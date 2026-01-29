@@ -1,0 +1,30 @@
+[package]
+name = "shamir-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smallvec = "1.11"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.149"
+fxhash = "0.2.1"
+once_cell = "1.20.2"
+regex = "1.11.1"
+unicode-normalization = "0.1.24"
+rayon = "1.10.0"
+chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
+env_logger = "0.10"
+rust_decimal = "1.40.0"
+
+[profile.dev]
+opt-level = 0
+codegen-units = 14
+incremental = true
+
+[profile.release]
+lto = "fat"
+opt-level = 3
+codegen-units = 14
+incremental = true
+strip = true
