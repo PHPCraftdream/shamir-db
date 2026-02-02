@@ -25,6 +25,8 @@ surrealkv = "0.17.0"
 fjall = "3.0.1"
 canopydb = "0.2.5"
 sled = "0.34.7"
+nebari = "0.5.5"
+persy = "1.7.1"
 
 # --- Core Dependencies ---
 tokio = { version = "1.49.0", features = ["full"] }
