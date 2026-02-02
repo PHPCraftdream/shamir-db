@@ -28,7 +28,7 @@ pub fn user_to_inner(value: &UserValue, interner: &Interner) -> InnerValue {
             for (key, val) in map {
                 let interned_key = interner.touch_ind(key);
                 let inner_val = user_to_inner(val, interner);
-                inner_map.insert(interned_key, inner_val);
+                inner_map.insert(interned_key.val(), inner_val);
             }
             Value::Map(inner_map)
         }

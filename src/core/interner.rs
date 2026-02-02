@@ -1,6 +1,29 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+
+#[derive(PartialEq, Eq, Hash, Debug)]
+pub enum TouchInd {
+    New(u64),
+    Exists(u64),
+}
+
+impl TouchInd {
+    pub fn val(&self) -> u64 {
+        match self {
+            TouchInd::New(n) => *n,
+            TouchInd::Exists(n) => *n,
+        }
+    }
+
+    pub fn is_new(&self) -> bool {
+        match self {
+            TouchInd::New(_) => true,
+            TouchInd::Exists(_) => false,
+        }
+    }
+}
+
 /// A thread-safe, two-way map for interning strings into u64 IDs.
 /// This is the core of the key interning mechanism.
 #[derive(Debug)]
@@ -21,17 +44,18 @@ impl Interner {
     }
 
     /// Gets the ID for a string, creating it if it doesn't exist.
-    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> u64 {
+    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> TouchInd {
         let key = str.as_ref();
         if let Some(id) = self.map_str.get(key) {
-            return *id;
+            return TouchInd::Exists(*id);
         }
         let new_id = *self.map_str.entry(key.to_string()).or_insert_with(|| {
             let id = self.current.fetch_add(1, Ordering::SeqCst);
             self.map_ind.insert(id, key.to_string());
             id
         });
-        new_id
+
+        TouchInd::New(new_id)
     }
 
     /// Gets the string corresponding to an ID.
@@ -54,9 +78,9 @@ mod tests {
     #[test]
     fn test_basic_interning() {
         let interner = Interner::new();
-        let id1 = interner.touch_ind("hello");
-        let id2 = interner.touch_ind("world");
-        let id3 = interner.touch_ind("hello");
+        let id1 = interner.touch_ind("hello").val();
+        let id2 = interner.touch_ind("world").val();
+        let id3 = interner.touch_ind("hello").val();
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 1);
@@ -81,9 +105,12 @@ mod tests {
                 ids
             }));
         }
-        let results: Vec<Vec<u64>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let results: Vec<Vec<TouchInd>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         for i in 1..results.len() {
-            assert_eq!(results[0], results[i]);
+            assert_eq!(
+                results[0].iter().map(|v| v.val()).collect::<Vec<_>>(),
+                results[i].iter().map(|v| v.val()).collect::<Vec<_>>(),
+            );
         }
         assert_eq!(interner.get_ind("a"), Some(1));
         assert_eq!(interner.get_ind("h"), Some(8));
