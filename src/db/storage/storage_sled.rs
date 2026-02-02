@@ -63,6 +63,7 @@ impl Repo for SledRepo {
             let names = db
                 .tree_names()
                 .into_iter()
+                .filter(|name| *name != b"__sled__default")
                 .map(|bytes| String::from_utf8(bytes.to_vec()))
                 .collect::<Result<Vec<String>, _>>()
                 .map_err(|e| DbError::Codec(format!("UTF-8 decode error: {}", e)))?;
