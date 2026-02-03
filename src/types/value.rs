@@ -32,8 +32,8 @@ pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
 
 impl<Key: Eq + Hash + Ord + Clone + Serialize + for<'de> Deserialize<'de> + Debug + 'static> Value<Key> {
     /// Serializes the `Value` into `Bytes` using MessagePack.
-    pub fn to_bytes(&self) -> Result<Bytes, rmp_serde::encode::Error> {
-        Ok(Bytes::from(rmp_serde::to_vec(self)?))
+    pub fn to_bytes(&self) -> Bytes {
+        Bytes::from(rmp_serde::to_vec(self).expect("Failed to serialize Value"))
     }
 
     /// Deserializes bytes into a `Value` using MessagePack.
@@ -291,7 +291,7 @@ mod tests {
         map.insert(456u64, InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
-        let bytes = value.to_bytes().unwrap();
+        let bytes = value.to_bytes();
         let reconstructed = InnerValue::from_bytes(&bytes).unwrap();
         assert_eq!(value, reconstructed);
 
@@ -320,7 +320,7 @@ mod tests {
         ];
 
         for value in test_cases {
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
             assert_eq!(value, reconstructed, "Failed for: {:?}", value);
         }
@@ -339,7 +339,7 @@ mod tests {
 
         for dec in decimals {
             let value = UserValue::Dec(dec);
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
 
             // After deserialization, Decimal becomes Str due to MessagePack serialization
@@ -364,7 +364,7 @@ mod tests {
 
         for big in bigints {
             let value = UserValue::Big(big.clone());
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
 
             // After deserialization, BigInt becomes Str due to MessagePack serialization
@@ -392,7 +392,7 @@ mod tests {
             UserValue::List(vec![UserValue::Bool(true), UserValue::Nil]),
         ]);
 
-        let bytes = value.to_bytes().unwrap();
+        let bytes = value.to_bytes();
         let reconstructed = UserValue::from_bytes(&bytes).unwrap();
         assert_eq!(value, reconstructed);
     }
@@ -445,10 +445,10 @@ mod tests {
         let empty_list = UserValue::List(vec![]);
         let empty_map = UserValue::Map(new_map());
 
-        let list_bytes = empty_list.to_bytes().unwrap();
+        let list_bytes = empty_list.to_bytes();
         assert_eq!(empty_list, UserValue::from_bytes(&list_bytes).unwrap());
 
-        let map_bytes = empty_map.to_bytes().unwrap();
+        let map_bytes = empty_map.to_bytes();
         assert_eq!(empty_map, UserValue::from_bytes(&map_bytes).unwrap());
     }
 
@@ -457,7 +457,7 @@ mod tests {
         let large_list = UserValue::List(
             (0..1000).map(|i| UserValue::Int(i)).collect()
         );
-        let bytes = large_list.to_bytes().unwrap();
+        let bytes = large_list.to_bytes();
         assert_eq!(large_list, UserValue::from_bytes(&bytes).unwrap());
 
         let mut large_map = new_map();
@@ -465,7 +465,7 @@ mod tests {
             large_map.insert(format!("key{}", i), UserValue::Int(i));
         }
         let map_value = UserValue::Map(large_map);
-        let bytes = map_value.to_bytes().unwrap();
+        let bytes = map_value.to_bytes();
         assert_eq!(map_value, UserValue::from_bytes(&bytes).unwrap());
     }
 
@@ -476,7 +476,7 @@ mod tests {
             nested = UserValue::List(vec![nested]);
         }
 
-        let bytes = nested.to_bytes().unwrap();
+        let bytes = nested.to_bytes();
         let reconstructed = UserValue::from_bytes(&bytes).unwrap();
         assert_eq!(nested, reconstructed);
     }
@@ -493,7 +493,7 @@ mod tests {
 
         for bin in binary_cases {
             let value = UserValue::Bin(bin);
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
             assert_eq!(value, reconstructed);
         }
@@ -512,7 +512,7 @@ mod tests {
 
         for s in strings {
             let value = UserValue::Str(s.to_string());
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
             assert_eq!(value, reconstructed);
         }
@@ -528,7 +528,7 @@ mod tests {
         outer_map.insert("simple".to_string(), UserValue::Bool(true));
 
         let value = UserValue::Map(outer_map);
-        let bytes = value.to_bytes().unwrap();
+        let bytes = value.to_bytes();
         let reconstructed = UserValue::from_bytes(&bytes).unwrap();
         assert_eq!(value, reconstructed);
     }
@@ -541,7 +541,7 @@ mod tests {
         map.insert(42u64, InnerValue::Int(42));
 
         let value = InnerValue::Map(map);
-        let bytes = value.to_bytes().unwrap();
+        let bytes = value.to_bytes();
         let reconstructed = InnerValue::from_bytes(&bytes).unwrap();
         assert_eq!(value, reconstructed);
     }
@@ -615,7 +615,7 @@ mod tests {
 
         for &val in &special_values {
             let value = UserValue::F64(val);
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
 
             match (value, reconstructed) {
@@ -648,7 +648,7 @@ mod tests {
         for input_str in test_cases {
             let decimal = Decimal::from_str(input_str).unwrap();
             let value = UserValue::Dec(decimal);
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
 
             match reconstructed {
@@ -682,7 +682,7 @@ mod tests {
         for input_str in test_cases {
             let bigint = BigInt::from_str(input_str).unwrap();
             let value = UserValue::Big(bigint.clone());
-            let bytes = value.to_bytes().unwrap();
+            let bytes = value.to_bytes();
             let reconstructed = UserValue::from_bytes(&bytes).unwrap();
 
             match reconstructed {
