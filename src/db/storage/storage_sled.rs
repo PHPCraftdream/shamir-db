@@ -258,6 +258,7 @@ impl Store for SledStore {
 mod tests {
     use super::*;
     use crate::types::value::InnerValue;
+    use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
 
@@ -409,7 +410,7 @@ mod tests {
         let mut all_records = Vec::new();
         let mut batch_count = 0;
 
-        while let Some(batch_result) = stream.try_next().await {
+        while let Some(batch_result) = stream.next().await {
             let batch = batch_result.unwrap();
             batch_count += 1;
             println!("Batch {} has {} records", batch_count, batch.len());
