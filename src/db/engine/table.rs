@@ -1,163 +1,346 @@
-use crate::db::engine::interner::PersistentInterner;
-use crate::db::error::DbResult;
-use crate::db::storage::types::Store;
-use crate::types::record_id::RecordId;
-use crate::types::value::{UserValue};
-use std::sync::Arc;
-use crate::types::repo_record::RepoRecord;
+//! High-level table with interning
+//!
+//! Provides UserValue/InnerValue transformations and key interning.
 
-/// A Table represents a logical collection of records with its own persistence and interner.
-pub struct Table {
-    name: String,
+use crate::core::interner::Interner;
+use crate::core::transform;
+use crate::db::error::{DbError, DbResult};
+use crate::db::storage::types::{Repo, Store};
+use crate::types::record_id::RecordId;
+use crate::types::value::{InnerValue, UserValue};
+use bytes::Bytes;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
+
+/// High-level table with automatic key interning
+pub struct Table<R: Repo> {
+    repo: Arc<R>,
+    table_name: String,
     data_store: Arc<dyn Store>,
-    interner: Arc<PersistentInterner>,
+    info_store: Arc<dyn Store>,
+    interner: Arc<OnceCell<Interner>>,
 }
 
-impl Table {
-    pub fn new(name: String, data_store: Arc<dyn Store>, interner: Arc<PersistentInterner>) -> Self {
+impl<R: Repo> Clone for Table<R> {
+    fn clone(&self) -> Self {
         Self {
-            name,
+            repo: Arc::clone(&self.repo),
+            table_name: self.table_name.clone(),
+            data_store: Arc::clone(&self.data_store),
+            info_store: Arc::clone(&self.info_store),
+            interner: Arc::clone(&self.interner),
+        }
+    }
+}
+
+impl<R: Repo> Table<R> {
+    /// Create a new table
+    pub async fn new(repo: Arc<R>, table_name: String) -> DbResult<Self> {
+        // Get or create stores
+        let data_store = repo.store_get(format!("__data__{}", table_name)).await?;
+        let info_store = repo.store_get(format!("__info__{}", table_name)).await?;
+
+        Ok(Self {
+            repo,
+            table_name,
             data_store,
-            interner,
-        }
+            info_store,
+            interner: Arc::new(OnceCell::new()),
+        })
     }
 
-    /// Inserts a new record.
+    /// Get the interner, loading it lazily on first access
+    async fn get_interner(&self) -> DbResult<&Interner> {
+        if self.interner.get().is_some() {
+            return Ok(self.interner.get().unwrap());
+        }
+
+        // Clone Arcs for async block
+        let info_store = Arc::clone(&self.info_store);
+        let interner_cell = Arc::clone(&self.interner);
+
+        interner_cell.get_or_init(|| async move {
+            // Load from info_store
+            let internals_id = RecordId::system("internals");
+            let inter_data = info_store.get(internals_id).await;
+
+            if let Ok(bytes) = inter_data {
+                // Deserialize: Vec<(u64, String)>
+                let data: Vec<(u64, String)> = bincode::deserialize(&bytes)
+                    .unwrap_or_else(|e| {
+                        log::error!("Failed to deserialize interner: {}", e);
+                        Vec::new()
+                    });
+                Interner::with_state(data)
+            } else {
+                // Empty interner
+                Interner::new()
+            }
+        }).await;
+
+        Ok(self.interner.get().unwrap())
+    }
+
+    /// Save new interned keys to info_store
+    async fn save_new_keys(&self, new_keys: &[(u64, String)]) -> DbResult<()> {
+        if new_keys.is_empty() {
+            return Ok(());
+        }
+
+        // Save the full interner state
+        let internals_id = RecordId::system("internals");
+
+        // Read existing
+        let existing = self.info_store.get(internals_id).await;
+        let mut current: Vec<(u64, String)> = if let Ok(bytes) = existing {
+            bincode::deserialize(&bytes)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Add new keys
+        current.extend_from_slice(new_keys);
+
+        // Serialize and save
+        let bytes = bincode::serialize(&current)
+            .map_err(|e| DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
+
+        self.info_store.set(internals_id, Bytes::from(bytes)).await?;
+
+        Ok(())
+    }
+
+    /// Insert a UserValue, returns RecordId
     pub async fn insert(&self, value: &UserValue) -> DbResult<RecordId> {
-        let inner = self.to_inner(value).await?;
-        self.data_store.insert(&inner).await
-    }
+        let interner = self.get_interner().await?;
 
-    /// Sets or updates a record.
-    pub async fn set(&self, key: RecordId, value: &UserValue) -> DbResult<bool> {
-        let inner = self.to_inner(value).await?;
-        self.data_store.set(key, &inner).await
-    }
+        // Transform UserValue → InnerValue
+        let transform = transform::user_to_inner(value, interner);
 
-    /// Retrieves a record.
-    pub async fn get(&self, key: RecordId) -> DbResult<UserValue> {
-        let record = self.data_store.get(key).await?;
-        Ok(self.to_user(&record))
-    }
-
-    /// Removes a record.
-    pub async fn remove(&self, key: RecordId) -> DbResult<bool> {
-        self.data_store.remove(key).await
-    }
-
-    /// Returns all records.
-    pub async fn iter(&self) -> DbResult<Vec<(RecordId, UserValue)>> {
-        let records = self.data_store.iter().await?;
-        let mut result = Vec::with_capacity(records.len());
-        for record in records {
-            let id = record.0;
-            let val = self.to_user(&record);
-            result.push((id, val));
+        // Save new keys if any
+        if let Some(ref new_keys) = transform.new_keys {
+            self.save_new_keys(new_keys).await?;
         }
+
+        // Serialize InnerValue
+        let inner_bytes = transform.inner_value.to_bytes();
+
+        // Insert to data store
+        self.data_store.insert(inner_bytes).await
+    }
+
+    /// Get a UserValue by RecordId
+    pub async fn get(&self, id: RecordId) -> DbResult<UserValue> {
+        let interner = self.get_interner().await?;
+
+        // Read from data store
+        let bytes = self.data_store.get(id).await?;
+
+        // Deserialize InnerValue
+        let inner_value = InnerValue::from_bytes(bytes)
+            .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {}", e)))?;
+
+        // Transform InnerValue → UserValue
+        Ok(transform::inner_to_user(&inner_value, interner))
+    }
+
+    /// Update a record by RecordId
+    pub async fn update(&self, id: RecordId, value: &UserValue) -> DbResult<bool> {
+        let interner = self.get_interner().await?;
+
+        // Check if exists
+        let exists = self.data_store.get(id).await.is_ok();
+        if !exists {
+            return Ok(false);
+        }
+
+        // Transform UserValue → InnerValue
+        let transform = transform::user_to_inner(value, interner);
+
+        // Save new keys if any
+        if let Some(ref new_keys) = transform.new_keys {
+            self.save_new_keys(new_keys).await?;
+        }
+
+        // Serialize and update
+        let inner_bytes = transform.inner_value.to_bytes();
+        self.data_store.set(id, inner_bytes).await?;
+        Ok(true)  // Existed and updated
+    }
+
+    /// Delete a record by RecordId
+    pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
+        self.data_store.remove(id).await
+    }
+
+    /// List all records
+    pub async fn list(&self) -> DbResult<Vec<(RecordId, UserValue)>> {
+        let interner = self.get_interner().await?;
+
+        let items = self.data_store.iter().await?;
+        let mut result = Vec::new();
+
+        for (id, bytes) in items {
+            match InnerValue::from_bytes(bytes) {
+                Ok(inner_value) => {
+                    let user_value = transform::inner_to_user(&inner_value, interner);
+                    result.push((id, user_value));
+                }
+                Err(e) => {
+                    log::warn!("Failed to deserialize record: {}", e);
+                }
+            }
+        }
+
         Ok(result)
     }
 
-    // Transformation helpers
-    // Note: We need a bridge between PersistentInterner and core::Interner or 
-    // we should make transformation functions work with a trait/interface.
-    // For now, let's do a simple bridge.
-
-    async fn to_inner(&self, value: &UserValue) -> DbResult<crate::types::value::InnerValue> {
-        // This is a bit inefficient because it creates a temporary core::Interner
-        // or we need to update user_to_inner to be async and support PersistentInterner.
-        // Let's create a temporary bridge for now.
-        
-        let temp_interner = crate::core::interner::Interner::new();
-        // Fill temp interner with existing data from persistent one
-        // (Actually, user_to_inner might call touch_ind, which needs to be persistent)
-        
-        // REFACTORING NEEDED: user_to_inner should probably take a trait.
-        // For this MVP, I'll implement a custom async transformation here.
-        self.transform_user_to_inner(value).await
+    /// Count records
+    pub async fn count(&self) -> DbResult<usize> {
+        let items = self.data_store.iter().await?;
+        Ok(items.len())
     }
 
-    fn to_user(&self, record: &RepoRecord) -> UserValue {
-        // record.3 is InnerValue
-        let temp_interner = crate::core::interner::Interner::new();
-        // This is also inefficient.
-        // TODO: Update core::transform to use a trait for Interner.
-        
-        // For now, let's use a manual transformation or a bridge.
-        self.transform_inner_to_user(&record.3)
+    /// Get table name
+    pub fn name(&self) -> &str {
+        &self.table_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::storage::storage_sled::SledRepo;
+    use crate::types::common::new_map;
+
+    async fn create_test_table() -> DbResult<(Table<SledRepo>, tempfile::TempDir)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("test_db");
+        let repo = Arc::new(SledRepo::new(path)?);
+        let table = Table::new(repo, "users".to_string()).await?;
+
+        Ok((table, dir))
     }
 
-    async fn transform_user_to_inner(&self, value: &UserValue) -> DbResult<crate::types::value::InnerValue> {
-        use crate::types::value::Value;
-        use crate::types::common::{new_map_wc, new_set_wc};
+    #[tokio::test]
+    async fn test_table_insert_and_get() {
+        let (table, _dir) = create_test_table().await.unwrap();
 
-        match value {
-            Value::Nil => Ok(Value::Nil),
-            Value::Bool(b) => Ok(Value::Bool(*b)),
-            Value::Int(i) => Ok(Value::Int(*i)),
-            Value::F64(f) => Ok(Value::F64(*f)),
-            Value::Dec(d) => Ok(Value::Dec(d.clone())),
-            Value::Big(b) => Ok(Value::Big(b.clone())),
-            Value::Str(s) => Ok(Value::Str(s.clone())),
-            Value::Bin(b) => Ok(Value::Bin(b.clone())),
-            Value::List(list) => {
-                let mut inner_list = Vec::with_capacity(list.len());
-                for v in list {
-                    inner_list.push(Box::pin(self.transform_user_to_inner(v)).await?);
-                }
-                Ok(Value::List(inner_list))
+        let mut user_data = new_map();
+        user_data.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        user_data.insert("age".to_string(), UserValue::Int(30));
+        user_data.insert("email".to_string(), UserValue::Str("alice@example.com".to_string()));
+        let user_value = UserValue::Map(user_data);
+
+        let id = table.insert(&user_value).await.unwrap();
+
+        let retrieved = table.get(id).await.unwrap();
+        assert_eq!(retrieved, user_value);
+    }
+
+    #[tokio::test]
+    async fn test_table_interning_persistence() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Insert first record
+        let mut data1 = new_map();
+        data1.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        let original1 = UserValue::Map(data1.clone());
+        let id1 = table.insert(&original1).await.unwrap();
+
+        // Insert second record with overlapping keys
+        let mut data2 = new_map();
+        data2.insert("name".to_string(), UserValue::Str("Charlie".to_string()));
+        data2.insert("age".to_string(), UserValue::Int(25));
+        let id2 = table.insert(&UserValue::Map(data2)).await.unwrap();
+
+        // Verify both records
+        let retrieved1 = table.get(id1).await.unwrap();
+        assert_eq!(retrieved1, original1);
+
+        let retrieved2 = table.get(id2).await.unwrap();
+        // Check it has the right data
+        match retrieved2 {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("name"), Some(&UserValue::Str("Charlie".to_string())));
+                assert_eq!(m.get("age"), Some(&UserValue::Int(25)));
             }
-            Value::Set(set) => {
-                let mut inner_set = new_set_wc(set.len());
-                for v in set {
-                    inner_set.insert(Box::pin(self.transform_user_to_inner(v)).await?);
-                }
-                Ok(Value::Set(inner_set))
-            }
-            Value::Map(map) => {
-                let mut inner_map = new_map_wc(map.len());
-                for (key, val) in map {
-                    let interned_key = self.interner.touch_ind(key).await?;
-                    let inner_val = Box::pin(self.transform_user_to_inner(val)).await?;
-                    inner_map.insert(interned_key, inner_val);
-                }
-                Ok(Value::Map(inner_map))
-            }
+            _ => panic!("Expected Map"),
         }
     }
 
-    fn transform_inner_to_user(&self, value: &crate::types::value::InnerValue) -> UserValue {
-        use crate::types::value::Value;
-        use crate::types::common::{new_map_wc, new_set_wc};
+    #[tokio::test]
+    async fn test_table_update() {
+        let (table, _dir) = create_test_table().await.unwrap();
 
-        match value {
-            Value::Nil => Value::Nil,
-            Value::Bool(b) => Value::Bool(*b),
-            Value::Int(i) => Value::Int(*i),
-            Value::F64(f) => Value::F64(*f),
-            Value::Dec(d) => Value::Dec(d.clone()),
-            Value::Big(b) => Value::Big(b.clone()),
-            Value::Str(s) => Value::Str(s.clone()),
-            Value::Bin(b) => Value::Bin(b.clone()),
-            Value::List(list) => {
-                let user_list = list.iter().map(|v| self.transform_inner_to_user(v)).collect();
-                Value::List(user_list)
+        let mut data = new_map();
+        data.insert("name".to_string(), UserValue::Str("Dave".to_string()));
+        let id = table.insert(&UserValue::Map(data.clone())).await.unwrap();
+
+        // Update
+        let mut updated = new_map();
+        updated.insert("name".to_string(), UserValue::Str("David".to_string()));
+        updated.insert("age".to_string(), UserValue::Int(40));
+
+        let existed = table.update(id, &UserValue::Map(updated)).await.unwrap();
+        assert!(existed);
+
+        let retrieved = table.get(id).await.unwrap();
+        match retrieved {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("name"), Some(&UserValue::Str("David".to_string())));
+                assert_eq!(m.get("age"), Some(&UserValue::Int(40)));
             }
-            Value::Set(set) => {
-                let mut user_set = new_set_wc(set.len());
-                for v in set {
-                    user_set.insert(self.transform_inner_to_user(v));
-                }
-                Value::Set(user_set)
-            }
-            Value::Map(map) => {
-                let mut user_map = new_map_wc(map.len());
-                for (key_id, val) in map {
-                    let key = self.interner.get_str(*key_id).expect("Data corruption: interned key not found");
-                    let user_val = self.transform_inner_to_user(val);
-                    user_map.insert(key, user_val);
-                }
-                Value::Map(user_map)
-            }
+            _ => panic!("Expected Map"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_table_delete() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        let mut data = new_map();
+        data.insert("name".to_string(), UserValue::Str("Eve".to_string()));
+        let id = table.insert(&UserValue::Map(data)).await.unwrap();
+
+        let deleted = table.delete(id).await.unwrap();
+        assert!(deleted);
+
+        let get_result = table.get(id).await;
+        assert!(matches!(get_result, Err(DbError::NotFound(_))));
+
+        let deleted_again = table.delete(id).await.unwrap();
+        assert!(!deleted_again);
+    }
+
+    #[tokio::test]
+    async fn test_table_list() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        for i in 1..=3 {
+            let mut data = new_map();
+            data.insert("id".to_string(), UserValue::Int(i));
+            data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
+            table.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        let records = table.list().await.unwrap();
+        assert_eq!(records.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_table_count() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        assert_eq!(table.count().await.unwrap(), 0);
+
+        for i in 1..=5 {
+            let mut data = new_map();
+            data.insert("id".to_string(), UserValue::Int(i));
+            table.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        assert_eq!(table.count().await.unwrap(), 5);
     }
 }

@@ -1,2 +1,1 @@
-// pub mod persistent_interner;
-// pub mod table;
+pub mod table;

@@ -30,6 +30,10 @@ pub enum DbError {
     /// An internal logic error.
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// A validation error (e.g., schema validation).
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 pub type DbResult<T> = Result<T, DbError>;
