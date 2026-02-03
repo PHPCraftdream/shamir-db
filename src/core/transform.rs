@@ -2,6 +2,34 @@ use crate::core::interner::Interner;
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
+/// The result of a `user_to_inner` transformation.
+///
+/// This struct contains the resulting `InnerValue` and an optional collection
+/// of any string keys that were newly interned during the transformation.
+#[derive(Debug)]
+pub struct TransformResult {
+    pub inner_value: InnerValue,
+    pub new_keys: Option<Vec<(u64, String)>>,
+}
+
+impl TransformResult {
+    /// Checks if any new keys were created during the transformation.
+    /// Returns true if `new_keys` is `Some` and not empty.
+    pub fn has_new_keys(&self) -> bool {
+        self.new_keys.as_ref().map_or(false, |v| !v.is_empty())
+    }
+
+    /// Consumes the result and returns its constituent parts.
+    pub fn into_parts(self) -> (InnerValue, Option<Vec<(u64, String)>>) {
+        (self.inner_value, self.new_keys)
+    }
+
+    /// Consumes the result and returns just the inner value.
+    pub fn into_inner_value(self) -> InnerValue {
+        self.inner_value
+    }
+}
+
 fn user_to_inner_rec(
     value: &UserValue,
     interner: &Interner,
@@ -49,24 +77,15 @@ fn user_to_inner_rec(
 
 /// Transforms a UserValue to an InnerValue, collecting newly interned keys.
 ///
-/// The function recursively traverses the `UserValue`. When it encounters a map,
-/// it interns its string keys. If a key is new to the interner, the pair
-/// of `(key_id, key_string)` is collected. This function is optimized to avoid
-/// heap allocations for the key collection if no new keys are found.
-///
-/// # Arguments
-/// * `value` - The `UserValue` to transform.
-/// * `interner` - The `Interner` instance to use for key interning.
-///
-/// # Returns
-/// A tuple containing:
-/// * The resulting `InnerValue`.
-/// * A `Vec<(u64, String)>` of newly created interned keys. The vector is empty
-///   if no new keys were interned.
-pub fn user_to_inner(value: &UserValue, interner: &Interner) -> (InnerValue, Vec<(u64, String)>) {
+/// This function is optimized to avoid heap allocations for the key collection
+/// if no new keys are found.
+pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult {
     let mut new_keys: Option<Vec<(u64, String)>> = None;
     let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
-    (inner_value, new_keys.unwrap_or_default())
+    TransformResult {
+        inner_value,
+        new_keys,
+    }
 }
 
 pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
@@ -128,17 +147,20 @@ mod tests {
         user_set.insert(UserValue::Str("tag1".to_string()));
         user_set.insert(UserValue::Str("tag2".to_string()));
         let original_value = UserValue::List(vec![UserValue::Map(user_map), UserValue::Set(user_set)]);
-        let (inner_value, new_keys) = user_to_inner(&original_value, &interner);
+        let result = user_to_inner(&original_value, &interner);
 
         // Verify new keys were collected
-        assert_eq!(new_keys.len(), 3);
-        assert!(new_keys.iter().any(|(_, s)| s == "name"));
-        assert!(new_keys.iter().any(|(_, s)| s == "age"));
-        assert!(new_keys.iter().any(|(_, s)| s == "balance"));
+        assert!(result.has_new_keys());
+        let keys = result.new_keys.as_ref().unwrap();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.iter().any(|(_, s)| s == "name"));
+        assert!(keys.iter().any(|(_, s)| s == "age"));
+        assert!(keys.iter().any(|(_, s)| s == "balance"));
 
         // Verify that calling again with the same keys yields no new keys
-        let (_, new_keys_again) = user_to_inner(&original_value, &interner);
-        assert!(new_keys_again.is_empty());
+        let result_again = user_to_inner(&original_value, &interner);
+        assert!(!result_again.has_new_keys());
+        assert!(result_again.new_keys.is_none());
 
         let name_id = interner.get_ind("name").unwrap();
         let age_id = interner.get_ind("age").unwrap();
@@ -157,8 +179,11 @@ mod tests {
             InnerValue::Map(expected_inner_map),
             InnerValue::Set(expected_inner_set),
         ]);
-        assert_eq!(inner_value, expected_value);
-        let final_value = inner_to_user(&inner_value, &interner);
+
+        let inner_value_from_result = result.into_inner_value();
+        assert_eq!(inner_value_from_result, expected_value);
+
+        let final_value = inner_to_user(&inner_value_from_result, &interner);
         assert_eq!(original_value, final_value);
     }
 
@@ -187,10 +212,10 @@ mod tests {
         );
 
         let user_value_1: UserValue = json_codec.decode(raw_json_1.as_bytes()).unwrap();
-        let (inner_value, new_keys) = user_to_inner(&user_value_1, &interner);
-        assert!(!new_keys.is_empty(), "Expected new keys on first pass");
+        let result = user_to_inner(&user_value_1, &interner);
+        assert!(result.has_new_keys(), "Expected new keys on first pass");
 
-        let user_value_2 = inner_to_user(&inner_value, &interner);
+        let user_value_2 = inner_to_user(&result.inner_value, &interner);
 
         assert_eq!(
             user_value_1, user_value_2,
