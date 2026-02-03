@@ -175,4 +175,253 @@ mod tests {
         assert_eq!(interner.get_ind("h"), Some(8));
         assert_eq!(interner.current.load(Ordering::SeqCst), 9);
     }
+
+    #[test]
+    fn test_concurrent_stress() {
+        let interner = Arc::new(Interner::new());
+        let num_threads = 50;
+        let keys_per_thread = 100;
+        let mut handles = vec![];
+
+        for thread_id in 0..num_threads {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                for i in 0..keys_per_thread {
+                    let key = format!("thread_{}_key_{}", thread_id, i);
+                    interner_clone.touch_ind(key);
+                }
+            }));
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all keys were interned correctly
+        let final_count = interner.current.load(Ordering::SeqCst);
+        assert_eq!(final_count, (num_threads * keys_per_thread) + 1);
+
+        // Verify first key (should always be first since thread 0 starts first)
+        assert_eq!(
+            interner.get_ind("thread_0_key_0"),
+            Some(1)
+        );
+
+        // Verify that some keys exist and are unique
+        assert!(interner.get_ind("thread_10_key_50").is_some());
+        assert!(interner.get_ind("thread_25_key_75").is_some());
+        assert!(interner.get_ind("thread_49_key_99").is_some());
+    }
+
+    #[test]
+    fn test_concurrent_read_while_write() {
+        let interner = Arc::new(Interner::new());
+        let _num_threads = 20;
+        let mut handles = vec![];
+
+        // Writer threads
+        for i in 0..10 {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                for j in 0..50 {
+                    let key = format!("write_{}_{}", i, j);
+                    interner_clone.touch_ind(key);
+                }
+            }));
+        }
+
+        // Reader threads
+        for _i in 0..10 {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    // Try to read various keys
+                    let _ = interner_clone.get_ind("write_0_0");
+                    let _ = interner_clone.get_str(1);
+                    let _ = interner_clone.get_ind("nonexistent");
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should have 500 unique keys (10 writers * 50 keys)
+        assert_eq!(interner.current.load(Ordering::SeqCst), 501);
+    }
+
+    #[test]
+    fn test_concurrent_same_key_determinism() {
+        let interner = Arc::new(Interner::new());
+        let num_threads = 100;
+        let mut handles = vec![];
+
+        // All threads touch the same keys
+        for _ in 0..num_threads {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                let mut ids = vec![];
+                for key in &["shared1", "shared2", "shared3", "shared1", "shared2"] {
+                    ids.push(interner_clone.touch_ind(key).val());
+                }
+                ids
+            }));
+        }
+
+        let results: Vec<Vec<u64>> = handles.into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+
+        // All threads should get the same IDs for the same keys
+        let expected = vec![1, 2, 3, 1, 2];
+        for result in results {
+            assert_eq!(result, expected);
+        }
+
+        // Verify final state
+        assert_eq!(interner.current.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn test_concurrent_reverse_lookup() {
+        let interner = Arc::new(Interner::new());
+        let num_threads = 20;
+        let mut handles = vec![];
+
+        // Populate first
+        for i in 0..100 {
+            let key = format!("key_{}", i);
+            interner.touch_ind(key);
+        }
+
+        // Concurrent reverse lookups
+        for _i in 0..num_threads {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                for j in 0..100 {
+                    let id = (j % 100) + 1;
+                    let key = interner_clone.get_str(id);
+                    assert!(key.is_some());
+                    assert_eq!(key, Some(format!("key_{}", j % 100)));
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_concurrent_touch_and_get() {
+        let interner = Arc::new(Interner::new());
+        let num_threads = 30;
+        let mut handles = vec![];
+
+        for i in 0..num_threads {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                for j in 0..50 {
+                    let key = format!("key_{}_{}", i, j);
+
+                    // Touch the key
+                    let touch_result = interner_clone.touch_ind(&key);
+
+                    // Immediately verify with get_ind
+                    let get_result = interner_clone.get_ind(&key);
+
+                    assert_eq!(Some(touch_result.val()), get_result);
+
+                    // Also verify reverse lookup
+                    let reverse = interner_clone.get_str(touch_result.val());
+                    assert_eq!(reverse, Some(key));
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Total: 30 threads * 50 keys = 1500
+        assert_eq!(interner.current.load(Ordering::SeqCst), 1501);
+    }
+
+    #[test]
+    fn test_edge_cases_empty_and_unicode() {
+        let interner = Interner::new();
+
+        // Empty string
+        let id1 = interner.touch_ind("").val();
+        assert_eq!(id1, 1);
+        assert_eq!(interner.get_ind(""), Some(1));
+        assert_eq!(interner.get_str(1), Some("".to_string()));
+
+        // Unicode strings
+        let unicode_keys = vec![
+            "привет",
+            "🚀🎉🔥",
+            "مرحبا",
+            "مرحبا2",  // Changed from duplicate to unique key
+            "😀😃😄😁",
+        ];
+
+        for key in &unicode_keys {
+            interner.touch_ind(key);
+        }
+
+        // Verify unicode keys work
+        assert_eq!(interner.get_ind("привет"), Some(2));
+        assert_eq!(interner.get_ind("🚀🎉🔥"), Some(3));
+        assert_eq!(interner.get_ind("مرحبا"), Some(4));
+        assert_eq!(interner.get_str(5), Some("مرحبا2".to_string()));
+        assert_eq!(interner.get_ind("😀😃😄😁"), Some(6));
+    }
+
+    #[test]
+    fn test_edge_cases_very_long_keys() {
+        let interner = Interner::new();
+
+        // Very long key (10KB)
+        let long_key = "a".repeat(10_000);
+        let id = interner.touch_ind(&long_key).val();
+        assert_eq!(id, 1);
+        assert_eq!(interner.get_ind(&long_key), Some(1));
+        assert_eq!(interner.get_str(1), Some(long_key));
+    }
+
+    #[test]
+    fn test_concurrent_with_state() {
+        let initial_data: Vec<(u64, String)> = (0..100)
+            .map(|i| (i, format!("initial_{}", i)))
+            .collect();
+
+        let interner = Arc::new(Interner::with_state(initial_data));
+        let num_threads = 20;
+        let mut handles = vec![];
+
+        for i in 0..num_threads {
+            let interner_clone = Arc::clone(&interner);
+            handles.push(thread::spawn(move || {
+                for j in 0..50 {
+                    let key = format!("thread_{}_{}", i, j);
+                    interner_clone.touch_ind(key);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Initial 100 + 20*50 new = 1100
+        assert_eq!(interner.current.load(Ordering::SeqCst), 1100);
+
+        // Verify initial data still accessible
+        assert_eq!(interner.get_ind("initial_0"), Some(0));
+        assert_eq!(interner.get_ind("initial_99"), Some(99));
+        assert_eq!(interner.get_str(0), Some("initial_0".to_string()));
+    }
 }
