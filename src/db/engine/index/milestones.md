@@ -68,35 +68,47 @@ Step-by-step implementation plan for the index engine. Each milestone should be 
 
 ---
 
-## Milestone 3: Index Configuration
+## Milestone 3: Index Paths Configuration
 
 **File:** `src/db/engine/index/config.rs`
 
 ### Tasks
-- [ ] Define `IndexDef` struct
-  - path: Vec<u64>
-  - path_str: String
-  - unique: bool
-  - created_at: u64
-- [ ] Define `IndexConfig` struct
-  - indexes: Vec<IndexDef>
-- [ ] Implement `save_config(store, config) -> DbResult<()>`
-  - Use `RecordId::system("index_config:{table}")` as key
-  - Serialize with bincode
+- [ ] Implement `save_index_paths(store, table, paths: &HashSet<Vec<u64>>) -> DbResult<()>`
+  - Use `RecordId::system("index_paths:{table}")` as key
+  - Serialize HashSet with bincode
   - Write to info_store
-- [ ] Implement `load_config(store) -> DbResult<IndexConfig>`
+- [ ] Implement `load_index_paths(store, table) -> DbResult<Option<HashSet<Vec<u64>>>>`
   - Read from info_store
   - Deserialize
-  - Return empty config if not found
+  - Return None if not found (means: no indexing)
+  - Return Some(empty) if found empty (means: index everything)
+- [ ] Implement `add_index_path(store, table, path: Vec<u64>) -> DbResult<()>`
+  - Load existing paths (create empty set if None)
+  - Insert new path
+  - Save back
+- [ ] Implement `remove_index_path(store, table, path: &Vec<u64>) -> DbResult<()>`
+  - Load existing paths (return Ok if None)
+  - Remove path
+  - Delete record if set becomes empty after removal
+  - Save back or delete
+- [ ] Implement `disable_indexing(store, table) -> DbResult<()>`
+  - Delete the index_paths system record
+  - Returns to "no indexing" state
 - [ ] Add tests:
   - [ ] Save and load roundtrip
-  - [ ] Load non-existent config returns empty
-  - [ ] Multiple indexes in config
+  - [ ] Load non-existent returns None
+  - [ ] Load empty returns Some(empty)
+  - [ ] add_index_path creates record if None
+  - [ ] remove_index_path deletes record if last path
+  - [ ] disable_indexing removes record
+  - [ ] Three states work correctly
 
 ### Acceptance Criteria
-- ✅ Config persists across restarts
-- ✅ Can add/remove indexes from config
-- ✅ Empty config handled correctly
+- ✅ Three states: None (no indexing), Some(empty) (index all), Some(non-empty) (selective)
+- ✅ Index paths persist across restarts
+- ✅ Can add/remove specific paths
+- ✅ Can disable indexing completely
+- ✅ Memory efficient (~2.4 KB for 100 paths)
 
 ### Estimated Time: 45 minutes
 
@@ -341,27 +353,41 @@ Step-by-step implementation plan for the index engine. Each milestone should be 
 
 ### Tasks
 - [ ] Add `create_index(&self, path: &str) -> DbResult<()>`
-  - Parse path to interned components
-  - Add to IndexConfig
-  - Save config
-  - Build initial index (scan all records)
+  - Parse path to interned components via interner
+  - Add to index_paths set
+  - Save updated index_paths
+  - Build initial index (scan all records, extract path values, add to index store)
 - [ ] Add `drop_index(&self, path: &str) -> DbResult<bool>`
-  - Remove from IndexConfig
-  - Save config
+  - Parse path to interned components
+  - Remove from index_paths set
+  - Save updated index_paths
   - Delete all entries with this path prefix from index store
-- [ ] Add `list_indexes(&self) -> DbResult<Vec<IndexDef>>`
-  - Load config
-  - Return index definitions
+- [ ] Add `list_indexes(&self) -> DbResult<HashSet<String>>`
+  - Load index_paths (interned)
+  - Convert each path back to string (via interner reverse lookup)
+  - Return human-readable path names
+- [ ] Add `set_index_all(&self) -> DbResult<()>`
+  - Save empty index_paths set
+  - Means "index everything" (all Map paths)
+- [ ] Add `disable_indexing(&self) -> DbResult<()>`
+  - Delete index_paths system record
+  - Means "no indexing" (journal disabled)
 - [ ] Add tests:
   - [ ] Create and list index
   - [ ] Create index on existing table (initial build)
   - [ ] Drop index removes entries
-  - [ ] Duplicate index creation fails
+  - [ ] List shows human-readable paths
+  - [ ] set_index_all enables full indexing
+  - [ ] disable_indexing removes record and stops indexing
+  - [ ] Duplicate index creation is idempotent
+  - [ ] Three states work correctly
 
 ### Acceptance Criteria
-- ✅ Can create/drop/list indexes
-- ✅ Initial index build works
-- ✅ Index config persists
+- ✅ Can create/drop/list/disable indexes
+- ✅ Initial index build works correctly
+- ✅ Index paths persist
+- ✅ Human-readable path names via interner
+- ✅ Three states: no indexing, index all, selective indexing
 
 ### Estimated Time: 2 hours
 
@@ -419,9 +445,9 @@ Step-by-step implementation plan for the index engine. Each milestone should be 
 
 | Milestone | Status | Completed Date |
 |-----------|--------|----------------|
-| 1. Basic Types | ⏳ Pending | - |
+| 1. Basic Types | ✅ Done | 2025-02-03 |
 | 2. Key Encoding | ⏳ Pending | - |
-| 3. Index Config | ⏳ Pending | - |
+| 3. Index Paths Config | ⏳ Pending | - |
 | 4. Path Extraction | ⏳ Pending | - |
 | 5. Hash Computation | ⏳ Pending | - |
 | 6. Table Journal | ⏳ Pending | - |

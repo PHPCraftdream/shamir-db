@@ -4,6 +4,7 @@
 
 use crate::core::interner::Interner;
 use crate::core::transform;
+use crate::db::engine::index::IndexTarget;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
@@ -12,7 +13,8 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use std::sync::Arc;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, RwLock};
+use futures::pin_mut;
 
 /// Get the system record key for storing record count
 fn count_key() -> RecordId {
@@ -29,6 +31,8 @@ pub struct Table<R: Repo> {
     batch_size: usize,
     /// Mutex for synchronizing counter updates
     counter_mutex: Arc<Mutex<()>>,
+    /// Index target configuration
+    index_target: Arc<RwLock<IndexTarget>>,
 }
 
 impl<R: Repo> Clone for Table<R> {
@@ -41,6 +45,7 @@ impl<R: Repo> Clone for Table<R> {
             interner: Arc::clone(&self.interner),
             batch_size: self.batch_size,
             counter_mutex: Arc::clone(&self.counter_mutex),
+            index_target: Arc::clone(&self.index_target),
         }
     }
 }
@@ -52,6 +57,9 @@ impl<R: Repo> Table<R> {
         let data_store = repo.store_get(format!("__data__{}", table_name)).await?;
         let info_store = repo.store_get(format!("__info__{}", table_name)).await?;
 
+        // Load index target from storage
+        let index_target = Self::load_index_target(&info_store).await?.unwrap_or(IndexTarget::Disabled);
+
         Ok(Self {
             repo,
             table_name,
@@ -60,6 +68,7 @@ impl<R: Repo> Table<R> {
             interner: Arc::new(OnceCell::new()),
             batch_size: 1000, // default batch size
             counter_mutex: Arc::new(Mutex::new(())),
+            index_target: Arc::new(RwLock::new(index_target)),
         })
     }
 
@@ -165,9 +174,178 @@ impl<R: Repo> Table<R> {
         self.set_record_count(new_count as u64).await
     }
 
+    /// Get the system record key for storing index target
+    fn index_target_key() -> RecordId {
+        RecordId::system("index_target")
+    }
+
+    /// Load index target from info_store
+    pub async fn load_index_target(info_store: &Arc<dyn Store>) -> DbResult<Option<IndexTarget>> {
+        let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+        match info_store.get(key_bytes).await {
+            Ok(bytes) => {
+                let target: IndexTarget = bincode::deserialize(&bytes)
+                    .map_err(|e| DbError::Codec(format!("Failed to deserialize index target: {}", e)))?;
+                Ok(Some(target))
+            }
+            Err(DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Save index target to info_store
+    async fn save_index_target(&self, target: &IndexTarget) -> DbResult<()> {
+        let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+        let bytes = bincode::serialize(target)
+            .map_err(|e| DbError::Codec(format!("Failed to serialize index target: {}", e)))?;
+        self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// Add a non-unique index
+    pub async fn add_index(&self, path: &[&str]) -> DbResult<()> {
+        let interner = self.get_interner().await?;
+
+        // Convert path to interned IDs
+        let interned_path: Vec<u64> = path.iter()
+            .map(|&s| interner.touch_ind(s).val())
+            .collect();
+
+        // Update index target
+        let mut target = self.index_target.write().await;
+        target.add_index(interned_path, false);
+
+        // Save to storage
+        self.save_index_target(&target).await?;
+
+        Ok(())
+    }
+
+    /// Add a unique index
+    pub async fn add_unique_index(&self, path: &[&str]) -> DbResult<()> {
+        let interner = self.get_interner().await?;
+
+        // Convert path to interned IDs
+        let interned_path: Vec<u64> = path.iter()
+            .map(|&s| interner.touch_ind(s).val())
+            .collect();
+
+        // Validate by scanning all existing data
+        self.validate_unique_index(&interned_path, interner).await?;
+
+        // Update index target
+        let mut target = self.index_target.write().await;
+        target.add_index(interned_path, true);
+
+        // Save to storage
+        self.save_index_target(&target).await?;
+
+        Ok(())
+    }
+
+    /// Validate that a unique index can be created (no duplicates)
+    async fn validate_unique_index(&self, path: &[u64], interner: &Interner) -> DbResult<()> {
+        use std::collections::HashSet;
+
+        let mut seen_values = HashSet::new();
+
+        // Stream all records and check for duplicates
+        let stream = self.list_stream(100);
+        pin_mut!(stream);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+
+            for (_id, value) in batch {
+                // Extract value at path
+                if let Some(extracted) = Self::extract_value(&value, path, interner)? {
+                    // Check if we've seen this value before
+                    if !seen_values.insert(extracted.clone()) {
+                        // Duplicate found!
+                        return Err(DbError::DuplicateKey(format!(
+                            "Cannot create unique index: duplicate value found at path: {:?}",
+                            path
+                        )));
+                    }
+                }
+                // If Some(None), we have null values which are allowed in unique indexes
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract a value from UserValue by interned path
+    fn extract_value(value: &UserValue, path: &[u64], interner: &Interner) -> DbResult<Option<UserValue>> {
+        let mut current = Some(value);
+
+        for &component in path {
+            match current {
+                Some(UserValue::Map(map)) => {
+                    // Look up key by interned ID
+                    let key = interner.get_str(component)
+                        .ok_or_else(|| DbError::Internal(format!(
+                            "Cannot reverse lookup interned ID: {}", component
+                        )))?;
+
+                    current = map.get(key.as_str());
+                }
+                _ => return Ok(None), // Path doesn't exist
+            }
+        }
+
+        Ok(current.map(|v| v.clone()))
+    }
+
+    /// Remove an index
+    pub async fn remove_index(&self, path: &[&str]) -> DbResult<bool> {
+        let interner = self.get_interner().await?;
+
+        // Convert path to interned IDs
+        let interned_path: Vec<u64> = path.iter()
+            .map(|&s| interner.touch_ind(s).val())
+            .collect();
+
+        // Update index target
+        let mut target = self.index_target.write().await;
+        let removed = target.remove_index(&interned_path);
+
+        // Save to storage or delete if disabled
+        if matches!(*target, IndexTarget::Disabled) {
+            let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+            self.info_store.remove(key_bytes).await?;
+        } else {
+            self.save_index_target(&target).await?;
+        }
+
+        Ok(removed)
+    }
+
+    /// Enable indexing for all Map fields
+    pub async fn enable_indexing_all(&self) -> DbResult<()> {
+        let mut target = self.index_target.write().await;
+        *target = IndexTarget::All;
+        self.save_index_target(&target).await?;
+        Ok(())
+    }
+
+    /// Disable indexing completely
+    pub async fn disable_indexing(&self) -> DbResult<()> {
+        let mut target = self.index_target.write().await;
+        *target = IndexTarget::Disabled;
+
+        // Delete from storage
+        let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+        self.info_store.remove(key_bytes).await?;
+
+        Ok(())
+    }
+
     /// Insert a UserValue, returns RecordId
     pub async fn insert(&self, value: &UserValue) -> DbResult<RecordId> {
         let interner = self.get_interner().await?;
+
+        // Check unique constraints before inserting
+        self.check_unique_constraints(value, interner).await?;
 
         // Transform UserValue → InnerValue
         let transform = transform::user_to_inner(value, interner);
@@ -190,6 +368,60 @@ impl<R: Repo> Table<R> {
         let arr: [u8; 16] = key_bytes.as_ref().try_into()
             .map_err(|_| DbError::Internal("Failed to convert key bytes to RecordId".to_string()))?;
         Ok(RecordId(arr))
+    }
+
+    /// Check unique constraints before insert/update
+    async fn check_unique_constraints(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
+        self.check_unique_constraints_exclude(value, interner, None).await
+    }
+
+    /// Check unique constraints before insert/update, optionally excluding a record ID
+    async fn check_unique_constraints_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
+        let target = self.index_target.read().await;
+
+        // Get unique indexes
+        let unique_indexes = target.unique_indexes();
+
+        for index_def in unique_indexes {
+            // Extract value at path
+            if let Some(extracted) = Self::extract_value(value, &index_def.path, interner)? {
+                // Check if this value already exists in the table
+                self.check_value_unique_exclude(&index_def.path, &extracted, interner, exclude_id).await?;
+            }
+            // None means the value at path is null - that's ok for unique indexes
+        }
+
+        Ok(())
+    }
+
+    /// Check if a value is unique at a given path, optionally excluding a record ID
+    async fn check_value_unique_exclude(&self, path: &[u64], value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
+        // Stream all records and check for duplicates
+        let stream = self.list_stream(100);
+        pin_mut!(stream);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+
+            for (id, existing_value) in batch {
+                // Skip the excluded record (for updates)
+                if let Some(exclude_id) = exclude_id {
+                    if id == exclude_id {
+                        continue;
+                    }
+                }
+
+                if let Some(existing) = Self::extract_value(&existing_value, path, interner)? {
+                    if existing == *value {
+                        return Err(DbError::DuplicateKey(format!(
+                            "Duplicate value for unique index at path: {:?}",
+                            path
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Get a UserValue by RecordId
@@ -223,6 +455,9 @@ impl<R: Repo> Table<R> {
             return Ok(false);
         }
 
+        // Check unique constraints before updating (excluding current record)
+        self.check_unique_constraints_exclude(value, interner, Some(id)).await?;
+
         // Transform UserValue → InnerValue
         let transform = transform::user_to_inner(value, interner);
 
@@ -247,6 +482,10 @@ impl<R: Repo> Table<R> {
 
         // Check if exists
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
+
+        // Check unique constraints (exclude current record if updating)
+        let exclude_id = if exists { Some(id) } else { None };
+        self.check_unique_constraints_exclude(value, interner, exclude_id).await?;
 
         // Transform UserValue → InnerValue
         let transform = transform::user_to_inner(value, interner);
@@ -398,6 +637,11 @@ impl<R: Repo> Table<R> {
     /// Get table name
     pub fn name(&self) -> &str {
         &self.table_name
+    }
+
+    /// Get the current index target (for testing)
+    pub async fn get_index_target(&self) -> IndexTarget {
+        self.index_target.read().await.clone()
     }
 }
 
@@ -1233,5 +1477,282 @@ mod tests {
         let expected = (num_threads * records_per_thread) as usize;
         let actual = table.count().await.unwrap();
         assert_eq!(actual, expected);
+    }
+
+    // === Index Management Tests ===
+
+    #[tokio::test]
+    async fn test_add_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add a simple index
+        table.add_index(&["email"]).await.unwrap();
+
+        // Verify index was added
+        let target = table.get_index_target().await;
+        assert!(target.is_selective());
+        // Note: The interned ID for "email" will be 1 since it's the first key
+    }
+
+    #[tokio::test]
+    async fn test_add_nested_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add a nested index
+        table.add_index(&["user", "profile", "age"]).await.unwrap();
+
+        // Verify index was added
+        let target = table.get_index_target().await;
+        assert!(target.is_selective());
+        let indexes = target.indexes().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].path.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_add_unique_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add a unique index on empty table (should succeed)
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Verify index was added
+        let target = table.get_index_target().await;
+        assert!(target.is_selective());
+        let unique_indexes = target.unique_indexes();
+        assert_eq!(unique_indexes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_unique_index_with_duplicates() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Insert two records with same email
+        let mut data1 = new_map();
+        data1.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
+        table.insert(&UserValue::Map(data1)).await.unwrap();
+
+        let mut data2 = new_map();
+        data2.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
+        table.insert(&UserValue::Map(data2)).await.unwrap();
+
+        // Try to add unique index - should fail
+        let result = table.add_unique_index(&["email"]).await;
+        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
+    }
+
+    #[tokio::test]
+    async fn test_remove_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add an index
+        table.add_index(&["email"]).await.unwrap();
+
+        // Remove it
+        let removed = table.remove_index(&["email"]).await.unwrap();
+        assert!(removed);
+
+        // Verify it was removed (should be disabled now)
+        let target = table.get_index_target().await;
+        assert!(matches!(target, IndexTarget::Disabled));
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Try to remove non-existent index
+        let removed = table.remove_index(&["nonexistent"]).await.unwrap();
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn test_enable_indexing_all() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Enable full indexing
+        table.enable_indexing_all().await.unwrap();
+
+        // Verify it was enabled
+        let target = table.get_index_target().await;
+        assert!(target.is_all());
+    }
+
+    #[tokio::test]
+    async fn test_disable_indexing() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add an index first
+        table.add_index(&["email"]).await.unwrap();
+
+        // Disable indexing
+        table.disable_indexing().await.unwrap();
+
+        // Verify it was disabled
+        let target = table.get_index_target().await;
+        assert!(matches!(target, IndexTarget::Disabled));
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_on_insert() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Insert first record
+        let mut data1 = new_map();
+        data1.insert("email".to_string(), UserValue::Str("unique@test.com".to_string()));
+        table.insert(&UserValue::Map(data1)).await.unwrap();
+
+        // Try to insert duplicate - should fail
+        let mut data2 = new_map();
+        data2.insert("email".to_string(), UserValue::Str("unique@test.com".to_string()));
+        let result = table.insert(&UserValue::Map(data2)).await;
+        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
+
+        // Different email should work
+        let mut data3 = new_map();
+        data3.insert("email".to_string(), UserValue::Str("different@test.com".to_string()));
+        table.insert(&UserValue::Map(data3)).await.unwrap();
+
+        // Verify count is 2
+        assert_eq!(table.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_on_update() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Insert two records
+        let mut data1 = new_map();
+        data1.insert("email".to_string(), UserValue::Str("first@test.com".to_string()));
+        let id1 = table.insert(&UserValue::Map(data1)).await.unwrap();
+
+        let mut data2 = new_map();
+        data2.insert("email".to_string(), UserValue::Str("second@test.com".to_string()));
+        table.insert(&UserValue::Map(data2)).await.unwrap();
+
+        // Try to update first record to have same email as second
+        let mut update_data = new_map();
+        update_data.insert("email".to_string(), UserValue::Str("second@test.com".to_string()));
+        let result = table.update(id1, &UserValue::Map(update_data)).await;
+        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
+
+        // Updating to different email should work
+        let mut update_data2 = new_map();
+        update_data2.insert("email".to_string(), UserValue::Str("changed@test.com".to_string()));
+        table.update(id1, &UserValue::Map(update_data2)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_on_set() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Insert first record
+        let mut data1 = new_map();
+        data1.insert("email".to_string(), UserValue::Str("first@test.com".to_string()));
+        let id1 = RecordId::new();
+        table.set(id1, &UserValue::Map(data1)).await.unwrap();
+
+        // Try to set second record with same email
+        let mut data2 = new_map();
+        data2.insert("email".to_string(), UserValue::Str("first@test.com".to_string()));
+        let id2 = RecordId::new();
+        let result = table.set(id2, &UserValue::Map(data2)).await;
+        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
+    }
+
+    #[tokio::test]
+    async fn test_unique_constraint_allows_null() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Insert multiple records without email field (null)
+        for i in 0..3 {
+            let mut data = new_map();
+            data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
+            table.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        // All should succeed - null values are allowed in unique indexes
+        assert_eq!(table.count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_indexes() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add multiple indexes
+        table.add_index(&["name"]).await.unwrap();
+        table.add_index(&["age"]).await.unwrap();
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Verify all were added
+        let target = table.get_index_target().await;
+        assert!(target.is_selective());
+        let indexes = target.indexes().unwrap();
+        assert_eq!(indexes.len(), 3);
+
+        let unique_indexes = target.unique_indexes();
+        assert_eq!(unique_indexes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_index_target_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_index_persistence");
+        let table_name = "test_index";
+
+        // === First session ===
+        let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+        let table1 = Table::new(repo1, table_name.to_string()).await.unwrap();
+
+        // Add indexes
+        table1.add_index(&["name"]).await.unwrap();
+        table1.add_unique_index(&["email"]).await.unwrap();
+
+        // Close first session
+        drop(table1);
+
+        // === Second session ===
+        let repo2 = Arc::new(SledRepo::new(path).unwrap());
+        let table2 = Table::new(repo2, table_name.to_string()).await.unwrap();
+
+        // Verify indexes persisted
+        let target = table2.get_index_target().await;
+        assert!(target.is_selective());
+
+        let unique_indexes = target.unique_indexes();
+        assert_eq!(unique_indexes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_same_value_succeeds() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Insert record
+        let mut data = new_map();
+        data.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
+        let id = table.insert(&UserValue::Map(data.clone())).await.unwrap();
+
+        // Update with same value - should succeed (self-update is allowed)
+        let result = table.update(id, &UserValue::Map(data.clone())).await.unwrap();
+        assert!(result);
+
+        // Verify record is still there
+        let retrieved = table.get(id).await.unwrap();
+        assert_eq!(retrieved, UserValue::Map(data));
     }
 }
