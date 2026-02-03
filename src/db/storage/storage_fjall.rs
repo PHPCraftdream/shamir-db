@@ -1,4 +1,4 @@
-use super::types::{Repo, Store};
+use super::types::{RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -73,41 +73,43 @@ pub struct FjallStore {
 
 #[async_trait]
 impl Store for FjallStore {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordId> {
-        let id = RecordId::new();
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let keyspace = self.keyspace.clone();
 
-        task::spawn_blocking(move || -> DbResult<RecordId> {
+        task::spawn_blocking(move || -> DbResult<RecordKey> {
+            let id = RecordId::new();
+            let key = RecordKey::copy_from_slice(id.as_bytes());
+
             // Check if key exists first
             if keyspace
-                .contains_key(id.as_bytes())
+                .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?
             {
-                return Err(DbError::KeyExists(format!("Key already exists: {:?}", id)));
+                return Err(DbError::KeyExists(format!("Key already exists: {:?}", key)));
             }
 
             // Insert the value
             keyspace
-                .insert(id.as_bytes(), &*value)
+                .insert(&key[..], &*value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            Ok(id)
+            Ok(key)
         })
             .await
             .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool> {
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
             // Check if key existed before
             let existed = keyspace
-                .contains_key(key.as_bytes())
+                .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             // Insert/update the value
             keyspace
-                .insert(key.as_bytes(), &*value)
+                .insert(&key[..], &*value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             // Return true if created (didn't exist), false if updated (existed)
@@ -117,30 +119,30 @@ impl Store for FjallStore {
             .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<Bytes> {
-            match keyspace.get(key.as_bytes()).map_err(|e| DbError::Storage(e.to_string()))?
+            match keyspace.get(&key[..]).map_err(|e| DbError::Storage(e.to_string()))?
             {
                 Some(slice) => Ok(Bytes::copy_from_slice(&slice)),
-                None => Err(DbError::NotFound(format!("record not found: {:}", key))),
+                None => Err(DbError::NotFound(format!("record not found: {:?}", key))),
             }
         })
             .await
             .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn remove(&self, key: RecordId) -> DbResult<bool> {
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
             // Check if key exists
             let existed = keyspace
-                .contains_key(key.as_bytes())
+                .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             if existed {
                 keyspace
-                    .remove(key.as_bytes())
+                    .remove(&key[..])
                     .map_err(|e| DbError::Storage(e.to_string()))?;
             }
 
@@ -150,9 +152,9 @@ impl Store for FjallStore {
             .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>> {
+    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
         let keyspace = self.keyspace.clone();
-        task::spawn_blocking(move || -> DbResult<Vec<(RecordId, Bytes)>> {
+        task::spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
             let mut items = Vec::new();
 
             // Iterate over all items - Guard::into_inner() returns key-value pair directly
@@ -161,11 +163,7 @@ impl Store for FjallStore {
                     .into_inner()
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
-                    DbError::Internal("Failed to convert key to RecordId".to_string())
-                })?);
-
-                items.push((record_id, Bytes::copy_from_slice(&value_slice)));
+                items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
             }
 
             Ok(items)
@@ -174,7 +172,7 @@ impl Store for FjallStore {
             .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let keyspace = self.keyspace.clone();
 
         Box::pin(stream! {
@@ -209,10 +207,7 @@ impl Store for FjallStore {
                             .map_err(|e| DbError::Storage(e.to_string()))?;
 
                         last_batch_key = Some(key.to_vec());
-                        let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
-                            DbError::Internal("Failed to convert key to RecordId".to_string())
-                        })?);
-                        items.push((record_id, Bytes::copy_from_slice(&value_slice)));
+                        items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
                     }
 
                     Ok((items, last_batch_key))
@@ -240,6 +235,7 @@ impl Store for FjallStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
     use std::fs;
     use tokio::time::{sleep, Duration};
@@ -247,38 +243,39 @@ mod tests {
     async fn run_store_tests(store: Arc<dyn Store>) {
         // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let id1 = store.insert(value1.to_bytes()).await.unwrap();
-        let retrieved_bytes = store.get(id1).await.unwrap();
+        let key1 = store.insert(value1.to_bytes()).await.unwrap();
+        let retrieved_bytes = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
         // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        let created = store.set(id1, value2.to_bytes()).await.unwrap();
+        let created = store.set(key1.clone(), value2.to_bytes()).await.unwrap();
         assert!(!created); // Should be false, as it's an update
-        let retrieved_bytes2 = store.get(id1).await.unwrap();
+        let retrieved_bytes2 = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Test set (create)
         let id2 = RecordId::new();
+        let key2 = Bytes::copy_from_slice(id2.as_bytes());
         let value3 = InnerValue::Int(123);
-        let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
+        let created2 = store.set(key2.clone(), value3.to_bytes()).await.unwrap();
         assert!(created2); // Should be true, as it's a new record
-        let retrieved_bytes3 = store.get(id2).await.unwrap();
+        let retrieved_bytes3 = store.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
 
         // Test iter
         let value4 = InnerValue::Bool(true);
-        let _id3 = store.insert(value4.to_bytes()).await.unwrap();
+        let _key3 = store.insert(value4.to_bytes()).await.unwrap();
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
-        assert!(all_records.iter().any(|(id, _)| *id == id1));
+        assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
-        assert!(store.remove(id1).await.unwrap());
-        assert!(store.get(id1).await.is_err());
-        assert!(!store.remove(id1).await.unwrap()); // Already removed
+        assert!(store.remove(key1.clone()).await.unwrap());
+        assert!(store.get(key1.clone()).await.is_err());
+        assert!(!store.remove(key1).await.unwrap()); // Already removed
 
         let all_records_after_remove = store.iter().await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);

@@ -1,4 +1,4 @@
-use super::types::{Repo, Store};
+use super::types::{RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -157,16 +157,18 @@ unsafe impl Sync for CanopyStore {}
 
 #[async_trait]
 impl Store for CanopyStore {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordId> {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
-        spawn_blocking(move || -> DbResult<RecordId> {
+        spawn_blocking(move || -> DbResult<RecordKey> {
             let tx = db
                 .begin_write()
                 .map_err(|e| DbError::Storage(format!("CanopyDB begin_write: {}", e)))?;
 
             let id = RecordId::new();
+            let key = RecordKey::copy_from_slice(id.as_bytes());
+
             {
                 let mut tree = tx
                     .get_or_create_tree(table_name.as_bytes())
@@ -174,20 +176,20 @@ impl Store for CanopyStore {
                         DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e))
                     })?;
 
-                tree.insert(id.as_bytes(), &*value)
+                tree.insert(&key[..], &*value)
                     .map_err(|e| DbError::Storage(format!("CanopyDB insert: {}", e)))?;
             }
 
             tx.commit()
                 .map_err(|e| DbError::Storage(format!("CanopyDB commit: {}", e)))?;
 
-            Ok(id)
+            Ok(key)
         })
         .await
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool> {
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
@@ -204,13 +206,12 @@ impl Store for CanopyStore {
                         DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e))
                     })?;
 
-                let key_bytes = key.as_bytes();
                 let existed = tree
-                    .get(key_bytes)
+                    .get(&key[..])
                     .map_err(|e| DbError::Storage(format!("CanopyDB get: {}", e)))?
                     .is_some();
 
-                tree.insert(key_bytes, &*value)
+                tree.insert(&key[..], &*value)
                     .map_err(|e| DbError::Storage(format!("CanopyDB insert: {}", e)))?;
 
                 created = !existed;
@@ -225,7 +226,7 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
@@ -240,9 +241,9 @@ impl Store for CanopyStore {
                 .ok_or_else(|| DbError::NotFound(table_name.clone()))?;
 
             let val = tree
-                .get(key.as_bytes())
+                .get(&key[..])
                 .map_err(|e| DbError::Storage(format!("CanopyDB get: {}", e)))?
-                .ok_or_else(|| DbError::NotFound(key.to_string()))?;
+                .ok_or_else(|| DbError::NotFound(format!("{:?}", key)))?;
 
             Ok(Bytes::copy_from_slice(&val))
         })
@@ -250,7 +251,7 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn remove(&self, key: RecordId) -> DbResult<bool> {
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
@@ -266,9 +267,8 @@ impl Store for CanopyStore {
                     .map_err(|e| DbError::Storage(format!("CanopyDB get_tree: {}", e)))?
                     .ok_or_else(|| DbError::NotFound(table_name.clone()))?;
 
-                let key_bytes = key.as_bytes();
                 existed = tree
-                    .delete(key_bytes)
+                    .delete(&key[..])
                     .map_err(|e| DbError::Storage(format!("CanopyDB delete: {}", e)))?;
             }
 
@@ -281,11 +281,11 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>> {
+    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
-        spawn_blocking(move || -> DbResult<Vec<(RecordId, Bytes)>> {
+        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
             let tx = db
                 .begin_read()
                 .map_err(|e| DbError::Storage(format!("CanopyDB begin_read: {}", e)))?;
@@ -302,10 +302,7 @@ impl Store for CanopyStore {
                 {
                     let (key, val) =
                         item.map_err(|e| DbError::Storage(format!("CanopyDB iter item: {}", e)))?;
-                    let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
-                        DbError::Internal("Failed to convert key to RecordId".to_string())
-                    })?);
-                    out.push((record_id, Bytes::copy_from_slice(&val)));
+                    out.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&val)));
                 }
                 Ok(out)
             } else {
@@ -316,7 +313,7 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
@@ -356,10 +353,7 @@ impl Store for CanopyStore {
                                 Some(Ok(item)) => {
                                     let (key, val) = item;
                                     next_cursor = Some(key.to_vec());
-                                    let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
-                                        DbError::Internal("Failed to convert key to RecordId".to_string())
-                                    })?);
-                                    out.push((record_id, Bytes::copy_from_slice(&val)));
+                                    out.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&val)));
                                 }
                                 Some(Err(e)) => {
                                     return Err(DbError::Storage(format!("CanopyDB iter item: {}", e)));
@@ -399,42 +393,44 @@ mod tests {
     use crate::types::value::InnerValue;
     use std::fs;
     use tokio::time::{sleep, Duration};
+    use crate::types::record_id::RecordId;
 
     async fn run_store_tests(store: Arc<dyn Store>) {
         // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let id1 = store.insert(value1.to_bytes()).await.unwrap();
-        let retrieved_bytes = store.get(id1).await.unwrap();
+        let key1 = store.insert(value1.to_bytes()).await.unwrap();
+        let retrieved_bytes = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
         // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        let created = store.set(id1, value2.to_bytes()).await.unwrap();
+        let created = store.set(key1.clone(), value2.to_bytes()).await.unwrap();
         assert!(!created); // Should be false, as it's an update
-        let retrieved_bytes2 = store.get(id1).await.unwrap();
+        let retrieved_bytes2 = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Test set (create)
         let id2 = RecordId::new();
+        let key2 = Bytes::copy_from_slice(id2.as_bytes());
         let value3 = InnerValue::Int(123);
-        let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
+        let created2 = store.set(key2.clone(), value3.to_bytes()).await.unwrap();
         assert!(created2); // Should be true, as it's a new record
-        let retrieved_bytes3 = store.get(id2).await.unwrap();
+        let retrieved_bytes3 = store.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
 
         // Test iter
         let value4 = InnerValue::Bool(true);
-        let _id3 = store.insert(value4.to_bytes()).await.unwrap();
+        let _key3 = store.insert(value4.to_bytes()).await.unwrap();
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
-        assert!(all_records.iter().any(|(id, _)| *id == id1));
+        assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
-        assert!(store.remove(id1).await.unwrap());
-        assert!(store.get(id1).await.is_err());
-        assert!(!store.remove(id1).await.unwrap()); // Already removed
+        assert!(store.remove(key1.clone()).await.unwrap());
+        assert!(store.get(key1.clone()).await.is_err());
+        assert!(!store.remove(key1).await.unwrap()); // Already removed
 
         let all_records_after_remove = store.iter().await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
@@ -506,30 +502,30 @@ mod tests {
 
         // Insert into table1
         let value1 = InnerValue::Str("table1_value".to_string());
-        let id1 = store1.insert(value1.to_bytes()).await.unwrap();
+        let key1 = store1.insert(value1.to_bytes()).await.unwrap();
 
         // Insert into table2
         let value2 = InnerValue::Str("table2_value".to_string());
-        let id2 = store2.insert(value2.to_bytes()).await.unwrap();
+        let key2 = store2.insert(value2.to_bytes()).await.unwrap();
 
         // Verify isolation - each table should have only 1 record
         assert_eq!(store1.iter().await.unwrap().len(), 1);
         assert_eq!(store2.iter().await.unwrap().len(), 1);
 
         // Verify correct values
-        let retrieved_bytes1 = store1.get(id1).await.unwrap();
+        let retrieved_bytes1 = store1.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes1).unwrap(), value1);
 
-        let retrieved_bytes2 = store2.get(id2).await.unwrap();
+        let retrieved_bytes2 = store2.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Verify cross-table isolation (get should fail with NotFound because the tree itself won't be found)
         assert!(matches!(
-            store2.get(id1).await,
+            store2.get(key1).await,
             Err(DbError::NotFound(_))
         ));
         assert!(matches!(
-            store1.get(id2).await,
+            store1.get(key2).await,
             Err(DbError::NotFound(_))
         ));
 

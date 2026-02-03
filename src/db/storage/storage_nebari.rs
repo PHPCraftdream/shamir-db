@@ -1,4 +1,4 @@
-use super::types::{Repo, Store};
+use super::types::{RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -169,27 +169,27 @@ unsafe impl Sync for NebariStore {}
 
 #[async_trait]
 impl Store for NebariStore {
-    async fn insert(&self, value: Bytes) -> DbResult<RecordId> {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let tree = self.tree.clone();
 
-        spawn_blocking(move || -> DbResult<RecordId> {
+        spawn_blocking(move || -> DbResult<RecordKey> {
             let id = RecordId::new();
-            let key = id.as_bytes().to_vec();
+            let key = RecordKey::copy_from_slice(id.as_bytes());
 
-            tree.set(key, value.to_vec())
+            tree.set(key.to_vec(), value.to_vec())
                 .map_err(|e| DbError::Storage(format!("NebariDB set: {}", e)))?;
 
-            Ok(id)
+            Ok(key)
         })
             .await
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool> {
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         let tree = self.tree.clone();
 
         spawn_blocking(move || -> DbResult<bool> {
-            let key_bytes = key.as_bytes().to_vec();
+            let key_bytes = key.to_vec();
 
             let existed = tree
                 .get(&key_bytes)
@@ -205,15 +205,15 @@ impl Store for NebariStore {
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         let tree = self.tree.clone();
 
         spawn_blocking(move || -> DbResult<Bytes> {
-            let key_bytes = key.as_bytes();
+            let key_bytes = key.to_vec();
             let val = tree
-                .get(key_bytes)
+                .get(&key_bytes)
                 .map_err(|e| DbError::Storage(format!("NebariDB get: {}", e)))?
-                .ok_or_else(|| DbError::NotFound(key.to_string()))?;
+                .ok_or_else(|| DbError::NotFound(format!("{:?}", key)))?;
 
             Ok(Bytes::copy_from_slice(val.as_ref()))
         })
@@ -221,13 +221,13 @@ impl Store for NebariStore {
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn remove(&self, key: RecordId) -> DbResult<bool> {
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let tree = self.tree.clone();
 
         spawn_blocking(move || -> DbResult<bool> {
-            let key_bytes = key.as_bytes();
+            let key_bytes = key.to_vec();
             let existed = tree
-                .remove(key_bytes)
+                .remove(&key_bytes)
                 .map_err(|e| DbError::Storage(format!("NebariDB remove: {}", e)))?
                 .is_some();
 
@@ -237,10 +237,10 @@ impl Store for NebariStore {
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>> {
+    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
         let tree = self.tree.clone();
 
-        spawn_blocking(move || -> DbResult<Vec<(RecordId, Bytes)>> {
+        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
             let mut out = Vec::new();
             tree.scan::<nebari::Error, _, _, _, _>(
                 &(..),
@@ -248,13 +248,7 @@ impl Store for NebariStore {
                 |_, _, _| ScanEvaluation::ReadData,
                 |_, _| ScanEvaluation::ReadData,
                 |key, _, value| {
-                    let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
-                        nebari::Error::from(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Failed to convert key to RecordId",
-                        ))
-                    })?);
-                    out.push((record_id, Bytes::copy_from_slice(value.as_ref())));
+                    out.push((Bytes::copy_from_slice(key.as_ref()), Bytes::copy_from_slice(value.as_ref())));
                     Ok(())
                 },
             )
@@ -266,7 +260,7 @@ impl Store for NebariStore {
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let tree = self.tree.clone();
 
         Box::pin(stream! {
@@ -302,13 +296,7 @@ impl Store for NebariStore {
 
                             if count < batch_size {
                                 next_cursor = Some(key.to_vec());
-                                let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
-                                    nebari::Error::from(std::io::Error::new(
-                                        std::io::ErrorKind::InvalidData,
-                                        "Failed to convert key to RecordId",
-                                    ))
-                                })?);
-                                out.push((record_id, Bytes::copy_from_slice(value.as_ref())));
+                                out.push((Bytes::copy_from_slice(key.as_ref()), Bytes::copy_from_slice(value.as_ref())));
                                 count += 1;
                             }
                             Ok(())
@@ -341,6 +329,7 @@ impl Store for NebariStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
     use std::fs;
     use tokio::time::{sleep, Duration};
@@ -348,38 +337,39 @@ mod tests {
     async fn run_store_tests(store: Arc<dyn Store>) {
         // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let id1 = store.insert(value1.to_bytes()).await.unwrap();
-        let retrieved_bytes = store.get(id1).await.unwrap();
+        let key1 = store.insert(value1.to_bytes()).await.unwrap();
+        let retrieved_bytes = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
         // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        let created = store.set(id1, value2.to_bytes()).await.unwrap();
+        let created = store.set(key1.clone(), value2.to_bytes()).await.unwrap();
         assert!(!created); // Should be false, as it's an update
-        let retrieved_bytes2 = store.get(id1).await.unwrap();
+        let retrieved_bytes2 = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Test set (create)
         let id2 = RecordId::new();
+        let key2 = Bytes::copy_from_slice(id2.as_bytes());
         let value3 = InnerValue::Int(123);
-        let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
+        let created2 = store.set(key2.clone(), value3.to_bytes()).await.unwrap();
         assert!(created2); // Should be true, as it's a new record
-        let retrieved_bytes3 = store.get(id2).await.unwrap();
+        let retrieved_bytes3 = store.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
 
         // Test iter
         let value4 = InnerValue::Bool(true);
-        let _id3 = store.insert(value4.to_bytes()).await.unwrap();
+        let _key3 = store.insert(value4.to_bytes()).await.unwrap();
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
-        assert!(all_records.iter().any(|(id, _)| *id == id1));
+        assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
-        assert!(store.remove(id1).await.unwrap());
-        assert!(store.get(id1).await.is_err());
-        assert!(!store.remove(id1).await.unwrap()); // Already removed
+        assert!(store.remove(key1.clone()).await.unwrap());
+        assert!(store.get(key1.clone()).await.is_err());
+        assert!(!store.remove(key1).await.unwrap()); // Already removed
 
         let all_records_after_remove = store.iter().await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
@@ -446,26 +436,26 @@ mod tests {
 
         // Insert into table1
         let value1 = InnerValue::Str("table1_value".to_string());
-        let id1 = store1.insert(value1.to_bytes()).await.unwrap();
+        let key1 = store1.insert(value1.to_bytes()).await.unwrap();
 
         // Insert into table2
         let value2 = InnerValue::Str("table2_value".to_string());
-        let id2 = store2.insert(value2.to_bytes()).await.unwrap();
+        let key2 = store2.insert(value2.to_bytes()).await.unwrap();
 
         // Verify isolation - each table should have only 1 record
         assert_eq!(store1.iter().await.unwrap().len(), 1);
         assert_eq!(store2.iter().await.unwrap().len(), 1);
 
         // Verify correct values
-        let retrieved_bytes1 = store1.get(id1).await.unwrap();
+        let retrieved_bytes1 = store1.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes1).unwrap(), value1);
 
-        let retrieved_bytes2 = store2.get(id2).await.unwrap();
+        let retrieved_bytes2 = store2.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Verify cross-table isolation (get should fail with NotFound)
-        assert!(matches!(store2.get(id1).await, Err(DbError::NotFound(_))));
-        assert!(matches!(store1.get(id2).await, Err(DbError::NotFound(_))));
+        assert!(matches!(store2.get(key1).await, Err(DbError::NotFound(_))));
+        assert!(matches!(store1.get(key2).await, Err(DbError::NotFound(_))));
 
         // Clean up
         repo.store_delete("isolated_table1").await.unwrap();
