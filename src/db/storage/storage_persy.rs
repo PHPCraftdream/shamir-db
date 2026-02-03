@@ -1,10 +1,8 @@
 use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use crate::types::repo_record::RepoRecord;
-use crate::types::value::InnerValue;
 use async_trait::async_trait;
-use chrono::Utc;
+use bytes::Bytes;
 use persy::{Persy, PersyId, Config, ByteVec};
 use std::path::Path;
 use std::sync::Arc;
@@ -118,21 +116,16 @@ unsafe impl Sync for PersyStore {}
 
 #[async_trait]
 impl Store for PersyStore {
-    async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordId> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         let index_name = self.index_name.clone();
-        let inner_value = value.clone();
 
         spawn_blocking(move || -> DbResult<RecordId> {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
 
             let id = RecordId::new();
-            let now = Utc::now().timestamp_micros() as u64;
-            let record: RepoRecord = (id, now, now, inner_value);
-            let serialized = rmp_serde::to_vec(&record).map_err(|e| DbError::Codec(e.to_string()))?;
-
-            let persy_id = tx.insert(&table_name, &serialized)
+            let persy_id = tx.insert(&table_name, &*value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             // Store RecordId -> PersyId mapping in index
@@ -149,11 +142,10 @@ impl Store for PersyStore {
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn set(&self, key: RecordId, value: &InnerValue) -> DbResult<bool> {
+    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         let index_name = self.index_name.clone();
-        let inner_value = value.clone();
 
         spawn_blocking(move || -> DbResult<bool> {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
@@ -163,46 +155,41 @@ impl Store for PersyStore {
             let mut iter = tx.get::<ByteVec, ByteVec>(&index_name, &key_bytes)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            let persy_id_str_bytes = iter.next()
-                .ok_or_else(|| DbError::NotFound(key.to_string()))?;
-            let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
-                .map_err(|e| DbError::Codec(e.to_string()))?;
-            let persy_id: PersyId = persy_id_str.parse()
-                .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+            let created = if let Some(persy_id_str_bytes) = iter.next() {
+                // Existing record - update
+                let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
+                    .map_err(|e| DbError::Codec(e.to_string()))?;
+                let persy_id: PersyId = persy_id_str.parse()
+                    .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
 
-            let existing_val = tx.read(&table_name, &persy_id)
-                .map_err(|e| DbError::Storage(e.to_string()))?
-                .ok_or_else(|| DbError::NotFound(key.to_string()))?;
+                tx.update(&table_name, &persy_id, &*value)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+                false
+            } else {
+                // New record - insert and update index
+                let persy_id = tx.insert(&table_name, &*value)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            let created_at = rmp_serde::from_slice::<RepoRecord>(&existing_val)
-                .map(|r| r.1)
-                .unwrap_or_else(|_| Utc::now().timestamp_micros() as u64);
-
-            let record: RepoRecord = (
-                key,
-                created_at,
-                Utc::now().timestamp_micros() as u64,
-                inner_value,
-            );
-
-            let serialized = rmp_serde::to_vec(&record).map_err(|e| DbError::Codec(e.to_string()))?;
-            tx.update(&table_name, &persy_id, &serialized)
-                .map_err(|e| DbError::Storage(e.to_string()))?;
+                let val = ByteVec::new(persy_id.to_string().into_bytes());
+                tx.put(&index_name, key_bytes, val)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+                true
+            };
 
             tx.prepare().map_err(|e| DbError::Storage(e.to_string()))?
                 .commit().map_err(|e| DbError::Storage(e.to_string()))?;
-            Ok(true)
+            Ok(created)
         })
             .await
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<RepoRecord> {
+    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         let index_name = self.index_name.clone();
 
-        spawn_blocking(move || -> DbResult<RepoRecord> {
+        spawn_blocking(move || -> DbResult<Bytes> {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
             let key_bytes = ByteVec::new(key.as_bytes().to_vec());
 
@@ -220,7 +207,7 @@ impl Store for PersyStore {
                 .map_err(|e| DbError::Storage(e.to_string()))?
                 .ok_or_else(|| DbError::NotFound(key.to_string()))?;
 
-            rmp_serde::from_slice(&val).map_err(|e| DbError::Codec(e.to_string()))
+            Ok(Bytes::copy_from_slice(&val))
         })
             .await
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
@@ -260,20 +247,44 @@ impl Store for PersyStore {
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<RepoRecord>> {
+    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
 
-        spawn_blocking(move || -> DbResult<Vec<RepoRecord>> {
+        spawn_blocking(move || -> DbResult<Vec<(RecordId, Bytes)>> {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
-            let mut out = Vec::new();
 
-            for (_id, content) in tx.scan(&table_name)
-                .map_err(|e| DbError::Storage(e.to_string()))? {
-                if let Ok(record) = rmp_serde::from_slice::<RepoRecord>(&content) {
-                    out.push(record);
+            // First: collect all RecordId -> PersyId mappings
+            let mut mappings = Vec::new();
+            {
+                let mut index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name, ..)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                    let record_id = RecordId(key_bytes.as_ref().try_into().map_err(|_| {
+                        DbError::Internal("Failed to convert key to RecordId".to_string())
+                    })?);
+
+                    if let Some(val_bytes) = val_iter.next() {
+                        let persy_id_str = String::from_utf8(val_bytes.to_vec())
+                            .map_err(|e| DbError::Codec(e.to_string()))?;
+                        let persy_id: PersyId = persy_id_str.parse()
+                            .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                        mappings.push((record_id, persy_id));
+                    }
                 }
+            } // index_iter dropped here
+
+            // Second: read all data using collected mappings
+            let mut out = Vec::new();
+            for (record_id, persy_id) in mappings {
+                let content = tx.read(&table_name, &persy_id)
+                    .map_err(|e| DbError::Storage(e.to_string()))?
+                    .ok_or_else(|| DbError::NotFound(format!("PersyId not found for record: {}", record_id)))?;
+                out.push((record_id, Bytes::copy_from_slice(&content)));
             }
+
             Ok(out)
         })
             .await
@@ -293,35 +304,43 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     async fn run_store_tests(store: Arc<dyn Store>) {
+        // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let id1 = store.insert(&value1).await.unwrap();
-        let retrieved1 = store.get(id1).await.unwrap();
-        assert_eq!(retrieved1.3, value1);
+        let id1 = store.insert(value1.to_bytes()).await.unwrap();
+        let retrieved_bytes = store.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
+        // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        store.set(id1, &value2).await.unwrap();
-        let retrieved2 = store.get(id1).await.unwrap();
-        assert_eq!(retrieved2.3, value2);
-        assert_eq!(retrieved2.1, retrieved1.1);
-        assert!(retrieved2.2 > retrieved1.2);
+        let created = store.set(id1, value2.to_bytes()).await.unwrap();
+        assert!(!created); // Should be false, as it's an update
+        let retrieved_bytes2 = store.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
-        let value3 = InnerValue::Int(99);
-        let _id2 = store.insert(&value3).await.unwrap();
+        // Test set (create)
+        let id2 = RecordId::new();
+        let value3 = InnerValue::Int(123);
+        let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
+        assert!(created2); // Should be true, as it's a new record
+        let retrieved_bytes3 = store.get(id2).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
+
+        // Test iter
+        let value4 = InnerValue::Bool(true);
+        let _id3 = store.insert(value4.to_bytes()).await.unwrap();
         let all_records = store.iter().await.unwrap();
-        assert_eq!(all_records.len(), 2);
-        assert!(all_records.iter().any(|r| r.3 == value2));
-        assert!(all_records.iter().any(|r| r.3 == value3));
+        assert_eq!(all_records.len(), 3);
+        assert!(all_records.iter().any(|(id, _)| *id == id1));
+        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
+        // Test remove
         assert!(store.remove(id1).await.unwrap());
+        assert!(store.get(id1).await.is_err());
+        assert!(!store.remove(id1).await.unwrap()); // Already removed
 
-        match store.get(id1).await {
-            Err(DbError::NotFound(_)) => { /* Correct */ }
-            Ok(_) => panic!("Should have been removed"),
-            Err(e) => panic!("Unexpected error: {}", e),
-        }
-
-        assert_eq!(store.iter().await.unwrap().len(), 1);
+        let all_records_after_remove = store.iter().await.unwrap();
+        assert_eq!(all_records_after_remove.len(), 2);
     }
 
     #[tokio::test]
@@ -335,6 +354,8 @@ mod tests {
         let store = repo.store_get("test_table").await.unwrap();
 
         run_store_tests(store).await;
+
+        assert!(repo.store_delete("test_table").await.unwrap());
     }
 
     #[tokio::test]
@@ -379,19 +400,19 @@ mod tests {
         let store2 = repo.store_get("isolated_table2").await.unwrap();
 
         let value1 = InnerValue::Str("table1_value".to_string());
-        let id1 = store1.insert(&value1).await.unwrap();
+        let id1 = store1.insert(value1.to_bytes()).await.unwrap();
 
         let value2 = InnerValue::Str("table2_value".to_string());
-        let id2 = store2.insert(&value2).await.unwrap();
+        let id2 = store2.insert(value2.to_bytes()).await.unwrap();
 
         assert_eq!(store1.iter().await.unwrap().len(), 1);
         assert_eq!(store2.iter().await.unwrap().len(), 1);
 
-        let retrieved1 = store1.get(id1).await.unwrap();
-        assert_eq!(retrieved1.3, value1);
+        let retrieved_bytes1 = store1.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes1).unwrap(), value1);
 
-        let retrieved2 = store2.get(id2).await.unwrap();
-        assert_eq!(retrieved2.3, value2);
+        let retrieved_bytes2 = store2.get(id2).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         assert!(matches!(store2.get(id1).await, Err(DbError::NotFound(_))));
         assert!(matches!(store1.get(id2).await, Err(DbError::NotFound(_))));
