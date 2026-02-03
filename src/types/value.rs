@@ -313,7 +313,6 @@ mod tests {
             UserValue::F64(3.14159),
             UserValue::F64(f64::INFINITY),
             UserValue::F64(f64::NEG_INFINITY),
-
             UserValue::Str("hello world".to_string()),
             UserValue::Str("".to_string()),
             UserValue::Bin(vec![1, 2, 3, 4, 5]),
@@ -628,6 +627,71 @@ mod tests {
                     }
                 }
                 _ => panic!("Type mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_decimal_roundtrip_preserves_string_representation() {
+        let test_cases = vec![
+            "0",
+            "1",
+            "123.456",
+            "-123.456",
+            "0.000000001",
+            "999999999999.999999999",
+            "-0.5",
+            "1.0",
+            "79228162514264337593543950335",  // Max Decimal
+        ];
+
+        for input_str in test_cases {
+            let decimal = Decimal::from_str(input_str).unwrap();
+            let value = UserValue::Dec(decimal);
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+
+            match reconstructed {
+                UserValue::Str(s) => {
+                    // Сравниваем строковое представление
+                    assert_eq!(s, decimal.to_string(),
+                               "Decimal from '{}' should roundtrip correctly", input_str);
+                }
+                _ => panic!("Expected Str after deserialization, got {:?}", reconstructed),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bigint_roundtrip_preserves_string_representation() {
+        let test_cases = vec![
+            "0",
+            "1",
+            "-1",
+            "42",
+            "-42",
+            "9223372036854775807",   // i64::MAX
+            "-9223372036854775808",  // i64::MIN
+            "18446744073709551615",  // u64::MAX
+            "123456789012345678901234567890",
+            "-999999999999999999999999999999",
+            "340282366920938463463374607431768211456",  // 2^128
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936",  // 2^256
+        ];
+
+        for input_str in test_cases {
+            let bigint = BigInt::from_str(input_str).unwrap();
+            let value = UserValue::Big(bigint.clone());
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+
+            match reconstructed {
+                UserValue::Str(s) => {
+                    // Сравниваем строковое представление
+                    assert_eq!(s, bigint.to_string(),
+                               "BigInt from '{}' should roundtrip correctly", input_str);
+                }
+                _ => panic!("Expected Str after deserialization, got {:?}", reconstructed),
             }
         }
     }
