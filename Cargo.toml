@@ -21,7 +21,6 @@ num-bigint = { version = "0.4", features = ["serde"] }
 
 # --- Storage Engines ---
 redb = "3.1.0"
-surrealkv = "0.17.0"
 fjall = "3.0.1"
 canopydb = "0.2.5"
 sled = "0.34.7"

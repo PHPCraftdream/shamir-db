@@ -5,4 +5,3 @@ pub mod storage_canopy;
 pub mod storage_nebari;
 pub mod storage_persy;
 pub mod storage_sled;
-pub mod storage_surreal;
