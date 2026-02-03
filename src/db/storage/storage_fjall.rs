@@ -117,12 +117,11 @@ impl Store for FjallStore {
     async fn get(&self, key: RecordId) -> DbResult<Bytes> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<Bytes> {
-            let result = keyspace
-                .get(key.as_bytes())
-                .map_err(|e| DbError::Storage(e.to_string()))?
-                .map(|slice| Bytes::copy_from_slice(&slice));
-
-            Ok(result.unwrap())
+            match keyspace.get(key.as_bytes()).map_err(|e| DbError::Storage(e.to_string()))?
+            {
+                Some(slice) => Ok(Bytes::copy_from_slice(&slice)),
+                None => Err(DbError::NotFound(format!("record not found: {:}", key))),
+            }
         })
             .await
             .map_err(|e| DbError::Internal(e.to_string()))?
