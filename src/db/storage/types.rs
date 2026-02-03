@@ -19,7 +19,7 @@ pub trait Store: Send + Sync {
     async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool>;
 
     /// Retrieves a record's raw bytes by its `RecordId`.
-    async fn get(&self, key: RecordId) -> DbResult<Option<Bytes>>;
+    async fn get(&self, key: RecordId) -> DbResult<Bytes>;
 
     /// Removes a record by its `RecordId`.
     async fn remove(&self, key: RecordId) -> DbResult<bool>;
