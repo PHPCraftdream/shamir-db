@@ -2,10 +2,14 @@ use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
+use async_stream::stream;
 use bytes::Bytes;
+use futures::stream::{Stream};
 use redb::{Database, Key, ReadableDatabase, ReadableTable, TableDefinition, TableHandle, Value};
 use std::cmp::Ordering;
+use std::ops::Bound;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task;
 
@@ -223,6 +227,56 @@ impl Store for RedbStore {
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
+
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+
+        Box::pin(stream! {
+            let mut last_id: Option<RecordId> = None;
+
+            loop {
+                let db_clone = db.clone();
+                let table_name_clone = table_name.clone();
+                let start_id = last_id;
+
+                let batch: DbResult<Vec<_>> = task::spawn_blocking(move || {
+                    let read_txn = db_clone.begin_read()?;
+                    let table_def = TableDefinition::<RecordId, &[u8]>::new(&table_name_clone);
+                    let table = read_txn.open_table(table_def)?;
+
+                    let range = if let Some(start) = start_id {
+                        (Bound::Excluded(start), Bound::Unbounded)
+                    } else {
+                        (Bound::Unbounded, Bound::Unbounded)
+                    };
+
+                    let mut items = Vec::new();
+                    for item in table.range(range)?.take(batch_size) {
+                        let (key, val) = item?;
+                        items.push((key.value(), val.value().to_vec()));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+                let batch = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_id = batch.last().map(|(id, _)| *id);
+
+                let result_batch: DbResult<Vec<_>> = batch.into_iter()
+                    .map(|(id, val)| Ok((id, Bytes::copy_from_slice(&val))))
+                    .collect();
+
+                yield result_batch;
+            }
+        })
+    }
 }
 
 // ============================================================================
@@ -291,5 +345,46 @@ mod tests {
         run_store_tests(store.as_ref()).await;
 
         assert!(repo.store_delete("test_table").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_redb_iter_stream() {
+        let path = "./test_data/redb_iter_stream/db.redb";
+        if let Some(parent) = Path::new(path).parent() {
+            if parent.exists() {
+                fs::remove_dir_all(parent).unwrap();
+            }
+        }
+
+        let repo = RedbRepo::new(path).unwrap();
+        let store = repo.store_get("test_table").await.unwrap();
+
+        // Insert 25 records
+        let mut expected_ids = Vec::new();
+        for i in 0..25 {
+            let value = InnerValue::Int(i);
+            let id = store.insert(value.to_bytes()).await.unwrap();
+            expected_ids.push(id);
+        }
+
+        // Test streaming with batch_size=10
+        let mut stream = store.iter_stream(10);
+        let mut all_records = Vec::new();
+        let mut batch_count = 0;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.unwrap();
+            batch_count += 1;
+            println!("Batch {} has {} records", batch_count, batch.len());
+            all_records.extend(batch);
+        }
+
+        assert_eq!(all_records.len(), 25);
+        assert_eq!(batch_count, 3); // 10 + 10 + 5 = 25
+
+        // Verify all IDs are present
+        for id in &expected_ids {
+            assert!(all_records.iter().any(|(rec_id, _)| rec_id == id));
+        }
     }
 }

@@ -8,7 +8,9 @@ use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
+use async_stream::stream;
 use bytes::Bytes;
+use futures::stream::{Stream, StreamExt};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -19,6 +21,7 @@ pub struct Table<R: Repo> {
     data_store: Arc<dyn Store>,
     info_store: Arc<dyn Store>,
     interner: Arc<OnceCell<Interner>>,
+    batch_size: usize,
 }
 
 impl<R: Repo> Clone for Table<R> {
@@ -29,6 +32,7 @@ impl<R: Repo> Clone for Table<R> {
             data_store: Arc::clone(&self.data_store),
             info_store: Arc::clone(&self.info_store),
             interner: Arc::clone(&self.interner),
+            batch_size: self.batch_size,
         }
     }
 }
@@ -46,6 +50,7 @@ impl<R: Repo> Table<R> {
             data_store,
             info_store,
             interner: Arc::new(OnceCell::new()),
+            batch_size: 1000, // default batch size
         })
     }
 
@@ -200,6 +205,77 @@ impl<R: Repo> Table<R> {
     pub async fn count(&self) -> DbResult<usize> {
         let items = self.data_store.iter().await?;
         Ok(items.len())
+    }
+
+    /// Set batch size for streaming operations
+    pub fn set_batch_size(&mut self, size: usize) {
+        self.batch_size = size;
+    }
+
+    /// Stream records in batches, returning UserValues
+    ///
+    /// This is memory-efficient for large tables as it doesn't load all records at once.
+    /// Returns a stream that yields batches of records.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch
+    ///
+    /// # Returns
+    /// A stream that yields batches of (RecordId, UserValue) tuples
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut stream = table.list_stream(500);
+    /// while let Some(batch) = stream.next().await {
+    ///     let records = batch?;
+    ///     for (id, record) in records {
+     ///         println!("Record: {:?}", record);
+    ///     }
+    /// }
+    /// ```
+    /// Stream all records in batches (async generator like PHP)
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch
+    ///
+    /// # Returns
+    /// Stream that yields batches of (RecordId, UserValue)
+    pub fn list_stream(
+        &self,
+        batch_size: usize,
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, UserValue)>>> + '_ {
+        let table = self.clone();
+
+        stream! {
+            // Get interner once
+            let interner = table.get_interner().await?;
+
+            // Get stream from storage
+            let mut storage_stream = table.data_store.iter_stream(batch_size);
+
+            // Transform each batch
+            while let Some(batch_result) = storage_stream.next().await {
+                let batch_bytes = batch_result?;
+
+                // Transform batch
+                let mut batch = Vec::new();
+                for (id, bytes) in batch_bytes {
+                    match InnerValue::from_bytes(bytes) {
+                        Ok(inner_value) => {
+                            let user_value = transform::inner_to_user(&inner_value, interner);
+                            batch.push((id, user_value));
+                        }
+                        Err(e) => {
+                            yield Err(DbError::Codec(format!("Failed to deserialize record: {}", e)));
+                        }
+                    }
+                }
+
+                if !batch.is_empty() {
+                    yield Ok(batch);
+                }
+            }
+        }
     }
 
     /// Get table name

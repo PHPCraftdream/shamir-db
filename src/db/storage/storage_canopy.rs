@@ -2,9 +2,12 @@ use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
+use async_stream::stream;
 use bytes::Bytes;
 use canopydb::Database;
+use futures::stream::Stream;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
@@ -311,6 +314,78 @@ impl Store for CanopyStore {
         })
         .await
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+
+        Box::pin(stream! {
+            let mut last_key: Option<Vec<u8>> = None;
+
+            loop {
+                let db_clone = db.clone();
+                let table_name_clone = table_name.clone();
+                let start_key = last_key;
+
+                let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = spawn_blocking(move || {
+                    let tx = db_clone
+                        .begin_read()
+                        .map_err(|e| DbError::Storage(format!("CanopyDB begin_read: {}", e)))?;
+
+                    let tree_res = tx
+                        .get_tree(table_name_clone.as_bytes())
+                        .map_err(|e| DbError::Storage(format!("CanopyDB get_tree: {}", e)))?;
+
+                    if let Some(tree) = tree_res {
+                        let mut out = Vec::new();
+                        let mut next_cursor = None;
+
+                        // Use range starting from cursor
+                        let iter_result = if let Some(start) = start_key {
+                            tree.range(start.as_slice()..)
+                        } else {
+                            tree.iter()
+                        };
+
+                        let mut iter = iter_result.map_err(|e| DbError::Storage(format!("CanopyDB iter: {}", e)))?;
+
+                        // Collect up to batch_size items
+                        for _ in 0..batch_size {
+                            match iter.next() {
+                                Some(Ok(item)) => {
+                                    let (key, val) = item;
+                                    next_cursor = Some(key.to_vec());
+                                    let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
+                                        DbError::Internal("Failed to convert key to RecordId".to_string())
+                                    })?);
+                                    out.push((record_id, Bytes::copy_from_slice(&val)));
+                                }
+                                Some(Err(e)) => {
+                                    return Err(DbError::Storage(format!("CanopyDB iter item: {}", e)));
+                                }
+                                None => break, // No more items
+                            }
+                        }
+
+                        Ok((out, next_cursor))
+                    } else {
+                        Ok((vec![], None))
+                    }
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let (batch, next_key) = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_key = next_key;
+                yield Ok(batch);
+            }
+        })
     }
 }
 
