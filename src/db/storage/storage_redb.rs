@@ -287,6 +287,7 @@ impl Store for RedbStore {
 mod tests {
     use super::*;
     use crate::types::value::InnerValue;
+    use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
 
