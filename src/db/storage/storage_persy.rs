@@ -2,9 +2,12 @@ use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
+use async_stream::stream;
 use bytes::Bytes;
+use futures::stream::Stream;
 use persy::{Persy, PersyId, Config, ByteVec};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
@@ -289,6 +292,84 @@ impl Store for PersyStore {
         })
             .await
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+
+        Box::pin(stream! {
+            let mut last_id: Option<RecordId> = None;
+
+            loop {
+                let db_clone = db.clone();
+                let table_name_clone = table_name.clone();
+                let index_name_clone = index_name.clone();
+                let start_id = last_id;
+
+                let batch: DbResult<(Vec<_>, Option<RecordId>)> = spawn_blocking(move || {
+                    let mut tx = db_clone.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+
+                    // Collect all mappings
+                    let mut mappings = Vec::new();
+                    {
+                        let mut index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name_clone, ..)
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                        while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                            let record_id = RecordId(key_bytes.as_ref().try_into().map_err(|_| {
+                                DbError::Internal("Failed to convert key to RecordId".to_string())
+                            })?);
+
+                            if let Some(val_bytes) = val_iter.next() {
+                                let persy_id_str = String::from_utf8(val_bytes.to_vec())
+                                    .map_err(|e| DbError::Codec(e.to_string()))?;
+                                let persy_id: PersyId = persy_id_str.parse()
+                                    .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                                mappings.push((record_id, persy_id));
+                            }
+                        }
+                    }
+
+                    // Skip records before cursor and take limit
+                    let start_idx = if let Some(cursor) = start_id {
+                        mappings.iter().position(|(id, _)| *id == cursor)
+                    } else {
+                        None
+                    };
+
+                    let start = start_idx.map_or(0, |i| i + 1);
+                    let end = (start + batch_size).min(mappings.len());
+                    let selected_mappings = &mappings[start..end];
+
+                    let mut out = Vec::new();
+                    let mut next_cursor = None;
+
+                    for (record_id, persy_id) in selected_mappings {
+                        let content = tx.read(&table_name_clone, &persy_id)
+                            .map_err(|e| DbError::Storage(e.to_string()))?
+                            .ok_or_else(|| DbError::NotFound(format!("PersyId not found for record: {}", record_id)))?;
+
+                        next_cursor = Some(*record_id);
+                        out.push((*record_id, Bytes::copy_from_slice(&content)));
+                    }
+
+                    Ok((out, next_cursor))
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let (batch, next_id) = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_id = next_id;
+                yield Ok(batch);
+            }
+        })
     }
 }
 

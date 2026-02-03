@@ -2,13 +2,16 @@ use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
+use async_stream::stream;
 use bytes::Bytes;
+use futures::stream::Stream;
 use nebari::{
     tree::{Root, Unversioned, UnversionedTreeRoot, ScanEvaluation},
     Config, Roots, Tree,
     io::fs::StdFile,
 };
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
@@ -261,6 +264,73 @@ impl Store for NebariStore {
         })
             .await
             .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+        let tree = self.tree.clone();
+
+        Box::pin(stream! {
+            let mut last_key: Option<Vec<u8>> = None;
+
+            loop {
+                let tree_clone = tree.clone();
+                let start_key = last_key;
+
+                let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = spawn_blocking(move || {
+                    let mut out = Vec::new();
+                    let mut next_cursor = None;
+                    let mut count = 0;
+                    let mut skipping = start_key.is_some();
+
+                    tree_clone.scan::<nebari::Error, _, _, _, _>(
+                        &(..),
+                        true, // forward
+                        |_, _, _| ScanEvaluation::ReadData,
+                        |_, _| ScanEvaluation::ReadData,
+                        |key, _, value| {
+                            // Skip records until we pass start_key
+                            if skipping {
+                                if let Some(ref start) = start_key {
+                                    if key.as_ref() == start.as_slice() {
+                                        skipping = false; // Next record will be included
+                                    }
+                                } else {
+                                    skipping = false;
+                                }
+                                return Ok(());
+                            }
+
+                            if count < batch_size {
+                                next_cursor = Some(key.to_vec());
+                                let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
+                                    nebari::Error::from(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "Failed to convert key to RecordId",
+                                    ))
+                                })?);
+                                out.push((record_id, Bytes::copy_from_slice(value.as_ref())));
+                                count += 1;
+                            }
+                            Ok(())
+                        },
+                    )
+                        .map_err(|e| DbError::Storage(format!("NebariDB scan: {}", e)))?;
+
+                    Ok((out, next_cursor))
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let (batch, next_key) = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_key = next_key;
+                yield Ok(batch);
+            }
+        })
     }
 }
 

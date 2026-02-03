@@ -2,9 +2,12 @@ use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
+use async_stream::stream;
 use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use futures::stream::Stream;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task;
 
@@ -169,6 +172,64 @@ impl Store for FjallStore {
         })
             .await
             .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+        let keyspace = self.keyspace.clone();
+
+        Box::pin(stream! {
+            let mut last_key: Option<Vec<u8>> = None;
+
+            loop {
+                let keyspace_clone = keyspace.clone();
+                let start_key = last_key;
+
+                let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
+                    let mut items = Vec::new();
+                    let mut last_batch_key: Option<Vec<u8>> = None;
+
+                    let mut iter = keyspace_clone.iter();
+
+                    // If cursor specified, skip until we pass it
+                    if let Some(start) = start_key {
+                        while let Some(guard) = iter.next() {
+                            let (key, _) = guard
+                                .into_inner()
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                            if key.as_ref() == start.as_slice() {
+                                // Found it, next item will be first in batch
+                                break;
+                            }
+                        }
+                    }
+
+                    for guard in iter.take(batch_size) {
+                        let (key, value_slice) = guard
+                            .into_inner()
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                        last_batch_key = Some(key.to_vec());
+                        let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
+                            DbError::Internal("Failed to convert key to RecordId".to_string())
+                        })?);
+                        items.push((record_id, Bytes::copy_from_slice(&value_slice)));
+                    }
+
+                    Ok((items, last_batch_key))
+                })
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+                let (batch, next_key) = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_key = next_key;
+                yield Ok(batch);
+            }
+        })
     }
 }
 

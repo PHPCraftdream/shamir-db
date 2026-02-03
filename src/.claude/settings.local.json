@@ -7,7 +7,11 @@
       "Bash(grep:*)",
       "Bash(cat:*)",
       "Bash(cargo build:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(cargo doc:*)",
+      "Bash(taskkill:*)",
+      "Bash(Select-String -Pattern \"Batch|passed|FAILED|test result\")",
+      "Bash(Select-Object -Last 20)"
     ]
   }
 }

@@ -2,9 +2,12 @@ use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
+use async_stream::stream;
 use bytes::Bytes;
+use futures::stream::{Stream};
 use sled::{Db, Tree};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 
@@ -181,6 +184,70 @@ impl Store for SledStore {
         .await
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
+
+    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>> {
+        let tree = self.tree.clone();
+
+        Box::pin(stream! {
+            let mut last_key: Option<Vec<u8>> = None;
+
+            loop {
+                // Fetch next batch in spawn_blocking
+                let tree_clone = tree.clone();
+                let start_key = last_key.clone();
+
+                let batch: DbResult<Vec<_>> = spawn_blocking(move || {
+                    let iter = if let Some(ref start) = start_key {
+                        tree_clone.range::<&[u8], _>(start.as_slice()..)
+                    } else {
+                        tree_clone.iter()
+                    };
+
+                    let mut items = Vec::new();
+                    let mut skip_first = start_key.is_some();
+
+                    for item in iter {
+                        if skip_first {
+                            skip_first = false;
+                            continue; // Skip the cursor record itself
+                        }
+
+                        if items.len() >= batch_size {
+                            break;
+                        }
+
+                        let (key, val) = item.map_err(|e| DbError::Storage(format!("SledDB iter error: {}", e)))?;
+                        items.push((key.to_vec(), val));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let batch = batch?;
+
+                if batch.is_empty() {
+                    break; // No more records
+                }
+
+                // Remember last key for next iteration
+                last_key = batch.last().map(|(k, _)| k.clone());
+
+                // Convert to (RecordId, Bytes)
+                let result_batch: Result<Vec<_>, DbError> = batch.into_iter()
+                    .map(|(key, val)| {
+                        let key_slice: &[u8] = key.as_ref();
+                        let key_array: [u8; 16] = key_slice.try_into()
+                            .map_err(|_| DbError::Internal("Failed to convert key to RecordId".to_string()))?;
+                        let record_id = RecordId(key_array);
+                        Ok((record_id, Bytes::copy_from_slice(&val)))
+                    })
+                    .collect();
+
+                yield result_batch;
+            }
+        })
+    }
 }
 
 // ============================================================================
@@ -317,5 +384,44 @@ mod tests {
         // Clean up
         repo.store_delete("isolated_table1").await.unwrap();
         repo.store_delete("isolated_table2").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sled_iter_stream() {
+        let path = "./test_data/sled_iter_stream";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+
+        let repo = SledRepo::new(path).unwrap();
+        let store = repo.store_get("test_table").await.unwrap();
+
+        // Insert 25 records
+        let mut expected_ids = Vec::new();
+        for i in 0..25 {
+            let value = InnerValue::Int(i);
+            let id = store.insert(value.to_bytes()).await.unwrap();
+            expected_ids.push(id);
+        }
+
+        // Test streaming with batch_size=10
+        let mut stream = store.iter_stream(10);
+        let mut all_records = Vec::new();
+        let mut batch_count = 0;
+
+        while let Some(batch_result) = stream.try_next().await {
+            let batch = batch_result.unwrap();
+            batch_count += 1;
+            println!("Batch {} has {} records", batch_count, batch.len());
+            all_records.extend(batch);
+        }
+
+        assert_eq!(all_records.len(), 25);
+        assert_eq!(batch_count, 3); // 10 + 10 + 5 = 25
+
+        // Verify all IDs are present
+        for id in &expected_ids {
+            assert!(all_records.iter().any(|(rec_id, _)| rec_id == id));
+        }
     }
 }
