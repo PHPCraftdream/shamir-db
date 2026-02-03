@@ -3,7 +3,11 @@
     "allow": [
       "Bash(cargo check:*)",
       "Bash(cargo test:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(cargo build:*)",
+      "Bash(find:*)"
     ]
   }
 }
