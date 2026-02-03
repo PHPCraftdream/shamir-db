@@ -100,26 +100,51 @@ pub struct IndexChange {
 ```
 __index_meta__ -> index configuration
 
-RecordId::system("index_config:{table_name}") -> IndexConfig (bincode)
+RecordId::system("index_paths:{table_name}") -> Set<Vec<u64>> (bincode)
 ```
 
-```rust
-pub struct IndexConfig {
-    pub indexes: Vec<IndexDef>,
+**Index paths specification:**
+```
+Record not found:  No indexing (disabled)
+Empty set:         Index everything (all Map paths)
+Non-empty set:     Index only these specific paths
+
+Example:
+{
+  [42, 78, 156],      // "user.profile.age"
+  [42, 78, 200],      // "user.profile.settings"
+  [55],               // "email"
 }
 
-pub struct IndexDef {
-    pub path: Vec<u64>,           // Interned path
-    pub path_str: String,         // Human-readable path
-    pub unique: bool,             // Is unique index?
-    pub created_at: u64,          // Creation timestamp
-}
+Memory usage: 100 paths × 24 bytes = ~2.4 KB (negligible)
 ```
 
-```
-__indexer_pos__ -> indexer positions
+**Why Set<Vec<u64>> instead of storing in IndexConfig:**
+- ✅ Compact (interned IDs vs strings)
+- ✅ Fast lookup (HashSet vs Vec scan)
+- ✅ Shared with interner (same IDs)
+- ✅ Binary serialization efficient
 
+```
 RecordId::system("indexer_pos:{table_name}") -> u64 (last processed seq_no)
+```
+
+### Optional: Extended Index Metadata
+
+```
+For advanced features (unique constraints, etc.):
+
+RecordId::system("index_meta:{table_name}") -> IndexConfig
+
+pub struct IndexConfig {
+    pub unique_paths: Set<Vec<u64>>,        // Paths with unique constraint
+    pub index_options: HashMap<Vec<u64>, IndexOptions>,
+}
+
+pub struct IndexOptions {
+    pub unique: bool,
+    pub created_at: u64,
+}
 ```
 
 ## Index Management

@@ -11,6 +11,10 @@ pub enum DbError {
     #[error("Key already exists: {0}")]
     KeyExists(String),
 
+    /// Duplicate value for unique index.
+    #[error("Duplicate key: {0}")]
+    DuplicateKey(String),
+
     /// An error originating from the underlying storage backend.
     #[error("Storage backend error: {0}")]
     Storage(String),
