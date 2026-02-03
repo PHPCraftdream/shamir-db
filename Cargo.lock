@@ -1760,6 +1760,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "base-x",
+ "bytes",
  "canopydb",
  "chrono",
  "crc32fast",
