@@ -5,7 +5,7 @@ use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
 
-type RecordKey = Bytes;
+pub type RecordKey = Bytes;
 
 /// An asynchronous, key-value store trait that operates on raw bytes.
 ///

@@ -65,9 +65,10 @@ impl<R: Repo> Table<R> {
         let interner_cell = Arc::clone(&self.interner);
 
         interner_cell.get_or_init(|| async move {
-            // Load from info_store
+            // Load from info_store - convert RecordId to Bytes
             let internals_id = RecordId::system("internals");
-            let inter_data = info_store.get(internals_id).await;
+            let key_bytes = Bytes::copy_from_slice(internals_id.as_bytes());
+            let inter_data = info_store.get(key_bytes).await;
 
             if let Ok(bytes) = inter_data {
                 // Deserialize: Vec<(u64, String)>
@@ -92,11 +93,12 @@ impl<R: Repo> Table<R> {
             return Ok(());
         }
 
-        // Save the full interner state
+        // Save the full interner state - convert RecordId to Bytes
         let internals_id = RecordId::system("internals");
+        let key_bytes = Bytes::copy_from_slice(internals_id.as_bytes());
 
         // Read existing
-        let existing = self.info_store.get(internals_id).await;
+        let existing = self.info_store.get(key_bytes.clone()).await;
         let mut current: Vec<(u64, String)> = if let Ok(bytes) = existing {
             bincode::deserialize(&bytes)
                 .unwrap_or_default()
@@ -111,7 +113,7 @@ impl<R: Repo> Table<R> {
         let bytes = bincode::serialize(&current)
             .map_err(|e| DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
 
-        self.info_store.set(internals_id, Bytes::from(bytes)).await?;
+        self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
 
         Ok(())
     }
@@ -131,16 +133,24 @@ impl<R: Repo> Table<R> {
         // Serialize InnerValue
         let inner_bytes = transform.inner_value.to_bytes();
 
-        // Insert to data store
-        self.data_store.insert(inner_bytes).await
+        // Insert to data store - returns Bytes (16 random bytes)
+        let key_bytes = self.data_store.insert(inner_bytes).await?;
+
+        // Convert Bytes to RecordId
+        let arr: [u8; 16] = key_bytes.as_ref().try_into()
+            .map_err(|_| DbError::Internal("Failed to convert key bytes to RecordId".to_string()))?;
+        Ok(RecordId(arr))
     }
 
     /// Get a UserValue by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<UserValue> {
         let interner = self.get_interner().await?;
 
+        // Convert RecordId to Bytes
+        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+
         // Read from data store
-        let bytes = self.data_store.get(id).await?;
+        let bytes = self.data_store.get(key_bytes).await?;
 
         // Deserialize InnerValue
         let inner_value = InnerValue::from_bytes(bytes)
@@ -154,8 +164,11 @@ impl<R: Repo> Table<R> {
     pub async fn update(&self, id: RecordId, value: &UserValue) -> DbResult<bool> {
         let interner = self.get_interner().await?;
 
+        // Convert RecordId to Bytes
+        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+
         // Check if exists
-        let exists = self.data_store.get(id).await.is_ok();
+        let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
         if !exists {
             return Ok(false);
         }
@@ -170,13 +183,15 @@ impl<R: Repo> Table<R> {
 
         // Serialize and update
         let inner_bytes = transform.inner_value.to_bytes();
-        self.data_store.set(id, inner_bytes).await?;
+        self.data_store.set(key_bytes, inner_bytes).await?;
         Ok(true)  // Existed and updated
     }
 
     /// Delete a record by RecordId
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
-        self.data_store.remove(id).await
+        // Convert RecordId to Bytes
+        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+        self.data_store.remove(key_bytes).await
     }
 
     /// List all records
@@ -186,7 +201,12 @@ impl<R: Repo> Table<R> {
         let items = self.data_store.iter().await?;
         let mut result = Vec::new();
 
-        for (id, bytes) in items {
+        for (key_bytes, bytes) in items {
+            // Convert Bytes to RecordId
+            let arr: [u8; 16] = key_bytes.as_ref().try_into()
+                .map_err(|_| DbError::Internal("Failed to convert key bytes to RecordId".to_string()))?;
+            let id = RecordId(arr);
+
             match InnerValue::from_bytes(bytes) {
                 Ok(inner_value) => {
                     let user_value = transform::inner_to_user(&inner_value, interner);
@@ -229,7 +249,7 @@ impl<R: Repo> Table<R> {
     /// while let Some(batch) = stream.next().await {
     ///     let records = batch?;
     ///     for (id, record) in records {
-     ///         println!("Record: {:?}", record);
+    ///         println!("Record: {:?}", record);
     ///     }
     /// }
     /// ```
@@ -259,7 +279,17 @@ impl<R: Repo> Table<R> {
 
                 // Transform batch
                 let mut batch = Vec::new();
-                for (id, bytes) in batch_bytes {
+                for (key_bytes, bytes) in batch_bytes {
+                    // Convert Bytes to RecordId
+                    let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                        Ok(a) => a,
+                        Err(_) => {
+                            yield Err(DbError::Internal("Failed to convert key bytes to RecordId".to_string()));
+                            continue;
+                        }
+                    };
+                    let id = RecordId(arr);
+
                     match InnerValue::from_bytes(bytes) {
                         Ok(inner_value) => {
                             let user_value = transform::inner_to_user(&inner_value, interner);
