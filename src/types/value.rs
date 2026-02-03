@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use fmt::Debug;
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
 use num_bigint::BigInt;
@@ -9,7 +8,7 @@ use fxhash::FxHasher;
 use std::cmp::Ord;
 use serde::de::{self, Deserializer, Visitor, MapAccess, SeqAccess};
 use serde::ser::{Serializer, SerializeMap, SerializeSeq};
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::str::FromStr;
 use std::any::TypeId;
 
@@ -33,20 +32,13 @@ pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
 
 impl<Key: Eq + Hash + Ord + Clone + Serialize + for<'de> Deserialize<'de> + Debug + 'static> Value<Key> {
     /// Serializes the `Value` into `Bytes` using MessagePack.
-    pub fn to_bytes(&self) -> Bytes {
-        // .unwrap() is acceptable here as serialization to vec should not fail.
-        Bytes::from(rmp_serde::to_vec(self).unwrap())
+    pub fn to_bytes(&self) -> Result<Bytes, rmp_serde::encode::Error> {
+        Ok(Bytes::from(rmp_serde::to_vec(self)?))
     }
 
-    /// Consumes the `Value` and serializes it into `Bytes` using MessagePack.
-    pub fn into_bytes(self) -> Bytes {
-        // .unwrap() is acceptable here as serialization to vec should not fail.
-        Bytes::from(rmp_serde::to_vec(&self).unwrap())
-    }
-
-    /// Deserializes `Bytes` into a `Value` using MessagePack.
-    pub fn from_bytes(bytes: Bytes) -> Result<Self, rmp_serde::decode::Error> {
-        rmp_serde::from_slice(&bytes)
+    /// Deserializes bytes into a `Value` using MessagePack.
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(bytes.as_ref())
     }
 }
 
@@ -217,7 +209,9 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> PartialEq for Value<Key> 
         }
     }
 }
+
 impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Eq for Value<Key> {}
+
 impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Hash for Value<Key> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
@@ -241,9 +235,15 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Hash for Value<Key> {
                 xor_sum.hash(state);
             }
             Value::Map(m) => {
-                let mut pairs: Vec<_> = m.iter().collect();
-                pairs.sort_by_key(|(k, _)| *k);
-                pairs.hash(state);
+                // XOR approach - order-independent and no allocation
+                let mut xor_sum: u64 = 0;
+                for (k, v) in m {
+                    let mut hasher = FxHasher::default();
+                    k.hash(&mut hasher);
+                    v.hash(&mut hasher);
+                    xor_sum ^= hasher.finish();
+                }
+                xor_sum.hash(state);
             }
         }
     }
@@ -292,12 +292,308 @@ mod tests {
         let value = InnerValue::Map(map);
 
         // Test to_bytes and from_bytes
-        let bytes = value.to_bytes();
-        let reconstructed = InnerValue::from_bytes(bytes.clone()).unwrap();
+        let bytes = value.to_bytes().unwrap();
+        let reconstructed = InnerValue::from_bytes(&bytes).unwrap();
         assert_eq!(value, reconstructed);
 
-        // Test into_bytes
-        let bytes_from_into = value.into_bytes();
-        assert_eq!(bytes, bytes_from_into);
+        // Test from_bytes with Bytes
+        let bytes_obj = Bytes::from(bytes.to_vec());
+        let reconstructed2 = InnerValue::from_bytes(bytes_obj).unwrap();
+        assert_eq!(value, reconstructed2);
+    }
+
+    #[test]
+    fn test_all_value_types_serialization() {
+        let test_cases = vec![
+            UserValue::Nil,
+            UserValue::Bool(true),
+            UserValue::Bool(false),
+            UserValue::Int(42),
+            UserValue::Int(-42),
+            UserValue::Int(i64::MAX),
+            UserValue::Int(i64::MIN),
+            UserValue::F64(3.14159),
+            UserValue::F64(f64::INFINITY),
+            UserValue::F64(f64::NEG_INFINITY),
+            UserValue::Dec(Decimal::from_str("123.456").unwrap()),
+            UserValue::Big(BigInt::from(12345678901234567890i128)),
+            UserValue::Str("hello world".to_string()),
+            UserValue::Str("".to_string()),
+            UserValue::Bin(vec![1, 2, 3, 4, 5]),
+            UserValue::Bin(vec![]),
+        ];
+
+        for value in test_cases {
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+            assert_eq!(value, reconstructed);
+        }
+    }
+
+    #[test]
+    fn test_nested_structures_serialization() {
+        let mut inner_map = new_map();
+        inner_map.insert("nested".to_string(), UserValue::Int(42));
+
+        let mut set = new_set();
+        set.insert(UserValue::Str("item1".to_string()));
+        set.insert(UserValue::Int(100));
+
+        let value = UserValue::List(vec![
+            UserValue::Map(inner_map),
+            UserValue::Set(set),
+            UserValue::List(vec![UserValue::Bool(true), UserValue::Nil]),
+        ]);
+
+        let bytes = value.to_bytes().unwrap();
+        let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+        assert_eq!(value, reconstructed);
+    }
+
+    #[test]
+    fn test_equality_for_all_types() {
+        // Nil
+        assert_eq!(UserValue::Nil, UserValue::Nil);
+
+        // Bool
+        assert_eq!(UserValue::Bool(true), UserValue::Bool(true));
+        assert_ne!(UserValue::Bool(true), UserValue::Bool(false));
+
+        // Int
+        assert_eq!(UserValue::Int(42), UserValue::Int(42));
+        assert_ne!(UserValue::Int(42), UserValue::Int(43));
+
+        // F64
+        assert_eq!(UserValue::F64(3.14), UserValue::F64(3.14));
+        assert_ne!(UserValue::F64(3.14), UserValue::F64(2.71));
+
+        // NaN equality
+        assert_eq!(UserValue::F64(f64::NAN), UserValue::F64(f64::NAN));
+
+        // Str
+        assert_eq!(UserValue::Str("test".to_string()), UserValue::Str("test".to_string()));
+        assert_ne!(UserValue::Str("test".to_string()), UserValue::Str("other".to_string()));
+
+        // Different types are not equal
+        assert_ne!(UserValue::Int(42), UserValue::Str("42".to_string()));
+        assert_ne!(UserValue::Bool(true), UserValue::Int(1));
+    }
+
+    #[test]
+    fn test_hash_consistency() {
+        // Same values should have same hash
+        let v1 = UserValue::Int(42);
+        let v2 = UserValue::Int(42);
+        assert_eq!(calculate_hash(&v1), calculate_hash(&v2));
+
+        // Different values should (usually) have different hashes
+        let v3 = UserValue::Int(43);
+        assert_ne!(calculate_hash(&v1), calculate_hash(&v3));
+    }
+
+    #[test]
+    fn test_nan_handling() {
+        let nan1 = UserValue::F64(f64::NAN);
+        let nan2 = UserValue::F64(f64::NAN);
+
+        // NaN should equal NaN in our implementation
+        assert_eq!(nan1, nan2);
+
+        // Hash should be consistent for NaN
+        assert_eq!(calculate_hash(&nan1), calculate_hash(&nan2));
+    }
+
+    #[test]
+    fn test_empty_collections() {
+        let empty_list = UserValue::List(vec![]);
+        let empty_set = UserValue::Set(new_set());
+        let empty_map = UserValue::Map(new_map());
+
+        // Should serialize/deserialize correctly
+        let list_bytes = empty_list.to_bytes().unwrap();
+        assert_eq!(empty_list, UserValue::from_bytes(&list_bytes).unwrap());
+
+        let set_bytes = empty_set.to_bytes().unwrap();
+        assert_eq!(empty_set, UserValue::from_bytes(&set_bytes).unwrap());
+
+        let map_bytes = empty_map.to_bytes().unwrap();
+        assert_eq!(empty_map, UserValue::from_bytes(&map_bytes).unwrap());
+    }
+
+    #[test]
+    fn test_large_collections() {
+        // Large list
+        let large_list = UserValue::List(
+            (0..1000).map(|i| UserValue::Int(i)).collect()
+        );
+        let bytes = large_list.to_bytes().unwrap();
+        assert_eq!(large_list, UserValue::from_bytes(&bytes).unwrap());
+
+        // Large map
+        let mut large_map = new_map();
+        for i in 0..1000 {
+            large_map.insert(format!("key{}", i), UserValue::Int(i));
+        }
+        let map_value = UserValue::Map(large_map);
+        let bytes = map_value.to_bytes().unwrap();
+        assert_eq!(map_value, UserValue::from_bytes(&bytes).unwrap());
+    }
+
+    #[test]
+    fn test_deeply_nested_structures() {
+        let mut nested = UserValue::Int(1);
+        for _ in 0..10 {
+            nested = UserValue::List(vec![nested]);
+        }
+
+        let bytes = nested.to_bytes().unwrap();
+        let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+        assert_eq!(nested, reconstructed);
+    }
+
+    #[test]
+    fn test_decimal_edge_cases() {
+        let decimals = vec![
+            Decimal::ZERO,
+            Decimal::ONE,
+            Decimal::from_str("0.000000001").unwrap(),
+            Decimal::from_str("999999999999.999999999").unwrap(),
+            Decimal::from_str("-123.456").unwrap(),
+        ];
+
+        for dec in decimals {
+            let value = UserValue::Dec(dec);
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+            assert_eq!(value, reconstructed);
+        }
+    }
+
+    #[test]
+    fn test_bigint_edge_cases() {
+        let bigints = vec![
+            BigInt::from(0),
+            BigInt::from(i64::MAX),
+            BigInt::from(i64::MIN),
+            BigInt::from(u128::MAX),
+            BigInt::from_str("999999999999999999999999999999").unwrap(),
+            BigInt::from_str("-999999999999999999999999999999").unwrap(),
+        ];
+
+        for big in bigints {
+            let value = UserValue::Big(big);
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+            assert_eq!(value, reconstructed);
+        }
+    }
+
+    #[test]
+    fn test_binary_data() {
+        let binary_cases = vec![
+            vec![],
+            vec![0],
+            vec![255],
+            vec![0, 1, 2, 3, 4, 5],
+            (0..=255).collect::<Vec<u8>>(),
+        ];
+
+        for bin in binary_cases {
+            let value = UserValue::Bin(bin);
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+            assert_eq!(value, reconstructed);
+        }
+    }
+
+    #[test]
+    fn test_unicode_strings() {
+        let strings = vec![
+            "",
+            "hello",
+            "Привет мир",
+            "你好世界",
+            "🚀🎉🔥",
+            "Mixed: English, Русский, 中文, 🌍",
+        ];
+
+        for s in strings {
+            let value = UserValue::Str(s.to_string());
+            let bytes = value.to_bytes().unwrap();
+            let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+            assert_eq!(value, reconstructed);
+        }
+    }
+
+    #[test]
+    fn test_set_with_different_types() {
+        let mut set = new_set();
+        set.insert(UserValue::Nil);
+        set.insert(UserValue::Bool(true));
+        set.insert(UserValue::Int(42));
+        set.insert(UserValue::Str("test".to_string()));
+
+        let value = UserValue::Set(set);
+        let bytes = value.to_bytes().unwrap();
+        let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+        assert_eq!(value, reconstructed);
+    }
+
+    #[test]
+    fn test_map_with_nested_values() {
+        let mut inner_map = new_map();
+        inner_map.insert("inner_key".to_string(), UserValue::Int(100));
+
+        let mut outer_map = new_map();
+        outer_map.insert("nested_map".to_string(), UserValue::Map(inner_map));
+        outer_map.insert("simple".to_string(), UserValue::Bool(true));
+
+        let value = UserValue::Map(outer_map);
+        let bytes = value.to_bytes().unwrap();
+        let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+        assert_eq!(value, reconstructed);
+    }
+
+    #[test]
+    fn test_inner_value_with_numeric_keys() {
+        let mut map = new_map();
+        map.insert(0u64, InnerValue::Str("zero".to_string()));
+        map.insert(u64::MAX, InnerValue::Str("max".to_string()));
+        map.insert(42u64, InnerValue::Int(42));
+
+        let value = InnerValue::Map(map);
+        let bytes = value.to_bytes().unwrap();
+        let reconstructed = InnerValue::from_bytes(&bytes).unwrap();
+        assert_eq!(value, reconstructed);
+    }
+
+    #[test]
+    fn test_hash_different_for_different_discriminants() {
+        // Same underlying value but different types should have different hashes
+        let int_val = UserValue::Int(42);
+        let str_val = UserValue::Str("42".to_string());
+
+        assert_ne!(calculate_hash(&int_val), calculate_hash(&str_val));
+    }
+
+    #[test]
+    fn test_clone_preserves_equality() {
+        let original = UserValue::List(vec![
+            UserValue::Int(1),
+            UserValue::Str("test".to_string()),
+            UserValue::Bool(true),
+        ]);
+
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+        assert_eq!(calculate_hash(&original), calculate_hash(&cloned));
+    }
+
+    #[test]
+    fn test_from_bytes_error_handling() {
+        // Invalid MessagePack data
+        let invalid_data = vec![0xFF, 0xFF, 0xFF, 0xFF];
+        let result = UserValue::from_bytes(&invalid_data);
+        assert!(result.is_err());
     }
 }
