@@ -12,7 +12,12 @@ use async_stream::stream;
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
+
+/// Get the system record key for storing record count
+fn count_key() -> RecordId {
+    RecordId::system("count")
+}
 
 /// High-level table with automatic key interning
 pub struct Table<R: Repo> {
@@ -22,6 +27,8 @@ pub struct Table<R: Repo> {
     info_store: Arc<dyn Store>,
     interner: Arc<OnceCell<Interner>>,
     batch_size: usize,
+    /// Mutex for synchronizing counter updates
+    counter_mutex: Arc<Mutex<()>>,
 }
 
 impl<R: Repo> Clone for Table<R> {
@@ -33,6 +40,7 @@ impl<R: Repo> Clone for Table<R> {
             info_store: Arc::clone(&self.info_store),
             interner: Arc::clone(&self.interner),
             batch_size: self.batch_size,
+            counter_mutex: Arc::clone(&self.counter_mutex),
         }
     }
 }
@@ -51,6 +59,7 @@ impl<R: Repo> Table<R> {
             info_store,
             interner: Arc::new(OnceCell::new()),
             batch_size: 1000, // default batch size
+            counter_mutex: Arc::new(Mutex::new(())),
         })
     }
 
@@ -118,6 +127,44 @@ impl<R: Repo> Table<R> {
         Ok(())
     }
 
+    /// Get the current record count from the counter
+    async fn get_record_count(&self) -> DbResult<u64> {
+        let key_bytes = Bytes::copy_from_slice(count_key().as_bytes());
+        match self.info_store.get(key_bytes).await {
+            Ok(bytes) => {
+                // Deserialize u64
+                let count: u64 = bincode::deserialize(&bytes)
+                    .map_err(|e| DbError::Codec(format!("Failed to deserialize count: {}", e)))?;
+                Ok(count)
+            }
+            Err(DbError::NotFound(_)) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set the record count (useful for initialization or manual correction)
+    async fn set_record_count(&self, count: u64) -> DbResult<()> {
+        let key_bytes = Bytes::copy_from_slice(count_key().as_bytes());
+        let bytes = bincode::serialize(&count)
+            .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
+        self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// Increment the record count by delta (with mutex lock for thread safety)
+    async fn increment_record_count(&self, delta: i64) -> DbResult<()> {
+        let _guard = self.counter_mutex.lock().await;
+        let current = self.get_record_count().await? as i64;
+        let new_count = current + delta;
+        if new_count < 0 {
+            return Err(DbError::Internal(format!(
+                "Record count cannot be negative: current={}, delta={}",
+                current, delta
+            )));
+        }
+        self.set_record_count(new_count as u64).await
+    }
+
     /// Insert a UserValue, returns RecordId
     pub async fn insert(&self, value: &UserValue) -> DbResult<RecordId> {
         let interner = self.get_interner().await?;
@@ -135,6 +182,9 @@ impl<R: Repo> Table<R> {
 
         // Insert to data store - returns Bytes (16 random bytes)
         let key_bytes = self.data_store.insert(inner_bytes).await?;
+
+        // Increment record count
+        self.increment_record_count(1).await?;
 
         // Convert Bytes to RecordId
         let arr: [u8; 16] = key_bytes.as_ref().try_into()
@@ -187,11 +237,49 @@ impl<R: Repo> Table<R> {
         Ok(true)  // Existed and updated
     }
 
+    /// Set a record by RecordId - creates if not exists, updates if exists
+    /// Returns true if created, false if updated
+    pub async fn set(&self, id: RecordId, value: &UserValue) -> DbResult<bool> {
+        let interner = self.get_interner().await?;
+
+        // Convert RecordId to Bytes
+        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+
+        // Check if exists
+        let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
+
+        // Transform UserValue → InnerValue
+        let transform = transform::user_to_inner(value, interner);
+
+        // Save new keys if any
+        if let Some(ref new_keys) = transform.new_keys {
+            self.save_new_keys(new_keys).await?;
+        }
+
+        // Serialize and set
+        let inner_bytes = transform.inner_value.to_bytes();
+        self.data_store.set(key_bytes, inner_bytes).await?;
+
+        if !exists {
+            // New record created - increment count
+            self.increment_record_count(1).await?;
+        }
+
+        Ok(!exists)  // true if created, false if updated
+    }
+
     /// Delete a record by RecordId
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Convert RecordId to Bytes
         let key_bytes = Bytes::copy_from_slice(id.as_bytes());
-        self.data_store.remove(key_bytes).await
+        let removed = self.data_store.remove(key_bytes).await?;
+
+        if removed {
+            // Decrement record count
+            self.increment_record_count(-1).await?;
+        }
+
+        Ok(removed)
     }
 
     /// List all records
@@ -221,10 +309,9 @@ impl<R: Repo> Table<R> {
         Ok(result)
     }
 
-    /// Count records
+    /// Count records (uses the stored counter for O(1) performance)
     pub async fn count(&self) -> DbResult<usize> {
-        let items = self.data_store.iter().await?;
-        Ok(items.len())
+        Ok(self.get_record_count().await? as usize)
     }
 
     /// Set batch size for streaming operations
@@ -804,5 +891,347 @@ mod tests {
         // All should be deleted
         let count = table.count().await.unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_interner_persistence_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_persistence_db");
+        let table_name = "users";
+
+        // === First session: write data ===
+        let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+        let table1 = Table::new(repo1.clone(), table_name.to_string()).await.unwrap();
+
+        // Insert multiple records with overlapping keys to test interning
+        let mut data1 = new_map();
+        data1.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        data1.insert("email".to_string(), UserValue::Str("alice@example.com".to_string()));
+        data1.insert("age".to_string(), UserValue::Int(30));
+        let value1 = UserValue::Map(data1);
+
+        let id1 = table1.insert(&value1).await.unwrap();
+
+        // Insert second record with same keys (should reuse interner entries)
+        let mut data2 = new_map();
+        data2.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        data2.insert("email".to_string(), UserValue::Str("bob@example.com".to_string()));
+        data2.insert("age".to_string(), UserValue::Int(25));
+        let value2 = UserValue::Map(data2);
+
+        let id2 = table1.insert(&value2).await.unwrap();
+
+        // Verify records in first session
+        let retrieved1 = table1.get(id1).await.unwrap();
+        assert_eq!(retrieved1, value1);
+
+        let retrieved2 = table1.get(id2).await.unwrap();
+        assert_eq!(retrieved2, value2);
+
+        let count1 = table1.count().await.unwrap();
+        assert_eq!(count1, 2);
+
+        // table1 and repo1 are dropped here, closing the database
+        drop(table1);
+        drop(repo1);
+
+        // === Second session: reopen and verify ===
+        let repo2 = Arc::new(SledRepo::new(path).unwrap());
+        let table2 = Table::new(repo2, table_name.to_string()).await.unwrap();
+
+        // Verify records are still there after restart
+        let retrieved1_after = table2.get(id1).await.unwrap();
+        assert_eq!(retrieved1_after, value1, "First record should match after restart");
+
+        let retrieved2_after = table2.get(id2).await.unwrap();
+        assert_eq!(retrieved2_after, value2, "Second record should match after restart");
+
+        // Verify count
+        let count2 = table2.count().await.unwrap();
+        assert_eq!(count2, 2, "Should have 2 records after restart");
+
+        // Insert new record with same keys (should reuse restored interner entries)
+        let mut data3 = new_map();
+        data3.insert("name".to_string(), UserValue::Str("Charlie".to_string()));
+        data3.insert("email".to_string(), UserValue::Str("charlie@example.com".to_string()));
+        data3.insert("age".to_string(), UserValue::Int(35));
+        let value3 = UserValue::Map(data3);
+
+        let id3 = table2.insert(&value3).await.unwrap();
+
+        // Verify all three records
+        let retrieved3 = table2.get(id3).await.unwrap();
+        assert_eq!(retrieved3, value3);
+
+        let count3 = table2.count().await.unwrap();
+        assert_eq!(count3, 3, "Should have 3 records after inserting in second session");
+
+        // List all records and verify
+        let all_records = table2.list().await.unwrap();
+        assert_eq!(all_records.len(), 3);
+
+        // Verify each record has the correct structure
+        for (_id, value) in all_records {
+            match value {
+                UserValue::Map(m) => {
+                    assert!(m.contains_key("name"), "Should have 'name' key");
+                    assert!(m.contains_key("email"), "Should have 'email' key");
+                    assert!(m.contains_key("age"), "Should have 'age' key");
+                    assert_eq!(m.len(), 3, "Should have exactly 3 keys");
+                }
+                _ => panic!("Expected Map"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_method_creates_new_record() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Create a new RecordId
+        let id = RecordId::new();
+
+        let mut data = new_map();
+        data.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        data.insert("age".to_string(), UserValue::Int(30));
+        let value = UserValue::Map(data);
+
+        // set should create new record
+        let created = table.set(id, &value).await.unwrap();
+        assert!(created, "Should return true for new record");
+
+        // Verify count increased
+        assert_eq!(table.count().await.unwrap(), 1);
+
+        // Verify record exists
+        let retrieved = table.get(id).await.unwrap();
+        assert_eq!(retrieved, value);
+    }
+
+    #[tokio::test]
+    async fn test_set_method_updates_existing_record() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // First insert a record
+        let id = RecordId::new();
+        let mut data1 = new_map();
+        data1.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        data1.insert("age".to_string(), UserValue::Int(25));
+        let value1 = UserValue::Map(data1);
+
+        let created = table.set(id, &value1).await.unwrap();
+        assert!(created);
+        assert_eq!(table.count().await.unwrap(), 1);
+
+        // Now update with set
+        let mut data2 = new_map();
+        data2.insert("name".to_string(), UserValue::Str("Robert".to_string()));
+        data2.insert("age".to_string(), UserValue::Int(26));
+        data2.insert("city".to_string(), UserValue::Str("NYC".to_string()));
+        let value2 = UserValue::Map(data2);
+
+        let created_again = table.set(id, &value2).await.unwrap();
+        assert!(!created_again, "Should return false for update");
+
+        // Count should still be 1 (not incremented)
+        assert_eq!(table.count().await.unwrap(), 1);
+
+        // Verify updated value
+        let retrieved = table.get(id).await.unwrap();
+        assert_eq!(retrieved, value2);
+    }
+
+    #[tokio::test]
+    async fn test_record_counter_with_insert_and_delete() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Initial count should be 0
+        assert_eq!(table.count().await.unwrap(), 0);
+
+        // Insert 5 records
+        let mut ids = vec![];
+        for i in 0..5 {
+            let mut data = new_map();
+            data.insert("id".to_string(), UserValue::Int(i));
+            let id = table.insert(&UserValue::Map(data)).await.unwrap();
+            ids.push(id);
+        }
+
+        assert_eq!(table.count().await.unwrap(), 5);
+
+        // Delete 2 records
+        table.delete(ids[0]).await.unwrap();
+        table.delete(ids[1]).await.unwrap();
+
+        assert_eq!(table.count().await.unwrap(), 3);
+
+        // Delete 1 more
+        table.delete(ids[2]).await.unwrap();
+
+        assert_eq!(table.count().await.unwrap(), 2);
+
+        // Insert 3 more
+        for i in 0..3 {
+            let mut data = new_map();
+            data.insert("new_id".to_string(), UserValue::Int(i));
+            table.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        assert_eq!(table.count().await.unwrap(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_set_method_respects_counter() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        assert_eq!(table.count().await.unwrap(), 0);
+
+        let id1 = RecordId::new();
+        let id2 = RecordId::new();
+
+        let mut data = new_map();
+        data.insert("value".to_string(), UserValue::Int(42));
+
+        // Create first record with set
+        let created1 = table.set(id1, &UserValue::Map(data.clone())).await.unwrap();
+        assert!(created1);
+        assert_eq!(table.count().await.unwrap(), 1);
+
+        // Create second record with set
+        let created2 = table.set(id2, &UserValue::Map(data.clone())).await.unwrap();
+        assert!(created2);
+        assert_eq!(table.count().await.unwrap(), 2);
+
+        // Update first record with set (count should not change)
+        let updated = table.set(id1, &UserValue::Map(data.clone())).await.unwrap();
+        assert!(!updated);
+        assert_eq!(table.count().await.unwrap(), 2);
+
+        // Update second record with set (count should not change)
+        let updated2 = table.set(id2, &UserValue::Map(data.clone())).await.unwrap();
+        assert!(!updated2);
+        assert_eq!(table.count().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_counter_persistence_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_counter_db");
+        let table_name = "counter_test";
+
+        // === First session ===
+        let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+        let table1 = Table::new(repo1.clone(), table_name.to_string()).await.unwrap();
+
+        // Insert some records
+        for i in 0..10 {
+            let mut data = new_map();
+            data.insert("num".to_string(), UserValue::Int(i));
+            table1.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        assert_eq!(table1.count().await.unwrap(), 10);
+
+        // Close first session
+        drop(table1);
+        drop(repo1);
+
+        // === Second session ===
+        let repo2 = Arc::new(SledRepo::new(path).unwrap());
+        let table2 = Table::new(repo2, table_name.to_string()).await.unwrap();
+
+        // Count should persist
+        assert_eq!(table2.count().await.unwrap(), 10);
+
+        // Insert more records
+        for i in 10..15 {
+            let mut data = new_map();
+            data.insert("num".to_string(), UserValue::Int(i));
+            table2.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        assert_eq!(table2.count().await.unwrap(), 15);
+
+        // Use set to create/update records
+        let id = RecordId::new();
+        let mut data = new_map();
+        data.insert("test".to_string(), UserValue::Str("value".to_string()));
+        let created = table2.set(id, &UserValue::Map(data)).await.unwrap();
+        assert!(created);
+        assert_eq!(table2.count().await.unwrap(), 16);
+
+        // Update with set (count shouldn't change)
+        let mut data2 = new_map();
+        data2.insert("test".to_string(), UserValue::Str("updated".to_string()));
+        let updated = table2.set(id, &UserValue::Map(data2)).await.unwrap();
+        assert!(!updated);
+        assert_eq!(table2.count().await.unwrap(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_counter_matches_actual_record_count() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Perform various operations
+        let mut ids = vec![];
+
+        // Insert 5 records
+        for i in 0..5 {
+            let mut data = new_map();
+            data.insert("i".to_string(), UserValue::Int(i));
+            let id = table.insert(&UserValue::Map(data)).await.unwrap();
+            ids.push(id);
+        }
+
+        // Use set to create 3 more
+        for i in 0..3 {
+            let id = RecordId::new();
+            let mut data = new_map();
+            data.insert("set_id".to_string(), UserValue::Int(i));
+            table.set(id, &UserValue::Map(data)).await.unwrap();
+        }
+
+        // Delete 2 records
+        table.delete(ids[0]).await.unwrap();
+        table.delete(ids[1]).await.unwrap();
+
+        // Use set to update a record (count shouldn't change)
+        table.set(ids[2], &UserValue::Map(new_map())).await.unwrap();
+
+        // Verify counter matches actual count
+        let counter = table.count().await.unwrap();
+        let actual = table.list().await.unwrap().len();
+        assert_eq!(counter, actual);
+        assert_eq!(counter, 6); // 5 insert - 2 delete + 3 set = 6
+    }
+
+    #[tokio::test]
+    async fn test_counter_with_concurrent_operations() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        let num_threads = 10;
+        let records_per_thread = 5;
+        let mut handles = vec![];
+
+        // Concurrent inserts
+        for _ in 0..num_threads {
+            let table_clone = table.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..records_per_thread {
+                    let mut data = new_map();
+                    data.insert("thread".to_string(), UserValue::Int(i));
+                    table_clone.insert(&UserValue::Map(data)).await.unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify count matches
+        let expected = (num_threads * records_per_thread) as usize;
+        let actual = table.count().await.unwrap();
+        assert_eq!(actual, expected);
     }
 }
