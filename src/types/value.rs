@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use fmt::Debug;
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
@@ -10,6 +11,7 @@ use serde::de::{self, Deserializer, Visitor, MapAccess, SeqAccess};
 use serde::ser::{Serializer, SerializeMap, SerializeSeq};
 use std::fmt;
 use std::str::FromStr;
+use std::any::TypeId;
 
 pub type UserValue = Value<String>;
 pub type InnerValue = Value<u64>;
@@ -27,6 +29,25 @@ pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
     List(Vec<Value<Key>>),
     Set(TSet<Value<Key>>),
     Map(TMap<Key, Value<Key>>),
+}
+
+impl<Key: Eq + Hash + Ord + Clone + Serialize + for<'de> Deserialize<'de> + Debug + 'static> Value<Key> {
+    /// Serializes the `Value` into `Bytes` using MessagePack.
+    pub fn to_bytes(&self) -> Bytes {
+        // .unwrap() is acceptable here as serialization to vec should not fail.
+        Bytes::from(rmp_serde::to_vec(self).unwrap())
+    }
+
+    /// Consumes the `Value` and serializes it into `Bytes` using MessagePack.
+    pub fn into_bytes(self) -> Bytes {
+        // .unwrap() is acceptable here as serialization to vec should not fail.
+        Bytes::from(rmp_serde::to_vec(&self).unwrap())
+    }
+
+    /// Deserializes `Bytes` into a `Value` using MessagePack.
+    pub fn from_bytes(bytes: Bytes) -> Result<Self, rmp_serde::decode::Error> {
+        rmp_serde::from_slice(&bytes)
+    }
 }
 
 impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Serialize for Value<Key> {
@@ -88,7 +109,7 @@ struct ValueVisitor<K>(std::marker::PhantomData<K>);
 
 impl<'de, Key> Visitor<'de> for ValueVisitor<Key>
 where
-    Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug,
+    Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug + 'static,
 {
     type Value = Value<Key>;
 
@@ -121,6 +142,16 @@ where
     fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
     where M: MapAccess<'de>,
     {
+        // For InnerValue (Key=u64) or other non-string keys, use direct deserialization.
+        if TypeId::of::<Key>() != TypeId::of::<String>() {
+            let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0));
+            while let Some((key, value)) = map.next_entry()? {
+                inner_map.insert(key, value);
+            }
+            return Ok(Value::Map(inner_map));
+        }
+
+        // For UserValue (Key=String), use the special prefix-parsing logic.
         let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0));
         while let Some(key_str) = map.next_key::<String>()? {
             let (prefix, real_key) = parse_key_prefix(&key_str);
@@ -156,7 +187,7 @@ where
 
 impl<'de, Key> Deserialize<'de> for Value<Key>
 where
-    Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug,
+    Key: Deserialize<'de> + Eq + Hash + Ord + Clone + Serialize + Debug + 'static,
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -251,5 +282,22 @@ mod tests {
         map2.insert("a".to_string(), UserValue::Int(1));
         assert_eq!(map1, map2);
         assert_eq!(calculate_hash(&UserValue::Map(map1)), calculate_hash(&UserValue::Map(map2)));
+    }
+
+    #[test]
+    fn test_bytes_serialization_roundtrip() {
+        let mut map = new_map();
+        map.insert(123u64, InnerValue::Str("hello".to_string()));
+        map.insert(456u64, InnerValue::Int(99));
+        let value = InnerValue::Map(map);
+
+        // Test to_bytes and from_bytes
+        let bytes = value.to_bytes();
+        let reconstructed = InnerValue::from_bytes(bytes.clone()).unwrap();
+        assert_eq!(value, reconstructed);
+
+        // Test into_bytes
+        let bytes_from_into = value.into_bytes();
+        assert_eq!(bytes, bytes_from_into);
     }
 }
