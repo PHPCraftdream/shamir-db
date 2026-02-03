@@ -1,8 +1,12 @@
-use crate::types::common::{new_map_wc, new_set_wc};
 use crate::core::interner::Interner;
+use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
-pub fn user_to_inner(value: &UserValue, interner: &Interner) -> InnerValue {
+fn user_to_inner_rec(
+    value: &UserValue,
+    interner: &Interner,
+    new_keys: &mut Vec<(u64, String)>,
+) -> InnerValue {
     match value {
         Value::Nil => Value::Nil,
         Value::Bool(b) => Value::Bool(*b),
@@ -13,13 +17,16 @@ pub fn user_to_inner(value: &UserValue, interner: &Interner) -> InnerValue {
         Value::Str(s) => Value::Str(s.clone()),
         Value::Bin(b) => Value::Bin(b.clone()),
         Value::List(list) => {
-            let inner_list = list.iter().map(|v| user_to_inner(v, interner)).collect();
+            let inner_list = list
+                .iter()
+                .map(|v| user_to_inner_rec(v, interner, new_keys))
+                .collect();
             Value::List(inner_list)
         }
         Value::Set(set) => {
             let mut inner_set = new_set_wc(set.len());
             for v in set {
-                inner_set.insert(user_to_inner(v, interner));
+                inner_set.insert(user_to_inner_rec(v, interner, new_keys));
             }
             Value::Set(inner_set)
         }
@@ -27,12 +34,35 @@ pub fn user_to_inner(value: &UserValue, interner: &Interner) -> InnerValue {
             let mut inner_map = new_map_wc(map.len());
             for (key, val) in map {
                 let interned_key = interner.touch_ind(key);
-                let inner_val = user_to_inner(val, interner);
+                if interned_key.is_new() {
+                    new_keys.push((interned_key.val(), key.clone()));
+                }
+                let inner_val = user_to_inner_rec(val, interner, new_keys);
                 inner_map.insert(interned_key.val(), inner_val);
             }
             Value::Map(inner_map)
         }
     }
+}
+
+/// Transforms a UserValue to an InnerValue, collecting newly interned keys.
+///
+/// The function recursively traverses the `UserValue`. When it encounters a map,
+/// it interns its string keys. If a key is new to the interner, the pair
+/// of `(key_id, key_string)` is collected.
+///
+/// # Arguments
+/// * `value` - The `UserValue` to transform.
+/// * `interner` - The `Interner` instance to use for key interning.
+///
+/// # Returns
+/// A tuple containing:
+/// * The resulting `InnerValue`.
+/// * A `Vec<(u64, String)>` of newly created interned keys.
+pub fn user_to_inner(value: &UserValue, interner: &Interner) -> (InnerValue, Vec<(u64, String)>) {
+    let mut new_keys = Vec::new();
+    let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
+    (inner_value, new_keys)
 }
 
 pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
@@ -59,7 +89,9 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
         Value::Map(map) => {
             let mut user_map = new_map_wc(map.len());
             for (key_id, val) in map {
-                let key = interner.get_str(*key_id).expect("Data corruption: interned key not found");
+                let key = interner
+                    .get_str(*key_id)
+                    .expect("Data corruption: interned key not found");
                 let user_val = inner_to_user(val, interner);
                 user_map.insert(key, user_val);
             }
@@ -71,10 +103,10 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::common::{new_map, new_set};
-    use num_bigint::BigInt;
     use crate::codecs::json::JsonCodec;
     use crate::codecs::Codec;
+    use crate::types::common::{new_map, new_set};
+    use num_bigint::BigInt;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -84,22 +116,32 @@ mod tests {
         let mut user_map = new_map();
         user_map.insert("name".to_string(), UserValue::Str("John Doe".to_string()));
         user_map.insert("age".to_string(), UserValue::Int(30));
-        user_map.insert("balance".to_string(), UserValue::Big(BigInt::from(1_000_000_000_000i64)));
+        user_map.insert(
+            "balance".to_string(),
+            UserValue::Big(BigInt::from(1_000_000_000_000i64)),
+        );
         let mut user_set = new_set();
         user_set.insert(UserValue::Str("tag1".to_string()));
         user_set.insert(UserValue::Str("tag2".to_string()));
-        let original_value = UserValue::List(vec![
-            UserValue::Map(user_map),
-            UserValue::Set(user_set),
-        ]);
-        let inner_value = user_to_inner(&original_value, &interner);
+        let original_value = UserValue::List(vec![UserValue::Map(user_map), UserValue::Set(user_set)]);
+        let (inner_value, new_keys) = user_to_inner(&original_value, &interner);
+
+        // Verify new keys were collected
+        assert_eq!(new_keys.len(), 3);
+        assert!(new_keys.iter().any(|(_, s)| s == "name"));
+        assert!(new_keys.iter().any(|(_, s)| s == "age"));
+        assert!(new_keys.iter().any(|(_, s)| s == "balance"));
+
         let name_id = interner.get_ind("name").unwrap();
         let age_id = interner.get_ind("age").unwrap();
         let balance_id = interner.get_ind("balance").unwrap();
         let mut expected_inner_map = new_map();
         expected_inner_map.insert(name_id, InnerValue::Str("John Doe".to_string()));
         expected_inner_map.insert(age_id, InnerValue::Int(30));
-        expected_inner_map.insert(balance_id, InnerValue::Big(BigInt::from(1_000_000_000_000i64)));
+        expected_inner_map.insert(
+            balance_id,
+            InnerValue::Big(BigInt::from(1_000_000_000_000i64)),
+        );
         let mut expected_inner_set = new_set();
         expected_inner_set.insert(InnerValue::Str("tag1".to_string()));
         expected_inner_set.insert(InnerValue::Str("tag2".to_string()));
@@ -117,7 +159,8 @@ mod tests {
         let json_codec = JsonCodec;
         let interner = Interner::new();
         let large_number_str = "123456789012345678901234567890";
-        let raw_json_1 = format!(r#"
+        let raw_json_1 = format!(
+            r#"
         {{
             "set:tags": ["a", "b"],
             "big:balance": "{}",
@@ -131,13 +174,18 @@ mod tests {
                 "active": true
             }}
         }}
-        "#, large_number_str);
+        "#,
+            large_number_str
+        );
 
         let user_value_1: UserValue = json_codec.decode(raw_json_1.as_bytes()).unwrap();
-        let inner_value = user_to_inner(&user_value_1, &interner);
+        let (inner_value, _) = user_to_inner(&user_value_1, &interner);
         let user_value_2 = inner_to_user(&inner_value, &interner);
 
-        assert_eq!(user_value_1, user_value_2, "The user_to_inner and inner_to_user transformation cycle failed");
+        assert_eq!(
+            user_value_1, user_value_2,
+            "The user_to_inner and inner_to_user transformation cycle failed"
+        );
 
         // --- Optional but recommended: Verify the contents of user_value_1 to be sure ---
         let mut expected_set = new_set();
@@ -151,13 +199,38 @@ mod tests {
 
         let mut expected_map = new_map();
         expected_map.insert("tags".to_string(), UserValue::Set(expected_set));
-        expected_map.insert("balance".to_string(), UserValue::Big(BigInt::from_str(large_number_str).unwrap()));
-        expected_map.insert("price".to_string(), UserValue::Dec(Decimal::from_str("99.95").unwrap()));
+        expected_map.insert(
+            "balance".to_string(),
+            UserValue::Big(BigInt::from_str(large_number_str).unwrap()),
+        );
+        expected_map.insert(
+            "price".to_string(),
+            UserValue::Dec(Decimal::from_str("99.95").unwrap()),
+        );
         expected_map.insert("ratio".to_string(), UserValue::F64(0.123));
-        expected_map.insert("history".to_string(), UserValue::List(vec![UserValue::Int(1), UserValue::Int(2), UserValue::Int(3)]));
-        expected_map.insert("simple_list".to_string(), UserValue::List(vec![UserValue::Str("one".to_string()), UserValue::Int(2), UserValue::Bool(false), UserValue::Nil]));
+        expected_map.insert(
+            "history".to_string(),
+            UserValue::List(vec![
+                UserValue::Int(1),
+                UserValue::Int(2),
+                UserValue::Int(3),
+            ]),
+        );
+        expected_map.insert(
+            "simple_list".to_string(),
+            UserValue::List(vec![
+                UserValue::Str("one".to_string()),
+                UserValue::Int(2),
+                UserValue::Bool(false),
+                UserValue::Nil,
+            ]),
+        );
         expected_map.insert("user".to_string(), UserValue::Map(user_sub_map));
 
-        assert_eq!(user_value_1, UserValue::Map(expected_map), "Initial JSON parsing created an unexpected structure");
+        assert_eq!(
+            user_value_1,
+            UserValue::Map(expected_map),
+            "Initial JSON parsing created an unexpected structure"
+        );
     }
 }

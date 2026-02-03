@@ -37,8 +37,8 @@ impl Interner {
     /// Creates a new, empty NameInd.
     pub fn new() -> Interner {
         Interner {
-            map_str: new_dash_map_wc(1024),
-            map_ind: new_dash_map_wc(1024),
+            map_str: new_dash_map_wc(64),
+            map_ind: new_dash_map_wc(64),
             current: AtomicU64::new(1),
         }
     }
