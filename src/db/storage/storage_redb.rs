@@ -172,16 +172,16 @@ impl Store for RedbStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<Option<Bytes>> {
+    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
-        task::spawn_blocking(move || -> DbResult<Option<Bytes>> {
+        task::spawn_blocking(move || -> DbResult<Bytes> {
             let read_txn = db.begin_read()?;
             let table_def = TableDefinition::<RecordId, &[u8]>::new(&table_name);
             let table = read_txn.open_table(table_def)?;
             match table.get(key)? {
-                Some(guard) => Ok(Some(Bytes::copy_from_slice(guard.value()))),
-                None => Ok(None),
+                Some(guard) => Ok(Bytes::copy_from_slice(guard.value())),
+                None => Err(DbError::NotFound(format!("record not found: {:}", key))),
             }
         })
         .await
@@ -240,7 +240,7 @@ mod tests {
         // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
         let id1 = store.insert(value1.to_bytes()).await.unwrap();
-        let retrieved_bytes = store.get(id1).await.unwrap().unwrap();
+        let retrieved_bytes = store.get(id1).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
         // Test set (update)
@@ -248,7 +248,7 @@ mod tests {
         let value2 = InnerValue::Str("world".to_string());
         let created = store.set(id1, value2.to_bytes()).await.unwrap();
         assert!(!created); // Should be false, as it's an update
-        let retrieved_bytes2 = store.get(id1).await.unwrap().unwrap();
+        let retrieved_bytes2 = store.get(id1).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Test set (create)
@@ -256,7 +256,7 @@ mod tests {
         let value3 = InnerValue::Int(123);
         let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
         assert!(created2); // Should be true, as it's a new record
-        let retrieved_bytes3 = store.get(id2).await.unwrap().unwrap();
+        let retrieved_bytes3 = store.get(id2).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
 
         // Test iter
@@ -269,7 +269,7 @@ mod tests {
 
         // Test remove
         assert!(store.remove(id1).await.unwrap());
-        assert!(store.get(id1).await.unwrap().is_none());
+        assert!(store.get(id1).await.is_err());
         assert!(!store.remove(id1).await.unwrap()); // Already removed
 
         let all_records_after_remove = store.iter().await.unwrap();
