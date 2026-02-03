@@ -10,6 +10,10 @@ use std::str::FromStr;
 /// Value: `chrono::Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap().timestamp_micros()`
 const CUSTOM_EPOCH_MICROS: i64 = 1_769_817_600_000_000;
 
+/// A prefix of 4 zero bytes, representing a timestamp of 0 relative to the epoch.
+/// This is used to identify system records, as a real timestamp will never be zero.
+const SYSTEM_RECORD_PREFIX: &[u8] = &[0, 0, 0, 0];
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordId(pub [u8; 16]);
 
@@ -27,6 +31,25 @@ impl RecordId {
             .try_fill_bytes(&mut bytes[8..16])
             .expect("Failed to get random bytes from OS");
         Self(bytes)
+    }
+
+    /// Creates a deterministic, system-level `RecordId` from a string name.
+    /// These IDs are used for internal metadata and are distinguished by a zero-timestamp prefix.
+    /// The name is directly copied into the ID, truncated to 12 bytes.
+    pub fn system(name: &str) -> Self {
+        let mut bytes = [0u8; 16];
+        // The first 4 bytes are the system prefix (zeros).
+        // The rest is filled with the name's bytes.
+        let name_bytes = name.as_bytes();
+        let len_to_copy = std::cmp::min(name_bytes.len(), 12);
+        bytes[4..4 + len_to_copy].copy_from_slice(&name_bytes[..len_to_copy]);
+        Self(bytes)
+    }
+
+    /// Checks if the `RecordId` is a system record.
+    /// Returns `true` if the first 4 bytes are zero.
+    pub fn is_system(&self) -> bool {
+        self.0.starts_with(SYSTEM_RECORD_PREFIX)
     }
 
     pub fn as_bytes(&self) -> &[u8; 16] {
@@ -116,5 +139,31 @@ mod tests {
         let s = id.to_string();
         let reconstructed_id: RecordId = s.parse().unwrap();
         assert_eq!(id, reconstructed_id);
+    }
+
+    #[test]
+    fn test_system_record_id_logic() {
+        // Short name
+        let id_short = RecordId::system("users");
+        assert!(id_short.is_system());
+        assert_eq!(&id_short.0[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&id_short.0[4..9], b"users");
+        assert_eq!(id_short.0[9], 0); // Padding
+
+        // 12-byte name
+        let id_exact = RecordId::system("123456789012");
+        assert_eq!(&id_exact.0[4..16], b"123456789012");
+
+        // Long name (truncation)
+        let id_long = RecordId::system("123456789012-extra");
+        assert_eq!(id_exact, id_long, "Long name should be truncated to the same ID");
+
+        // Determinism
+        let id_again = RecordId::system("users");
+        assert_eq!(id_short, id_again);
+
+        // User ID should not be system
+        let user_id = RecordId::new();
+        assert!(!user_id.is_system());
     }
 }
