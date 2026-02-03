@@ -1,7 +1,22 @@
 //! Index operation types for journal-based asynchronous index updates
 //!
-//! These types define the structure of index operations that are written to the journal
-//! and processed by the global indexer thread.
+//! # Current Status
+//!
+//! These types are defined for the future async journal-based indexing system.
+//! Currently, only `IndexDef` and `IndexTarget` are actively used for:
+//! - Index configuration management
+//! - Unique constraint enforcement
+//!
+//! # Type Usage
+//!
+//! - **IndexDef**: Defines a single index with path and unique flag (✅ Active)
+//! - **IndexTarget**: Three-state indexing configuration (✅ Active)
+//! - **OpType**: Operation type enum (⏸️ For future journal)
+//! - **IndexChange**: Single index change entry (⏸️ For future journal)
+//! - **IndexOp**: Complete journal operation (⏸️ For future journal)
+//!
+//! See `index_engine.md` for the full architecture design.
+//! See `milestones.md` for implementation status.
 
 use crate::types::record_id::RecordId;
 use serde::{Deserialize, Serialize};
