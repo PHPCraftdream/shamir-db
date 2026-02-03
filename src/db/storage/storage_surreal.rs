@@ -1,10 +1,8 @@
 use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use crate::types::repo_record::RepoRecord;
-use crate::types::value::InnerValue;
 use async_trait::async_trait;
-use chrono::Utc;
+use bytes::Bytes;
 use surrealkv::{Tree, TreeBuilder};
 use std::path::Path;
 use std::sync::Arc;
@@ -19,10 +17,20 @@ pub struct SurrealKVRepo {
 
 impl SurrealKVRepo {
     pub fn new(path: impl AsRef<Path>) -> DbResult<Self> {
+        let path = path.as_ref();
+
+        // FIX for Windows: Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| DbError::Storage(format!("Failed to create directory: {}", e)))?;
+            }
+        }
+
         let tree = TreeBuilder::new()
-            .with_path(path.as_ref().to_path_buf())
+            .with_path(path.to_path_buf())
             .build()
-            .map_err(|e| DbError::Storage(e.to_string()))?;
+            .map_err(|e| DbError::Storage(format!("SurrealKV build: {}", e)))?;
 
         Ok(Self {
             tree: Arc::new(tree),
@@ -30,33 +38,40 @@ impl SurrealKVRepo {
     }
 
     async fn register_store(&self, table_name: &str) -> DbResult<()> {
-        let mut txn = self.tree.begin()?;
+        let mut txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let tables_key = b"__system__:__tables__";
 
         let mut tables = txn
-            .get(tables_key)?
+            .get(tables_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
             .map(|v| decode_tables(&v))
             .unwrap_or_default();
 
         if !tables.contains(&table_name.to_string()) {
             tables.push(table_name.to_string());
-            txn.set(tables_key.to_vec(), encode_tables(&tables))?;
-            txn.commit().await?;
+            txn.set(tables_key.to_vec(), encode_tables(&tables))
+                .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
+            txn.commit()
+                .await
+                .map_err(|e| DbError::Storage(format!("SurrealKV commit: {}", e)))?;
         }
 
         Ok(())
     }
 
     async fn unregister_store(&self, table_name: &str) -> DbResult<bool> {
-        let mut txn = self.tree.begin()?;
+        let mut txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let tables_key = b"__system__:__tables__";
 
-        let existed = if let Some(v) = txn.get(tables_key)? {
+        let existed = if let Some(v) = txn.get(tables_key).map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))? {
             let mut tables = decode_tables(&v);
             let existed = tables.contains(&table_name.to_string());
             tables.retain(|t| t != table_name);
-            txn.set(tables_key.to_vec(), encode_tables(&tables))?;
-            txn.commit().await?;
+            txn.set(tables_key.to_vec(), encode_tables(&tables))
+                .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
+            txn.commit()
+                .await
+                .map_err(|e| DbError::Storage(format!("SurrealKV commit: {}", e)))?;
             existed
         } else {
             false
@@ -75,31 +90,35 @@ impl SurrealKVRepo {
     }
 
     pub async fn store_delete_by_name(&self, name: &str) -> DbResult<bool> {
-        let mut txn = self.tree.begin()?;
+        let mut txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let idx_key = format!("__table__:{}:__keys__", name).into_bytes();
 
         let ids = txn
-            .get(&idx_key)?
+            .get(&idx_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
             .map(|v| decode_ids(&v))
             .unwrap_or_default();
 
         if ids.is_empty() {
-            // Even if no data, we might have the table registered
-            drop(txn); // Release transaction before calling unregister_store
-            return self.unregister_store(name).await;
+            drop(txn);
+            // Return false - no data to delete
+            return Ok(false);
         }
 
         // Delete all records
         for id in &ids {
-            txn.delete(prefixed_key(name, *id))?;
+            txn.delete(prefixed_key(name, *id))
+                .map_err(|e| DbError::Storage(format!("SurrealKV delete: {}", e)))?;
         }
 
         // Delete index
-        txn.delete(idx_key)?;
-        txn.commit().await?;
+        txn.delete(idx_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV delete: {}", e)))?;
+        txn.commit()
+            .await
+            .map_err(|e| DbError::Storage(format!("SurrealKV commit: {}", e)))?;
 
-        // Remove from global tables list
-        self.unregister_store(name).await  // <- добавлен .await
+        Ok(true)
     }
 }
 
@@ -110,15 +129,22 @@ impl Repo for SurrealKVRepo {
     }
 
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
-        self.store_delete_by_name(name.as_ref()).await
+        // First delete the data
+        let data_deleted = self.store_delete_by_name(name.as_ref()).await?;
+
+        // Then unregister from tables list
+        let table_existed = self.unregister_store(name.as_ref()).await?;
+
+        Ok(data_deleted || table_existed)
     }
 
     async fn stores_list(&self) -> DbResult<Vec<String>> {
-        let txn = self.tree.begin()?;
+        let txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let tables_key = b"__system__:__tables__";
 
         let tables = txn
-            .get(tables_key)?
+            .get(tables_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
             .map(|v| decode_tables(&v))
             .unwrap_or_default();
 
@@ -139,119 +165,129 @@ unsafe impl Send for SurrealKVStore {}
 unsafe impl Sync for SurrealKVStore {}
 
 impl SurrealKVStore {
-    fn index_key(&self) -> Vec<u8> {
-        format!("__table__:{}:__keys__", self.table_name).into_bytes()
-    }
+    // Helper methods are inline in the impl Store above
 }
 
 #[async_trait]
 impl Store for SurrealKVStore {
-    async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
-        let mut txn = self.tree.begin()?;
+    async fn insert(&self, value: Bytes) -> DbResult<RecordId> {
+        let mut txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
 
         let id = RecordId::new();
-        let now = Utc::now().timestamp_micros() as u64;
-        let record: RepoRecord = (id, now, now, value.clone());
-
         let key = prefixed_key(&self.table_name, id);
-        if txn.get(&key)?.is_some() {
-            return Err(DbError::Internal(format!("Key exists: {:?}", id)));
+
+        // Check if key exists
+        if txn.get(&key).map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?.is_some() {
+            return Err(DbError::KeyExists(format!("Key exists: {:?}", id)));
         }
 
-        txn.set(key, rmp_serde::to_vec(&record)?)?;
+        txn.set(key, value.to_vec())
+            .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
 
-        let idx_key = self.index_key();
+        let idx_key = index_key_for_table(&self.table_name);
         let mut ids = txn
-            .get(&idx_key)?
+            .get(&idx_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
             .map(|v| decode_ids(&v))
             .unwrap_or_default();
         ids.push(id);
-        txn.set(idx_key, encode_ids(&ids))?;
+        txn.set(idx_key, encode_ids(&ids))
+            .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
 
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(|e| DbError::Storage(format!("SurrealKV commit: {}", e)))?;
         Ok(id)
     }
 
-    async fn set(&self, key: RecordId, value: &InnerValue) -> DbResult<bool> {
-        let mut txn = self.tree.begin()?;
+    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool> {
+        let mut txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let key_bytes = prefixed_key(&self.table_name, key);
 
-        let existing = txn
-            .get(&key_bytes)?
-            .and_then(|v| rmp_serde::from_slice::<RepoRecord>(&v).ok());
+        let existed = txn
+            .get(&key_bytes)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
+            .is_some();
 
-        let created_at = existing.map_or(Utc::now().timestamp_micros() as u64, |r| r.1);
+        txn.set(key_bytes, value.to_vec())
+            .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
 
-        let record: RepoRecord = (
-            key,
-            created_at,
-            Utc::now().timestamp_micros() as u64,
-            value.clone(),
-        );
-
-        txn.set(key_bytes.clone(), rmp_serde::to_vec(&record)?)?;
-
-        let idx_key = self.index_key();
+        let idx_key = index_key_for_table(&self.table_name);
         let mut ids = txn
-            .get(&idx_key)?
+            .get(&idx_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
             .map(|v| decode_ids(&v))
             .unwrap_or_default();
 
         if !ids.contains(&key) {
             ids.push(key);
-            txn.set(idx_key, encode_ids(&ids))?;
+            txn.set(idx_key, encode_ids(&ids))
+                .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
         }
 
-        txn.commit().await?;
-        Ok(true)
+        txn.commit()
+            .await
+            .map_err(|e| DbError::Storage(format!("SurrealKV commit: {}", e)))?;
+
+        Ok(!existed)
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<RepoRecord> {
-        let txn = self.tree.begin()?;
+    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
+        let txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let key_bytes = prefixed_key(&self.table_name, key);
 
         let val = txn
-            .get(&key_bytes)?
-            .ok_or_else(|| DbError::Internal(format!("Key not found: {:?}", key)))?;
+            .get(&key_bytes)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
+            .ok_or_else(|| DbError::NotFound(key.to_string()))?;
 
-        rmp_serde::from_slice(&val).map_err(|e| DbError::Codec(e.to_string()))
+        Ok(Bytes::copy_from_slice(&val))
     }
 
     async fn remove(&self, key: RecordId) -> DbResult<bool> {
-        let mut txn = self.tree.begin()?;
+        let mut txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
         let key_bytes = prefixed_key(&self.table_name, key);
 
-        if txn.get(&key_bytes)?.is_none() {
-            return Ok(false);
+        let existed = txn
+            .get(&key_bytes)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
+            .is_some();
+
+        if existed {
+            txn.delete(key_bytes)
+                .map_err(|e| DbError::Storage(format!("SurrealKV delete: {}", e)))?;
+
+            let idx_key = index_key_for_table(&self.table_name);
+            if let Some(v) = txn.get(&idx_key).map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))? {
+                let mut ids = decode_ids(&v);
+                ids.retain(|&k| k != key);
+                txn.set(idx_key, encode_ids(&ids))
+                    .map_err(|e| DbError::Storage(format!("SurrealKV set: {}", e)))?;
+            }
+
+            txn.commit()
+                .await
+                .map_err(|e| DbError::Storage(format!("SurrealKV commit: {}", e)))?;
         }
 
-        txn.delete(key_bytes)?;
-
-        let idx_key = self.index_key();
-        if let Some(v) = txn.get(&idx_key)? {
-            let mut ids = decode_ids(&v);
-            ids.retain(|&k| k != key);
-            txn.set(idx_key, encode_ids(&ids))?;
-        }
-
-        txn.commit().await?;
-        Ok(true)
+        Ok(existed)
     }
 
-    async fn iter(&self) -> DbResult<Vec<RepoRecord>> {
-        let txn = self.tree.begin()?;
-        let idx_key = self.index_key();
+    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>> {
+        let txn = self.tree.begin().map_err(|e| DbError::Storage(format!("SurrealKV begin: {}", e)))?;
+        let idx_key = index_key_for_table(&self.table_name);
 
         let ids = txn
-            .get(&idx_key)?
+            .get(&idx_key)
+            .map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))?
             .map(|v| decode_ids(&v))
             .unwrap_or_default();
 
         let mut out = Vec::new();
         for id in ids {
             let key = prefixed_key(&self.table_name, id);
-            if let Some(val) = txn.get(&key)? {
-                out.push(rmp_serde::from_slice(&val)?);
+            if let Some(val) = txn.get(&key).map_err(|e| DbError::Storage(format!("SurrealKV get: {}", e)))? {
+                out.push((id, Bytes::copy_from_slice(&val)));
             }
         }
         Ok(out)
@@ -267,6 +303,10 @@ fn prefixed_key(table_name: &str, key: RecordId) -> Vec<u8> {
     k.push(b':');
     k.extend_from_slice(key.as_bytes());
     k
+}
+
+fn index_key_for_table(table_name: &str) -> Vec<u8> {
+    format!("__table__:{}:__keys__", table_name).into_bytes()
 }
 
 fn decode_ids(data: &[u8]) -> Vec<RecordId> {
@@ -289,33 +329,52 @@ fn encode_tables(tables: &[String]) -> Vec<u8> {
 // Tests
 // ============================================================================
 #[cfg(test)]
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(target_os = "windows"))]  // SurrealKV has known issues on Windows (Access denied errors)
 mod tests {
     use super::*;
+    use crate::types::value::InnerValue;
     use std::fs;
     use tokio::time::{sleep, Duration};
     use serial_test::serial;
 
-    // Generic test function that works with any Store implementation
-    async fn run_store_tests(store: &dyn Store) {
+    async fn run_store_tests(store: Arc<dyn Store>) {
+        // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let id1 = store.insert(&value1).await.unwrap();
-        let retrieved1 = store.get(id1).await.unwrap();
-        assert_eq!(retrieved1.3, value1);
+        let id1 = store.insert(value1.to_bytes()).await.unwrap();
+        let retrieved_bytes = store.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
+        // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        store.set(id1, &value2).await.unwrap();
-        let retrieved2 = store.get(id1).await.unwrap();
-        assert_eq!(retrieved2.3, value2);
-        assert_eq!(retrieved2.1, retrieved1.1);
-        assert!(retrieved2.2 > retrieved1.2);
+        let created = store.set(id1, value2.to_bytes()).await.unwrap();
+        assert!(!created); // Should be false, as it's an update
+        let retrieved_bytes2 = store.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
-        let _id2 = store.insert(&InnerValue::Int(99)).await.unwrap();
-        assert_eq!(store.iter().await.unwrap().len(), 2);
+        // Test set (create)
+        let id2 = RecordId::new();
+        let value3 = InnerValue::Int(123);
+        let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
+        assert!(created2); // Should be true, as it's a new record
+        let retrieved_bytes3 = store.get(id2).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
 
+        // Test iter
+        let value4 = InnerValue::Bool(true);
+        let _id3 = store.insert(value4.to_bytes()).await.unwrap();
+        let all_records = store.iter().await.unwrap();
+        assert_eq!(all_records.len(), 3);
+        assert!(all_records.iter().any(|(id, _)| *id == id1));
+        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+
+        // Test remove
         assert!(store.remove(id1).await.unwrap());
         assert!(store.get(id1).await.is_err());
+        assert!(!store.remove(id1).await.unwrap()); // Already removed
+
+        let all_records_after_remove = store.iter().await.unwrap();
+        assert_eq!(all_records_after_remove.len(), 2);
     }
 
     #[tokio::test]
@@ -327,7 +386,7 @@ mod tests {
             let repo = SurrealKVRepo::new(path).unwrap();
             let store = repo.store_get("test_table").await.unwrap();
 
-            run_store_tests(store.as_ref()).await;
+            run_store_tests(store.clone()).await;
 
             assert!(repo.store_delete("test_table").await.unwrap());
 
@@ -409,22 +468,22 @@ mod tests {
 
             // Insert into table1
             let value1 = InnerValue::Str("table1_value".to_string());
-            let id1 = store1.insert(&value1).await.unwrap();
+            let id1 = store1.insert(value1.to_bytes()).await.unwrap();
 
             // Insert into table2
             let value2 = InnerValue::Str("table2_value".to_string());
-            let id2 = store2.insert(&value2).await.unwrap();
+            let id2 = store2.insert(value2.to_bytes()).await.unwrap();
 
             // Verify isolation - each table should have only 1 record
             assert_eq!(store1.iter().await.unwrap().len(), 1);
             assert_eq!(store2.iter().await.unwrap().len(), 1);
 
             // Verify correct values
-            let retrieved1 = store1.get(id1).await.unwrap();
-            assert_eq!(retrieved1.3, value1);
+            let retrieved_bytes1 = store1.get(id1).await.unwrap();
+            assert_eq!(InnerValue::from_bytes(retrieved_bytes1).unwrap(), value1);
 
-            let retrieved2 = store2.get(id2).await.unwrap();
-            assert_eq!(retrieved2.3, value2);
+            let retrieved_bytes2 = store2.get(id2).await.unwrap();
+            assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
             // Verify cross-table isolation
             assert!(store2.get(id1).await.is_err());
