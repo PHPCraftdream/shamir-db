@@ -152,24 +152,19 @@ impl Store for FjallStore {
         task::spawn_blocking(move || -> DbResult<Vec<(RecordId, Bytes)>> {
             let mut items = Vec::new();
 
-            // Итерируемся по всем ключам
-            for item in keyspace.iter() {
-                // Получаем ключ и значение через отдельные вызовы get
-                let key_result = item.key();
-                let key_bytes = key_result
+            // Iterate over all items - Guard::into_inner() returns key-value pair directly
+            for guard in keyspace.iter() {
+                let (key, value_slice) = guard
+                    .into_inner()
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                let key = RecordId(key_bytes.as_ref().try_into().map_err(|_| {
+                let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
                     DbError::Internal("Failed to convert key to RecordId".to_string())
                 })?);
 
-                // Теперь получаем значение через keyspace.get()
-                if let Some(value_slice) = keyspace.get(key.as_bytes())
-                    .map_err(|e| DbError::Storage(e.to_string()))?
-                {
-                    items.push((key, Bytes::copy_from_slice(&value_slice)));
-                }
+                items.push((record_id, Bytes::copy_from_slice(&value_slice)));
             }
+
             Ok(items)
         })
             .await
