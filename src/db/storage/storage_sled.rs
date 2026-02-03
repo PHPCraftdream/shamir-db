@@ -1,10 +1,8 @@
 use super::types::{Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use crate::types::repo_record::RepoRecord;
-use crate::types::value::InnerValue;
 use async_trait::async_trait;
-use chrono::Utc;
+use bytes::Bytes;
 use sled::{Db, Tree};
 use std::path::Path;
 use std::sync::Arc;
@@ -87,20 +85,14 @@ unsafe impl Sync for SledStore {}
 
 #[async_trait]
 impl Store for SledStore {
-    async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordId> {
         let tree = self.tree.clone();
-        let inner_value = value.clone();
 
         spawn_blocking(move || -> DbResult<RecordId> {
             let id = RecordId::new();
-            let now = Utc::now().timestamp_micros() as u64;
-            let record: RepoRecord = (id, now, now, inner_value);
-
             let key = id.as_bytes();
-            let serialized =
-                rmp_serde::to_vec(&record).map_err(|e| DbError::Codec(e.to_string()))?;
 
-            tree.insert(key, serialized)
+            tree.insert(key, &*value)
                 .map_err(|e| DbError::Storage(format!("SledDB insert: {}", e)))?;
 
             // sled is transactional by default, but we might want to flush explicitly for durability
@@ -113,57 +105,40 @@ impl Store for SledStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn set(&self, key: RecordId, value: &InnerValue) -> DbResult<bool> {
+    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool> {
         let tree = self.tree.clone();
-        let inner_value = value.clone();
 
         spawn_blocking(move || -> DbResult<bool> {
             let key_bytes = key.as_bytes();
 
-            let existing_val = tree
+            let existed = tree
                 .get(key_bytes)
-                .map_err(|e| DbError::Storage(format!("SledDB get: {}", e)))?;
+                .map_err(|e| DbError::Storage(format!("SledDB get: {}", e)))?
+                .is_some();
 
-            let created_at = match existing_val {
-                Some(v) => rmp_serde::from_slice::<RepoRecord>(&v)
-                    .map(|r| r.1)
-                    .unwrap_or_else(|_| Utc::now().timestamp_micros() as u64),
-                None => Utc::now().timestamp_micros() as u64,
-            };
-
-            let record: RepoRecord = (
-                key,
-                created_at,
-                Utc::now().timestamp_micros() as u64,
-                inner_value,
-            );
-
-            let serialized =
-                rmp_serde::to_vec(&record).map_err(|e| DbError::Codec(e.to_string()))?;
-
-            tree.insert(key_bytes, serialized)
+            tree.insert(key_bytes, &*value)
                 .map_err(|e| DbError::Storage(format!("SledDB insert: {}", e)))?;
 
             tree.flush()
                 .map_err(|e| DbError::Storage(format!("SledDB flush: {}", e)))?;
 
-            Ok(true)
+            Ok(!existed)
         })
         .await
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn get(&self, key: RecordId) -> DbResult<RepoRecord> {
+    async fn get(&self, key: RecordId) -> DbResult<Bytes> {
         let tree = self.tree.clone();
 
-        spawn_blocking(move || -> DbResult<RepoRecord> {
+        spawn_blocking(move || -> DbResult<Bytes> {
             let key_bytes = key.as_bytes();
             let val = tree
                 .get(key_bytes)
                 .map_err(|e| DbError::Storage(format!("SledDB get: {}", e)))?
                 .ok_or_else(|| DbError::NotFound(key.to_string()))?;
 
-            rmp_serde::from_slice(&val).map_err(|e| DbError::Codec(e.to_string()))
+            Ok(Bytes::copy_from_slice(&val))
         })
         .await
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
@@ -188,17 +163,18 @@ impl Store for SledStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<RepoRecord>> {
+    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>> {
         let tree = self.tree.clone();
 
-        spawn_blocking(move || -> DbResult<Vec<RepoRecord>> {
+        spawn_blocking(move || -> DbResult<Vec<(RecordId, Bytes)>> {
             let mut out = Vec::new();
             for item in tree.iter() {
-                let (_key, val) =
+                let (key, val) =
                     item.map_err(|e| DbError::Storage(format!("SledDB iter item: {}", e)))?;
-                let record: RepoRecord =
-                    rmp_serde::from_slice(&val).map_err(|e| DbError::Codec(e.to_string()))?;
-                out.push(record);
+                let record_id = RecordId(key.as_ref().try_into().map_err(|_| {
+                    DbError::Internal("Failed to convert key to RecordId".to_string())
+                })?);
+                out.push((record_id, Bytes::copy_from_slice(&val)));
             }
             Ok(out)
         })
@@ -219,36 +195,43 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     async fn run_store_tests(store: Arc<dyn Store>) {
+        // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let id1 = store.insert(&value1).await.unwrap();
-        let retrieved1 = store.get(id1).await.unwrap();
-        assert_eq!(retrieved1.3, value1);
+        let id1 = store.insert(value1.to_bytes()).await.unwrap();
+        let retrieved_bytes = store.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
+        // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        store.set(id1, &value2).await.unwrap();
-        let retrieved2 = store.get(id1).await.unwrap();
-        assert_eq!(retrieved2.3, value2);
-        assert_eq!(retrieved2.1, retrieved1.1);
-        assert!(retrieved2.2 > retrieved1.2);
+        let created = store.set(id1, value2.to_bytes()).await.unwrap();
+        assert!(!created); // Should be false, as it's an update
+        let retrieved_bytes2 = store.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
-        let value3 = InnerValue::Int(99);
-        let _id2 = store.insert(&value3).await.unwrap();
+        // Test set (create)
+        let id2 = RecordId::new();
+        let value3 = InnerValue::Int(123);
+        let created2 = store.set(id2, value3.to_bytes()).await.unwrap();
+        assert!(created2); // Should be true, as it's a new record
+        let retrieved_bytes3 = store.get(id2).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
+
+        // Test iter
+        let value4 = InnerValue::Bool(true);
+        let _id3 = store.insert(value4.to_bytes()).await.unwrap();
         let all_records = store.iter().await.unwrap();
-        assert_eq!(all_records.len(), 2);
-        assert!(all_records.iter().any(|r| r.3 == value2));
-        assert!(all_records.iter().any(|r| r.3 == value3));
+        assert_eq!(all_records.len(), 3);
+        assert!(all_records.iter().any(|(id, _)| *id == id1));
+        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
+        // Test remove
         assert!(store.remove(id1).await.unwrap());
+        assert!(store.get(id1).await.is_err());
+        assert!(!store.remove(id1).await.unwrap()); // Already removed
 
-        // Verify removal
-        match store.get(id1).await {
-            Err(DbError::NotFound(_)) => { /* Correct */ }
-            Ok(_) => panic!("Should have been removed"),
-            Err(e) => panic!("Unexpected error: {}", e),
-        }
-
-        assert_eq!(store.iter().await.unwrap().len(), 1);
+        let all_records_after_remove = store.iter().await.unwrap();
+        assert_eq!(all_records_after_remove.len(), 2);
     }
 
     #[tokio::test]
@@ -262,6 +245,8 @@ mod tests {
         let store = repo.store_get("test_table").await.unwrap();
 
         run_store_tests(store).await;
+
+        assert!(repo.store_delete("test_table").await.unwrap());
     }
 
     #[tokio::test]
@@ -308,22 +293,22 @@ mod tests {
 
         // Insert into table1
         let value1 = InnerValue::Str("table1_value".to_string());
-        let id1 = store1.insert(&value1).await.unwrap();
+        let id1 = store1.insert(value1.to_bytes()).await.unwrap();
 
         // Insert into table2
         let value2 = InnerValue::Str("table2_value".to_string());
-        let id2 = store2.insert(&value2).await.unwrap();
+        let id2 = store2.insert(value2.to_bytes()).await.unwrap();
 
         // Verify isolation - each table should have only 1 record
         assert_eq!(store1.iter().await.unwrap().len(), 1);
         assert_eq!(store2.iter().await.unwrap().len(), 1);
 
         // Verify correct values
-        let retrieved1 = store1.get(id1).await.unwrap();
-        assert_eq!(retrieved1.3, value1);
+        let retrieved_bytes1 = store1.get(id1).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes1).unwrap(), value1);
 
-        let retrieved2 = store2.get(id2).await.unwrap();
-        assert_eq!(retrieved2.3, value2);
+        let retrieved_bytes2 = store2.get(id2).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Verify cross-table isolation (get should fail with NotFound)
         assert!(matches!(store2.get(id1).await, Err(DbError::NotFound(_))));
