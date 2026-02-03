@@ -7,6 +7,10 @@ pub enum DbError {
     #[error("Item not found: {0}")]
     NotFound(String),
 
+    /// The key already exists and cannot be inserted again.
+    #[error("Key already exists: {0}")]
+    KeyExists(String),
+
     /// An error originating from the underlying storage backend.
     #[error("Storage backend error: {0}")]
     Storage(String),
@@ -26,24 +30,6 @@ pub enum DbError {
     /// An internal logic error.
     #[error("Internal error: {0}")]
     Internal(String),
-}
-
-impl From<rmp_serde::encode::Error> for DbError {
-    fn from(err: rmp_serde::encode::Error) -> Self {
-        DbError::Codec(err.to_string())
-    }
-}
-
-impl From<rmp_serde::decode::Error> for DbError {
-    fn from(err: rmp_serde::decode::Error) -> Self {
-        DbError::Codec(err.to_string())
-    }
-}
-
-impl From<surrealkv::Error> for DbError {
-    fn from(err: surrealkv::Error) -> Self {
-        DbError::Storage(err.to_string())
-    }
 }
 
 pub type DbResult<T> = Result<T, DbError>;
