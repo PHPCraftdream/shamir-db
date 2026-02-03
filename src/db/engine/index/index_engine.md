@@ -2,7 +2,29 @@
 
 ## Overview
 
-Index engine provides fast lookups for table records without full table scans. Indices are maintained asynchronously using a journal-based approach.
+> **⚠️ Implementation Status (2025-02-03)**
+>
+> This document describes the **full async journal-based architecture** that we plan to implement eventually.
+>
+> **What's actually implemented now:**
+> - ✅ Index configuration management (IndexTarget, IndexDef)
+> - ✅ Unique constraint enforcement (synchronous validation on write)
+> - ✅ Index CRUD operations (add, remove, enable, disable)
+> - ✅ Persistence across restarts
+>
+> **What's deferred:**
+> - ⏸️ Actual index storage (hash keys → Vec<RecordId>)
+> - ⏸️ Journal-based async updates
+> - ⏸️ Global indexer thread
+> - ⏸️ Query-by-index functionality
+>
+> See `milestones.md` for the current implementation status and roadmap.
+
+---
+
+## Original Architecture Design
+
+Index engine provides fast lookups for table records without full table scans. **In the full design**, indices are maintained asynchronously using a journal-based approach.
 
 ## Storage Structure
 

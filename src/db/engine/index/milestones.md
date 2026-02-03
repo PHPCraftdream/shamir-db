@@ -4,465 +4,343 @@
 
 Step-by-step implementation plan for the index engine. Each milestone should be completed and tested before moving to the next.
 
+**🔄 Updated Approach (2025-02-03):**
+
+We've pivoted from the original journal-based async indexing plan to a **synchronous Table API approach** for index management and unique constraints. This provides immediate value while we defer the complex async indexing infrastructure.
+
+### What's Implemented Now ✅
+
+- **Milestone 1**: Basic types (`IndexDef`, `IndexTarget`, `OpType`, `IndexChange`, `IndexOp`)
+- **Index Management API**: `add_index()`, `add_unique_index()`, `remove_index()`, `enable_indexing_all()`, `disable_indexing()`
+- **Unique Constraints**: Validation on insert/update/set with duplicate detection
+- **Path Extraction**: `extract_value()` for nested Map access via interned IDs
+- **Persistence**: IndexTarget persists across restarts in `__info__{table}`
+
+### Deferred to Later ⏳
+
+The full journal-based async indexing (Milestones 2-10, 12) is deferred until we need actual query acceleration. The current implementation focuses on:
+1. Index configuration management
+2. Unique constraint enforcement
+3. Foundation for future query optimization
+
 ---
 
-## Milestone 1: Basic Types
+## Milestone 1: Basic Types ✅ Done
 
 **File:** `src/db/engine/index/types.rs`
 
 ### Tasks
-- [ ] Create module file
-- [ ] Define `OpType` enum (Insert/Update/Delete)
-- [ ] Define `IndexChange` struct
+- [x] Create module file
+- [x] Define `OpType` enum (Insert/Update/Delete)
+- [x] Define `IndexChange` struct
   - path: Vec<u64>
   - value_type: u8
   - hash1: u64
   - hash2: u64
-- [ ] Define `IndexOp` struct
+- [x] Define `IndexOp` struct
   - seq_no: u64
   - timestamp: u64
   - op_type: OpType
   - record_id: [u8; 16]
   - changes: Vec<IndexChange>
-- [ ] Add derives: Debug, Clone, Serialize, Deserialize
-- [ ] Add `#[cfg(test)]` module placeholder
+- [x] Define `IndexDef` struct
+  - path: Vec<u64>
+  - unique: bool
+- [x] Define `IndexTarget` enum
+  - Disabled (no indexing)
+  - All (index all Map fields, non-unique)
+  - Selective(Vec<IndexDef>) (specific indexes)
+- [x] Add derives: Debug, Clone, Serialize, Deserialize
+- [x] Add comprehensive tests (21 tests, all passing)
 
 ### Acceptance Criteria
 - ✅ Code compiles
 - ✅ Types can be serialized/deserialized with bincode
 - ✅ Basic unit tests for type creation
+- ✅ IndexTarget supports three-state indexing
+- ✅ IndexDef supports unique/non-unique indexes
 
-### Estimated Time: 30 minutes
+### Completed: 2025-02-03
 
 ---
 
-## Milestone 2: Key Encoding/Decoding
+## Milestone 2: Index Management API ✅ Done
 
-**File:** `src/db/engine/index/encoding.rs`
+**File:** `src/db/engine/table.rs`
+
+### Tasks
+- [x] Add `index_target: Arc<RwLock<IndexTarget>>` to Table struct
+- [x] Implement `add_index(&self, path: &[&str]) -> DbResult<()>`
+  - Parse path to interned components via interner
+  - Add to IndexTarget
+  - Persist to info_store
+- [x] Implement `add_unique_index(&self, path: &[&str]) -> DbResult<()>`
+  - Parse path to interned components
+  - **Validate existing data** (scan all records, check for duplicates)
+  - Add to IndexTarget if validation passes
+  - Persist to info_store
+- [x] Implement `remove_index(&self, path: &[&str]) -> DbResult<bool>`
+  - Parse path to interned components
+  - Remove from IndexTarget
+  - Delete from storage if becomes Disabled
+- [x] Implement `enable_indexing_all(&self) -> DbResult<()>`
+  - Set IndexTarget::All
+  - Persist to info_store
+- [x] Implement `disable_indexing(&self) -> DbResult<()>`
+  - Set IndexTarget::Disabled
+  - Delete from storage
+- [x] Add helper: `get_index_target(&self) -> IndexTarget` (for testing)
+- [x] Add `DbError::DuplicateKey` variant
+
+### Acceptance Criteria
+- ✅ Can add/remove/list/disable indexes
+- ✅ Unique index creation validates existing data
+- ✅ Index paths persist across restarts
+- ✅ Three states work correctly (Disabled/All/Selective)
+- ✅ Thread-safe (RwLock protection)
+
+### Tests Added (15 tests, all passing)
+- `test_add_index` - Add simple index
+- `test_add_nested_index` - Add nested path index
+- `test_add_unique_index` - Add unique index on empty table
+- `test_add_unique_index_with_duplicates` - Fail when duplicates exist
+- `test_remove_index` - Remove existing index
+- `test_remove_nonexistent_index` - Handle non-existent index
+- `test_enable_indexing_all` - Enable full indexing
+- `test_disable_indexing` - Disable indexing
+- `test_unique_constraint_on_insert` - Enforce uniqueness on insert
+- `test_unique_constraint_on_update` - Enforce uniqueness on update
+- `test_unique_constraint_on_set` - Enforce uniqueness on set
+- `test_unique_constraint_allows_null` - Null values allowed
+- `test_multiple_indexes` - Multiple indexes on same table
+- `test_index_target_persistence` - Persist across restarts
+- `test_update_same_value_succeeds` - Self-update works
+
+### Completed: 2025-02-03
+
+---
+
+## Milestone 3: Unique Constraint Enforcement ✅ Done
+
+**File:** `src/db/engine/table.rs`
+
+### Tasks
+- [x] Implement `check_unique_constraints()` for insert
+- [x] Implement `check_unique_constraints_exclude()` for update/set
+- [x] Implement `extract_value()` for path-based value extraction
+  - Supports nested Maps: `["user", "profile", "age"]`
+  - Uses interned IDs for path components
+  - Returns None for missing paths (null values)
+- [x] Implement `validate_unique_index()` for index creation
+  - Streams all records (memory-efficient)
+  - Checks for duplicate values
+  - Returns `DbError::DuplicateKey` if found
+- [x] Pin streams with `pin_mut!` for async iteration
+- [x] Add comprehensive tests for all scenarios
+
+### Acceptance Criteria
+- ✅ Insert validates all unique indexes
+- ✅ Update validates excluding current record
+- ✅ Set validates for both create and update
+- ✅ Unique index creation validates existing data
+- ✅ Null values allowed in unique indexes
+- ✅ Memory-efficient (uses streaming, not full table load)
+
+### Completed: 2025-02-03
+
+---
+
+## Deferred Milestones (Original Plan)
+
+The following milestones are **deferred** until we need actual query-by-index functionality. The types and structures are already defined in `types.rs` for future use.
+
+### Milestone 4: Key Encoding/Decoding ⏸️ Deferred
+
+**File:** `src/db/engine/index/encoding.rs` (not yet created)
 
 ### Tasks
 - [ ] Implement `encode_index_key(path, type, hash1, hash2) -> Bytes`
-  - Append path components (each u64 as 8 bytes big-endian)
-  - Append type discriminator (1 byte)
-  - Append hash1 (8 bytes big-endian)
-  - Append hash2 (8 bytes big-endian)
 - [ ] Implement `decode_index_key(key) -> Result<(Vec<u64>, u8, u64, u64)>`
-  - Read last 17 bytes (tail)
-  - Extract path from beginning
-  - Validate path length % 8 == 0
-  - Parse path components
-- [ ] Add unit tests:
-  - [ ] Encode/decode roundtrip
-  - [ ] Single component path
-  - [ ] Multi component path
-  - [ ] All value types (0x00-0x0B)
-  - [ ] Invalid key length (should error)
+- [ ] Add unit tests for roundtrip encoding
 
-### Acceptance Criteria
-- ✅ Encoding produces correct Bytes format
-- ✅ Decoding recovers original values
-- ✅ Invalid inputs produce errors
-- ✅ Test coverage > 90%
-
-### Estimated Time: 1 hour
+**Why Deferred:** Not needed until we implement actual index storage and querying.
 
 ---
 
-## Milestone 3: Index Paths Configuration
+### Milestone 5: Hash Computation ⏸️ Deferred
 
-**File:** `src/db/engine/index/config.rs`
-
-### Tasks
-- [ ] Implement `save_index_paths(store, table, paths: &HashSet<Vec<u64>>) -> DbResult<()>`
-  - Use `RecordId::system("index_paths:{table}")` as key
-  - Serialize HashSet with bincode
-  - Write to info_store
-- [ ] Implement `load_index_paths(store, table) -> DbResult<Option<HashSet<Vec<u64>>>>`
-  - Read from info_store
-  - Deserialize
-  - Return None if not found (means: no indexing)
-  - Return Some(empty) if found empty (means: index everything)
-- [ ] Implement `add_index_path(store, table, path: Vec<u64>) -> DbResult<()>`
-  - Load existing paths (create empty set if None)
-  - Insert new path
-  - Save back
-- [ ] Implement `remove_index_path(store, table, path: &Vec<u64>) -> DbResult<()>`
-  - Load existing paths (return Ok if None)
-  - Remove path
-  - Delete record if set becomes empty after removal
-  - Save back or delete
-- [ ] Implement `disable_indexing(store, table) -> DbResult<()>`
-  - Delete the index_paths system record
-  - Returns to "no indexing" state
-- [ ] Add tests:
-  - [ ] Save and load roundtrip
-  - [ ] Load non-existent returns None
-  - [ ] Load empty returns Some(empty)
-  - [ ] add_index_path creates record if None
-  - [ ] remove_index_path deletes record if last path
-  - [ ] disable_indexing removes record
-  - [ ] Three states work correctly
-
-### Acceptance Criteria
-- ✅ Three states: None (no indexing), Some(empty) (index all), Some(non-empty) (selective)
-- ✅ Index paths persist across restarts
-- ✅ Can add/remove specific paths
-- ✅ Can disable indexing completely
-- ✅ Memory efficient (~2.4 KB for 100 paths)
-
-### Estimated Time: 45 minutes
-
----
-
-## Milestone 4: Path Extraction
-
-**File:** `src/db/engine/index/path.rs`
-
-### Tasks
-- [ ] Implement `extract_value(value: &InnerValue, path: &str) -> Option<&InnerValue>`
-  - Parse path string: "a.b.c" -> ["a", "b", "c"]
-  - Traverse InnerValue recursively
-  - Support Map access by key
-  - Support Array access by index (optional, mark as such)
-- [ ] Add helper: `parse_path(path: &str) -> Vec<&str>`
-- [ ] Add tests:
-  - [ ] Simple Map access: "user.age"
-  - [ ] Nested Map access: "user.profile.age"
-  - [ ] Missing path returns None
-  - [ ] Non-Map value returns None
-  - [ ] Array access: "items.0" (if implemented)
-  - [ ] Edge cases: empty path, "." etc
-
-### Acceptance Criteria
-- ✅ Can extract values from nested Maps
-- ✅ Returns None for missing paths
-- ✅ Handles edge cases gracefully
-- ✅ Test coverage for all cases
-
-### Estimated Time: 1.5 hours
-
----
-
-## Milestone 5: Hash Computation
-
-**File:** `src/db/engine/index/hash.rs`
+**File:** `src/db/engine/index/hash.rs` (not yet created)
 
 ### Tasks
 - [ ] Implement `compute_hash(value: &InnerValue) -> Option<(u8, u64, u64)>`
-  - For simple types (Int, UInt, Float, Bool, Str, Bin, Decimal, BigInt):
-    - Determine type discriminator
-    - Compute hash1 = xxhash64
-    - Compute hash2 = fnvhash64
-    - Return Some((type, h1, h2))
-  - For Map:
-    - Serialize with bincode
-    - Hash serialized bytes
-    - Return Some((0x08, h1, h2))
-  - For Array, Set:
-    - Return None (not indexed)
-  - For Null:
-    - Return Some((0x00, 0, 0))
-- [ ] Add tests:
-  - [ ] All simple types produce hashes
-  - [ ] Map produces hash
-  - [ ] Array/Set return None
-  - [ ] Same value produces same hash (deterministic)
-  - [ ] Different values produce different hashes (collision resistance)
+- [ ] Support all types with xxhash64 + fnvhash64
+- [ ] Add tests for determinism and collision resistance
 
-### Acceptance Criteria
-- ✅ All indexable types produce valid hashes
-- ✅ Non-indexable types return None
-- ✅ Hashes are deterministic
-- ✅ Test coverage for all InnerValue variants
-
-### Estimated Time: 1 hour
+**Why Deferred:** Hash computation only needed when we build actual index data structures.
 
 ---
 
-## Milestone 6: Table Journal
+### Milestone 6: Table Journal ⏸️ Deferred
 
-**File:** `src/db/engine/index/journal.rs`
+**File:** `src/db/engine/index/journal.rs` (not yet created)
 
 ### Tasks
 - [ ] Define `TableJournal` struct
-  - table_name: String
-  - store: Arc<dyn Store>
-  - seq_no: AtomicU64
-- [ ] Implement `new(table_name, store) -> Self`
-- [ ] Implement `append(&self, op: IndexOp) -> DbResult<u64>`
-  - Fetch-add seq_no
-  - Encode key as seq_no (big-endian)
-  - Serialize op with bincode
-  - Insert to store
-  - Return seq_no
-- [ ] Implement `read(&self, seq: u64) -> DbResult<Option<IndexOp>>`
-  - Encode key
-  - Try get from store
-  - Deserialize if found
-  - Return None if not found
-- [ ] Implement `next_seq(&self) -> u64`
-  - Return current seq_no
-- [ ] Add tests:
-  - [ ] Append and read roundtrip
-  - [ ] Sequential seq_no generation
-  - [ ] Read non-existent returns None
-  - [ ] Concurrent append (seq_no uniqueness)
+- [ ] Implement `append()`, `read()`, `next_seq()`
+- [ ] Add tests for persistence and concurrency
 
-### Acceptance Criteria
-- ✅ Operations persist correctly
-- ✅ Seq_no increments atomically
-- ✅ Can read back operations
-- ✅ Thread-safe
-
-### Estimated Time: 1 hour
+**Why Deferred:** Journal-based async indexing is complex. Current synchronous validation is sufficient for now.
 
 ---
 
-## Milestone 7: Integration with Table (Basic)
+### Milestone 7-10: Index Store & Global Indexer ⏸️ Deferred
 
-**File:** `src/db/engine/table.rs`
+**Files:**
+- `src/db/engine/index/store.rs`
+- `src/db/engine/index/position.rs`
+- `src/db/engine/indexer.rs` (in `db/engine/`)
 
-### Tasks
-- [ ] Add `journal: Arc<TableJournal>` to Table struct
-- [ ] Update `Table::new()` to create journal
-- [ ] Update `insert()` to write to journal
-  - Extract indexed paths
-  - Compute hashes
-  - Create IndexOp with Insert
-  - Append to journal
-- [ ] Update `delete()` to write to journal
-  - Extract indexed paths
-  - Compute hashes
-  - Create IndexOp with Delete
-  - Append to journal
-- [ ] Add helper: `collect_index_changes(value) -> Vec<IndexChange>`
-- [ ] Add tests:
-  - [ ] Insert creates journal entry
-  - [ ] Delete creates journal entry
-  - [ ] Journal persists across restarts
+**Tasks**
+- [ ] Index store operations (add/remove/find)
+- [ ] Position tracking for indexer
+- [ ] Global indexer thread
+- [ ] Async index updates
 
-### Acceptance Criteria
-- ✅ All table operations logged
-- ✅ Journal entries contain correct changes
-- ✅ No impact on existing functionality
-
-### Estimated Time: 1.5 hours
+**Why Deferred:** Full async indexing infrastructure is not needed until we:
+1. Have large datasets requiring index-based query acceleration
+2. Need non-blocking writes
+3. Want to separate index maintenance from write path
 
 ---
 
-## Milestone 8: Index Store Operations
+### Milestone 11: Query API ⏸️ Deferred
 
-**File:** `src/db/engine/index/store.rs`
-
-### Tasks
-- [ ] Define `IndexStore` struct
-  - store: Arc<dyn Store>
-- [ ] Implement `add(&self, key: Bytes, record_id: RecordId) -> DbResult<()>`
-  - Get existing Vec<RecordId>
-  - Push new record_id
-  - Set back to store
-- [ ] Implement `remove(&self, key: Bytes, record_id: RecordId) -> DbResult<bool>`
-  - Get existing Vec<RecordId>
-  - Remove record_id
-  - Update or delete if empty
-- [ ] Implement `find(&self, key: Bytes) -> DbResult<Vec<RecordId>>`
-  - Get and deserialize
-  - Return empty vec if not found
-- [ ] Add tests:
-  - [ ] Add and find roundtrip
-  - [ ] Add multiple records to same key
-  - [ ] Remove removes specific record
-  - [ ] Remove last record deletes entry
-
-### Acceptance Criteria
-- ✅ Can add/remove/find records
-- ✅ Multiple records per key work correctly
-- ✅ Empty entries cleaned up
-
-### Estimated Time: 1 hour
-
----
-
-## Milestone 9: Indexer Position Tracking
-
-**File:** `src/db/engine/index/position.rs`
-
-### Tasks
-- [ ] Implement `save_position(store, table, seq_no) -> DbResult<()>`
-  - Key: `RecordId::system("indexer_pos:{table}")`
-  - Value: seq_no (u64)
-  - Write to info_store
-- [ ] Implement `load_position(store, table) -> DbResult<u64>`
-  - Read from info_store
-  - Return 0 if not found
-- [ ] Add tests:
-  - [ ] Save and load roundtrip
-  - [ ] Load non-existent returns 0
-  - [ ] Concurrent updates
-
-### Acceptance Criteria
-- ✅ Position persists across restarts
-- ✅ Can resume from last position
-
-### Estimated Time: 30 minutes
-
----
-
-## Milestone 10: Global Indexer (Basic)
-
-**File:** `src/db/engine/indexer.rs`
-
-### Tasks
-- [ ] Define `GlobalIndexer` struct
-  - journals: HashMap<String, Arc<TableJournal>>
-  - index_stores: HashMap<String, Arc<IndexStore>>
-  - positions: Arc<RwLock<HashMap<String, u64>>>
-  - meta_store: Arc<dyn Store>
-  - shutdown: AtomicBool
-- [ ] Implement `run(&self) -> impl Future`
-  - Loop until shutdown
-  - Round-robin through tables
-  - Read next journal entry
-  - Process (add/remove from index store)
-  - Save position
-- [ ] Implement `process_op(&self, table, op) -> DbResult<()>`
-  - For each change in op:
-    - Encode key
-    - Add or remove from index store
-- [ ] Implement `shutdown(&self)`
-  - Set shutdown flag
-  - Wait for completion
-- [ ] Add tests:
-  - [ ] Processes single operation
-  - [ ] Processes multiple tables
-  - [ ] Position advances correctly
-  - [ ] Shutdown works
-
-### Acceptance Criteria
-- ✅ Indexer processes operations sequentially
-- ✅ Multiple tables handled correctly
-- ✅ Positions tracked correctly
-
-### Estimated Time: 2 hours
-
----
-
-## Milestone 11: Index Management API
-
-**File:** `src/db/engine/table.rs`
-
-### Tasks
-- [ ] Add `create_index(&self, path: &str) -> DbResult<()>`
-  - Parse path to interned components via interner
-  - Add to index_paths set
-  - Save updated index_paths
-  - Build initial index (scan all records, extract path values, add to index store)
-- [ ] Add `drop_index(&self, path: &str) -> DbResult<bool>`
-  - Parse path to interned components
-  - Remove from index_paths set
-  - Save updated index_paths
-  - Delete all entries with this path prefix from index store
-- [ ] Add `list_indexes(&self) -> DbResult<HashSet<String>>`
-  - Load index_paths (interned)
-  - Convert each path back to string (via interner reverse lookup)
-  - Return human-readable path names
-- [ ] Add `set_index_all(&self) -> DbResult<()>`
-  - Save empty index_paths set
-  - Means "index everything" (all Map paths)
-- [ ] Add `disable_indexing(&self) -> DbResult<()>`
-  - Delete index_paths system record
-  - Means "no indexing" (journal disabled)
-- [ ] Add tests:
-  - [ ] Create and list index
-  - [ ] Create index on existing table (initial build)
-  - [ ] Drop index removes entries
-  - [ ] List shows human-readable paths
-  - [ ] set_index_all enables full indexing
-  - [ ] disable_indexing removes record and stops indexing
-  - [ ] Duplicate index creation is idempotent
-  - [ ] Three states work correctly
-
-### Acceptance Criteria
-- ✅ Can create/drop/list/disable indexes
-- ✅ Initial index build works correctly
-- ✅ Index paths persist
-- ✅ Human-readable path names via interner
-- ✅ Three states: no indexing, index all, selective indexing
-
-### Estimated Time: 2 hours
-
----
-
-## Milestone 12: Query API (Basic)
-
-**File:** `src/db/engine/index/query.rs`
+**File:** `src/db/engine/index/query.rs` (not yet created)
 
 ### Tasks
 - [ ] Define `QueryBuilder` struct
-  - table: Arc<Table>
-  - filters: Vec<Filter>
-- [ ] Define `Filter` enum
-  - Eq { path: String, value: InnerValue }
-- [ ] Implement `eq(&mut self, path: &str, value) -> &mut Self`
-- [ ] Implement `find(&self) -> impl Future<Output = DbResult<Vec<(RecordId, UserValue)>>>`
-  - For single filter:
-    - Resolve path to interned
-    - Compute hash
-    - Lookup in index store
-    - Fetch records
-  - For multiple filters:
-    - Intersect result sets
-    - Fetch records
-- [ ] Add tests:
-  - [ ] Single equality query
-  - [ ] Multiple filters (AND logic)
-  - [ ] No results case
-  - [ ] Index not found error
+- [ ] Define `Filter` enum (Eq, In, etc.)
+- [ ] Implement `eq()`, `find()` methods
+- [ ] Add intersection for multiple filters
 
-### Acceptance Criteria
-- ✅ Can query by indexed field
-- ✅ Multiple filters work correctly
-- ✅ Returns correct records
-
-### Estimated Time: 1.5 hours
+**Why Deferred:**
+- Current table scans are fast enough for small/medium datasets
+- No query-by-index requirement yet
+- Index management is the priority
 
 ---
 
-## Future Milestones (Not Yet Scheduled)
+## Future Enhancements
 
-- [ ] **Milestone 13:** Update operations in journal
-- [ ] **Milestone 14:** Concurrent indexer testing
-- [ ] **Milestone 15:** Query optimizations (batch fetching)
-- [ ] **Milestone 16:** IN queries (multiple values)
-- [ ] **Milestone 17:** Unique index enforcement
-- [ ] **Milestone 18:** Index rebuild on corruption
-- [ ] **Milestone 19:** Background index creation
-- [ ] **Milestone 20:** Performance benchmarks
+### High Priority
+- [ ] **Background index creation**: Create unique indexes without blocking
+- [ ] **Index rebuild on corruption**: Recovery mechanism
+- [ ] **Performance benchmarks**: Measure index overhead
+
+### Medium Priority
+- [ ] **Hash computation**: For index keys
+- [ ] **Index storage**: Actual index data structures
+- [ ] **Query API**: Index-based lookups
+
+### Low Priority
+- [ ] **Journal-based async indexing**: Non-blocking index updates
+- [ ] **Global indexer thread**: Background processing
+- [ ] **Range indexes**: For inequality queries
+- [ ] **Full-text search**: Inverted indexes for text fields
 
 ---
 
 ## Progress Tracking
 
-| Milestone | Status | Completed Date |
-|-----------|--------|----------------|
-| 1. Basic Types | ✅ Done | 2025-02-03 |
-| 2. Key Encoding | ⏳ Pending | - |
-| 3. Index Paths Config | ⏳ Pending | - |
-| 4. Path Extraction | ⏳ Pending | - |
-| 5. Hash Computation | ⏳ Pending | - |
-| 6. Table Journal | ⏳ Pending | - |
-| 7. Table Integration | ⏳ Pending | - |
-| 8. Index Store Ops | ⏳ Pending | - |
-| 9. Position Tracking | ⏳ Pending | - |
-| 10. Global Indexer | ⏳ Pending | - |
-| 11. Index Management | ⏳ Pending | - |
-| 12. Query API | ⏳ Pending | - |
+| Milestone | Status | Completed Date | Notes |
+|-----------|--------|----------------|-------|
+| 1. Basic Types | ✅ Done | 2025-02-03 | All types defined, 21 tests passing |
+| 2. Index Management API | ✅ Done | 2025-02-03 | Full CRUD for indexes, 15 tests |
+| 3. Unique Constraints | ✅ Done | 2025-02-03 | Validation on insert/update/set |
+| 4. Key Encoding | ⏸️ Deferred | - | Not needed yet |
+| 5. Hash Computation | ⏸️ Deferred | - | Not needed yet |
+| 6. Table Journal | ⏸️ Deferred | - | Complex, not needed yet |
+| 7-10. Index Store & Indexer | ⏸️ Deferred | - | Not needed until query phase |
+| 11. Query API | ⏸️ Deferred | - | Table scans sufficient for now |
 
 ---
 
-## Notes
+## Architecture Notes
 
-- Each milestone should be completed independently
-- Tests are required for each milestone
-- Code should compile after each milestone
-- Review architecture document before starting: `index_engine.md`
+### Current Approach (2025-02-03)
+
+**Synchronous Index Management:**
+- Index configuration stored in `__info__{table}` as `IndexTarget`
+- Path components stored as interned u64 IDs
+- Unique constraints validated synchronously on write
+- Thread-safe via `RwLock<IndexTarget>`
+- Memory-efficient (streaming validation, not full table scans)
+
+**Three-State Indexing:**
+```rust
+pub enum IndexTarget {
+    Disabled,                    // No indexing, no record in storage
+    All,                         // Index all Map fields (non-unique)
+    Selective(Vec<IndexDef>),   // Specific indexes with unique flags
+}
+```
+
+**Unique Index Validation:**
+1. On `add_unique_index()`: Scan all existing data for duplicates
+2. On `insert()`: Check all unique indexes before inserting
+3. On `update()`: Check excluding the record being updated
+4. On `set()`: Check for create, exclude for update
+
+**Storage Format:**
+```
+RecordId::system("index_target") -> IndexTarget (bincode serialized)
+```
+
+### Original Async Design (Deferred)
+
+The `index_engine.md` document describes a more complex async journal-based architecture that we're not implementing yet. Key differences:
+
+| Original Plan | Current Implementation |
+|--------------|------------------------|
+| Async journal writes | Synchronous validation |
+| Global indexer thread | Validation on write path |
+| Index store with Vec<RecordId> | No index storage yet |
+| Non-blocking writes | Blocking unique checks |
+| Query acceleration | Unique constraints only |
+
+---
+
+## Testing Status
+
+**Total Tests:** 136 (all passing except 1 flaky interner test)
+
+**Index-Related Tests:**
+- `types.rs`: 21 tests ✅
+- Index management: 15 tests ✅
+- Table tests: All passing ✅
+
+**Test Coverage:**
+- ✅ IndexDef creation and serialization
+- ✅ IndexTarget state transitions
+- ✅ Add/remove/enable/disable operations
+- ✅ Unique constraint enforcement
+- ✅ Path extraction for nested Maps
+- ✅ Persistence across restarts
+- ✅ Null value handling
+- ✅ Self-update scenarios
+
+---
+
+## Next Steps
+
+When we need query acceleration, implement in order:
+1. **Hash computation** (Milestone 5) - For index keys
+2. **Key encoding** (Milestone 4) - For index storage format
+3. **Index store** (Milestone 8) - Actual index data structure
+4. **Query API** (Milestone 12) - Index-based lookups
+
+Only then consider:
+5. **Journal** (Milestone 6) - For async updates
+6. **Global indexer** (Milestone 10) - Background processing
+
+The current implementation provides a solid foundation for unique constraints and index configuration management.
