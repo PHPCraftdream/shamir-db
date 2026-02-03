@@ -33,13 +33,41 @@ pub struct Interner {
     current: AtomicU64,
 }
 
+impl Default for Interner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Interner {
-    /// Creates a new, empty NameInd.
+    /// Creates a new, empty Interner.
     pub fn new() -> Interner {
         Interner {
             map_str: new_dash_map_wc(64),
             map_ind: new_dash_map_wc(64),
             current: AtomicU64::new(1),
+        }
+    }
+
+    /// Creates a new Interner from a pre-existing state.
+    /// This is used to "hydrate" the interner from a persistent store.
+    pub fn with_state(initial_data: Vec<(u64, String)>) -> Self {
+        let map_str = new_dash_map_wc(initial_data.len());
+        let map_ind = new_dash_map_wc(initial_data.len());
+        let mut max_id = 0;
+
+        for (id, key) in initial_data {
+            if id > max_id {
+                max_id = id;
+            }
+            map_str.insert(key.clone(), id);
+            map_ind.insert(id, key);
+        }
+
+        Interner {
+            map_str,
+            map_ind,
+            current: AtomicU64::new(max_id + 1),
         }
     }
 
@@ -87,6 +115,37 @@ mod tests {
         assert_eq!(interner.get_str(1), Some("hello".to_string()));
         assert_eq!(interner.get_str(2), Some("world".to_string()));
         assert_eq!(interner.get_ind("world"), Some(2));
+    }
+
+    #[test]
+    fn test_with_state_initialization() {
+        let initial_data = vec![
+            (10, "name".to_string()),
+            (20, "age".to_string()),
+            (30, "city".to_string()),
+        ];
+        let interner = Interner::with_state(initial_data);
+
+        // Check that initial data is loaded correctly
+        assert_eq!(interner.get_ind("name"), Some(10));
+        assert_eq!(interner.get_str(20), Some("age".to_string()));
+        assert_eq!(interner.get_ind("city"), Some(30));
+
+        // Check that touching an existing key returns the correct ID
+        let touch_existing = interner.touch_ind("name");
+        assert_eq!(touch_existing, TouchInd::Exists(10));
+        assert!(!touch_existing.is_new());
+
+        // Check that the next ID is correctly assigned
+        let next_id = interner.touch_ind("new_key");
+        assert_eq!(next_id, TouchInd::New(31));
+        assert!(next_id.is_new());
+        assert_eq!(interner.current.load(Ordering::SeqCst), 32);
+
+        // Check that an empty state works
+        let empty_interner = Interner::with_state(vec![]);
+        let first_id = empty_interner.touch_ind("first");
+        assert_eq!(first_id, TouchInd::New(1));
     }
 
     #[test]
