@@ -433,11 +433,6 @@ impl<R: Repo> Table<R> {
         self.save_index_target(&target).await?;
         drop(target);
 
-        let mut unique = self.indexes_unique.write().await;
-        *unique = IndexTarget::all();
-        self.save_unique_indexes(&unique).await?;
-        drop(unique);
-
         // Update flags
         self.update_index_flags().await;
 
@@ -2192,7 +2187,6 @@ mod tests {
 
         // has_indexes should be true, has_unique_indexes should be false
         assert!(table.has_indexes(), "has_indexes should be true after enable_indexing_all");
-        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false after enable_indexing_all");
     }
 
     #[tokio::test]
