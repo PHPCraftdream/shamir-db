@@ -12,6 +12,7 @@ use crate::types::value::{InnerValue, UserValue};
 use async_stream::stream;
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use futures::pin_mut;
@@ -35,6 +36,10 @@ pub struct Table<R: Repo> {
     index_target: Arc<RwLock<IndexTarget>>,
     /// Unique indexes (separate for fast validation)
     unique_indexes: Arc<RwLock<Option<Vec<IndexDef>>>>,
+    /// Fast path flag: does this table have ANY indexes?
+    has_indexes: AtomicBool,
+    /// Fast path flag: does this table have UNIQUE indexes?
+    has_unique_indexes: AtomicBool,
 }
 
 impl<R: Repo> Clone for Table<R> {
@@ -49,6 +54,8 @@ impl<R: Repo> Clone for Table<R> {
             counter_mutex: Arc::clone(&self.counter_mutex),
             index_target: Arc::clone(&self.index_target),
             unique_indexes: Arc::clone(&self.unique_indexes),
+            has_indexes: AtomicBool::new(self.has_indexes.load(Ordering::Relaxed)),
+            has_unique_indexes: AtomicBool::new(self.has_unique_indexes.load(Ordering::Relaxed)),
         }
     }
 }
@@ -66,6 +73,14 @@ impl<R: Repo> Table<R> {
         // Load unique indexes from storage
         let unique_indexes = Self::load_unique_indexes(&info_store).await?;
 
+        // Initialize fast path flags
+        let has_indexes = match &index_target {
+            IndexTarget::Disabled => false,
+            IndexTarget::All | IndexTarget::Selective(_) => true,
+        };
+
+        let has_unique_indexes = unique_indexes.is_some();
+
         Ok(Self {
             repo,
             table_name,
@@ -76,6 +91,8 @@ impl<R: Repo> Table<R> {
             counter_mutex: Arc::new(Mutex::new(())),
             index_target: Arc::new(RwLock::new(index_target)),
             unique_indexes: Arc::new(RwLock::new(unique_indexes)),
+            has_indexes: AtomicBool::new(has_indexes),
+            has_unique_indexes: AtomicBool::new(has_unique_indexes),
         })
     }
 
@@ -110,6 +127,34 @@ impl<R: Repo> Table<R> {
         }).await;
 
         Ok(self.interner.get().unwrap())
+    }
+
+    /// Update index flags based on current state
+    /// Should be called whenever indexes are added/removed
+    async fn update_index_flags(&self) {
+        // Update has_unique_indexes flag
+        let unique = self.unique_indexes.read().await;
+
+        // Check if we have any unique indexes
+        let has_unique = unique.is_some()
+            && match &*unique {
+                Some(indexes) => !indexes.is_empty(),
+                None => false,
+            };
+
+        self.has_unique_indexes.store(has_unique, Ordering::Relaxed);
+        drop(unique);
+
+        // Update has_indexes flag
+        let target = self.index_target.read().await;
+
+        let has_any = match &*target {
+            IndexTarget::Disabled => false,
+            IndexTarget::All => true,
+            IndexTarget::Selective(indexes) => !indexes.is_empty(),
+        };
+
+        self.has_indexes.store(has_any, Ordering::Relaxed);
     }
 
     /// Save new interned keys to info_store
@@ -259,6 +304,10 @@ impl<R: Repo> Table<R> {
         let mut target = self.index_target.write().await;
         target.add_index(interned_path, false);
         self.save_index_target(&target).await?;
+        drop(target);
+
+        // Update flags
+        self.update_index_flags().await;
 
         Ok(())
     }
@@ -296,6 +345,10 @@ impl<R: Repo> Table<R> {
         // Save unique_indexes separately
         drop(target); // Release lock before saving
         self.save_unique_indexes(&unique).await?;
+
+        // Update flags
+        drop(unique);
+        self.update_index_flags().await;
 
         Ok(())
     }
@@ -400,7 +453,11 @@ impl<R: Repo> Table<R> {
         if removed {
             let unique = self.unique_indexes.read().await;
             self.save_unique_indexes(&unique).await?;
+            drop(unique);
         }
+
+        // Update flags after all changes
+        self.update_index_flags().await;
 
         Ok(removed)
     }
@@ -410,12 +467,17 @@ impl<R: Repo> Table<R> {
         let mut target = self.index_target.write().await;
         *target = IndexTarget::All;
         self.save_index_target(&target).await?;
+        drop(target);
 
         // Note: "All" mode doesn't have unique indexes
         // Clear unique_indexes if any
         let mut unique = self.unique_indexes.write().await;
         *unique = None;
         self.save_unique_indexes(&unique).await?;
+        drop(unique);
+
+        // Update flags
+        self.update_index_flags().await;
 
         Ok(())
     }
@@ -428,11 +490,16 @@ impl<R: Repo> Table<R> {
         // Delete from storage
         let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
         self.info_store.remove(key_bytes).await?;
+        drop(target);
 
         // Also clear unique_indexes
         let mut unique = self.unique_indexes.write().await;
         *unique = None;
         self.save_unique_indexes(&unique).await?;
+        drop(unique);
+
+        // Update flags
+        self.update_index_flags().await;
 
         Ok(())
     }
@@ -469,16 +536,55 @@ impl<R: Repo> Table<R> {
 
     /// Check unique constraints before insert/update
     async fn check_unique_constraints(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
-        self.check_unique_constraints_exclude(value, interner, None).await
+        // FAST PATH: Check atomic flag first (O(1))
+        if !self.has_unique_indexes.load(Ordering::Relaxed) {
+            return Ok(());  // <-- No unique indexes, skip all validation!
+        }
+
+        // SLOW PATH: Has unique indexes, need to validate
+        self.check_unique_constraints_slow(value, interner).await
     }
 
     /// Check unique constraints before insert/update, optionally excluding a record ID
     async fn check_unique_constraints_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
-        // FAST PATH: If no unique indexes, skip validation entirely!
+        // FAST PATH: Check atomic flag first
+        if !self.has_unique_indexes.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // SLOW PATH: Has unique indexes, need to validate
+        self.check_unique_constraints_slow_exclude(value, interner, exclude_id).await
+    }
+
+    /// Slow path: validate unique constraints (only called when has_unique_indexes == true)
+    async fn check_unique_constraints_slow(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
+        // Get unique indexes (only called when flag is true)
         let unique = self.unique_indexes.read().await;
         let unique_indexes = match &*unique {
             Some(indexes) => indexes.as_slice(),
-            None => return Ok(()),  // <-- No unique indexes, skip validation!
+            None => return Ok(()),  // Race condition: flag was cleared
+        };
+
+        // Check each unique index
+        for index_def in unique_indexes {
+            // Extract value at path
+            if let Some(extracted) = Self::extract_value(value, &index_def.path, interner)? {
+                // Check if this value already exists in the table
+                self.check_value_unique_exclude(&index_def.path, &extracted, interner, None).await?;
+            }
+            // None means the value at path is null - that's ok for unique indexes
+        }
+
+        Ok(())
+    }
+
+    /// Slow path: validate unique constraints with exclude (only called when has_unique_indexes == true)
+    async fn check_unique_constraints_slow_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
+        // Get unique indexes (only called when flag is true)
+        let unique = self.unique_indexes.read().await;
+        let unique_indexes = match &*unique {
+            Some(indexes) => indexes.as_slice(),
+            None => return Ok(()),  // Race condition: flag was cleared
         };
 
         // Check each unique index
@@ -747,6 +853,16 @@ impl<R: Repo> Table<R> {
     /// Get the current unique indexes (for testing)
     pub async fn get_unique_indexes(&self) -> Option<Vec<IndexDef>> {
         self.unique_indexes.read().await.clone()
+    }
+
+    /// Check if table has any indexes (for testing)
+    pub fn has_indexes(&self) -> bool {
+        self.has_indexes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Check if table has unique indexes (for testing)
+    pub fn has_unique_indexes_flag(&self) -> bool {
+        self.has_unique_indexes.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1836,8 +1952,9 @@ mod tests {
         let target = table2.get_index_target().await;
         assert!(target.is_selective());
 
-        let unique_indexes = target.unique_indexes();
-        assert_eq!(unique_indexes.len(), 1);
+        let unique_indexes = table2.get_unique_indexes().await;
+        assert!(unique_indexes.is_some());
+        assert_eq!(unique_indexes.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2006,5 +2123,190 @@ mod tests {
         let target2 = table2.get_index_target().await;
         assert!(target2.is_selective());
         assert!(target2.has_unique_index(&vec![1])); // "id" interned as ID 1
+    }
+
+    // === Tests for Atomic Flag Optimization ===
+
+    #[tokio::test]
+    async fn test_index_flags_initial_state() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Initially, no indexes should be present
+        assert!(!table.has_indexes(), "has_indexes should be false initially");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false initially");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_add_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add regular index
+        table.add_index(&["name"]).await.unwrap();
+
+        // has_indexes should be true, has_unique_indexes should be false
+        assert!(table.has_indexes(), "has_indexes should be true after add_index");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false after add_index");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_add_unique_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Both flags should be true
+        assert!(table.has_indexes(), "has_indexes should be true after add_unique_index");
+        assert!(table.has_unique_indexes_flag(), "has_unique_indexes should be true after add_unique_index");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_add_both_types() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add both types
+        table.add_index(&["name"]).await.unwrap();
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        // Both flags should be true
+        assert!(table.has_indexes());
+        assert!(table.has_unique_indexes_flag());
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_remove_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add regular index
+        table.add_index(&["name"]).await.unwrap();
+        assert!(table.has_indexes());
+
+        // Remove it
+        table.remove_index(&["name"]).await.unwrap();
+
+        // has_indexes should be false again
+        assert!(!table.has_indexes(), "has_indexes should be false after removing only index");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should still be false");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_remove_unique_index() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+        assert!(table.has_indexes());
+        assert!(table.has_unique_indexes_flag());
+
+        // Remove it
+        table.remove_index(&["email"]).await.unwrap();
+
+        // Both flags should be false
+        assert!(!table.has_indexes(), "has_indexes should be false after removing only unique index");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false after removing unique index");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_remove_mixed_indexes() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add both types
+        table.add_index(&["name"]).await.unwrap();
+        table.add_unique_index(&["email"]).await.unwrap();
+        assert!(table.has_indexes());
+        assert!(table.has_unique_indexes_flag());
+
+        // Remove only the unique index
+        table.remove_index(&["email"]).await.unwrap();
+
+        // has_indexes should still be true (regular index remains)
+        assert!(table.has_indexes(), "has_indexes should still be true (regular index remains)");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false after removing unique index");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_enable_all() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Enable all indexing
+        table.enable_indexing_all().await.unwrap();
+
+        // has_indexes should be true, has_unique_indexes should be false
+        assert!(table.has_indexes(), "has_indexes should be true after enable_indexing_all");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false after enable_indexing_all");
+    }
+
+    #[tokio::test]
+    async fn test_index_flags_after_disable() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add indexes
+        table.add_index(&["name"]).await.unwrap();
+        table.add_unique_index(&["email"]).await.unwrap();
+        assert!(table.has_indexes());
+        assert!(table.has_unique_indexes_flag());
+
+        // Disable indexing
+        table.disable_indexing().await.unwrap();
+
+        // Both flags should be false
+        assert!(!table.has_indexes(), "has_indexes should be false after disable");
+        assert!(!table.has_unique_indexes_flag(), "has_unique_indexes should be false after disable");
+    }
+
+    #[tokio::test]
+    async fn test_fast_path_flag_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_flags_persistence");
+        let table_name = "test_flags";
+
+        // === First session ===
+        let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+        let table1 = Table::new(repo1, table_name.to_string()).await.unwrap();
+
+        // Initially no flags
+        assert!(!table1.has_indexes());
+        assert!(!table1.has_unique_indexes_flag());
+
+        // Add indexes
+        table1.add_index(&["name"]).await.unwrap();
+        table1.add_unique_index(&["email"]).await.unwrap();
+        assert!(table1.has_indexes());
+        assert!(table1.has_unique_indexes_flag());
+
+        // Close first session
+        drop(table1);
+
+        // === Second session ===
+        let repo2 = Arc::new(SledRepo::new(path).unwrap());
+        let table2 = Table::new(repo2, table_name.to_string()).await.unwrap();
+
+        // Flags should be restored from persistent storage
+        assert!(table2.has_indexes(), "has_indexes should be restored from storage");
+        assert!(table2.has_unique_indexes_flag(), "has_unique_indexes should be restored from storage");
+    }
+
+    #[tokio::test]
+    async fn test_fast_path_with_unique_constraint() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+        assert!(table.has_unique_indexes_flag());
+
+        // Insert first record
+        let mut data = new_map();
+        data.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
+        let id1 = table.insert(&UserValue::Map(data.clone())).await.unwrap();
+
+        // Try to insert duplicate - should fail
+        let result = table.insert(&UserValue::Map(data.clone())).await;
+        assert!(result.is_err(), "Duplicate should fail with unique index");
+
+        // First record should still exist
+        let retrieved = table.get(id1).await.unwrap();
+        assert_eq!(retrieved, UserValue::Map(data));
+
+        assert_eq!(table.count().await.unwrap(), 1);
     }
 }
