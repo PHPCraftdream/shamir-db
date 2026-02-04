@@ -4,19 +4,18 @@
 
 use crate::core::interner::Interner;
 use crate::core::transform;
+use crate::db::engine::index::target::{IndexTarget};
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
 use async_stream::stream;
 use bytes::Bytes;
+use futures::pin_mut;
 use futures::stream::{Stream, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, RwLock};
-use futures::pin_mut;
-use crate::db::engine::index::item::IndexItem;
-use crate::db::engine::index::target::IndexTarget;
 
 /// Get the system record key for storing record count
 fn count_key() -> RecordId {
@@ -37,7 +36,7 @@ pub struct Table<R: Repo> {
     /// Index target configuration (for future queries)
     indexes: Arc<RwLock<IndexTarget>>,
     /// Unique indexes (separate for fast validation)
-    indexes_unique: Arc<RwLock<Option<Vec<IndexItem>>>>,
+    indexes_unique: Arc<RwLock<IndexTarget>>,
 
     /// Fast path flag: does this table have ANY indexes?
     has_indexes: AtomicBool,
@@ -79,7 +78,7 @@ impl<R: Repo> Table<R> {
         // Initialize fast path flags
         let has_indexes = index_target.is_enabled();
 
-        let has_unique_indexes = unique_indexes.is_some();
+        let has_unique_indexes = unique_indexes.has_indexes();
 
         Ok(Self {
             repo,
@@ -135,30 +134,14 @@ impl<R: Repo> Table<R> {
         let unique = self.indexes_unique.read().await;
 
         // Check if we have any unique indexes
-        let has_unique = unique.is_some()
-            && match &*unique {
-                Some(indexes) => !indexes.is_empty(),
-                None => false,
-            };
-
+        let has_unique = unique.has_indexes();
         self.has_indexes_unique.store(has_unique, Ordering::Relaxed);
         drop(unique);
 
         // Update has_indexes flag
         let target = self.indexes.read().await;
 
-        let has_any = if target.is_enabled() {
-            if target.is_all() {
-                true
-            } else {
-                // Selective - check if has indexes
-                target.indexes().map_or(false, |i| !i.is_empty())
-            }
-        } else {
-            false
-        };
-
-        self.has_indexes.store(has_any, Ordering::Relaxed);
+        self.has_indexes.store(target.has_indexes(), Ordering::Relaxed);
     }
 
     /// Save new interned keys to info_store
@@ -263,24 +246,24 @@ impl<R: Repo> Table<R> {
     }
 
     /// Load unique indexes from info_store
-    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexItem>>> {
+    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<IndexTarget> {
         let key_bytes = Self::unique_indexes_key().to_bytes();
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
-                let indexes: Vec<IndexItem> = bincode::deserialize(&bytes)
+                let indexes: IndexTarget = bincode::deserialize(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize unique indexes: {}", e)))?;
-                Ok(Some(indexes))
+                Ok(indexes)
             }
-            Err(DbError::NotFound(_)) => Ok(None),
+            Err(DbError::NotFound(_)) => Ok(IndexTarget::disabled()),
             Err(e) => Err(e),
         }
     }
 
     /// Save unique indexes to info_store
-    async fn save_unique_indexes(&self, unique: &Option<Vec<IndexItem>>) -> DbResult<()> {
+    async fn save_unique_indexes(&self, unique: &IndexTarget) -> DbResult<()> {
         let key_bytes = Self::unique_indexes_key().to_bytes();
 
-        match unique {
+        match unique.indexes() {
             Some(indexes) => {
                 let bytes = bincode::serialize(indexes)
                     .map_err(|e| DbError::Codec(format!("Failed to serialize unique indexes: {}", e)))?;
@@ -329,16 +312,8 @@ impl<R: Repo> Table<R> {
 
         // Update unique_indexes
         let mut unique = self.indexes_unique.write().await;
-        match &mut *unique {
-            Some(indexes) => {
-                // Replace if exists with same path
-                indexes.retain(|idx| idx.path != interned_path);
-                indexes.push(IndexItem::new(interned_path.clone()));
-            }
-            None => {
-                *unique = Some(vec![IndexItem::new(interned_path.clone())]);
-            }
-        }
+
+        unique.add_index(interned_path.clone());
 
         // Update index_target too (for future queries)
         let mut target = self.indexes.write().await;
@@ -419,22 +394,8 @@ impl<R: Repo> Table<R> {
             .collect();
 
         let mut removed = false;
-
-        // Remove from unique_indexes if present
-        {
-            let mut unique = self.indexes_unique.write().await;
-            if let Some(indexes) = &mut *unique {
-                let initial_len = indexes.len();
-                indexes.retain(|idx| idx.path != interned_path);
-                if indexes.len() < initial_len {
-                    removed = true;
-                    // If empty, set to None
-                    if indexes.is_empty() {
-                        *unique = None;
-                    }
-                }
-            }
-        }
+        let mut unique = self.indexes_unique.write().await;
+        unique.remove_index(&interned_path);
 
         // Remove from index_target too
         {
@@ -472,10 +433,8 @@ impl<R: Repo> Table<R> {
         self.save_index_target(&target).await?;
         drop(target);
 
-        // Note: "All" mode doesn't have unique indexes
-        // Clear unique_indexes if any
         let mut unique = self.indexes_unique.write().await;
-        *unique = None;
+        *unique = IndexTarget::all();
         self.save_unique_indexes(&unique).await?;
         drop(unique);
 
@@ -497,7 +456,7 @@ impl<R: Repo> Table<R> {
 
         // Also clear unique_indexes
         let mut unique = self.indexes_unique.write().await;
-        *unique = None;
+        *unique = IndexTarget::disabled();
         self.save_unique_indexes(&unique).await?;
         drop(unique);
 
@@ -563,8 +522,8 @@ impl<R: Repo> Table<R> {
     async fn check_unique_constraints_slow(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
         // Get unique indexes (only called when flag is true)
         let unique = self.indexes_unique.read().await;
-        let unique_indexes = match &*unique {
-            Some(indexes) => indexes.as_slice(),
+        let unique_indexes = match unique.indexes() {
+            Some(indexes) => indexes,
             None => return Ok(()),  // Race condition: flag was cleared
         };
 
@@ -585,8 +544,8 @@ impl<R: Repo> Table<R> {
     async fn check_unique_constraints_slow_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
         // Get unique indexes (only called when flag is true)
         let unique = self.indexes_unique.read().await;
-        let unique_indexes = match &*unique {
-            Some(indexes) => indexes.as_slice(),
+        let unique_indexes = match unique.indexes() {
+            Some(indexes) => indexes,
             None => return Ok(()),  // Race condition: flag was cleared
         };
 
@@ -854,7 +813,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Get the current unique indexes (for testing)
-    pub async fn get_unique_indexes(&self) -> Option<Vec<IndexItem>> {
+    pub async fn get_unique_indexes(&self) -> IndexTarget {
         self.indexes_unique.read().await.clone()
     }
 
@@ -1742,8 +1701,8 @@ mod tests {
 
         // Verify index was added
         let unique_indexes = table.get_unique_indexes().await;
-        assert!(unique_indexes.is_some());
-        assert_eq!(unique_indexes.unwrap().len(), 1);
+        assert!(unique_indexes.has_indexes());
+        assert_eq!(unique_indexes.indexes().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1926,8 +1885,8 @@ mod tests {
         assert_eq!(indexes.len(), 3);
 
         let unique_indexes = table.get_unique_indexes().await;
-        assert!(unique_indexes.is_some());
-        assert_eq!(unique_indexes.unwrap().len(), 1);
+        assert!(unique_indexes.has_indexes());
+        assert_eq!(unique_indexes.indexes().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1956,8 +1915,8 @@ mod tests {
         assert!(target.is_selective());
 
         let unique_indexes = table2.get_unique_indexes().await;
-        assert!(unique_indexes.is_some());
-        assert_eq!(unique_indexes.unwrap().len(), 1);
+        assert!(unique_indexes.has_indexes());
+        assert_eq!(unique_indexes.indexes().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1991,20 +1950,20 @@ mod tests {
         let target = table.get_index_target().await;
         assert!(!target.is_enabled());
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_none());
+        assert!(!unique.is_enabled());
 
         // Add regular index - only index_target should change
         table.add_index(&["name"]).await.unwrap();
         let target = table.get_index_target().await;
         assert!(target.is_selective());
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_none());  // Still None!
+        assert!(!unique.has_indexes());
 
         // Add unique index - both should change
         table.add_unique_index(&["email"]).await.unwrap();
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_some());
-        assert_eq!(unique.unwrap().len(), 1);
+        assert!(unique.has_indexes());
+        assert_eq!(unique.indexes().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -2016,7 +1975,7 @@ mod tests {
 
         // Verify unique_indexes is None
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_none());
+        assert!(!unique.has_indexes());
 
         // Insert multiple records with same value - should succeed
         for _i in 0..3 {
@@ -2037,15 +1996,15 @@ mod tests {
         table.add_unique_index(&["email"]).await.unwrap();
 
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_some());
-        assert_eq!(unique.unwrap().len(), 1);
+        assert!(unique.has_indexes());
+        assert_eq!(unique.indexes().unwrap().len(), 1);
 
         // Remove the unique index
         table.remove_index(&["email"]).await.unwrap();
 
         // Should be cleared
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_none());
+        assert!(!unique.has_indexes());
     }
 
     #[tokio::test]
@@ -2056,14 +2015,14 @@ mod tests {
         table.add_unique_index(&["email"]).await.unwrap();
 
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_some());
+        assert!(unique.has_indexes());
 
         // Enable all indexing
         table.enable_indexing_all().await.unwrap();
 
         // unique_indexes should be cleared (All mode is non-unique)
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_none());
+        assert!(unique.has_indexes());
 
         let target = table.get_index_target().await;
         assert!(target.is_all());
@@ -2080,7 +2039,7 @@ mod tests {
         let target = table.get_index_target().await;
         assert!(target.is_selective());
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_some());
+        assert!(unique.has_indexes());
 
         // Disable indexing
         table.disable_indexing().await.unwrap();
@@ -2089,7 +2048,7 @@ mod tests {
         let target = table.get_index_target().await;
         assert!(!target.is_enabled());
         let unique = table.get_unique_indexes().await;
-        assert!(unique.is_none());
+        assert!(!unique.has_indexes());
     }
 
     #[tokio::test]
@@ -2106,8 +2065,8 @@ mod tests {
         table1.add_unique_index(&["id"]).await.unwrap();
 
         let unique1 = table1.get_unique_indexes().await;
-        assert!(unique1.is_some());
-        assert_eq!(unique1.unwrap().len(), 1);
+        assert!(unique1.has_indexes());
+        assert_eq!(unique1.indexes().unwrap().len(), 1);
 
         // Close first session
         drop(table1);
@@ -2118,8 +2077,8 @@ mod tests {
 
         // Verify unique indexes persisted
         let unique2 = table2.get_unique_indexes().await;
-        assert!(unique2.is_some());
-        assert_eq!(unique2.unwrap().len(), 1);
+        assert!(unique2.has_indexes());
+        assert_eq!(unique2.indexes().unwrap().len(), 1);
 
         let target2 = table2.get_index_target().await;
         assert!(target2.is_selective());

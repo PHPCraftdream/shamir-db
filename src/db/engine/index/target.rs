@@ -181,6 +181,16 @@ impl IndexTarget {
             }
         }
     }
+
+
+    /// Check if a specific path is indexed
+    pub fn has_indexes(&self) -> bool {
+        match &self.mode {
+            IndexMode::All => true,
+            IndexMode::Selective(v) => v.len() > 0,
+            IndexMode::Disabled => false,
+        }
+    }
 }
 
 impl Default for IndexTarget {

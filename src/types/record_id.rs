@@ -4,6 +4,7 @@ use rand::TryRngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use bytes::Bytes;
 
 /// The custom epoch for our RecordId timestamps, set to 2026-01-31 00:00:00 UTC.
 /// This makes the timestamp part of the ID smaller and more manageable.
@@ -54,6 +55,10 @@ impl RecordId {
 
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
+    }
+
+    pub fn to_bytes(&self) -> Bytes {
+        Bytes::copy_from_slice(&self.0)
     }
 }
 
