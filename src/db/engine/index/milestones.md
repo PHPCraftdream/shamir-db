@@ -537,6 +537,32 @@ The `index_engine.md` document describes a more complex async journal-based arch
 
 ---
 
+### ⭐ Better Alternative: LRU Index with State Flags
+
+**See:** `src/db/engine/index/lru_indexing.md` for full architecture.
+
+**Why LRU is better than two-instance in-memory:**
+- ✅ **Single index instance** (no 2x memory duplication!)
+- ✅ **Memory limit** with automatic LRU eviction
+- ✅ **Per-record state flags**: ACTUAL, UPDATE, SAVING
+- ✅ **On-demand loading** from disk when needed
+- ✅ **Predictable memory usage** (bounded)
+
+**Comparison:**
+
+| Factor | Two-Instance | LRU + Flags ⭐ |
+|--------|--------------|---------------|
+| Memory copies | 2x indexes ❌ | 1x index ✅ |
+| Memory limit | Unbounded ❌ | Bounded ✅ |
+| Eviction | Manual ❌ | Automatic ✅ |
+| Complexity | Medium | Medium |
+
+**Implementation:** Same effort (12-17 hours), but better architecture!
+
+**Recommendation:** Implement LRU approach instead of two-instance.
+
+---
+
 ### Original Plan (Now Lower Priority)
 
 The following milestones are now **lower priority** since in-memory indexing provides better performance:
