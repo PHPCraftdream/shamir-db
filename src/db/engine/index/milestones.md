@@ -502,14 +502,54 @@ The `index_engine.md` document describes a more complex async journal-based arch
 
 ## Next Steps
 
-When we need query acceleration, implement in order:
-1. **Hash computation** (Milestone 5) - For index keys
-2. **Key encoding** (Milestone 4) - For index storage format
-3. **Index store** (Milestone 8) - Actual index data structure
-4. **Query API** (Milestone 12) - Index-based lookups
+### 🎯 NEW: In-Memory Indexing Approach (2025-02-04)
 
-Only then consider:
-5. **Journal** (Milestone 6) - For async updates
-6. **Global indexer** (Milestone 10) - Background processing
+**See:** `src/db/engine/index/inmemory_indexing.md` for detailed architecture.
 
-The current implementation provides a solid foundation for unique constraints and index configuration management.
+**Recommended implementation order:**
+
+#### Phase 1: Core In-Memory Indexing (4-6 hours) - HIGH PRIORITY
+1. **Create InMemoryIndex struct** - HashMap-based O(1) lookups
+2. **Create IndexManager** - Thread-safe wrapper with check_unique()
+3. **Update Table operations** - Replace table scan with IndexManager
+4. **Testing** - Unit tests + benchmarks
+
+**Benefits:**
+- O(1) unique constraint checking (vs O(N) table scan)
+- ~94% faster insert with unique indexes
+- No background thread complexity
+- Immediate performance gain
+
+#### Phase 2: Background Indexer (6-8 hours) - MEDIUM PRIORITY
+5. **Create IndexDiff types** - Add/Remove/Update variants
+6. **Create BackgroundIndexer** - Async message processing
+7. **Add persistence** - Diff log + snapshots
+8. **Integration & testing** - Crash recovery
+
+**Benefits:**
+- Non-blocking writes
+- Crash recovery
+- Production-ready persistence
+
+#### Phase 3: Optimization (2-3 hours) - LOW PRIORITY
+9. **Performance tuning** - HashMap benchmarks
+10. **Stress testing** - Concurrent operations
+
+---
+
+### Original Plan (Now Lower Priority)
+
+The following milestones are now **lower priority** since in-memory indexing provides better performance:
+
+1. **Hash computation** (Milestone 5) - Not needed for HashMap approach
+2. **Key encoding** (Milestone 4) - Not needed for HashMap approach
+3. **Index store** (Milestone 8) - Replaced by InMemoryIndex
+4. **Query API** (Milestone 12) - Can be added after Phase 1
+
+Only consider implementing:
+5. **Journal** (Milestone 6) - Replaced by diff log (Phase 2)
+6. **Global indexer** (Milestone 10) - Part of Phase 2
+
+**The current implementation (Milestones 1-3.2) provides a solid foundation for unique constraints and index configuration management.**
+
+**Next logical step: Phase 1 of in-memory indexing for O(1) constraint validation.**
