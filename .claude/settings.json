@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "jetbrains-ide": {
+      "type": "sse",
+      "url": "http://localhost:64343/sse",
+      "headers": {
+        "IJ_MCP_SERVER_PROJECT_PATH": null
+      }
+    }
+  }
+}
