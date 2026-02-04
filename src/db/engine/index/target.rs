@@ -1,40 +1,16 @@
-//! Index types
+//! Index target configuration
+//!
+//! Defines what should be indexed for a table.
 
 use serde::{Deserialize, Serialize};
-
-/// Definition of a single index
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct IndexDef {
-    /// Path to indexed field (interned components)
-    pub path: Vec<u64>,
-
-    /// Is this a unique index?
-    pub unique: bool,
-}
-
-impl IndexDef {
-    /// Create a non-unique index
-    pub fn new(path: Vec<u64>) -> Self {
-        Self { path, unique: false }
-    }
-
-    /// Create a unique index
-    pub fn unique(path: Vec<u64>) -> Self {
-        Self { path, unique: true }
-    }
-
-    /// Check if this is a unique index
-    pub fn is_unique(&self) -> bool {
-        self.unique
-    }
-}
+use super::def::IndexDef;
 
 /// Indexing target specification
 ///
 /// Defines what should be indexed for a table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexTarget {
-    /// Indexing disabled - no indexing, journal not written
+    /// Indexing disabled - no indexing
     Disabled,
 
     /// Index everything - all Map fields are indexed (non-unique)
@@ -101,11 +77,8 @@ impl IndexTarget {
         let (should_disable, removed) = match self {
             IndexTarget::Disabled | IndexTarget::All => (false, false),
             IndexTarget::Selective(indexes) => {
-                let _initial_len = indexes.len();
                 let was_present = indexes.iter().any(|idx| idx.path == *path);
-
                 indexes.retain(|idx| idx.path != *path);
-
                 (indexes.is_empty(), was_present)
             }
         };
@@ -138,7 +111,7 @@ impl IndexTarget {
     /// Check if a specific path is indexed (regardless of uniqueness)
     pub fn has_index(&self, path: &Vec<u64>) -> bool {
         match self {
-            IndexTarget::All => true,  // Everything is indexed
+            IndexTarget::All => true,
             IndexTarget::Disabled => false,
             IndexTarget::Selective(indexes) => {
                 indexes.iter().any(|idx| idx.path == *path)
@@ -149,7 +122,7 @@ impl IndexTarget {
     /// Check if a specific path has a unique index
     pub fn has_unique_index(&self, path: &Vec<u64>) -> bool {
         match self {
-            IndexTarget::All => false,  // All is non-unique
+            IndexTarget::All => false,
             IndexTarget::Disabled => false,
             IndexTarget::Selective(indexes) => {
                 indexes.iter().any(|idx| idx.path == *path && idx.unique)
@@ -158,20 +131,15 @@ impl IndexTarget {
     }
 }
 
+impl Default for IndexTarget {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_index_def() {
-        let def1 = IndexDef::new(vec![1, 2]);
-        assert_eq!(def1.path, vec![1, 2]);
-        assert!(!def1.is_unique());
-
-        let def2 = IndexDef::unique(vec![3, 4]);
-        assert_eq!(def2.path, vec![3, 4]);
-        assert!(def2.is_unique());
-    }
 
     #[test]
     fn test_index_target_disabled() {
@@ -193,8 +161,8 @@ mod tests {
         assert!(!target.is_selective());
         assert!(target.indexes().is_none());
         assert!(target.unique_indexes().is_empty());
-        assert!(target.has_index(&vec![1]));  // All means everything is indexed
-        assert!(!target.has_unique_index(&vec![1]));  // But not unique
+        assert!(target.has_index(&vec![1]));
+        assert!(!target.has_unique_index(&vec![1]));
     }
 
     #[test]
@@ -317,19 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn test_index_def_serialization() {
-        let def = IndexDef {
-            path: vec![1, 2, 3],
-            unique: true,
-        };
-
-        let serialized = bincode::serialize(&def).unwrap();
-        let deserialized: IndexDef = bincode::deserialize(&serialized).unwrap();
-
-        assert_eq!(deserialized, def);
-    }
-
-    #[test]
     fn test_index_target_serialization() {
         let targets = vec![
             IndexTarget::Disabled,
@@ -356,7 +311,13 @@ mod tests {
 
         assert!(!target.has_unique_index(&vec![1]));
         assert!(target.has_unique_index(&vec![2]));
-        assert!(target.has_index(&vec![1]));  // Has non-unique index
-        assert!(target.has_index(&vec![2]));  // Has unique index
+        assert!(target.has_index(&vec![1]));
+        assert!(target.has_index(&vec![2]));
+    }
+
+    #[test]
+    fn test_index_target_default() {
+        let target = IndexTarget::default();
+        assert!(matches!(target, IndexTarget::Disabled));
     }
 }

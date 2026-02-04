@@ -2,6 +2,8 @@
 //!
 //! Provides index configuration types.
 
-mod types;
+mod def;
+mod target;
 
-pub use types::{IndexDef, IndexTarget};
+pub use def::IndexDef;
+pub use target::IndexTarget;

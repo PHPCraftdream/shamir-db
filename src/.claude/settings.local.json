@@ -12,7 +12,8 @@
       "Bash(taskkill:*)",
       "Bash(Select-String -Pattern \"Batch|passed|FAILED|test result\")",
       "Bash(Select-Object -Last 20)",
-      "Bash(cargo:*)"
+      "Bash(cargo:*)",
+      "Bash(ls:*)"
     ]
   }
 }
