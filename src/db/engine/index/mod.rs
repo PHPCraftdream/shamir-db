@@ -6,4 +6,4 @@ mod def;
 mod target;
 
 pub use def::IndexDef;
-pub use target::IndexTarget;
+pub use target::{IndexTarget, IndexMode, IndexStatus};

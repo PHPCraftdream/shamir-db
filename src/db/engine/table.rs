@@ -68,16 +68,13 @@ impl<R: Repo> Table<R> {
         let info_store = repo.store_get(format!("__info__{}", table_name)).await?;
 
         // Load index target from storage
-        let index_target = Self::load_index_target(&info_store).await?.unwrap_or(IndexTarget::Disabled);
+        let index_target = Self::load_index_target(&info_store).await?.unwrap_or_else(IndexTarget::disabled);
 
         // Load unique indexes from storage
         let unique_indexes = Self::load_unique_indexes(&info_store).await?;
 
         // Initialize fast path flags
-        let has_indexes = match &index_target {
-            IndexTarget::Disabled => false,
-            IndexTarget::All | IndexTarget::Selective(_) => true,
-        };
+        let has_indexes = index_target.is_enabled();
 
         let has_unique_indexes = unique_indexes.is_some();
 
@@ -148,10 +145,15 @@ impl<R: Repo> Table<R> {
         // Update has_indexes flag
         let target = self.index_target.read().await;
 
-        let has_any = match &*target {
-            IndexTarget::Disabled => false,
-            IndexTarget::All => true,
-            IndexTarget::Selective(indexes) => !indexes.is_empty(),
+        let has_any = if target.is_enabled() {
+            if target.is_all() {
+                true
+            } else {
+                // Selective - check if has indexes
+                target.indexes().map_or(false, |i| !i.is_empty())
+            }
+        } else {
+            false
         };
 
         self.has_indexes.store(has_any, Ordering::Relaxed);
@@ -302,7 +304,7 @@ impl<R: Repo> Table<R> {
 
         // Update index_target only (not unique)
         let mut target = self.index_target.write().await;
-        target.add_index(interned_path, false);
+        target.add_index(interned_path);
         self.save_index_target(&target).await?;
         drop(target);
 
@@ -330,16 +332,16 @@ impl<R: Repo> Table<R> {
             Some(indexes) => {
                 // Replace if exists with same path
                 indexes.retain(|idx| idx.path != interned_path);
-                indexes.push(IndexDef::unique(interned_path.clone()));
+                indexes.push(IndexDef::new(interned_path.clone()));
             }
             None => {
-                *unique = Some(vec![IndexDef::unique(interned_path.clone())]);
+                *unique = Some(vec![IndexDef::new(interned_path.clone())]);
             }
         }
 
         // Update index_target too (for future queries)
         let mut target = self.index_target.write().await;
-        target.add_index(interned_path, true);
+        target.add_index(interned_path);
         self.save_index_target(&target).await?;
 
         // Save unique_indexes separately
@@ -441,7 +443,7 @@ impl<R: Repo> Table<R> {
             }
 
             // Save to storage or delete if disabled
-            if matches!(*target, IndexTarget::Disabled) {
+            if !target.is_enabled() {
                 let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
                 self.info_store.remove(key_bytes).await?;
             } else {
@@ -465,7 +467,7 @@ impl<R: Repo> Table<R> {
     /// Enable indexing for all Map fields
     pub async fn enable_indexing_all(&self) -> DbResult<()> {
         let mut target = self.index_target.write().await;
-        *target = IndexTarget::All;
+        *target = IndexTarget::all();
         self.save_index_target(&target).await?;
         drop(target);
 
@@ -485,7 +487,7 @@ impl<R: Repo> Table<R> {
     /// Disable indexing completely
     pub async fn disable_indexing(&self) -> DbResult<()> {
         let mut target = self.index_target.write().await;
-        *target = IndexTarget::Disabled;
+        *target = IndexTarget::disabled();
 
         // Delete from storage
         let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
@@ -1738,10 +1740,9 @@ mod tests {
         table.add_unique_index(&["email"]).await.unwrap();
 
         // Verify index was added
-        let target = table.get_index_target().await;
-        assert!(target.is_selective());
-        let unique_indexes = target.unique_indexes();
-        assert_eq!(unique_indexes.len(), 1);
+        let unique_indexes = table.get_unique_indexes().await;
+        assert!(unique_indexes.is_some());
+        assert_eq!(unique_indexes.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1775,7 +1776,7 @@ mod tests {
 
         // Verify it was removed (should be disabled now)
         let target = table.get_index_target().await;
-        assert!(matches!(target, IndexTarget::Disabled));
+        assert!(!target.is_enabled());
     }
 
     #[tokio::test]
@@ -1811,7 +1812,7 @@ mod tests {
 
         // Verify it was disabled
         let target = table.get_index_target().await;
-        assert!(matches!(target, IndexTarget::Disabled));
+        assert!(!target.is_enabled());
     }
 
     #[tokio::test]
@@ -1923,8 +1924,9 @@ mod tests {
         let indexes = target.indexes().unwrap();
         assert_eq!(indexes.len(), 3);
 
-        let unique_indexes = target.unique_indexes();
-        assert_eq!(unique_indexes.len(), 1);
+        let unique_indexes = table.get_unique_indexes().await;
+        assert!(unique_indexes.is_some());
+        assert_eq!(unique_indexes.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1986,7 +1988,7 @@ mod tests {
 
         // Initially both should be empty/disabled
         let target = table.get_index_target().await;
-        assert!(matches!(target, IndexTarget::Disabled));
+        assert!(!target.is_enabled());
         let unique = table.get_unique_indexes().await;
         assert!(unique.is_none());
 
@@ -1999,8 +2001,6 @@ mod tests {
 
         // Add unique index - both should change
         table.add_unique_index(&["email"]).await.unwrap();
-        let target = table.get_index_target().await;
-        assert!(target.has_unique_index(&vec![2])); // "email" interned as ID 2
         let unique = table.get_unique_indexes().await;
         assert!(unique.is_some());
         assert_eq!(unique.unwrap().len(), 1);
@@ -2086,7 +2086,7 @@ mod tests {
 
         // Both should be cleared
         let target = table.get_index_target().await;
-        assert!(matches!(target, IndexTarget::Disabled));
+        assert!(!target.is_enabled());
         let unique = table.get_unique_indexes().await;
         assert!(unique.is_none());
     }
@@ -2122,7 +2122,6 @@ mod tests {
 
         let target2 = table2.get_index_target().await;
         assert!(target2.is_selective());
-        assert!(target2.has_unique_index(&vec![1])); // "id" interned as ID 1
     }
 
     // === Tests for Atomic Flag Optimization ===
