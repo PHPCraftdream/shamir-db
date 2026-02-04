@@ -4,7 +4,7 @@
 
 use crate::core::interner::Interner;
 use crate::core::transform;
-use crate::db::engine::index::IndexTarget;
+use crate::db::engine::index::{IndexDef, IndexTarget};
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
@@ -31,8 +31,10 @@ pub struct Table<R: Repo> {
     batch_size: usize,
     /// Mutex for synchronizing counter updates
     counter_mutex: Arc<Mutex<()>>,
-    /// Index target configuration
+    /// Index target configuration (for future queries)
     index_target: Arc<RwLock<IndexTarget>>,
+    /// Unique indexes (separate for fast validation)
+    unique_indexes: Arc<RwLock<Option<Vec<IndexDef>>>>,
 }
 
 impl<R: Repo> Clone for Table<R> {
@@ -46,6 +48,7 @@ impl<R: Repo> Clone for Table<R> {
             batch_size: self.batch_size,
             counter_mutex: Arc::clone(&self.counter_mutex),
             index_target: Arc::clone(&self.index_target),
+            unique_indexes: Arc::clone(&self.unique_indexes),
         }
     }
 }
@@ -60,6 +63,9 @@ impl<R: Repo> Table<R> {
         // Load index target from storage
         let index_target = Self::load_index_target(&info_store).await?.unwrap_or(IndexTarget::Disabled);
 
+        // Load unique indexes from storage
+        let unique_indexes = Self::load_unique_indexes(&info_store).await?;
+
         Ok(Self {
             repo,
             table_name,
@@ -69,6 +75,7 @@ impl<R: Repo> Table<R> {
             batch_size: 1000, // default batch size
             counter_mutex: Arc::new(Mutex::new(())),
             index_target: Arc::new(RwLock::new(index_target)),
+            unique_indexes: Arc::new(RwLock::new(unique_indexes)),
         })
     }
 
@@ -202,6 +209,43 @@ impl<R: Repo> Table<R> {
         Ok(())
     }
 
+    /// Get the system record key for storing unique indexes
+    fn unique_indexes_key() -> RecordId {
+        RecordId::system("unique_indexes")
+    }
+
+    /// Load unique indexes from info_store
+    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexDef>>> {
+        let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
+        match info_store.get(key_bytes).await {
+            Ok(bytes) => {
+                let indexes: Vec<IndexDef> = bincode::deserialize(&bytes)
+                    .map_err(|e| DbError::Codec(format!("Failed to deserialize unique indexes: {}", e)))?;
+                Ok(Some(indexes))
+            }
+            Err(DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Save unique indexes to info_store
+    async fn save_unique_indexes(&self, unique: &Option<Vec<IndexDef>>) -> DbResult<()> {
+        let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
+
+        match unique {
+            Some(indexes) => {
+                let bytes = bincode::serialize(indexes)
+                    .map_err(|e| DbError::Codec(format!("Failed to serialize unique indexes: {}", e)))?;
+                self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
+            }
+            None => {
+                self.info_store.remove(key_bytes).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Add a non-unique index
     pub async fn add_index(&self, path: &[&str]) -> DbResult<()> {
         let interner = self.get_interner().await?;
@@ -211,11 +255,9 @@ impl<R: Repo> Table<R> {
             .map(|&s| interner.touch_ind(s).val())
             .collect();
 
-        // Update index target
+        // Update index_target only (not unique)
         let mut target = self.index_target.write().await;
         target.add_index(interned_path, false);
-
-        // Save to storage
         self.save_index_target(&target).await?;
 
         Ok(())
@@ -233,12 +275,27 @@ impl<R: Repo> Table<R> {
         // Validate by scanning all existing data
         self.validate_unique_index(&interned_path, interner).await?;
 
-        // Update index target
+        // Update unique_indexes
+        let mut unique = self.unique_indexes.write().await;
+        match &mut *unique {
+            Some(indexes) => {
+                // Replace if exists with same path
+                indexes.retain(|idx| idx.path != interned_path);
+                indexes.push(IndexDef::unique(interned_path.clone()));
+            }
+            None => {
+                *unique = Some(vec![IndexDef::unique(interned_path.clone())]);
+            }
+        }
+
+        // Update index_target too (for future queries)
         let mut target = self.index_target.write().await;
         target.add_index(interned_path, true);
-
-        // Save to storage
         self.save_index_target(&target).await?;
+
+        // Save unique_indexes separately
+        drop(target); // Release lock before saving
+        self.save_unique_indexes(&unique).await?;
 
         Ok(())
     }
@@ -305,16 +362,44 @@ impl<R: Repo> Table<R> {
             .map(|&s| interner.touch_ind(s).val())
             .collect();
 
-        // Update index target
-        let mut target = self.index_target.write().await;
-        let removed = target.remove_index(&interned_path);
+        let mut removed = false;
 
-        // Save to storage or delete if disabled
-        if matches!(*target, IndexTarget::Disabled) {
-            let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
-            self.info_store.remove(key_bytes).await?;
-        } else {
-            self.save_index_target(&target).await?;
+        // Remove from unique_indexes if present
+        {
+            let mut unique = self.unique_indexes.write().await;
+            if let Some(indexes) = &mut *unique {
+                let initial_len = indexes.len();
+                indexes.retain(|idx| idx.path != interned_path);
+                if indexes.len() < initial_len {
+                    removed = true;
+                    // If empty, set to None
+                    if indexes.is_empty() {
+                        *unique = None;
+                    }
+                }
+            }
+        }
+
+        // Remove from index_target too
+        {
+            let mut target = self.index_target.write().await;
+            if target.remove_index(&interned_path) {
+                removed = true;
+            }
+
+            // Save to storage or delete if disabled
+            if matches!(*target, IndexTarget::Disabled) {
+                let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+                self.info_store.remove(key_bytes).await?;
+            } else {
+                self.save_index_target(&target).await?;
+            }
+        }
+
+        // Save unique_indexes if changed
+        if removed {
+            let unique = self.unique_indexes.read().await;
+            self.save_unique_indexes(&unique).await?;
         }
 
         Ok(removed)
@@ -325,6 +410,13 @@ impl<R: Repo> Table<R> {
         let mut target = self.index_target.write().await;
         *target = IndexTarget::All;
         self.save_index_target(&target).await?;
+
+        // Note: "All" mode doesn't have unique indexes
+        // Clear unique_indexes if any
+        let mut unique = self.unique_indexes.write().await;
+        *unique = None;
+        self.save_unique_indexes(&unique).await?;
+
         Ok(())
     }
 
@@ -336,6 +428,11 @@ impl<R: Repo> Table<R> {
         // Delete from storage
         let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
         self.info_store.remove(key_bytes).await?;
+
+        // Also clear unique_indexes
+        let mut unique = self.unique_indexes.write().await;
+        *unique = None;
+        self.save_unique_indexes(&unique).await?;
 
         Ok(())
     }
@@ -377,11 +474,14 @@ impl<R: Repo> Table<R> {
 
     /// Check unique constraints before insert/update, optionally excluding a record ID
     async fn check_unique_constraints_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
-        let target = self.index_target.read().await;
+        // FAST PATH: If no unique indexes, skip validation entirely!
+        let unique = self.unique_indexes.read().await;
+        let unique_indexes = match &*unique {
+            Some(indexes) => indexes.as_slice(),
+            None => return Ok(()),  // <-- No unique indexes, skip validation!
+        };
 
-        // Get unique indexes
-        let unique_indexes = target.unique_indexes();
-
+        // Check each unique index
         for index_def in unique_indexes {
             // Extract value at path
             if let Some(extracted) = Self::extract_value(value, &index_def.path, interner)? {
@@ -642,6 +742,11 @@ impl<R: Repo> Table<R> {
     /// Get the current index target (for testing)
     pub async fn get_index_target(&self) -> IndexTarget {
         self.index_target.read().await.clone()
+    }
+
+    /// Get the current unique indexes (for testing)
+    pub async fn get_unique_indexes(&self) -> Option<Vec<IndexDef>> {
+        self.unique_indexes.read().await.clone()
     }
 }
 
@@ -1754,5 +1859,152 @@ mod tests {
         // Verify record is still there
         let retrieved = table.get(id).await.unwrap();
         assert_eq!(retrieved, UserValue::Map(data));
+    }
+
+    // === Tests for Separated Unique Indexes Storage ===
+
+    #[tokio::test]
+    async fn test_separated_unique_indexes_storage() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Initially both should be empty/disabled
+        let target = table.get_index_target().await;
+        assert!(matches!(target, IndexTarget::Disabled));
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_none());
+
+        // Add regular index - only index_target should change
+        table.add_index(&["name"]).await.unwrap();
+        let target = table.get_index_target().await;
+        assert!(target.is_selective());
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_none());  // Still None!
+
+        // Add unique index - both should change
+        table.add_unique_index(&["email"]).await.unwrap();
+        let target = table.get_index_target().await;
+        assert!(target.has_unique_index(&vec![2])); // "email" interned as ID 2
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_some());
+        assert_eq!(unique.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_fast_path_no_unique_indexes() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add regular (non-unique) index
+        table.add_index(&["name"]).await.unwrap();
+
+        // Verify unique_indexes is None
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_none());
+
+        // Insert multiple records with same value - should succeed
+        for _i in 0..3 {
+            let mut data = new_map();
+            data.insert("name".to_string(), UserValue::Str("duplicate".to_string()));
+            table.insert(&UserValue::Map(data)).await.unwrap();
+        }
+
+        // All inserts succeeded because no unique constraint
+        assert_eq!(table.count().await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_remove_unique_clears_separated_storage() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_some());
+        assert_eq!(unique.unwrap().len(), 1);
+
+        // Remove the unique index
+        table.remove_index(&["email"]).await.unwrap();
+
+        // Should be cleared
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_enable_all_clears_unique_indexes() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add unique index
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_some());
+
+        // Enable all indexing
+        table.enable_indexing_all().await.unwrap();
+
+        // unique_indexes should be cleared (All mode is non-unique)
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_none());
+
+        let target = table.get_index_target().await;
+        assert!(target.is_all());
+    }
+
+    #[tokio::test]
+    async fn test_disable_clears_both_storages() {
+        let (table, _dir) = create_test_table().await.unwrap();
+
+        // Add both regular and unique indexes
+        table.add_index(&["name"]).await.unwrap();
+        table.add_unique_index(&["email"]).await.unwrap();
+
+        let target = table.get_index_target().await;
+        assert!(target.is_selective());
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_some());
+
+        // Disable indexing
+        table.disable_indexing().await.unwrap();
+
+        // Both should be cleared
+        let target = table.get_index_target().await;
+        assert!(matches!(target, IndexTarget::Disabled));
+        let unique = table.get_unique_indexes().await;
+        assert!(unique.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unique_indexes_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_unique_persistence");
+        let table_name = "test_unique";
+
+        // === First session ===
+        let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
+        let table1 = Table::new(repo1, table_name.to_string()).await.unwrap();
+
+        // Add unique index
+        table1.add_unique_index(&["id"]).await.unwrap();
+
+        let unique1 = table1.get_unique_indexes().await;
+        assert!(unique1.is_some());
+        assert_eq!(unique1.unwrap().len(), 1);
+
+        // Close first session
+        drop(table1);
+
+        // === Second session ===
+        let repo2 = Arc::new(SledRepo::new(path).unwrap());
+        let table2 = Table::new(repo2, table_name.to_string()).await.unwrap();
+
+        // Verify unique indexes persisted
+        let unique2 = table2.get_unique_indexes().await;
+        assert!(unique2.is_some());
+        assert_eq!(unique2.unwrap().len(), 1);
+
+        let target2 = table2.get_index_target().await;
+        assert!(target2.is_selective());
+        assert!(target2.has_unique_index(&vec![1])); // "id" interned as ID 1
     }
 }
