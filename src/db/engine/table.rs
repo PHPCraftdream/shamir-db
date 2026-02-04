@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use futures::pin_mut;
-use crate::db::engine::index::items::IndexItems;
+use crate::db::engine::index::item::IndexItem;
 use crate::db::engine::index::target::IndexTarget;
 
 /// Get the system record key for storing record count
@@ -34,9 +34,9 @@ pub struct Table<R: Repo> {
     /// Mutex for synchronizing counter updates
     counter_mutex: Arc<Mutex<()>>,
     /// Index target configuration (for future queries)
-    index_target: Arc<RwLock<IndexTarget>>,
+    indexes: Arc<RwLock<IndexTarget>>,
     /// Unique indexes (separate for fast validation)
-    unique_indexes: Arc<RwLock<Option<Vec<IndexItems>>>>,
+    indexes_unique: Arc<RwLock<Option<Vec<IndexItem>>>>,
     /// Fast path flag: does this table have ANY indexes?
     has_indexes: AtomicBool,
     /// Fast path flag: does this table have UNIQUE indexes?
@@ -53,8 +53,8 @@ impl<R: Repo> Clone for Table<R> {
             interner: Arc::clone(&self.interner),
             batch_size: self.batch_size,
             counter_mutex: Arc::clone(&self.counter_mutex),
-            index_target: Arc::clone(&self.index_target),
-            unique_indexes: Arc::clone(&self.unique_indexes),
+            indexes: Arc::clone(&self.indexes),
+            indexes_unique: Arc::clone(&self.indexes_unique),
             has_indexes: AtomicBool::new(self.has_indexes.load(Ordering::Relaxed)),
             has_unique_indexes: AtomicBool::new(self.has_unique_indexes.load(Ordering::Relaxed)),
         }
@@ -87,8 +87,8 @@ impl<R: Repo> Table<R> {
             interner: Arc::new(OnceCell::new()),
             batch_size: 1000, // default batch size
             counter_mutex: Arc::new(Mutex::new(())),
-            index_target: Arc::new(RwLock::new(index_target)),
-            unique_indexes: Arc::new(RwLock::new(unique_indexes)),
+            indexes: Arc::new(RwLock::new(index_target)),
+            indexes_unique: Arc::new(RwLock::new(unique_indexes)),
             has_indexes: AtomicBool::new(has_indexes),
             has_unique_indexes: AtomicBool::new(has_unique_indexes),
         })
@@ -131,7 +131,7 @@ impl<R: Repo> Table<R> {
     /// Should be called whenever indexes are added/removed
     async fn update_index_flags(&self) {
         // Update has_unique_indexes flag
-        let unique = self.unique_indexes.read().await;
+        let unique = self.indexes_unique.read().await;
 
         // Check if we have any unique indexes
         let has_unique = unique.is_some()
@@ -144,7 +144,7 @@ impl<R: Repo> Table<R> {
         drop(unique);
 
         // Update has_indexes flag
-        let target = self.index_target.read().await;
+        let target = self.indexes.read().await;
 
         let has_any = if target.is_enabled() {
             if target.is_all() {
@@ -263,11 +263,11 @@ impl<R: Repo> Table<R> {
     }
 
     /// Load unique indexes from info_store
-    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexItems>>> {
+    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexItem>>> {
         let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
-                let indexes: Vec<IndexItems> = bincode::deserialize(&bytes)
+                let indexes: Vec<IndexItem> = bincode::deserialize(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize unique indexes: {}", e)))?;
                 Ok(Some(indexes))
             }
@@ -277,7 +277,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Save unique indexes to info_store
-    async fn save_unique_indexes(&self, unique: &Option<Vec<IndexItems>>) -> DbResult<()> {
+    async fn save_unique_indexes(&self, unique: &Option<Vec<IndexItem>>) -> DbResult<()> {
         let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
 
         match unique {
@@ -304,7 +304,7 @@ impl<R: Repo> Table<R> {
             .collect();
 
         // Update index_target only (not unique)
-        let mut target = self.index_target.write().await;
+        let mut target = self.indexes.write().await;
         target.add_index(interned_path);
         self.save_index_target(&target).await?;
         drop(target);
@@ -328,20 +328,20 @@ impl<R: Repo> Table<R> {
         self.validate_unique_index(&interned_path, interner).await?;
 
         // Update unique_indexes
-        let mut unique = self.unique_indexes.write().await;
+        let mut unique = self.indexes_unique.write().await;
         match &mut *unique {
             Some(indexes) => {
                 // Replace if exists with same path
                 indexes.retain(|idx| idx.path != interned_path);
-                indexes.push(IndexItems::new(interned_path.clone()));
+                indexes.push(IndexItem::new(interned_path.clone()));
             }
             None => {
-                *unique = Some(vec![IndexItems::new(interned_path.clone())]);
+                *unique = Some(vec![IndexItem::new(interned_path.clone())]);
             }
         }
 
         // Update index_target too (for future queries)
-        let mut target = self.index_target.write().await;
+        let mut target = self.indexes.write().await;
         target.add_index(interned_path);
         self.save_index_target(&target).await?;
 
@@ -422,7 +422,7 @@ impl<R: Repo> Table<R> {
 
         // Remove from unique_indexes if present
         {
-            let mut unique = self.unique_indexes.write().await;
+            let mut unique = self.indexes_unique.write().await;
             if let Some(indexes) = &mut *unique {
                 let initial_len = indexes.len();
                 indexes.retain(|idx| idx.path != interned_path);
@@ -438,7 +438,7 @@ impl<R: Repo> Table<R> {
 
         // Remove from index_target too
         {
-            let mut target = self.index_target.write().await;
+            let mut target = self.indexes.write().await;
             if target.remove_index(&interned_path) {
                 removed = true;
             }
@@ -454,7 +454,7 @@ impl<R: Repo> Table<R> {
 
         // Save unique_indexes if changed
         if removed {
-            let unique = self.unique_indexes.read().await;
+            let unique = self.indexes_unique.read().await;
             self.save_unique_indexes(&unique).await?;
             drop(unique);
         }
@@ -467,14 +467,14 @@ impl<R: Repo> Table<R> {
 
     /// Enable indexing for all Map fields
     pub async fn enable_indexing_all(&self) -> DbResult<()> {
-        let mut target = self.index_target.write().await;
+        let mut target = self.indexes.write().await;
         *target = IndexTarget::all();
         self.save_index_target(&target).await?;
         drop(target);
 
         // Note: "All" mode doesn't have unique indexes
         // Clear unique_indexes if any
-        let mut unique = self.unique_indexes.write().await;
+        let mut unique = self.indexes_unique.write().await;
         *unique = None;
         self.save_unique_indexes(&unique).await?;
         drop(unique);
@@ -487,7 +487,7 @@ impl<R: Repo> Table<R> {
 
     /// Disable indexing completely
     pub async fn disable_indexing(&self) -> DbResult<()> {
-        let mut target = self.index_target.write().await;
+        let mut target = self.indexes.write().await;
         *target = IndexTarget::disabled();
 
         // Delete from storage
@@ -496,7 +496,7 @@ impl<R: Repo> Table<R> {
         drop(target);
 
         // Also clear unique_indexes
-        let mut unique = self.unique_indexes.write().await;
+        let mut unique = self.indexes_unique.write().await;
         *unique = None;
         self.save_unique_indexes(&unique).await?;
         drop(unique);
@@ -562,7 +562,7 @@ impl<R: Repo> Table<R> {
     /// Slow path: validate unique constraints (only called when has_unique_indexes == true)
     async fn check_unique_constraints_slow(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
         // Get unique indexes (only called when flag is true)
-        let unique = self.unique_indexes.read().await;
+        let unique = self.indexes_unique.read().await;
         let unique_indexes = match &*unique {
             Some(indexes) => indexes.as_slice(),
             None => return Ok(()),  // Race condition: flag was cleared
@@ -584,7 +584,7 @@ impl<R: Repo> Table<R> {
     /// Slow path: validate unique constraints with exclude (only called when has_unique_indexes == true)
     async fn check_unique_constraints_slow_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
         // Get unique indexes (only called when flag is true)
-        let unique = self.unique_indexes.read().await;
+        let unique = self.indexes_unique.read().await;
         let unique_indexes = match &*unique {
             Some(indexes) => indexes.as_slice(),
             None => return Ok(()),  // Race condition: flag was cleared
@@ -850,12 +850,12 @@ impl<R: Repo> Table<R> {
 
     /// Get the current index target (for testing)
     pub async fn get_index_target(&self) -> IndexTarget {
-        self.index_target.read().await.clone()
+        self.indexes.read().await.clone()
     }
 
     /// Get the current unique indexes (for testing)
-    pub async fn get_unique_indexes(&self) -> Option<Vec<IndexItems>> {
-        self.unique_indexes.read().await.clone()
+    pub async fn get_unique_indexes(&self) -> Option<Vec<IndexItem>> {
+        self.indexes_unique.read().await.clone()
     }
 
     /// Check if table has any indexes (for testing)
