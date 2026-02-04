@@ -1,13 +1,14 @@
 //! Index engine module
 //!
-//! # Current Implementation (2025-02-03)
+//! # Current Implementation (2025-02-04)
 //!
-//! This module provides **index configuration management** and **unique constraint enforcement**.
+//! This module provides **index configuration management**, **unique constraint enforcement**, and **in-memory index storage**.
 //!
 //! ## What's Implemented
 //!
 //! - **IndexTarget**: Three-state indexing configuration (Disabled/All/Selective)
 //! - **IndexDef**: Index definition with path and unique flag
+//! - **IndexStore**: In-memory index storage with DashMap (lock-free reads!)
 //! - **IndexOp**: Journal operation types (for future async indexing)
 //! - **IndexChange**: Index change entries (for future async indexing)
 //!
@@ -29,14 +30,13 @@
 //!
 //! ## What's NOT Yet Implemented
 //!
-//! - Actual index storage (hash keys to record ID lists)
 //! - Query-by-index functionality
 //! - Journal-based async index updates
 //! - Global indexer thread
 //!
 //! See `index_engine.md` for the full architecture design (deferred).
 //! See `milestones.md` for implementation status and roadmap.
+//! See `store.rs` for in-memory index storage implementation.
 
 mod types;
-
-pub use types::{IndexChange, IndexDef, IndexOp, IndexTarget, OpType};
+mod index_engine_real;
