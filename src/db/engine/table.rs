@@ -4,7 +4,6 @@
 
 use crate::core::interner::Interner;
 use crate::core::transform;
-use crate::db::engine::index::{IndexDef, IndexTarget};
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
@@ -16,6 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use futures::pin_mut;
+use crate::db::engine::index::def::IndexDef;
+use crate::db::engine::index::target::IndexTarget;
 
 /// Get the system record key for storing record count
 fn count_key() -> RecordId {

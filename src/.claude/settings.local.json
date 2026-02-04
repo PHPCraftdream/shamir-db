@@ -13,7 +13,8 @@
       "Bash(Select-String -Pattern \"Batch|passed|FAILED|test result\")",
       "Bash(Select-Object -Last 20)",
       "Bash(cargo:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }

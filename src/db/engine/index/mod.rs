@@ -1,9 +1,6 @@
 //! Index module
 //!
-//! Provides index configuration types.
+//! Provides index configuration, RAM index storage, and global index manager.
 
-mod def;
-mod target;
-
-pub use def::IndexDef;
-pub use target::{IndexTarget, IndexMode, IndexStatus};
+pub mod def;
+pub mod target;
