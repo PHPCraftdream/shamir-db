@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_status_not_serialized() {
-        let mut target = IndexTarget::all();
+        let target = IndexTarget::all();
         target.mark_dirty();
 
         let serialized = bincode::serialize(&target).unwrap();
