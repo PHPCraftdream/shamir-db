@@ -263,15 +263,12 @@ impl<R: Repo> Table<R> {
     async fn save_unique_indexes(&self, unique: &IndexTarget) -> DbResult<()> {
         let key_bytes = Self::unique_indexes_key().to_bytes();
 
-        match unique.indexes() {
-            Some(indexes) => {
-                let bytes = bincode::serialize(indexes)
-                    .map_err(|e| DbError::Codec(format!("Failed to serialize unique indexes: {}", e)))?;
-                self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
-            }
-            None => {
-                self.info_store.remove(key_bytes).await?;
-            }
+        if !unique.is_enabled() {
+            self.info_store.remove(key_bytes).await?;
+        } else {
+            let bytes = bincode::serialize(unique)
+                .map_err(|e| DbError::Codec(format!("Failed to serialize unique indexes: {}", e)))?;
+            self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
         }
 
         Ok(())
@@ -393,11 +390,14 @@ impl<R: Repo> Table<R> {
             .map(|&s| interner.touch_ind(s).val())
             .collect();
 
-        let mut removed = false;
-        let mut unique = self.indexes_unique.write().await;
-        unique.remove_index(&interned_path);
+        // Remove from indexes_unique
+        {
+            let mut unique = self.indexes_unique.write().await;
+            unique.remove_index(&interned_path);
+        }
 
-        // Remove from index_target too
+        // Remove from index_target and save
+        let mut removed = false;
         {
             let mut target = self.indexes.write().await;
             if target.remove_index(&interned_path) {
@@ -413,11 +413,10 @@ impl<R: Repo> Table<R> {
             }
         }
 
-        // Save unique_indexes if changed
-        if removed {
+        // Save indexes_unique
+        {
             let unique = self.indexes_unique.read().await;
             self.save_unique_indexes(&unique).await?;
-            drop(unique);
         }
 
         // Update flags after all changes
