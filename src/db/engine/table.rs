@@ -33,14 +33,16 @@ pub struct Table<R: Repo> {
     batch_size: usize,
     /// Mutex for synchronizing counter updates
     counter_mutex: Arc<Mutex<()>>,
+
     /// Index target configuration (for future queries)
     indexes: Arc<RwLock<IndexTarget>>,
     /// Unique indexes (separate for fast validation)
     indexes_unique: Arc<RwLock<Option<Vec<IndexItem>>>>,
+
     /// Fast path flag: does this table have ANY indexes?
     has_indexes: AtomicBool,
     /// Fast path flag: does this table have UNIQUE indexes?
-    has_unique_indexes: AtomicBool,
+    has_indexes_unique: AtomicBool,
 }
 
 impl<R: Repo> Clone for Table<R> {
@@ -56,7 +58,7 @@ impl<R: Repo> Clone for Table<R> {
             indexes: Arc::clone(&self.indexes),
             indexes_unique: Arc::clone(&self.indexes_unique),
             has_indexes: AtomicBool::new(self.has_indexes.load(Ordering::Relaxed)),
-            has_unique_indexes: AtomicBool::new(self.has_unique_indexes.load(Ordering::Relaxed)),
+            has_indexes_unique: AtomicBool::new(self.has_indexes_unique.load(Ordering::Relaxed)),
         }
     }
 }
@@ -90,7 +92,7 @@ impl<R: Repo> Table<R> {
             indexes: Arc::new(RwLock::new(index_target)),
             indexes_unique: Arc::new(RwLock::new(unique_indexes)),
             has_indexes: AtomicBool::new(has_indexes),
-            has_unique_indexes: AtomicBool::new(has_unique_indexes),
+            has_indexes_unique: AtomicBool::new(has_unique_indexes),
         })
     }
 
@@ -106,9 +108,8 @@ impl<R: Repo> Table<R> {
 
         interner_cell.get_or_init(|| async move {
             // Load from info_store - convert RecordId to Bytes
-            let internals_id = RecordId::system("internals");
-            let key_bytes = Bytes::copy_from_slice(internals_id.as_bytes());
-            let inter_data = info_store.get(key_bytes).await;
+            let internals_id = RecordId::system("internals").to_bytes();
+            let inter_data = info_store.get(internals_id).await;
 
             if let Ok(bytes) = inter_data {
                 // Deserialize: Vec<(u64, String)>
@@ -140,7 +141,7 @@ impl<R: Repo> Table<R> {
                 None => false,
             };
 
-        self.has_unique_indexes.store(has_unique, Ordering::Relaxed);
+        self.has_indexes_unique.store(has_unique, Ordering::Relaxed);
         drop(unique);
 
         // Update has_indexes flag
@@ -168,10 +169,9 @@ impl<R: Repo> Table<R> {
 
         // Save the full interner state - convert RecordId to Bytes
         let internals_id = RecordId::system("internals");
-        let key_bytes = Bytes::copy_from_slice(internals_id.as_bytes());
 
         // Read existing
-        let existing = self.info_store.get(key_bytes.clone()).await;
+        let existing = self.info_store.get(internals_id.to_bytes()).await;
         let mut current: Vec<(u64, String)> = if let Ok(bytes) = existing {
             bincode::deserialize(&bytes)
                 .unwrap_or_default()
@@ -186,14 +186,14 @@ impl<R: Repo> Table<R> {
         let bytes = bincode::serialize(&current)
             .map_err(|e| DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
 
-        self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
+        self.info_store.set(internals_id.to_bytes(), Bytes::from(bytes)).await?;
 
         Ok(())
     }
 
     /// Get the current record count from the counter
     async fn get_record_count(&self) -> DbResult<u64> {
-        let key_bytes = Bytes::copy_from_slice(count_key().as_bytes());
+        let key_bytes = count_key().to_bytes();
         match self.info_store.get(key_bytes).await {
             Ok(bytes) => {
                 // Deserialize u64
@@ -208,7 +208,7 @@ impl<R: Repo> Table<R> {
 
     /// Set the record count (useful for initialization or manual correction)
     async fn set_record_count(&self, count: u64) -> DbResult<()> {
-        let key_bytes = Bytes::copy_from_slice(count_key().as_bytes());
+        let key_bytes = count_key().to_bytes();
         let bytes = bincode::serialize(&count)
             .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
         self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
@@ -236,7 +236,7 @@ impl<R: Repo> Table<R> {
 
     /// Load index target from info_store
     pub async fn load_index_target(info_store: &Arc<dyn Store>) -> DbResult<Option<IndexTarget>> {
-        let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+        let key_bytes = Self::index_target_key().to_bytes();
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
                 let target: IndexTarget = bincode::deserialize(&bytes)
@@ -250,7 +250,7 @@ impl<R: Repo> Table<R> {
 
     /// Save index target to info_store
     async fn save_index_target(&self, target: &IndexTarget) -> DbResult<()> {
-        let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+        let key_bytes = Self::index_target_key().to_bytes();
         let bytes = bincode::serialize(target)
             .map_err(|e| DbError::Codec(format!("Failed to serialize index target: {}", e)))?;
         self.info_store.set(key_bytes, Bytes::from(bytes)).await?;
@@ -264,7 +264,7 @@ impl<R: Repo> Table<R> {
 
     /// Load unique indexes from info_store
     pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexItem>>> {
-        let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
+        let key_bytes = Self::unique_indexes_key().to_bytes();
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
                 let indexes: Vec<IndexItem> = bincode::deserialize(&bytes)
@@ -278,7 +278,7 @@ impl<R: Repo> Table<R> {
 
     /// Save unique indexes to info_store
     async fn save_unique_indexes(&self, unique: &Option<Vec<IndexItem>>) -> DbResult<()> {
-        let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
+        let key_bytes = Self::unique_indexes_key().to_bytes();
 
         match unique {
             Some(indexes) => {
@@ -445,7 +445,7 @@ impl<R: Repo> Table<R> {
 
             // Save to storage or delete if disabled
             if !target.is_enabled() {
-                let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+                let key_bytes = Self::index_target_key().to_bytes();
                 self.info_store.remove(key_bytes).await?;
             } else {
                 self.save_index_target(&target).await?;
@@ -491,7 +491,7 @@ impl<R: Repo> Table<R> {
         *target = IndexTarget::disabled();
 
         // Delete from storage
-        let key_bytes = Bytes::copy_from_slice(Self::index_target_key().as_bytes());
+        let key_bytes = Self::index_target_key().to_bytes();
         self.info_store.remove(key_bytes).await?;
         drop(target);
 
@@ -540,7 +540,7 @@ impl<R: Repo> Table<R> {
     /// Check unique constraints before insert/update
     async fn check_unique_constraints(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
         // FAST PATH: Check atomic flag first (O(1))
-        if !self.has_unique_indexes.load(Ordering::Relaxed) {
+        if !self.has_indexes_unique.load(Ordering::Relaxed) {
             return Ok(());  // <-- No unique indexes, skip all validation!
         }
 
@@ -551,7 +551,7 @@ impl<R: Repo> Table<R> {
     /// Check unique constraints before insert/update, optionally excluding a record ID
     async fn check_unique_constraints_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
         // FAST PATH: Check atomic flag first
-        if !self.has_unique_indexes.load(Ordering::Relaxed) {
+        if !self.has_indexes_unique.load(Ordering::Relaxed) {
             return Ok(());
         }
 
@@ -638,7 +638,7 @@ impl<R: Repo> Table<R> {
         let interner = self.get_interner().await?;
 
         // Convert RecordId to Bytes
-        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+        let key_bytes = id.to_bytes();
 
         // Read from data store
         let bytes = self.data_store.get(key_bytes).await?;
@@ -656,7 +656,7 @@ impl<R: Repo> Table<R> {
         let interner = self.get_interner().await?;
 
         // Convert RecordId to Bytes
-        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+        let key_bytes = id.to_bytes();
 
         // Check if exists
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
@@ -687,7 +687,7 @@ impl<R: Repo> Table<R> {
         let interner = self.get_interner().await?;
 
         // Convert RecordId to Bytes
-        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+        let key_bytes = id.to_bytes();
 
         // Check if exists
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
@@ -719,7 +719,7 @@ impl<R: Repo> Table<R> {
     /// Delete a record by RecordId
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Convert RecordId to Bytes
-        let key_bytes = Bytes::copy_from_slice(id.as_bytes());
+        let key_bytes = id.to_bytes();
         let removed = self.data_store.remove(key_bytes).await?;
 
         if removed {
@@ -860,12 +860,12 @@ impl<R: Repo> Table<R> {
 
     /// Check if table has any indexes (for testing)
     pub fn has_indexes(&self) -> bool {
-        self.has_indexes.load(std::sync::atomic::Ordering::Relaxed)
+        self.has_indexes.load(Ordering::Relaxed)
     }
 
     /// Check if table has unique indexes (for testing)
     pub fn has_unique_indexes_flag(&self) -> bool {
-        self.has_unique_indexes.load(std::sync::atomic::Ordering::Relaxed)
+        self.has_indexes_unique.load(Ordering::Relaxed)
     }
 }
 
@@ -1317,7 +1317,7 @@ mod tests {
         for (_id, value) in records {
             match value {
                 UserValue::Map(m) => {
-                    assert!(m.len() == 1);
+                    assert_eq!(m.len(), 1);
                     let key = m.keys().next().unwrap();
                     assert!(special_keys.contains(&key.as_str()));
                 }
