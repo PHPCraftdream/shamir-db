@@ -2,7 +2,7 @@
 
 ## Overview
 
-> **⚠️ Implementation Status (2025-02-03)**
+> **⚠️ Implementation Status (2025-02-04)**
 >
 > This document describes the **full async journal-based architecture** that we plan to implement eventually.
 >
@@ -11,6 +11,8 @@
 > - ✅ Unique constraint enforcement (synchronous validation on write)
 > - ✅ Index CRUD operations (add, remove, enable, disable)
 > - ✅ Persistence across restarts
+> - ✅ **Separated unique indexes storage** (2025-02-04)
+> - ✅ **Atomic flags for fast path optimization** (2025-02-04)
 >
 > **What's deferred:**
 > - ⏸️ Actual index storage (hash keys → Vec<RecordId>)
