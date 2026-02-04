@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, RwLock};
 use futures::pin_mut;
-use crate::db::engine::index::def::IndexDef;
+use crate::db::engine::index::items::IndexItems;
 use crate::db::engine::index::target::IndexTarget;
 
 /// Get the system record key for storing record count
@@ -36,7 +36,7 @@ pub struct Table<R: Repo> {
     /// Index target configuration (for future queries)
     index_target: Arc<RwLock<IndexTarget>>,
     /// Unique indexes (separate for fast validation)
-    unique_indexes: Arc<RwLock<Option<Vec<IndexDef>>>>,
+    unique_indexes: Arc<RwLock<Option<Vec<IndexItems>>>>,
     /// Fast path flag: does this table have ANY indexes?
     has_indexes: AtomicBool,
     /// Fast path flag: does this table have UNIQUE indexes?
@@ -263,11 +263,11 @@ impl<R: Repo> Table<R> {
     }
 
     /// Load unique indexes from info_store
-    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexDef>>> {
+    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<Option<Vec<IndexItems>>> {
         let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
-                let indexes: Vec<IndexDef> = bincode::deserialize(&bytes)
+                let indexes: Vec<IndexItems> = bincode::deserialize(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize unique indexes: {}", e)))?;
                 Ok(Some(indexes))
             }
@@ -277,7 +277,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Save unique indexes to info_store
-    async fn save_unique_indexes(&self, unique: &Option<Vec<IndexDef>>) -> DbResult<()> {
+    async fn save_unique_indexes(&self, unique: &Option<Vec<IndexItems>>) -> DbResult<()> {
         let key_bytes = Bytes::copy_from_slice(Self::unique_indexes_key().as_bytes());
 
         match unique {
@@ -333,10 +333,10 @@ impl<R: Repo> Table<R> {
             Some(indexes) => {
                 // Replace if exists with same path
                 indexes.retain(|idx| idx.path != interned_path);
-                indexes.push(IndexDef::new(interned_path.clone()));
+                indexes.push(IndexItems::new(interned_path.clone()));
             }
             None => {
-                *unique = Some(vec![IndexDef::new(interned_path.clone())]);
+                *unique = Some(vec![IndexItems::new(interned_path.clone())]);
             }
         }
 
@@ -854,7 +854,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Get the current unique indexes (for testing)
-    pub async fn get_unique_indexes(&self) -> Option<Vec<IndexDef>> {
+    pub async fn get_unique_indexes(&self) -> Option<Vec<IndexItems>> {
         self.unique_indexes.read().await.clone()
     }
 

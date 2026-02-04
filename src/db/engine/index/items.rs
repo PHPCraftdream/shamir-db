@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 
 /// Definition of a single index
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct IndexDef {
+pub struct IndexItems {
     /// Path to indexed field (interned components)
     pub path: Vec<u64>,
 }
 
-impl IndexDef {
+impl IndexItems {
     /// Create an index definition
     pub fn new(path: Vec<u64>) -> Self {
         Self { path }
@@ -24,18 +24,18 @@ mod tests {
 
     #[test]
     fn test_index_def() {
-        let def = IndexDef::new(vec![1, 2, 3]);
+        let def = IndexItems::new(vec![1, 2, 3]);
         assert_eq!(def.path, vec![1, 2, 3]);
     }
 
     #[test]
     fn test_index_def_serialization() {
-        let def = IndexDef {
+        let def = IndexItems {
             path: vec![1, 2, 3],
         };
 
         let serialized = bincode::serialize(&def).unwrap();
-        let deserialized: IndexDef = bincode::deserialize(&serialized).unwrap();
+        let deserialized: IndexItems = bincode::deserialize(&serialized).unwrap();
 
         assert_eq!(deserialized, def);
     }
