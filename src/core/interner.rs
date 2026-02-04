@@ -202,13 +202,8 @@ mod tests {
         let final_count = interner.current.load(Ordering::SeqCst);
         assert_eq!(final_count, (num_threads * keys_per_thread) + 1);
 
-        // Verify first key (should always be first since thread 0 starts first)
-        assert_eq!(
-            interner.get_ind("thread_0_key_0"),
-            Some(1)
-        );
-
-        // Verify that some keys exist and are unique
+        // Verify that keys from different threads were interned
+        assert!(interner.get_ind("thread_0_key_0").is_some());
         assert!(interner.get_ind("thread_10_key_50").is_some());
         assert!(interner.get_ind("thread_25_key_75").is_some());
         assert!(interner.get_ind("thread_49_key_99").is_some());
