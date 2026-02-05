@@ -1,4 +1,4 @@
-use super::types::{RecordKey, Repo, Store};
+use super::types::{PrefixScan, RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -323,6 +323,126 @@ impl Store for NebariStore {
 }
 
 // ============================================================================
+// PrefixScan implementation for NebariStore
+// ============================================================================
+
+#[async_trait]
+impl PrefixScan for NebariStore {
+    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
+        let tree = self.tree.clone();
+
+        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
+            let mut out = Vec::new();
+            let prefix_slice = &prefix[..];
+
+            // Calculate upper bound for prefix scan
+            let mut prefix_end = prefix.to_vec();
+            if let Some(last_byte) = prefix_end.last_mut() {
+                *last_byte = last_byte.wrapping_add(1);
+            }
+
+            tree.scan::<nebari::Error, _, _, _, _>(
+                &(prefix_slice..&prefix_end),
+                true, // forward
+                |_, _, _| ScanEvaluation::ReadData,
+                |_, _| ScanEvaluation::ReadData,
+                |key, _, value| {
+                    out.push((Bytes::copy_from_slice(key.as_ref()), Bytes::copy_from_slice(value.as_ref())));
+                    Ok(())
+                },
+            )
+            .map_err(|e| DbError::Storage(format!("NebariDB scan: {}", e)))?;
+
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let tree = self.tree.clone();
+
+        Box::pin(stream! {
+            let mut last_key: Option<Vec<u8>> = None;
+
+            // Calculate upper bound for prefix
+            let mut prefix_end = prefix.to_vec();
+            if let Some(last_byte) = prefix_end.last_mut() {
+                *last_byte = last_byte.wrapping_add(1);
+            }
+
+            loop {
+                let tree_clone = tree.clone();
+                let start_key = last_key;
+                let prefix_clone = prefix.clone();
+                let prefix_end_clone = prefix_end.clone();
+
+                let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = spawn_blocking(move || {
+                    let mut out = Vec::new();
+                    let mut next_cursor = None;
+                    let mut count = 0;
+                    let mut skipping = start_key.is_some();
+
+                    let range = if let Some(ref start) = start_key {
+                        &start[..]..&prefix_end_clone
+                    } else {
+                        &prefix_clone[..]..&prefix_end_clone
+                    };
+
+                    tree_clone.scan::<nebari::Error, _, _, _, _>(
+                        &range,
+                        true,
+                        |_, _, _| ScanEvaluation::ReadData,
+                        |_, _| ScanEvaluation::ReadData,
+                        |key, _, value| {
+                            // Skip records until we pass start_key
+                            if skipping {
+                                if let Some(ref start) = start_key {
+                                    if key.as_ref() == start.as_slice() {
+                                        skipping = false;
+                                    }
+                                } else {
+                                    skipping = false;
+                                }
+                                return Ok(());
+                            }
+
+                            // Stop if we've collected enough
+                            if count >= batch_size {
+                                return Ok(());
+                            }
+
+                            next_cursor = Some(key.to_vec());
+                            out.push((Bytes::copy_from_slice(key.as_ref()), Bytes::copy_from_slice(value.as_ref())));
+                            count += 1;
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| DbError::Storage(format!("NebariDB scan: {}", e)))?;
+
+                    Ok((out, next_cursor))
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let (batch, next_key) = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_key = next_key;
+                yield Ok(batch);
+            }
+        })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -331,6 +451,7 @@ mod tests {
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
+    use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
 
@@ -460,5 +581,62 @@ mod tests {
         // Clean up
         repo.store_delete("isolated_table1").await.unwrap();
         repo.store_delete("isolated_table2").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_nebari_prefix_scan() {
+        let path = "./test_data/nebari_prefix_scan.nebari";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+
+        let repo = NebariRepo::new(path).unwrap();
+        let roots = repo.roots.clone();
+
+        // Create NebariStore directly to access PrefixScan
+        let tree_name = "test_table";
+        let tree = Arc::new(roots.tree(nebari::tree::Unversioned::tree(tree_name)).unwrap());
+
+        let store = NebariStore { tree };
+
+        // Insert records with composite keys
+        let data = vec![
+            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
+            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
+            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
+            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+        ];
+
+        for (key, value) in &data {
+            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+        }
+
+        // Test prefix scan for "country:Russia:Moscow:"
+        let results = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:Moscow:"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+
+        // Test prefix scan for "country:Russia:"
+        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        assert_eq!(results_russia.len(), 3);
+
+        // Test streaming prefix scan
+        let mut stream = store.scan_prefix_stream(Bytes::copy_from_slice(b"country:Russia:"), 2);
+        let mut all_records = Vec::new();
+        let mut batch_count = 0;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.unwrap();
+            batch_count += 1;
+            all_records.extend(batch);
+        }
+
+        assert_eq!(all_records.len(), 3);
+        assert_eq!(batch_count, 2); // 2 + 1 = 3
     }
 }

@@ -1,4 +1,4 @@
-use super::types::{RecordKey, Repo, Store};
+use super::types::{PrefixScan, RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -377,6 +377,164 @@ impl Store for PersyStore {
 }
 
 // ============================================================================
+// PrefixScan implementation for PersyStore
+// ============================================================================
+
+#[async_trait]
+impl PrefixScan for PersyStore {
+    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+
+        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
+            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+
+            // Calculate upper bound for prefix scan
+            let mut prefix_end = prefix.to_vec();
+            if let Some(last_byte) = prefix_end.last_mut() {
+                *last_byte = last_byte.wrapping_add(1);
+            }
+
+            // Scan the index to find all keys with the given prefix
+            let mut mappings = Vec::new();
+            {
+                let prefix_bv = ByteVec::new(prefix.to_vec());
+                let prefix_end_bv = ByteVec::new(prefix_end);
+
+                let mut index_iter = tx
+                    .range::<ByteVec, ByteVec, _>(&index_name, prefix_bv..prefix_end_bv)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                    let key = RecordKey::copy_from_slice(key_bytes.as_ref());
+
+                    if let Some(val_bytes) = val_iter.next() {
+                        let persy_id_str = String::from_utf8(val_bytes.to_vec())
+                            .map_err(|e| DbError::Codec(e.to_string()))?;
+                        let persy_id: PersyId = persy_id_str.parse()
+                            .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                        mappings.push((key, persy_id));
+                    }
+                }
+            }
+
+            // Read all data using collected mappings
+            let mut out = Vec::new();
+            for (key, persy_id) in mappings {
+                let content = tx.read(&table_name, &persy_id)
+                    .map_err(|e| DbError::Storage(e.to_string()))?
+                    .ok_or_else(|| DbError::NotFound(format!("PersyId not found")))?;
+                out.push((key, Bytes::copy_from_slice(&content)));
+            }
+
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+
+        Box::pin(stream! {
+            let mut mappings: Vec<(RecordKey, PersyId)> = Vec::new();
+            let mut collected = false;
+            let mut mapping_offset = 0;
+
+            // Calculate upper bound for prefix
+            let mut prefix_end = prefix.to_vec();
+            if let Some(last_byte) = prefix_end.last_mut() {
+                *last_byte = last_byte.wrapping_add(1);
+            }
+
+            loop {
+                // First iteration: collect all mappings
+                if !collected {
+                    let db_clone = db.clone();
+                    let index_name_clone = index_name.clone();
+                    let prefix_clone = prefix.clone();
+                    let prefix_end_clone = prefix_end.clone();
+
+                    let collect_result: DbResult<Vec<_>> = spawn_blocking(move || {
+                        let mut tx = db_clone.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+                        let mut result = Vec::new();
+
+                        let prefix_bv = ByteVec::new(prefix_clone.to_vec());
+                        let prefix_end_bv = ByteVec::new(prefix_end_clone);
+
+                        let mut index_iter = tx
+                            .range::<ByteVec, ByteVec, _>(&index_name_clone, prefix_bv..prefix_end_bv)
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                        while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                            let key = RecordKey::copy_from_slice(key_bytes.as_ref());
+
+                            if let Some(val_bytes) = val_iter.next() {
+                                let persy_id_str = String::from_utf8(val_bytes.to_vec())
+                                    .map_err(|e| DbError::Codec(e.to_string()))?;
+                                let persy_id: PersyId = persy_id_str.parse()
+                                    .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                                result.push((key, persy_id));
+                            }
+                        }
+
+                        Ok(result)
+                    })
+                    .await
+                    .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                    mappings = collect_result?;
+                    collected = true;
+                }
+
+                // Yield next batch
+                if mapping_offset >= mappings.len() {
+                    break;
+                }
+
+                let end_idx = (mapping_offset + batch_size).min(mappings.len());
+                let batch_mappings = mappings[mapping_offset..end_idx].to_vec();
+                mapping_offset = end_idx;
+
+                let db_clone = db.clone();
+                let table_name_clone = table_name.clone();
+
+                let batch_result: DbResult<Vec<_>> = spawn_blocking(move || {
+                    let mut tx = db_clone.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+                    let mut out = Vec::new();
+
+                    for (key, persy_id) in batch_mappings {
+                        let content = tx.read(&table_name_clone, &persy_id)
+                            .map_err(|e| DbError::Storage(e.to_string()))?
+                            .ok_or_else(|| DbError::NotFound(format!("PersyId not found")))?;
+                        out.push((key, Bytes::copy_from_slice(&content)));
+                    }
+
+                    Ok(out)
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let batch = batch_result?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                yield Ok(batch);
+            }
+        })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -385,6 +543,7 @@ mod tests {
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
+    use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
 
@@ -505,5 +664,71 @@ mod tests {
 
         repo.store_delete("isolated_table1").await.unwrap();
         repo.store_delete("isolated_table2").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persy_prefix_scan() {
+        let path = "./test_data/persy_prefix_scan.persy";
+        if std::path::Path::new(path).exists() {
+            fs::remove_file(path).unwrap();
+        }
+
+        let repo = PersyRepo::new(path).unwrap();
+        let db = repo.db.clone();
+
+        // Create PersyStore directly to access PrefixScan
+        let table_name = "test_table";
+        let index_name = format!("{}_idx", table_name);
+        let mut tx = db.begin().unwrap();
+
+        tx.create_segment(&table_name).unwrap();
+        tx.create_index::<ByteVec, ByteVec>(&index_name, persy::ValueMode::Replace).unwrap();
+        tx.prepare().unwrap().commit().unwrap();
+
+        let store = PersyStore {
+            db,
+            table_name: table_name.to_string(),
+            index_name,
+        };
+
+        // Insert records with composite keys
+        let data = vec![
+            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
+            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
+            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
+            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+        ];
+
+        for (key, value) in &data {
+            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+        }
+
+        // Test prefix scan for "country:Russia:Moscow:"
+        let results = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:Moscow:"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+
+        // Test prefix scan for "country:Russia:"
+        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        assert_eq!(results_russia.len(), 3);
+
+        // Test streaming prefix scan
+        let mut stream = store.scan_prefix_stream(Bytes::copy_from_slice(b"country:Russia:"), 2);
+        let mut all_records = Vec::new();
+        let mut batch_count = 0;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.unwrap();
+            batch_count += 1;
+            all_records.extend(batch);
+        }
+
+        assert_eq!(all_records.len(), 3);
+        assert_eq!(batch_count, 2); // 2 + 1 = 3
     }
 }

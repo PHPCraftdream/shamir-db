@@ -1,4 +1,4 @@
-use super::types::{RecordKey, Repo, Store};
+use super::types::{PrefixScan, RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -229,6 +229,107 @@ impl Store for FjallStore {
 }
 
 // ============================================================================
+// PrefixScan implementation for FjallStore
+// ============================================================================
+
+#[async_trait]
+impl PrefixScan for FjallStore {
+    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
+        let keyspace = self.keyspace.clone();
+
+        task::spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
+            let prefix_slice = &prefix[..];
+            let mut items = Vec::new();
+
+            // Fjall doesn't have native prefix scan, so we iterate and filter
+            for guard in keyspace.iter() {
+                let (key, value_slice) = guard
+                    .into_inner()
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                // Check if key starts with prefix
+                if key.starts_with(prefix_slice) {
+                    items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
+                }
+            }
+
+            Ok(items)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let keyspace = self.keyspace.clone();
+
+        Box::pin(stream! {
+            let mut last_key: Option<Vec<u8>> = None;
+            let prefix_slice = prefix.to_vec();
+
+            loop {
+                let keyspace_clone = keyspace.clone();
+                let start_key = last_key;
+                let prefix_clone = prefix_slice.clone();
+
+                let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
+                    let mut items = Vec::new();
+                    let mut last_batch_key: Option<Vec<u8>> = None;
+
+                    let mut iter = keyspace_clone.iter();
+
+                    // Skip until we pass the cursor
+                    if let Some(start) = start_key {
+                        while let Some(guard) = iter.next() {
+                            let (key, _) = guard
+                                .into_inner()
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                            if key.as_ref() == start.as_slice() {
+                                break;
+                            }
+                        }
+                    }
+
+                    for guard in iter {
+                        let (key, value_slice) = guard
+                            .into_inner()
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                        // Stop if no longer starts with prefix
+                        if !key.starts_with(&prefix_clone) {
+                            break;
+                        }
+
+                        last_batch_key = Some(key.to_vec());
+                        items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
+
+                        if items.len() >= batch_size {
+                            break;
+                        }
+                    }
+
+                    Ok((items, last_batch_key))
+                })
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+                let (batch, next_key) = batch?;
+
+                if batch.is_empty() {
+                    break;
+                }
+
+                last_key = next_key;
+                yield Ok(batch);
+            }
+        })
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -237,6 +338,7 @@ mod tests {
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
+    use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
 
@@ -318,5 +420,62 @@ mod tests {
         let mut tables_after_delete = repo.stores_list().await.unwrap();
         tables_after_delete.sort();
         assert_eq!(tables_after_delete, vec!["table1", "table3"]);
+    }
+
+    #[tokio::test]
+    async fn test_fjall_prefix_scan() {
+        let path = "./test_data/fjall_prefix_scan";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+
+        let repo = FjallRepo::new(path).unwrap();
+        let db = repo.db.clone();
+
+        // Create FjallStore directly to access PrefixScan
+        let table_name = "test_table";
+        let keyspace = db.keyspace(table_name, || KeyspaceCreateOptions::default()).unwrap();
+
+        let store = FjallStore { keyspace };
+
+        // Insert records with composite keys
+        let data = vec![
+            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
+            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
+            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
+            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+        ];
+
+        for (key, value) in &data {
+            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+        }
+
+        // Test prefix scan for "country:Russia:Moscow:"
+        let results = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:Moscow:"))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+
+        // Test prefix scan for "country:Russia:"
+        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        assert_eq!(results_russia.len(), 3);
+
+        // Test streaming prefix scan
+        let mut stream = store.scan_prefix_stream(Bytes::copy_from_slice(b"country:Russia:"), 2);
+        let mut all_records = Vec::new();
+        let mut batch_count = 0;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.unwrap();
+            batch_count += 1;
+            all_records.extend(batch);
+        }
+
+        assert_eq!(all_records.len(), 3);
+        assert_eq!(batch_count, 2); // 2 + 1 = 3
     }
 }
