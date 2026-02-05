@@ -6,7 +6,7 @@ use crate::db::storage::types::Store;
 
 pub struct TableIndexManager {
     // Метаданные (уже есть)
-    index_target: Arc<RwLock<IndexInfo>>,
+    indexes: Arc<RwLock<IndexInfo>>,
     indexes_unique: Arc<RwLock<IndexInfo>>,
 
     // Флаги быстрого пути
