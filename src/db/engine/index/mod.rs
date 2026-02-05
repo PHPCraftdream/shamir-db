@@ -4,3 +4,4 @@
 
 pub mod item;
 pub mod target;
+pub mod manager;
