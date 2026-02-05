@@ -44,6 +44,52 @@ pub trait Store: Send + Sync {
     fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 }
 
+/// A trait for stores that support prefix-based key scanning.
+///
+/// This trait enables efficient retrieval of all records with keys starting
+/// with a given prefix, which is essential for implementing composite indexes
+/// like "idx:field:value:record_id".
+///
+/// # Example
+/// ```ignore
+/// // Using composite keys: "user:city:Moscow:user_123"
+/// let prefix = b"user:city:Moscow:";
+/// let results = store.scan_prefix(prefix.into()).await?;
+/// // Returns all (key, value) pairs where key starts with the prefix
+/// ```
+#[async_trait]
+pub trait PrefixScan: Send + Sync {
+    /// Returns all records with keys starting with the given prefix.
+    ///
+    /// # Arguments
+    /// * `prefix` - The prefix to search for (e.g., b"idx:city:Moscow:")
+    ///
+    /// # Returns
+    /// All (key, value) pairs where key starts with the prefix
+    ///
+    /// # Performance
+    /// - For Sled: O(log n + k) using native `scan_prefix()`
+    /// - For others: O(log n + k) using `range(prefix..)` + filtering
+    /// where k is the number of matching records
+    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>>;
+
+    /// Returns an async stream that yields batches of records with keys starting with the given prefix.
+    ///
+    /// Like `iter_stream()` but filtered by prefix. More efficient than loading all results into memory.
+    ///
+    /// # Arguments
+    /// * `prefix` - The prefix to search for
+    /// * `batch_size` - Number of records per batch
+    ///
+    /// # Returns
+    /// Stream that yields batches of matching records
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+}
+
 /// A trait for a repository that can manage multiple `Store` instances.
 #[async_trait]
 pub trait Repo: Send + Sync {
