@@ -468,14 +468,17 @@ impl PrefixScan for CanopyStore {
                         let mut out = Vec::new();
                         let mut next_cursor = None;
 
-                        // Use range starting from cursor
-                        let iter_result = if let Some(start) = start_key {
-                            tree.range(start.as_slice()..&prefix_end_clone)
+                        // Use range with exclusive start to avoid duplicates
+                        use std::ops::Bound;
+
+                        let range_bounds: (Bound<&[u8]>, Bound<&[u8]>) = if let Some(start) = &start_key {
+                            (Bound::Excluded(start.as_slice()), Bound::Excluded(prefix_end_clone.as_slice()))
                         } else {
-                            tree.range(prefix_clone.as_ref()..&prefix_end_clone)
+                            (Bound::Included(prefix_clone.as_ref()), Bound::Excluded(prefix_end_clone.as_slice()))
                         };
 
-                        let mut iter = iter_result
+                        let mut iter = tree
+                            .range::<&[u8]>(range_bounds)
                             .map_err(|e| DbError::Storage(format!("CanopyDB iter: {}", e)))?;
 
                         // Collect up to batch_size items

@@ -276,42 +276,35 @@ impl PrefixScan for FjallStore {
                 let prefix_clone = prefix_slice.clone();
 
                 let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
-                    let mut items = Vec::new();
-                    let mut last_batch_key: Option<Vec<u8>> = None;
-
-                    let mut iter = keyspace_clone.iter();
-
-                    // Skip until we pass the cursor
-                    if let Some(start) = start_key {
-                        while let Some(guard) = iter.next() {
-                            let (key, _) = guard
-                                .into_inner()
-                                .map_err(|e| DbError::Storage(e.to_string()))?;
-                            if key.as_ref() == start.as_slice() {
-                                break;
-                            }
-                        }
-                    }
-
-                    for guard in iter {
-                        let (key, value_slice) = guard
+                    // First pass: collect all matching records (fjall iter order is not guaranteed)
+                    let mut all_matches: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                    for guard in keyspace_clone.iter() {
+                        let (key, value) = guard
                             .into_inner()
                             .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                        // Stop if no longer starts with prefix
-                        if !key.starts_with(&prefix_clone) {
-                            break;
-                        }
-
-                        last_batch_key = Some(key.to_vec());
-                        items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
-
-                        if items.len() >= batch_size {
-                            break;
+                        if key.starts_with(&prefix_clone) {
+                            all_matches.push((key.to_vec(), value.to_vec()));
                         }
                     }
 
-                    Ok((items, last_batch_key))
+                    // Filter by cursor and take batch_size
+                    let start_idx = if let Some(start) = &start_key {
+                        all_matches.iter().position(|(k, _)| k.as_slice() > start.as_slice()).unwrap_or(all_matches.len())
+                    } else {
+                        0
+                    };
+
+                    let batch_range = start_idx..(start_idx + batch_size).min(all_matches.len());
+                    let batch_end = batch_range.end;
+                    let items: Vec<_> = all_matches[batch_range]
+                        .iter()
+                        .map(|(k, v)| (Bytes::copy_from_slice(k), Bytes::copy_from_slice(v)))
+                        .collect();
+
+                    let last_key = batch_end.checked_sub(1).and_then(|i| all_matches.get(i).map(|(k, _)| k.clone()));
+
+                    Ok((items, last_key))
                 })
                 .await
                 .map_err(|e| DbError::Internal(e.to_string()))?;
