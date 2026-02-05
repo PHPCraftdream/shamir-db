@@ -1,4 +1,4 @@
-use super::types::{PrefixScan, RecordKey, Repo, Store};
+use super::types::{RecordKey, Repo, Store};
 use crate::db::error::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
@@ -247,14 +247,7 @@ impl Store for RedbStore {
             }
         })
     }
-}
 
-// ============================================================================
-// PrefixScan implementation for RedbStore
-// ============================================================================
-
-#[async_trait]
-impl PrefixScan for RedbStore {
     async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();

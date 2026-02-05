@@ -42,24 +42,10 @@ pub trait Store: Send + Sync {
     /// Stream that yields DbResult<Vec<(RecordKey, Bytes)>> - each batch has exactly batch_size items
     /// (except possibly the last batch which may be smaller)
     fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
-}
 
-/// A trait for stores that support prefix-based key scanning.
-///
-/// This trait enables efficient retrieval of all records with keys starting
-/// with a given prefix, which is essential for implementing composite indexes
-/// like "idx:field:value:record_id".
-///
-/// # Example
-/// ```ignore
-/// // Using composite keys: "user:city:Moscow:user_123"
-/// let prefix = b"user:city:Moscow:";
-/// let results = store.scan_prefix(prefix.into()).await?;
-/// // Returns all (key, value) pairs where key starts with the prefix
-/// ```
-#[async_trait]
-pub trait PrefixScan: Send + Sync {
     /// Returns all records with keys starting with the given prefix.
+    ///
+    /// This enables efficient retrieval of records with composite keys like "idx:field:value:record_id".
     ///
     /// # Arguments
     /// * `prefix` - The prefix to search for (e.g., b"idx:city:Moscow:")
