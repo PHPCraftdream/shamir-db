@@ -304,9 +304,6 @@ impl<R: Repo> Table<R> {
             .map(|&s| interner.touch_ind(s).val())
             .collect();
 
-        // Validate by scanning all existing data
-        self.validate_unique_index(&interned_path, interner).await?;
-
         // Update unique_indexes
         let mut unique = self.indexes_unique.write().await;
 
@@ -326,59 +323,6 @@ impl<R: Repo> Table<R> {
         self.update_index_flags().await;
 
         Ok(())
-    }
-
-    /// Validate that a unique index can be created (no duplicates)
-    async fn validate_unique_index(&self, path: &[u64], interner: &Interner) -> DbResult<()> {
-        use std::collections::HashSet;
-
-        let mut seen_values = HashSet::new();
-
-        // Stream all records and check for duplicates
-        let stream = self.list_stream(100);
-        pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-
-            for (_id, value) in batch {
-                // Extract value at path
-                if let Some(extracted) = Self::extract_value(&value, path, interner)? {
-                    // Check if we've seen this value before
-                    if !seen_values.insert(extracted.clone()) {
-                        // Duplicate found!
-                        return Err(DbError::DuplicateKey(format!(
-                            "Cannot create unique index: duplicate value found at path: {:?}",
-                            path
-                        )));
-                    }
-                }
-                // If Some(None), we have null values which are allowed in unique indexes
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Extract a value from UserValue by interned path
-    fn extract_value(value: &UserValue, path: &[u64], interner: &Interner) -> DbResult<Option<UserValue>> {
-        let mut current = Some(value);
-
-        for &component in path {
-            match current {
-                Some(UserValue::Map(map)) => {
-                    // Look up key by interned ID
-                    let key = interner.get_str(component)
-                        .ok_or_else(|| DbError::Internal(format!(
-                            "Cannot reverse lookup interned ID: {}", component
-                        )))?;
-
-                    current = map.get(key.as_str());
-                }
-                _ => return Ok(None), // Path doesn't exist
-            }
-        }
-
-        Ok(current.map(|v| v.clone()))
     }
 
     /// Remove an index
@@ -464,9 +408,6 @@ impl<R: Repo> Table<R> {
     pub async fn insert(&self, value: &UserValue) -> DbResult<RecordId> {
         let interner = self.get_interner().await?;
 
-        // Check unique constraints before inserting
-        self.check_unique_constraints(value, interner).await?;
-
         // Transform UserValue → InnerValue
         let transform = transform::user_to_inner(value, interner);
 
@@ -488,102 +429,6 @@ impl<R: Repo> Table<R> {
         let arr: [u8; 16] = key_bytes.as_ref().try_into()
             .map_err(|_| DbError::Internal("Failed to convert key bytes to RecordId".to_string()))?;
         Ok(RecordId(arr))
-    }
-
-    /// Check unique constraints before insert/update
-    async fn check_unique_constraints(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
-        // FAST PATH: Check atomic flag first (O(1))
-        if !self.has_indexes_unique.load(Ordering::Relaxed) {
-            return Ok(());  // <-- No unique indexes, skip all validation!
-        }
-
-        // SLOW PATH: Has unique indexes, need to validate
-        self.check_unique_constraints_slow(value, interner).await
-    }
-
-    /// Check unique constraints before insert/update, optionally excluding a record ID
-    async fn check_unique_constraints_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
-        // FAST PATH: Check atomic flag first
-        if !self.has_indexes_unique.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        // SLOW PATH: Has unique indexes, need to validate
-        self.check_unique_constraints_slow_exclude(value, interner, exclude_id).await
-    }
-
-    /// Slow path: validate unique constraints (only called when has_unique_indexes == true)
-    async fn check_unique_constraints_slow(&self, value: &UserValue, interner: &Interner) -> DbResult<()> {
-        // Get unique indexes (only called when flag is true)
-        let unique = self.indexes_unique.read().await;
-        let unique_indexes = match unique.indexes() {
-            Some(indexes) => indexes,
-            None => return Ok(()),  // Race condition: flag was cleared
-        };
-
-        // Check each unique index
-        for index_def in unique_indexes {
-            // Extract value at path
-            if let Some(extracted) = Self::extract_value(value, &index_def.path, interner)? {
-                // Check if this value already exists in the table
-                self.check_value_unique_exclude(&index_def.path, &extracted, interner, None).await?;
-            }
-            // None means the value at path is null - that's ok for unique indexes
-        }
-
-        Ok(())
-    }
-
-    /// Slow path: validate unique constraints with exclude (only called when has_unique_indexes == true)
-    async fn check_unique_constraints_slow_exclude(&self, value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
-        // Get unique indexes (only called when flag is true)
-        let unique = self.indexes_unique.read().await;
-        let unique_indexes = match unique.indexes() {
-            Some(indexes) => indexes,
-            None => return Ok(()),  // Race condition: flag was cleared
-        };
-
-        // Check each unique index
-        for index_def in unique_indexes {
-            // Extract value at path
-            if let Some(extracted) = Self::extract_value(value, &index_def.path, interner)? {
-                // Check if this value already exists in the table
-                self.check_value_unique_exclude(&index_def.path, &extracted, interner, exclude_id).await?;
-            }
-            // None means the value at path is null - that's ok for unique indexes
-        }
-
-        Ok(())
-    }
-
-    /// Check if a value is unique at a given path, optionally excluding a record ID
-    async fn check_value_unique_exclude(&self, path: &[u64], value: &UserValue, interner: &Interner, exclude_id: Option<RecordId>) -> DbResult<()> {
-        // Stream all records and check for duplicates
-        let stream = self.list_stream(100);
-        pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-
-            for (id, existing_value) in batch {
-                // Skip the excluded record (for updates)
-                if let Some(exclude_id) = exclude_id {
-                    if id == exclude_id {
-                        continue;
-                    }
-                }
-
-                if let Some(existing) = Self::extract_value(&existing_value, path, interner)? {
-                    if existing == *value {
-                        return Err(DbError::DuplicateKey(format!(
-                            "Duplicate value for unique index at path: {:?}",
-                            path
-                        )));
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Get a UserValue by RecordId
@@ -617,9 +462,6 @@ impl<R: Repo> Table<R> {
             return Ok(false);
         }
 
-        // Check unique constraints before updating (excluding current record)
-        self.check_unique_constraints_exclude(value, interner, Some(id)).await?;
-
         // Transform UserValue → InnerValue
         let transform = transform::user_to_inner(value, interner);
 
@@ -644,10 +486,6 @@ impl<R: Repo> Table<R> {
 
         // Check if exists
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
-
-        // Check unique constraints (exclude current record if updating)
-        let exclude_id = if exists { Some(id) } else { None };
-        self.check_unique_constraints_exclude(value, interner, exclude_id).await?;
 
         // Transform UserValue → InnerValue
         let transform = transform::user_to_inner(value, interner);
@@ -1700,24 +1538,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_add_unique_index_with_duplicates() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Insert two records with same email
-        let mut data1 = new_map();
-        data1.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
-        table.insert(&UserValue::Map(data1)).await.unwrap();
-
-        let mut data2 = new_map();
-        data2.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
-        table.insert(&UserValue::Map(data2)).await.unwrap();
-
-        // Try to add unique index - should fail
-        let result = table.add_unique_index(&["email"]).await;
-        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
-    }
-
-    #[tokio::test]
     async fn test_remove_index() {
         let (table, _dir) = create_test_table().await.unwrap();
 
@@ -1770,100 +1590,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unique_constraint_on_insert() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Add unique index
-        table.add_unique_index(&["email"]).await.unwrap();
-
-        // Insert first record
-        let mut data1 = new_map();
-        data1.insert("email".to_string(), UserValue::Str("unique@test.com".to_string()));
-        table.insert(&UserValue::Map(data1)).await.unwrap();
-
-        // Try to insert duplicate - should fail
-        let mut data2 = new_map();
-        data2.insert("email".to_string(), UserValue::Str("unique@test.com".to_string()));
-        let result = table.insert(&UserValue::Map(data2)).await;
-        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
-
-        // Different email should work
-        let mut data3 = new_map();
-        data3.insert("email".to_string(), UserValue::Str("different@test.com".to_string()));
-        table.insert(&UserValue::Map(data3)).await.unwrap();
-
-        // Verify count is 2
-        assert_eq!(table.count().await.unwrap(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_unique_constraint_on_update() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Add unique index
-        table.add_unique_index(&["email"]).await.unwrap();
-
-        // Insert two records
-        let mut data1 = new_map();
-        data1.insert("email".to_string(), UserValue::Str("first@test.com".to_string()));
-        let id1 = table.insert(&UserValue::Map(data1)).await.unwrap();
-
-        let mut data2 = new_map();
-        data2.insert("email".to_string(), UserValue::Str("second@test.com".to_string()));
-        table.insert(&UserValue::Map(data2)).await.unwrap();
-
-        // Try to update first record to have same email as second
-        let mut update_data = new_map();
-        update_data.insert("email".to_string(), UserValue::Str("second@test.com".to_string()));
-        let result = table.update(id1, &UserValue::Map(update_data)).await;
-        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
-
-        // Updating to different email should work
-        let mut update_data2 = new_map();
-        update_data2.insert("email".to_string(), UserValue::Str("changed@test.com".to_string()));
-        table.update(id1, &UserValue::Map(update_data2)).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_unique_constraint_on_set() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Add unique index
-        table.add_unique_index(&["email"]).await.unwrap();
-
-        // Insert first record
-        let mut data1 = new_map();
-        data1.insert("email".to_string(), UserValue::Str("first@test.com".to_string()));
-        let id1 = RecordId::new();
-        table.set(id1, &UserValue::Map(data1)).await.unwrap();
-
-        // Try to set second record with same email
-        let mut data2 = new_map();
-        data2.insert("email".to_string(), UserValue::Str("first@test.com".to_string()));
-        let id2 = RecordId::new();
-        let result = table.set(id2, &UserValue::Map(data2)).await;
-        assert!(matches!(result, Err(DbError::DuplicateKey(_))));
-    }
-
-    #[tokio::test]
-    async fn test_unique_constraint_allows_null() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Add unique index
-        table.add_unique_index(&["email"]).await.unwrap();
-
-        // Insert multiple records without email field (null)
-        for i in 0..3 {
-            let mut data = new_map();
-            data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
-            table.insert(&UserValue::Map(data)).await.unwrap();
-        }
-
-        // All should succeed - null values are allowed in unique indexes
-        assert_eq!(table.count().await.unwrap(), 3);
-    }
-
-    #[tokio::test]
     async fn test_multiple_indexes() {
         let (table, _dir) = create_test_table().await.unwrap();
 
@@ -1911,27 +1637,6 @@ mod tests {
         let unique_indexes = table2.get_unique_indexes().await;
         assert!(unique_indexes.has_indexes());
         assert_eq!(unique_indexes.indexes().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_update_same_value_succeeds() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Add unique index
-        table.add_unique_index(&["email"]).await.unwrap();
-
-        // Insert record
-        let mut data = new_map();
-        data.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
-        let id = table.insert(&UserValue::Map(data.clone())).await.unwrap();
-
-        // Update with same value - should succeed (self-update is allowed)
-        let result = table.update(id, &UserValue::Map(data.clone())).await.unwrap();
-        assert!(result);
-
-        // Verify record is still there
-        let retrieved = table.get(id).await.unwrap();
-        assert_eq!(retrieved, UserValue::Map(data));
     }
 
     // === Tests for Separated Unique Indexes Storage ===
@@ -2236,29 +1941,5 @@ mod tests {
         // Flags should be restored from persistent storage
         assert!(table2.has_indexes(), "has_indexes should be restored from storage");
         assert!(table2.has_unique_indexes_flag(), "has_unique_indexes should be restored from storage");
-    }
-
-    #[tokio::test]
-    async fn test_fast_path_with_unique_constraint() {
-        let (table, _dir) = create_test_table().await.unwrap();
-
-        // Add unique index
-        table.add_unique_index(&["email"]).await.unwrap();
-        assert!(table.has_unique_indexes_flag());
-
-        // Insert first record
-        let mut data = new_map();
-        data.insert("email".to_string(), UserValue::Str("test@example.com".to_string()));
-        let id1 = table.insert(&UserValue::Map(data.clone())).await.unwrap();
-
-        // Try to insert duplicate - should fail
-        let result = table.insert(&UserValue::Map(data.clone())).await;
-        assert!(result.is_err(), "Duplicate should fail with unique index");
-
-        // First record should still exist
-        let retrieved = table.get(id1).await.unwrap();
-        assert_eq!(retrieved, UserValue::Map(data));
-
-        assert_eq!(table.count().await.unwrap(), 1);
     }
 }
