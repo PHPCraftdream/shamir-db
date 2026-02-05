@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::RwLock;
-use crate::db::engine::index::target::IndexTarget;
+use crate::db::engine::index::index_info::IndexInfo;
 use crate::db::storage::types::Store;
 
-pub struct IndexManager {
+pub struct TableIndexManager {
     // Метаданные (уже есть)
-    index_target: Arc<RwLock<IndexTarget>>,
-    indexes_unique: Arc<RwLock<IndexTarget>>,
+    index_target: Arc<RwLock<IndexInfo>>,
+    indexes_unique: Arc<RwLock<IndexInfo>>,
 
     // Флаги быстрого пути
     has_indexes: AtomicBool,

@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use super::item::IndexItem;
+use super::index_info_item::IndexInfoItem;
 
 /// Status of index synchronization with disk
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,21 +43,21 @@ pub enum IndexMode {
     All,
 
     /// Selective indexing - only specific paths are indexed
-    Selective(Vec<IndexItem>),
+    Selective(Vec<IndexInfoItem>),
 }
 
 /// Indexing target with mode and sync status
 ///
 /// Status is NOT serialized - it's runtime-only state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexTarget {
+pub struct IndexInfo {
     mode: IndexMode,
     /// Status is skipped during serialization
     #[serde(skip)]
     status: Arc<AtomicU8>,
 }
 
-impl IndexTarget {
+impl IndexInfo {
     /// Create Disabled target
     pub fn disabled() -> Self {
         Self {
@@ -75,7 +75,7 @@ impl IndexTarget {
     }
 
     /// Create Selective target with indexes
-    pub fn selective(indexes: Vec<IndexItem>) -> Self {
+    pub fn selective(indexes: Vec<IndexInfoItem>) -> Self {
         Self {
             mode: IndexMode::Selective(indexes),
             status: Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8())),
@@ -126,7 +126,7 @@ impl IndexTarget {
     pub fn add_index(&mut self, path: Vec<u64>) {
         match &mut self.mode {
             IndexMode::Disabled => {
-                self.mode = IndexMode::Selective(vec![IndexItem { path }]);
+                self.mode = IndexMode::Selective(vec![IndexInfoItem { path }]);
             }
             IndexMode::All => {
                 // Already indexing everything, nothing to do
@@ -134,7 +134,7 @@ impl IndexTarget {
             IndexMode::Selective(indexes) => {
                 // Remove existing index with same path (if any)
                 indexes.retain(|idx| idx.path != path);
-                indexes.push(IndexItem { path });
+                indexes.push(IndexInfoItem { path });
             }
         }
         self.mark_dirty();
@@ -164,7 +164,7 @@ impl IndexTarget {
     }
 
     /// Get all indexes if selective, None otherwise
-    pub fn indexes(&self) -> Option<&[IndexItem]> {
+    pub fn indexes(&self) -> Option<&[IndexInfoItem]> {
         match &self.mode {
             IndexMode::Selective(indexes) => Some(indexes),
             _ => None,
@@ -193,20 +193,20 @@ impl IndexTarget {
     }
 }
 
-impl Default for IndexTarget {
+impl Default for IndexInfo {
     fn default() -> Self {
         Self::disabled()
     }
 }
 
 // PartialEq based on mode only (status is runtime state)
-impl PartialEq for IndexTarget {
+impl PartialEq for IndexInfo {
     fn eq(&self, other: &Self) -> bool {
         self.mode == other.mode
     }
 }
 
-impl Eq for IndexTarget {}
+impl Eq for IndexInfo {}
 
 #[cfg(test)]
 mod tests {
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_index_target_disabled() {
-        let target = IndexTarget::disabled();
+        let target = IndexInfo::disabled();
         assert!(!target.is_enabled());
         assert!(!target.is_all());
         assert!(!target.is_selective());
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn test_index_target_all() {
-        let target = IndexTarget::all();
+        let target = IndexInfo::all();
         assert!(target.is_enabled());
         assert!(target.is_all());
         assert!(!target.is_selective());
@@ -236,15 +236,15 @@ mod tests {
     #[test]
     fn test_index_target_selective() {
         let indexes = vec![
-            IndexItem::new(vec![1, 2]),
-            IndexItem::new(vec![3, 4]),
+            IndexInfoItem::new(vec![1, 2]),
+            IndexInfoItem::new(vec![3, 4]),
         ];
-        let target = IndexTarget::selective(indexes.clone());
+        let target = IndexInfo::selective(indexes.clone());
 
         assert!(target.is_enabled());
         assert!(!target.is_all());
         assert!(target.is_selective());
-        assert_eq!(target.indexes(), Some(&indexes as &[IndexItem]));
+        assert_eq!(target.indexes(), Some(&indexes as &[IndexInfoItem]));
         assert!(target.has_index(&vec![1, 2]));
         assert!(target.has_index(&vec![3, 4]));
         assert!(!target.has_index(&vec![5]));
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_index_status() {
-        let target = IndexTarget::all();
+        let target = IndexInfo::all();
         assert_eq!(target.status(), IndexStatus::Actual);
         assert!(!target.needs_sync());
 
@@ -267,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_add_index_marks_dirty() {
-        let mut target = IndexTarget::disabled();
+        let mut target = IndexInfo::disabled();
         assert!(!target.needs_sync());
 
         target.add_index(vec![1, 2]);
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_remove_index_marks_dirty() {
-        let mut target = IndexTarget::selective(vec![IndexItem::new(vec![1, 2])]);
+        let mut target = IndexInfo::selective(vec![IndexInfoItem::new(vec![1, 2])]);
         target.mark_actual(); // Clear initial dirty state
 
         target.remove_index(&vec![1, 2]);
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_index_target_add_index_to_disabled() {
-        let mut target = IndexTarget::disabled();
+        let mut target = IndexInfo::disabled();
         target.add_index(vec![1, 2]);
 
         assert!(target.is_selective());
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_index_target_add_index_to_all() {
-        let mut target = IndexTarget::all();
+        let mut target = IndexInfo::all();
         target.add_index(vec![1, 2]);
 
         // Still All - no change
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_index_target_add_index_to_selective() {
-        let mut target = IndexTarget::selective(vec![IndexItem::new(vec![1])]);
+        let mut target = IndexInfo::selective(vec![IndexInfoItem::new(vec![1])]);
         target.add_index(vec![2, 3]);
 
         let indexes = target.indexes().unwrap();
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn test_index_target_add_duplicate_replaces() {
-        let mut target = IndexTarget::selective(vec![IndexItem::new(vec![1])]);
+        let mut target = IndexInfo::selective(vec![IndexInfoItem::new(vec![1])]);
         target.add_index(vec![1]); // Add same path again
 
         let indexes = target.indexes().unwrap();
@@ -325,9 +325,9 @@ mod tests {
 
     #[test]
     fn test_index_target_remove_index_from_selective() {
-        let mut target = IndexTarget::selective(vec![
-            IndexItem::new(vec![1, 2]),
-            IndexItem::new(vec![3, 4]),
+        let mut target = IndexInfo::selective(vec![
+            IndexInfoItem::new(vec![1, 2]),
+            IndexInfoItem::new(vec![3, 4]),
         ]);
 
         let removed = target.remove_index(&vec![1, 2]);
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_index_target_remove_last_index_becomes_disabled() {
-        let mut target = IndexTarget::selective(vec![IndexItem::new(vec![1, 2])]);
+        let mut target = IndexInfo::selective(vec![IndexInfoItem::new(vec![1, 2])]);
 
         let removed = target.remove_index(&vec![1, 2]);
         assert!(removed);
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_index_target_remove_index_from_disabled() {
-        let mut target = IndexTarget::disabled();
+        let mut target = IndexInfo::disabled();
         let removed = target.remove_index(&vec![1, 2]);
 
         assert!(!removed);
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_index_target_remove_index_from_all() {
-        let mut target = IndexTarget::all();
+        let mut target = IndexInfo::all();
         let removed = target.remove_index(&vec![1, 2]);
 
         assert!(!removed);
@@ -369,17 +369,17 @@ mod tests {
     #[test]
     fn test_index_target_serialization() {
         let targets = vec![
-            IndexTarget::disabled(),
-            IndexTarget::all(),
-            IndexTarget::selective(vec![
-                IndexItem::new(vec![1, 2]),
-                IndexItem::new(vec![3]),
+            IndexInfo::disabled(),
+            IndexInfo::all(),
+            IndexInfo::selective(vec![
+                IndexInfoItem::new(vec![1, 2]),
+                IndexInfoItem::new(vec![3]),
             ]),
         ];
 
         for original in targets {
             let serialized = bincode::serialize(&original).unwrap();
-            let deserialized: IndexTarget = bincode::deserialize(&serialized).unwrap();
+            let deserialized: IndexInfo = bincode::deserialize(&serialized).unwrap();
             assert_eq!(deserialized, original);
             // Status should be Actual after deserialization (default)
             assert_eq!(deserialized.status(), IndexStatus::Actual);
@@ -388,17 +388,17 @@ mod tests {
 
     #[test]
     fn test_index_target_default() {
-        let target = IndexTarget::default();
+        let target = IndexInfo::default();
         assert!(!target.is_enabled());
     }
 
     #[test]
     fn test_status_not_serialized() {
-        let target = IndexTarget::all();
+        let target = IndexInfo::all();
         target.mark_dirty();
 
         let serialized = bincode::serialize(&target).unwrap();
-        let deserialized: IndexTarget = bincode::deserialize(&serialized).unwrap();
+        let deserialized: IndexInfo = bincode::deserialize(&serialized).unwrap();
 
         // Status is reset to Actual after deserialization
         assert_eq!(deserialized.status(), IndexStatus::Actual);

@@ -4,14 +4,13 @@
 
 use crate::core::interner::Interner;
 use crate::core::transform;
-use crate::db::engine::index::target::{IndexTarget};
+use crate::db::engine::index::index_info::{IndexInfo};
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
 use async_stream::stream;
 use bytes::Bytes;
-use futures::pin_mut;
 use futures::stream::{Stream, StreamExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,9 +33,9 @@ pub struct Table<R: Repo> {
     counter_mutex: Arc<Mutex<()>>,
 
     /// Index target configuration (for future queries)
-    indexes: Arc<RwLock<IndexTarget>>,
+    indexes: Arc<RwLock<IndexInfo>>,
     /// Unique indexes (separate for fast validation)
-    indexes_unique: Arc<RwLock<IndexTarget>>,
+    indexes_unique: Arc<RwLock<IndexInfo>>,
 
     /// Fast path flag: does this table have ANY indexes?
     has_indexes: AtomicBool,
@@ -70,7 +69,7 @@ impl<R: Repo> Table<R> {
         let info_store = repo.store_get(format!("__info__{}", table_name)).await?;
 
         // Load index target from storage
-        let index_target = Self::load_index_target(&info_store).await?.unwrap_or_else(IndexTarget::disabled);
+        let index_target = Self::load_index_target(&info_store).await?.unwrap_or_else(IndexInfo::disabled);
 
         // Load unique indexes from storage
         let unique_indexes = Self::load_unique_indexes(&info_store).await?;
@@ -218,11 +217,11 @@ impl<R: Repo> Table<R> {
     }
 
     /// Load index target from info_store
-    pub async fn load_index_target(info_store: &Arc<dyn Store>) -> DbResult<Option<IndexTarget>> {
+    pub async fn load_index_target(info_store: &Arc<dyn Store>) -> DbResult<Option<IndexInfo>> {
         let key_bytes = Self::index_target_key().to_bytes();
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
-                let target: IndexTarget = bincode::deserialize(&bytes)
+                let target: IndexInfo = bincode::deserialize(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize index target: {}", e)))?;
                 Ok(Some(target))
             }
@@ -232,7 +231,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Save index target to info_store
-    async fn save_index_target(&self, target: &IndexTarget) -> DbResult<()> {
+    async fn save_index_target(&self, target: &IndexInfo) -> DbResult<()> {
         let key_bytes = Self::index_target_key().to_bytes();
         let bytes = bincode::serialize(target)
             .map_err(|e| DbError::Codec(format!("Failed to serialize index target: {}", e)))?;
@@ -246,21 +245,21 @@ impl<R: Repo> Table<R> {
     }
 
     /// Load unique indexes from info_store
-    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<IndexTarget> {
+    pub async fn load_unique_indexes(info_store: &Arc<dyn Store>) -> DbResult<IndexInfo> {
         let key_bytes = Self::unique_indexes_key().to_bytes();
         match info_store.get(key_bytes).await {
             Ok(bytes) => {
-                let indexes: IndexTarget = bincode::deserialize(&bytes)
+                let indexes: IndexInfo = bincode::deserialize(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize unique indexes: {}", e)))?;
                 Ok(indexes)
             }
-            Err(DbError::NotFound(_)) => Ok(IndexTarget::disabled()),
+            Err(DbError::NotFound(_)) => Ok(IndexInfo::disabled()),
             Err(e) => Err(e),
         }
     }
 
     /// Save unique indexes to info_store
-    async fn save_unique_indexes(&self, unique: &IndexTarget) -> DbResult<()> {
+    async fn save_unique_indexes(&self, unique: &IndexInfo) -> DbResult<()> {
         let key_bytes = Self::unique_indexes_key().to_bytes();
 
         if !unique.is_enabled() {
@@ -372,7 +371,7 @@ impl<R: Repo> Table<R> {
     /// Enable indexing for all Map fields
     pub async fn enable_indexing_all(&self) -> DbResult<()> {
         let mut target = self.indexes.write().await;
-        *target = IndexTarget::all();
+        *target = IndexInfo::all();
         self.save_index_target(&target).await?;
         drop(target);
 
@@ -385,7 +384,7 @@ impl<R: Repo> Table<R> {
     /// Disable indexing completely
     pub async fn disable_indexing(&self) -> DbResult<()> {
         let mut target = self.indexes.write().await;
-        *target = IndexTarget::disabled();
+        *target = IndexInfo::disabled();
 
         // Delete from storage
         let key_bytes = Self::index_target_key().to_bytes();
@@ -394,7 +393,7 @@ impl<R: Repo> Table<R> {
 
         // Also clear unique_indexes
         let mut unique = self.indexes_unique.write().await;
-        *unique = IndexTarget::disabled();
+        *unique = IndexInfo::disabled();
         self.save_unique_indexes(&unique).await?;
         drop(unique);
 
@@ -640,12 +639,12 @@ impl<R: Repo> Table<R> {
     }
 
     /// Get the current index target (for testing)
-    pub async fn get_index_target(&self) -> IndexTarget {
+    pub async fn get_index_target(&self) -> IndexInfo {
         self.indexes.read().await.clone()
     }
 
     /// Get the current unique indexes (for testing)
-    pub async fn get_unique_indexes(&self) -> IndexTarget {
+    pub async fn get_unique_indexes(&self) -> IndexInfo {
         self.indexes_unique.read().await.clone()
     }
 
