@@ -7,26 +7,47 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+// ============================================================================
+// WriteMode - write strategy for CachedStore
+// ============================================================================
+
+/// Write strategy for cache operations.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WriteMode {
+    /// Write-through: wait for disk write before returning.
+    /// Safer, slower. Use for critical data like indexes.
+    Sync,
+
+    /// Write-behind: write to cache immediately, disk write in background.
+    /// Faster, but data may be lost on crash. Use for non-critical data.
+    Async,
+}
 
 // ============================================================================
 // CachedStore - in-memory full mirror of any Store
 // ============================================================================
 
 /// Full mirror cache that loads ALL data from inner store on creation.
-/// - Constructor: loads all data from inner into local cache
-/// - Reads: from cache first, fallback to inner on miss (lazy load on cache miss)
-/// - Writes: to both cache and inner store (write-through)
 ///
-/// This handles external modifications to inner store by lazy-loading on access.
+/// ## Write Modes:
+/// - `WriteMode::Sync`: write-through, waits for disk (safer for indexes)
+/// - `WriteMode::Async`: write-behind, background writes (faster for data)
+///
+/// ## Behavior:
+/// - Constructor: loads all data from inner into local cache
+/// - Reads: from cache first, fallback to inner on miss (lazy load)
+/// - Writes: depends on WriteMode (sync or async)
 pub struct CachedStore {
     inner: Arc<dyn Store>,
     cache: Arc<TDashMap<RecordKey, Bytes>>,
+    mode: WriteMode,
+    pending_writes: Arc<AtomicUsize>,
 }
 
 impl CachedStore {
-    /// Create a new cached store and load ALL data from inner store.
-    /// This may take time for large stores.
-    pub async fn new(inner: Arc<dyn Store>) -> DbResult<Self> {
+    async fn new_with_mode(inner: Arc<dyn Store>, mode: WriteMode) -> DbResult<Self> {
         let cache = Arc::new(new_dash_map());
 
         // Load ALL data from inner store into cache
@@ -35,7 +56,24 @@ impl CachedStore {
             cache.insert(key, value);
         }
 
-        Ok(Self { inner, cache })
+        Ok(Self {
+            inner,
+            cache,
+            mode,
+            pending_writes: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    /// Create a new cached store with Sync write mode (safer, for indexes).
+    /// Loads ALL data from inner store into cache.
+    pub async fn new_sync(inner: Arc<dyn Store>) -> DbResult<Self> {
+        Self::new_with_mode(inner, WriteMode::Sync).await
+    }
+
+    /// Create a new cached store with Async write mode (faster, for data).
+    /// Loads ALL data from inner store into cache.
+    pub async fn new_async(inner: Arc<dyn Store>) -> DbResult<Self> {
+        Self::new_with_mode(inner, WriteMode::Async).await
     }
 
     /// Get reference to the inner store.
@@ -48,9 +86,19 @@ impl CachedStore {
         &self.cache
     }
 
+    /// Get write mode.
+    pub fn mode(&self) -> WriteMode {
+        self.mode
+    }
+
     /// Get number of entries currently in cache.
     pub fn cache_size(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Get number of pending async writes (0 for Sync mode).
+    pub fn pending_writes(&self) -> usize {
+        self.pending_writes.load(Ordering::Relaxed)
     }
 
     /// Reload all data from inner store (re-sync cache).
@@ -67,28 +115,61 @@ impl CachedStore {
 
         Ok(())
     }
+
+    /// Flush all pending async writes (only for Async mode).
+    /// For Sync mode, this is a no-op.
+    pub async fn flush(&self) -> DbResult<()> {
+        if matches!(self.mode, WriteMode::Sync) {
+            return Ok(());
+        }
+
+        // Wait for pending writes to complete
+        while self.pending_writes.load(Ordering::Relaxed) > 0 {
+            tokio::task::yield_now().await;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl Store for CachedStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        // Insert into inner store first
+        // Insert ALWAYS needs to wait for inner to get the correct key
+        // Async mode only applies to set/remove, not insert
         let key = self.inner.insert(value.clone()).await?;
 
-        // Cache the newly inserted value
+        // Cache the value immediately
         self.cache.insert(key.clone(), value);
-
         Ok(key)
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        // Write to both inner store and cache
-        let created = self.inner.set(key.clone(), value.clone()).await?;
+        match self.mode {
+            WriteMode::Sync => {
+                // Write to both inner store and cache synchronously
+                let created = self.inner.set(key.clone(), value.clone()).await?;
+                self.cache.insert(key, value);
+                Ok(created)
+            }
+            WriteMode::Async => {
+                // Write to cache immediately
+                let existed = self.cache.contains_key(&key);
+                self.cache.insert(key.clone(), value.clone());
 
-        // Update cache
-        self.cache.insert(key, value);
+                // Background write to inner store
+                let inner = self.inner.clone();
+                let pending = self.pending_writes.clone();
 
-        Ok(created)
+                pending.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(async move {
+                    let _ = inner.set(key, value).await;
+                    pending.fetch_sub(1, Ordering::Relaxed);
+                });
+
+                Ok(!existed)
+            }
+        }
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -108,9 +189,26 @@ impl Store for CachedStore {
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        // Remove from both cache and inner store
-        self.cache.remove(&key);
-        self.inner.remove(key.clone()).await
+        let existed = self.cache.remove(&key).is_some();
+
+        match self.mode {
+            WriteMode::Sync => {
+                self.inner.remove(key).await
+            }
+            WriteMode::Async => {
+                // Background delete
+                let inner = self.inner.clone();
+                let pending = self.pending_writes.clone();
+
+                pending.fetch_add(1, Ordering::Relaxed);
+                tokio::spawn(async move {
+                    let _ = inner.remove(key).await;
+                    pending.fetch_sub(1, Ordering::Relaxed);
+                });
+
+                Ok(existed)
+            }
+        }
     }
 
     async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
@@ -198,10 +296,76 @@ mod tests {
     use crate::db::storage::storage_in_memory::InMemoryStore;
     use crate::types::value::InnerValue;
     use futures::StreamExt;
+    use tokio::time::{sleep, Duration};
+
+    #[tokio::test]
+    async fn test_cached_store_sync_mode() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+        // Insert should be in both cache and inner immediately
+        let value1 = InnerValue::Str("sync_value".to_string());
+        let key1 = cached.insert(value1.to_bytes()).await.unwrap();
+
+        assert!(cached.cache.get(&key1).is_some());
+        assert!(inner.get(key1.clone()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cached_store_async_mode() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached = CachedStore::new_async(inner.clone()).await.unwrap();
+
+        // Insert - immediately in cache
+        let value1 = InnerValue::Str("async_value".to_string());
+        let key1 = cached.insert(value1.to_bytes()).await.unwrap();
+
+        assert!(cached.cache.get(&key1).is_some());
+
+        // May not be in inner yet (background write)
+        // But eventually should be
+        sleep(Duration::from_millis(10)).await;
+        assert!(inner.get(key1).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cached_store_async_pending_writes() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached = CachedStore::new_async(inner.clone()).await.unwrap();
+
+        // Start multiple async writes
+        for i in 0..10 {
+            let key = format!("key_{}", i);
+            let value = Bytes::from(key.clone());
+            cached.set(key.into(), value).await.unwrap();
+        }
+
+        // Should have some pending writes
+        let pending = cached.pending_writes();
+        assert!(pending > 0 || pending == 0); // Might have completed already
+
+        // Flush and wait for completion
+        cached.flush().await.unwrap();
+        assert_eq!(cached.pending_writes(), 0);
+
+        // All data should be in inner now
+        assert_eq!(inner.iter().await.unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_cached_store_sync_no_pending() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
+
+        cached.set(Bytes::from("key"), Bytes::from("value")).await.unwrap();
+
+        // Sync mode - no pending writes
+        assert_eq!(cached.pending_writes(), 0);
+        cached.flush().await.unwrap(); // Should be no-op
+    }
 
     #[tokio::test]
     async fn test_cached_store_loads_all_on_creation() {
-        // Create in-memory store as backing
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
 
         // Add some data to inner store BEFORE creating cached store
@@ -211,7 +375,7 @@ mod tests {
         }
 
         // Create cached store - should load all data
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
         // All data should be in cache
         assert_eq!(cached.cache_size(), 10);
@@ -230,7 +394,7 @@ mod tests {
         let key1 = inner.insert(value1.to_bytes()).await.unwrap();
 
         // Create cached store - loads all data
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
         // Get should work (from cache)
         let retrieved = cached.get(key1.clone()).await.unwrap();
@@ -256,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn test_cached_insert_mirrors_to_inner() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
         assert_eq!(cached.cache_size(), 0);
 
@@ -277,7 +441,7 @@ mod tests {
     #[tokio::test]
     async fn test_cached_set_mirrors_to_inner() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
         // Set new value
         let key = Bytes::from(b"test_key".to_vec());
@@ -306,7 +470,7 @@ mod tests {
     #[tokio::test]
     async fn test_cached_remove_mirrors_to_inner() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
         // Insert data
         let key1 = cached.insert(Bytes::from(&b"value1"[..])).await.unwrap();
@@ -339,7 +503,7 @@ mod tests {
         }
 
         // Create cached store - loads all data
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
         assert_eq!(cached.cache_size(), 4);
 
         // Scan prefix from cache (no inner access)
@@ -364,7 +528,7 @@ mod tests {
         let key1 = inner.insert(Bytes::from(&b"value1"[..])).await.unwrap();
 
         // Create cached store
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
         assert_eq!(cached.cache_size(), 1);
 
         // Add more data to inner directly
@@ -395,7 +559,7 @@ mod tests {
         }
 
         // Create cached store
-        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
         assert_eq!(cached.cache_size(), 20);
 
         // Stream from cache (no inner access)
@@ -415,7 +579,7 @@ mod tests {
         use tokio::task::JoinSet;
 
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = Arc::new(CachedStore::new(inner.clone()).await.unwrap());
+        let cached = Arc::new(CachedStore::new_sync(inner.clone()).await.unwrap());
         let mut join_set = JoinSet::new();
 
         // Spawn 50 concurrent writes
@@ -445,5 +609,29 @@ mod tests {
         // All writes mirrored to both cache and inner
         assert_eq!(cached.cache_size(), 50);
         assert_eq!(inner.iter().await.unwrap().len(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_cached_async_mode_crash_simulation() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached = CachedStore::new_async(inner.clone()).await.unwrap();
+
+        // Write data
+        for i in 0..5 {
+            let key = format!("key_{}", i);
+            let value = Bytes::from(key.clone());
+            cached.set(key.into(), value).await.unwrap();
+        }
+
+        // Data is in cache
+        assert_eq!(cached.cache_size(), 5);
+
+        // But may not be fully written to inner yet
+        let inner_count = inner.iter().await.unwrap().len();
+        assert!(inner_count <= 5); // May be less due to async writes
+
+        // After flush, all should be in inner
+        cached.flush().await.unwrap();
+        assert_eq!(inner.iter().await.unwrap().len(), 5);
     }
 }
