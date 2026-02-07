@@ -5,30 +5,37 @@ use async_trait::async_trait;
 use async_stream::stream;
 use bytes::Bytes;
 use futures::stream::Stream;
-use futures::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 
 // ============================================================================
-// CachedStore - in-memory cache wrapper over any Store
+// CachedStore - in-memory full mirror of any Store
 // ============================================================================
 
-/// Cache layer that sits on top of another Store.
-/// - Reads: Check local cache first, if missing - load from inner store
-/// - Writes: Write to both cache and inner store (write-through)
-/// - Keeps frequently accessed data in memory for fast access
+/// Full mirror cache that loads ALL data from inner store on creation.
+/// - Constructor: loads all data from inner into local cache
+/// - Reads: from cache first, fallback to inner on miss (lazy load on cache miss)
+/// - Writes: to both cache and inner store (write-through)
+///
+/// This handles external modifications to inner store by lazy-loading on access.
 pub struct CachedStore {
     inner: Arc<dyn Store>,
     cache: Arc<TDashMap<RecordKey, Bytes>>,
 }
 
 impl CachedStore {
-    /// Create a new cached store wrapping the given inner store.
-    pub fn new(inner: Arc<dyn Store>) -> Self {
-        Self {
-            inner,
-            cache: Arc::new(new_dash_map()),
+    /// Create a new cached store and load ALL data from inner store.
+    /// This may take time for large stores.
+    pub async fn new(inner: Arc<dyn Store>) -> DbResult<Self> {
+        let cache = Arc::new(new_dash_map());
+
+        // Load ALL data from inner store into cache
+        let all_data = inner.iter().await?;
+        for (key, value) in all_data {
+            cache.insert(key, value);
         }
+
+        Ok(Self { inner, cache })
     }
 
     /// Get reference to the inner store.
@@ -41,48 +48,24 @@ impl CachedStore {
         &self.cache
     }
 
-    /// Clear all cached entries (does NOT affect inner store).
-    pub fn clear_cache(&self) {
-        self.cache.clear();
-    }
-
     /// Get number of entries currently in cache.
     pub fn cache_size(&self) -> usize {
         self.cache.len()
     }
 
-    /// Preload a key into cache (useful for warming up cache).
-    pub async fn preload(&self, key: RecordKey) -> DbResult<()> {
-        // Try to get from inner store, which will cache it
-        let _ = self.get_with_cache(key).await?;
+    /// Reload all data from inner store (re-sync cache).
+    /// Useful if inner store was modified externally.
+    pub async fn reload(&self) -> DbResult<()> {
+        // Clear current cache
+        self.cache.clear();
+
+        // Reload all data from inner
+        let all_data = self.inner.iter().await?;
+        for (key, value) in all_data {
+            self.cache.insert(key, value);
+        }
+
         Ok(())
-    }
-
-    /// Preload multiple keys into cache.
-    pub async fn preload_many(&self, keys: Vec<RecordKey>) -> DbResult<usize> {
-        let mut loaded = 0;
-        for key in keys {
-            if self.preload(key).await.is_ok() {
-                loaded += 1;
-            }
-        }
-        Ok(loaded)
-    }
-
-    /// Get value - check cache first, load from inner if missing.
-    async fn get_with_cache(&self, key: RecordKey) -> DbResult<Bytes> {
-        // Check cache first
-        if let Some(ref_) = self.cache.get(&key) {
-            return Ok(ref_.value().clone());
-        }
-
-        // Cache miss - load from inner store
-        let value = self.inner.get(key.clone()).await?;
-
-        // Store in cache for future access
-        self.cache.insert(key, value.clone());
-
-        Ok(value)
     }
 }
 
@@ -109,7 +92,19 @@ impl Store for CachedStore {
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        self.get_with_cache(key).await
+        // Try cache first
+        if let Some(ref_) = self.cache.get(&key) {
+            return Ok(ref_.value().clone());
+        }
+
+        // Cache miss - load from inner store and cache it
+        // This handles cases where inner was modified externally
+        let value = self.inner.get(key.clone()).await?;
+
+        // Store in cache for future access
+        self.cache.insert(key, value.clone());
+
+        Ok(value)
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
@@ -119,25 +114,31 @@ impl Store for CachedStore {
     }
 
     async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        // Return all items from inner store
-        // This ensures consistency but may be slower
-        self.inner.iter().await
+        // Return all items from cache (no need to query inner)
+        let items: Vec<(RecordKey, Bytes)> = self
+            .cache
+            .iter()
+            .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
+            .collect();
+        Ok(items)
     }
 
     fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        let inner = self.inner.clone();
         let cache = self.cache.clone();
 
         Box::pin(stream! {
-            let mut stream = inner.iter_stream(batch_size);
+            let all_items: Vec<(RecordKey, Bytes)> = cache
+                .iter()
+                .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
+                .collect();
 
-            while let Some(batch_result) = stream.next().await {
-                let batch: Vec<(RecordKey, Bytes)> = batch_result?;
+            let mut items = all_items;
+            items.sort_by(|a, b| a.0.cmp(&b.0)); // Sort for consistent ordering
 
-                // Cache all items in this batch
-                for (key, value) in &batch {
-                    cache.insert(key.clone(), value.clone());
-                }
+            while !items.is_empty() {
+                let batch: Vec<_> = items
+                    .drain(..std::cmp::min(batch_size, items.len()))
+                    .collect();
 
                 yield Ok(batch);
             }
@@ -145,15 +146,17 @@ impl Store for CachedStore {
     }
 
     async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        // Scan inner store and cache results
-        let results = self.inner.scan_prefix(prefix.clone()).await?;
+        let prefix_slice = &prefix[..];
 
-        // Cache all matching items
-        for (key, value) in &results {
-            self.cache.insert(key.clone(), value.clone());
-        }
+        // Scan only cache (all data is already there)
+        let items: Vec<(RecordKey, Bytes)> = self
+            .cache
+            .iter()
+            .filter(|ref_| ref_.key().starts_with(prefix_slice))
+            .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
+            .collect();
 
-        Ok(results)
+        Ok(items)
     }
 
     fn scan_prefix_stream(
@@ -161,19 +164,23 @@ impl Store for CachedStore {
         prefix: Bytes,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        let inner = self.inner.clone();
         let cache = self.cache.clone();
+        let prefix_slice = prefix.to_vec();
 
         Box::pin(stream! {
-            let mut stream = inner.scan_prefix_stream(prefix, batch_size);
+            let matching_items: Vec<(RecordKey, Bytes)> = cache
+                .iter()
+                .filter(|ref_| ref_.key().starts_with(&prefix_slice[..]))
+                .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
+                .collect();
 
-            while let Some(batch_result) = stream.next().await {
-                let batch: Vec<(RecordKey, Bytes)> = batch_result?;
+            let mut items = matching_items;
+            items.sort_by(|a, b| a.0.cmp(&b.0)); // Sort for consistent ordering
 
-                // Cache all items in this batch
-                for (key, value) in &batch {
-                    cache.insert(key.clone(), value.clone());
-                }
+            while !items.is_empty() {
+                let batch: Vec<_> = items
+                    .drain(..std::cmp::min(batch_size, items.len()))
+                    .collect();
 
                 yield Ok(batch);
             }
@@ -193,38 +200,68 @@ mod tests {
     use futures::StreamExt;
 
     #[tokio::test]
-    async fn test_cached_store_basic() {
+    async fn test_cached_store_loads_all_on_creation() {
         // Create in-memory store as backing
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
 
-        // Add some data to inner store
-        let value1 = InnerValue::Str("from_inner".to_string());
-        let key1 = inner.insert(value1.to_bytes()).await.unwrap();
+        // Add some data to inner store BEFORE creating cached store
+        for i in 0..10 {
+            let value = InnerValue::Int(i);
+            inner.insert(value.to_bytes()).await.unwrap();
+        }
 
-        // Wrap with cached store
-        let cached = CachedStore::new(inner.clone());
+        // Create cached store - should load all data
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
 
-        // Cache should be empty initially
-        assert_eq!(cached.cache_size(), 0);
+        // All data should be in cache
+        assert_eq!(cached.cache_size(), 10);
 
-        // First get should load from inner and cache it
-        let retrieved = cached.get(key1.clone()).await.unwrap();
-        assert_eq!(InnerValue::from_bytes(retrieved).unwrap(), value1);
-        assert_eq!(cached.cache_size(), 1);
-
-        // Second get should hit cache
-        let retrieved2 = cached.get(key1.clone()).await.unwrap();
-        assert_eq!(InnerValue::from_bytes(retrieved2).unwrap(), value1);
-        assert_eq!(cached.cache_size(), 1); // Still 1, no new entry
+        // Can retrieve all items without touching inner store
+        let all_from_cache = cached.iter().await.unwrap();
+        assert_eq!(all_from_cache.len(), 10);
     }
 
     #[tokio::test]
-    async fn test_cached_store_insert() {
+    async fn test_cached_get_with_fallback() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone());
+
+        // Add data to inner
+        let value1 = InnerValue::Str("test_value".to_string());
+        let key1 = inner.insert(value1.to_bytes()).await.unwrap();
+
+        // Create cached store - loads all data
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
+
+        // Get should work (from cache)
+        let retrieved = cached.get(key1.clone()).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved).unwrap(), value1);
+
+        // Remove from inner store
+        inner.remove(key1.clone()).await.unwrap();
+
+        // Get should STILL work (from cache, inner is empty now)
+        let retrieved2 = cached.get(key1.clone()).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved2).unwrap(), value1);
+
+        // Add NEW data to inner directly (external modification)
+        let value2 = InnerValue::Str("new_external_value".to_string());
+        let key2 = inner.insert(value2.to_bytes()).await.unwrap();
+
+        // Get should work with fallback - loads from inner and caches it
+        let retrieved3 = cached.get(key2.clone()).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(retrieved3).unwrap(), value2);
+        assert_eq!(cached.cache_size(), 2); // Now both keys in cache
+    }
+
+    #[tokio::test]
+    async fn test_cached_insert_mirrors_to_inner() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
+
+        assert_eq!(cached.cache_size(), 0);
 
         // Insert through cached store
-        let value1 = InnerValue::Str("cached_value".to_string());
+        let value1 = InnerValue::Str("mirrored".to_string());
         let key1 = cached.insert(value1.to_bytes()).await.unwrap();
 
         // Should be in cache
@@ -232,124 +269,61 @@ mod tests {
         let from_cache = cached.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(from_cache).unwrap(), value1);
 
-        // Should also be in inner store
+        // Should ALSO be in inner store
         let from_inner = inner.get(key1).await.unwrap();
         assert_eq!(InnerValue::from_bytes(from_inner).unwrap(), value1);
     }
 
     #[tokio::test]
-    async fn test_cached_store_set() {
+    async fn test_cached_set_mirrors_to_inner() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone());
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
 
-        // Set new value through cached store
+        // Set new value
         let key = Bytes::from(b"test_key".to_vec());
         let value1 = InnerValue::Str("new_value".to_string());
         let created = cached.set(key.clone(), value1.to_bytes()).await.unwrap();
-        assert!(created); // Should be new
-        assert_eq!(cached.cache_size(), 1);
+        assert!(created);
 
-        // Update through cached store
-        let value2 = InnerValue::Str("updated_value".to_string());
-        let created2 = cached.set(key.clone(), value2.to_bytes()).await.unwrap();
-        assert!(!created2); // Should be update
-
-        // Both cache and inner should have updated value
+        // Both cache and inner should have it
         let from_cache = cached.get(key.clone()).await.unwrap();
-        assert_eq!(InnerValue::from_bytes(from_cache).unwrap(), value2);
+        let from_inner = inner.get(key.clone()).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(from_cache).unwrap(), value1);
+        assert_eq!(InnerValue::from_bytes(from_inner).unwrap(), value1);
 
+        // Update value
+        let value2 = InnerValue::Str("updated".to_string());
+        let created2 = cached.set(key.clone(), value2.to_bytes()).await.unwrap();
+        assert!(!created2);
+
+        // Both should reflect update
+        let from_cache = cached.get(key.clone()).await.unwrap();
         let from_inner = inner.get(key).await.unwrap();
+        assert_eq!(InnerValue::from_bytes(from_cache).unwrap(), value2);
         assert_eq!(InnerValue::from_bytes(from_inner).unwrap(), value2);
     }
 
     #[tokio::test]
-    async fn test_cached_store_remove() {
+    async fn test_cached_remove_mirrors_to_inner() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone());
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
 
-        // Insert a value
-        let value1 = InnerValue::Str("to_delete".to_string());
-        let key1 = cached.insert(value1.to_bytes()).await.unwrap();
+        // Insert data
+        let key1 = cached.insert(Bytes::from(&b"value1"[..])).await.unwrap();
         assert_eq!(cached.cache_size(), 1);
 
         // Remove through cached store
         let removed = cached.remove(key1.clone()).await.unwrap();
         assert!(removed);
-        assert_eq!(cached.cache_size(), 0); // Cache cleared
+        assert_eq!(cached.cache_size(), 0);
 
-        // Should not exist in cache or inner
+        // Should be removed from both
         assert!(cached.get(key1.clone()).await.is_err());
         assert!(inner.get(key1).await.is_err());
     }
 
     #[tokio::test]
-    async fn test_cached_store_clear_cache() {
-        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = CachedStore::new(inner.clone());
-
-        // Insert some data
-        let key1 = cached.insert(Bytes::from(&b"value1"[..])).await.unwrap();
-        let key2 = cached.insert(Bytes::from(&b"value2"[..])).await.unwrap();
-        assert_eq!(cached.cache_size(), 2);
-
-        // Clear cache
-        cached.clear_cache();
-        assert_eq!(cached.cache_size(), 0);
-
-        // Data should still be in inner store
-        assert!(inner.get(key1.clone()).await.is_ok());
-        assert!(inner.get(key2.clone()).await.is_ok());
-
-        // Get should reload from inner
-        let _ = cached.get(key1).await.unwrap();
-        assert_eq!(cached.cache_size(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_cached_store_preload() {
-        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-
-        // Add data to inner
-        let key1 = inner.insert(Bytes::from(&b"value1"[..])).await.unwrap();
-        let key2 = inner.insert(Bytes::from(&b"value2"[..])).await.unwrap();
-
-        let cached = CachedStore::new(inner.clone());
-        assert_eq!(cached.cache_size(), 0);
-
-        // Preload keys
-        let loaded = cached.preload_many(vec![key1.clone(), key2.clone()]).await.unwrap();
-        assert_eq!(loaded, 2);
-        assert_eq!(cached.cache_size(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_cached_store_iter_stream_caches() {
-        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-
-        // Add data to inner
-        for i in 0..10 {
-            let value = Bytes::from(format!("value_{}", i));
-            inner.insert(value).await.unwrap();
-        }
-
-        let cached = CachedStore::new(inner.clone());
-        assert_eq!(cached.cache_size(), 0);
-
-        // Stream all items - should cache them
-        let mut stream = cached.iter_stream(3);
-        let mut count = 0;
-
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.unwrap();
-            count += batch.len();
-        }
-
-        assert_eq!(count, 10);
-        assert_eq!(cached.cache_size(), 10); // All items cached
-    }
-
-    #[tokio::test]
-    async fn test_cached_store_scan_prefix_caches() {
+    async fn test_cached_scan_prefix_from_cache() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
 
         // Insert data with composite keys
@@ -364,25 +338,84 @@ mod tests {
             inner.set(key.clone().into(), Bytes::copy_from_slice(key)).await.unwrap();
         }
 
-        let cached = CachedStore::new(inner.clone());
-        assert_eq!(cached.cache_size(), 0);
+        // Create cached store - loads all data
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        assert_eq!(cached.cache_size(), 4);
 
-        // Scan prefix - should cache results
+        // Scan prefix from cache (no inner access)
         let results = cached
             .scan_prefix(b"country:Russia:".to_vec().into())
             .await
             .unwrap();
 
         assert_eq!(results.len(), 3);
-        assert_eq!(cached.cache_size(), 3); // All results cached
+
+        // Even if we modify inner, cache still has original data
+        inner.set(b"country:Russia:NEW:user5".to_vec().into(), Bytes::from(&b"new"[..])).await.unwrap();
+        let results2 = cached.scan_prefix(b"country:Russia:".to_vec().into()).await.unwrap();
+        assert_eq!(results2.len(), 3); // Still 3, not 4 (cache is out of sync)
     }
 
     #[tokio::test]
-    async fn test_cached_store_concurrent_access() {
+    async fn test_cached_reload_resyncs_with_inner() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+
+        // Initial data
+        let key1 = inner.insert(Bytes::from(&b"value1"[..])).await.unwrap();
+
+        // Create cached store
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        assert_eq!(cached.cache_size(), 1);
+
+        // Add more data to inner directly
+        let key2 = inner.insert(Bytes::from(&b"value2"[..])).await.unwrap();
+        let key3 = inner.insert(Bytes::from(&b"value3"[..])).await.unwrap();
+
+        // Cache still has only 1 item
+        assert_eq!(cached.cache_size(), 1);
+
+        // Reload - should fetch all data from inner
+        cached.reload().await.unwrap();
+        assert_eq!(cached.cache_size(), 3);
+
+        // Now can get all items from cache
+        assert!(cached.get(key1).await.is_ok());
+        assert!(cached.get(key2).await.is_ok());
+        assert!(cached.get(key3).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cached_iter_stream_from_cache() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+
+        // Add data to inner
+        for i in 0..20 {
+            let value = Bytes::from(format!("value_{}", i));
+            inner.insert(value).await.unwrap();
+        }
+
+        // Create cached store
+        let cached = CachedStore::new(inner.clone()).await.unwrap();
+        assert_eq!(cached.cache_size(), 20);
+
+        // Stream from cache (no inner access)
+        let mut stream = cached.iter_stream(5);
+        let mut count = 0;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.unwrap();
+            count += batch.len();
+        }
+
+        assert_eq!(count, 20);
+    }
+
+    #[tokio::test]
+    async fn test_cached_concurrent_access() {
         use tokio::task::JoinSet;
 
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-        let cached = Arc::new(CachedStore::new(inner.clone()));
+        let cached = Arc::new(CachedStore::new(inner.clone()).await.unwrap());
         let mut join_set = JoinSet::new();
 
         // Spawn 50 concurrent writes
@@ -395,7 +428,7 @@ mod tests {
             });
         }
 
-        // Spawn 50 concurrent reads
+        // Spawn 50 concurrent reads (all from cache, no inner access)
         for i in 0..50 {
             let store = cached.clone();
             join_set.spawn(async move {
@@ -409,7 +442,7 @@ mod tests {
             result.unwrap();
         }
 
-        // All writes should be in both cache and inner
+        // All writes mirrored to both cache and inner
         assert_eq!(cached.cache_size(), 50);
         assert_eq!(inner.iter().await.unwrap().len(), 50);
     }
