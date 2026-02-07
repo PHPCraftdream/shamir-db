@@ -14,7 +14,7 @@ pub enum IndexStatus {
     /// Index matches disk state
     Actual = 0,
     /// Index was modified, needs to be saved
-    Dirty = 1,
+    Pending = 1,
     /// Index is being saved to disk
     Saving = 2,
 }
@@ -23,7 +23,7 @@ impl IndexStatus {
     fn from_u8(value: u8) -> Self {
         match value {
             0 => Self::Actual,
-            1 => Self::Dirty,
+            1 => Self::Pending,
             _ => Self::Saving,
         }
     }
@@ -107,9 +107,9 @@ impl IndexInfo {
         self.status.store(status.as_u8(), Ordering::Release);
     }
 
-    /// Mark as dirty (needs sync)
-    pub fn mark_dirty(&self) {
-        self.set_status(IndexStatus::Dirty);
+    /// Mark as pending (needs sync)
+    pub fn mark_pending(&self) {
+        self.set_status(IndexStatus::Pending);
     }
 
     /// Mark as actual (synced)
@@ -119,7 +119,7 @@ impl IndexInfo {
 
     /// Check if needs sync
     pub fn needs_sync(&self) -> bool {
-        matches!(self.status(), IndexStatus::Dirty)
+        matches!(self.status(), IndexStatus::Pending)
     }
 
     /// Add an index path
@@ -137,7 +137,7 @@ impl IndexInfo {
                 indexes.push(IndexInfoItem { path });
             }
         }
-        self.mark_dirty();
+        self.mark_pending();
     }
 
     /// Remove an index path
@@ -157,7 +157,7 @@ impl IndexInfo {
         }
 
         if removed {
-            self.mark_dirty();
+            self.mark_pending();
         }
 
         removed
@@ -256,8 +256,8 @@ mod tests {
         assert_eq!(target.status(), IndexStatus::Actual);
         assert!(!target.needs_sync());
 
-        target.mark_dirty();
-        assert_eq!(target.status(), IndexStatus::Dirty);
+        target.mark_pending();
+        assert_eq!(target.status(), IndexStatus::Pending);
         assert!(target.needs_sync());
 
         target.mark_actual();
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_index_marks_dirty() {
+    fn test_add_index_marks_pending() {
         let mut target = IndexInfo::disabled();
         assert!(!target.needs_sync());
 
@@ -275,9 +275,9 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_index_marks_dirty() {
+    fn test_remove_index_marks_pending() {
         let mut target = IndexInfo::selective(vec![IndexInfoItem::new(vec![1, 2])]);
-        target.mark_actual(); // Clear initial dirty state
+        target.mark_actual(); // Clear initial pending state
 
         target.remove_index(&vec![1, 2]);
         assert!(target.needs_sync());
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn test_status_not_serialized() {
         let target = IndexInfo::all();
-        target.mark_dirty();
+        target.mark_pending();
 
         let serialized = bincode::serialize(&target).unwrap();
         let deserialized: IndexInfo = bincode::deserialize(&serialized).unwrap();
