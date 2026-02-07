@@ -22,8 +22,4 @@ pub struct TableIndexManager {
 
     // Хранилище для персистентности метаданных
     info_store: Arc<dyn Store>,
-
-    // === ЗАГОТОВКИ для будущих RAM индексов ===
-    // indexes_ram: Option<RamIndexStore>,
-    // indexes_unique_ram: Option<RamIndexStore>,
 }
