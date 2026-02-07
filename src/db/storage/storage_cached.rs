@@ -342,7 +342,7 @@ mod tests {
 
         // Should have some pending writes
         let pending = cached.pending_writes();
-        assert!(pending > 0 || pending == 0); // Might have completed already
+        assert!(pending > 0); // Might have completed already
 
         // Flush and wait for completion
         cached.flush().await.unwrap();
