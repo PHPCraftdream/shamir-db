@@ -2,7 +2,6 @@ use crate::types::base::{self, Base58Error};
 use bytes::Bytes;
 use chrono::Utc;
 use rand::TryRngCore;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -16,7 +15,7 @@ const CUSTOM_EPOCH_MICROS: i64 = 1_769_817_600_000_000;
 /// This is used to identify system records, as a real timestamp will never be zero.
 const SYSTEM_RECORD_PREFIX: &[u8] = &[0, 0, 0, 0];
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordId(pub [u8; 16]);
 
 impl RecordId {
@@ -119,7 +118,7 @@ impl<'de> Deserialize<'de> for RecordId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::codec;
+    use crate::codecs::bytes;
     use std::collections::HashSet;
     use std::thread;
     use std::time::Duration;
@@ -178,18 +177,18 @@ mod tests {
     }
 
     #[test]
-    fn test_rkyv_roundtrip() {
+    fn test_roundtrip() {
         let id = RecordId::new();
-        let bytes = codec::to_bytes(&id).unwrap();
-        let deserialized: RecordId = codec::from_bytes(&bytes).unwrap();
+        let bytes = bytes::to_bytes(&id).unwrap();
+        let deserialized: RecordId = bytes::from_bytes(&bytes).unwrap();
         assert_eq!(id, deserialized);
     }
 
     #[test]
-    fn test_rkyv_zero_copy() {
+    fn test_bincode_roundtrip() {
         let id = RecordId::new();
-        let bytes = codec::to_bytes(&id).unwrap();
-        let archived = codec::as_archived::<RecordId>(&bytes).unwrap();
-        assert_eq!(archived.0, id.0);
+        let bytes = bytes::to_bytes(&id).unwrap();
+        let id2 = bytes::from_bytes::<RecordId>(&bytes).unwrap();
+        assert_eq!(id2.0, id.0);
     }
 }

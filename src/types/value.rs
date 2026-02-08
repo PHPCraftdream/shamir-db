@@ -12,9 +12,6 @@ use std::fmt::{self, Debug};
 use std::str::FromStr;
 use std::any::TypeId;
 
-// Rkyv support (for archival of types containing Value)
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-
 pub type UserValue = Value<String>;
 pub type InnerValue = Value<u16>;
 
@@ -705,92 +702,6 @@ mod tests {
                 }
                 _ => panic!("Expected Str after deserialization, got {:?}", reconstructed),
             }
-        }
-    }
-}
-
-// ============================================================================
-// Rkyv Support for Value
-// ============================================================================
-
-/// Helper types for Rkyv archival of Decimal and BigInt.
-/// These store the values as strings, matching their serde representation.
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct ArchivedDecimal(String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
-pub struct ArchivedBigInt(String);
-
-impl From<&Decimal> for ArchivedDecimal {
-    fn from(dec: &Decimal) -> Self {
-        Self(dec.to_string())
-    }
-}
-
-impl From<&BigInt> for ArchivedBigInt {
-    fn from(big: &BigInt) -> Self {
-        Self(big.to_string())
-    }
-}
-
-impl From<&ArchivedDecimal> for Decimal {
-    fn from(archived: &ArchivedDecimal) -> Self {
-        Decimal::from_str(&archived.0).expect("Invalid decimal in archive")
-    }
-}
-
-impl From<&ArchivedBigInt> for BigInt {
-    fn from(archived: &ArchivedBigInt) -> Self {
-        BigInt::from_str(&archived.0).expect("Invalid bigint in archive")
-    }
-}
-
-#[cfg(test)]
-mod rkyv_tests {
-    use super::*;
-
-    #[test]
-    fn test_archived_decimal() {
-        let dec = Decimal::from_str("123.45").unwrap();
-        let archived = ArchivedDecimal::from(&dec);
-        assert_eq!(archived.0, "123.45");
-
-        let restored = Decimal::from(&archived);
-        assert_eq!(restored, dec);
-    }
-
-    #[test]
-    fn test_archived_bigint() {
-        let big = BigInt::from_str("9999999999999999").unwrap();
-        let archived = ArchivedBigInt::from(&big);
-        assert_eq!(archived.0, "9999999999999999");
-
-        let restored = BigInt::from(&archived);
-        assert_eq!(restored, big);
-    }
-
-    #[test]
-    fn test_decimal_string_roundtrip() {
-        let test_cases = vec!["0", "123.456", "-123.456", "0.000000001"];
-
-        for s in test_cases {
-            let dec = Decimal::from_str(s).unwrap();
-            let archived = ArchivedDecimal::from(&dec);
-            let restored = Decimal::from(&archived);
-            assert_eq!(restored, dec);
-        }
-    }
-
-    #[test]
-    fn test_bigint_string_roundtrip() {
-        let test_cases = vec!["0", "9999999999999999", "-12345678901234567890"];
-
-        for s in test_cases {
-            let big = BigInt::from_str(s).unwrap();
-            let archived = ArchivedBigInt::from(&big);
-            let restored = BigInt::from(&archived);
-            assert_eq!(restored, big);
         }
     }
 }

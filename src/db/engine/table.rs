@@ -8,7 +8,7 @@ use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
-use crate::types::codec;
+use crate::codecs::bytes;
 use async_stream::stream;
 use futures::stream::{Stream, StreamExt};
 use std::sync::Arc;
@@ -79,8 +79,8 @@ impl<R: Repo> Table<R> {
             let inter_data = info_store.get(internals_id).await;
 
             if let Ok(bytes) = inter_data {
-                // Deserialize: Vec<(u16, String)> using rkyv
-                let data: Vec<(u16, String)> = codec::from_bytes(&bytes)
+                // Deserialize: Vec<(u16, String)>
+                let data: Vec<(u16, String)> = bytes::from_bytes(&bytes)
                     .unwrap_or_else(|e| {
                         log::error!("Failed to deserialize interner: {}", e);
                         Vec::new()
@@ -107,7 +107,7 @@ impl<R: Repo> Table<R> {
         // Read existing
         let existing = self.info_store.get(internals_id.to_bytes()).await;
         let mut current: Vec<(u16, String)> = if let Ok(bytes) = existing {
-            codec::from_bytes(&bytes)
+            bytes::from_bytes(&bytes)
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -116,8 +116,8 @@ impl<R: Repo> Table<R> {
         // Add new keys
         current.extend_from_slice(new_keys);
 
-        // Serialize and save using rkyv
-        let bytes = codec::to_bytes(&current)
+        // Serialize and save
+        let bytes = bytes::to_bytes(&current)
             .map_err(|e| DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
 
         self.info_store.set(internals_id.to_bytes(), bytes).await?;
@@ -130,8 +130,8 @@ impl<R: Repo> Table<R> {
         let key_bytes = count_key().to_bytes();
         match self.info_store.get(key_bytes).await {
             Ok(bytes) => {
-                // Deserialize u64 using rkyv (zero-copy!)
-                let count: u64 = codec::from_bytes(&bytes)
+                // Deserialize u64
+                let count: u64 = bytes::from_bytes(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize count: {}", e)))?;
                 Ok(count)
             }
@@ -143,7 +143,7 @@ impl<R: Repo> Table<R> {
     /// Set the record count (useful for initialization or manual correction)
     async fn set_record_count(&self, count: u64) -> DbResult<()> {
         let key_bytes = count_key().to_bytes();
-        let bytes = codec::to_bytes(&count)
+        let bytes = bytes::to_bytes(&count)
             .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
         self.info_store.set(key_bytes, bytes).await?;
         Ok(())

@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use super::index_info_item::IndexInfoItem;
 
 /// Defines a single index, which can be simple (one path) or composite (multiple paths).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexDefinition {
     /// A unique name for the index.
     pub name: String,
@@ -25,7 +24,7 @@ impl IndexDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::codec;
+    use crate::codecs::bytes;
 
     #[test]
     fn test_index_definition_creation() {
@@ -43,7 +42,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_definition_rkyv_roundtrip() {
+    fn test_index_definition_roundtrip() {
         let def = IndexDefinition::new(
             "composite_index",
             vec![
@@ -52,22 +51,22 @@ mod tests {
             ],
         );
 
-        let bytes = codec::to_bytes(&def).unwrap();
-        let deserialized: IndexDefinition = codec::from_bytes(&bytes).unwrap();
+        let bytes = bytes::to_bytes(&def).unwrap();
+        let deserialized: IndexDefinition = bytes::from_bytes(&bytes).unwrap();
         assert_eq!(def, deserialized);
     }
 
     #[test]
-    fn test_index_definition_rkyv_zero_copy() {
+    fn test_index_definition_zero_copy() {
         let def = IndexDefinition::new(
             "test_index",
             vec![IndexInfoItem::new(vec![10, 20, 30])],
         );
 
-        let bytes = codec::to_bytes(&def).unwrap();
-        let archived = codec::as_archived::<IndexDefinition>(&bytes).unwrap();
-        assert_eq!(archived.name, "test_index");
-        assert_eq!(archived.paths.len(), 1);
-        assert_eq!(&archived.paths[0].path[..], &[10, 20, 30]);
+        let bytes = bytes::to_bytes(&def).unwrap();
+        let def2 = bytes::from_bytes::<IndexDefinition>(&bytes).unwrap();
+        assert_eq!(def2.name, "test_index");
+        assert_eq!(def2.paths.len(), 1);
+        assert_eq!(&def2.paths[0].path[..], &[10, 20, 30]);
     }
 }

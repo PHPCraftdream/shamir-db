@@ -6,13 +6,10 @@ use dashmap::DashMap;
 
 pub type THasher = BuildHasherDefault<FxHasher>;
 
-// --- Collections with rkyv support ---
-/// Ordered map that supports rkyv zero-copy deserialization
-/// Maintains insertion order for predictable iteration
+/// Ordered map that maintains insertion order for predictable iteration
 pub type TMap<K, V> = IndexMap<K, V, THasher>;
 
-/// Ordered set that supports rkyv zero-copy deserialization
-/// Maintains insertion order for predictable iteration
+/// Ordered set that maintains insertion order for predictable iteration
 pub type TSet<T> = IndexSet<T, THasher>;
 
 pub fn new_map<K: Eq + Hash, V>() -> TMap<K, V> {
