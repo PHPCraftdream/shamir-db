@@ -13,8 +13,18 @@ db/
 │   │   ├── index_info_item.rs    # Single index path item
 │   │   ├── index_record.rs       # Index record representation
 │   │   └── table_index_manager.rs # Index manager for tables
-│   ├── table.rs     # Table with interning + streaming
-│   └── table.md     # Table analysis & refactoring plans
+│   ├── table/        # ✅ MODULARIZED (2025-02-08)
+│   │   ├── counter.rs           # RecordCounter service
+│   │   ├── interner.rs          # InternerManager service
+│   │   ├── table.rs             # Main Table facade
+│   │   ├── mod.rs               # Public API exports
+│   │   └── tests/              # Organized test suites
+│   │       ├── mod.rs
+│   │       ├── crud_tests.rs
+│   │       ├── concurrent_tests.rs
+│   │       └── persistence_tests.rs
+│   ├── README.md     # Engine documentation
+│   └── table.md     # Table refactoring documentation
 ├── storage/          # Storage abstraction (low-level)
 │   ├── types.rs      # Store and Repo traits
 │   ├── storage_in_memory.rs  # In-memory store (for testing)
@@ -24,7 +34,8 @@ db/
 │   ├── storage_fjall.rs
 │   ├── storage_nebari.rs
 │   ├── storage_persy.rs
-│   └── storage_canopy.rs
+│   ├── storage_canopy.rs
+│   └── README.md     # Storage documentation
 ├── mod.rs
 └── error.rs          # DbError, DbResult types
 ```
@@ -33,11 +44,26 @@ db/
 
 ### Engine (`db/engine/`)
 **High-level table API** with automatic interning and index management:
-- `Table<R>` - Main table abstraction
+- `Table<R>` - Main table abstraction (modularized 2025-02-08)
 - `TableIndexManager` - Index management system
+- `RecordCounter` - Counter service (separate module)
+- `InternerManager` - Interning service (separate module)
 - Manages key interning transparently
 - Transforms UserValue ↔ InnerValue
 - Provides memory-efficient async streaming
+
+**New Modular Structure (2025-02-08):**
+```
+table/
+├── counter.rs       # RecordCounter (170 lines, 5 tests)
+├── interner.rs      # InternerManager (185 lines, 5 tests)
+├── table.rs         # Table facade (270 lines)
+├── mod.rs          # Public API exports
+└── tests/          # Organized tests
+    ├── crud_tests.rs        # 15 CRUD tests
+    ├── concurrent_tests.rs  # 7 concurrent tests
+    └── persistence_tests.rs # 3 persistence tests
+```
 
 See `engine/README.md` for details.
 
@@ -342,6 +368,11 @@ let inner_value = InnerValue::from_bytes(bytes)?;
 
 ## Future Enhancements
 
+- [x] ✅ **Modular table architecture** (2025-02-08)
+  - Extracted RecordCounter to separate module
+  - Extracted InternerManager to separate module
+  - Organized tests by type (CRUD, concurrent, persistence)
+  - 227 tests passing (35 table tests total)
 - [x] Index system with simple/composite indexes
 - [x] Unique constraint validation
 - [x] Atomic flags for fast path optimization
@@ -349,3 +380,4 @@ let inner_value = InnerValue::from_bytes(bytes)?;
 - [ ] Transaction support across tables
 - [ ] Migration system
 - [ ] Backup/restore utilities
+- [ ] Extract IndexManager to separate module (planned)

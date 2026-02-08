@@ -1,1 +1,1 @@
-start cmd2
+cmd

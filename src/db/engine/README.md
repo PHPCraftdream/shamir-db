@@ -12,8 +12,17 @@ engine/
 │   ├── index_info_item.rs    # Single index path item
 │   ├── index_record.rs       # Index record representation
 │   └── table_index_manager.rs # Index manager for tables
-├── table.rs                  # Main table implementation
-└── table.md                  # Table analysis & refactoring plans
+├── table/                    # ✅ MODULARIZED (2025-02-08)
+│   ├── counter.rs           # RecordCounter service (170 lines)
+│   ├── interner.rs          # InternerManager service (185 lines)
+│   ├── table.rs             # Main Table facade (270 lines)
+│   ├── mod.rs               # Public API exports
+│   └── tests/              # Organized test suites
+│       ├── mod.rs           # Test module organizer
+│       ├── crud_tests.rs    # 15 CRUD tests
+│       ├── concurrent_tests.rs  # 7 concurrent tests
+│       └── persistence_tests.rs # 3 persistence tests
+└── table.md                 # Table refactoring documentation (updated 2025-02-08)
 ```
 
 ## Purpose
@@ -137,14 +146,31 @@ if !self.has_indexes_unique.load(Ordering::Relaxed) {
 
 ## Table Structure
 
+**Updated: 2025-02-08 - Modular Architecture**
+
 ```rust
+// Main Table facade (src/db/engine/table/table.rs)
 pub struct Table<R: Repo> {
-    repo: Arc<R>,                          // Storage repository
-    table_name: String,                    // Table name
-    data_store: Arc<dyn Store>,           // __data__{table}
-    info_store: Arc<dyn Store>,           // __info__{table}
-    interner: Arc<OnceCell<Interner>>,    // Lazy-loaded interner
-    batch_size: usize,                    // Streaming batch size
+    repo: Arc<R>,
+    table_name: String,
+    data_store: Arc<dyn Store>,
+    info_store: Arc<dyn Store>,
+
+    // Service components (wrapped in Arc for shared state)
+    interner: Arc<InternerManager>,
+    counter: Arc<RecordCounter>,
+}
+
+// RecordCounter service (src/db/engine/table/counter.rs)
+pub struct RecordCounter {
+    info_store: Arc<dyn Store>,
+    counter_mutex: Mutex<()>,
+}
+
+// InternerManager service (src/db/engine/table/interner.rs)
+pub struct InternerManager {
+    info_store: Arc<dyn Store>,
+    interner: OnceCell<Interner>,
 }
 ```
 
@@ -372,6 +398,11 @@ Interned strings live as long as the table exists:
 
 ### Future Enhancements
 
+- [x] ✅ **Modular architecture** (2025-02-08)
+  - Extracted RecordCounter to separate module
+  - Extracted InternerManager to separate module
+  - Organized tests by type (CRUD, concurrent, persistence)
+  - 227 tests passing (35 table tests)
 - [x] Index system with simple/composite indexes
 - [x] Atomic flags for fast path optimization
 - [x] Unique constraint validation
@@ -380,3 +411,4 @@ Interned strings live as long as the table exists:
 - [ ] Statistics (record count, interned strings count)
 - [ ] Query planner integration
 - [ ] In-memory index for O(1) unique validation
+- [ ] Extract IndexManager to separate module (planned)
