@@ -1,11 +1,11 @@
 use crate::types::base::{self, Base58Error};
+use bytes::Bytes;
 use chrono::Utc;
 use rand::TryRngCore;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use bytes::Bytes;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// The custom epoch for our RecordId timestamps, set to 2026-01-31 00:00:00 UTC.
 /// This makes the timestamp part of the ID smaller and more manageable.
@@ -109,9 +109,9 @@ impl<'de> Deserialize<'de> for RecordId {
         D: serde::Deserializer<'de>,
     {
         let bytes: &[u8] = serde::Deserialize::deserialize(deserializer)?;
-        let arr: [u8; 16] = bytes.try_into().map_err(|_| {
-            serde::de::Error::invalid_length(bytes.len(), &"16 bytes")
-        })?;
+        let arr: [u8; 16] = bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::invalid_length(bytes.len(), &"16 bytes"))?;
         Ok(RecordId(arr))
     }
 }
@@ -119,10 +119,10 @@ impl<'de> Deserialize<'de> for RecordId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::codec;
     use std::collections::HashSet;
     use std::thread;
     use std::time::Duration;
-    use crate::types::codec;
 
     #[test]
     fn test_record_id_uniqueness() {
@@ -163,7 +163,10 @@ mod tests {
 
         // Long name (truncation)
         let id_long = RecordId::system("123456789012-extra");
-        assert_eq!(id_exact, id_long, "Long name should be truncated to the same ID");
+        assert_eq!(
+            id_exact, id_long,
+            "Long name should be truncated to the same ID"
+        );
 
         // Determinism
         let id_again = RecordId::system("users");
