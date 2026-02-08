@@ -38,16 +38,6 @@ impl IndexRecordKey {
     /// # Arguments
     /// * `unique` - флаг уникальности индекса
     /// * `path` - пути к индексируемым полям (интернированные компоненты)
-    ///
-    /// # Примеры
-    /// ```
-    /// # use shamir_db::db::engine::index::index_record::IndexRecordKey;
-    /// // Простой индекс по email
-    /// let key = IndexRecordKey::new(true, vec![vec![1]]);
-    ///
-    /// // Составной индекс (city, age)
-    /// let key = IndexRecordKey::new(false, vec![vec![2], vec![3]]);
-    /// ```
     pub fn new(unique: bool, path: Vec<Vec<u64>>) -> Self {
         Self {
             is_unique: if unique { 1 } else { 0 },
@@ -435,5 +425,16 @@ mod tests {
 
         // Размер: 1 + 1 + 3*(4+8) + 8 + 8 = 54 байт
         assert_eq!(key.to_bytes().len(), 54);
+    }
+
+    #[test]
+    fn test_doc_new() {
+        // Простой индекс по email
+        let key = IndexRecordKey::new(true, vec![vec![1]]);
+        assert_eq!(key.is_unique, 1);
+
+        // Составной индекс (city, age)
+        let key2 = IndexRecordKey::new(false, vec![vec![2], vec![3]]);
+        assert_eq!(key2.is_unique, 0);
     }
 }
