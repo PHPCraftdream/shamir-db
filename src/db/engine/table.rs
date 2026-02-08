@@ -2,7 +2,7 @@
 //!
 //! Provides UserValue/InnerValue transformations and key interning.
 
-use crate::core::interner::Interner;
+use crate::core::interner::{Interner, InternerType};
 use crate::core::transform;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
@@ -79,8 +79,8 @@ impl<R: Repo> Table<R> {
             let inter_data = info_store.get(internals_id).await;
 
             if let Ok(bytes) = inter_data {
-                // Deserialize: Vec<(u16, String)>
-                let data: Vec<(u16, String)> = bytes::from_bytes(&bytes)
+                // Deserialize: Vec<(InternerType, String)>
+                let data: Vec<(InternerType, String)> = bytes::from_bytes(&bytes)
                     .unwrap_or_else(|e| {
                         log::error!("Failed to deserialize interner: {}", e);
                         Vec::new()
@@ -96,7 +96,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Save new interned keys to info_store
-    async fn save_new_keys(&self, new_keys: &[(u16, String)]) -> DbResult<()> {
+    async fn save_new_keys(&self, new_keys: &[(InternerType, String)]) -> DbResult<()> {
         if new_keys.is_empty() {
             return Ok(());
         }
@@ -106,7 +106,7 @@ impl<R: Repo> Table<R> {
 
         // Read existing
         let existing = self.info_store.get(internals_id.to_bytes()).await;
-        let mut current: Vec<(u16, String)> = if let Ok(bytes) = existing {
+        let mut current: Vec<(InternerType, String)> = if let Ok(bytes) = existing {
             bytes::from_bytes(&bytes)
                 .unwrap_or_default()
         } else {
