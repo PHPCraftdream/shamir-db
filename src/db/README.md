@@ -318,6 +318,14 @@ match table.get(id).await {
 }
 ```
 
+
+Data transform:
+// Write: [api: MessagePack] → [DB: InnerValue  → Bytes → Store]
+let inner_bytes = transform.inner_value.to_bytes();  // rmp_serde
+
+// Read: [DB: Store → Bytes → InnerValue] → [api: MessagePack]
+let inner_value = InnerValue::from_bytes(bytes)?;
+
 ## Best Practices
 
 ### ✅ DO

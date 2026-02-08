@@ -328,23 +328,7 @@ impl<R: Repo> Table<R> {
     /// # Returns
     /// A stream that yields batches of (RecordId, UserValue) tuples
     ///
-    /// # Example
-    /// ```ignore
-    /// let mut stream = table.list_stream(500);
-    /// while let Some(batch) = stream.next().await {
-    ///     let records = batch?;
-    ///     for (id, record) in records {
-    ///         println!("Record: {:?}", record);
-    ///     }
-    /// }
-    /// ```
     /// Stream all records in batches (async generator like PHP)
-    ///
-    /// # Arguments
-    /// * `batch_size` - Number of records per batch
-    ///
-    /// # Returns
-    /// Stream that yields batches of (RecordId, UserValue)
     pub fn list_stream(
         &self,
         batch_size: usize,
