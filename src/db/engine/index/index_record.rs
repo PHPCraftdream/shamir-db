@@ -5,6 +5,9 @@ use bytes::Bytes;
 use fxhash::FxHasher;
 use std::hash::{Hash, Hasher};
 
+/// Record in an index - stores a set of record IDs.
+/// Currently unused but reserved for future index implementations.
+#[allow(dead_code)]
 pub struct IndexRecord(TSet<RecordId>);
 
 /// Ключ для записи индекса.
@@ -38,13 +41,12 @@ impl IndexRecordKey {
     ///
     /// # Примеры
     /// ```
+    /// # use shamir_db::db::engine::index::index_record::IndexRecordKey;
     /// // Простой индекс по email
-    /// let key = IndexRecordKey::new(true, vec![vec![1]])
-    ///     .with_values(&[&email_value]);
+    /// let key = IndexRecordKey::new(true, vec![vec![1]]);
     ///
     /// // Составной индекс (city, age)
-    /// let key = IndexRecordKey::new(false, vec![vec![2], vec![3]])
-    ///     .with_values(&[&city_value, &age_value]);
+    /// let key = IndexRecordKey::new(false, vec![vec![2], vec![3]]);
     /// ```
     pub fn new(unique: bool, path: Vec<Vec<u64>>) -> Self {
         Self {
@@ -203,6 +205,7 @@ impl IndexRecordKey {
 
     /// Вычисляет хеш значения (для тестирования и отладки)
     #[cfg(test)]
+    #[allow(dead_code)]
     fn hash_values<T: Hash>(values: &[&T], paths: &[Vec<u64>]) -> (u64, u64) {
         let mut hasher = FxHasher::default();
         for value in values {

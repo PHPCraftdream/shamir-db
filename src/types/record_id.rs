@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use bytes::Bytes;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 /// The custom epoch for our RecordId timestamps, set to 2026-01-31 00:00:00 UTC.
 /// This makes the timestamp part of the ID smaller and more manageable.
@@ -15,7 +16,7 @@ const CUSTOM_EPOCH_MICROS: i64 = 1_769_817_600_000_000;
 /// This is used to identify system records, as a real timestamp will never be zero.
 const SYSTEM_RECORD_PREFIX: &[u8] = &[0, 0, 0, 0];
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Archive, RkyvSerialize, RkyvDeserialize)]
 pub struct RecordId(pub [u8; 16]);
 
 impl RecordId {
@@ -121,6 +122,7 @@ mod tests {
     use std::collections::HashSet;
     use std::thread;
     use std::time::Duration;
+    use crate::types::codec;
 
     #[test]
     fn test_record_id_uniqueness() {
@@ -170,5 +172,21 @@ mod tests {
         // User ID should not be system
         let user_id = RecordId::new();
         assert!(!user_id.is_system());
+    }
+
+    #[test]
+    fn test_rkyv_roundtrip() {
+        let id = RecordId::new();
+        let bytes = codec::to_bytes(&id).unwrap();
+        let deserialized: RecordId = codec::from_bytes(&bytes).unwrap();
+        assert_eq!(id, deserialized);
+    }
+
+    #[test]
+    fn test_rkyv_zero_copy() {
+        let id = RecordId::new();
+        let bytes = codec::to_bytes(&id).unwrap();
+        let archived = codec::as_archived::<RecordId>(&bytes).unwrap();
+        assert_eq!(archived.0, id.0);
     }
 }
