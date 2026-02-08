@@ -17,6 +17,15 @@ pub struct InternerManager {
     interner: OnceCell<Interner>,
 }
 
+impl Clone for InternerManager {
+    fn clone(&self) -> Self {
+        Self {
+            info_store: Arc::clone(&self.info_store),
+            interner: OnceCell::new(),
+        }
+    }
+}
+
 impl InternerManager {
     /// Create a new interner manager
     pub fn new(info_store: Arc<dyn Store>) -> Self {

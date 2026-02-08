@@ -1,26 +1,23 @@
-//! Table implementation with CRUD operations and interning
+//! Table implementation - InnerValue only (no interning!)
 
 use super::counter::RecordCounter;
-use super::interner::InternerManager;
-
-use crate::core::interner::InternedKey;
-use crate::core::transform;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
-use crate::types::value::{InnerValue, UserValue};
-use crate::codecs::bytes;
+use crate::types::value::InnerValue;
 use async_stream::stream;
 use futures::stream::{Stream, StreamExt};
 use std::sync::Arc;
 
-/// High-level table with automatic key interning
+/// Low-level table - InnerValue only (no interning/conversion)
+///
+/// This table operates directly on InnerValue (interned format).
+/// Interning and format conversion should be handled at higher level.
 pub struct Table<R: Repo> {
     repo: Arc<R>,
     table_name: String,
     data_store: Arc<dyn Store>,
     info_store: Arc<dyn Store>,
-    interner: Arc<InternerManager>,
     counter: Arc<RecordCounter>,
 }
 
@@ -31,7 +28,6 @@ impl<R: Repo> Clone for Table<R> {
             table_name: self.table_name.clone(),
             data_store: Arc::clone(&self.data_store),
             info_store: Arc::clone(&self.info_store),
-            interner: Arc::clone(&self.interner),
             counter: Arc::clone(&self.counter),
         }
     }
@@ -51,26 +47,17 @@ impl<R: Repo> Table<R> {
             repo,
             table_name,
             data_store,
-            info_store: Arc::clone(&info_store),
-            interner: Arc::new(InternerManager::new(Arc::clone(&info_store))),
+            info_store: info_store.clone(),
             counter: Arc::new(RecordCounter::new(Arc::clone(&info_store))),
         })
     }
 
-    /// Insert a UserValue, returns RecordId
-    pub async fn insert(&self, value: &UserValue) -> DbResult<RecordId> {
-        let interner = self.interner.get().await?;
-
-        // Transform UserValue → InnerValue
-        let transform = transform::user_to_inner(value, interner);
-
-        // Save new keys if any
-        if let Some(ref new_keys) = transform.new_keys {
-            self.interner.save_new_keys(new_keys).await?;
-        }
-
+    /// Insert an InnerValue, returns RecordId
+    ///
+    /// No interning or conversion - expects already-interned InnerValue
+    pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         // Serialize InnerValue
-        let inner_bytes = transform.inner_value.to_bytes();
+        let inner_bytes = value.to_bytes();
 
         // Insert to data store - returns Bytes (16 random bytes)
         let key_bytes = self.data_store.insert(inner_bytes).await?;
@@ -84,10 +71,10 @@ impl<R: Repo> Table<R> {
         Ok(RecordId(arr))
     }
 
-    /// Get a UserValue by RecordId
-    pub async fn get(&self, id: RecordId) -> DbResult<UserValue> {
-        let interner = self.interner.get().await?;
-
+    /// Get an InnerValue by RecordId
+    ///
+    /// No conversion - returns InnerValue directly
+    pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();
 
@@ -95,17 +82,14 @@ impl<R: Repo> Table<R> {
         let bytes = self.data_store.get(key_bytes).await?;
 
         // Deserialize InnerValue
-        let inner_value = InnerValue::from_bytes(bytes)
-            .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {}", e)))?;
-
-        // Transform InnerValue → UserValue
-        Ok(transform::inner_to_user(&inner_value, interner))
+        InnerValue::from_bytes(bytes)
+            .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {}", e)))
     }
 
     /// Update a record by RecordId
-    pub async fn update(&self, id: RecordId, value: &UserValue) -> DbResult<bool> {
-        let interner = self.interner.get().await?;
-
+    ///
+    /// No interning or conversion - expects already-interned InnerValue
+    pub async fn update(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();
 
@@ -115,41 +99,25 @@ impl<R: Repo> Table<R> {
             return Ok(false);
         }
 
-        // Transform UserValue → InnerValue
-        let transform = transform::user_to_inner(value, interner);
-
-        // Save new keys if any
-        if let Some(ref new_keys) = transform.new_keys {
-            self.interner.save_new_keys(new_keys).await?;
-        }
-
         // Serialize and update
-        let inner_bytes = transform.inner_value.to_bytes();
+        let inner_bytes = value.to_bytes();
         self.data_store.set(key_bytes, inner_bytes).await?;
         Ok(true)
     }
 
     /// Set a record by RecordId - creates if not exists, updates if exists
+    ///
+    /// No interning or conversion - expects already-interned InnerValue
     /// Returns true if created, false if updated
-    pub async fn set(&self, id: RecordId, value: &UserValue) -> DbResult<bool> {
-        let interner = self.interner.get().await?;
-
+    pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();
 
         // Check if exists
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
 
-        // Transform UserValue → InnerValue
-        let transform = transform::user_to_inner(value, interner);
-
-        // Save new keys if any
-        if let Some(ref new_keys) = transform.new_keys {
-            self.interner.save_new_keys(new_keys).await?;
-        }
-
         // Serialize and set
-        let inner_bytes = transform.inner_value.to_bytes();
+        let inner_bytes = value.to_bytes();
         self.data_store.set(key_bytes, inner_bytes).await?;
 
         if !exists {
@@ -174,10 +142,10 @@ impl<R: Repo> Table<R> {
         Ok(removed)
     }
 
-    /// List all records
-    pub async fn list(&self) -> DbResult<Vec<(RecordId, UserValue)>> {
-        let interner = self.interner.get().await?;
-
+    /// List all records (returns InnerValues)
+    ///
+    /// No conversion - returns InnerValues directly
+    pub async fn list(&self) -> DbResult<Vec<(RecordId, InnerValue)>> {
         let items = self.data_store.iter().await?;
         let mut result = Vec::new();
 
@@ -189,8 +157,7 @@ impl<R: Repo> Table<R> {
 
             match InnerValue::from_bytes(bytes) {
                 Ok(inner_value) => {
-                    let user_value = transform::inner_to_user(&inner_value, interner);
-                    result.push((id, user_value));
+                    result.push((id, inner_value));
                 }
                 Err(e) => {
                     log::warn!("Failed to deserialize record: {}", e);
@@ -206,7 +173,7 @@ impl<R: Repo> Table<R> {
         Ok(self.counter.get().await? as usize)
     }
 
-    /// Stream records in batches, returning UserValues
+    /// Stream records in batches, returning InnerValues
     ///
     /// This is memory-efficient for large tables as it doesn't load all records at once.
     /// Returns a stream that yields batches of records.
@@ -215,17 +182,14 @@ impl<R: Repo> Table<R> {
     /// * `batch_size` - Number of records per batch
     ///
     /// # Returns
-    /// A stream that yields batches of (RecordId, UserValue) tuples
+    /// A stream that yields batches of (RecordId, InnerValue) tuples
     pub fn list_stream(
         &self,
         batch_size: usize,
-    ) -> impl Stream<Item = DbResult<Vec<(RecordId, UserValue)>>> {
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
         let table = self.clone();
 
         stream! {
-            // Get interner once
-            let interner = table.interner.get().await?;
-
             // Get stream from storage
             let mut storage_stream = table.data_store.iter_stream(batch_size);
 
@@ -249,8 +213,7 @@ impl<R: Repo> Table<R> {
 
                     match InnerValue::from_bytes(bytes) {
                         Ok(inner_value) => {
-                            let user_value = transform::inner_to_user(&inner_value, interner);
-                            batch.push((id, user_value));
+                            batch.push((id, inner_value));
                         }
                         Err(e) => {
                             yield Err(DbError::Codec(format!("Failed to deserialize record: {}", e)));

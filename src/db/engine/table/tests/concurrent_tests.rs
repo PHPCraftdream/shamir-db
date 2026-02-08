@@ -1,23 +1,45 @@
 //! Concurrent access tests for Table
 
+use crate::core::transform;
 use crate::db::engine::table::Table;
+use crate::db::engine::table::interner::InternerManager;
 use crate::db::storage::storage_sled::SledRepo;
+use crate::db::storage::types::Repo;
 use crate::types::common::new_map;
 use crate::types::record_id::RecordId;
-use crate::types::value::UserValue;
+use crate::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
 
-async fn create_test_table() -> (Table<SledRepo>, tempfile::TempDir) {
+async fn create_test_table() -> (Table<SledRepo>, InternerManager, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_db");
     let repo = Arc::new(SledRepo::new(path).unwrap());
-    let table = Table::new(repo, "users".to_string()).await.unwrap();
-    (table, dir)
+    let table = Table::new(Arc::clone(&repo), "users".to_string()).await.unwrap();
+
+    // Get info_store for interner manager
+    let info_store = repo.store_get("__info__users".to_string()).await.unwrap();
+    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
+    let interner = InternerManager::new(info_store);
+
+    (table, interner, dir)
+}
+
+/// Helper to intern a UserValue and save new keys
+async fn intern_value(value: &UserValue, interner: &InternerManager) -> InnerValue {
+    let inter = interner.get().await.unwrap();
+    let transform = transform::user_to_inner(value, inter);
+
+    // Save new keys if any
+    if let Some(ref new_keys) = transform.new_keys {
+        interner.save_new_keys(new_keys).await.unwrap();
+    }
+
+    transform.inner_value
 }
 
 #[tokio::test]
 async fn test_concurrent_inserts() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     let num_threads = 20;
     let records_per_thread = 10;
@@ -25,6 +47,7 @@ async fn test_concurrent_inserts() {
 
     for thread_id in 0..num_threads {
         let table_clone = table.clone();
+        let interner_clone = interner.clone();
         handles.push(tokio::spawn(async move {
             let mut ids = vec![];
             for i in 0..records_per_thread {
@@ -33,7 +56,8 @@ async fn test_concurrent_inserts() {
                 data.insert("index".to_string(), UserValue::Int(i));
                 data.insert("name".to_string(), UserValue::Str(format!("User_{}_{}", thread_id, i)));
                 let value = UserValue::Map(data);
-                let id = table_clone.insert(&value).await.unwrap();
+                let inner = intern_value(&value, &interner_clone).await;
+                let id = table_clone.insert(&inner).await.unwrap();
                 ids.push(id);
             }
             ids
@@ -56,7 +80,7 @@ async fn test_concurrent_inserts() {
 
 #[tokio::test]
 async fn test_concurrent_insert_and_read() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     let num_inserters = 10;
     let num_readers = 10;
@@ -65,12 +89,14 @@ async fn test_concurrent_insert_and_read() {
     // Inserters
     for i in 0..num_inserters {
         let table_clone = table.clone();
+        let interner_clone = interner.clone();
         handles.push(tokio::spawn(async move {
             for j in 0..20 {
                 let mut data = new_map();
                 data.insert("key".to_string(), UserValue::Str(format!("value_{}_{}", i, j)));
                 data.insert("num".to_string(), UserValue::Int(i * 20 + j));
-                table_clone.insert(&UserValue::Map(data)).await.unwrap();
+                let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                table_clone.insert(&inner).await.unwrap();
             }
         }));
     }
@@ -98,7 +124,7 @@ async fn test_concurrent_insert_and_read() {
 
 #[tokio::test]
 async fn test_concurrent_same_keys_interning() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     let num_threads = 50;
     let mut handles = vec![];
@@ -106,6 +132,7 @@ async fn test_concurrent_same_keys_interning() {
     // All threads insert records with same keys
     for i in 0..num_threads {
         let table_clone = table.clone();
+        let interner_clone = interner.clone();
         handles.push(tokio::spawn(async move {
             for j in 0..10 {
                 let mut data = new_map();
@@ -114,7 +141,8 @@ async fn test_concurrent_same_keys_interning() {
                 data.insert("age".to_string(), UserValue::Int(i));
                 data.insert("email".to_string(), UserValue::Str(format!("user{}@test.com", i)));
                 data.insert("index".to_string(), UserValue::Int(j));
-                table_clone.insert(&UserValue::Map(data)).await.unwrap();
+                let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                table_clone.insert(&inner).await.unwrap();
             }
         }));
     }
@@ -128,14 +156,20 @@ async fn test_concurrent_same_keys_interning() {
     assert_eq!(records.len(), (num_threads * 10) as usize);
 
     // All records should have same 4 keys (name, age, email, index)
+    let interner = interner.get().await.unwrap();
+    let name_key = interner.touch_ind("name").unwrap().key().clone();
+    let age_key = interner.touch_ind("age").unwrap().key().clone();
+    let email_key = interner.touch_ind("email").unwrap().key().clone();
+    let index_key = interner.touch_ind("index").unwrap().key().clone();
+
     for (_id, value) in records {
         match value {
-            UserValue::Map(m) => {
+            InnerValue::Map(m) => {
                 assert_eq!(m.len(), 4);
-                assert!(m.contains_key("name"));
-                assert!(m.contains_key("age"));
-                assert!(m.contains_key("email"));
-                assert!(m.contains_key("index"));
+                assert!(m.contains_key(&name_key));
+                assert!(m.contains_key(&age_key));
+                assert!(m.contains_key(&email_key));
+                assert!(m.contains_key(&index_key));
             }
             _ => panic!("Expected Map"),
         }
@@ -144,12 +178,13 @@ async fn test_concurrent_same_keys_interning() {
 
 #[tokio::test]
 async fn test_concurrent_updates() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     // Insert initial record
     let mut data = new_map();
     data.insert("counter".to_string(), UserValue::Int(0));
-    let id = table.insert(&UserValue::Map(data)).await.unwrap();
+    let inner = intern_value(&UserValue::Map(data), &interner).await;
+    let id = table.insert(&inner).await.unwrap();
 
     let num_threads = 20;
     let mut handles = vec![];
@@ -157,12 +192,14 @@ async fn test_concurrent_updates() {
     // All threads update same record
     for _ in 0..num_threads {
         let table_clone = table.clone();
+        let interner_clone = interner.clone();
         handles.push(tokio::spawn(async move {
             for i in 0..5 {
                 let mut data = new_map();
                 data.insert("counter".to_string(), UserValue::Int(i));
                 data.insert("thread".to_string(), UserValue::Str("test".to_string()));
-                let _ = table_clone.update(id, &UserValue::Map(data)).await;
+                let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                let _ = table_clone.update(id, &inner).await;
             }
         }));
     }
@@ -174,9 +211,12 @@ async fn test_concurrent_updates() {
     // Final record should exist
     let final_record = table.get(id).await.unwrap();
     match final_record {
-        UserValue::Map(m) => {
-            assert!(m.contains_key("counter"));
-            assert!(m.contains_key("thread"));
+        InnerValue::Map(m) => {
+            let interner = interner.get().await.unwrap();
+            let counter_key = interner.touch_ind("counter").unwrap().key().clone();
+            let thread_key = interner.touch_ind("thread").unwrap().key().clone();
+            assert!(m.contains_key(&counter_key));
+            assert!(m.contains_key(&thread_key));
         }
         _ => panic!("Expected Map"),
     }
@@ -184,13 +224,14 @@ async fn test_concurrent_updates() {
 
 #[tokio::test]
 async fn test_concurrent_clone_and_operations() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     let num_threads = 30;
     let mut handles = vec![];
 
     for i in 0..num_threads {
         let table_clone = table.clone();
+        let interner_clone = interner.clone();
         handles.push(tokio::spawn(async move {
             // Each thread does different operations
             match i % 4 {
@@ -199,7 +240,8 @@ async fn test_concurrent_clone_and_operations() {
                     let mut data = new_map();
                     data.insert("op".to_string(), UserValue::Str("insert".to_string()));
                     data.insert("num".to_string(), UserValue::Int(i));
-                    table_clone.insert(&UserValue::Map(data)).await.unwrap();
+                    let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                    table_clone.insert(&inner).await.unwrap();
                 }
                 1 => {
                     // List
@@ -213,7 +255,8 @@ async fn test_concurrent_clone_and_operations() {
                     // Insert then get
                     let mut data = new_map();
                     data.insert("op".to_string(), UserValue::Str("insert_get".to_string()));
-                    let id = table_clone.insert(&UserValue::Map(data)).await.unwrap();
+                    let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                    let id = table_clone.insert(&inner).await.unwrap();
                     let _ = table_clone.get(id).await;
                 }
                 _ => unreachable!(),
@@ -232,14 +275,15 @@ async fn test_concurrent_clone_and_operations() {
 
 #[tokio::test]
 async fn test_concurrent_delete() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     // Insert some records
     let mut ids = vec![];
     for i in 0..20 {
         let mut data = new_map();
         data.insert("id".to_string(), UserValue::Int(i));
-        let id = table.insert(&UserValue::Map(data)).await.unwrap();
+        let inner = intern_value(&UserValue::Map(data), &interner).await;
+        let id = table.insert(&inner).await.unwrap();
         ids.push(id);
     }
 
@@ -267,13 +311,14 @@ async fn test_concurrent_delete() {
 
 #[tokio::test]
 async fn test_counter_with_concurrent_operations() {
-    let (table, _dir) = create_test_table().await;
+    let (table, interner, _dir) = create_test_table().await;
 
     let num_threads = 50;
     let mut handles = vec![];
 
     for i in 0..num_threads {
         let table_clone = table.clone();
+        let interner_clone = interner.clone();
         handles.push(tokio::spawn(async move {
             for j in 0..10 {
                 match i % 3 {
@@ -281,7 +326,8 @@ async fn test_counter_with_concurrent_operations() {
                         // Insert
                         let mut data = new_map();
                         data.insert("val".to_string(), UserValue::Int(i * 10 + j));
-                        table_clone.insert(&UserValue::Map(data)).await.unwrap();
+                        let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
+                        table_clone.insert(&inner).await.unwrap();
                     }
                     1 => {
                         // Delete
