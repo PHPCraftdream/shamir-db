@@ -1,15 +1,24 @@
 # Database Layer
 
-S.H.A.M.I.R. database abstraction layer, providing table management and storage abstraction.
+S.H.A.M.I.R. database abstraction layer, providing table management, indexing system, and storage abstraction.
 
 ## Architecture
 
 ```
 db/
 ├── engine/           # Table engine (high-level API)
-│   └── table.rs      # Table with interning + streaming
+│   ├── index/        # Index management system
+│   │   ├── index_definition.rs   # Index definition (simple/composite)
+│   │   ├── index_info.rs         # Index metadata & status
+│   │   ├── index_info_item.rs    # Single index path item
+│   │   ├── index_record.rs       # Index record representation
+│   │   └── table_index_manager.rs # Index manager for tables
+│   ├── table.rs     # Table with interning + streaming
+│   └── table.md     # Table analysis & refactoring plans
 ├── storage/          # Storage abstraction (low-level)
 │   ├── types.rs      # Store and Repo traits
+│   ├── storage_in_memory.rs  # In-memory store (for testing)
+│   ├── storage_cached.rs     # Cached store wrapper (sync/async modes)
 │   ├── storage_sled.rs
 │   ├── storage_redb.rs
 │   ├── storage_fjall.rs
@@ -23,20 +32,34 @@ db/
 ## Components
 
 ### Engine (`db/engine/`)
-**High-level table API** with automatic interning:
+**High-level table API** with automatic interning and index management:
 - `Table<R>` - Main table abstraction
+- `TableIndexManager` - Index management system
 - Manages key interning transparently
 - Transforms UserValue ↔ InnerValue
 - Provides memory-efficient async streaming
 
 See `engine/README.md` for details.
 
+### Index System (`db/engine/index/`)
+**Index management** for tables:
+- `IndexDefinition` - Simple and composite index definitions
+- `IndexInfo` - Index metadata with sync status tracking
+- `TableIndexManager` - Index operations and validation
+- Atomic flags for fast path optimization (O(1) existence check)
+- Three indexing modes: Disabled, All, Selective
+
 ### Storage (`db/storage/`)
-**Low-level storage abstraction** over 6 embedded databases:
-- Pluggable backends (Sled, Redb, Fjall, Nebari, Persy, Canopy)
+**Low-level storage abstraction** over 8 embedded databases:
+- Pluggable backends (InMemory, Cached, Sled, Redb, Fjall, Nebari, Persy, Canopy)
 - Unified `Store` trait for key-value operations
 - Unified `Repo` trait for multi-store management
 - Async streaming with batch generators
+- Prefix scan operations for composite keys
+
+**New Storage Options:**
+- **InMemoryStore** - Pure in-memory storage for testing/caching
+- **CachedStore** - Wrapper with write-through or write-behind modes
 
 See `storage/README.md` for details.
 
@@ -103,6 +126,16 @@ while let Some(batch) = stream.next().await {
         println!("{}: {:?}", id, record);
     }
 }
+
+// Index operations
+table.add_index(&["email"]).await?;
+table.add_unique_index(&["username"]).await?;
+
+// Query with prefix scan (for index lookups)
+let results = store.scan_prefix(b"idx:email:".to_vec().into()).await?;
+for (key, value) in results {
+    // Process matching records
+}
 ```
 
 ## Storage Layout
@@ -128,7 +161,9 @@ Contains actual user records:
 Contains metadata:
 - `RecordId::system("internals")` → `Map<String, u64>`
 - `RecordId::system("inter_max")` → `u64`
-- Future: indexes, statistics, etc.
+- `RecordId::system("indexes")` → `IndexInfo` (index definitions)
+- `RecordId::system("indexes_unique")` → `IndexInfo` (unique constraints)
+- Future: statistics, etc.
 
 ## Async Flow
 
@@ -228,6 +263,11 @@ tokio::join!(
 - Don't need interning overhead
 - Building internal components
 
+**Storage Backend Options:**
+- **InMemoryStore** - For testing/caching (zero latency)
+- **CachedStore** - Wrapper with sync/async write modes
+- **Persistent stores** - Sled, Redb, Fjall, Nebari, Persy, Canopy
+
 ### Memory Usage
 
 | Operation | Memory |
@@ -294,7 +334,9 @@ match table.get(id).await {
 
 ## Future Enhancements
 
-- [ ] Automatic index creation
+- [x] Index system with simple/composite indexes
+- [x] Unique constraint validation
+- [x] Atomic flags for fast path optimization
 - [ ] Query planner integration
 - [ ] Transaction support across tables
 - [ ] Migration system
