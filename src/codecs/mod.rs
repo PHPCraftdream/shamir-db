@@ -3,6 +3,8 @@ use thiserror::Error;
 
 pub mod json;
 pub mod message_pack;
+pub mod interned_msgpack;
+pub mod interned_json;
 
 #[derive(Error, Debug)]
 pub enum CodecError {
