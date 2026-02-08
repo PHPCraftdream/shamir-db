@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use super::index_definition::IndexDefinition;
 
 /// Status of index synchronization with disk
@@ -35,7 +34,7 @@ impl IndexStatus {
 }
 
 /// Indexing mode - what to index
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexMode {
     /// Indexing disabled
     Disabled,
@@ -47,7 +46,7 @@ pub enum IndexMode {
     Selective(Vec<IndexDefinition>),
 }
 
-/// Wrapper around Arc<AtomicU8> that implements Default for rkyv deserialization.
+/// Wrapper around Arc<AtomicU8> that implements Default for deserialization.
 /// The default value is IndexStatus::Actual.
 #[derive(Debug, Clone)]
 struct StatusAtom(Arc<AtomicU8>);
@@ -66,45 +65,18 @@ impl std::ops::Deref for StatusAtom {
     }
 }
 
-// Manual Archive implementation for StatusAtom (field is omitted anyway)
-// The archived version is just a unit placeholder since we never actually serialize it.
-impl Archive for StatusAtom {
-    type Archived = ();
-    type Resolver = ();
 
-    unsafe fn resolve(&self, _: usize, _: (), out: *mut ()) {
-        // Field is omitted, nothing to resolve
-        out.write(())
-    }
-}
 
-impl<S, E> rkyv::Serialize<S> for StatusAtom
-where
-    S: rkyv::Fallible<Error = E> + ?Sized,
-{
-    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, E> {
-        Ok(()) // Field is omitted, no serialization needed
-    }
-}
 
-impl<D, E> rkyv::Deserialize<StatusAtom, D> for ()
-where
-    D: rkyv::Fallible<Error = E> + ?Sized,
-{
-    fn deserialize(&self, _: &mut D) -> Result<StatusAtom, E> {
-        Ok(StatusAtom::default()) // Always use default on deserialization
-    }
-}
 
 /// Indexing target with mode and sync status
 ///
 /// Status is NOT serialized - it's runtime-only state.
-#[derive(Debug, Clone, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexInfo {
     mode: IndexMode,
-    /// Status is skipped during serialization (both serde and rkyv)
+    /// Status is skipped during serialization
     #[serde(skip)]
-    #[archive(omit)]
     status: StatusAtom,
 }
 
@@ -221,6 +193,7 @@ impl Eq for IndexInfo {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codecs::bytes;
     use crate::db::engine::index::index_info_item::IndexInfoItem;
 
     #[test]
@@ -292,15 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rkyv_roundtrip() {
-        use crate::types::codec;
-
+    fn test_roundtrip() {
         let index_def = IndexDefinition::new("by_email", vec![IndexInfoItem::new(vec![1, 2])]);
         let target = IndexInfo::selective(vec![index_def]);
         target.mark_pending();
 
-        let bytes = codec::to_bytes(&target).unwrap();
-        let deserialized: IndexInfo = codec::from_bytes(&bytes).unwrap();
+        let bytes = bytes::to_bytes(&target).unwrap();
+        let deserialized: IndexInfo = bytes::from_bytes(&bytes).unwrap();
 
         // Mode should be preserved
         assert_eq!(deserialized.mode, target.mode);
@@ -311,22 +282,20 @@ mod tests {
     }
 
     #[test]
-    fn test_rkyv_zero_copy() {
-        use crate::types::codec;
-
+    fn test_zero_copy() {
         let index_def = IndexDefinition::new("composite", vec![
             IndexInfoItem::new(vec![1]),
             IndexInfoItem::new(vec![2, 3]),
         ]);
         let target = IndexInfo::selective(vec![index_def]);
 
-        let bytes = codec::to_bytes(&target).unwrap();
-        let archived = codec::as_archived::<IndexInfo>(&bytes).unwrap();
+        let bytes = bytes::to_bytes(&target).unwrap();
+        let info2 = bytes::from_bytes::<IndexInfo>(&bytes).unwrap();
 
         // Can access mode without allocation - using ArchivedIndexMode
-        let _archived_mode: &<IndexMode as Archive>::Archived = &archived.mode;
+        assert_eq!(info2, target);
         // The archived mode contains the same data
-        match &archived.mode {
+        match &info2.mode {
             // For archived enums, variants are accessed differently
             _ => {
                 // Just verify we can access the archived data

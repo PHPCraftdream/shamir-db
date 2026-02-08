@@ -1624,7 +1624,6 @@ dependencies = [
  "rayon",
  "redb",
  "regex",
- "rkyv",
  "rmp-serde",
  "rust_decimal",
  "serde",
