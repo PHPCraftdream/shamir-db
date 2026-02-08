@@ -79,8 +79,8 @@ impl<R: Repo> Table<R> {
             let inter_data = info_store.get(internals_id).await;
 
             if let Ok(bytes) = inter_data {
-                // Deserialize: Vec<(u64, String)> using rkyv
-                let data: Vec<(u64, String)> = codec::from_bytes(&bytes)
+                // Deserialize: Vec<(u16, String)> using rkyv
+                let data: Vec<(u16, String)> = codec::from_bytes(&bytes)
                     .unwrap_or_else(|e| {
                         log::error!("Failed to deserialize interner: {}", e);
                         Vec::new()
@@ -96,7 +96,7 @@ impl<R: Repo> Table<R> {
     }
 
     /// Save new interned keys to info_store
-    async fn save_new_keys(&self, new_keys: &[(u64, String)]) -> DbResult<()> {
+    async fn save_new_keys(&self, new_keys: &[(u16, String)]) -> DbResult<()> {
         if new_keys.is_empty() {
             return Ok(());
         }
@@ -106,7 +106,7 @@ impl<R: Repo> Table<R> {
 
         // Read existing
         let existing = self.info_store.get(internals_id.to_bytes()).await;
-        let mut current: Vec<(u64, String)> = if let Ok(bytes) = existing {
+        let mut current: Vec<(u16, String)> = if let Ok(bytes) = existing {
             codec::from_bytes(&bytes)
                 .unwrap_or_default()
         } else {

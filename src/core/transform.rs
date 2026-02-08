@@ -9,7 +9,7 @@ use crate::types::value::{InnerValue, UserValue, Value};
 #[derive(Debug)]
 pub struct TransformResult {
     pub inner_value: InnerValue,
-    pub new_keys: Option<Vec<(u64, String)>>,
+    pub new_keys: Option<Vec<(u16, String)>>,
 }
 
 impl TransformResult {
@@ -20,7 +20,7 @@ impl TransformResult {
     }
 
     /// Consumes the result and returns its constituent parts.
-    pub fn into_parts(self) -> (InnerValue, Option<Vec<(u64, String)>>) {
+    pub fn into_parts(self) -> (InnerValue, Option<Vec<(u16, String)>>) {
         (self.inner_value, self.new_keys)
     }
 
@@ -33,7 +33,7 @@ impl TransformResult {
 fn user_to_inner_rec(
     value: &UserValue,
     interner: &Interner,
-    new_keys: &mut Option<Vec<(u64, String)>>,
+    new_keys: &mut Option<Vec<(u16, String)>>,
 ) -> InnerValue {
     match value {
         Value::Nil => Value::Nil,
@@ -61,7 +61,7 @@ fn user_to_inner_rec(
         Value::Map(map) => {
             let mut inner_map = new_map_wc(map.len());
             for (key, val) in map {
-                let interned_key = interner.touch_ind(key);
+                let interned_key = interner.touch_ind(key).unwrap();
                 if interned_key.is_new() {
                     new_keys
                         .get_or_insert_with(Vec::new)
@@ -80,7 +80,7 @@ fn user_to_inner_rec(
 /// This function is optimized to avoid heap allocations for the key collection
 /// if no new keys are found.
 pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult {
-    let mut new_keys: Option<Vec<(u64, String)>> = None;
+    let mut new_keys: Option<Vec<(u16, String)>> = None;
     let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
     TransformResult {
         inner_value,
@@ -130,8 +130,6 @@ mod tests {
     use crate::codecs::Codec;
     use crate::types::common::{new_map, new_set};
     use num_bigint::BigInt;
-    use rust_decimal::Decimal;
-    use std::str::FromStr;
 
     #[test]
     fn test_round_trip_transformation() {
@@ -236,11 +234,11 @@ mod tests {
         expected_map.insert("tags".to_string(), UserValue::Set(expected_set));
         expected_map.insert(
             "balance".to_string(),
-            UserValue::Big(BigInt::from_str(large_number_str).unwrap()),
+            UserValue::Str(large_number_str.to_string()),
         );
         expected_map.insert(
             "price".to_string(),
-            UserValue::Dec(Decimal::from_str("99.95").unwrap()),
+            UserValue::Str("99.95".to_string()),
         );
         expected_map.insert("ratio".to_string(), UserValue::F64(0.123));
         expected_map.insert(

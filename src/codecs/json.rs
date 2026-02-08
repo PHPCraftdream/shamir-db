@@ -114,8 +114,8 @@ mod tests {
             expected_map.insert("version".to_string(), UserValue::Int(-10));
             expected_map.insert("user_id".to_string(), UserValue::Int(1234567890));
             expected_map.insert("pi".to_string(), UserValue::F64(3.14));
-            expected_map.insert("price".to_string(), UserValue::Dec(Decimal::new(1999, 2)));
-            expected_map.insert("large".to_string(), UserValue::Big(BigInt::from(10000)));
+            expected_map.insert("price".to_string(), UserValue::Str("19.99".to_string()));
+            expected_map.insert("large".to_string(), UserValue::Str("10000".to_string()));
             let expected_value = UserValue::Map(expected_map);
             let decoded_value: UserValue = codec.decode(raw_json.as_bytes()).unwrap();
             assert_eq!(decoded_value, expected_value);
@@ -127,7 +127,7 @@ mod tests {
             let large_number_str = "1234567890123456789012345678901234567890";
             let raw_json = format!(r#"{{ "big:large": "{}" }}"#, large_number_str);
             let mut expected_map = new_map();
-            expected_map.insert("large".to_string(), UserValue::Big(BigInt::from_str(large_number_str).unwrap()));
+            expected_map.insert("large".to_string(), UserValue::Str(large_number_str.to_string()));
             let expected_value = UserValue::Map(expected_map);
             let decoded_value: UserValue = codec.decode(raw_json.as_bytes()).unwrap();
             assert_eq!(decoded_value, expected_value);
@@ -163,7 +163,7 @@ mod tests {
             assert!(result.is_ok());
             let value = result.unwrap();
             if let UserValue::Map(map) = value {
-                assert_eq!(map.get("balance"), Some(&UserValue::Big(BigInt::from(12345))));
+                assert_eq!(map.get("balance"), Some(&UserValue::Str("12345".to_string())));
             } else {
                 panic!("Expected a map");
             }
@@ -173,10 +173,50 @@ mod tests {
             assert!(result.is_ok());
             let value = result.unwrap();
             if let UserValue::Map(map) = value {
-                assert_eq!(map.get("balance"), Some(&UserValue::Big(BigInt::from(12345))));
+                assert_eq!(map.get("balance"), Some(&UserValue::Str("12345".to_string())));
             } else {
                 panic!("Expected a map");
             }
+        }
+
+        #[test]
+        fn test_decode_decimal_validation() {
+            let codec = JsonCodec;
+            // Valid decimal should decode to Str
+            let json = r#"{ "dec:price": "19.99" }"#;
+            let result: Result<UserValue, _> = codec.decode(json.as_bytes());
+            assert!(result.is_ok());
+            let value = result.unwrap();
+            if let UserValue::Map(map) = value {
+                assert_eq!(map.get("price"), Some(&UserValue::Str("19.99".to_string())));
+            } else {
+                panic!("Expected a map");
+            }
+
+            // Invalid decimal should fail
+            let json = r#"{ "dec:price": "not_a_decimal" }"#;
+            let result: Result<UserValue, _> = codec.decode(json.as_bytes());
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_decode_bigint_validation() {
+            let codec = JsonCodec;
+            // Valid bigint should decode to Str
+            let json = r#"{ "big:balance": "123456789012345678901234567890" }"#;
+            let result: Result<UserValue, _> = codec.decode(json.as_bytes());
+            assert!(result.is_ok());
+            let value = result.unwrap();
+            if let UserValue::Map(map) = value {
+                assert_eq!(map.get("balance"), Some(&UserValue::Str("123456789012345678901234567890".to_string())));
+            } else {
+                panic!("Expected a map");
+            }
+
+            // Invalid bigint should fail
+            let json = r#"{ "big:balance": "not_a_number" }"#;
+            let result: Result<UserValue, _> = codec.decode(json.as_bytes());
+            assert!(result.is_err());
         }
     }
 }

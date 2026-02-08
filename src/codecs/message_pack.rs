@@ -92,8 +92,9 @@ mod tests {
             rich_map.insert("version".to_string(), UserValue::Int(-10));
             rich_map.insert("user_id".to_string(), UserValue::Int(987));
             rich_map.insert("pi".to_string(), UserValue::F64(3.14));
-            rich_map.insert("price".to_string(), UserValue::Dec(Decimal::new(1999, 2)));
-            rich_map.insert("large".to_string(), UserValue::Big(BigInt::from(10000)));
+            // dec: and big: now validate but store as Str
+            rich_map.insert("price".to_string(), UserValue::Str("19.99".to_string()));
+            rich_map.insert("large".to_string(), UserValue::Str("10000".to_string()));
             let rich_value = UserValue::Map(rich_map);
 
             let initial_value: UserValue = json_codec.decode(raw_json.as_bytes()).unwrap();
