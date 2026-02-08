@@ -1,22 +1,25 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo check:*)",
-      "Bash(cargo test:*)",
-      "WebSearch",
-      "Bash(grep:*)",
-      "Bash(cat:*)",
-      "Bash(cargo build:*)",
-      "Bash(find:*)",
-      "Bash(cargo doc:*)",
-      "Bash(taskkill:*)",
-      "Bash(Select-String -Pattern \"Batch|passed|FAILED|test result\")",
       "Bash(Select-Object -Last 20)",
+      "Bash(Select-String -Pattern \"Batch|passed|FAILED|test result\")",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo test:*)",
       "Bash(cargo:*)",
-      "Bash(ls:*)",
-      "Bash(git checkout:*)",
+      "Bash(cat:*)",
+      "Bash(cd:*)",
+      "Bash(curl:*)",
       "Bash(dir:*)",
-      "Bash(wc:*)"
+      "Bash(find:*)",
+      "Bash(git checkout:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(node:*)",
+      "Bash(taskkill:*)",
+      "Bash(wc:*)",
+      "WebSearch"
     ]
   }
 }

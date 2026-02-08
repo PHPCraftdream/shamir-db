@@ -24,12 +24,19 @@ impl<'a> InternedJsonCodec<'a> {
     /// ```rust
     /// use shamir_db::codecs::interned_json::InternedJsonCodec;
     /// use shamir_db::core::interner::Interner;
+    /// use shamir_db::types::value::UserValue;
+    /// use shamir_db::types::common::new_map;
     ///
     /// let interner = Interner::new();
     /// let codec = InternedJsonCodec::new(&interner);
     ///
-    /// // JSON bytes (encoded from UserValue)
-    /// let json = json_codec.encode(&user_value).unwrap();
+    /// // Create a UserValue and encode to JSON
+    /// let mut user_map = new_map();
+    /// user_map.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+    /// let user_value = UserValue::Map(user_map);
+    /// let json = serde_json::to_vec(&user_value).unwrap();
+    ///
+    /// // Decode to InnerValue with interned keys
     /// let inner_value = codec.decode_to_inner(&json).unwrap();
     /// ```
     pub fn decode_to_inner(&self, bytes: &[u8]) -> Result<InnerValue, CodecError> {

@@ -24,12 +24,19 @@ impl<'a> InternedMessagePackCodec<'a> {
     /// ```rust
     /// use shamir_db::codecs::interned_msgpack::InternedMessagePackCodec;
     /// use shamir_db::core::interner::Interner;
+    /// use shamir_db::types::value::UserValue;
+    /// use shamir_db::types::common::new_map;
     ///
     /// let interner = Interner::new();
     /// let codec = InternedMessagePackCodec::new(&interner);
     ///
-    /// // MessagePack bytes (encoded from UserValue)
+    /// // Create a UserValue and encode to MessagePack
+    /// let mut user_map = new_map();
+    /// user_map.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+    /// let user_value = UserValue::Map(user_map);
     /// let msgpack = rmp_serde::to_vec_named(&user_value).unwrap();
+    ///
+    /// // Decode to InnerValue with interned keys
     /// let inner_value = codec.decode_to_inner(&msgpack).unwrap();
     /// ```
     pub fn decode_to_inner(&self, bytes: &[u8]) -> Result<InnerValue, CodecError> {
