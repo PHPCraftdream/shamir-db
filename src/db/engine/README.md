@@ -1,6 +1,20 @@
 # Table Engine
 
-High-level table abstraction with automatic key interning and value transformations.
+High-level table abstraction with automatic key interning, value transformations, and index management.
+
+## Architecture
+
+```
+engine/
+├── index/                    # Index management system
+│   ├── index_definition.rs   # Index definition (simple/composite)
+│   ├── index_info.rs         # Index metadata with sync status
+│   ├── index_info_item.rs    # Single index path item
+│   ├── index_record.rs       # Index record representation
+│   └── table_index_manager.rs # Index manager for tables
+├── table.rs                  # Main table implementation
+└── table.md                  # Table analysis & refactoring plans
+```
 
 ## Purpose
 
@@ -29,6 +43,96 @@ RecordId::system("inter_max")   → u64               // Next available ID
 
 // Future use:
 RecordId::system("indexes")    → Index metadata
+```
+
+## Index System
+
+The index system provides efficient data lookup with three indexing modes:
+
+### Index Modes
+
+```rust
+pub enum IndexMode {
+    Disabled,                      // No indexing
+    All,                           // Index all Map fields (simple indexes)
+    Selective(Vec<IndexDefinition>), // Custom indexes
+}
+```
+
+### Index Definition
+
+Indexes can be **simple** (single path) or **composite** (multiple paths):
+
+```rust
+// Simple index
+let email_idx = IndexDefinition::new("by_email", vec![
+    IndexInfoItem::new(vec![2])  // Path to email field
+]);
+
+// Composite index
+let name_age_idx = IndexDefinition::new("by_name_and_age", vec![
+    IndexInfoItem::new(vec![1]),  // Path to name field
+    IndexInfoItem::new(vec![3])   // Path to age field
+]);
+```
+
+### TableIndexManager
+
+The `TableIndexManager` handles index operations:
+
+- **Atomic flags** for O(1) existence check (no locks!)
+- **Lazy loading** of index metadata
+- **Status tracking**: Actual, Pending, Saving
+
+```rust
+pub struct TableIndexManager {
+    data_store: Arc<dyn Store>,
+    interner: Arc<OnceCell<Interner>>,
+    indexes: Arc<RwLock<IndexInfo>>,
+    indexes_unique: Arc<RwLock<IndexInfo>>,
+    has_indexes: AtomicBool,        // O(1) check!
+    has_indexes_unique: AtomicBool, // O(1) check!
+    info_store: Arc<dyn Store>,
+}
+```
+
+### Index Operations
+
+```rust
+// Add index
+table.add_index(&["email"]).await?;
+
+// Add unique index
+table.add_unique_index(&["username"]).await?;
+
+// Check if has indexes (O(1) - no locks!)
+if table.has_indexes() {
+    // Use indexes for query
+}
+
+// Remove index
+table.remove_index(&["email"]).await?;
+
+// Enable/disable indexing
+table.enable_indexing_all().await?;
+table.disable_indexing().await?;
+```
+
+### Performance Optimization
+
+The index system uses atomic flags for fast path optimization:
+
+```rust
+// Before: O(N) with locks even when no indexes
+if let Some(indexes) = self.unique_indexes.read().await {
+    // Validate...
+}
+
+// After: O(1) without locks when no indexes
+if !self.has_indexes_unique.load(Ordering::Relaxed) {
+    return Ok(()); // Skip validation!
+}
+// Only acquire lock when indexes actually exist
 ```
 
 ## Table Structure
@@ -268,8 +372,11 @@ Interned strings live as long as the table exists:
 
 ### Future Enhancements
 
+- [x] Index system with simple/composite indexes
+- [x] Atomic flags for fast path optimization
+- [x] Unique constraint validation
 - [ ] Garbage collection for unused interned strings
 - [ ] Automatic batch size tuning
 - [ ] Statistics (record count, interned strings count)
-- [ ] Index metadata in system records
-- [ ] Secondary indexes
+- [ ] Query planner integration
+- [ ] In-memory index for O(1) unique validation

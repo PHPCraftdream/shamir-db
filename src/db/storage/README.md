@@ -6,13 +6,15 @@ This module provides a unified interface over 6 different embedded database engi
 
 ```
 storage/
-├── types.rs              # Store and Repo traits
-├── storage_sled.rs       # Sled backend
-├── storage_redb.rs       # Redb backend
-├── storage_fjall.rs      # Fjall backend
-├── storage_nebari.rs     # Nebari backend
-├── storage_persy.rs      # Persy backend
-└── storage_canopy.rs     # Canopy backend
+├── types.rs                  # Store and Repo traits
+├── storage_in_memory.rs      # In-memory backend (testing/caching)
+├── storage_cached.rs         # Cached wrapper (sync/async write modes)
+├── storage_sled.rs           # Sled backend
+├── storage_redb.rs           # Redb backend
+├── storage_fjall.rs          # Fjall backend
+├── storage_nebari.rs         # Nebari backend
+├── storage_persy.rs          # Persy backend
+└── storage_canopy.rs         # Canopy backend
 ```
 
 ## Core Traits
@@ -54,6 +56,8 @@ pub trait Repo: Send + Sync {
 
 | Backend | Type | Best For | Status |
 |---------|------|----------|--------|
+| **InMemory** | DashMap | Testing, caching | ✅ Stable |
+| **Cached** | Wrapper | Read-heavy workloads | ✅ Stable |
 | **Sled** | B-Tree | General purpose | ✅ Stable |
 | **Redb** | MVCC B-Tree | Concurrency | ✅ Stable |
 | **Fjall** | LSM-Tree | Write-heavy | ✅ Stable |
@@ -94,6 +98,32 @@ repo.store_delete("users").await?;
 ```
 
 ## Backend-Specific Details
+
+### InMemoryStore
+- **Type**: DashMap-based in-memory storage
+- **Pros**: Zero latency, thread-safe, perfect for tests
+- **Cons**: Data lost on restart, limited by RAM
+- **Use**: Testing, caching layers, temporary data
+
+### CachedStore
+- **Type**: Wrapper with caching capabilities
+- **Pros**: Two write modes (Sync/Async), full mirror cache
+- **Cons**: Higher memory usage, eventual consistency in Async mode
+- **Write Modes**:
+  - `WriteMode::Sync`: Write-through - waits for disk (safer, for indexes)
+  - `WriteMode::Async`: Write-behind - background writes (faster, for data)
+
+```rust
+// Create cached store with sync mode (for indexes)
+let cached = CachedStore::new_sync(inner).await?;
+
+// Create cached store with async mode (for data)
+let cached = CachedStore::new_async(inner).await?;
+
+// Check pending writes in async mode
+let pending = cached.pending_writes();
+cached.flush().await?; // Wait for all pending writes
+```
 
 ### Sled
 - **Type**: Pure Rust B-tree database
@@ -198,11 +228,13 @@ cargo test --lib storage
 
 | Use Case | Recommended Backend |
 |----------|---------------------|
-| **Read-heavy** | Sled, Redb |
-| **Write-heavy** | Fjall |
+| **Testing** | InMemory |
+| **Read-heavy** | Sled, Redb, Cached (Sync) |
+| **Write-heavy** | Fjall, Cached (Async) |
 | **Transactions** | Persy |
 | **Compression** | Canopy |
 | **Maximum concurrency** | Redb (MVCC) |
+| **Hot data caching** | CachedStore wrapper |
 
 ### Memory Usage
 
