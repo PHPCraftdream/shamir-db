@@ -187,7 +187,8 @@ fn transform_json_to_inner(value: serde_json::Value, interner: &Interner) -> Inn
                 let interned_key = interner
                     .touch_ind(&real_key)
                     .expect("failed to intern key")
-                    .val();
+                    .key()
+                    .clone();
                 inner_map.insert(interned_key, inner_val);
             }
             Value::Map(inner_map)
@@ -216,7 +217,7 @@ fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> serde_json::V
             let mut obj = serde_json::map::Map::with_capacity(map.len());
             for (key_id, val) in map {
                 // Look up string key from interner
-                let key_str = match interner.get_str(*key_id) {
+                let key_str = match interner.get_str(key_id) {
                     Some(s) => s.to_string(),
                     None => format!("<key:{}>", key_id),
                 };
@@ -230,6 +231,7 @@ fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> serde_json::V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::interner::InternedKey;
     use crate::types::common::new_map;
     use crate::types::value::UserValue;
 
@@ -420,9 +422,9 @@ mod tests {
         let json2 = to_json(&UserValue::Map(map2));
         json_to_inner(&interner, &json2).unwrap();
 
-        // "name" should have the same ID (first key gets ID 1)
+        // "name" should have the same ID (first key gets ID "2")
         let name_id = interner.get_ind("name").unwrap();
-        assert_eq!(name_id, 1);
+        assert_eq!(name_id, InternedKey::from_str("2"));
     }
 
     #[test]
@@ -444,9 +446,9 @@ mod tests {
         let result = json_to_inner(&interner, &json2).unwrap();
 
         // Check that keys are shared (JSON objects iterate in alphabetical order)
-        assert_eq!(interner.get_ind("email"), Some(1));
-        assert_eq!(interner.get_ind("name"), Some(2));
-        assert_eq!(interner.get_ind("age"), Some(3));
+        assert_eq!(interner.get_ind("email"), Some(InternedKey::from_str("2")));
+        assert_eq!(interner.get_ind("name"), Some(InternedKey::from_str("3")));
+        assert_eq!(interner.get_ind("age"), Some(InternedKey::from_str("4")));
 
         // Expected result
         let name_id = interner.get_ind("name").unwrap();

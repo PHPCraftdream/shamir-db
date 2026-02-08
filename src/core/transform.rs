@@ -1,4 +1,4 @@
-use crate::core::interner::{Interner, InternerType};
+use crate::core::interner::{Interner, InternedKey, UserKey};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
@@ -9,7 +9,7 @@ use crate::types::value::{InnerValue, UserValue, Value};
 #[derive(Debug)]
 pub struct TransformResult {
     pub inner_value: InnerValue,
-    pub new_keys: Option<Vec<(InternerType, String)>>,
+    pub new_keys: Option<Vec<(InternedKey, UserKey)>>,
 }
 
 impl TransformResult {
@@ -20,7 +20,7 @@ impl TransformResult {
     }
 
     /// Consumes the result and returns its constituent parts.
-    pub fn into_parts(self) -> (InnerValue, Option<Vec<(InternerType, String)>>) {
+    pub fn into_parts(self) -> (InnerValue, Option<Vec<(InternedKey, UserKey)>>) {
         (self.inner_value, self.new_keys)
     }
 
@@ -33,7 +33,7 @@ impl TransformResult {
 fn user_to_inner_rec(
     value: &UserValue,
     interner: &Interner,
-    new_keys: &mut Option<Vec<(InternerType, String)>>,
+    new_keys: &mut Option<Vec<(InternedKey, UserKey)>>,
 ) -> InnerValue {
     match value {
         Value::Nil => Value::Nil,
@@ -65,10 +65,10 @@ fn user_to_inner_rec(
                 if interned_key.is_new() {
                     new_keys
                         .get_or_insert_with(Vec::new)
-                        .push((interned_key.val(), key.clone()));
+                        .push((interned_key.key().clone(), UserKey::from_str(key)));
                 }
                 let inner_val = user_to_inner_rec(val, interner, new_keys);
-                inner_map.insert(interned_key.val(), inner_val);
+                inner_map.insert(interned_key.key().clone(), inner_val);
             }
             Value::Map(inner_map)
         }
@@ -80,7 +80,7 @@ fn user_to_inner_rec(
 /// This function is optimized to avoid heap allocations for the key collection
 /// if no new keys are found.
 pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult {
-    let mut new_keys: Option<Vec<(InternerType, String)>> = None;
+    let mut new_keys: Option<Vec<(InternedKey, UserKey)>> = None;
     let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
     TransformResult {
         inner_value,
@@ -113,10 +113,10 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
             let mut user_map = new_map_wc(map.len());
             for (key_id, val) in map {
                 let key = interner
-                    .get_str(*key_id)
+                    .get_str(key_id)
                     .expect("Data corruption: interned key not found");
                 let user_val = inner_to_user(val, interner);
-                user_map.insert(key, user_val);
+                user_map.insert(key.as_str().to_string(), user_val);
             }
             Value::Map(user_map)
         }
@@ -151,9 +151,9 @@ mod tests {
         assert!(result.has_new_keys());
         let keys = result.new_keys.as_ref().unwrap();
         assert_eq!(keys.len(), 3);
-        assert!(keys.iter().any(|(_, s)| s == "name"));
-        assert!(keys.iter().any(|(_, s)| s == "age"));
-        assert!(keys.iter().any(|(_, s)| s == "balance"));
+        assert!(keys.iter().any(|(_, s)| s.as_str() == "name"));
+        assert!(keys.iter().any(|(_, s)| s.as_str() == "age"));
+        assert!(keys.iter().any(|(_, s)| s.as_str() == "balance"));
 
         // Verify that calling again with the same keys yields no new keys
         let result_again = user_to_inner(&original_value, &interner);
