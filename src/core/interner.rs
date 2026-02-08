@@ -132,7 +132,6 @@ impl TouchInd {
 
 /// A thread-safe, two-way map for interning strings into base58 string IDs.
 /// This is the core of the key interning mechanism.
-/// Max 65535 unique keys per interner.
 #[derive(Debug)]
 pub struct Interner {
     map_user_to_interned: TDashMap<UserKey, InternedKey>,
@@ -183,26 +182,33 @@ impl Interner {
     }
 
     /// Gets the ID for a string, creating it if it doesn't exist.
-    /// Returns error if max keys (65535) exceeded.
     pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, &'static str> {
         let key = UserKey::from_str(str.as_ref());
 
-        // Check if key already exists
-        if let Some(id) = self.map_user_to_interned.get(&key) {
-            return Ok(TouchInd::Exists(id.clone()));
+        use dashmap::mapref::entry::Entry;
+
+        match self.map_user_to_interned.entry(key.clone()) {
+            Entry::Occupied(e) => {
+                // Key already exists
+                Ok(TouchInd::Exists(e.get().clone()))
+            }
+            Entry::Vacant(e) => {
+                // Key doesn't exist - create new ID and insert atomically
+                let new_id: InternedKey = {
+                    let mut current_id = self.current_id.lock().unwrap();
+                    current_id.increment();
+                    InternedKey::from_str(current_id.as_str())
+                };
+
+                // Insert into forward map
+                e.insert(new_id.clone());
+
+                // Also insert into reverse map
+                self.map_interned_to_user.insert(new_id.clone(), key);
+
+                Ok(TouchInd::New(new_id))
+            }
         }
-
-        // Create new ID
-        let new_id: InternedKey = {
-            let mut current_id = self.current_id.lock().unwrap();
-            current_id.increment();
-            InternedKey::from_str(current_id.as_str())
-        };
-
-        self.map_user_to_interned.insert(key.clone(), new_id.clone());
-        self.map_interned_to_user.insert(new_id.clone(), key);
-
-        Ok(TouchInd::New(new_id))
     }
 
     /// Gets the user key corresponding to an interned key.
