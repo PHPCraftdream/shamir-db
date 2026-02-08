@@ -348,7 +348,7 @@ impl<R: Repo> Table<R> {
     pub fn list_stream(
         &self,
         batch_size: usize,
-    ) -> impl Stream<Item = DbResult<Vec<(RecordId, UserValue)>>> + '_ {
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, UserValue)>>> {
         let table = self.clone();
 
         stream! {
