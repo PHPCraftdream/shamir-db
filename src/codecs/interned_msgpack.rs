@@ -234,7 +234,8 @@ fn transform_msgpack_to_inner(value: rmpv::Value, interner: &Interner) -> InnerV
                     let interned_key = interner
                         .touch_ind(&real_key)
                         .expect("failed to intern key")
-                        .val();
+                        .key()
+                        .clone();
                     inner_map.insert(interned_key, inner_val);
                 }
             }
@@ -269,7 +270,7 @@ fn inner_to_msgpack_value(value: &InnerValue, interner: &Interner) -> rmpv::Valu
             let mut mp_map = Vec::with_capacity(map.len());
             for (key_id, val) in map {
                 // Look up string key from interner
-                let key_str = match interner.get_str(*key_id) {
+                let key_str = match interner.get_str(key_id) {
                     Some(s) => s.to_string(),
                     None => format!("<key:{}>", key_id),
                 };
@@ -320,7 +321,7 @@ mod tests {
         // Expected InnerValue - get the ID from the result
         if let InnerValue::Map(map) = &result {
             eprintln!("Result map keys: {:?}", map.keys().collect::<Vec<_>>());
-            let name_id = *map.keys().next().unwrap();
+            let name_id = map.keys().next().unwrap().clone();
             let mut expected_map = new_map_wc(1);
             expected_map.insert(name_id, InnerValue::Str("Alice".to_string()));
             let expected = InnerValue::Map(expected_map);

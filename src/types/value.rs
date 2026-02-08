@@ -11,10 +11,10 @@ use serde::ser::{Serializer, SerializeMap, SerializeSeq};
 use std::fmt::{self, Debug};
 use std::str::FromStr;
 use std::any::TypeId;
-use crate::core::interner::InternerType;
+use crate::core::interner::InternedKey;
 
 pub type UserValue = Value<String>;
-pub type InnerValue = Value<InternerType>;
+pub type InnerValue = Value<InternedKey>;
 
 #[derive(Debug, Clone)]
 pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
@@ -297,8 +297,8 @@ mod tests {
     #[test]
     fn test_bytes_serialization_roundtrip() {
         let mut map = new_map();
-        map.insert(InternerType::from(123_u32), InnerValue::Str("hello".to_string()));
-        map.insert(InternerType::from(456_u32), InnerValue::Int(99));
+        map.insert(InternedKey::from_str("2m"), InnerValue::Str("hello".to_string()));
+        map.insert(InternedKey::from_str("4P"), InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
         let bytes = value.to_bytes();
@@ -546,9 +546,9 @@ mod tests {
     #[test]
     fn test_inner_value_with_numeric_keys() {
         let mut map = new_map();
-        map.insert(InternerType::from(0u32), InnerValue::Str("zero".to_string()));
-        map.insert(InternerType::MAX, InnerValue::Str("max".to_string()));
-        map.insert(InternerType::from(42u32), InnerValue::Int(42));
+        map.insert(InternedKey::from_str("2"), InnerValue::Str("zero".to_string()));
+        map.insert(InternedKey::from_str("zzzzzzzzzz"), InnerValue::Str("max".to_string()));
+        map.insert(InternedKey::from_str("4P"), InnerValue::Int(42));
 
         let value = InnerValue::Map(map);
         let bytes = value.to_bytes();
