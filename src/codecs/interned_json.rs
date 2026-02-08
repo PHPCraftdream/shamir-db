@@ -1,41 +1,63 @@
 //! JSON codec with on-the-fly key interning.
 //!
-//! This codec deserializes JSON directly into InnerValue (Value<u16>)
-//! by interning string keys during deserialization.
+//! Functions to convert between JSON bytes and InnerValue (Value<u16>)
+//! with string key interning.
 
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::new_map_wc;
-use crate::types::value::{InnerValue, Value};
+use crate::types::value::{InnerValue, Value, UserValue};
 
-/// A codec that deserializes JSON directly to InnerValue with key interning.
-pub struct InternedJsonCodec<'a> {
-    interner: &'a Interner,
+/// Decode JSON bytes to InnerValue, interning string keys.
+pub fn json_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue, CodecError> {
+    // Parse JSON to serde_json::Value
+    let json_value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| CodecError::Decode(e.to_string()))?;
+
+    // Transform to InnerValue with interning
+    Ok(transform_json_to_inner(json_value, interner))
 }
 
-impl<'a> InternedJsonCodec<'a> {
-    pub fn new(interner: &'a Interner) -> Self {
-        Self { interner }
-    }
+/// Encode InnerValue to JSON bytes.
+pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>, CodecError> {
+    // Convert InnerValue to serde_json::Value with string keys
+    let json_value = inner_to_json_value(value, interner);
+    serde_json::to_vec(&json_value).map_err(|e| CodecError::Encode(e.to_string()))
+}
 
-    /// Decode JSON bytes directly to InnerValue, interning string keys.
-    pub fn decode_to_inner(&self, bytes: &[u8]) -> Result<InnerValue, CodecError> {
-        // Parse JSON to serde_json::Value
-        let json_value: serde_json::Value = serde_json::from_slice(bytes)
-            .map_err(|e| CodecError::Decode(e.to_string()))?;
-
-        // Transform to InnerValue with interning
-        Ok(transform_json_to_inner(json_value, self.interner))
-    }
-
-    /// Encode InnerValue to JSON bytes.
-    pub fn encode_from_inner(&self, value: &InnerValue) -> Result<Vec<u8>, CodecError> {
-        serde_json::to_vec(value).map_err(|e| CodecError::Encode(e.to_string()))
+/// Convert InnerValue to serde_json::Value, converting numeric keys back to strings.
+fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> serde_json::Value {
+    match value {
+        Value::Nil => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+        Value::F64(f) => serde_json::Value::Number(serde_json::Number::from_f64(*f).unwrap_or(serde_json::Number::from(0))),
+        Value::Dec(d) => serde_json::Value::String(d.to_string()),
+        Value::Big(b) => serde_json::Value::String(b.to_string()),
+        Value::Str(s) => serde_json::Value::String(s.clone()),
+        Value::Bin(b) => serde_json::Value::Array(b.iter().map(|v| serde_json::Value::Number(serde_json::Number::from(*v))).collect()),
+        Value::List(list) => {
+            serde_json::Value::Array(list.iter().map(|v| inner_to_json_value(v, interner)).collect())
+        }
+        Value::Set(set) => {
+            serde_json::Value::Array(set.iter().map(|v| inner_to_json_value(v, interner)).collect())
+        }
+        Value::Map(map) => {
+            let mut obj = serde_json::map::Map::with_capacity(map.len());
+            for (key_id, val) in map {
+                // Look up string key from interner
+                let key_str = match interner.get_str(*key_id) {
+                    Some(s) => s.to_string(),
+                    None => format!("<key:{}>", key_id),
+                };
+                obj.insert(key_str, inner_to_json_value(val, interner));
+            }
+            serde_json::Value::Object(obj)
+        }
     }
 }
 
 /// Transforms serde_json::Value to InnerValue, interning all string keys.
-/// This is a single-pass transformation from JSON to InnerValue.
 fn transform_json_to_inner(value: serde_json::Value, interner: &Interner) -> InnerValue {
     match value {
         serde_json::Value::Null => Value::Nil,
@@ -75,132 +97,141 @@ fn transform_json_to_inner(value: serde_json::Value, interner: &Interner) -> Inn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::common::new_map;
+
+    /// Helper: UserValue → JSON bytes
+    fn to_json(value: &UserValue) -> Vec<u8> {
+        serde_json::to_vec(value).unwrap()
+    }
 
     #[test]
     fn test_decode_simple_map() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // Raw JSON bytes - no UserValue involved
-        let json = br#"{"name":"Alice"}"#;
+        // Create UserValue (as JSON constructor)
+        let mut user_map = new_map();
+        user_map.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        let user_value = UserValue::Map(user_map);
 
-        let result = codec.decode_to_inner(json).unwrap();
+        // UserValue → JSON → InnerValue
+        let json = to_json(&user_value);
+        let result = json_to_inner(&interner, &json).unwrap();
 
-        if let InnerValue::Map(map) = result {
-            assert_eq!(map.len(), 1);
-            // Check "name" was interned
-            let name_id = interner.get_ind("name").expect("name should be interned");
-            assert!(map.contains_key(&name_id));
-            assert_eq!(
-                map.get(&name_id),
-                Some(&InnerValue::Str("Alice".to_string()))
-            );
-        } else {
-            panic!("Expected Map, got {:?}", result);
-        }
+        // Expected InnerValue
+        let name_id = interner.get_ind("name").expect("name should be interned");
+        let mut expected_map = new_map_wc(1);
+        expected_map.insert(name_id, InnerValue::Str("Alice".to_string()));
+        let expected = InnerValue::Map(expected_map);
+
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn test_decode_multiple_keys() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // Raw JSON bytes
-        let json = br#"{"name":"Bob","age":30}"#;
+        // Create UserValue with multiple keys
+        let mut user_map = new_map();
+        user_map.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        user_map.insert("age".to_string(), UserValue::Int(30));
+        let user_value = UserValue::Map(user_map);
 
-        let result = codec.decode_to_inner(json).unwrap();
+        // UserValue → JSON → InnerValue
+        let json = to_json(&user_value);
+        let result = json_to_inner(&interner, &json).unwrap();
 
-        if let InnerValue::Map(map) = result {
-            assert_eq!(map.len(), 2);
-            assert!(interner.get_ind("name").is_some());
-            assert!(interner.get_ind("age").is_some());
-        } else {
-            panic!("Expected Map");
-        }
-    }
+        // Expected InnerValue
+        let name_id = interner.get_ind("name").unwrap();
+        let age_id = interner.get_ind("age").unwrap();
+        let mut expected_map = new_map_wc(2);
+        expected_map.insert(name_id, InnerValue::Str("Bob".to_string()));
+        expected_map.insert(age_id, InnerValue::Int(30));
+        let expected = InnerValue::Map(expected_map);
 
-    #[test]
-    fn test_encode_decode_roundtrip() {
-        let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
-
-        // Raw JSON bytes
-        let json = br#"{"name":"Alice","age":30}"#;
-
-        // Decode directly to InnerValue with interning
-        let inner_value = codec.decode_to_inner(json).unwrap();
-
-        // Check keys were interned
-        assert!(interner.get_ind("name").is_some());
-        assert!(interner.get_ind("age").is_some());
-
-        // Check values are correct
-        if let InnerValue::Map(map) = inner_value {
-            let name_id = interner.get_ind("name").unwrap();
-            let age_id = interner.get_ind("age").unwrap();
-            assert_eq!(map.get(&name_id), Some(&InnerValue::Str("Alice".to_string())));
-            assert_eq!(map.get(&age_id), Some(&InnerValue::Int(30)));
-        } else {
-            panic!("Expected Map");
-        }
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn test_nested_map() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // Raw JSON: {"user": {"name": "Bob", "age": 30}}
-        let json = br#"{"user":{"name":"Bob","age":30}}"#;
+        // Create nested UserValue: {"user": {"name": "Bob", "age": 30}}
+        let mut inner_map = new_map();
+        inner_map.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        inner_map.insert("age".to_string(), UserValue::Int(30));
 
-        let result = codec.decode_to_inner(json).unwrap();
+        let mut user_map = new_map();
+        user_map.insert("user".to_string(), UserValue::Map(inner_map));
+        let user_value = UserValue::Map(user_map);
 
-        if let InnerValue::Map(outer) = result {
-            assert_eq!(outer.len(), 1);
-            assert!(interner.get_ind("user").is_some());
-            assert!(interner.get_ind("name").is_some());
-            assert!(interner.get_ind("age").is_some());
-        } else {
-            panic!("Expected nested Map");
-        }
+        // UserValue → JSON → InnerValue
+        let json = to_json(&user_value);
+        let result = json_to_inner(&interner, &json).unwrap();
+
+        // Expected InnerValue
+        let user_id = interner.get_ind("user").unwrap();
+        let name_id = interner.get_ind("name").unwrap();
+        let age_id = interner.get_ind("age").unwrap();
+
+        let mut nested_map = new_map_wc(2);
+        nested_map.insert(name_id, InnerValue::Str("Bob".to_string()));
+        nested_map.insert(age_id, InnerValue::Int(30));
+
+        let mut expected_map = new_map_wc(1);
+        expected_map.insert(user_id, InnerValue::Map(nested_map));
+        let expected = InnerValue::Map(expected_map);
+
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn test_all_value_types() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // Raw JSON with various types
-        let json = br#"[null,true,false,42,3.14,"hello",[1,2]]"#;
+        // Create UserValue with various types
+        let user_value = UserValue::List(vec![
+            UserValue::Nil,
+            UserValue::Bool(true),
+            UserValue::Bool(false),
+            UserValue::Int(42),
+            UserValue::F64(3.14),
+            UserValue::Str("hello".to_string()),
+            UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]),
+        ]);
 
-        let result = codec.decode_to_inner(json).unwrap();
+        // UserValue → JSON → InnerValue
+        let json = to_json(&user_value);
+        let result = json_to_inner(&interner, &json).unwrap();
 
-        if let InnerValue::List(list) = result {
-            assert_eq!(list.len(), 7);
-            assert_eq!(list[0], InnerValue::Nil);
-            assert_eq!(list[1], InnerValue::Bool(true));
-            assert_eq!(list[2], InnerValue::Bool(false));
-            assert_eq!(list[3], InnerValue::Int(42));
-            assert_eq!(list[4], InnerValue::F64(3.14));
-            assert_eq!(list[5], InnerValue::Str("hello".to_string()));
-            assert_eq!(list[6], InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(2)]));
-        } else {
-            panic!("Expected List");
-        }
+        // Expected InnerValue
+        let expected = InnerValue::List(vec![
+            InnerValue::Nil,
+            InnerValue::Bool(true),
+            InnerValue::Bool(false),
+            InnerValue::Int(42),
+            InnerValue::F64(3.14),
+            InnerValue::Str("hello".to_string()),
+            InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(2)]),
+        ]);
+
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn test_interning_is_deterministic() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // First call - raw JSON
-        let json1 = br#"{"name":"Alice"}"#;
-        codec.decode_to_inner(json1).unwrap();
+        // First call
+        let mut map1 = new_map();
+        map1.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        let json1 = to_json(&UserValue::Map(map1));
+        json_to_inner(&interner, &json1).unwrap();
 
         // Second call with same key
-        let json2 = br#"{"name":"Bob"}"#;
-        codec.decode_to_inner(json2).unwrap();
+        let mut map2 = new_map();
+        map2.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        let json2 = to_json(&UserValue::Map(map2));
+        json_to_inner(&interner, &json2).unwrap();
 
         // "name" should have the same ID (first key gets ID 1)
         let name_id = interner.get_ind("name").unwrap();
@@ -208,96 +239,99 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_data() {
-        let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
-
-        // Raw JSON with array
-        let json = br#"[1,2,3,4,5]"#;
-        let result = codec.decode_to_inner(json).unwrap();
-
-        assert_eq!(result, InnerValue::List(vec![
-            InnerValue::Int(1),
-            InnerValue::Int(2),
-            InnerValue::Int(3),
-            InnerValue::Int(4),
-            InnerValue::Int(5),
-        ]));
-    }
-
-    #[test]
     fn test_multiple_calls_with_same_keys() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // First call - raw JSON
-        let json1 = br#"{"name":"Alice","email":"alice@example.com"}"#;
-        codec.decode_to_inner(json1).unwrap();
+        // First call
+        let mut map1 = new_map();
+        map1.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        map1.insert("email".to_string(), UserValue::Str("alice@example.com".to_string()));
+        let json1 = to_json(&UserValue::Map(map1));
+        json_to_inner(&interner, &json1).unwrap();
 
         // Second call with overlapping keys
-        let json2 = br#"{"name":"Bob","age":25}"#;
-        let result = codec.decode_to_inner(json2).unwrap();
+        let mut map2 = new_map();
+        map2.insert("name".to_string(), UserValue::Str("Bob".to_string()));
+        map2.insert("age".to_string(), UserValue::Int(25));
+        let json2 = to_json(&UserValue::Map(map2));
+        let result = json_to_inner(&interner, &json2).unwrap();
 
         // Check that keys are shared (JSON objects iterate in alphabetical order)
-        assert_eq!(interner.get_ind("email"), Some(1)); // First alphabetically
+        assert_eq!(interner.get_ind("email"), Some(1));
         assert_eq!(interner.get_ind("name"), Some(2));
-        assert_eq!(interner.get_ind("age"), Some(3)); // New key
+        assert_eq!(interner.get_ind("age"), Some(3));
 
-        // Check result is correct
-        if let InnerValue::Map(map) = result {
-            let name_id = interner.get_ind("name").unwrap();
-            let age_id = interner.get_ind("age").unwrap();
-            assert_eq!(map.get(&name_id), Some(&InnerValue::Str("Bob".to_string())));
-            assert_eq!(map.get(&age_id), Some(&InnerValue::Int(25)));
-        } else {
-            panic!("Expected Map");
-        }
+        // Expected result
+        let name_id = interner.get_ind("name").unwrap();
+        let age_id = interner.get_ind("age").unwrap();
+        let mut expected_map = new_map_wc(2);
+        expected_map.insert(name_id, InnerValue::Str("Bob".to_string()));
+        expected_map.insert(age_id, InnerValue::Int(25));
+        let expected = InnerValue::Map(expected_map);
+
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn test_json_with_unicode() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // Raw JSON with unicode
-        let json = r#"{"привет":"мир","emoji":"🚀🎉"}"#.as_bytes();
-        let result = codec.decode_to_inner(json).unwrap();
+        // Create UserValue with unicode
+        let mut user_map = new_map();
+        user_map.insert("привет".to_string(), UserValue::Str("мир".to_string()));
+        user_map.insert("emoji".to_string(), UserValue::Str("🚀🎉".to_string()));
+        let user_value = UserValue::Map(user_map);
 
-        if let InnerValue::Map(map) = result {
-            assert_eq!(map.len(), 2);
-            assert!(interner.get_ind("привет").is_some());
-            assert!(interner.get_ind("emoji").is_some());
-        } else {
-            panic!("Expected Map");
-        }
+        // UserValue → JSON → InnerValue
+        let json = to_json(&user_value);
+        let result = json_to_inner(&interner, &json).unwrap();
+
+        // Expected InnerValue
+        let privet_id = interner.get_ind("привет").unwrap();
+        let emoji_id = interner.get_ind("emoji").unwrap();
+        let mut expected_map = new_map_wc(2);
+        expected_map.insert(privet_id, InnerValue::Str("мир".to_string()));
+        expected_map.insert(emoji_id, InnerValue::Str("🚀🎉".to_string()));
+        let expected = InnerValue::Map(expected_map);
+
+        assert_eq!(result, expected);
     }
 
     #[test]
     fn test_json_empty_map_and_array() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
         // Empty map
-        let json1 = b"{}";
-        let result1 = codec.decode_to_inner(json1).unwrap();
+        let user_value1 = UserValue::Map(new_map());
+        let json1 = to_json(&user_value1);
+        let result1 = json_to_inner(&interner, &json1).unwrap();
         assert_eq!(result1, InnerValue::Map(new_map_wc(0)));
 
         // Empty list
-        let json2 = b"[]";
-        let result2 = codec.decode_to_inner(json2).unwrap();
+        let user_value2 = UserValue::List(vec![]);
+        let json2 = to_json(&user_value2);
+        let result2 = json_to_inner(&interner, &json2).unwrap();
         assert_eq!(result2, InnerValue::List(vec![]));
     }
 
     #[test]
-    fn test_doc_decode_to_inner() {
+    fn test_inner_to_json_roundtrip() {
         let interner = Interner::new();
-        let codec = InternedJsonCodec::new(&interner);
 
-        // Raw JSON bytes - direct decoding
-        let json = br#"{"name":"Alice"}"#;
+        // Create UserValue
+        let mut user_map = new_map();
+        user_map.insert("name".to_string(), UserValue::Str("Alice".to_string()));
+        user_map.insert("age".to_string(), UserValue::Int(30));
+        let user_value = UserValue::Map(user_map);
 
-        // Decode to InnerValue with interned keys
-        let inner_value = codec.decode_to_inner(json).unwrap();
-        assert!(matches!(inner_value, InnerValue::Map(_)));
+        // UserValue → JSON → InnerValue → JSON
+        let json1 = to_json(&user_value);
+        let inner = json_to_inner(&interner, &json1).unwrap();
+        let json2 = inner_to_json(&interner, &inner).unwrap();
+
+        // Both JSON should be equivalent (may differ in whitespace/ordering)
+        let v1: serde_json::Value = serde_json::from_slice(&json1).unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&json2).unwrap();
+        assert_eq!(v1, v2);
     }
 }
