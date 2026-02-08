@@ -1,16 +1,18 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_KEYS: u16 = 65535;
+pub type InternerType = u64;
+
+const MAX_KEYS: InternerType = InternerType::MAX;
 
 #[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
 pub enum TouchInd {
-    New(u16),
-    Exists(u16),
+    New(InternerType),
+    Exists(InternerType),
 }
 
 impl TouchInd {
-    pub fn val(&self) -> u16 {
+    pub fn val(&self) -> InternerType {
         match self {
             TouchInd::New(n) => *n,
             TouchInd::Exists(n) => *n,
@@ -25,14 +27,14 @@ impl TouchInd {
     }
 }
 
-/// A thread-safe, two-way map for interning strings into u16 IDs.
+/// A thread-safe, two-way map for interning strings into InternerType IDs.
 /// This is the core of the key interning mechanism.
 /// Max 65535 unique keys per interner.
 #[derive(Debug)]
 pub struct Interner {
-    map_str: TDashMap<String, u16>,
-    map_ind: TDashMap<u16, String>,
-    current: AtomicU16,
+    map_str: TDashMap<String, InternerType>,
+    map_ind: TDashMap<InternerType, String>,
+    current: AtomicU64,
 }
 
 impl Default for Interner {
@@ -47,13 +49,13 @@ impl Interner {
         Interner {
             map_str: new_dash_map_wc(64),
             map_ind: new_dash_map_wc(64),
-            current: AtomicU16::new(1),
+            current: AtomicU64::new(1),
         }
     }
 
     /// Creates a new Interner from a pre-existing state.
     /// This is used to "hydrate" the interner from a persistent store.
-    pub fn with_state(initial_data: Vec<(u16, String)>) -> Self {
+    pub fn with_state(initial_data: Vec<(InternerType, String)>) -> Self {
         let map_str = new_dash_map_wc(initial_data.len());
         let map_ind = new_dash_map_wc(initial_data.len());
         let mut max_id = 0;
@@ -69,7 +71,7 @@ impl Interner {
         Interner {
             map_str,
             map_ind,
-            current: AtomicU16::new(max_id + 1),
+            current: AtomicU64::new(max_id + 1),
         }
     }
 
@@ -107,12 +109,12 @@ impl Interner {
     }
 
     /// Gets the string corresponding to an ID.
-    pub fn get_str(&self, index: u16) -> Option<String> {
+    pub fn get_str(&self, index: InternerType) -> Option<String> {
         self.map_ind.get(&index).map(|s| s.clone())
     }
 
     /// Gets the ID corresponding to a string.
-    pub fn get_ind<S: AsRef<str>>(&self, str: S) -> Option<u16> {
+    pub fn get_ind<S: AsRef<str>>(&self, str: S) -> Option<InternerType> {
         self.map_str.get(str.as_ref()).map(|id| *id)
     }
 
@@ -295,7 +297,7 @@ mod tests {
             }));
         }
 
-        let results: Vec<Vec<u16>> = handles.into_iter()
+        let results: Vec<Vec<InternerType>> = handles.into_iter()
             .map(|h| h.join().unwrap())
             .collect();
 
@@ -419,7 +421,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_with_state() {
-        let initial_data: Vec<(u16, String)> = (0..100)
+        let initial_data: Vec<(InternerType, String)> = (0..100)
             .map(|i| (i, format!("initial_{}", i)))
             .collect();
 

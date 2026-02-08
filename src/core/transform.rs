@@ -1,4 +1,4 @@
-use crate::core::interner::Interner;
+use crate::core::interner::{Interner, InternerType};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
@@ -9,7 +9,7 @@ use crate::types::value::{InnerValue, UserValue, Value};
 #[derive(Debug)]
 pub struct TransformResult {
     pub inner_value: InnerValue,
-    pub new_keys: Option<Vec<(u16, String)>>,
+    pub new_keys: Option<Vec<(InternerType, String)>>,
 }
 
 impl TransformResult {
@@ -20,7 +20,7 @@ impl TransformResult {
     }
 
     /// Consumes the result and returns its constituent parts.
-    pub fn into_parts(self) -> (InnerValue, Option<Vec<(u16, String)>>) {
+    pub fn into_parts(self) -> (InnerValue, Option<Vec<(InternerType, String)>>) {
         (self.inner_value, self.new_keys)
     }
 
@@ -33,7 +33,7 @@ impl TransformResult {
 fn user_to_inner_rec(
     value: &UserValue,
     interner: &Interner,
-    new_keys: &mut Option<Vec<(u16, String)>>,
+    new_keys: &mut Option<Vec<(InternerType, String)>>,
 ) -> InnerValue {
     match value {
         Value::Nil => Value::Nil,
@@ -80,7 +80,7 @@ fn user_to_inner_rec(
 /// This function is optimized to avoid heap allocations for the key collection
 /// if no new keys are found.
 pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult {
-    let mut new_keys: Option<Vec<(u16, String)>> = None;
+    let mut new_keys: Option<Vec<(InternerType, String)>> = None;
     let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
     TransformResult {
         inner_value,

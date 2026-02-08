@@ -11,9 +11,10 @@ use serde::ser::{Serializer, SerializeMap, SerializeSeq};
 use std::fmt::{self, Debug};
 use std::str::FromStr;
 use std::any::TypeId;
+use crate::core::interner::InternerType;
 
 pub type UserValue = Value<String>;
-pub type InnerValue = Value<u16>;
+pub type InnerValue = Value<InternerType>;
 
 #[derive(Debug, Clone)]
 pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
@@ -296,8 +297,8 @@ mod tests {
     #[test]
     fn test_bytes_serialization_roundtrip() {
         let mut map = new_map();
-        map.insert(123u16, InnerValue::Str("hello".to_string()));
-        map.insert(456u16, InnerValue::Int(99));
+        map.insert(InternerType::from(123_u32), InnerValue::Str("hello".to_string()));
+        map.insert(InternerType::from(456_u32), InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
         let bytes = value.to_bytes();
@@ -319,7 +320,7 @@ mod tests {
             UserValue::Int(-42),
             UserValue::Int(i64::MAX),
             UserValue::Int(i64::MIN),
-            UserValue::F64(3.14159),
+            UserValue::F64(std::f64::consts::PI),
             UserValue::F64(f64::INFINITY),
             UserValue::F64(f64::NEG_INFINITY),
             UserValue::Str("hello world".to_string()),
@@ -545,9 +546,9 @@ mod tests {
     #[test]
     fn test_inner_value_with_numeric_keys() {
         let mut map = new_map();
-        map.insert(0u16, InnerValue::Str("zero".to_string()));
-        map.insert(u16::MAX, InnerValue::Str("max".to_string()));
-        map.insert(42u16, InnerValue::Int(42));
+        map.insert(InternerType::from(0u32), InnerValue::Str("zero".to_string()));
+        map.insert(InternerType::MAX, InnerValue::Str("max".to_string()));
+        map.insert(InternerType::from(42u32), InnerValue::Int(42));
 
         let value = InnerValue::Map(map);
         let bytes = value.to_bytes();
