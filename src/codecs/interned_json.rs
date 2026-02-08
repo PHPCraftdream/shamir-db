@@ -1,6 +1,6 @@
 //! JSON codec with on-the-fly key interning.
 //!
-//! This codec deserializes JSON directly into InnerValue (Value<u64>)
+//! This codec deserializes JSON directly into InnerValue (Value<u16>)
 //! by interning string keys during deserialization.
 
 use crate::codecs::CodecError;
@@ -45,7 +45,7 @@ impl<'a> InternedJsonCodec<'a> {
             .map_err(|e| CodecError::Decode(e.to_string()))?;
 
         // Then transform to InnerValue with interning
-        Ok(transform_to_inner(&user_value, self.interner))
+        transform_to_inner(&user_value, self.interner)
     }
 
     /// Encode InnerValue to JSON bytes.
@@ -58,8 +58,8 @@ use crate::types::value::UserValue;
 
 /// Transforms UserValue to InnerValue, interning all string keys.
 /// This is the core function that eliminates the need for transform::user_to_inner.
-fn transform_to_inner(value: &UserValue, interner: &Interner) -> InnerValue {
-    match value {
+fn transform_to_inner(value: &UserValue, interner: &Interner) -> Result<InnerValue, CodecError> {
+    Ok(match value {
         Value::Nil => Value::Nil,
         Value::Bool(b) => Value::Bool(*b),
         Value::Int(i) => Value::Int(*i),
@@ -72,26 +72,26 @@ fn transform_to_inner(value: &UserValue, interner: &Interner) -> InnerValue {
             let inner_list = list
                 .iter()
                 .map(|v| transform_to_inner(v, interner))
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
             Value::List(inner_list)
         }
         Value::Set(set) => {
             let mut inner_set = crate::types::common::new_set_wc(set.len());
             for v in set {
-                inner_set.insert(transform_to_inner(v, interner));
+                inner_set.insert(transform_to_inner(v, interner)?);
             }
             Value::Set(inner_set)
         }
         Value::Map(map) => {
             let mut inner_map = new_map_wc(map.len());
             for (key, val) in map {
-                let interned_key = interner.touch_ind(key).val();
-                let inner_val = transform_to_inner(val, interner);
+                let interned_key = interner.touch_ind(key).map_err(|e| CodecError::Decode(e.to_string()))?.val();
+                let inner_val = transform_to_inner(val, interner)?;
                 inner_map.insert(interned_key, inner_val);
             }
             Value::Map(inner_map)
         }
-    }
+    })
 }
 
 #[cfg(test)]

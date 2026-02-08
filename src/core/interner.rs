@@ -1,15 +1,16 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 
+const MAX_KEYS: u16 = 65535;
 
-#[derive(PartialEq, Eq, Hash, Debug)]
+#[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
 pub enum TouchInd {
-    New(u64),
-    Exists(u64),
+    New(u16),
+    Exists(u16),
 }
 
 impl TouchInd {
-    pub fn val(&self) -> u64 {
+    pub fn val(&self) -> u16 {
         match self {
             TouchInd::New(n) => *n,
             TouchInd::Exists(n) => *n,
@@ -24,13 +25,14 @@ impl TouchInd {
     }
 }
 
-/// A thread-safe, two-way map for interning strings into u64 IDs.
+/// A thread-safe, two-way map for interning strings into u16 IDs.
 /// This is the core of the key interning mechanism.
+/// Max 65535 unique keys per interner.
 #[derive(Debug)]
 pub struct Interner {
-    map_str: TDashMap<String, u64>,
-    map_ind: TDashMap<u64, String>,
-    current: AtomicU64,
+    map_str: TDashMap<String, u16>,
+    map_ind: TDashMap<u16, String>,
+    current: AtomicU16,
 }
 
 impl Default for Interner {
@@ -45,13 +47,13 @@ impl Interner {
         Interner {
             map_str: new_dash_map_wc(64),
             map_ind: new_dash_map_wc(64),
-            current: AtomicU64::new(1),
+            current: AtomicU16::new(1),
         }
     }
 
     /// Creates a new Interner from a pre-existing state.
     /// This is used to "hydrate" the interner from a persistent store.
-    pub fn with_state(initial_data: Vec<(u64, String)>) -> Self {
+    pub fn with_state(initial_data: Vec<(u16, String)>) -> Self {
         let map_str = new_dash_map_wc(initial_data.len());
         let map_ind = new_dash_map_wc(initial_data.len());
         let mut max_id = 0;
@@ -67,33 +69,61 @@ impl Interner {
         Interner {
             map_str,
             map_ind,
-            current: AtomicU64::new(max_id + 1),
+            current: AtomicU16::new(max_id + 1),
         }
     }
 
     /// Gets the ID for a string, creating it if it doesn't exist.
-    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> TouchInd {
+    /// Returns error if max keys (65535) exceeded.
+    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, &'static str> {
         let key = str.as_ref();
         if let Some(id) = self.map_str.get(key) {
-            return TouchInd::Exists(*id);
+            return Ok(TouchInd::Exists(*id));
         }
+
+        // Check capacity before allocating (best-effort, may still race)
+        let current_val = self.current.load(Ordering::SeqCst);
+        if current_val > MAX_KEYS {
+            return Err("Interner capacity exceeded (max 65535 keys)");
+        }
+
         let new_id = *self.map_str.entry(key.to_string()).or_insert_with(|| {
             let id = self.current.fetch_add(1, Ordering::SeqCst);
-            self.map_ind.insert(id, key.to_string());
-            id
+            // In race condition, id may exceed MAX_KEYS - return sentinel
+            if id > MAX_KEYS {
+                0 // sentinel: invalid ID (IDs start at 1)
+            } else {
+                self.map_ind.insert(id, key.to_string());
+                id
+            }
         });
 
-        TouchInd::New(new_id)
+        // Check for sentinel value indicating overflow
+        if new_id == 0 {
+            return Err("Interner capacity exceeded (max 65535 keys)");
+        }
+
+        Ok(TouchInd::New(new_id))
     }
 
     /// Gets the string corresponding to an ID.
-    pub fn get_str(&self, index: u64) -> Option<String> {
+    pub fn get_str(&self, index: u16) -> Option<String> {
         self.map_ind.get(&index).map(|s| s.clone())
     }
 
     /// Gets the ID corresponding to a string.
-    pub fn get_ind<S: AsRef<str>>(&self, str: S) -> Option<u64> {
+    pub fn get_ind<S: AsRef<str>>(&self, str: S) -> Option<u16> {
         self.map_str.get(str.as_ref()).map(|id| *id)
+    }
+
+    /// Returns the current number of interned keys.
+    pub fn len(&self) -> usize {
+        self.current.load(Ordering::SeqCst) as usize - 1
+    }
+
+    /// Returns true if the interner is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -106,9 +136,9 @@ mod tests {
     #[test]
     fn test_basic_interning() {
         let interner = Interner::new();
-        let id1 = interner.touch_ind("hello").val();
-        let id2 = interner.touch_ind("world").val();
-        let id3 = interner.touch_ind("hello").val();
+        let id1 = interner.touch_ind("hello").unwrap().val();
+        let id2 = interner.touch_ind("world").unwrap().val();
+        let id3 = interner.touch_ind("hello").unwrap().val();
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
         assert_eq!(id3, 1);
@@ -132,19 +162,19 @@ mod tests {
         assert_eq!(interner.get_ind("city"), Some(30));
 
         // Check that touching an existing key returns the correct ID
-        let touch_existing = interner.touch_ind("name");
+        let touch_existing = interner.touch_ind("name").unwrap();
         assert_eq!(touch_existing, TouchInd::Exists(10));
         assert!(!touch_existing.is_new());
 
         // Check that the next ID is correctly assigned
-        let next_id = interner.touch_ind("new_key");
+        let next_id = interner.touch_ind("new_key").unwrap();
         assert_eq!(next_id, TouchInd::New(31));
         assert!(next_id.is_new());
         assert_eq!(interner.current.load(Ordering::SeqCst), 32);
 
         // Check that an empty state works
         let empty_interner = Interner::with_state(vec![]);
-        let first_id = empty_interner.touch_ind("first");
+        let first_id = empty_interner.touch_ind("first").unwrap();
         assert_eq!(first_id, TouchInd::New(1));
     }
 
@@ -159,7 +189,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut ids = vec![];
                 for key in keys_clone {
-                    ids.push(interner_clone.touch_ind(key));
+                    ids.push(interner_clone.touch_ind(key).unwrap());
                 }
                 ids
             }));
@@ -188,7 +218,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..keys_per_thread {
                     let key = format!("thread_{}_key_{}", thread_id, i);
-                    interner_clone.touch_ind(key);
+                    interner_clone.touch_ind(key).unwrap();
                 }
             }));
         }
@@ -221,7 +251,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for j in 0..50 {
                     let key = format!("write_{}_{}", i, j);
-                    interner_clone.touch_ind(key);
+                    interner_clone.touch_ind(key).unwrap();
                 }
             }));
         }
@@ -259,13 +289,13 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut ids = vec![];
                 for key in &["shared1", "shared2", "shared3", "shared1", "shared2"] {
-                    ids.push(interner_clone.touch_ind(key).val());
+                    ids.push(interner_clone.touch_ind(key).unwrap().val());
                 }
                 ids
             }));
         }
 
-        let results: Vec<Vec<u64>> = handles.into_iter()
+        let results: Vec<Vec<u16>> = handles.into_iter()
             .map(|h| h.join().unwrap())
             .collect();
 
@@ -288,7 +318,7 @@ mod tests {
         // Populate first
         for i in 0..100 {
             let key = format!("key_{}", i);
-            interner.touch_ind(key);
+            interner.touch_ind(key).unwrap();
         }
 
         // Concurrent reverse lookups
@@ -322,7 +352,7 @@ mod tests {
                     let key = format!("key_{}_{}", i, j);
 
                     // Touch the key
-                    let touch_result = interner_clone.touch_ind(&key);
+                    let touch_result = interner_clone.touch_ind(&key).unwrap();
 
                     // Immediately verify with get_ind
                     let get_result = interner_clone.get_ind(&key);
@@ -349,7 +379,7 @@ mod tests {
         let interner = Interner::new();
 
         // Empty string
-        let id1 = interner.touch_ind("").val();
+        let id1 = interner.touch_ind("").unwrap().val();
         assert_eq!(id1, 1);
         assert_eq!(interner.get_ind(""), Some(1));
         assert_eq!(interner.get_str(1), Some("".to_string()));
@@ -364,7 +394,7 @@ mod tests {
         ];
 
         for key in &unicode_keys {
-            interner.touch_ind(key);
+            interner.touch_ind(key).unwrap();
         }
 
         // Verify unicode keys work
@@ -381,7 +411,7 @@ mod tests {
 
         // Very long key (10KB)
         let long_key = "a".repeat(10_000);
-        let id = interner.touch_ind(&long_key).val();
+        let id = interner.touch_ind(&long_key).unwrap().val();
         assert_eq!(id, 1);
         assert_eq!(interner.get_ind(&long_key), Some(1));
         assert_eq!(interner.get_str(1), Some(long_key));
@@ -389,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_with_state() {
-        let initial_data: Vec<(u64, String)> = (0..100)
+        let initial_data: Vec<(u16, String)> = (0..100)
             .map(|i| (i, format!("initial_{}", i)))
             .collect();
 
@@ -402,7 +432,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for j in 0..50 {
                     let key = format!("thread_{}_{}", i, j);
-                    interner_clone.touch_ind(key);
+                    interner_clone.touch_ind(key).unwrap();
                 }
             }));
         }
@@ -418,5 +448,17 @@ mod tests {
         assert_eq!(interner.get_ind("initial_0"), Some(0));
         assert_eq!(interner.get_ind("initial_99"), Some(99));
         assert_eq!(interner.get_str(0), Some("initial_0".to_string()));
+    }
+
+    #[test]
+    fn test_len_and_is_empty() {
+        let interner = Interner::new();
+        assert_eq!(interner.len(), 0);
+        assert!(interner.is_empty());
+
+        interner.touch_ind("a").unwrap();
+        interner.touch_ind("b").unwrap();
+        assert_eq!(interner.len(), 2);
+        assert!(!interner.is_empty());
     }
 }

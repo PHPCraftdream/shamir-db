@@ -16,7 +16,7 @@ use std::any::TypeId;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 pub type UserValue = Value<String>;
-pub type InnerValue = Value<u64>;
+pub type InnerValue = Value<u16>;
 
 #[derive(Debug, Clone)]
 pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
@@ -155,15 +155,24 @@ where
                 Some("i") => map.next_value::<i64>().map(Value::Int)?,
                 Some("u") => map.next_value::<u64>().map(|v| Value::Int(v as i64))?,
                 Some("float") => map.next_value::<f64>().map(Value::F64)?,
-                Some("dec") => map.next_value::<Decimal>().map(Value::Dec)?,
+                Some("dec") => {
+                    let s: String = map.next_value()?;
+                    // Validate that it's a valid decimal, but store as string
+                    let _ = Decimal::from_str(&s).map_err(de::Error::custom)?;
+                    Value::Str(s)
+                },
                 Some("big") => {
                     let source: BigIntSource = map.next_value()?;
-                    let bigint = match source {
-                        BigIntSource::Str(s) => BigInt::from_str(&s).map_err(de::Error::custom)?,
-                        BigIntSource::Int(i) => BigInt::from(i),
-                        BigIntSource::Uint(u) => BigInt::from(u),
+                    // Validate that it's a valid bigint, but store as string
+                    let s = match source {
+                        BigIntSource::Str(s) => {
+                            let _ = BigInt::from_str(&s).map_err(de::Error::custom)?;
+                            s
+                        }
+                        BigIntSource::Int(i) => BigInt::from(i).to_string(),
+                        BigIntSource::Uint(u) => BigInt::from(u).to_string(),
                     };
-                    Value::Big(bigint)
+                    Value::Str(s)
                 },
                 Some("arr") => map.next_value::<Vec<Value<Key>>>().map(Value::List)?,
                 Some("set") => map.next_value::<TSet<Value<Key>>>().map(Value::Set)?,
@@ -290,8 +299,8 @@ mod tests {
     #[test]
     fn test_bytes_serialization_roundtrip() {
         let mut map = new_map();
-        map.insert(123u64, InnerValue::Str("hello".to_string()));
-        map.insert(456u64, InnerValue::Int(99));
+        map.insert(123u16, InnerValue::Str("hello".to_string()));
+        map.insert(456u16, InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
         let bytes = value.to_bytes();
@@ -539,9 +548,9 @@ mod tests {
     #[test]
     fn test_inner_value_with_numeric_keys() {
         let mut map = new_map();
-        map.insert(0u64, InnerValue::Str("zero".to_string()));
-        map.insert(u64::MAX, InnerValue::Str("max".to_string()));
-        map.insert(42u64, InnerValue::Int(42));
+        map.insert(0u16, InnerValue::Str("zero".to_string()));
+        map.insert(u16::MAX, InnerValue::Str("max".to_string()));
+        map.insert(42u16, InnerValue::Int(42));
 
         let value = InnerValue::Map(map);
         let bytes = value.to_bytes();
