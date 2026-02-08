@@ -6,7 +6,7 @@
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::{new_map_wc, new_set_wc};
-use crate::types::value::{InnerValue, Value, UserValue};
+use crate::types::value::{InnerValue, Value};
 use rust_decimal::Decimal;
 use num_bigint::BigInt;
 use std::str::FromStr;
@@ -231,6 +231,7 @@ fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> serde_json::V
 mod tests {
     use super::*;
     use crate::types::common::new_map;
+    use crate::types::value::UserValue;
 
     /// Helper: UserValue → JSON bytes
     fn to_json(value: &UserValue) -> Vec<u8> {
