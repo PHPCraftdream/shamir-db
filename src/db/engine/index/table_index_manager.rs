@@ -7,19 +7,16 @@ use crate::db::storage::types::Store;
 use crate::types::record_id::RecordId;
 
 pub struct TableIndexManager {
-    _data_store: Arc<dyn Store>,
+    interner: Arc<OnceCell<Interner>>,
 
-    _interner: Arc<OnceCell<Interner>>,
+    data_store: Arc<dyn Store>,
+    info_store: Arc<dyn Store>,
 
-    _indexes: Arc<RwLock<IndexInfo>>,
-
-    _indexes_unique: Arc<RwLock<IndexInfo>>,
+    indexes: Arc<RwLock<IndexInfo>>,
+    indexes_unique: Arc<RwLock<IndexInfo>>,
 
     has_indexes: AtomicBool,
-
     has_indexes_unique: AtomicBool,
-
-    _info_store: Arc<dyn Store>,
 }
 
 impl TableIndexManager {
@@ -49,13 +46,13 @@ impl TableIndexManager {
         let has_indexes_unique = AtomicBool::new(indexes_unique.is_enabled());
 
         Ok(Self {
-            _data_store: data_store,
-            _interner: interner,
-            _indexes: Arc::new(RwLock::new(indexes)),
-            _indexes_unique: Arc::new(RwLock::new(indexes_unique)),
+            interner,
+            data_store,
+            info_store,
+            indexes: Arc::new(RwLock::new(indexes)),
+            indexes_unique: Arc::new(RwLock::new(indexes_unique)),
             has_indexes,
             has_indexes_unique,
-            _info_store: info_store,
         })
     }
 
