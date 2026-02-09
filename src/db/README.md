@@ -7,12 +7,27 @@ S.H.A.M.I.R. database abstraction layer, providing table management, indexing sy
 ```
 db/
 ├── engine/           # Table engine (high-level API)
+│   ├── dispatcher/   # ✅ NEW (2025-02-08) - Multi-repo dispatcher
+│   │   ├── config.rs          # YAML configuration loader
+│   │   ├── dispatcher.rs      # Dispatcher (manages multiple repos)
+│   │   ├── types.rs           # Config types (DbConfig, RepoConfig, etc.)
+│   │   └── tests/             # Dispatcher tests
+│   │       ├── config_loader_tests.rs
+│   │       ├── config_validation_tests.rs
+│   │       └── dispatcher_tests.rs
 │   ├── index/        # Index management system
 │   │   ├── index_definition.rs   # Index definition (simple/composite)
 │   │   ├── index_info.rs         # Index metadata & status
 │   │   ├── index_info_item.rs    # Single index path item
 │   │   ├── index_record.rs       # Index record representation
-│   │   └── table_index_manager.rs # Index manager for tables
+│   │   ├── table_index_manager.rs # Index manager for tables
+│   │   └── tests/              # ✅ REORGANIZED (2025-02-08)
+│   │       ├── mod.rs
+│   │       ├── index_definition_tests.rs
+│   │       ├── index_info_item_tests.rs
+│   │       ├── index_info_tests.rs
+│   │       ├── index_record_tests.rs
+│   │       └── table_index_manager_tests.rs
 │   ├── table/        # ✅ MODULARIZED (2025-02-08)
 │   │   ├── counter.rs           # RecordCounter service
 │   │   ├── interner.rs          # InternerManager service
@@ -23,6 +38,15 @@ db/
 │   │       ├── crud_tests.rs
 │   │       ├── concurrent_tests.rs
 │   │       └── persistence_tests.rs
+│   ├── repo/         # ✅ NEW (2025-02-08) - Repo management
+│   │   ├── repo_config.rs       # Repo configuration types
+│   │   ├── repo_manager.rs     # RepoManager (manages repos)
+│   │   ├── repo_manager_instance.rs # RepoManagerInstance
+│   │   ├── repo_types.rs       # Repo types
+│   │   └── tests/              # Repo tests
+│   │       ├── mod.rs
+│   │       ├── repo_config_tests.rs
+│   │       └── repo_manager_tests.rs
 │   ├── README.md     # Engine documentation
 │   └── table.md     # Table refactoring documentation
 ├── storage/          # Storage abstraction (low-level)
@@ -44,6 +68,8 @@ db/
 
 ### Engine (`db/engine/`)
 **High-level table API** with automatic interning and index management:
+- `Dispatcher` - ✅ NEW: Multi-repo management with YAML configuration (2025-02-08)
+- `RepoManager` - ✅ NEW: Repository and table management (2025-02-08)
 - `Table<R>` - Main table abstraction (modularized 2025-02-08)
 - `TableIndexManager` - Index management system
 - `RecordCounter` - Counter service (separate module)
@@ -54,15 +80,27 @@ db/
 
 **New Modular Structure (2025-02-08):**
 ```
-table/
-├── counter.rs       # RecordCounter (170 lines, 5 tests)
-├── interner.rs      # InternerManager (185 lines, 5 tests)
-├── table.rs         # Table facade (270 lines)
-├── mod.rs          # Public API exports
-└── tests/          # Organized tests
-    ├── crud_tests.rs        # 15 CRUD tests
-    ├── concurrent_tests.rs  # 7 concurrent tests
-    └── persistence_tests.rs # 3 persistence tests
+engine/
+├── dispatcher/           # Multi-repo dispatcher
+│   ├── config.rs         # YAML configuration loader
+│   ├── dispatcher.rs     # Dispatcher implementation
+│   ├── types.rs          # Config types
+│   └── tests/            # 8 config tests + dispatcher tests
+├── repo/                 # Repo management
+│   ├── repo_config.rs    # Repo config types
+│   ├── repo_manager.rs  # RepoManager
+│   └── tests/            # 14 repo tests
+├── table/                # Table implementation
+│   ├── counter.rs        # RecordCounter (5 tests)
+│   ├── interner.rs       # InternerManager (5 tests)
+│   ├── table.rs          # Table facade
+│   └── tests/            # 25 table tests (CRUD, concurrent, persistence)
+└── index/                # Index system
+    ├── index_definition.rs
+    ├── index_info.rs
+    ├── index_record.rs
+    ├── table_index_manager.rs
+    └── tests/            # 33 index tests
 ```
 
 See `engine/README.md` for details.
@@ -74,6 +112,25 @@ See `engine/README.md` for details.
 - `TableIndexManager` - Index operations and validation
 - Atomic flags for fast path optimization (O(1) existence check)
 - Three indexing modes: Disabled, All, Selective
+- **33 tests** organized by entity in `tests/` folder
+
+### Dispatcher (`db/engine/dispatcher/`)
+**Multi-repo management** with YAML configuration:
+- `Dispatcher` - Manages multiple RepoManagers
+- `ConfigLoader` - Load/save YAML configuration files
+- `DbConfig`, `RepoConfig`, `TableConfig`, `IndexConfig` - Configuration types
+- Atomic file writes (temp + rename) for safe updates
+- Validation on load (ensures config correctness)
+- **Hot-reload ready** - web interface can update config atomically
+
+### Repo Manager (`db/engine/repo/`)
+**Repository and table management**:
+- `RepoManager` - Manages repositories (collections of tables)
+- `RepoManagerInstance` - Holds Arc<Repo> with lazy table initialization
+- `RepoConfig` - Repository configuration
+- Default repo support
+- CRUD operations for repos
+- **14 tests** for repo management
 
 ### Storage (`db/storage/`)
 **Low-level storage abstraction** over 8 embedded databases:
@@ -368,11 +425,23 @@ let inner_value = InnerValue::from_bytes(bytes)?;
 
 ## Future Enhancements
 
+- [x] ✅ **Multi-repo dispatcher** (2025-02-08)
+  - Dispatcher manages multiple RepoManagers
+  - YAML configuration support
+  - ConfigLoader for atomic file operations
 - [x] ✅ **Modular table architecture** (2025-02-08)
   - Extracted RecordCounter to separate module
   - Extracted InternerManager to separate module
   - Organized tests by type (CRUD, concurrent, persistence)
-  - 227 tests passing (35 table tests total)
+  - 240 tests passing
+- [x] ✅ **Test reorganization** (2025-02-08)
+  - Tests moved to separate `tests/` folders
+  - One entity per test file
+  - Names match content
+- [x] ✅ **Repo management** (2025-02-08)
+  - RepoManager for repository operations
+  - Lazy table initialization
+  - Default repo support
 - [x] Index system with simple/composite indexes
 - [x] Unique constraint validation
 - [x] Atomic flags for fast path optimization
