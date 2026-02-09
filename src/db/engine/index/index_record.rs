@@ -39,7 +39,7 @@ impl IndexRecordKey {
     }
 
     /// Set hash values from the provided values
-    pub fn with_values<'a, T: Hash>(mut self, values: &[&'a T]) -> Self {
+    pub fn with_values<T: Hash>(mut self, values: &[&T]) -> Self {
         let mut hasher = FxHasher::default();
         for value in values {
             value.hash(&mut hasher);
