@@ -61,7 +61,7 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
         "arr:history": [1, 2],
         "i:version": -10,
         "u:user_id": 987,
-        "float:pi": 3.14,
+        "float:a39": 3.9,
         "dec:price": "19.99",
         "big:large": "10000"
     }"#;
@@ -77,7 +77,7 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
     );
     rich_map.insert("version".to_string(), UserValue::Int(-10));
     rich_map.insert("user_id".to_string(), UserValue::Int(987));
-    rich_map.insert("pi".to_string(), UserValue::F64(3.9));
+    rich_map.insert("a39".to_string(), UserValue::F64(3.9));
     // dec: and big: now validate but store as Str
     rich_map.insert("price".to_string(), UserValue::Str("19.99".to_string()));
     rich_map.insert("large".to_string(), UserValue::Str("10000".to_string()));
@@ -103,7 +103,7 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
         );
         assert_eq!(final_map.get("version"), Some(&UserValue::Int(-10)));
         assert_eq!(final_map.get("user_id"), Some(&UserValue::Int(987)));
-        assert_eq!(final_map.get("pi"), Some(&UserValue::F64(3.14)));
+        assert_eq!(final_map.get("a39"), Some(&UserValue::F64(3.9)));
         assert_eq!(
             final_map.get("history"),
             Some(&UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]))

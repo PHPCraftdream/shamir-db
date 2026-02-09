@@ -52,6 +52,10 @@ tables:
 ```yaml
 indexes:
   <index_name>:
+    # paths can be:
+    # - Single string for field index: "email"
+    # - Multiple strings for composite index: "category", "subcategory"
+    # - Empty array for full value index: []
     paths:
       - field.path
       - nested.field.path
@@ -74,21 +78,55 @@ indexes_unique:
 
 ## Index Paths
 
-Index paths use dot notation for nested fields:
+Index paths define which fields are indexed. The `paths` field is a `Vec<String>` where:
+
+- **Single string** = index on a specific field (e.g., `"email"`)
+- **Multiple strings** = composite index on multiple fields (e.g., `"category"`, `"subcategory"`)
+- **Empty array `[]`** = index the entire value
+
+### Dot Notation for Nested Fields
+
+For nested objects, use dot notation (`.`) to reference fields:
 
 ```yaml
-# Simple field
+# Single field index (flat object)
 paths:
   - email
 
-# Nested field
+# Nested field index (user.name references "name" field in "user" object)
 paths:
+  - user.name
   - user.profile.age
 
-# Multi-field index
+# Composite index with nested fields
 paths:
-  - category
-  - subcategory
+  - user.email
+  - order.date
+```
+
+**Important:** The `.` character separates nested field levels. When indexing `"user.name"`, the database looks for a `user` object containing a `name` field.
+
+### Examples
+
+**Single Field Index:**
+```yaml
+email_idx:
+  paths:
+    - email  # Indexes the "email" field only
+```
+
+**Composite Index:**
+```yaml
+category_subcategory_idx:
+  paths:
+    - category      # First field in composite key
+    - subcategory   # Second field in composite key
+```
+
+**Full Value Index:**
+```yaml
+full_value_idx:
+  paths: []  # Indexes the entire Map/Set value
 ```
 
 ## Validation Rules
