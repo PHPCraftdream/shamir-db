@@ -8,6 +8,9 @@ pub mod interned_json;
 pub mod interned;
 pub mod bytes;
 
+#[cfg(test)]
+pub mod tests;
+
 #[derive(Error, Debug)]
 pub enum CodecError {
     #[error("Failed to encode data: {0}")]
