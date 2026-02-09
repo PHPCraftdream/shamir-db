@@ -11,8 +11,8 @@ mod tests {
         tables.insert(
             "users".to_string(),
             DbTableConfig {
-                indexes: new_map(),
-                indexes_unique: new_map(),
+                indexes: Some(new_map()),
+                indexes_unique: Some(new_map()),
             },
         );
 
