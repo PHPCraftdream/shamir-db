@@ -9,7 +9,7 @@ repos:
   main:
     # Storage engine: Canopy, Fjall, Cached, Memory, Nebari, Persy, Redb, Sled
     storage_type: Redb
-    # Enable RAM caching for tables // occupies the full volume in RAM
+    # Enable RAM caching for tables # occupies the full volume in RAM
     ram_cached: false
 
     # Tables configuration
