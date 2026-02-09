@@ -15,7 +15,7 @@ repos:
     # Tables configuration
     tables:
       users:
-        # Regular indexes
+        # Regular indexes (optional)
         indexes:
           email_idx:
             # Path to the field (string for single field, multiple strings for composite)
@@ -26,7 +26,7 @@ repos:
             paths:
               - name
 
-        # Unique indexes
+        # Unique indexes (optional)
         indexes_unique:
           user_id_idx:
             paths:
@@ -56,7 +56,11 @@ repos:
             paths:
               - user.email
               - order_date
-        indexes_unique: {}
+        # indexes_unique is optional and can be omitted
+
+      logs:
+        # Table with no indexes at all
+        # indexes and indexes_unique can both be omitted
 
   # Secondary repository
   analytics:

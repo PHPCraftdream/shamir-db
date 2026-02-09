@@ -16,8 +16,8 @@ mod tests {
         );
 
         let tables_config = DbTableConfig {
-            indexes,
-            indexes_unique: new_map(),
+            indexes: Some(indexes),
+            indexes_unique: Some(new_map()),
         };
 
         tables.insert("users".to_string(), tables_config);
@@ -48,7 +48,10 @@ mod tests {
         assert!(matches!(repo.storage_type, StorageType::Redb));
 
         let table = repo.tables.get("users").unwrap();
-        assert_eq!(table.indexes.len(), 1);
-        assert_eq!(table.indexes["email_idx"].paths, vec!["email".to_string()]);
+        assert_eq!(table.indexes.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            table.indexes.as_ref().unwrap()["email_idx"].paths,
+            vec!["email".to_string()]
+        );
     }
 }

@@ -50,6 +50,7 @@ tables:
 ### TableConfig
 
 ```yaml
+# Both indexes and indexes_unique are optional
 indexes:
   <index_name>:
     # paths can be:
@@ -64,6 +65,8 @@ indexes_unique:
     paths:
       - field.path
 ```
+
+**Note:** Both `indexes` and `indexes_unique` are optional. If a table doesn't need indexes, you can omit these fields entirely.
 
 ## Storage Engines
 
@@ -134,8 +137,9 @@ full_value_idx:
 1. `data_dir` must be specified
 2. At least one repository must exist
 3. Each repository must have at least one table
-4. Each table must have at least one index (regular or unique)
-5. Each index must have at least one path
+4. Each index must have at least one path
+
+**Note:** Indexes are optional for tables. A table can have no indexes, only regular indexes, only unique indexes, or both.
 
 ## Loading Configuration
 

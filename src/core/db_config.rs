@@ -16,8 +16,8 @@ pub struct DbRepoConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbTableConfig {
-    pub indexes: TMap<String, IndexConfig>,
-    pub indexes_unique: TMap<String, IndexConfig>,
+    pub indexes: Option<TMap<String, IndexConfig>>,
+    pub indexes_unique: Option<TMap<String, IndexConfig>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
