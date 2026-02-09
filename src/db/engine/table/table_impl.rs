@@ -1,7 +1,7 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use crate::db::{DbError, DbResult};
 use crate::db::storage::types::Store;
+use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use async_stream::stream;
@@ -28,9 +28,7 @@ impl Clone for Table {
 impl Table {
     /// Create a new table
     pub fn new(data_store: Arc<dyn Store>) -> Self {
-        Self {
-            data_store,
-        }
+        Self { data_store }
     }
 
     /// Insert an InnerValue, returns RecordId
@@ -45,8 +43,9 @@ impl Table {
         let key_bytes = self.data_store.insert(inner_bytes).await?;
 
         // Convert Bytes to RecordId
-        let arr: [u8; 16] = key_bytes.as_ref().try_into()
-            .map_err(|_| DbError::Internal("Failed to convert key bytes to RecordId".to_string()))?;
+        let arr: [u8; 16] = key_bytes.as_ref().try_into().map_err(|_| {
+            DbError::Internal("Failed to convert key bytes to RecordId".to_string())
+        })?;
         Ok(RecordId(arr))
     }
 
@@ -120,8 +119,9 @@ impl Table {
 
         for (key_bytes, bytes) in items {
             // Convert Bytes to RecordId
-            let arr: [u8; 16] = key_bytes.as_ref().try_into()
-                .map_err(|_| DbError::Internal("Failed to convert key bytes to RecordId".to_string()))?;
+            let arr: [u8; 16] = key_bytes.as_ref().try_into().map_err(|_| {
+                DbError::Internal("Failed to convert key bytes to RecordId".to_string())
+            })?;
             let id = RecordId(arr);
 
             match InnerValue::from_bytes(bytes) {
@@ -136,8 +136,6 @@ impl Table {
 
         Ok(result)
     }
-
-
 
     /// Stream records in batches, returning InnerValues
     ///

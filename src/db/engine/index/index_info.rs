@@ -1,10 +1,10 @@
 //! Index configuration and sync status
 
+use super::index_definition::IndexDefinition;
+use crate::db::engine::index::index_status::IndexStatus;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use crate::db::engine::index::index_status::IndexStatus;
-use super::index_definition::IndexDefinition;
 
 /// Wrapper around Arc<AtomicU8> that implements Default for deserialization.
 /// The default value is IndexStatus::Actual.
@@ -24,10 +24,6 @@ impl std::ops::Deref for StatusAtom {
         &self.0
     }
 }
-
-
-
-
 
 /// Index configuration with list of index definitions and sync status
 ///

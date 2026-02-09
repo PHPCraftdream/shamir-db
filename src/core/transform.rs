@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use crate::core::interner::{Interner, InternedKey, UserKey};
+use crate::core::interner::{InternedKey, Interner, UserKey};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
@@ -124,4 +124,3 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
         }
     }
 }
-

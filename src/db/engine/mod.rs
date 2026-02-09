@@ -4,6 +4,6 @@ pub mod repo;
 pub mod table;
 
 // Re-exports for convenience
-pub use table::{TableConfig, TableContext};
-pub use repo::{RepoConfig, RepoManager, BoxRepo};
 pub use dispatcher::Dispatcher;
+pub use repo::{BoxRepo, RepoConfig, RepoManager};
+pub use table::{TableConfig, TableContext};

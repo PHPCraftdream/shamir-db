@@ -1,5 +1,5 @@
-use crate::db::engine::repo::{RepoConfig, RepoManagerInstance};
 use super::super::table::TableContext;
+use crate::db::engine::repo::{RepoConfig, RepoManagerInstance};
 use crate::db::{DbError, DbResult};
 use crate::types::common::TMap;
 
@@ -10,7 +10,9 @@ pub struct Dispatcher {
 
 impl Clone for Dispatcher {
     fn clone(&self) -> Self {
-        let repos: TMap<String, RepoManagerInstance> = self.repos.iter()
+        let repos: TMap<String, RepoManagerInstance> = self
+            .repos
+            .iter()
             .map(|(k, v): (&String, &RepoManagerInstance)| (k.clone(), v.clone()))
             .collect();
         Self { repos }
@@ -28,9 +30,7 @@ impl Dispatcher {
             })
             .collect();
 
-        Self {
-            repos: instances
-        }
+        Self { repos: instances }
     }
 
     /// Add a new repository
@@ -41,12 +41,10 @@ impl Dispatcher {
 
     /// Get a table from a specific repository
     pub async fn get_table(&self, repo_name: &str, table_name: &str) -> DbResult<TableContext> {
-        let repo_manager = self.repos
+        let repo_manager = self
+            .repos
             .get(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!(
-                "Repository '{}' not found",
-                repo_name
-            )))?;
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
 
         repo_manager.get_table(table_name).await
     }
@@ -55,10 +53,7 @@ impl Dispatcher {
     pub fn get_repo(&self, repo_name: &str) -> DbResult<&RepoManagerInstance> {
         self.repos
             .get(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!(
-                "Repository '{}' not found",
-                repo_name
-            )))
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))
     }
 
     /// List all repository names
@@ -68,12 +63,10 @@ impl Dispatcher {
 
     /// List all tables in a repository
     pub fn list_tables(&self, repo_name: &str) -> DbResult<Vec<String>> {
-        let repo_manager = self.repos
+        let repo_manager = self
+            .repos
             .get(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!(
-                "Repository '{}' not found",
-                repo_name
-            )))?;
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
 
         Ok(repo_manager.list_table_names())
     }

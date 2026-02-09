@@ -1,5 +1,5 @@
-pub mod types;
-pub mod core;
-pub mod codecs;
 pub mod api;
+pub mod codecs;
+pub mod core;
 pub mod db;
+pub mod types;

@@ -71,11 +71,7 @@ pub trait Store: Send + Sync {
     ///
     /// # Returns
     /// Stream that yields batches of matching records
-    fn scan_prefix_stream(
-        &self,
-        prefix: Bytes,
-        batch_size: usize,
-    ) -> RecordStream;
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream;
 }
 
 /// A trait for a repository that can manage multiple `Store` instances.

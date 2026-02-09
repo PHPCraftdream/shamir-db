@@ -1,11 +1,11 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
-use persy::{Persy, PersyId, Config, ByteVec};
+use persy::{ByteVec, Config, Persy, PersyId};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,7 +23,8 @@ pub struct PersyRepo {
 impl PersyRepo {
     pub fn new(path: impl AsRef<Path>) -> DbResult<Self> {
         Persy::create(path.as_ref()).map_err(|e| DbError::Storage(e.to_string()))?;
-        let db = Persy::open(path.as_ref(), Config::default()).map_err(|e| DbError::Storage(e.to_string()))?;
+        let db = Persy::open(path.as_ref(), Config::default())
+            .map_err(|e| DbError::Storage(e.to_string()))?;
         Ok(Self { db: Arc::new(db) })
     }
 }
@@ -39,22 +40,31 @@ impl Repo for PersyRepo {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
 
             // Create segment if it doesn't exist
-            if !tx.exists_segment(&table_name).map_err(|e| DbError::Storage(e.to_string()))? {
-                tx.create_segment(&table_name).map_err(|e| DbError::Storage(e.to_string()))?;
+            if !tx
+                .exists_segment(&table_name)
+                .map_err(|e| DbError::Storage(e.to_string()))?
+            {
+                tx.create_segment(&table_name)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
             }
 
             // Create index for RecordKey -> PersyId mapping
-            if !tx.exists_index(&index_name).map_err(|e| DbError::Storage(e.to_string()))? {
+            if !tx
+                .exists_index(&index_name)
+                .map_err(|e| DbError::Storage(e.to_string()))?
+            {
                 tx.create_index::<ByteVec, ByteVec>(&index_name, persy::ValueMode::Replace)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
             }
 
-            tx.prepare().map_err(|e| DbError::Storage(e.to_string()))?
-                .commit().map_err(|e| DbError::Storage(e.to_string()))?;
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
             Ok(())
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
 
         let store = PersyStore {
             db: self.db.clone(),
@@ -72,26 +82,38 @@ impl Repo for PersyRepo {
         spawn_blocking(move || -> DbResult<bool> {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
 
-            if tx.exists_index(&index_name).map_err(|e| DbError::Storage(e.to_string()))? {
-                tx.drop_index(&index_name).map_err(|e| DbError::Storage(e.to_string()))?;
+            if tx
+                .exists_index(&index_name)
+                .map_err(|e| DbError::Storage(e.to_string()))?
+            {
+                tx.drop_index(&index_name)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
             }
 
-            if tx.exists_segment(&table_name).map_err(|e| DbError::Storage(e.to_string()))? {
-                tx.drop_segment(&table_name).map_err(|e| DbError::Storage(e.to_string()))?;
+            if tx
+                .exists_segment(&table_name)
+                .map_err(|e| DbError::Storage(e.to_string()))?
+            {
+                tx.drop_segment(&table_name)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
             }
 
-            tx.prepare().map_err(|e| DbError::Storage(e.to_string()))?
-                .commit().map_err(|e| DbError::Storage(e.to_string()))?;
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
             Ok(true)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn stores_list(&self) -> DbResult<Vec<String>> {
         let db = self.db.clone();
         spawn_blocking(move || -> DbResult<Vec<String>> {
-            let segments = db.list_segments().map_err(|e| DbError::Storage(e.to_string()))?;
+            let segments = db
+                .list_segments()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
             let names: Vec<String> = segments
                 .into_iter()
                 .map(|(name, _id)| name)
@@ -99,8 +121,8 @@ impl Repo for PersyRepo {
                 .collect();
             Ok(names)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 }
 
@@ -130,7 +152,8 @@ impl Store for PersyStore {
             let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
 
-            let persy_id = tx.insert(&table_name, &value)
+            let persy_id = tx
+                .insert(&table_name, &value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             // Store RecordKey -> PersyId mapping in index
@@ -139,12 +162,14 @@ impl Store for PersyStore {
             tx.put(&index_name, key_bytes_index, val)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            tx.prepare().map_err(|e| DbError::Storage(e.to_string()))?
-                .commit().map_err(|e| DbError::Storage(e.to_string()))?;
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
             Ok(key)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
@@ -157,14 +182,16 @@ impl Store for PersyStore {
             let key_bytes = ByteVec::new(key.to_vec());
 
             // Find PersyId from index
-            let mut iter = tx.get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+            let mut iter = tx
+                .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             let created = if let Some(persy_id_str_bytes) = iter.next() {
                 // Existing record - update
                 let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
                     .map_err(|e| DbError::Codec(e.to_string()))?;
-                let persy_id: PersyId = persy_id_str.parse()
+                let persy_id: PersyId = persy_id_str
+                    .parse()
                     .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
 
                 tx.update(&table_name, &persy_id, &value)
@@ -172,7 +199,8 @@ impl Store for PersyStore {
                 false
             } else {
                 // New record - insert and update index
-                let persy_id = tx.insert(&table_name, &value)
+                let persy_id = tx
+                    .insert(&table_name, &value)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
                 let val = ByteVec::new(persy_id.to_string().into_bytes());
@@ -181,12 +209,14 @@ impl Store for PersyStore {
                 true
             };
 
-            tx.prepare().map_err(|e| DbError::Storage(e.to_string()))?
-                .commit().map_err(|e| DbError::Storage(e.to_string()))?;
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
             Ok(created)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -198,24 +228,28 @@ impl Store for PersyStore {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
             let key_bytes = ByteVec::new(key.to_vec());
 
-            let mut iter = tx.get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+            let mut iter = tx
+                .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            let persy_id_str_bytes = iter.next()
+            let persy_id_str_bytes = iter
+                .next()
                 .ok_or_else(|| DbError::NotFound(format!("{:?}", key)))?;
             let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
                 .map_err(|e| DbError::Codec(e.to_string()))?;
-            let persy_id: PersyId = persy_id_str.parse()
+            let persy_id: PersyId = persy_id_str
+                .parse()
                 .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
 
-            let val = tx.read(&table_name, &persy_id)
+            let val = tx
+                .read(&table_name, &persy_id)
                 .map_err(|e| DbError::Storage(e.to_string()))?
                 .ok_or_else(|| DbError::NotFound(format!("{:?}", key)))?;
 
             Ok(Bytes::copy_from_slice(&val))
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
@@ -227,13 +261,15 @@ impl Store for PersyStore {
             let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
             let key_bytes = ByteVec::new(key.to_vec());
 
-            let mut iter = tx.get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+            let mut iter = tx
+                .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             if let Some(persy_id_str_bytes) = iter.next() {
                 let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
                     .map_err(|e| DbError::Codec(e.to_string()))?;
-                let persy_id: PersyId = persy_id_str.parse()
+                let persy_id: PersyId = persy_id_str
+                    .parse()
                     .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
 
                 tx.delete(&table_name, &persy_id)
@@ -241,15 +277,17 @@ impl Store for PersyStore {
                 tx.remove(&index_name, key_bytes, None::<ByteVec>)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                tx.prepare().map_err(|e| DbError::Storage(e.to_string()))?
-                    .commit().map_err(|e| DbError::Storage(e.to_string()))?;
+                tx.prepare()
+                    .map_err(|e| DbError::Storage(e.to_string()))?
+                    .commit()
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
                 Ok(true)
             } else {
                 Ok(false)
             }
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
@@ -263,7 +301,8 @@ impl Store for PersyStore {
             // First: collect all RecordKey -> PersyId mappings
             let mut mappings = Vec::new();
             {
-                let index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name, ..)
+                let index_iter = tx
+                    .range::<ByteVec, ByteVec, _>(&index_name, ..)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
                 for (key_bytes, mut val_iter) in index_iter {
@@ -272,7 +311,8 @@ impl Store for PersyStore {
                     if let Some(val_bytes) = val_iter.next() {
                         let persy_id_str = String::from_utf8(val_bytes.to_vec())
                             .map_err(|e| DbError::Codec(e.to_string()))?;
-                        let persy_id: PersyId = persy_id_str.parse()
+                        let persy_id: PersyId = persy_id_str
+                            .parse()
                             .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
                         mappings.push((key, persy_id));
                     }
@@ -282,19 +322,25 @@ impl Store for PersyStore {
             // Second: read all data using collected mappings
             let mut out = Vec::new();
             for (key, persy_id) in mappings {
-                let content = tx.read(&table_name, &persy_id)
+                let content = tx
+                    .read(&table_name, &persy_id)
                     .map_err(|e| DbError::Storage(e.to_string()))?
-                    .ok_or_else(|| DbError::NotFound(format!("PersyId not found for key: {:?}", key)))?;
+                    .ok_or_else(|| {
+                        DbError::NotFound(format!("PersyId not found for key: {:?}", key))
+                    })?;
                 out.push((key, Bytes::copy_from_slice(&content)));
             }
 
             Ok(out)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         let index_name = self.index_name.clone();
@@ -405,7 +451,8 @@ impl Store for PersyStore {
                     if let Some(val_bytes) = val_iter.next() {
                         let persy_id_str = String::from_utf8(val_bytes.to_vec())
                             .map_err(|e| DbError::Codec(e.to_string()))?;
-                        let persy_id: PersyId = persy_id_str.parse()
+                        let persy_id: PersyId = persy_id_str
+                            .parse()
                             .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
                         mappings.push((key, persy_id));
                     }
@@ -415,7 +462,8 @@ impl Store for PersyStore {
             // Read all data using collected mappings
             let mut out = Vec::new();
             for (key, persy_id) in mappings {
-                let content = tx.read(&table_name, &persy_id)
+                let content = tx
+                    .read(&table_name, &persy_id)
                     .map_err(|e| DbError::Storage(e.to_string()))?
                     .ok_or_else(|| DbError::NotFound("PersyId not found".to_string()))?;
                 out.push((key, Bytes::copy_from_slice(&content)));
@@ -570,7 +618,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -675,7 +725,8 @@ mod tests {
         let mut tx = db.begin().unwrap();
 
         tx.create_segment(&table_name).unwrap();
-        tx.create_index::<ByteVec, ByteVec>(&index_name, persy::ValueMode::Replace).unwrap();
+        tx.create_index::<ByteVec, ByteVec>(&index_name, persy::ValueMode::Replace)
+            .unwrap();
         tx.prepare().unwrap().commit().unwrap();
 
         let store = PersyStore {
@@ -686,14 +737,29 @@ mod tests {
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -703,11 +769,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:"
-        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        let results_russia = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
 
         // Test streaming prefix scan

@@ -1,8 +1,8 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use futures::stream::Stream;
@@ -95,8 +95,8 @@ impl Store for FjallStore {
 
             Ok(key)
         })
-            .await
-            .map_err(|e| DbError::Internal(e.to_string()))?
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
@@ -115,21 +115,23 @@ impl Store for FjallStore {
             // Return true if created (didn't exist), false if updated (existed)
             Ok(!existed)
         })
-            .await
-            .map_err(|e| DbError::Internal(e.to_string()))?
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<Bytes> {
-            match keyspace.get(&key[..]).map_err(|e| DbError::Storage(e.to_string()))?
+            match keyspace
+                .get(&key[..])
+                .map_err(|e| DbError::Storage(e.to_string()))?
             {
                 Some(slice) => Ok(Bytes::copy_from_slice(&slice)),
                 None => Err(DbError::NotFound(format!("record not found: {:?}", key))),
             }
         })
-            .await
-            .map_err(|e| DbError::Internal(e.to_string()))?
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
@@ -148,8 +150,8 @@ impl Store for FjallStore {
 
             Ok(existed)
         })
-            .await
-            .map_err(|e| DbError::Internal(e.to_string()))?
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
     async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
@@ -163,16 +165,22 @@ impl Store for FjallStore {
                     .into_inner()
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
+                items.push((
+                    Bytes::copy_from_slice(&key),
+                    Bytes::copy_from_slice(&value_slice),
+                ));
             }
 
             Ok(items)
         })
-            .await
-            .map_err(|e| DbError::Internal(e.to_string()))?
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let keyspace = self.keyspace.clone();
 
         Box::pin(stream! {
@@ -242,7 +250,10 @@ impl Store for FjallStore {
 
                 // Check if key starts with prefix
                 if key.starts_with(prefix_slice) {
-                    items.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&value_slice)));
+                    items.push((
+                        Bytes::copy_from_slice(&key),
+                        Bytes::copy_from_slice(&value_slice),
+                    ));
                 }
             }
 
@@ -358,7 +369,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -420,20 +433,37 @@ mod tests {
 
         // Create FjallStore directly to access PrefixScan
         let table_name = "test_table";
-        let keyspace = db.keyspace(table_name, || KeyspaceCreateOptions::default()).unwrap();
+        let keyspace = db
+            .keyspace(table_name, || KeyspaceCreateOptions::default())
+            .unwrap();
 
         let store = FjallStore { keyspace };
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -443,11 +473,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:"
-        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        let results_russia = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
 
         // Test streaming prefix scan

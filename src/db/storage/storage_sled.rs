@@ -1,8 +1,8 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
 use sled::{Db, Tree};
@@ -37,8 +37,8 @@ impl Repo for SledRepo {
             db.open_tree(table_name.as_bytes())
                 .map_err(|e| DbError::Storage(format!("SledDB open_tree: {}", e)))
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
 
         let store = SledStore {
             tree: Arc::new(tree),
@@ -54,8 +54,8 @@ impl Repo for SledRepo {
             db.drop_tree(table_name.as_bytes())
                 .map_err(|e| DbError::Storage(format!("SledDB drop_tree: {}", e)))
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn stores_list(&self) -> DbResult<Vec<String>> {
@@ -70,8 +70,8 @@ impl Repo for SledRepo {
                 .map_err(|e| DbError::Codec(format!("UTF-8 decode error: {}", e)))?;
             Ok(names)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 }
 
@@ -104,8 +104,8 @@ impl Store for SledStore {
 
             Ok(key)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
@@ -125,8 +125,8 @@ impl Store for SledStore {
 
             Ok(!existed)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -140,8 +140,8 @@ impl Store for SledStore {
 
             Ok(Bytes::copy_from_slice(&val))
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
@@ -158,8 +158,8 @@ impl Store for SledStore {
 
             Ok(existed)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
@@ -174,11 +174,14 @@ impl Store for SledStore {
             }
             Ok(out)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item=Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let tree = self.tree.clone();
 
         Box::pin(stream! {
@@ -247,15 +250,15 @@ impl Store for SledStore {
 
             Ok(out)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
         batch_size: usize,
-    ) -> Pin<Box<dyn Stream<Item=Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let tree = self.tree.clone();
 
         Box::pin(stream! {
@@ -354,7 +357,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -503,19 +508,39 @@ mod tests {
         let table_name = "test_table";
         let tree = db.open_tree(table_name).unwrap();
 
-        let store = SledStore { tree: Arc::new(tree) };
+        let store = SledStore {
+            tree: Arc::new(tree),
+        };
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
-            (b"country:France:Lyon:user5".to_vec(), InnerValue::Str("Eve".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
+            (
+                b"country:France:Lyon:user5".to_vec(),
+                InnerValue::Str("Eve".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -525,18 +550,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:" - should get all Russian cities
-        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        let results_russia = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
-        assert!(results_russia.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results_russia.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
-        assert!(results_russia.iter().any(|(k, _)| k.as_ref() == b"country:Russia:SPb:user3"));
+        assert!(results_russia
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results_russia
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results_russia
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:SPb:user3"));
 
         // Test prefix scan for "country:France:"
-        let results_france = store.scan_prefix(Bytes::copy_from_slice(b"country:France:")).await.unwrap();
+        let results_france = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:France:"))
+            .await
+            .unwrap();
         assert_eq!(results_france.len(), 2);
 
         // Test streaming prefix scan

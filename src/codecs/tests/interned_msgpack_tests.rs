@@ -1,7 +1,7 @@
-use crate::codecs::interned_msgpack::{msgpack_to_inner, inner_to_msgpack};
+use crate::codecs::interned_msgpack::{inner_to_msgpack, msgpack_to_inner};
 use crate::core::interner::Interner;
-use crate::types::value::InnerValue;
 use crate::types::common::new_map;
+use crate::types::value::InnerValue;
 
 #[test]
 fn test_msgpack_to_inner_simple() {
@@ -25,7 +25,10 @@ fn test_msgpack_to_inner_simple() {
             // Check name
             let name_key = interner.touch_ind("name").unwrap().key().clone();
             assert!(m.contains_key(&name_key));
-            assert_eq!(m.get(&name_key), Some(&InnerValue::Str("Alice".to_string())));
+            assert_eq!(
+                m.get(&name_key),
+                Some(&InnerValue::Str("Alice".to_string()))
+            );
 
             // Check age
             let age_key = interner.touch_ind("age").unwrap().key().clone();
@@ -85,10 +88,10 @@ fn test_roundtrip_msgpack() {
         (rmpv::Value::from("name"), rmpv::Value::from("Alice")),
         (rmpv::Value::from("age"), rmpv::Value::from(30i64)),
         (rmpv::Value::from("active"), rmpv::Value::Boolean(true)),
-        (rmpv::Value::from("tags"), rmpv::Value::Array(vec![
-            rmpv::Value::from("rust"),
-            rmpv::Value::from("db"),
-        ])),
+        (
+            rmpv::Value::from("tags"),
+            rmpv::Value::Array(vec![rmpv::Value::from("rust"), rmpv::Value::from("db")]),
+        ),
     ]);
 
     let mut original_buf = Vec::new();
@@ -107,17 +110,27 @@ fn test_nested_structures() {
     let interner = Interner::new();
 
     let test_data = rmpv::Value::Map(vec![
-        (rmpv::Value::from("user"), rmpv::Value::Map(vec![
-            (rmpv::Value::from("name"), rmpv::Value::from("Bob")),
-            (rmpv::Value::from("prefs"), rmpv::Value::Map(vec![
-                (rmpv::Value::from("theme"), rmpv::Value::from("dark")),
-            ])),
-        ])),
-        (rmpv::Value::from("items"), rmpv::Value::Array(vec![
-            rmpv::Value::from(1i64),
-            rmpv::Value::from(2i64),
-            rmpv::Value::from(3i64),
-        ])),
+        (
+            rmpv::Value::from("user"),
+            rmpv::Value::Map(vec![
+                (rmpv::Value::from("name"), rmpv::Value::from("Bob")),
+                (
+                    rmpv::Value::from("prefs"),
+                    rmpv::Value::Map(vec![(
+                        rmpv::Value::from("theme"),
+                        rmpv::Value::from("dark"),
+                    )]),
+                ),
+            ]),
+        ),
+        (
+            rmpv::Value::from("items"),
+            rmpv::Value::Array(vec![
+                rmpv::Value::from(1i64),
+                rmpv::Value::from(2i64),
+                rmpv::Value::from(3i64),
+            ]),
+        ),
     ]);
 
     let mut buf = Vec::new();
@@ -135,9 +148,10 @@ fn test_interning_reuse() {
 
     let test_data = rmpv::Value::Map(vec![
         (rmpv::Value::from("key"), rmpv::Value::from("value")),
-        (rmpv::Value::from("nested"), rmpv::Value::Map(vec![
-            (rmpv::Value::from("key"), rmpv::Value::from("other")),
-        ])),
+        (
+            rmpv::Value::from("nested"),
+            rmpv::Value::Map(vec![(rmpv::Value::from("key"), rmpv::Value::from("other"))]),
+        ),
     ]);
 
     let mut buf = Vec::new();
@@ -154,9 +168,10 @@ fn test_interning_reuse() {
 fn test_binary_data() {
     let interner = Interner::new();
 
-    let test_data = rmpv::Value::Map(vec![
-        (rmpv::Value::from("data"), rmpv::Value::Binary(vec![1, 2, 3, 4, 5])),
-    ]);
+    let test_data = rmpv::Value::Map(vec![(
+        rmpv::Value::from("data"),
+        rmpv::Value::Binary(vec![1, 2, 3, 4, 5]),
+    )]);
 
     let mut buf = Vec::new();
     rmpv::encode::write_value(&mut buf, &test_data).unwrap();
@@ -179,11 +194,14 @@ fn test_all_msgpack_types() {
         (rmpv::Value::from("uint_val"), rmpv::Value::from(42u32)),
         (rmpv::Value::from("float_val"), rmpv::Value::from(3.14f64)),
         (rmpv::Value::from("string_val"), rmpv::Value::from("hello")),
-        (rmpv::Value::from("binary_val"), rmpv::Value::Binary(vec![1, 2, 3])),
-        (rmpv::Value::from("array_val"), rmpv::Value::Array(vec![
-            rmpv::Value::from(1i64),
-            rmpv::Value::from(2i64),
-        ])),
+        (
+            rmpv::Value::from("binary_val"),
+            rmpv::Value::Binary(vec![1, 2, 3]),
+        ),
+        (
+            rmpv::Value::from("array_val"),
+            rmpv::Value::Array(vec![rmpv::Value::from(1i64), rmpv::Value::from(2i64)]),
+        ),
     ]);
 
     let mut buf = Vec::new();
@@ -231,9 +249,10 @@ fn test_large_unsigned_int() {
 
     // Large unsigned integer that doesn't fit in i64
     let large_u64: u64 = i64::MAX as u64 + 1;
-    let test_data = rmpv::Value::Map(vec![
-        (rmpv::Value::from("large"), rmpv::Value::from(large_u64)),
-    ]);
+    let test_data = rmpv::Value::Map(vec![(
+        rmpv::Value::from("large"),
+        rmpv::Value::from(large_u64),
+    )]);
 
     let mut buf = Vec::new();
     rmpv::encode::write_value(&mut buf, &test_data).unwrap();

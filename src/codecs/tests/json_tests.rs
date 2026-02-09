@@ -18,7 +18,10 @@ struct SimpleStruct {
 #[test]
 fn test_generic_json_codec() {
     let codec = JsonCodec;
-    let original = SimpleStruct { a: 10, b: "test".to_string() };
+    let original = SimpleStruct {
+        a: 10,
+        b: "test".to_string(),
+    };
     let encoded = codec.encode(&original).unwrap();
     let decoded: SimpleStruct = codec.decode(&encoded).unwrap();
     assert_eq!(original, decoded);
@@ -62,7 +65,13 @@ fn test_decode_from_raw_json_string() {
     let mut expected_map = new_map();
     expected_map.insert("user".to_string(), UserValue::Str("test".to_string()));
     expected_map.insert("active".to_string(), UserValue::Bool(true));
-    expected_map.insert("roles".to_string(), UserValue::List(vec![UserValue::Str("admin".to_string()), UserValue::Str("editor".to_string())]));
+    expected_map.insert(
+        "roles".to_string(),
+        UserValue::List(vec![
+            UserValue::Str("admin".to_string()),
+            UserValue::Str("editor".to_string()),
+        ]),
+    );
     expected_map.insert("prefs".to_string(), UserValue::Map(prefs_map));
     expected_map.insert("last_login".to_string(), UserValue::Nil);
     let expected_value = UserValue::Map(expected_map);
@@ -108,7 +117,10 @@ fn test_decode_with_truly_large_bigint() {
     let large_number_str = "1234567890123456789012345678901234567890";
     let raw_json = format!(r#"{{ "big:large": "{}" }}"#, large_number_str);
     let mut expected_map = new_map();
-    expected_map.insert("large".to_string(), UserValue::Str(large_number_str.to_string()));
+    expected_map.insert(
+        "large".to_string(),
+        UserValue::Str(large_number_str.to_string()),
+    );
     let expected_value = UserValue::Map(expected_map);
     let decoded_value: UserValue = codec.decode(raw_json.as_bytes()).unwrap();
     assert_eq!(decoded_value, expected_value);
@@ -123,8 +135,14 @@ fn test_serialization_to_string_for_big_types() {
     let dec_val = UserValue::Dec(Decimal::from_str(price_str).unwrap());
     let big_encoded = codec.encode(&big_val).unwrap();
     let dec_encoded = codec.encode(&dec_val).unwrap();
-    assert_eq!(String::from_utf8(big_encoded).unwrap().trim(), format!(r#""{}""#, large_number_str));
-    assert_eq!(String::from_utf8(dec_encoded).unwrap().trim(), format!(r#""{}""#, price_str));
+    assert_eq!(
+        String::from_utf8(big_encoded).unwrap().trim(),
+        format!(r#""{}""#, large_number_str)
+    );
+    assert_eq!(
+        String::from_utf8(dec_encoded).unwrap().trim(),
+        format!(r#""{}""#, price_str)
+    );
 }
 
 #[test]
@@ -133,7 +151,10 @@ fn test_fail_on_unknown_prefix() {
     let json_unknown_prefix = r#"{ "foo:bar": 123 }"#;
     let result: Result<UserValue, _> = codec.decode(json_unknown_prefix.as_bytes());
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("unknown type prefix: 'foo'"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("unknown type prefix: 'foo'"));
 }
 
 #[test]
@@ -144,7 +165,10 @@ fn test_decode_bigint_from_number() {
     assert!(result.is_ok());
     let value = result.unwrap();
     if let UserValue::Map(map) = value {
-        assert_eq!(map.get("balance"), Some(&UserValue::Str("12345".to_string())));
+        assert_eq!(
+            map.get("balance"),
+            Some(&UserValue::Str("12345".to_string()))
+        );
     } else {
         panic!("Expected a map");
     }
@@ -154,7 +178,10 @@ fn test_decode_bigint_from_number() {
     assert!(result.is_ok());
     let value = result.unwrap();
     if let UserValue::Map(map) = value {
-        assert_eq!(map.get("balance"), Some(&UserValue::Str("12345".to_string())));
+        assert_eq!(
+            map.get("balance"),
+            Some(&UserValue::Str("12345".to_string()))
+        );
     } else {
         panic!("Expected a map");
     }
@@ -189,7 +216,12 @@ fn test_decode_bigint_validation() {
     assert!(result.is_ok());
     let value = result.unwrap();
     if let UserValue::Map(map) = value {
-        assert_eq!(map.get("balance"), Some(&UserValue::Str("123456789012345678901234567890".to_string())));
+        assert_eq!(
+            map.get("balance"),
+            Some(&UserValue::Str(
+                "123456789012345678901234567890".to_string()
+            ))
+        );
     } else {
         panic!("Expected a map");
     }

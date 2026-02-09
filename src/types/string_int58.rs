@@ -38,7 +38,9 @@ impl StringInt58 {
             }
         }
 
-        Some(Self { bytes: s.bytes().collect() })
+        Some(Self {
+            bytes: s.bytes().collect(),
+        })
     }
 
     /// Simple increment: replace each char with next in BASE58, carry when needed
@@ -51,7 +53,7 @@ impl StringInt58 {
             if next != 0 {
                 // Normal case: just replace with next char
                 self.bytes[pos] = next;
-                return ;
+                return;
             }
 
             // Overflow at this position: wrap to '1' and carry left
@@ -59,7 +61,7 @@ impl StringInt58 {
             if pos == 0 {
                 // Need new digit at front: "z" -> "21"
                 self.bytes.insert(0, b'2');
-                return ;
+                return;
             }
             pos -= 1;
         }
@@ -143,7 +145,12 @@ mod tests {
         let test_cases = ["1", "2", "9", "A", "z", "21", "22", "1z"];
         for expected in test_cases {
             let id = StringInt58::from_str(expected).unwrap();
-            assert_eq!(id.as_str(), expected, "Expected {} to parse as itself", expected);
+            assert_eq!(
+                id.as_str(),
+                expected,
+                "Expected {} to parse as itself",
+                expected
+            );
         }
 
         // Test round trip via increment

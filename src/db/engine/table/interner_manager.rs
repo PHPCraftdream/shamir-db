@@ -1,12 +1,12 @@
 //! Interner manager for lazy loading and persistence
 
-use crate::core::interner::{Interner, InternedKey, UserKey};
-use crate::db::DbResult;
-use crate::db::storage::types::Store;
 use crate::codecs::bytes;
+use crate::core::interner::{InternedKey, Interner, UserKey};
+use crate::db::storage::types::Store;
+use crate::db::DbResult;
 use crate::types::record_id::RecordId;
-use tokio::sync::OnceCell;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 /// Manages interned keys with lazy loading and persistence
 ///
@@ -45,24 +45,26 @@ impl InternerManager {
         let info_store = Arc::clone(&self.info_store);
         let interner_cell = &self.interner;
 
-        interner_cell.get_or_init(|| async move {
-            // Load from storage
-            let internals_id = RecordId::system("internals").to_bytes();
-            let inter_data = info_store.get(internals_id).await;
+        interner_cell
+            .get_or_init(|| async move {
+                // Load from storage
+                let internals_id = RecordId::system("internals").to_bytes();
+                let inter_data = info_store.get(internals_id).await;
 
-            if let Ok(bytes) = inter_data {
-                // Deserialize
-                let data: Vec<(InternedKey, UserKey)> = bytes::from_bytes(&bytes)
-                    .unwrap_or_else(|e| {
-                        log::error!("Failed to deserialize interner: {}", e);
-                        Vec::new()
-                    });
-                Interner::with_state(data)
-            } else {
-                // Empty interner
-                Interner::new()
-            }
-        }).await;
+                if let Ok(bytes) = inter_data {
+                    // Deserialize
+                    let data: Vec<(InternedKey, UserKey)> = bytes::from_bytes(&bytes)
+                        .unwrap_or_else(|e| {
+                            log::error!("Failed to deserialize interner: {}", e);
+                            Vec::new()
+                        });
+                    Interner::with_state(data)
+                } else {
+                    // Empty interner
+                    Interner::new()
+                }
+            })
+            .await;
 
         Ok(self.interner.get().unwrap())
     }
@@ -86,8 +88,9 @@ impl InternerManager {
         current.extend_from_slice(new_keys);
 
         // Serialize and save
-        let bytes = bytes::to_bytes(&current)
-            .map_err(|e| crate::db::DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
+        let bytes = bytes::to_bytes(&current).map_err(|e| {
+            crate::db::DbError::Codec(format!("Failed to serialize interner: {}", e))
+        })?;
 
         self.info_store.set(internals_id.to_bytes(), bytes).await?;
 

@@ -1,8 +1,8 @@
-use indexmap::{IndexMap, IndexSet};
-use std::hash::{Hash, BuildHasherDefault};
-use std::cmp::Eq;
-use fxhash::FxHasher;
 use dashmap::DashMap;
+use fxhash::FxHasher;
+use indexmap::{IndexMap, IndexSet};
+use std::cmp::Eq;
+use std::hash::{BuildHasherDefault, Hash};
 
 pub type THasher = BuildHasherDefault<FxHasher>;
 

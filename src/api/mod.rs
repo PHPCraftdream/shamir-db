@@ -68,7 +68,9 @@ mod tests {
         assert_eq!(request, decoded_req);
 
         // 2. Create a Get command
-        let get_command = Command::Get { key: "test_key".to_string() };
+        let get_command = Command::Get {
+            key: "test_key".to_string(),
+        };
         let request = Request {
             request_id: 2,
             command: get_command,

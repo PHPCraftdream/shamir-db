@@ -1,14 +1,14 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
 use nebari::{
-    tree::{Root, Unversioned, UnversionedTreeRoot, ScanEvaluation},
-    Config, Roots, Tree,
     io::fs::StdFile,
+    tree::{Root, ScanEvaluation, Unversioned, UnversionedTreeRoot},
+    Config, Roots, Tree,
 };
 use std::path::Path;
 use std::pin::Pin;
@@ -55,17 +55,19 @@ impl Repo for NebariRepo {
                 .map_err(|e| DbError::Storage(format!("NebariDB meta_set: {}", e)))?;
             Ok(())
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
 
         // Открываем дерево пользователя
-        let tree = spawn_blocking(move || -> DbResult<Tree<UnversionedTreeRoot<()>, StdFile>> {
-            roots
-                .tree(Unversioned::tree(table_name))
-                .map_err(|e| DbError::Storage(format!("NebariDB open_tree: {}", e)))
-        })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
+        let tree = spawn_blocking(
+            move || -> DbResult<Tree<UnversionedTreeRoot<()>, StdFile>> {
+                roots
+                    .tree(Unversioned::tree(table_name))
+                    .map_err(|e| DbError::Storage(format!("NebariDB open_tree: {}", e)))
+            },
+        )
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
 
         let store = NebariStore {
             tree: Arc::new(tree),
@@ -117,8 +119,8 @@ impl Repo for NebariRepo {
 
             Ok(existed)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn stores_list(&self) -> DbResult<Vec<String>> {
@@ -151,8 +153,8 @@ impl Repo for NebariRepo {
 
             Ok(names)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 }
 
@@ -181,8 +183,8 @@ impl Store for NebariStore {
 
             Ok(key)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
@@ -201,8 +203,8 @@ impl Store for NebariStore {
 
             Ok(!existed)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -217,8 +219,8 @@ impl Store for NebariStore {
 
             Ok(Bytes::copy_from_slice(val.as_ref()))
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
@@ -233,8 +235,8 @@ impl Store for NebariStore {
 
             Ok(existed)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
     async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
@@ -248,19 +250,25 @@ impl Store for NebariStore {
                 |_, _, _| ScanEvaluation::ReadData,
                 |_, _| ScanEvaluation::ReadData,
                 |key, _, value| {
-                    out.push((Bytes::copy_from_slice(key.as_ref()), Bytes::copy_from_slice(value.as_ref())));
+                    out.push((
+                        Bytes::copy_from_slice(key.as_ref()),
+                        Bytes::copy_from_slice(value.as_ref()),
+                    ));
                     Ok(())
                 },
             )
-                .map_err(|e| DbError::Storage(format!("NebariDB scan: {}", e)))?;
+            .map_err(|e| DbError::Storage(format!("NebariDB scan: {}", e)))?;
 
             Ok(out)
         })
-            .await
-            .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let tree = self.tree.clone();
 
         Box::pin(stream! {
@@ -340,7 +348,10 @@ impl Store for NebariStore {
                 |_, _, _| ScanEvaluation::ReadData,
                 |_, _| ScanEvaluation::ReadData,
                 |key, _, value| {
-                    out.push((Bytes::copy_from_slice(key.as_ref()), Bytes::copy_from_slice(value.as_ref())));
+                    out.push((
+                        Bytes::copy_from_slice(key.as_ref()),
+                        Bytes::copy_from_slice(value.as_ref()),
+                    ));
                     Ok(())
                 },
             )
@@ -478,7 +489,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -588,20 +601,39 @@ mod tests {
 
         // Create NebariStore directly to access PrefixScan
         let tree_name = "test_table";
-        let tree = Arc::new(roots.tree(nebari::tree::Unversioned::tree(tree_name)).unwrap());
+        let tree = Arc::new(
+            roots
+                .tree(nebari::tree::Unversioned::tree(tree_name))
+                .unwrap(),
+        );
 
         let store = NebariStore { tree };
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -611,11 +643,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:"
-        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        let results_russia = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
 
         // Test streaming prefix scan

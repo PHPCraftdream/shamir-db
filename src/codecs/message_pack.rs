@@ -1,6 +1,6 @@
 use crate::codecs::{Codec, CodecError};
-use serde::{de::DeserializeOwned, Serialize};
 use rmp_serde::{from_slice, to_vec_named};
+use serde::{de::DeserializeOwned, Serialize};
 
 /// A generic codec for the MessagePack format.
 pub struct MessagePackCodec;

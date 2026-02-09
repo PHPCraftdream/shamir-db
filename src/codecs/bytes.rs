@@ -52,6 +52,5 @@ pub fn from_bytes<T>(bytes: &[u8]) -> Result<T, CodecError>
 where
     T: serde::de::DeserializeOwned,
 {
-    bincode::deserialize(bytes)
-        .map_err(|e| CodecError::Deserialize(e.to_string()))
+    bincode::deserialize(bytes).map_err(|e| CodecError::Deserialize(e.to_string()))
 }

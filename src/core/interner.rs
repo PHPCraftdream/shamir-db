@@ -186,8 +186,9 @@ impl Interner {
             map_interned_to_user.insert(id.clone(), key);
             // Update max_id to be at least this id
             // We need to increment until we reach or surpass this id
-            while max_id.as_str().len() < id.as_str().len() ||
-                  (max_id.as_str().len() == id.as_str().len() && max_id.as_str() < id.as_str()) {
+            while max_id.as_str().len() < id.as_str().len()
+                || (max_id.as_str().len() == id.as_str().len() && max_id.as_str() < id.as_str())
+            {
                 max_id.increment();
             }
         }
@@ -264,4 +265,3 @@ impl Interner {
         current_id.as_str().to_string()
     }
 }
-

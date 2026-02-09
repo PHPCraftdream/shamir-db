@@ -1,8 +1,8 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
@@ -17,12 +17,36 @@ use tokio::task;
 // ============================================================================
 
 // Конвертация ошибок redb в DbError
-impl From<redb::Error> for DbError { fn from(err: redb::Error) -> Self { DbError::Storage(err.to_string()) } }
-impl From<redb::TransactionError> for DbError { fn from(err: redb::TransactionError) -> Self { DbError::Storage(err.to_string()) } }
-impl From<redb::TableError> for DbError { fn from(err: redb::TableError) -> Self { DbError::Storage(err.to_string()) } }
-impl From<redb::CommitError> for DbError { fn from(err: redb::CommitError) -> Self { DbError::Storage(err.to_string()) } }
-impl From<redb::DatabaseError> for DbError { fn from(err: redb::DatabaseError) -> Self { DbError::Storage(err.to_string()) } }
-impl From<redb::StorageError> for DbError { fn from(err: redb::StorageError) -> Self { DbError::Storage(err.to_string()) } }
+impl From<redb::Error> for DbError {
+    fn from(err: redb::Error) -> Self {
+        DbError::Storage(err.to_string())
+    }
+}
+impl From<redb::TransactionError> for DbError {
+    fn from(err: redb::TransactionError) -> Self {
+        DbError::Storage(err.to_string())
+    }
+}
+impl From<redb::TableError> for DbError {
+    fn from(err: redb::TableError) -> Self {
+        DbError::Storage(err.to_string())
+    }
+}
+impl From<redb::CommitError> for DbError {
+    fn from(err: redb::CommitError) -> Self {
+        DbError::Storage(err.to_string())
+    }
+}
+impl From<redb::DatabaseError> for DbError {
+    fn from(err: redb::DatabaseError) -> Self {
+        DbError::Storage(err.to_string())
+    }
+}
+impl From<redb::StorageError> for DbError {
+    fn from(err: redb::StorageError) -> Self {
+        DbError::Storage(err.to_string())
+    }
+}
 
 // ============================================================================
 // RedbRepo - manages database connection and tables
@@ -195,7 +219,10 @@ impl Store for RedbStore {
             let mut result = Vec::new();
             for item in table.iter()? {
                 let (key, val) = item?;
-                result.push((Bytes::copy_from_slice(key.value()), Bytes::copy_from_slice(val.value())));
+                result.push((
+                    Bytes::copy_from_slice(key.value()),
+                    Bytes::copy_from_slice(val.value()),
+                ));
             }
             Ok(result)
         })
@@ -203,7 +230,10 @@ impl Store for RedbStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
@@ -268,7 +298,10 @@ impl Store for RedbStore {
                 // Empty prefix - return everything
                 for item in table.iter()? {
                     let (key, val) = item?;
-                    result.push((Bytes::copy_from_slice(key.value()), Bytes::copy_from_slice(val.value())));
+                    result.push((
+                        Bytes::copy_from_slice(key.value()),
+                        Bytes::copy_from_slice(val.value()),
+                    ));
                 }
                 return Ok(result);
             }
@@ -281,7 +314,10 @@ impl Store for RedbStore {
 
             for item in table.range::<&[u8]>(range)? {
                 let (key, val) = item?;
-                result.push((Bytes::copy_from_slice(key.value()), Bytes::copy_from_slice(val.value())));
+                result.push((
+                    Bytes::copy_from_slice(key.value()),
+                    Bytes::copy_from_slice(val.value()),
+                ));
             }
 
             Ok(result)
@@ -393,7 +429,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -478,23 +516,46 @@ mod tests {
         let table_name = "test_table";
         let write_txn = db.begin_write().unwrap();
         {
-            let _table = write_txn.open_table(TableDefinition::<&[u8], &[u8]>::new(table_name)).unwrap();
+            let _table = write_txn
+                .open_table(TableDefinition::<&[u8], &[u8]>::new(table_name))
+                .unwrap();
         }
         write_txn.commit().unwrap();
 
-        let store = RedbStore { db, table_name: table_name.to_string() };
+        let store = RedbStore {
+            db,
+            table_name: table_name.to_string(),
+        };
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
-            (b"country:France:Lyon:user5".to_vec(), InnerValue::Str("Eve".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
+            (
+                b"country:France:Lyon:user5".to_vec(),
+                InnerValue::Str("Eve".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -504,15 +565,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:"
-        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        let results_russia = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
 
         // Test prefix scan for "country:France:"
-        let results_france = store.scan_prefix(Bytes::copy_from_slice(b"country:France:")).await.unwrap();
+        let results_france = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:France:"))
+            .await
+            .unwrap();
         assert_eq!(results_france.len(), 2);
 
         // Test streaming prefix scan

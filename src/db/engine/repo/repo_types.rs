@@ -1,7 +1,7 @@
-use crate::db::DbResult;
-use crate::db::storage::types::{Repo, Store};
-use std::sync::Arc;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
+use crate::db::storage::types::{Repo, Store};
+use crate::db::DbResult;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum BoxRepo {

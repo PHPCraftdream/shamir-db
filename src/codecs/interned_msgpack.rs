@@ -5,9 +5,9 @@
 
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
-use crate::types::value::{InnerValue, Value};
 use crate::types::common::new_map;
-use rmpv::{Value as RmpvValue};
+use crate::types::value::{InnerValue, Value};
+use rmpv::Value as RmpvValue;
 
 /// Decodes MessagePack bytes to InnerValue, interning string keys
 ///
@@ -38,7 +38,10 @@ pub fn inner_to_msgpack(interner: &Interner, value: &InnerValue) -> Result<Vec<u
 }
 
 /// Converts rmpv::Value to InnerValue, interning all string keys
-fn rmpv_value_to_inner(rmpv_value: &RmpvValue, interner: &Interner) -> Result<InnerValue, CodecError> {
+fn rmpv_value_to_inner(
+    rmpv_value: &RmpvValue,
+    interner: &Interner,
+) -> Result<InnerValue, CodecError> {
     match rmpv_value {
         RmpvValue::Nil => Ok(InnerValue::Nil),
         RmpvValue::Boolean(b) => Ok(InnerValue::Bool(*b)),
@@ -60,7 +63,9 @@ fn rmpv_value_to_inner(rmpv_value: &RmpvValue, interner: &Interner) -> Result<In
         RmpvValue::F64(f) => Ok(InnerValue::F64(*f)),
         RmpvValue::F32(f) => Ok(InnerValue::F64(*f as f64)),
         RmpvValue::String(s) => {
-            let s_str = s.as_str().ok_or_else(|| CodecError::Decode("Invalid UTF-8 in string".to_string()))?;
+            let s_str = s
+                .as_str()
+                .ok_or_else(|| CodecError::Decode("Invalid UTF-8 in string".to_string()))?;
             Ok(InnerValue::Str(s_str.to_string()))
         }
         RmpvValue::Binary(b) => Ok(InnerValue::Bin(b.clone())),
@@ -81,7 +86,8 @@ fn rmpv_value_to_inner(rmpv_value: &RmpvValue, interner: &Interner) -> Result<In
                 };
 
                 // Intern the key
-                let interned_key = interner.touch_ind(&key_str)
+                let interned_key = interner
+                    .touch_ind(&key_str)
                     .map_err(|e| CodecError::Decode(format!("Failed to intern key: {}", e)))?
                     .key()
                     .clone();
@@ -120,7 +126,8 @@ fn inner_to_rmpv_value(value: &InnerValue, interner: &Interner) -> RmpvValue {
         Value::Map(m) => {
             let mut map = Vec::new();
             for (interned_key, val) in m {
-                let key_str = interner.get_str(interned_key)
+                let key_str = interner
+                    .get_str(interned_key)
                     .expect("Interned key not found in interner")
                     .as_ref()
                     .to_string();
