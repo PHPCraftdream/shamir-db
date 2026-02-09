@@ -28,7 +28,13 @@ impl Clone for TableContext {
 }
 
 impl TableContext {
-    pub fn new(name: String, table: Table, interner: InternerManager, counter: Arc<RecordCounter>, index_manager: TableIndexManager) -> Self {
+    pub fn new(
+        name: String,
+        table: Table,
+        interner: InternerManager,
+        counter: Arc<RecordCounter>,
+        index_manager: TableIndexManager,
+    ) -> Self {
         Self {
             name,
             table: Arc::new(table),

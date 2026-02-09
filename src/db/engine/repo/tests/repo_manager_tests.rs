@@ -2,8 +2,8 @@ use crate::db::engine::repo::repo_config::RepoConfig;
 use crate::db::engine::repo::repo_manager::RepoManager;
 use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
-use std::sync::Arc;
 use crate::db::DbError::NotFound;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn test_repo_manager_new() {
@@ -74,9 +74,18 @@ async fn test_remove_repo_not_found() {
 async fn test_list_repos() {
     let mut manager = RepoManager::new();
 
-    manager.add_repo(RepoConfig::new("repo1", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
-    manager.add_repo(RepoConfig::new("repo2", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
-    manager.add_repo(RepoConfig::new("repo3", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
+    manager.add_repo(RepoConfig::new(
+        "repo1",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
+    manager.add_repo(RepoConfig::new(
+        "repo2",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
+    manager.add_repo(RepoConfig::new(
+        "repo3",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
 
     let names = manager.list_repos();
     assert_eq!(names.len(), 3);
@@ -131,10 +140,22 @@ async fn test_get_or_create_default() {
 async fn test_multiple_repos_different_names() {
     let mut manager = RepoManager::new();
 
-    manager.add_repo(RepoConfig::new("production", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
-    manager.add_repo(RepoConfig::new("staging", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
-    manager.add_repo(RepoConfig::new("testing", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
-    manager.add_repo(RepoConfig::new("cache", BoxRepo::InMemory(Arc::new(InMemoryRepo::new()))));
+    manager.add_repo(RepoConfig::new(
+        "production",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
+    manager.add_repo(RepoConfig::new(
+        "staging",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
+    manager.add_repo(RepoConfig::new(
+        "testing",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
+    manager.add_repo(RepoConfig::new(
+        "cache",
+        BoxRepo::InMemory(Arc::new(InMemoryRepo::new())),
+    ));
 
     assert_eq!(manager.repo_count(), 4);
     assert!(manager.has_repo("production"));

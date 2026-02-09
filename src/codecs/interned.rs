@@ -10,10 +10,18 @@ use crate::types::value::InnerValue;
 /// client data (JSON/MessagePack) with automatic interning.
 pub trait InternedCodec: Send + Sync {
     /// Decode bytes to InnerValue, interning string keys
-    fn decode_with_interner(&self, bytes: &[u8], interner: &Interner) -> Result<InnerValue, CodecError>;
+    fn decode_with_interner(
+        &self,
+        bytes: &[u8],
+        interner: &Interner,
+    ) -> Result<InnerValue, CodecError>;
 
     /// Encode InnerValue to bytes
-    fn encode_with_interner(&self, value: &InnerValue, interner: &Interner) -> Result<Vec<u8>, CodecError>;
+    fn encode_with_interner(
+        &self,
+        value: &InnerValue,
+        interner: &Interner,
+    ) -> Result<Vec<u8>, CodecError>;
 
     /// Get codec format name (for debugging/logging)
     fn format_name(&self) -> &'static str;
@@ -27,11 +35,19 @@ pub trait InternedCodec: Send + Sync {
 pub struct JsonInternedCodec;
 
 impl InternedCodec for JsonInternedCodec {
-    fn decode_with_interner(&self, bytes: &[u8], interner: &Interner) -> Result<InnerValue, CodecError> {
+    fn decode_with_interner(
+        &self,
+        bytes: &[u8],
+        interner: &Interner,
+    ) -> Result<InnerValue, CodecError> {
         crate::codecs::interned_json::json_to_inner(interner, bytes)
     }
 
-    fn encode_with_interner(&self, value: &InnerValue, interner: &Interner) -> Result<Vec<u8>, CodecError> {
+    fn encode_with_interner(
+        &self,
+        value: &InnerValue,
+        interner: &Interner,
+    ) -> Result<Vec<u8>, CodecError> {
         crate::codecs::interned_json::inner_to_json(interner, value)
     }
 
@@ -48,11 +64,19 @@ impl InternedCodec for JsonInternedCodec {
 pub struct MsgPackInternedCodec;
 
 impl InternedCodec for MsgPackInternedCodec {
-    fn decode_with_interner(&self, bytes: &[u8], interner: &Interner) -> Result<InnerValue, CodecError> {
+    fn decode_with_interner(
+        &self,
+        bytes: &[u8],
+        interner: &Interner,
+    ) -> Result<InnerValue, CodecError> {
         crate::codecs::interned_msgpack::msgpack_to_inner(interner, bytes)
     }
 
-    fn encode_with_interner(&self, value: &InnerValue, interner: &Interner) -> Result<Vec<u8>, CodecError> {
+    fn encode_with_interner(
+        &self,
+        value: &InnerValue,
+        interner: &Interner,
+    ) -> Result<Vec<u8>, CodecError> {
         crate::codecs::interned_msgpack::inner_to_msgpack(interner, value)
     }
 

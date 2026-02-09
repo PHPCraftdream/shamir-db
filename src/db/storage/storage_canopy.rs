@@ -1,8 +1,8 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use canopydb::Database;
 use futures::stream::Stream;
@@ -172,9 +172,7 @@ impl Store for CanopyStore {
             {
                 let mut tree = tx
                     .get_or_create_tree(table_name.as_bytes())
-                    .map_err(|e| {
-                        DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e))
-                    })?;
+                    .map_err(|e| DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e)))?;
 
                 tree.insert(&key[..], &value)
                     .map_err(|e| DbError::Storage(format!("CanopyDB insert: {}", e)))?;
@@ -202,9 +200,7 @@ impl Store for CanopyStore {
             {
                 let mut tree = tx
                     .get_or_create_tree(table_name.as_bytes())
-                    .map_err(|e| {
-                        DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e))
-                    })?;
+                    .map_err(|e| DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e)))?;
 
                 let existed = tree
                     .get(&key[..])
@@ -313,7 +309,10 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
 
@@ -406,8 +405,8 @@ impl Store for CanopyStore {
                 }
 
                 let iter_result = tree.range(prefix_slice..&prefix_end);
-                let mut iter = iter_result
-                    .map_err(|e| DbError::Storage(format!("CanopyDB iter: {}", e)))?;
+                let mut iter =
+                    iter_result.map_err(|e| DbError::Storage(format!("CanopyDB iter: {}", e)))?;
 
                 for item in &mut iter {
                     let (key, val) =
@@ -521,11 +520,11 @@ impl Store for CanopyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
     use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
-    use crate::types::record_id::RecordId;
 
     async fn run_store_tests(store: Arc<dyn Store>) {
         // Test insert and get
@@ -557,7 +556,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -652,14 +653,8 @@ mod tests {
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
 
         // Verify cross-table isolation (get should fail with NotFound because the tree itself won't be found)
-        assert!(matches!(
-            store2.get(key1).await,
-            Err(DbError::NotFound(_))
-        ));
-        assert!(matches!(
-            store1.get(key2).await,
-            Err(DbError::NotFound(_))
-        ));
+        assert!(matches!(store2.get(key1).await, Err(DbError::NotFound(_))));
+        assert!(matches!(store1.get(key2).await, Err(DbError::NotFound(_))));
 
         // Clean up
         repo.store_delete("isolated_table1").await.unwrap();
@@ -692,14 +687,29 @@ mod tests {
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -709,11 +719,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:"
-        let results_russia = store.scan_prefix(Bytes::copy_from_slice(b"country:Russia:")).await.unwrap();
+        let results_russia = store
+            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
 
         // Test streaming prefix scan

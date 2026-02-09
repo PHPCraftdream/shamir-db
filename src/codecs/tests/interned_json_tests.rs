@@ -1,7 +1,7 @@
-use crate::codecs::interned_json::{json_to_inner, inner_to_json};
+use crate::codecs::interned_json::{inner_to_json, json_to_inner};
 use crate::core::interner::Interner;
-use crate::types::value::InnerValue;
 use crate::types::common::new_map;
+use crate::types::value::InnerValue;
 
 #[test]
 fn test_json_to_inner_simple() {
@@ -17,7 +17,10 @@ fn test_json_to_inner_simple() {
             // Check name
             let name_key = interner.touch_ind("name").unwrap().key().clone();
             assert!(m.contains_key(&name_key));
-            assert_eq!(m.get(&name_key), Some(&InnerValue::Str("Alice".to_string())));
+            assert_eq!(
+                m.get(&name_key),
+                Some(&InnerValue::Str("Alice".to_string()))
+            );
 
             // Check age
             let age_key = interner.touch_ind("age").unwrap().key().clone();

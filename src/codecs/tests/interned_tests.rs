@@ -1,7 +1,9 @@
-use crate::codecs::interned::{InternedCodec, JsonInternedCodec, MsgPackInternedCodec, CodecFormat};
+use crate::codecs::interned::{
+    CodecFormat, InternedCodec, JsonInternedCodec, MsgPackInternedCodec,
+};
 use crate::core::interner::Interner;
-use crate::types::value::InnerValue;
 use crate::types::common::new_map;
+use crate::types::value::InnerValue;
 
 fn test_roundtrip<C: InternedCodec>(codec: &C, format_name: &str) {
     let interner = Interner::new();
@@ -18,13 +20,21 @@ fn test_roundtrip<C: InternedCodec>(codec: &C, format_name: &str) {
 
     // Encode
     let encoded = codec.encode_with_interner(&value, &interner).unwrap();
-    assert!(!encoded.is_empty(), "{} encoding should produce output", format_name);
+    assert!(
+        !encoded.is_empty(),
+        "{} encoding should produce output",
+        format_name
+    );
 
     // Decode
     let decoded = codec.decode_with_interner(&encoded, &interner).unwrap();
 
     // Verify
-    assert_eq!(decoded, value, "{} roundtrip should preserve data", format_name);
+    assert_eq!(
+        decoded, value,
+        "{} roundtrip should preserve data",
+        format_name
+    );
 }
 
 #[test]

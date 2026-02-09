@@ -1,27 +1,30 @@
 #![allow(deprecated)]
 
-use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use rust_decimal::Decimal;
-use num_bigint::BigInt;
-use crate::types::common::{TMap, TSet, new_map_wc};
-use std::hash::{Hash, Hasher};
-use fxhash::FxHasher;
-use std::cmp::Ord;
-use serde::de::{self, Deserializer, Visitor, MapAccess, SeqAccess};
-use serde::ser::{Serializer, SerializeMap, SerializeSeq};
-use std::fmt::{self, Debug};
-use std::str::FromStr;
-use std::any::TypeId;
 use crate::core::interner::InternedKey;
+use crate::types::common::{new_map_wc, TMap, TSet};
+use bytes::Bytes;
+use fxhash::FxHasher;
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde::ser::{SerializeMap, SerializeSeq, Serializer};
+use serde::{Deserialize, Serialize};
+use std::any::TypeId;
+use std::cmp::Ord;
+use std::fmt::{self, Debug};
+use std::hash::{Hash, Hasher};
+use std::str::FromStr;
 
 /// User-facing value type with string keys
-/// 
+///
 /// **DEPRECATED & FOR TESTS ONLY**
-/// 
+///
 /// This type should only be used in tests for convenience.
 /// Production code should use `InnerValue` directly with interning.
-#[deprecated(since = "0.1.0", note = "Use InnerValue instead. UserValue is for tests only.")]
+#[deprecated(
+    since = "0.1.0",
+    note = "Use InnerValue instead. UserValue is for tests only."
+)]
 pub type UserValue = Value<String>;
 pub type InnerValue = Value<InternedKey>;
 
@@ -40,7 +43,9 @@ pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
     Map(TMap<Key, Value<Key>>),
 }
 
-impl<Key: Eq + Hash + Ord + Clone + Serialize + for<'de> Deserialize<'de> + Debug + 'static> Value<Key> {
+impl<Key: Eq + Hash + Ord + Clone + Serialize + for<'de> Deserialize<'de> + Debug + 'static>
+    Value<Key>
+{
     /// Serializes the `Value` into `Bytes` using MessagePack.
     pub fn to_bytes(&self) -> Bytes {
         Bytes::from(rmp_serde::to_vec(self).expect("Failed to serialize Value"))
@@ -119,20 +124,49 @@ where
         formatter.write_str("any valid SHAMIR value")
     }
 
-    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> { Ok(Value::Bool(value)) }
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> { Ok(Value::Int(value)) }
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> { Ok(Value::Int(value as i64)) }
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> { Ok(Value::F64(value)) }
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> where E: de::Error { Ok(Value::Str(value.to_owned())) }
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> { Ok(Value::Str(value)) }
-    fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E> { Ok(Value::Bin(value.to_vec())) }
-    fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E> { Ok(Value::Bin(value)) }
-    fn visit_none<E>(self) -> Result<Self::Value, E> { Ok(Value::Nil) }
-    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error> where D: Deserializer<'de> { deserializer.deserialize_any(self) }
-    fn visit_unit<E>(self) -> Result<Self::Value, E> { Ok(Value::Nil) }
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(Value::Bool(value))
+    }
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(Value::Int(value))
+    }
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(Value::Int(value as i64))
+    }
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+        Ok(Value::F64(value))
+    }
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(Value::Str(value.to_owned()))
+    }
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(Value::Str(value))
+    }
+    fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E> {
+        Ok(Value::Bin(value.to_vec()))
+    }
+    fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+        Ok(Value::Bin(value))
+    }
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(Value::Nil)
+    }
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(Value::Nil)
+    }
 
     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-    where A: SeqAccess<'de>,
+    where
+        A: SeqAccess<'de>,
     {
         let mut list = Vec::with_capacity(seq.size_hint().unwrap_or(0));
         while let Some(elem) = seq.next_element()? {
@@ -142,7 +176,8 @@ where
     }
 
     fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-    where M: MapAccess<'de>,
+    where
+        M: MapAccess<'de>,
     {
         // For InnerValue (Key=u64) or other non-string keys, use direct deserialization.
         if TypeId::of::<Key>() != TypeId::of::<String>() {
@@ -167,7 +202,7 @@ where
                     // Validate that it's a valid decimal, but store as string
                     let _ = Decimal::from_str(&s).map_err(de::Error::custom)?;
                     Value::Str(s)
-                },
+                }
                 Some("big") => {
                     let source: BigIntSource = map.next_value()?;
                     // Validate that it's a valid bigint, but store as string
@@ -180,12 +215,15 @@ where
                         BigIntSource::Uint(u) => BigInt::from(u).to_string(),
                     };
                     Value::Str(s)
-                },
+                }
                 Some("arr") => map.next_value::<Vec<Value<Key>>>().map(Value::List)?,
                 Some("set") => map.next_value::<TSet<Value<Key>>>().map(Value::Set)?,
                 None => map.next_value()?,
                 Some(unknown) => {
-                    return Err(de::Error::custom(format!("unknown type prefix: '{}'", unknown)));
+                    return Err(de::Error::custom(format!(
+                        "unknown type prefix: '{}'",
+                        unknown
+                    )));
                 }
             };
 
@@ -215,7 +253,11 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> PartialEq for Value<Key> 
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::F64(a), Value::F64(b)) => {
-                if a.is_nan() && b.is_nan() { true } else { a == b }
+                if a.is_nan() && b.is_nan() {
+                    true
+                } else {
+                    a == b
+                }
             }
             (Value::Dec(a), Value::Dec(b)) => a == b,
             (Value::Big(a), Value::Big(b)) => a == b,
@@ -288,7 +330,10 @@ mod tests {
         set2.insert(UserValue::Str("hello".to_string()));
         set2.insert(UserValue::Int(1));
         assert_eq!(set1, set2);
-        assert_eq!(calculate_hash(&UserValue::Set(set1)), calculate_hash(&UserValue::Set(set2)));
+        assert_eq!(
+            calculate_hash(&UserValue::Set(set1)),
+            calculate_hash(&UserValue::Set(set2))
+        );
     }
 
     #[test]
@@ -300,13 +345,19 @@ mod tests {
         map2.insert("b".to_string(), UserValue::Str("world".to_string()));
         map2.insert("a".to_string(), UserValue::Int(1));
         assert_eq!(map1, map2);
-        assert_eq!(calculate_hash(&UserValue::Map(map1)), calculate_hash(&UserValue::Map(map2)));
+        assert_eq!(
+            calculate_hash(&UserValue::Map(map1)),
+            calculate_hash(&UserValue::Map(map2))
+        );
     }
 
     #[test]
     fn test_bytes_serialization_roundtrip() {
         let mut map = new_map();
-        map.insert(InternedKey::from_str("2m"), InnerValue::Str("hello".to_string()));
+        map.insert(
+            InternedKey::from_str("2m"),
+            InnerValue::Str("hello".to_string()),
+        );
         map.insert(InternedKey::from_str("4P"), InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
@@ -432,8 +483,14 @@ mod tests {
         // NaN equality
         assert_eq!(UserValue::F64(f64::NAN), UserValue::F64(f64::NAN));
 
-        assert_eq!(UserValue::Str("test".to_string()), UserValue::Str("test".to_string()));
-        assert_ne!(UserValue::Str("test".to_string()), UserValue::Str("other".to_string()));
+        assert_eq!(
+            UserValue::Str("test".to_string()),
+            UserValue::Str("test".to_string())
+        );
+        assert_ne!(
+            UserValue::Str("test".to_string()),
+            UserValue::Str("other".to_string())
+        );
 
         // Different types are not equal
         assert_ne!(UserValue::Int(42), UserValue::Str("42".to_string()));
@@ -473,9 +530,7 @@ mod tests {
 
     #[test]
     fn test_large_collections() {
-        let large_list = UserValue::List(
-            (0..1000).map(|i| UserValue::Int(i)).collect()
-        );
+        let large_list = UserValue::List((0..1000).map(|i| UserValue::Int(i)).collect());
         let bytes = large_list.to_bytes();
         assert_eq!(large_list, UserValue::from_bytes(&bytes).unwrap());
 
@@ -555,8 +610,14 @@ mod tests {
     #[test]
     fn test_inner_value_with_numeric_keys() {
         let mut map = new_map();
-        map.insert(InternedKey::from_str("2"), InnerValue::Str("zero".to_string()));
-        map.insert(InternedKey::from_str("zzzzzzzzzz"), InnerValue::Str("max".to_string()));
+        map.insert(
+            InternedKey::from_str("2"),
+            InnerValue::Str("zero".to_string()),
+        );
+        map.insert(
+            InternedKey::from_str("zzzzzzzzzz"),
+            InnerValue::Str("max".to_string()),
+        );
         map.insert(InternedKey::from_str("4P"), InnerValue::Int(42));
 
         let value = InnerValue::Map(map);
@@ -591,7 +652,10 @@ mod tests {
         // Completely invalid MessagePack data that should fail to deserialize
         let invalid_data = vec![0xC1]; // Reserved MessagePack type
         let result = UserValue::from_bytes(&invalid_data);
-        assert!(result.is_err(), "Should fail to deserialize invalid MessagePack");
+        assert!(
+            result.is_err(),
+            "Should fail to deserialize invalid MessagePack"
+        );
     }
 
     #[test]
@@ -624,13 +688,7 @@ mod tests {
 
     #[test]
     fn test_f64_special_values() {
-        let special_values = vec![
-            f64::INFINITY,
-            f64::NEG_INFINITY,
-            f64::NAN,
-            0.0,
-            -0.0,
-        ];
+        let special_values = vec![f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.0, -0.0];
 
         for &val in &special_values {
             let value = UserValue::F64(val);
@@ -661,7 +719,7 @@ mod tests {
             "999999999999.999999999",
             "-0.5",
             "1.0",
-            "79228162514264337593543950335",  // Max Decimal
+            "79228162514264337593543950335", // Max Decimal
         ];
 
         for input_str in test_cases {
@@ -673,10 +731,17 @@ mod tests {
             match reconstructed {
                 UserValue::Str(s) => {
                     // Сравниваем строковое представление
-                    assert_eq!(s, decimal.to_string(),
-                               "Decimal from '{}' should roundtrip correctly", input_str);
+                    assert_eq!(
+                        s,
+                        decimal.to_string(),
+                        "Decimal from '{}' should roundtrip correctly",
+                        input_str
+                    );
                 }
-                _ => panic!("Expected Str after deserialization, got {:?}", reconstructed),
+                _ => panic!(
+                    "Expected Str after deserialization, got {:?}",
+                    reconstructed
+                ),
             }
         }
     }
@@ -689,13 +754,13 @@ mod tests {
             "-1",
             "42",
             "-42",
-            "9223372036854775807",   // i64::MAX
-            "-9223372036854775808",  // i64::MIN
-            "18446744073709551615",  // u64::MAX
+            "9223372036854775807",  // i64::MAX
+            "-9223372036854775808", // i64::MIN
+            "18446744073709551615", // u64::MAX
             "123456789012345678901234567890",
             "-999999999999999999999999999999",
-            "340282366920938463463374607431768211456",  // 2^128
-            "115792089237316195423570985008687907853269984665640564039457584007913129639936",  // 2^256
+            "340282366920938463463374607431768211456", // 2^128
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936", // 2^256
         ];
 
         for input_str in test_cases {
@@ -707,10 +772,17 @@ mod tests {
             match reconstructed {
                 UserValue::Str(s) => {
                     // Сравниваем строковое представление
-                    assert_eq!(s, bigint.to_string(),
-                               "BigInt from '{}' should roundtrip correctly", input_str);
+                    assert_eq!(
+                        s,
+                        bigint.to_string(),
+                        "BigInt from '{}' should roundtrip correctly",
+                        input_str
+                    );
                 }
-                _ => panic!("Expected Str after deserialization, got {:?}", reconstructed),
+                _ => panic!(
+                    "Expected Str after deserialization, got {:?}",
+                    reconstructed
+                ),
             }
         }
     }

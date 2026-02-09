@@ -2,8 +2,8 @@ use super::types::{RecordKey, Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_dash_map, new_dash_map_wc, TDashMap};
 use crate::types::record_id::RecordId;
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
 use std::pin::Pin;
@@ -37,9 +37,10 @@ impl Repo for InMemoryRepo {
         let name = name.as_ref();
 
         // Use DashMap's entry API for lock-free read or insert
-        let entry = self.stores.entry(name.to_string()).or_insert_with(|| {
-            Arc::new(InMemoryStore::new())
-        });
+        let entry = self
+            .stores
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(InMemoryStore::new()));
 
         Ok(entry.value().clone() as Arc<dyn Store>)
     }
@@ -93,7 +94,9 @@ impl Store for InMemoryStore {
                         vacant.insert(value);
                         Ok(key)
                     }
-                    Entry::Occupied(_) => Err(DbError::KeyExists(format!("Key already exists: {:?}", key))),
+                    Entry::Occupied(_) => {
+                        Err(DbError::KeyExists(format!("Key already exists: {:?}", key)))
+                    }
                 }
             }
             None => Err(DbError::KeyExists(format!("Key already exists: {:?}", key))),
@@ -126,7 +129,10 @@ impl Store for InMemoryStore {
         Ok(items)
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let data = self.data.clone();
 
         Box::pin(stream! {
@@ -253,7 +259,9 @@ mod tests {
         let all_records = store.iter().await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
-        assert!(all_records.iter().any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
+        assert!(all_records
+            .iter()
+            .any(|(_, bytes)| InnerValue::from_bytes(bytes.clone()).unwrap() == value4));
 
         // Test remove
         assert!(store.remove(key1.clone()).await.unwrap());
@@ -300,15 +308,33 @@ mod tests {
 
         // Insert records with composite keys
         let data = vec![
-            (b"country:Russia:Moscow:user1".to_vec(), InnerValue::Str("Alice".to_string())),
-            (b"country:Russia:Moscow:user2".to_vec(), InnerValue::Str("Bob".to_string())),
-            (b"country:Russia:SPb:user3".to_vec(), InnerValue::Str("Charlie".to_string())),
-            (b"country:France:Paris:user4".to_vec(), InnerValue::Str("David".to_string())),
-            (b"country:France:Lyon:user5".to_vec(), InnerValue::Str("Eve".to_string())),
+            (
+                b"country:Russia:Moscow:user1".to_vec(),
+                InnerValue::Str("Alice".to_string()),
+            ),
+            (
+                b"country:Russia:Moscow:user2".to_vec(),
+                InnerValue::Str("Bob".to_string()),
+            ),
+            (
+                b"country:Russia:SPb:user3".to_vec(),
+                InnerValue::Str("Charlie".to_string()),
+            ),
+            (
+                b"country:France:Paris:user4".to_vec(),
+                InnerValue::Str("David".to_string()),
+            ),
+            (
+                b"country:France:Lyon:user5".to_vec(),
+                InnerValue::Str("Eve".to_string()),
+            ),
         ];
 
         for (key, value) in &data {
-            store.set(key.clone().into(), value.to_bytes()).await.unwrap();
+            store
+                .set(key.clone().into(), value.to_bytes())
+                .await
+                .unwrap();
         }
 
         // Test prefix scan for "country:Russia:Moscow:"
@@ -318,15 +344,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results.iter().any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
+        assert!(results
+            .iter()
+            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
 
         // Test prefix scan for "country:Russia:"
-        let results_russia = store.scan_prefix(b"country:Russia:".to_vec().into()).await.unwrap();
+        let results_russia = store
+            .scan_prefix(b"country:Russia:".to_vec().into())
+            .await
+            .unwrap();
         assert_eq!(results_russia.len(), 3);
 
         // Test prefix scan for "country:France:"
-        let results_france = store.scan_prefix(b"country:France:".to_vec().into()).await.unwrap();
+        let results_france = store
+            .scan_prefix(b"country:France:".to_vec().into())
+            .await
+            .unwrap();
         assert_eq!(results_france.len(), 2);
 
         // Test streaming prefix scan

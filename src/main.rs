@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
-use shamir_db::codecs::Codec;
 use shamir_db::codecs::message_pack::MessagePackCodec;
+use shamir_db::codecs::Codec;
 use shamir_db::types::value::UserValue;
 
 fn main() {

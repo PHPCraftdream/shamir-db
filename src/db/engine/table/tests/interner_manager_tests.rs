@@ -1,6 +1,6 @@
+use crate::core::interner::UserKey;
 use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::storage::storage_in_memory::InMemoryStore;
-use crate::core::interner::UserKey;
 use crate::db::storage::types::Store;
 use std::sync::Arc;
 
@@ -54,8 +54,14 @@ async fn test_interner_persistence() {
     let interner2 = manager2.get().await.unwrap();
 
     assert_eq!(interner2.len(), 2);
-    assert_eq!(interner2.touch_ind("name").unwrap().as_ref(), name_key.as_ref());
-    assert_eq!(interner2.touch_ind("age").unwrap().as_ref(), age_key.as_ref());
+    assert_eq!(
+        interner2.touch_ind("name").unwrap().as_ref(),
+        name_key.as_ref()
+    );
+    assert_eq!(
+        interner2.touch_ind("age").unwrap().as_ref(),
+        age_key.as_ref()
+    );
 }
 
 #[tokio::test]
@@ -74,10 +80,16 @@ async fn test_interner_multiple_saves() {
     let interner = manager.get().await.unwrap();
 
     let key1 = interner.touch_ind("key1").unwrap();
-    manager.save_new_keys(&[(key1.key().clone(), UserKey::from_str("key1"))]).await.unwrap();
+    manager
+        .save_new_keys(&[(key1.key().clone(), UserKey::from_str("key1"))])
+        .await
+        .unwrap();
 
     let key2 = interner.touch_ind("key2").unwrap();
-    manager.save_new_keys(&[(key2.key().clone(), UserKey::from_str("key2"))]).await.unwrap();
+    manager
+        .save_new_keys(&[(key2.key().clone(), UserKey::from_str("key2"))])
+        .await
+        .unwrap();
 
     assert_eq!(interner.len(), 2);
 }

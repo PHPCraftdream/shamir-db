@@ -1,4 +1,4 @@
-use crate::codecs::bytes::{to_bytes, from_bytes};
+use crate::codecs::bytes::{from_bytes, to_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct TestStruct {

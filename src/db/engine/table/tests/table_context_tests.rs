@@ -1,9 +1,9 @@
-use crate::db::engine::table::TableContext;
+use crate::db::engine::repo::repo_types::BoxRepo;
+use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
+use crate::db::engine::table::TableContext;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::storage::types::Repo;
-use crate::db::engine::repo::RepoConfig;
-use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
 
@@ -16,9 +16,9 @@ async fn test_table_context_creation() {
     let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
     let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
 
+    use crate::db::engine::index::table_index_manager::TableIndexManager;
     use crate::db::engine::table::interner_manager::InternerManager;
     use crate::db::engine::table::record_counter::RecordCounter;
-    use crate::db::engine::index::table_index_manager::TableIndexManager;
 
     let interner = InternerManager::new(Arc::clone(&info_store));
     let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
@@ -28,7 +28,9 @@ async fn test_table_context_creation() {
         Arc::clone(&data_store),
         Arc::clone(&info_store),
         interner_cell,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     use crate::db::engine::table::Table;
     let table = Table::new(Arc::clone(&data_store));

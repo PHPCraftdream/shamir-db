@@ -7,26 +7,22 @@ pub struct ConfigLoader;
 
 impl ConfigLoader {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<DbConfig> {
-        let content = fs::read_to_string(path.as_ref())
-            .context("Failed to read config file")?;
+        let content = fs::read_to_string(path.as_ref()).context("Failed to read config file")?;
 
-        let config: DbConfig = serde_yaml::from_str(&content)
-            .context("Failed to parse YAML config")?;
+        let config: DbConfig =
+            serde_yaml::from_str(&content).context("Failed to parse YAML config")?;
 
         Self::validate_config(&config)?;
         Ok(config)
     }
 
     pub fn save_to_file<P: AsRef<Path>>(path: P, config: &DbConfig) -> Result<()> {
-        let yaml = serde_yaml::to_string(config)
-            .context("Failed to serialize config to YAML")?;
+        let yaml = serde_yaml::to_string(config).context("Failed to serialize config to YAML")?;
 
         let temp_path = path.as_ref().with_extension("yaml.tmp");
-        fs::write(&temp_path, yaml)
-            .context("Failed to write temp config file")?;
+        fs::write(&temp_path, yaml).context("Failed to write temp config file")?;
 
-        fs::rename(&temp_path, path.as_ref())
-            .context("Failed to rename temp config file")?;
+        fs::rename(&temp_path, path.as_ref()).context("Failed to rename temp config file")?;
 
         Ok(())
     }

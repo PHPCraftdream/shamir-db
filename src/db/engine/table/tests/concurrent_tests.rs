@@ -3,9 +3,9 @@
 #![allow(deprecated)]
 
 use crate::core::transform;
-use crate::db::engine::table::Table;
 use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::engine::table::record_counter::RecordCounter;
+use crate::db::engine::table::Table;
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
 use crate::types::common::new_map;
@@ -13,14 +13,23 @@ use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
 
-async fn create_test_table() -> (Table, InternerManager, Arc<RecordCounter>, tempfile::TempDir) {
+async fn create_test_table() -> (
+    Table,
+    InternerManager,
+    Arc<RecordCounter>,
+    tempfile::TempDir,
+) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_db");
     let repo = Arc::new(SledRepo::new(path).unwrap());
     let table_name = "users";
 
     let data_store = Arc::from(repo.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(
+        repo.store_get(format!("__info__{}", table_name))
+            .await
+            .unwrap(),
+    );
     let table = Table::new(data_store);
     let interner = InternerManager::new(info_store.clone());
     let counter = Arc::new(RecordCounter::new(info_store));
@@ -59,7 +68,10 @@ async fn test_concurrent_inserts() {
                 let mut data = new_map();
                 data.insert("thread".to_string(), UserValue::Int(thread_id));
                 data.insert("index".to_string(), UserValue::Int(i));
-                data.insert("name".to_string(), UserValue::Str(format!("User_{}_{}", thread_id, i)));
+                data.insert(
+                    "name".to_string(),
+                    UserValue::Str(format!("User_{}_{}", thread_id, i)),
+                );
                 let value = UserValue::Map(data);
                 let inner = intern_value(&value, &interner_clone).await;
                 let id = table_clone.insert(&inner).await.unwrap();
@@ -100,7 +112,10 @@ async fn test_concurrent_insert_and_read() {
         handles.push(tokio::spawn(async move {
             for j in 0..20 {
                 let mut data = new_map();
-                data.insert("key".to_string(), UserValue::Str(format!("value_{}_{}", i, j)));
+                data.insert(
+                    "key".to_string(),
+                    UserValue::Str(format!("value_{}_{}", i, j)),
+                );
                 data.insert("num".to_string(), UserValue::Int(i * 20 + j));
                 let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
                 table_clone.insert(&inner).await.unwrap();
@@ -149,7 +164,10 @@ async fn test_concurrent_same_keys_interning() {
                 // Same keys across all threads
                 data.insert("name".to_string(), UserValue::Str(format!("User_{}", i)));
                 data.insert("age".to_string(), UserValue::Int(i));
-                data.insert("email".to_string(), UserValue::Str(format!("user{}@test.com", i)));
+                data.insert(
+                    "email".to_string(),
+                    UserValue::Str(format!("user{}@test.com", i)),
+                );
                 data.insert("index".to_string(), UserValue::Int(j));
                 let inner = intern_value(&UserValue::Map(data), &interner_clone).await;
                 table_clone.insert(&inner).await.unwrap();

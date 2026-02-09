@@ -40,8 +40,7 @@ fn test_repo_config_add_tables() {
 #[test]
 fn test_repo_config_clone() {
     let repo = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
-    let config1 = RepoConfig::new("test", repo.clone())
-        .add_table(TableConfig::new("users"));
+    let config1 = RepoConfig::new("test", repo.clone()).add_table(TableConfig::new("users"));
     let config2 = config1.clone();
 
     assert_eq!(config1.name, config2.name);

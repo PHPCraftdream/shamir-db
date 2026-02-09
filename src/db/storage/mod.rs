@@ -1,10 +1,10 @@
 pub mod error;
-pub mod types;
-pub mod storage_redb;
-pub mod storage_fjall;
+pub mod storage_cached;
 pub mod storage_canopy;
+pub mod storage_fjall;
+pub mod storage_in_memory;
 pub mod storage_nebari;
 pub mod storage_persy;
+pub mod storage_redb;
 pub mod storage_sled;
-pub mod storage_in_memory;
-pub mod storage_cached;
+pub mod types;

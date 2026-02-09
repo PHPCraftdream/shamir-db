@@ -19,7 +19,10 @@ struct SimpleStruct {
 #[test]
 fn test_generic_msgpack_codec() {
     let codec = MessagePackCodec;
-    let original = SimpleStruct { a: 10, b: "test".to_string() };
+    let original = SimpleStruct {
+        a: 10,
+        b: "test".to_string(),
+    };
 
     let encoded = codec.encode(&original).unwrap();
     let decoded: SimpleStruct = codec.decode(&encoded).unwrap();
@@ -68,7 +71,10 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
     expected_set.insert(UserValue::Str("db".to_string()));
     let mut rich_map = new_map();
     rich_map.insert("tags".to_string(), UserValue::Set(expected_set.clone()));
-    rich_map.insert("history".to_string(), UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]));
+    rich_map.insert(
+        "history".to_string(),
+        UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]),
+    );
     rich_map.insert("version".to_string(), UserValue::Int(-10));
     rich_map.insert("user_id".to_string(), UserValue::Int(987));
     rich_map.insert("pi".to_string(), UserValue::F64(3.14));
@@ -78,21 +84,36 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
     let rich_value = UserValue::Map(rich_map);
 
     let initial_value: UserValue = json_codec.decode(raw_json.as_bytes()).unwrap();
-    assert_eq!(initial_value, rich_value, "Initial JSON parsing with hints failed");
+    assert_eq!(
+        initial_value, rich_value,
+        "Initial JSON parsing with hints failed"
+    );
 
     let msgpack_bytes = msgpack_codec.encode(&initial_value).unwrap();
     let final_value: UserValue = msgpack_codec.decode(&msgpack_bytes).unwrap();
 
     if let UserValue::Map(final_map) = final_value {
-        assert_eq!(final_map.get("large"), Some(&UserValue::Str("10000".to_string())));
-        assert_eq!(final_map.get("price"), Some(&UserValue::Str("19.99".to_string())));
+        assert_eq!(
+            final_map.get("large"),
+            Some(&UserValue::Str("10000".to_string()))
+        );
+        assert_eq!(
+            final_map.get("price"),
+            Some(&UserValue::Str("19.99".to_string()))
+        );
         assert_eq!(final_map.get("version"), Some(&UserValue::Int(-10)));
         assert_eq!(final_map.get("user_id"), Some(&UserValue::Int(987)));
         assert_eq!(final_map.get("pi"), Some(&UserValue::F64(3.14)));
-        assert_eq!(final_map.get("history"), Some(&UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)])));
+        assert_eq!(
+            final_map.get("history"),
+            Some(&UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)]))
+        );
         if let Some(UserValue::List(tags_list)) = final_map.get("tags") {
             let tags_set_from_list: TSet<UserValue> = tags_list.iter().cloned().collect();
-            assert_eq!(tags_set_from_list, expected_set, "Set contents should be preserved in List");
+            assert_eq!(
+                tags_set_from_list, expected_set,
+                "Set contents should be preserved in List"
+            );
         } else {
             panic!("'tags' key should have been a List");
         }

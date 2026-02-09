@@ -1,13 +1,13 @@
 use super::types::{RecordKey, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_dash_map, TDashMap};
-use async_trait::async_trait;
 use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // ============================================================================
 // WriteMode - write strategy for CachedStore
@@ -192,9 +192,7 @@ impl Store for CachedStore {
         let existed = self.cache.remove(&key).is_some();
 
         match self.mode {
-            WriteMode::Sync => {
-                self.inner.remove(key).await
-            }
+            WriteMode::Sync => self.inner.remove(key).await,
             WriteMode::Async => {
                 // Background delete
                 let inner = self.inner.clone();
@@ -221,7 +219,10 @@ impl Store for CachedStore {
         Ok(items)
     }
 
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+    fn iter_stream(
+        &self,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let cache = self.cache.clone();
 
         Box::pin(stream! {
@@ -357,7 +358,10 @@ mod tests {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
         let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
 
-        cached.set(Bytes::from("key"), Bytes::from("value")).await.unwrap();
+        cached
+            .set(Bytes::from("key"), Bytes::from("value"))
+            .await
+            .unwrap();
 
         // Sync mode - no pending writes
         assert_eq!(cached.pending_writes(), 0);
@@ -499,7 +503,10 @@ mod tests {
         ];
 
         for key in &data {
-            inner.set(key.clone().into(), Bytes::copy_from_slice(key)).await.unwrap();
+            inner
+                .set(key.clone().into(), Bytes::copy_from_slice(key))
+                .await
+                .unwrap();
         }
 
         // Create cached store - loads all data
@@ -515,8 +522,17 @@ mod tests {
         assert_eq!(results.len(), 3);
 
         // Even if we modify inner, cache still has original data
-        inner.set(b"country:Russia:NEW:user5".to_vec().into(), Bytes::from(&b"new"[..])).await.unwrap();
-        let results2 = cached.scan_prefix(b"country:Russia:".to_vec().into()).await.unwrap();
+        inner
+            .set(
+                b"country:Russia:NEW:user5".to_vec().into(),
+                Bytes::from(&b"new"[..]),
+            )
+            .await
+            .unwrap();
+        let results2 = cached
+            .scan_prefix(b"country:Russia:".to_vec().into())
+            .await
+            .unwrap();
         assert_eq!(results2.len(), 3); // Still 3, not 4 (cache is out of sync)
     }
 

@@ -1,8 +1,8 @@
 //! Record counter for tracking number of records in a table
 
-use crate::db::{DbError, DbResult};
-use crate::db::storage::types::Store;
 use crate::codecs::bytes;
+use crate::db::storage::types::Store;
+use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use std::sync::Arc;
 use tokio::sync::Mutex;

@@ -1,10 +1,9 @@
 #![allow(unused_imports)]
 
+use crate::core::interner::{InternedKey, Interner, TouchInd, UserKey};
+use crate::types::string_int58::StringInt58;
 use std::sync::Arc;
 use std::thread;
-use crate::core::interner::{InternedKey, UserKey, TouchInd, Interner};
-use crate::types::string_int58::StringInt58;
-
 
 #[test]
 fn test_basic_interning() {
@@ -21,8 +20,14 @@ fn test_basic_interning() {
     assert_eq!(id2.as_ref(), "3");
     assert_eq!(id3.as_ref(), "2"); // Same as id1
 
-    assert_eq!(interner.get_str(&InternedKey::from_str("2")), Some(UserKey::from_str("hello")));
-    assert_eq!(interner.get_str(&InternedKey::from_str("3")), Some(UserKey::from_str("world")));
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("2")),
+        Some(UserKey::from_str("hello"))
+    );
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("3")),
+        Some(UserKey::from_str("world"))
+    );
     assert_eq!(interner.get_ind("world"), Some(InternedKey::from_str("3")));
 }
 
@@ -37,8 +42,14 @@ fn test_with_state_initialization() {
 
     // Check that initial data is loaded correctly
     assert_eq!(interner.get_ind("name"), Some(InternedKey::from_str("11")));
-    assert_eq!(interner.get_str(&InternedKey::from_str("111")), Some(UserKey::from_str("age")));
-    assert_eq!(interner.get_ind("city"), Some(InternedKey::from_str("2111")));
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("111")),
+        Some(UserKey::from_str("age"))
+    );
+    assert_eq!(
+        interner.get_ind("city"),
+        Some(InternedKey::from_str("2111"))
+    );
 
     // Check that touching an existing key returns correct ID
     let touch_existing = interner.touch_ind("name").unwrap();
@@ -73,11 +84,13 @@ fn test_concurrent_interning() {
     // across all threads (though not necessarily in insertion order)
     let first_result = &results[0];
     for i in 1..results.len() {
-        let id_map_1: std::collections::HashMap<&str, &str> = first_result.iter()
+        let id_map_1: std::collections::HashMap<&str, &str> = first_result
+            .iter()
             .zip(keys.iter())
             .map(|(result, key)| (*key, result.as_ref()))
             .collect();
-        let id_map_2: std::collections::HashMap<&str, &str> = results[i].iter()
+        let id_map_2: std::collections::HashMap<&str, &str> = results[i]
+            .iter()
             .zip(keys.iter())
             .map(|(result, key)| (*key, result.as_ref()))
             .collect();
@@ -189,8 +202,7 @@ fn test_concurrent_same_key_determinism() {
         }));
     }
 
-    let results: Vec<Vec<String>> =
-        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let results: Vec<Vec<String>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
     // All threads should get same IDs for same keys
     let expected = vec!["2", "3", "4", "2", "3"];
@@ -217,7 +229,8 @@ fn test_concurrent_reverse_lookup() {
     }
 
     // Create a mapping for easy lookup
-    let id_lookup: std::collections::HashMap<InternedKey, String> = key_to_id.iter()
+    let id_lookup: std::collections::HashMap<InternedKey, String> = key_to_id
+        .iter()
         .map(|(k, v)| (v.clone(), k.clone()))
         .collect();
 
@@ -257,7 +270,10 @@ fn test_concurrent_touch_and_get() {
                 // Immediately verify with get_ind
                 let get_result = interner_clone.get_ind(&key);
 
-                assert_eq!(Some(touch_result.as_ref()), get_result.as_ref().map(|k| k.as_str()));
+                assert_eq!(
+                    Some(touch_result.as_ref()),
+                    get_result.as_ref().map(|k| k.as_str())
+                );
 
                 // Also verify reverse lookup
                 let reverse = interner_clone.get_str(touch_result.key());
@@ -282,16 +298,13 @@ fn test_edge_cases_empty_and_unicode() {
     let id1 = interner.touch_ind("").unwrap();
     assert_eq!(id1.as_ref(), "2");
     assert_eq!(interner.get_ind(""), Some(InternedKey::from_str("2")));
-    assert_eq!(interner.get_str(&InternedKey::from_str("2")), Some(UserKey::from_str("")));
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("2")),
+        Some(UserKey::from_str(""))
+    );
 
     // Unicode strings
-    let unicode_keys = vec![
-        "привет",
-        "🚀🎉🔥",
-        "مرحبا",
-        "مرحبا2",
-        "😀😃😄😁",
-    ];
+    let unicode_keys = vec!["привет", "🚀🎉🔥", "مرحبا", "مرحبا2", "😀😃😄😁"];
 
     for key in &unicode_keys {
         interner.touch_ind(key).unwrap();
@@ -301,8 +314,14 @@ fn test_edge_cases_empty_and_unicode() {
     assert_eq!(interner.get_ind("привет"), Some(InternedKey::from_str("3")));
     assert_eq!(interner.get_ind("🚀🎉🔥"), Some(InternedKey::from_str("4")));
     assert_eq!(interner.get_ind("مرحبا"), Some(InternedKey::from_str("5")));
-    assert_eq!(interner.get_str(&InternedKey::from_str("6")), Some(UserKey::from_str("مرحبا2")));
-    assert_eq!(interner.get_ind("😀😃😄😁"), Some(InternedKey::from_str("7")));
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("6")),
+        Some(UserKey::from_str("مرحبا2"))
+    );
+    assert_eq!(
+        interner.get_ind("😀😃😄😁"),
+        Some(InternedKey::from_str("7"))
+    );
 }
 
 #[test]
@@ -313,14 +332,26 @@ fn test_edge_cases_very_long_keys() {
     let long_key = "a".repeat(10_000);
     let id = interner.touch_ind(&long_key).unwrap();
     assert_eq!(id.as_ref(), "2");
-    assert_eq!(interner.get_ind(&long_key), Some(InternedKey::from_str("2")));
-    assert_eq!(interner.get_str(&InternedKey::from_str("2")), Some(UserKey::from_str(long_key.clone())));
+    assert_eq!(
+        interner.get_ind(&long_key),
+        Some(InternedKey::from_str("2"))
+    );
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("2")),
+        Some(UserKey::from_str(long_key.clone()))
+    );
 }
 
 #[test]
 fn test_concurrent_with_state() {
-    let initial_data: Vec<(InternedKey, UserKey)> =
-        (0..100).map(|i| (InternedKey::from_str(format!("{}", i + 2)), UserKey::from_str(format!("initial_{}", i)))).collect();
+    let initial_data: Vec<(InternedKey, UserKey)> = (0..100)
+        .map(|i| {
+            (
+                InternedKey::from_str(format!("{}", i + 2)),
+                UserKey::from_str(format!("initial_{}", i)),
+            )
+        })
+        .collect();
 
     let interner = Arc::new(Interner::with_state(initial_data));
     let num_threads = 20;
@@ -344,9 +375,18 @@ fn test_concurrent_with_state() {
     assert_eq!(interner.len(), 1100);
 
     // Verify initial data still accessible
-    assert_eq!(interner.get_ind("initial_0"), Some(InternedKey::from_str("2")));
-    assert_eq!(interner.get_ind("initial_99"), Some(InternedKey::from_str("101")));
-    assert_eq!(interner.get_str(&InternedKey::from_str("2")), Some(UserKey::from_str("initial_0")));
+    assert_eq!(
+        interner.get_ind("initial_0"),
+        Some(InternedKey::from_str("2"))
+    );
+    assert_eq!(
+        interner.get_ind("initial_99"),
+        Some(InternedKey::from_str("101"))
+    );
+    assert_eq!(
+        interner.get_str(&InternedKey::from_str("2")),
+        Some(UserKey::from_str("initial_0"))
+    );
 }
 
 #[test]

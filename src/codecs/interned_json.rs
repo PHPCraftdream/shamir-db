@@ -5,8 +5,8 @@
 
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
-use crate::types::value::{InnerValue, Value};
 use crate::types::common::new_map;
+use crate::types::value::{InnerValue, Value};
 use serde_json as json;
 
 /// Decodes JSON bytes to InnerValue, interning string keys
@@ -37,7 +37,10 @@ pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>,
 }
 
 /// Converts serde_json::Value to InnerValue, interning all string keys
-fn json_value_to_inner(json_value: &json::Value, interner: &Interner) -> Result<InnerValue, CodecError> {
+fn json_value_to_inner(
+    json_value: &json::Value,
+    interner: &Interner,
+) -> Result<InnerValue, CodecError> {
     match json_value {
         json::Value::Null => Ok(InnerValue::Nil),
         json::Value::Bool(b) => Ok(InnerValue::Bool(*b)),
@@ -68,7 +71,8 @@ fn json_value_to_inner(json_value: &json::Value, interner: &Interner) -> Result<
         json::Value::Object(obj) => {
             let mut converted = new_map();
             for (key_str, val) in obj {
-                let interned_key = interner.touch_ind(key_str)
+                let interned_key = interner
+                    .touch_ind(key_str)
                     .map_err(|e| CodecError::Decode(format!("Failed to intern key: {}", e)))?
                     .key()
                     .clone();
@@ -103,7 +107,11 @@ fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
         Value::Bin(b) => {
             // Binary data as base64 or array? JSON doesn't have binary type
             // Using array of numbers for simplicity
-            json::Value::Array(b.iter().map(|&byte| json::Value::Number(byte.into())).collect())
+            json::Value::Array(
+                b.iter()
+                    .map(|&byte| json::Value::Number(byte.into()))
+                    .collect(),
+            )
         }
         Value::List(l) => {
             json::Value::Array(l.iter().map(|v| inner_to_json_value(v, interner)).collect())
@@ -115,7 +123,8 @@ fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
         Value::Map(m) => {
             let mut obj = json::Map::new();
             for (interned_key, val) in m {
-                let key_str = interner.get_str(interned_key)
+                let key_str = interner
+                    .get_str(interned_key)
                     .expect("Interned key not found in interner")
                     .as_ref()
                     .to_string();

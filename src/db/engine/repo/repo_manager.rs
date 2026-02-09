@@ -53,8 +53,8 @@ impl RepoManager {
             return self.get_repo_config("default").unwrap();
         }
 
-        use crate::db::storage::storage_in_memory::InMemoryRepo;
         use super::repo_types::BoxRepo;
+        use crate::db::storage::storage_in_memory::InMemoryRepo;
         use std::sync::Arc;
         let config = RepoConfig::new("default", BoxRepo::InMemory(Arc::new(InMemoryRepo::new())));
         self.add_repo(config.clone());
