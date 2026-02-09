@@ -28,3 +28,9 @@
 3. Testing:
    - Only add tests if explicitly requested
    - Follow existing test patterns in the codebase
+
+4. Code Quality (MANDATORY):
+   - **ALWAYS** run `cargo clippy --all-targets` before submitting changes
+   - **ALWAYS** run `cargo fmt` after completing work
+   - Fix all clippy warnings before considering work done
+   - Ensure all tests pass with `cargo test --lib`
