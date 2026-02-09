@@ -1,5 +1,13 @@
 #![allow(deprecated)]
+#![allow(unused_imports)]
 
+use crate::codecs::Codec;
+use crate::core::interner::Interner;
+use crate::core::interner::{InternedKey, UserKey};
+use crate::types::common::{new_map, new_set};
+use crate::types::value::{UserValue, InnerValue};
+use crate::core::transform::{user_to_inner, inner_to_user};
+use num_bigint::BigInt;
 
 #[test]
 fn test_round_trip_transformation() {
@@ -21,9 +29,9 @@ fn test_round_trip_transformation() {
     assert!(result.has_new_keys());
     let keys = result.new_keys.as_ref().unwrap();
     assert_eq!(keys.len(), 3);
-    assert!(keys.iter().any(|(_, s)| s.as_str() == "name"));
-    assert!(keys.iter().any(|(_, s)| s.as_str() == "age"));
-    assert!(keys.iter().any(|(_, s)| s.as_str() == "balance"));
+    assert!(keys.iter().any(|(_, s): &(InternedKey, UserKey)| s.as_str() == "name"));
+    assert!(keys.iter().any(|(_, s): &(InternedKey, UserKey)| s.as_str() == "age"));
+    assert!(keys.iter().any(|(_, s): &(InternedKey, UserKey)| s.as_str() == "balance"));
 
     // Verify that calling again with same keys yields no new keys
     let result_again = user_to_inner(&original_value, &interner);
@@ -57,7 +65,7 @@ fn test_round_trip_transformation() {
 
 #[test]
 fn test_full_lifecycle_transformation() {
-    let json_codec = JsonCodec;
+    let json_codec = crate::codecs::json::JsonCodec;
     let interner = Interner::new();
     let large_number_str = "123456789012345678901234567890";
     let raw_json_1 = format!(
