@@ -19,6 +19,20 @@ pub struct TableIndexManager {
     has_indexes_unique: AtomicBool,
 }
 
+impl Clone for TableIndexManager {
+    fn clone(&self) -> Self {
+        Self {
+            interner: Arc::clone(&self.interner),
+            data_store: Arc::clone(&self.data_store),
+            info_store: Arc::clone(&self.info_store),
+            indexes: Arc::clone(&self.indexes),
+            indexes_unique: Arc::clone(&self.indexes_unique),
+            has_indexes: AtomicBool::new(self.has_indexes.load(Ordering::Relaxed)),
+            has_indexes_unique: AtomicBool::new(self.has_indexes_unique.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 impl TableIndexManager {
     pub async fn new(
         data_store: Arc<dyn Store>,
