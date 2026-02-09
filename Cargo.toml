@@ -60,7 +60,9 @@ incremental = true
 
 [profile.release]
 lto = "fat"
-opt-level = 3
+opt-level = "z"
 codegen-units = 14
 incremental = true
+debug = false
 strip = true
+panic = "abort"
