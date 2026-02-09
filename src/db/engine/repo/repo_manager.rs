@@ -1,9 +1,9 @@
 use super::repo_config::RepoConfig;
 use crate::db::error::{DbError, DbResult};
-use std::collections::HashMap;
+use crate::types::common::{new_map_wc, TMap};
 
 pub struct RepoManager {
-    repos: HashMap<String, RepoConfig>,
+    repos: TMap<String, RepoConfig>,
 }
 
 impl Default for RepoManager {
@@ -15,7 +15,7 @@ impl Default for RepoManager {
 impl RepoManager {
     pub fn new() -> Self {
         Self {
-            repos: HashMap::new(),
+            repos: new_map_wc(100),
         }
     }
 
@@ -32,7 +32,7 @@ impl RepoManager {
 
     pub fn remove_repo(&mut self, name: &str) -> DbResult<RepoConfig> {
         self.repos
-            .remove(name)
+            .swap_remove(name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", name)))
     }
 

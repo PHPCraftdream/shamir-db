@@ -1,15 +1,16 @@
 use crate::db::error::DbResult;
-use crate::db::storage::types::Repo;
+use crate::db::storage::types::{Repo, Store};
 use std::sync::Arc;
+use crate::db::storage::storage_in_memory::InMemoryRepo;
 
 #[derive(Clone)]
 pub enum BoxRepo {
-    InMemory(Arc<crate::db::storage::storage_in_memory::InMemoryRepo>),
+    InMemory(Arc<InMemoryRepo>),
 }
 
 #[async_trait::async_trait]
 impl Repo for BoxRepo {
-    async fn store_get<S>(&self, name: S) -> DbResult<Arc<dyn crate::db::storage::types::Store>>
+    async fn store_get<S>(&self, name: S) -> DbResult<Arc<dyn Store>>
     where
         S: AsRef<str> + Send,
     {
@@ -31,8 +32,8 @@ impl Repo for BoxRepo {
     }
 }
 
-impl From<Arc<crate::db::storage::storage_in_memory::InMemoryRepo>> for BoxRepo {
-    fn from(repo: Arc<crate::db::storage::storage_in_memory::InMemoryRepo>) -> Self {
+impl From<Arc<InMemoryRepo>> for BoxRepo {
+    fn from(repo: Arc<InMemoryRepo>) -> Self {
         BoxRepo::InMemory(repo)
     }
 }
