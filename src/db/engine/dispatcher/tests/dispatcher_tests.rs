@@ -1,8 +1,8 @@
-use crate::db::engine::dispatcher::Dispatcher;
 use crate::db::engine::repo::{RepoConfig, BoxRepo};
 use crate::db::engine::table::TableConfig;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use std::sync::Arc;
+use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
 
 #[tokio::test]
 async fn test_dispatcher_new() {

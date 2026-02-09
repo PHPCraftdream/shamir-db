@@ -1,5 +1,6 @@
 #![allow(deprecated)]
 #![allow(unused_imports)]
+#[cfg(test)]
 
 use crate::codecs::Codec;
 use crate::core::interner::Interner;

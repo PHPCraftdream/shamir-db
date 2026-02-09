@@ -1,5 +1,7 @@
-use crate::db::engine::dispatcher::types::{DbConfig, DbRepoConfig, DbTableConfig, StorageType};
-use crate::db::engine::dispatcher::ConfigLoader;
+#[cfg(test)]
+
+use crate::core::db_config::{DbConfig, DbRepoConfig, DbTableConfig, StorageType};
+use crate::core::db_config_loader::DbConfigLoader;
 use crate::types::common::new_map;
 
 #[test]
@@ -28,7 +30,7 @@ fn test_config_validation_empty_data_dir() {
         repos,
     };
 
-    let result = ConfigLoader::validate_config(&config);
+    let result = DbConfigLoader::validate_config(&config);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("data_dir"));
 }
@@ -40,7 +42,7 @@ fn test_config_validation_empty_repos() {
         repos: new_map(),
     };
 
-    let result = ConfigLoader::validate_config(&config);
+    let result = DbConfigLoader::validate_config(&config);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()

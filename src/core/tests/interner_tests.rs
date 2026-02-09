@@ -1,4 +1,5 @@
 #![allow(unused_imports)]
+#[cfg(test)]
 
 use crate::core::interner::{InternedKey, Interner, TouchInd, UserKey};
 use crate::types::string_int58::StringInt58;
