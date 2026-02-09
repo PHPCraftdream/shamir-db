@@ -7,8 +7,9 @@
 //! - hash1 (8 bytes)
 //! - hash2 (8 bytes)
 
-use std::hash::{Hash, Hasher};
+use bytes::Bytes;
 use fxhash::FxHasher;
+use std::hash::{Hash, Hasher};
 
 /// Index record key for B-Tree
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +47,9 @@ impl IndexRecordKey {
         }
         self.hash1 = hasher.finish();
 
-        let path_hash: u64 = self.path.iter()
+        let path_hash: u64 = self
+            .path
+            .iter()
             .flat_map(|p| p.iter())
             .fold(0u64, |acc, &id| acc.wrapping_add(id));
         self.hash2 = self.hash1.wrapping_neg() ^ path_hash;
@@ -55,24 +58,29 @@ impl IndexRecordKey {
     }
 
     /// Convert to bytes for storage
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Bytes {
         let mut bytes = Vec::new();
         bytes.push(self.is_unique);
         bytes.push(self.path.len() as u8);
 
         for path in &self.path {
             bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(&path.iter().flat_map(|&id| id.to_le_bytes().to_vec()).collect::<Vec<_>>());
+            bytes.extend_from_slice(
+                &path
+                    .iter()
+                    .flat_map(|&id| id.to_le_bytes().to_vec())
+                    .collect::<Vec<_>>(),
+            );
         }
 
         bytes.extend_from_slice(&self.hash1.to_le_bytes());
         bytes.extend_from_slice(&self.hash2.to_le_bytes());
 
-        bytes
+        Bytes::from(bytes)
     }
 
     /// Create from bytes
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+    pub fn from_bytes(bytes: Bytes) -> Result<Self, String> {
         if bytes.len() < 18 {
             return Err("IndexRecordKey too short".to_string());
         }
@@ -94,7 +102,9 @@ impl IndexRecordKey {
             }
 
             let path_vec: Vec<u64> = (0..path_len)
-                .map(|i| u64::from_le_bytes(bytes[pos + i * 8..pos + (i + 1) * 8].try_into().unwrap()))
+                .map(|i| {
+                    u64::from_le_bytes(bytes[pos + i * 8..pos + (i + 1) * 8].try_into().unwrap())
+                })
                 .collect();
             pos += path_len * 8;
 

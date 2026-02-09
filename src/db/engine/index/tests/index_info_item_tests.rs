@@ -1,5 +1,5 @@
-use crate::db::engine::index::index_info_item::IndexInfoItem;
 use crate::codecs::bytes;
+use crate::db::engine::index::index_info_item::IndexInfoItem;
 
 #[test]
 fn test_index_info_item_creation() {

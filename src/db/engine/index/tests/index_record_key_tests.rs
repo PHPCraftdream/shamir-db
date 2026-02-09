@@ -1,4 +1,5 @@
 use crate::db::engine::index::index_record_key::IndexRecordKey;
+use bytes::Bytes;
 
 #[test]
 fn test_simple_index_key_creation() {
@@ -77,7 +78,7 @@ fn test_simple_index_from_bytes_roundtrip() {
     let original = IndexRecordKey::new(true, path.clone()).with_values(&[&value]);
 
     let bytes = original.to_bytes();
-    let restored = IndexRecordKey::from_bytes(&bytes).unwrap();
+    let restored = IndexRecordKey::from_bytes(Bytes::from(bytes)).unwrap();
 
     assert_eq!(restored.is_unique, original.is_unique);
     assert_eq!(restored.path, original.path);
@@ -93,7 +94,7 @@ fn test_composite_index_from_bytes_roundtrip() {
     let original = IndexRecordKey::new(false, paths.clone()).with_values(&[&value1, &value2]);
 
     let bytes = original.to_bytes();
-    let restored = IndexRecordKey::from_bytes(&bytes).unwrap();
+    let restored = IndexRecordKey::from_bytes(Bytes::from(bytes)).unwrap();
 
     assert_eq!(restored.is_unique, original.is_unique);
     assert_eq!(restored.path, original.path);
@@ -103,7 +104,7 @@ fn test_composite_index_from_bytes_roundtrip() {
 
 #[test]
 fn test_from_bytes_too_short() {
-    let result = IndexRecordKey::from_bytes(&[1, 2, 3]);
+    let result = IndexRecordKey::from_bytes(Bytes::from(vec![1, 2, 3]));
     assert!(result.is_err());
 }
 
@@ -115,7 +116,7 @@ fn test_from_bytes_wrong_size() {
 
     // Укорачиваем на 1 байт
     bytes.pop();
-    let result = IndexRecordKey::from_bytes(&bytes);
+    let result = IndexRecordKey::from_bytes(Bytes::from(bytes));
     assert!(result.is_err());
 }
 

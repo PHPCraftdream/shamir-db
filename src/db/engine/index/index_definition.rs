@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::index_info_item::IndexInfoItem;
+use serde::{Deserialize, Serialize};
 
 /// Defines a single index, which can be simple (one path) or composite (multiple paths).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

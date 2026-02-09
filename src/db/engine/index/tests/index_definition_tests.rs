@@ -1,6 +1,6 @@
+use crate::codecs::bytes;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
-use crate::codecs::bytes;
 
 #[test]
 fn test_index_definition_creation() {
@@ -34,10 +34,7 @@ fn test_index_definition_roundtrip() {
 
 #[test]
 fn test_index_definition_zero_copy() {
-    let def = IndexDefinition::new(
-        "test_index",
-        vec![IndexInfoItem::new(vec![10, 20, 30])],
-    );
+    let def = IndexDefinition::new("test_index", vec![IndexInfoItem::new(vec![10, 20, 30])]);
 
     let bytes = bytes::to_bytes(&def).unwrap();
     let def2 = bytes::from_bytes::<IndexDefinition>(&bytes).unwrap();
