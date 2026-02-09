@@ -1,7 +1,7 @@
 use crate::types::base::{self, Base58Error};
 use bytes::Bytes;
 use chrono::Utc;
-use rand::TryRngCore;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -28,9 +28,7 @@ impl RecordId {
         bytes[0..8].copy_from_slice(&relative_micros.to_be_bytes());
 
         // Random part
-        rand::rngs::OsRng
-            .try_fill_bytes(&mut bytes[8..16])
-            .expect("Failed to get random bytes from OS");
+        rand::rngs::OsRng.fill_bytes(&mut bytes[8..16]);
         Self(bytes)
     }
 
