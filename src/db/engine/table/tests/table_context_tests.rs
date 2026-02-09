@@ -6,6 +6,7 @@ use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::storage::types::Repo;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
+use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
 
 #[tokio::test]
 async fn test_table_context_creation() {
@@ -43,7 +44,6 @@ async fn test_table_context_creation() {
 async fn test_table_context_clone() {
     let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
-    use crate::db::engine::dispatcher::Dispatcher;
     let repo_config = RepoConfig {
         name: "default".to_string(),
         repo: BoxRepo::InMemory(repo),
@@ -62,7 +62,6 @@ async fn test_table_context_clone() {
 async fn test_table_context_components() {
     let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
-    use crate::db::engine::dispatcher::Dispatcher;
     let repo_config = RepoConfig {
         name: "default".to_string(),
         repo: BoxRepo::InMemory(repo),

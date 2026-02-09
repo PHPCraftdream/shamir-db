@@ -22,7 +22,7 @@ pub struct DbTableConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
-    pub paths: Vec<Vec<String>>,
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,1 +1,1 @@
-pub mod config_validation_tests;
+pub mod dispatcher_tests;

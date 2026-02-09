@@ -1,11 +1,11 @@
-use crate::db::engine::dispatcher::types::DbConfig;
+use crate::core::db_config::DbConfig;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
 
-pub struct ConfigLoader;
+pub struct DbConfigLoader;
 
-impl ConfigLoader {
+impl DbConfigLoader {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<DbConfig> {
         let content = fs::read_to_string(path.as_ref()).context("Failed to read config file")?;
 

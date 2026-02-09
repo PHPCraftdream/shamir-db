@@ -1,5 +1,6 @@
-use crate::db::engine::dispatcher::types::{DbRepoConfig, DbTableConfig, IndexConfig, StorageType};
-use crate::db::engine::dispatcher::DbConfig;
+#[cfg(test)]
+
+use crate::core::db_config::{DbConfig, DbRepoConfig, DbTableConfig, IndexConfig, StorageType};
 use crate::types::common::new_map;
 
 #[test]
@@ -10,7 +11,7 @@ fn test_config_roundtrip_yaml() {
     indexes.insert(
         "email_idx".to_string(),
         IndexConfig {
-            paths: vec![vec!["email".to_string()]],
+            paths: vec!["email".to_string()],
         },
     );
 
