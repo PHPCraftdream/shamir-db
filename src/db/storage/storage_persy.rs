@@ -130,7 +130,7 @@ impl Store for PersyStore {
             let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
 
-            let persy_id = tx.insert(&table_name, &*value)
+            let persy_id = tx.insert(&table_name, &value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
             // Store RecordKey -> PersyId mapping in index
@@ -167,12 +167,12 @@ impl Store for PersyStore {
                 let persy_id: PersyId = persy_id_str.parse()
                     .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
 
-                tx.update(&table_name, &persy_id, &*value)
+                tx.update(&table_name, &persy_id, &value)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
                 false
             } else {
                 // New record - insert and update index
-                let persy_id = tx.insert(&table_name, &*value)
+                let persy_id = tx.insert(&table_name, &value)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
                 let val = ByteVec::new(persy_id.to_string().into_bytes());
@@ -263,10 +263,10 @@ impl Store for PersyStore {
             // First: collect all RecordKey -> PersyId mappings
             let mut mappings = Vec::new();
             {
-                let mut index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name, ..)
+                let index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name, ..)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                for (key_bytes, mut val_iter) in index_iter {
                     let key = RecordKey::copy_from_slice(key_bytes.as_ref());
 
                     if let Some(val_bytes) = val_iter.next() {
@@ -313,10 +313,10 @@ impl Store for PersyStore {
                         let mut tx = db_clone.begin().map_err(|e| DbError::Storage(e.to_string()))?;
                         let mut result = Vec::new();
 
-                        let mut index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name_clone, ..)
+                        let index_iter = tx.range::<ByteVec, ByteVec, _>(&index_name_clone, ..)
                             .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                        while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                        for (key_bytes, mut val_iter) in index_iter {
                             let key = RecordKey::copy_from_slice(key_bytes.as_ref());
 
                             if let Some(val_bytes) = val_iter.next() {
@@ -355,7 +355,7 @@ impl Store for PersyStore {
                     for (key, persy_id) in batch_mappings {
                         let content = tx.read(&table_name_clone, &persy_id)
                             .map_err(|e| DbError::Storage(e.to_string()))?
-                            .ok_or_else(|| DbError::NotFound(format!("PersyId not found")))?;
+                            .ok_or_else(|| DbError::NotFound("PersyId not found".to_string()))?;
                         out.push((key, Bytes::copy_from_slice(&content)));
                     }
 
@@ -395,11 +395,11 @@ impl Store for PersyStore {
                 let prefix_bv = ByteVec::new(prefix.to_vec());
                 let prefix_end_bv = ByteVec::new(prefix_end);
 
-                let mut index_iter = tx
+                let index_iter = tx
                     .range::<ByteVec, ByteVec, _>(&index_name, prefix_bv..prefix_end_bv)
                     .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                for (key_bytes, mut val_iter) in index_iter {
                     let key = RecordKey::copy_from_slice(key_bytes.as_ref());
 
                     if let Some(val_bytes) = val_iter.next() {
@@ -417,7 +417,7 @@ impl Store for PersyStore {
             for (key, persy_id) in mappings {
                 let content = tx.read(&table_name, &persy_id)
                     .map_err(|e| DbError::Storage(e.to_string()))?
-                    .ok_or_else(|| DbError::NotFound(format!("PersyId not found")))?;
+                    .ok_or_else(|| DbError::NotFound("PersyId not found".to_string()))?;
                 out.push((key, Bytes::copy_from_slice(&content)));
             }
 
@@ -462,11 +462,11 @@ impl Store for PersyStore {
                         let prefix_bv = ByteVec::new(prefix_clone.to_vec());
                         let prefix_end_bv = ByteVec::new(prefix_end_clone);
 
-                        let mut index_iter = tx
+                        let index_iter = tx
                             .range::<ByteVec, ByteVec, _>(&index_name_clone, prefix_bv..prefix_end_bv)
                             .map_err(|e| DbError::Storage(e.to_string()))?;
 
-                        while let Some((key_bytes, mut val_iter)) = index_iter.next() {
+                        for (key_bytes, mut val_iter) in index_iter {
                             let key = RecordKey::copy_from_slice(key_bytes.as_ref());
 
                             if let Some(val_bytes) = val_iter.next() {
@@ -506,7 +506,7 @@ impl Store for PersyStore {
                     for (key, persy_id) in batch_mappings {
                         let content = tx.read(&table_name_clone, &persy_id)
                             .map_err(|e| DbError::Storage(e.to_string()))?
-                            .ok_or_else(|| DbError::NotFound(format!("PersyId not found")))?;
+                            .ok_or_else(|| DbError::NotFound("PersyId not found".to_string()))?;
                         out.push((key, Bytes::copy_from_slice(&content)));
                     }
 

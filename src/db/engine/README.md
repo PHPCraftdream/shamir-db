@@ -428,7 +428,7 @@ Interned strings live as long as the table exists:
 
 - [x] ✅ **Multi-repo dispatcher** (2025-02-08)
   - Dispatcher manages multiple RepoManagers
-  - YAML configuration with ConfigLoader
+  - YAML configuration with ConfigLoader (from core::config)
   - Atomic file writes for safe updates
 - [x] ✅ **Repo management** (2025-02-08)
   - RepoManager for repository operations

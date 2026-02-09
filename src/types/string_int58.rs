@@ -25,6 +25,7 @@ impl StringInt58 {
         Self { bytes: vec![b'1'] } // "1"
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         if s.is_empty() {
             return None;
@@ -41,7 +42,7 @@ impl StringInt58 {
     }
 
     /// Simple increment: replace each char with next in BASE58, carry when needed
-    pub fn increment(&mut self) -> () {
+    pub fn increment(&mut self) {
         let mut pos = self.bytes.len() - 1;
         loop {
             let current = self.bytes[pos];
@@ -50,7 +51,7 @@ impl StringInt58 {
             if next != 0 {
                 // Normal case: just replace with next char
                 self.bytes[pos] = next;
-                return ();
+                return ;
             }
 
             // Overflow at this position: wrap to '1' and carry left
@@ -58,7 +59,7 @@ impl StringInt58 {
             if pos == 0 {
                 // Need new digit at front: "z" -> "21"
                 self.bytes.insert(0, b'2');
-                return ();
+                return ;
             }
             pos -= 1;
         }
@@ -66,6 +67,14 @@ impl StringInt58 {
 
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.bytes).unwrap()
+    }
+}
+
+impl std::str::FromStr for StringInt58 {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_str(s).ok_or("Invalid base58 string")
     }
 }
 
@@ -130,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_conversion_round_trip() {
-        // Test that parsing and stringifying are consistent
+        // Test that parsing and stringify are consistent
         let test_cases = ["1", "2", "9", "A", "z", "21", "22", "1z"];
         for expected in test_cases {
             let id = StringInt58::from_str(expected).unwrap();

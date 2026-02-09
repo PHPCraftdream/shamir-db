@@ -51,7 +51,7 @@ impl Repo for NebariRepo {
                 .tree(Unversioned::tree(META_TREE_NAME))
                 .map_err(|e| DbError::Storage(format!("NebariDB meta_tree: {}", e)))?;
             meta_tree
-                .set(table_name_clone, &[])
+                .set(table_name_clone, [])
                 .map_err(|e| DbError::Storage(format!("NebariDB meta_set: {}", e)))?;
             Ok(())
         })

@@ -51,19 +51,19 @@ impl RepoManagerInstance {
         }
 
         let cell = self.tables.entry(table_name.to_string())
-            .or_insert_with(|| OnceCell::new());
+            .or_insert_with(OnceCell::new);
 
         cell.get_or_try_init(|| async move {
             self.create_table_context(table_name).await
-        }).await.map(|ctx| ctx.clone())
+        }).await.cloned()
     }
 
     async fn create_table_context(&self, table_name: &str) -> DbResult<TableContext> {
         let data_store = self.repo.store_get(format!("__data__{}", table_name)).await?;
         let info_store = self.repo.store_get(format!("__info__{}", table_name)).await?;
 
-        let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
-        let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
+        let data_store: Arc<dyn crate::db::storage::types::Store> = data_store;
+        let info_store: Arc<dyn crate::db::storage::types::Store> = info_store;
 
         let interner_manager = InternerManager::new(Arc::clone(&info_store));
         let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));

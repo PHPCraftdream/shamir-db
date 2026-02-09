@@ -1,4 +1,5 @@
-use crate::db::engine::dispatcher::types::{DbConfig, DbRepoConfig, DbTableConfig, IndexConfig, StorageType};
+use crate::db::engine::dispatcher::DbConfig;
+use crate::db::engine::dispatcher::types::{DbRepoConfig, DbTableConfig, IndexConfig, StorageType};
 use crate::types::common::new_map;
 
 #[test]

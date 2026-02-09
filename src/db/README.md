@@ -117,7 +117,7 @@ See `engine/README.md` for details.
 ### Dispatcher (`db/engine/dispatcher/`)
 **Multi-repo management** with YAML configuration:
 - `Dispatcher` - Manages multiple RepoManagers
-- `ConfigLoader` - Load/save YAML configuration files
+- `ConfigLoader` (from `core::config`) - Load/save YAML configuration files
 - `DbConfig`, `RepoConfig`, `TableConfig`, `IndexConfig` - Configuration types
 - Atomic file writes (temp + rename) for safe updates
 - Validation on load (ensures config correctness)

@@ -33,7 +33,7 @@ impl Repo for FjallRepo {
     async fn store_get<S: AsRef<str> + Send>(&self, name: S) -> DbResult<Arc<dyn Store>> {
         let keyspace = self
             .db
-            .keyspace(name.as_ref(), || KeyspaceCreateOptions::default())
+            .keyspace(name.as_ref(), KeyspaceCreateOptions::default)
             .map_err(|e| DbError::Storage(e.to_string()))?;
         Ok(Arc::new(FjallStore { keyspace }))
     }
@@ -42,7 +42,7 @@ impl Repo for FjallRepo {
         // Get the keyspace first
         let keyspace = self
             .db
-            .keyspace(name.as_ref(), || KeyspaceCreateOptions::default())
+            .keyspace(name.as_ref(), KeyspaceCreateOptions::default)
             .map_err(|e| DbError::Storage(e.to_string()))?;
 
         // Then delete it using the keyspace handle
@@ -190,7 +190,7 @@ impl Store for FjallStore {
 
                     // If cursor specified, skip until we pass it
                     if let Some(start) = start_key {
-                        while let Some(guard) = iter.next() {
+                        for guard in iter.by_ref() {
                             let (key, _) = guard
                                 .into_inner()
                                 .map_err(|e| DbError::Storage(e.to_string()))?;

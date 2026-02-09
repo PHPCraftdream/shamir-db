@@ -51,21 +51,6 @@ impl StorageType {
             Self::Sled => "Sled",
         }
     }
-
-    /// Создаёт из строки
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "Canopy" => Some(Self::Canopy),
-            "Fjall" => Some(Self::Fjall),
-            "Cached" => Some(Self::Cached),
-            "Memory" => Some(Self::Memory),
-            "Nebari" => Some(Self::Nebari),
-            "Persy" => Some(Self::Persy),
-            "Redb" => Some(Self::Redb),
-            "Sled" => Some(Self::Sled),
-            _ => None,
-        }
-    }
 }
 
 // Для использования в Display
@@ -80,6 +65,16 @@ impl std::str::FromStr for StorageType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_str(s).ok_or_else(|| format!("Invalid StorageType: {}", s))
+        match s {
+            "Canopy" => Ok(Self::Canopy),
+            "Fjall" => Ok(Self::Fjall),
+            "Cached" => Ok(Self::Cached),
+            "Memory" => Ok(Self::Memory),
+            "Nebari" => Ok(Self::Nebari),
+            "Persy" => Ok(Self::Persy),
+            "Redb" => Ok(Self::Redb),
+            "Sled" => Ok(Self::Sled),
+            _ => Err(format!("Invalid StorageType: {}", s)),
+        }
     }
 }
