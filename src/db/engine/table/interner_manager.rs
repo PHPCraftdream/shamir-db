@@ -1,7 +1,7 @@
 //! Interner manager for lazy loading and persistence
 
 use crate::core::interner::{Interner, InternedKey, UserKey};
-use crate::db::error::DbResult;
+use crate::db::DbResult;
 use crate::db::storage::types::Store;
 use crate::codecs::bytes;
 use crate::types::record_id::RecordId;
@@ -87,7 +87,7 @@ impl InternerManager {
 
         // Serialize and save
         let bytes = bytes::to_bytes(&current)
-            .map_err(|e| crate::db::error::DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
+            .map_err(|e| crate::db::DbError::Codec(format!("Failed to serialize interner: {}", e)))?;
 
         self.info_store.set(internals_id.to_bytes(), bytes).await?;
 

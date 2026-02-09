@@ -1,5 +1,5 @@
 use super::repo_config::RepoConfig;
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use crate::types::common::{new_map_wc, TMap};
 
 pub struct RepoManager {

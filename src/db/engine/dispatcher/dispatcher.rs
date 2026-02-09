@@ -1,6 +1,6 @@
 use crate::db::engine::repo::{RepoConfig, RepoManagerInstance};
 use super::super::table::TableContext;
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use crate::types::common::TMap;
 
 /// Manages multiple repositories

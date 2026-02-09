@@ -1,3 +1,4 @@
+pub mod error;
 pub mod types;
 pub mod storage_redb;
 pub mod storage_fjall;

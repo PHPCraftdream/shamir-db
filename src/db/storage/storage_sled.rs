@@ -1,5 +1,5 @@
 use super::types::{RecordKey, Repo, Store};
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
 use async_stream::stream;
@@ -189,7 +189,7 @@ impl Store for SledStore {
                 let tree_clone = tree.clone();
                 let start_key = last_key.clone();
 
-                let batch: DbResult<Vec<_>> = spawn_blocking(move || {
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
                     let iter = if let Some(ref start) = start_key {
                         tree_clone.range::<&[u8], _>(start.as_slice()..)
                     } else {
@@ -267,7 +267,7 @@ impl Store for SledStore {
                 let start_key = last_key.clone();
                 let prefix_clone = prefix_slice.clone();
 
-                let batch: DbResult<Vec<_>> = spawn_blocking(move || {
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
                     let prefix_ref = &prefix_clone;
 
                     // Sled's scan_prefix doesn't support cursor, so we need to skip

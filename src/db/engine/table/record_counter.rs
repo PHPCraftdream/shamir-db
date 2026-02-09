@@ -1,6 +1,6 @@
 //! Record counter for tracking number of records in a table
 
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use crate::db::storage::types::Store;
 use crate::codecs::bytes;
 use crate::types::record_id::RecordId;

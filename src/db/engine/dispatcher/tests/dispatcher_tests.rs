@@ -55,7 +55,7 @@ async fn test_get_table_not_configured() {
     let result = dispatcher.get_table("default", "products").await;
     assert!(result.is_err());
     match result {
-        Err(crate::db::error::DbError::NotFound(msg)) => {
+        Err(crate::db::DbError::NotFound(msg)) => {
             assert!(msg.contains("products"));
             assert!(msg.contains("not configured"));
         }

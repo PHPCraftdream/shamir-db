@@ -3,6 +3,7 @@ use crate::db::engine::repo::repo_manager::RepoManager;
 use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use std::sync::Arc;
+use crate::db::DbError::NotFound;
 
 #[tokio::test]
 async fn test_repo_manager_new() {
@@ -41,7 +42,7 @@ async fn test_get_repo_not_found() {
     let result = manager.get_repo_config("nonexistent");
     assert!(result.is_err());
     match result {
-        Err(crate::db::error::DbError::NotFound(msg)) => {
+        Err(NotFound(msg)) => {
             assert!(msg.contains("nonexistent"));
             assert!(msg.contains("not found"));
         }

@@ -1,4 +1,4 @@
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;

@@ -1,5 +1,5 @@
 use super::types::{RecordKey, Repo, Store};
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use async_trait::async_trait;
 use async_stream::stream;
