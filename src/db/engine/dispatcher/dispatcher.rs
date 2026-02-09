@@ -1,5 +1,6 @@
 use super::super::table::{Table, TableConfig, TableContext};
 use super::super::table::interner_manager::InternerManager;
+use super::super::table::record_counter::RecordCounter;
 use super::super::index::table_index_manager::TableIndexManager;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::Repo;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 pub struct Dispatcher<R: Repo> {
     repo: Arc<R>,
     configs: Arc<std::collections::HashMap<String, TableConfig>>,
-    tables: Arc<dashmap::DashMap<String, OnceCell<TableContext<R>>>>,
+    tables: Arc<dashmap::DashMap<String, OnceCell<TableContext>>>,
 }
 
 impl<R: Repo> Clone for Dispatcher<R> {
@@ -29,7 +30,7 @@ impl<R: Repo> Dispatcher<R> {
             .map(|cfg| (cfg.name.clone(), cfg))
             .collect();
 
-        let tables: dashmap::DashMap<String, OnceCell<TableContext<R>>> = dashmap::DashMap::new();
+        let tables: dashmap::DashMap<String, OnceCell<TableContext>> = dashmap::DashMap::new();
 
         Self {
             repo,
@@ -38,7 +39,7 @@ impl<R: Repo> Dispatcher<R> {
         }
     }
 
-    pub async fn get_table(&self, table_name: &str) -> DbResult<TableContext<R>> {
+    pub async fn get_table(&self, table_name: &str) -> DbResult<TableContext> {
         if !self.configs.contains_key(table_name) {
             return Err(DbError::NotFound(format!(
                 "Table '{}' is not configured",
@@ -54,7 +55,7 @@ impl<R: Repo> Dispatcher<R> {
         }).await.map(|ctx| ctx.clone())
     }
 
-    async fn create_table_context(&self, table_name: &str) -> DbResult<TableContext<R>> {
+    async fn create_table_context(&self, table_name: &str) -> DbResult<TableContext> {
         let data_store = self.repo.store_get(format!("__data__{}", table_name)).await?;
         let info_store = self.repo.store_get(format!("__info__{}", table_name)).await?;
 
@@ -62,6 +63,7 @@ impl<R: Repo> Dispatcher<R> {
         let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
 
         let interner_manager = InternerManager::new(Arc::clone(&info_store));
+        let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
 
         let interner_cell = Arc::new(OnceCell::new());
         let index_manager = TableIndexManager::new(
@@ -70,9 +72,9 @@ impl<R: Repo> Dispatcher<R> {
             interner_cell,
         ).await?;
 
-        let table = Table::new(Arc::clone(&self.repo), table_name.to_string()).await?;
+        let table = Table::new(Arc::clone(&data_store));
 
-        Ok(TableContext::new(table, interner_manager, index_manager))
+        Ok(TableContext::new(table_name.to_string(), table, interner_manager, counter, index_manager))
     }
 
     pub fn list_table_names(&self) -> Vec<String> {
