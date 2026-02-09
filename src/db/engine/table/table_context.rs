@@ -1,15 +1,16 @@
 use super::table::Table;
-use super::interner::InternerManager;
+use super::interner_manager::InternerManager;
 use crate::db::engine::index::table_index_manager::TableIndexManager;
 use std::sync::Arc;
+use crate::db::storage::types::Repo;
 
-pub struct TableContext<R: crate::db::storage::types::Repo> {
+pub struct TableContext<R: Repo> {
     table: Arc<Table<R>>,
     interner: InternerManager,
     index_manager: TableIndexManager,
 }
 
-impl<R: crate::db::storage::types::Repo> Clone for TableContext<R> {
+impl<R: Repo> Clone for TableContext<R> {
     fn clone(&self) -> Self {
         Self {
             table: Arc::clone(&self.table),
@@ -19,7 +20,7 @@ impl<R: crate::db::storage::types::Repo> Clone for TableContext<R> {
     }
 }
 
-impl<R: crate::db::storage::types::Repo> TableContext<R> {
+impl<R: Repo> TableContext<R> {
     pub fn new(table: Table<R>, interner: InternerManager, index_manager: TableIndexManager) -> Self {
         Self {
             table: Arc::new(table),

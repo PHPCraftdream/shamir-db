@@ -1,5 +1,5 @@
 use super::super::table::{Table, TableConfig, TableContext};
-use super::super::table::interner::InternerManager;
+use super::super::table::interner_manager::InternerManager;
 use super::super::index::table_index_manager::TableIndexManager;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::Repo;

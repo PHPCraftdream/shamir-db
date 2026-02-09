@@ -14,7 +14,7 @@ async fn test_table_context_creation() {
     let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
     let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
 
-    use crate::db::engine::table::interner::InternerManager;
+    use crate::db::engine::table::interner_manager::InternerManager;
     use crate::db::engine::index::table_index_manager::TableIndexManager;
 
     let interner = InternerManager::new(Arc::clone(&info_store));

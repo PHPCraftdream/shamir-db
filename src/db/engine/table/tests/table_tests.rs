@@ -2,7 +2,7 @@
 
 use crate::core::transform;
 use crate::db::engine::table::Table;
-use crate::db::engine::table::interner::InternerManager;
+use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
