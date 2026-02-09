@@ -13,6 +13,13 @@ use std::str::FromStr;
 use std::any::TypeId;
 use crate::core::interner::InternedKey;
 
+/// User-facing value type with string keys
+/// 
+/// **DEPRECATED & FOR TESTS ONLY**
+/// 
+/// This type should only be used in tests for convenience.
+/// Production code should use `InnerValue` directly with interning.
+#[deprecated(since = "0.1.0", note = "Use InnerValue instead. UserValue is for tests only.")]
 pub type UserValue = Value<String>;
 pub type InnerValue = Value<InternedKey>;
 

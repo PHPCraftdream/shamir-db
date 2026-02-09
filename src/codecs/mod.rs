@@ -5,6 +5,7 @@ pub mod json;
 pub mod message_pack;
 pub mod interned_msgpack;
 pub mod interned_json;
+pub mod interned;
 pub mod bytes;
 
 #[derive(Error, Debug)]
