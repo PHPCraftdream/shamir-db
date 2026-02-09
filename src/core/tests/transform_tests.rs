@@ -23,7 +23,8 @@ mod tests {
         let mut user_set = new_set();
         user_set.insert(UserValue::Str("tag1".to_string()));
         user_set.insert(UserValue::Str("tag2".to_string()));
-        let original_value = UserValue::List(vec![UserValue::Map(user_map), UserValue::Set(user_set)]);
+        let original_value =
+            UserValue::List(vec![UserValue::Map(user_map), UserValue::Set(user_set)]);
         let result = user_to_inner(&original_value, &interner);
 
         // Verify new keys were collected

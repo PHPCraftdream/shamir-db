@@ -1,3 +1,4 @@
+use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
 use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
@@ -6,7 +7,6 @@ use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::storage::types::Repo;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
-use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
 
 #[tokio::test]
 async fn test_table_context_creation() {
