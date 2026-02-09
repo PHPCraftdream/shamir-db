@@ -433,6 +433,7 @@ mod tests {
 
         // Create FjallStore directly to access PrefixScan
         let table_name = "test_table";
+        #[allow(clippy::redundant_closure)]
         let keyspace = db
             .keyspace(table_name, || KeyspaceCreateOptions::default())
             .unwrap();

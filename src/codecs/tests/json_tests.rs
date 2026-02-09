@@ -103,7 +103,7 @@ fn test_decode_with_all_type_prefixes() {
     expected_map.insert("history".to_string(), UserValue::List(expected_arr));
     expected_map.insert("version".to_string(), UserValue::Int(-10));
     expected_map.insert("user_id".to_string(), UserValue::Int(1234567890));
-    expected_map.insert("pi".to_string(), UserValue::F64(3.14));
+    expected_map.insert("pi".to_string(), UserValue::F64(3.9));
     expected_map.insert("price".to_string(), UserValue::Str("19.99".to_string()));
     expected_map.insert("large".to_string(), UserValue::Str("10000".to_string()));
     let expected_value = UserValue::Map(expected_map);

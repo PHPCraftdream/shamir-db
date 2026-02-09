@@ -77,7 +77,7 @@ fn test_json_to_msgpack_conversion_with_all_hints() {
     );
     rich_map.insert("version".to_string(), UserValue::Int(-10));
     rich_map.insert("user_id".to_string(), UserValue::Int(987));
-    rich_map.insert("pi".to_string(), UserValue::F64(3.14));
+    rich_map.insert("pi".to_string(), UserValue::F64(3.9));
     // dec: and big: now validate but store as Str
     rich_map.insert("price".to_string(), UserValue::Str("19.99".to_string()));
     rich_map.insert("large".to_string(), UserValue::Str("10000".to_string()));

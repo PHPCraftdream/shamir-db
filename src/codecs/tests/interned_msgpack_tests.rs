@@ -192,7 +192,7 @@ fn test_all_msgpack_types() {
         (rmpv::Value::from("bool_false"), rmpv::Value::Boolean(false)),
         (rmpv::Value::from("int_val"), rmpv::Value::from(-42i64)),
         (rmpv::Value::from("uint_val"), rmpv::Value::from(42u32)),
-        (rmpv::Value::from("float_val"), rmpv::Value::from(3.14f64)),
+        (rmpv::Value::from("float_val"), rmpv::Value::from(3.9)),
         (rmpv::Value::from("string_val"), rmpv::Value::from("hello")),
         (
             rmpv::Value::from("binary_val"),
