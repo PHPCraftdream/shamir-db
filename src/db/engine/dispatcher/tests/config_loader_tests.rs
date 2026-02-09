@@ -1,4 +1,4 @@
-use crate::db::engine::dispatcher::types::{DbConfig, RepoConfig, TableConfig, IndexConfig, StorageType};
+use crate::db::engine::dispatcher::types::{DbConfig, DbRepoConfig, DbTableConfig, IndexConfig, StorageType};
 use crate::types::common::new_map;
 
 #[test]
@@ -7,17 +7,17 @@ fn test_config_roundtrip_yaml() {
     let mut tables = new_map();
     let mut indexes = new_map();
     indexes.insert("email_idx".to_string(), IndexConfig {
-        paths: vec!["email".to_string()],
+        paths: vec![vec!["email".to_string()]],
     });
 
-    let tables_config = TableConfig {
+    let tables_config = DbTableConfig {
         indexes,
         indexes_unique: new_map(),
     };
 
     tables.insert("users".to_string(), tables_config);
 
-    repos.insert("default".to_string(), RepoConfig {
+    repos.insert("default".to_string(), DbRepoConfig {
         tables,
         storage_type: StorageType::Redb,
         ram_cached: true,
@@ -41,5 +41,5 @@ fn test_config_roundtrip_yaml() {
 
     let table = repo.tables.get("users").unwrap();
     assert_eq!(table.indexes.len(), 1);
-    assert_eq!(table.indexes["email_idx"].paths, vec!["email"]);
+    assert_eq!(table.indexes["email_idx"].paths, vec![vec!["email".to_string()]]);
 }

@@ -4,25 +4,25 @@ use serde::{Serialize, Deserialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbConfig {
     pub data_dir: String,
-    pub repos: TMap<String, RepoConfig>,
+    pub repos: TMap<String, DbRepoConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoConfig {
-    pub tables: TMap<String, TableConfig>,
+pub struct DbRepoConfig {
+    pub tables: TMap<String, DbTableConfig>,
     pub storage_type: StorageType,
     pub ram_cached: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TableConfig {
+pub struct DbTableConfig {
     pub indexes: TMap<String, IndexConfig>,
     pub indexes_unique: TMap<String, IndexConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
-    pub paths: Vec<String>,
+    pub paths: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

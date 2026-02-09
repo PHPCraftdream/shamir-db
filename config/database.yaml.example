@@ -18,29 +18,32 @@ repos:
         # Regular indexes
         indexes:
           email_idx:
-            # Path to the field (dot notation for nested) // empty list == full value index
+            # Path to the field (list of components for nested paths) // empty list == full value index
+            # Single index: [["email"]]
+            # Composite index: [["category"], ["subcategory"]] - indexes across multiple fields
             paths:
-              - email
+              - ["email"]
           name_idx:
             paths:
-              - name
+              - ["name"]
 
         # Unique indexes
         indexes_unique:
           user_id_idx:
             paths:
-              - id
+              - ["id"]
 
       products:
         indexes:
-          category_idx:
+          # Composite index on category and subcategory
+          category_subcategory_idx:
             paths:
-              - category
-              - subcategory
+              - ["category"]
+              - ["subcategory"]
         indexes_unique:
           sku_idx:
             paths:
-              - sku
+              - ["sku"]
 
   # Secondary repository
   analytics:
@@ -51,8 +54,8 @@ repos:
         indexes:
           timestamp_idx:
             paths:
-              - timestamp
+              - ["timestamp"]
           type_idx:
             paths:
-              - event_type
+              - ["event_type"]
         indexes_unique: {}
