@@ -6,12 +6,36 @@ High-level table abstraction with automatic key interning, value transformations
 
 ```
 engine/
+├── dispatcher/               # ✅ NEW (2025-02-08) - Multi-repo dispatcher
+│   ├── config.rs             # YAML configuration loader
+│   ├── dispatcher.rs         # Dispatcher implementation
+│   ├── types.rs              # Config types (DbConfig, RepoConfig, etc.)
+│   └── tests/                # Dispatcher tests
+│       ├── config_loader_tests.rs      # YAML roundtrip tests
+│       ├── config_validation_tests.rs  # Validation rule tests
+│       └── dispatcher_tests.rs          # Dispatcher logic tests
 ├── index/                    # Index management system
 │   ├── index_definition.rs   # Index definition (simple/composite)
 │   ├── index_info.rs         # Index metadata with sync status
 │   ├── index_info_item.rs    # Single index path item
 │   ├── index_record.rs       # Index record representation
-│   └── table_index_manager.rs # Index manager for tables
+│   ├── table_index_manager.rs # Index manager for tables
+│   └── tests/                # ✅ REORGANIZED (2025-02-08)
+│       ├── mod.rs
+│       ├── index_definition_tests.rs    # 4 tests
+│       ├── index_info_item_tests.rs    # 4 tests
+│       ├── index_info_tests.rs          # 6 tests
+│       ├── index_record_tests.rs        # 16 tests
+│       └── table_index_manager_tests.rs # 3 tests
+├── repo/                     # ✅ NEW (2025-02-08) - Repo management
+│   ├── repo_config.rs        # Repo configuration types
+│   ├── repo_manager.rs      # RepoManager (manages repos)
+│   ├── repo_manager_instance.rs # RepoManagerInstance
+│   ├── repo_types.rs        # Repo types
+│   └── tests/                # Repo tests
+│       ├── mod.rs
+│       ├── repo_config_tests.rs          # 5 tests
+│       └── repo_manager_tests.rs         # 9 tests
 ├── table/                    # ✅ MODULARIZED (2025-02-08)
 │   ├── counter.rs           # RecordCounter service (170 lines)
 │   ├── interner.rs          # InternerManager service (185 lines)
@@ -22,16 +46,20 @@ engine/
 │       ├── crud_tests.rs    # 15 CRUD tests
 │       ├── concurrent_tests.rs  # 7 concurrent tests
 │       └── persistence_tests.rs # 3 persistence tests
-└── table.md                 # Table refactoring documentation (updated 2025-02-08)
+├── README.md     # Engine documentation
+└── table.md     # Table refactoring documentation (updated 2025-02-08)
 ```
 
 ## Purpose
 
 Bridges the gap between raw storage (`Store`) and user-friendly API:
+- **Dispatcher**: Manages multiple repositories with YAML configuration
+- **RepoManager**: Manages tables within repositories with lazy initialization
 - Manages key interning transparently
 - Transforms UserValue ↔ InnerValue
 - Provides async streaming for large datasets
 - Handles table metadata via system records
+- Test organization: one entity per file in `tests/` folders
 
 ## Architecture
 
@@ -398,11 +426,22 @@ Interned strings live as long as the table exists:
 
 ### Future Enhancements
 
+- [x] ✅ **Multi-repo dispatcher** (2025-02-08)
+  - Dispatcher manages multiple RepoManagers
+  - YAML configuration with ConfigLoader
+  - Atomic file writes for safe updates
+- [x] ✅ **Repo management** (2025-02-08)
+  - RepoManager for repository operations
+  - Lazy table initialization
+  - Default repo support
 - [x] ✅ **Modular architecture** (2025-02-08)
-  - Extracted RecordCounter to separate module
-  - Extracted InternerManager to separate module
-  - Organized tests by type (CRUD, concurrent, persistence)
-  - 227 tests passing (35 table tests)
+  - RecordCounter, InternerManager separated
+  - Tests organized by type
+  - 240 tests passing
+- [x] ✅ **Test reorganization** (2025-02-08)
+  - Tests in separate `tests/` folders
+  - One entity per file
+  - Names match content
 - [x] Index system with simple/composite indexes
 - [x] Atomic flags for fast path optimization
 - [x] Unique constraint validation

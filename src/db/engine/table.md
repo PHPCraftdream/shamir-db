@@ -392,7 +392,31 @@ async fn test_interner_persistence_after_restart() {
 }
 ```
 
-**Total: 35 table tests (out of 227 total library tests)**
+**Total: 35 table tests (out of 240 total library tests)**
+
+### Test Organization Pattern (2025-02-08)
+
+All tests are organized in separate `tests/` folders with:
+- **One entity per file** - each test file corresponds to a single struct/type
+- **Descriptive names** - file names match their content
+- **Modular structure** - `tests/mod.rs` for module declarations
+
+**Example:**
+```
+src/db/engine/index/
+├── index_definition.rs
+├── index_info.rs
+├── index_info_item.rs
+├── index_record.rs
+├── table_index_manager.rs
+└── tests/
+    ├── mod.rs                      # Module declarations
+    ├── index_definition_tests.rs   # Tests for IndexDefinition
+    ├── index_info_tests.rs         # Tests for IndexInfo
+    ├── index_info_item_tests.rs    # Tests for IndexInfoItem
+    ├── index_record_tests.rs       # Tests for IndexRecordKey
+    └── table_index_manager_tests.rs # Tests for TableIndexManager
+```
 
 ---
 
@@ -777,3 +801,70 @@ The Table module has been successfully refactored from a 1100-line God object in
 4. **Update docs** - Document public API changes
 
 **Priority:** Low. Current refactoring is complete and working well.
+
+## Test Reorganization (2025-02-08)
+
+### Motivation
+All tests have been reorganized into separate `tests/` folders to:
+- Separate implementation code from test code
+- Group tests by entity (one file per type)
+- Improve maintainability and discoverability
+- Follow Rust conventions
+
+### New Structure
+```
+src/db/engine/
+├── dispatcher/
+│   ├── config.rs
+│   ├── dispatcher.rs
+│   ├── types.rs
+│   └── tests/
+│       ├── mod.rs
+│       ├── config_loader_tests.rs
+│       ├── config_validation_tests.rs
+│       └── dispatcher_tests.rs
+├── index/
+│   ├── index_definition.rs
+│   ├── index_info.rs
+│   ├── index_info_item.rs
+│   ├── index_record.rs
+│   ├── table_index_manager.rs
+│   └── tests/
+│       ├── mod.rs
+│       ├── index_definition_tests.rs
+│       ├── index_info_tests.rs
+│       ├── index_info_item_tests.rs
+│       ├── index_record_tests.rs
+│       └── table_index_manager_tests.rs
+├── repo/
+│   ├── repo_config.rs
+│   ├── repo_manager.rs
+│   ├── repo_manager_instance.rs
+│   ├── repo_types.rs
+│   └── tests/
+│       ├── mod.rs
+│       ├── repo_config_tests.rs
+│       └── repo_manager_tests.rs
+└── table/
+    ├── counter.rs
+    ├── interner.rs
+    ├── table.rs
+    ├── table_config.rs
+    ├── table_context.rs
+    └── tests/
+        ├── mod.rs
+        ├── concurrent_tests.rs
+        ├── interner_manager_tests.rs
+        ├── persistence_tests.rs
+        ├── record_counter_tests.rs
+        ├── table_config_tests.rs
+        ├── table_context_tests.rs
+        └── table_tests.rs
+```
+
+### Test Counts
+- **Dispatcher**: 8 tests
+- **Index**: 33 tests
+- **Repo**: 14 tests
+- **Table**: 25 tests
+- **Total**: 240 tests passing ✅
