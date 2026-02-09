@@ -3,6 +3,7 @@
 use crate::core::transform;
 use crate::db::engine::table::Table;
 use crate::db::engine::table::interner_manager::InternerManager;
+use crate::db::engine::table::record_counter::RecordCounter;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
@@ -11,18 +12,22 @@ use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
 
-async fn create_test_table() -> DbResult<(Table<SledRepo>, InternerManager, tempfile::TempDir)> {
+async fn create_test_table() -> DbResult<(Table, InternerManager, Arc<RecordCounter>, tempfile::TempDir)> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("test_db");
     let repo = Arc::new(SledRepo::new(path)?);
-    let table = Table::new(Arc::clone(&repo), "users".to_string()).await?;
 
-    // Get info_store for interner manager
+    let data_store = repo.store_get("__data__users".to_string()).await?;
     let info_store = repo.store_get("__info__users".to_string()).await?;
+
+    let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
     let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
+
+    let table = Table::new(Arc::clone(&data_store));
+    let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
     let interner = InternerManager::new(info_store);
 
-    Ok((table, interner, dir))
+    Ok((table, interner, counter, dir))
 }
 
 /// Helper to intern a UserValue and save new keys
@@ -40,7 +45,7 @@ async fn intern_value(value: &UserValue, interner: &InternerManager) -> DbResult
 
 #[tokio::test]
 async fn test_table_insert_and_get() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let mut user_data = new_map();
     user_data.insert("name".to_string(), UserValue::Str("Alice".to_string()));
@@ -58,7 +63,7 @@ async fn test_table_insert_and_get() {
 
 #[tokio::test]
 async fn test_table_interning_persistence() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     // Insert first record
     let mut data1 = new_map();
@@ -94,7 +99,7 @@ async fn test_table_interning_persistence() {
 
 #[tokio::test]
 async fn test_table_update() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let mut data = new_map();
     data.insert("name".to_string(), UserValue::Str("Dave".to_string()));
@@ -125,7 +130,7 @@ async fn test_table_update() {
 
 #[tokio::test]
 async fn test_table_delete() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let mut data = new_map();
     data.insert("name".to_string(), UserValue::Str("Eve".to_string()));
@@ -144,7 +149,7 @@ async fn test_table_delete() {
 
 #[tokio::test]
 async fn test_table_list() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     for i in 1..=3 {
         let mut data = new_map();
@@ -160,23 +165,24 @@ async fn test_table_list() {
 
 #[tokio::test]
 async fn test_table_count() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, counter, _dir) = create_test_table().await.unwrap();
 
-    assert_eq!(table.count().await.unwrap(), 0);
+    assert_eq!(counter.get().await.unwrap() as usize, 0);
 
     for i in 1..=5 {
         let mut data = new_map();
         data.insert("id".to_string(), UserValue::Int(i));
         let inner = intern_value(&UserValue::Map(data), &interner).await.unwrap();
         table.insert(&inner).await.unwrap();
+        counter.increment(1).await.unwrap();
     }
 
-    assert_eq!(table.count().await.unwrap(), 5);
+    assert_eq!(counter.get().await.unwrap() as usize, 5);
 }
 
 #[tokio::test]
 async fn test_table_with_nested_structures() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     // Complex nested structure
     let mut inner_map = new_map();
@@ -221,7 +227,7 @@ async fn test_table_with_nested_structures() {
 
 #[tokio::test]
 async fn test_table_with_special_characters() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 
     let special_keys = vec![
         "key with spaces",
@@ -262,7 +268,7 @@ async fn test_table_with_special_characters() {
 
 #[tokio::test]
 async fn test_set_method_creates_new_record() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, counter, _dir) = create_test_table().await.unwrap();
 
     // Create a new RecordId
     let id = RecordId::new();
@@ -275,9 +281,10 @@ async fn test_set_method_creates_new_record() {
     // set should create new record
     let created = table.set(id, &inner).await.unwrap();
     assert!(created, "Should return true for new record");
+    counter.increment(1).await.unwrap();
 
     // Verify count increased
-    assert_eq!(table.count().await.unwrap(), 1);
+    assert_eq!(counter.get().await.unwrap() as usize, 1);
 
     // Verify record exists
     let retrieved = table.get(id).await.unwrap();
@@ -286,7 +293,7 @@ async fn test_set_method_creates_new_record() {
 
 #[tokio::test]
 async fn test_set_method_updates_existing_record() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, counter, _dir) = create_test_table().await.unwrap();
 
     // First insert a record
     let id = RecordId::new();
@@ -297,7 +304,8 @@ async fn test_set_method_updates_existing_record() {
 
     let created = table.set(id, &inner1).await.unwrap();
     assert!(created);
-    assert_eq!(table.count().await.unwrap(), 1);
+    counter.increment(1).await.unwrap();
+    assert_eq!(counter.get().await.unwrap() as usize, 1);
 
     // Now update with set
     let mut data2 = new_map();
@@ -310,7 +318,7 @@ async fn test_set_method_updates_existing_record() {
     assert!(!created_again, "Should return false for update");
 
     // Count should still be 1 (not incremented)
-    assert_eq!(table.count().await.unwrap(), 1);
+    assert_eq!(counter.get().await.unwrap() as usize, 1);
 
     // Verify updated value
     let retrieved = table.get(id).await.unwrap();
@@ -319,10 +327,10 @@ async fn test_set_method_updates_existing_record() {
 
 #[tokio::test]
 async fn test_record_counter_with_insert_and_delete() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, counter, _dir) = create_test_table().await.unwrap();
 
     // Initial count should be 0
-    assert_eq!(table.count().await.unwrap(), 0);
+    assert_eq!(counter.get().await.unwrap() as usize, 0);
 
     // Insert 5 records
     let mut ids = vec![];
@@ -331,21 +339,25 @@ async fn test_record_counter_with_insert_and_delete() {
         data.insert("id".to_string(), UserValue::Int(i));
         let inner = intern_value(&UserValue::Map(data), &interner).await.unwrap();
         let id = table.insert(&inner).await.unwrap();
+        counter.increment(1).await.unwrap();
         ids.push(id);
     }
 
-    assert_eq!(table.count().await.unwrap(), 5);
+    assert_eq!(counter.get().await.unwrap() as usize, 5);
 
     // Delete 2 records
     table.delete(ids[0]).await.unwrap();
+    counter.increment(-1).await.unwrap();
     table.delete(ids[1]).await.unwrap();
+    counter.increment(-1).await.unwrap();
 
-    assert_eq!(table.count().await.unwrap(), 3);
+    assert_eq!(counter.get().await.unwrap() as usize, 3);
 
     // Delete 1 more
     table.delete(ids[2]).await.unwrap();
+    counter.increment(-1).await.unwrap();
 
-    assert_eq!(table.count().await.unwrap(), 2);
+    assert_eq!(counter.get().await.unwrap() as usize, 2);
 
     // Insert 3 more
     for i in 0..3 {
@@ -353,16 +365,17 @@ async fn test_record_counter_with_insert_and_delete() {
         data.insert("new_id".to_string(), UserValue::Int(i));
         let inner = intern_value(&UserValue::Map(data), &interner).await.unwrap();
         table.insert(&inner).await.unwrap();
+        counter.increment(1).await.unwrap();
     }
 
-    assert_eq!(table.count().await.unwrap(), 5);
+    assert_eq!(counter.get().await.unwrap() as usize, 5);
 }
 
 #[tokio::test]
 async fn test_set_method_respects_counter() {
-    let (table, interner, _dir) = create_test_table().await.unwrap();
+    let (table, interner, counter, _dir) = create_test_table().await.unwrap();
 
-    assert_eq!(table.count().await.unwrap(), 0);
+    assert_eq!(counter.get().await.unwrap() as usize, 0);
 
     let id1 = RecordId::new();
     let id2 = RecordId::new();
@@ -374,20 +387,22 @@ async fn test_set_method_respects_counter() {
     // Create first record with set
     let created1 = table.set(id1, &inner).await.unwrap();
     assert!(created1);
-    assert_eq!(table.count().await.unwrap(), 1);
+    counter.increment(1).await.unwrap();
+    assert_eq!(counter.get().await.unwrap() as usize, 1);
 
     // Create second record with set
     let created2 = table.set(id2, &inner).await.unwrap();
     assert!(created2);
-    assert_eq!(table.count().await.unwrap(), 2);
+    counter.increment(1).await.unwrap();
+    assert_eq!(counter.get().await.unwrap() as usize, 2);
 
     // Update first record with set (count should not change)
     let updated = table.set(id1, &inner).await.unwrap();
     assert!(!updated);
-    assert_eq!(table.count().await.unwrap(), 2);
+    assert_eq!(counter.get().await.unwrap() as usize, 2);
 
     // Update second record with set (count should not change)
     let updated2 = table.set(id2, &inner).await.unwrap();
     assert!(!updated2);
-    assert_eq!(table.count().await.unwrap(), 2);
+    assert_eq!(counter.get().await.unwrap() as usize, 2);
 }

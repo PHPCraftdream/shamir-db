@@ -36,8 +36,8 @@ async fn test_get_table_lazy_loading() {
     assert_eq!(ctx2.name(), "users");
 
     assert_eq!(
-        ctx1.table().name(),
-        ctx2.table().name()
+        ctx1.name(),
+        ctx2.name()
     );
 }
 
@@ -88,13 +88,12 @@ async fn test_table_context_components() {
 
     let ctx = dispatcher.get_table("users").await.unwrap();
 
-    assert_eq!(ctx.table().name(), "users");
     assert_eq!(ctx.name(), "users");
 
     use crate::types::value::InnerValue;
     let value = InnerValue::Str("test".to_string());
-    let record_id = ctx.table().insert(&value).await.unwrap();
-    assert_eq!(ctx.table().count().await.unwrap(), 1);
+    let record_id = ctx.insert(&value).await.unwrap();
+    assert_eq!(ctx.count().await.unwrap(), 1);
 
     let retrieved = ctx.table().get(record_id).await.unwrap();
     assert_eq!(retrieved, value);
@@ -113,8 +112,8 @@ async fn test_dispatcher_clone() {
     assert!(dispatcher2.has_table("users"));
 
     let ctx1 = dispatcher1.get_table("users").await.unwrap();
-    let _ = ctx1.table().insert(&crate::types::value::InnerValue::Int(42)).await.unwrap();
+    let _ = ctx1.insert(&crate::types::value::InnerValue::Int(42)).await.unwrap();
 
     let ctx2 = dispatcher2.get_table("users").await.unwrap();
-    assert_eq!(ctx2.table().count().await.unwrap(), 1);
+    assert_eq!(ctx2.count().await.unwrap(), 1);
 }

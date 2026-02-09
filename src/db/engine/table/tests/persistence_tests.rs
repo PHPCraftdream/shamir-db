@@ -3,6 +3,7 @@
 use crate::core::transform;
 use crate::db::engine::table::Table;
 use crate::db::engine::table::interner_manager::InternerManager;
+use crate::db::engine::table::record_counter::RecordCounter;
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
 use crate::types::common::new_map;
@@ -10,10 +11,13 @@ use crate::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
 
 /// Helper to create InternerManager for a table
-async fn create_interner_manager(repo: &Arc<SledRepo>, table_name: &str) -> InternerManager {
-    let info_store = repo.store_get(format!("__info__{}", table_name)).await.unwrap();
-    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
+fn create_interner_manager(info_store: Arc<dyn crate::db::storage::types::Store>) -> InternerManager {
     InternerManager::new(info_store)
+}
+
+/// Helper to create RecordCounter for a table
+fn create_record_counter(info_store: Arc<dyn crate::db::storage::types::Store>) -> Arc<RecordCounter> {
+    Arc::new(RecordCounter::new(info_store))
 }
 
 /// Helper to intern a UserValue and save new keys
@@ -37,8 +41,11 @@ async fn test_interner_persistence_after_restart() {
 
     // === First session: write data ===
     let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let table1 = Table::new(Arc::clone(&repo1), table_name.to_string()).await.unwrap();
-    let interner1 = create_interner_manager(&repo1, table_name).await;
+    let data_store1 = Arc::from(repo1.store_get(format!("{}", table_name)).await.unwrap());
+    let info_store1: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo1.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let table1 = Table::new(data_store1);
+    let interner1 = create_interner_manager(info_store1.clone());
+    let counter1 = create_record_counter(info_store1);
 
     // Insert multiple records with overlapping keys to test interning
     let mut data1 = new_map();
@@ -49,6 +56,7 @@ async fn test_interner_persistence_after_restart() {
 
     let inner1 = intern_value(&value1, &interner1).await;
     let id1 = table1.insert(&inner1).await.unwrap();
+    counter1.increment(1).await.unwrap();
 
     // Insert second record with same keys (should reuse interner entries)
     let mut data2 = new_map();
@@ -59,6 +67,7 @@ async fn test_interner_persistence_after_restart() {
 
     let inner2 = intern_value(&value2, &interner1).await;
     let id2 = table1.insert(&inner2).await.unwrap();
+    counter1.increment(1).await.unwrap();
 
     // Verify records in first session
     let retrieved1 = table1.get(id1).await.unwrap();
@@ -67,18 +76,22 @@ async fn test_interner_persistence_after_restart() {
     let retrieved2 = table1.get(id2).await.unwrap();
     assert_eq!(retrieved2, inner2);
 
-    let count1 = table1.count().await.unwrap();
+    let count1 = counter1.get().await.unwrap() as usize;
     assert_eq!(count1, 2);
 
-    // table1, repo1 and interner1 are dropped here, closing database
+    // table1, repo1, interner1 and counter1 are dropped here, closing database
+    drop(counter1);
     drop(table1);
     drop(repo1);
     drop(interner1);
 
     // === Second session: reopen and verify ===
-    let repo2 = Arc::new(SledRepo::new(path).unwrap());
-    let table2 = Table::new(Arc::clone(&repo2), table_name.to_string()).await.unwrap();
-    let interner2 = create_interner_manager(&repo2, table_name).await;
+    let repo2 = Arc::new(SledRepo::new(path.clone()).unwrap());
+    let data_store2 = Arc::from(repo2.store_get(format!("{}", table_name)).await.unwrap());
+    let info_store2: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo2.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let table2 = Table::new(data_store2);
+    let interner2 = create_interner_manager(info_store2.clone());
+    let counter2 = create_record_counter(info_store2);
 
     // Verify records are still there after restart
     let retrieved1_after = table2.get(id1).await.unwrap();
@@ -88,7 +101,7 @@ async fn test_interner_persistence_after_restart() {
     assert_eq!(retrieved2_after, inner2, "Second record should match after restart");
 
     // Verify count
-    let count2 = table2.count().await.unwrap();
+    let count2 = counter2.get().await.unwrap() as usize;
     assert_eq!(count2, 2, "Should have 2 records after restart");
 
     // Insert new record with same keys (should reuse restored interner entries)
@@ -100,12 +113,13 @@ async fn test_interner_persistence_after_restart() {
 
     let inner3 = intern_value(&value3, &interner2).await;
     let id3 = table2.insert(&inner3).await.unwrap();
+    counter2.increment(1).await.unwrap();
 
     // Verify all three records
     let retrieved3 = table2.get(id3).await.unwrap();
     assert_eq!(retrieved3, inner3);
 
-    let count3 = table2.count().await.unwrap();
+    let count3 = counter2.get().await.unwrap() as usize;
     assert_eq!(count3, 3, "Should have 3 records after inserting in second session");
 
     // List all records and verify
@@ -139,8 +153,11 @@ async fn test_counter_persistence_after_restart() {
 
     // === First session: insert records ===
     let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let table1 = Table::new(Arc::clone(&repo1), table_name.to_string()).await.unwrap();
-    let interner1 = create_interner_manager(&repo1, table_name).await;
+    let data_store1 = Arc::from(repo1.store_get(format!("{}", table_name)).await.unwrap());
+    let info_store1: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo1.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let table1 = Table::new(data_store1);
+    let interner1 = create_interner_manager(info_store1.clone());
+    let counter1 = create_record_counter(info_store1);
 
     // Insert multiple records
     for i in 0..5 {
@@ -149,22 +166,27 @@ async fn test_counter_persistence_after_restart() {
         data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
         let inner = intern_value(&UserValue::Map(data), &interner1).await;
         table1.insert(&inner).await.unwrap();
+        counter1.increment(1).await.unwrap();
     }
 
-    let count1 = table1.count().await.unwrap();
+    let count1 = counter1.get().await.unwrap() as usize;
     assert_eq!(count1, 5, "Should have 5 records in first session");
 
-    // table1, repo1 and interner1 are dropped here
+    // table1, repo1, interner1 and counter1 are dropped here
+    drop(counter1);
     drop(table1);
     drop(repo1);
     drop(interner1);
 
     // === Second session: reopen and verify ===
     let repo2 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let table2 = Table::new(Arc::clone(&repo2), table_name.to_string()).await.unwrap();
-    let interner2 = create_interner_manager(&repo2, table_name).await;
+    let data_store2 = Arc::from(repo2.store_get(format!("{}", table_name)).await.unwrap());
+    let info_store2: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo2.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let table2 = Table::new(data_store2);
+    let interner2 = create_interner_manager(info_store2.clone());
+    let counter2 = create_record_counter(info_store2);
 
-    let count2 = table2.count().await.unwrap();
+    let count2 = counter2.get().await.unwrap() as usize;
     assert_eq!(count2, 5, "Counter should persist after restart");
 
     // Verify actual records match counter
@@ -178,21 +200,26 @@ async fn test_counter_persistence_after_restart() {
         data.insert("name".to_string(), UserValue::Str(format!("User{}", i)));
         let inner = intern_value(&UserValue::Map(data), &interner2).await;
         table2.insert(&inner).await.unwrap();
+        counter2.increment(1).await.unwrap();
     }
 
-    let count3 = table2.count().await.unwrap();
+    let count3 = counter2.get().await.unwrap() as usize;
     assert_eq!(count3, 10, "Counter should update correctly");
 
-    // table2, repo2 and interner2 are dropped here
+    // table2, repo2, interner2 and counter2 are dropped here
+    drop(counter2);
     drop(table2);
     drop(repo2);
     drop(interner2);
 
     // === Third session: verify final state ===
     let repo3 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let table3 = Table::new(Arc::clone(&repo3), table_name.to_string()).await.unwrap();
+    let data_store3 = Arc::from(repo3.store_get(format!("{}", table_name)).await.unwrap());
+    let info_store3: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo3.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let table3 = Table::new(data_store3);
+    let counter3 = create_record_counter(info_store3);
 
-    let count4 = table3.count().await.unwrap();
+    let count4 = counter3.get().await.unwrap() as usize;
     assert_eq!(count4, 10, "Counter should persist correctly after multiple restarts");
 
     // Verify counter matches actual record count
@@ -207,14 +234,17 @@ async fn test_counter_matches_actual_record_count() {
     let table_name = "accuracy_test";
 
     let repo = Arc::new(SledRepo::new(path).unwrap());
-    let table = Table::new(Arc::clone(&repo), table_name.to_string()).await.unwrap();
-    let interner = create_interner_manager(&repo, table_name).await;
+    let data_store = Arc::from(repo.store_get(format!("{}", table_name)).await.unwrap());
+    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(repo.store_get(format!("__info__{}", table_name)).await.unwrap());
+    let table = Table::new(data_store);
+    let interner = create_interner_manager(info_store.clone());
+    let counter = create_record_counter(info_store);
 
     // Test after various operations
     let mut ids = vec![];
 
     // Initial state
-    assert_eq!(table.count().await.unwrap(), 0);
+    assert_eq!(counter.get().await.unwrap() as usize, 0);
     assert_eq!(table.list().await.unwrap().len(), 0);
 
     // Insert 10 records
@@ -224,17 +254,21 @@ async fn test_counter_matches_actual_record_count() {
         let inner = intern_value(&UserValue::Map(data), &interner).await;
         let id = table.insert(&inner).await.unwrap();
         ids.push(id);
+        counter.increment(1).await.unwrap();
     }
 
-    assert_eq!(table.count().await.unwrap(), 10);
+    assert_eq!(counter.get().await.unwrap() as usize, 10);
     assert_eq!(table.list().await.unwrap().len(), 10);
 
     // Delete 3 records
     table.delete(ids[0]).await.unwrap();
+    counter.increment(-1).await.unwrap();
     table.delete(ids[1]).await.unwrap();
+    counter.increment(-1).await.unwrap();
     table.delete(ids[2]).await.unwrap();
+    counter.increment(-1).await.unwrap();
 
-    assert_eq!(table.count().await.unwrap(), 7);
+    assert_eq!(counter.get().await.unwrap() as usize, 7);
     assert_eq!(table.list().await.unwrap().len(), 7);
 
     // Update 2 records
@@ -245,7 +279,7 @@ async fn test_counter_matches_actual_record_count() {
     table.update(ids[4], &inner).await.unwrap();
 
     // Count should not change on update
-    assert_eq!(table.count().await.unwrap(), 7);
+    assert_eq!(counter.get().await.unwrap() as usize, 7);
     assert_eq!(table.list().await.unwrap().len(), 7);
 
     // Insert 5 more
@@ -254,8 +288,9 @@ async fn test_counter_matches_actual_record_count() {
         data.insert("id".to_string(), UserValue::Int(i));
         let inner = intern_value(&UserValue::Map(data), &interner).await;
         table.insert(&inner).await.unwrap();
+        counter.increment(1).await.unwrap();
     }
 
-    assert_eq!(table.count().await.unwrap(), 12);
+    assert_eq!(counter.get().await.unwrap() as usize, 12);
     assert_eq!(table.list().await.unwrap().len(), 12);
 }

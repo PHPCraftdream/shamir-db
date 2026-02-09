@@ -1,8 +1,7 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use super::record_counter::RecordCounter;
 use crate::db::error::{DbError, DbResult};
-use crate::db::storage::types::{Repo, Store};
+use crate::db::storage::types::Store;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use async_stream::stream;
@@ -12,58 +11,38 @@ use std::sync::Arc;
 /// Low-level table - InnerValue only (no interning/conversion)
 ///
 /// This table operates directly on InnerValue (interned format).
-/// Interning and format conversion should be handled at higher level.
-pub struct Table<R: Repo> {
-    repo: Arc<R>,
-    table_name: String,
+/// Interning, indexing, and format conversion should be handled at higher level.
+/// Table is just a data store - it doesn't know its name or manage counters.
+pub struct Table {
     data_store: Arc<dyn Store>,
-    info_store: Arc<dyn Store>,
-    counter: Arc<RecordCounter>,
 }
 
-impl<R: Repo> Clone for Table<R> {
+impl Clone for Table {
     fn clone(&self) -> Self {
         Self {
-            repo: Arc::clone(&self.repo),
-            table_name: self.table_name.clone(),
             data_store: Arc::clone(&self.data_store),
-            info_store: Arc::clone(&self.info_store),
-            counter: Arc::clone(&self.counter),
         }
     }
 }
 
-impl<R: Repo> Table<R> {
+impl Table {
     /// Create a new table
-    pub async fn new(repo: Arc<R>, table_name: String) -> DbResult<Self> {
-        // Get or create stores
-        let data_store = repo.store_get(format!("__data__{}", table_name)).await?;
-        let info_store = repo.store_get(format!("__info__{}", table_name)).await?;
-
-        let data_store: Arc<dyn Store> = Arc::from(data_store);
-        let info_store: Arc<dyn Store> = Arc::from(info_store);
-
-        Ok(Self {
-            repo,
-            table_name,
+    pub fn new(data_store: Arc<dyn Store>) -> Self {
+        Self {
             data_store,
-            info_store: info_store.clone(),
-            counter: Arc::new(RecordCounter::new(Arc::clone(&info_store))),
-        })
+        }
     }
 
     /// Insert an InnerValue, returns RecordId
     ///
     /// No interning or conversion - expects already-interned InnerValue
+    /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         // Serialize InnerValue
         let inner_bytes = value.to_bytes();
 
         // Insert to data store - returns Bytes (16 random bytes)
         let key_bytes = self.data_store.insert(inner_bytes).await?;
-
-        // Increment record count
-        self.counter.increment(1).await?;
 
         // Convert Bytes to RecordId
         let arr: [u8; 16] = key_bytes.as_ref().try_into()
@@ -109,6 +88,7 @@ impl<R: Repo> Table<R> {
     ///
     /// No interning or conversion - expects already-interned InnerValue
     /// Returns true if created, false if updated
+    /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();
@@ -120,26 +100,15 @@ impl<R: Repo> Table<R> {
         let inner_bytes = value.to_bytes();
         self.data_store.set(key_bytes, inner_bytes).await?;
 
-        if !exists {
-            // New record created - increment count
-            self.counter.increment(1).await?;
-        }
-
         Ok(!exists)
     }
 
     /// Delete a record by RecordId
+    /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Convert RecordId to Bytes
         let key_bytes = id.to_bytes();
-        let removed = self.data_store.remove(key_bytes).await?;
-
-        if removed {
-            // Decrement record count
-            self.counter.increment(-1).await?;
-        }
-
-        Ok(removed)
+        self.data_store.remove(key_bytes).await
     }
 
     /// List all records (returns InnerValues)
@@ -168,10 +137,7 @@ impl<R: Repo> Table<R> {
         Ok(result)
     }
 
-    /// Count records (uses stored counter for O(1) performance)
-    pub async fn count(&self) -> DbResult<usize> {
-        Ok(self.counter.get().await? as usize)
-    }
+
 
     /// Stream records in batches, returning InnerValues
     ///
@@ -226,10 +192,5 @@ impl<R: Repo> Table<R> {
                 }
             }
         }
-    }
-
-    /// Get table name
-    pub fn name(&self) -> &str {
-        &self.table_name
     }
 }

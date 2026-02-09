@@ -15,9 +15,11 @@ async fn test_table_context_creation() {
     let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
 
     use crate::db::engine::table::interner_manager::InternerManager;
+    use crate::db::engine::table::record_counter::RecordCounter;
     use crate::db::engine::index::table_index_manager::TableIndexManager;
 
     let interner = InternerManager::new(Arc::clone(&info_store));
+    let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
     use tokio::sync::OnceCell;
     let interner_cell = Arc::new(OnceCell::new());
     let index_manager = TableIndexManager::new(
@@ -27,9 +29,9 @@ async fn test_table_context_creation() {
     ).await.unwrap();
 
     use crate::db::engine::table::Table;
-    let table = Table::new(Arc::clone(&repo), "test".to_string()).await.unwrap();
+    let table = Table::new(Arc::clone(&data_store));
 
-    let ctx = TableContext::new(table, interner, index_manager);
+    let ctx = TableContext::new("test".to_string(), table, interner, counter, index_manager);
     assert_eq!(ctx.name(), "test");
 }
 
@@ -56,12 +58,11 @@ async fn test_table_context_components() {
 
     let ctx = dispatcher.get_table("users").await.unwrap();
 
-    assert_eq!(ctx.table().name(), "users");
     assert_eq!(ctx.name(), "users");
 
     let value = InnerValue::Str("test".to_string());
-    let record_id = ctx.table().insert(&value).await.unwrap();
-    assert_eq!(ctx.table().count().await.unwrap(), 1);
+    let record_id = ctx.insert(&value).await.unwrap();
+    assert_eq!(ctx.count().await.unwrap(), 1);
 
     let retrieved = ctx.table().get(record_id).await.unwrap();
     assert_eq!(retrieved, value);
