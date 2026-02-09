@@ -1,4 +1,4 @@
-use crate::db::engine::index::index_record::IndexRecordKey;
+use crate::db::engine::index::index_record_key::IndexRecordKey;
 
 #[test]
 fn test_simple_index_key_creation() {
