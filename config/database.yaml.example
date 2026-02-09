@@ -1,0 +1,58 @@
+# SHAMIR Database Configuration
+
+# Base directory for all repository data
+data_dir: "./data"
+
+# Repositories map (repo name -> config)
+repos:
+  # Default repository
+  main:
+    # Storage engine: Canopy, Fjall, Cached, Memory, Nebari, Persy, Redb, Sled
+    storage_type: Redb
+    # Enable RAM caching for tables // occupies the full volume in RAM
+    ram_cached: false
+
+    # Tables configuration
+    tables:
+      users:
+        # Regular indexes
+        indexes:
+          email_idx:
+            # Path to the field (dot notation for nested) // empty list == full value index
+            paths:
+              - email
+          name_idx:
+            paths:
+              - name
+
+        # Unique indexes
+        indexes_unique:
+          user_id_idx:
+            paths:
+              - id
+
+      products:
+        indexes:
+          category_idx:
+            paths:
+              - category
+              - subcategory
+        indexes_unique:
+          sku_idx:
+            paths:
+              - sku
+
+  # Secondary repository
+  analytics:
+    storage_type: Fjall
+    ram_cached: false
+    tables:
+      events:
+        indexes:
+          timestamp_idx:
+            paths:
+              - timestamp
+          type_idx:
+            paths:
+              - event_type
+        indexes_unique: {}
