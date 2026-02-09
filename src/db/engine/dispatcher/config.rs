@@ -40,6 +40,44 @@ impl ConfigLoader {
             if repo_config.tables.is_empty() {
                 anyhow::bail!("Repository '{}' must contain at least one table", repo_name);
             }
+
+            Self::validate_repo_config(repo_name, repo_config)?;
+        }
+
+        Ok(())
+    }
+
+    fn validate_repo_config(repo_name: &str, repo_config: &RepoConfig) -> Result<()> {
+        for (table_name, table_config) in &repo_config.tables {
+            if table_config.indexes.is_empty() && table_config.indexes_unique.is_empty() {
+                anyhow::bail!(
+                    "Table '{}.{}' must have at least one index",
+                    repo_name,
+                    table_name
+                );
+            }
+
+            for (index_name, index_config) in &table_config.indexes {
+                if index_config.paths.is_empty() {
+                    anyhow::bail!(
+                        "Index '{}.{}.{}' must have at least one path",
+                        repo_name,
+                        table_name,
+                        index_name
+                    );
+                }
+            }
+
+            for (index_name, index_config) in &table_config.indexes_unique {
+                if index_config.paths.is_empty() {
+                    anyhow::bail!(
+                        "Unique index '{}.{}.{}' must have at least one path",
+                        repo_name,
+                        table_name,
+                        index_name
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -48,9 +86,10 @@ impl ConfigLoader {
 
 #[cfg(test)]
 mod tests {
+    use crate::db::engine::dispatcher::StorageType;
     use super::*;
-    use crate::db::engine::dispatcher::types::{IndexConfig, StorageType, TableConfig};
     use crate::types::common::new_map;
+    use crate::db::engine::dispatcher::types::{IndexConfig, TableConfig};
 
     #[test]
     fn test_config_roundtrip_yaml() {
@@ -61,45 +100,42 @@ mod tests {
             paths: vec!["email".to_string()],
         });
 
-        tables.insert("users".to_string(), TableConfig {
+        let tables_config = TableConfig {
             indexes,
             indexes_unique: new_map(),
-        });
+        };
+
+        tables.insert("users".to_string(), tables_config);
 
         repos.insert("default".to_string(), RepoConfig {
-            path: "./data/default".to_string(),
             tables,
             storage_type: StorageType::Redb,
             ram_cached: true,
         });
 
         let config = DbConfig {
-            data_dir: "./data".to_string(),
-            wal_enabled: true,
             repos,
         };
 
-        // Serialize
         let yaml = serde_yaml::to_string(&config).unwrap();
 
-        // Deserialize
         let deserialized: DbConfig = serde_yaml::from_str(&yaml).unwrap();
 
-        // Verify
-        assert_eq!(config.data_dir, deserialized.data_dir);
-        assert_eq!(config.wal_enabled, deserialized.wal_enabled);
         assert_eq!(config.repos.len(), deserialized.repos.len());
 
         let repo = deserialized.repos.get("default").unwrap();
-        assert_eq!(repo.path, "./data/default");
         assert_eq!(repo.tables.len(), 1);
+        assert!(repo.ram_cached);
+        assert!(matches!(repo.storage_type, StorageType::Redb));
+
+        let table = repo.tables.get("users").unwrap();
+        assert_eq!(table.indexes.len(), 1);
+        assert_eq!(table.indexes["email_idx"].paths, vec!["email"]);
     }
 
     #[test]
     fn test_config_validation_empty_repos() {
         let config = DbConfig {
-            data_dir: "./data".to_string(),
-            wal_enabled: true,
             repos: new_map(),
         };
 
@@ -109,30 +145,44 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validation_no_primary_key() {
+    fn test_config_validation_no_tables() {
+        let mut repos = new_map();
+        repos.insert("default".to_string(), RepoConfig {
+            tables: new_map(),
+            storage_type: StorageType::Redb,
+            ram_cached: true,
+        });
+
+        let config = DbConfig {
+            repos,
+        };
+
+        let result = ConfigLoader::validate_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least one table"));
+    }
+
+    #[test]
+    fn test_config_validation_no_indexes() {
         let mut repos = new_map();
         let mut tables = new_map();
-
         tables.insert("users".to_string(), TableConfig {
             indexes: new_map(),
             indexes_unique: new_map(),
         });
 
         repos.insert("default".to_string(), RepoConfig {
-            path: "./data/default".to_string(),
             tables,
             storage_type: StorageType::Redb,
             ram_cached: true,
         });
 
         let config = DbConfig {
-            data_dir: "./data".to_string(),
-            wal_enabled: true,
             repos,
         };
 
         let result = ConfigLoader::validate_config(&config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("primary key"));
+        assert!(result.unwrap_err().to_string().contains("at least one index"));
     }
 }
