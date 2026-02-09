@@ -1,5 +1,7 @@
-//! Table tests
-
-pub mod crud_tests;
+pub mod counter_tests;
+pub mod interner_tests;
+pub mod table_tests;
 pub mod concurrent_tests;
 pub mod persistence_tests;
+pub mod table_config_tests;
+pub mod table_context_tests;
