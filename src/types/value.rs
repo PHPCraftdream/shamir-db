@@ -477,8 +477,8 @@ mod tests {
         assert_eq!(UserValue::Int(42), UserValue::Int(42));
         assert_ne!(UserValue::Int(42), UserValue::Int(43));
 
-        assert_eq!(UserValue::F64(3.14), UserValue::F64(3.14));
-        assert_ne!(UserValue::F64(3.14), UserValue::F64(2.71));
+        assert_eq!(UserValue::F64(3.15), UserValue::F64(3.15));
+        assert_ne!(UserValue::F64(3.15), UserValue::F64(2.72));
 
         // NaN equality
         assert_eq!(UserValue::F64(f64::NAN), UserValue::F64(f64::NAN));
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_large_collections() {
-        let large_list = UserValue::List((0..1000).map(|i| UserValue::Int(i)).collect());
+        let large_list = UserValue::List((0..1000).map(UserValue::Int).collect());
         let bytes = large_list.to_bytes();
         assert_eq!(large_list, UserValue::from_bytes(&bytes).unwrap());
 

@@ -724,7 +724,7 @@ mod tests {
         let index_name = format!("{}_idx", table_name);
         let mut tx = db.begin().unwrap();
 
-        tx.create_segment(&table_name).unwrap();
+        tx.create_segment(table_name).unwrap();
         tx.create_index::<ByteVec, ByteVec>(&index_name, persy::ValueMode::Replace)
             .unwrap();
         tx.prepare().unwrap().commit().unwrap();
