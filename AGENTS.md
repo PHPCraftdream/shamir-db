@@ -22,6 +22,11 @@
 3.  **WASM-First:** Логика БД — это WASM модули.
 4.  **Reliability:** WAL (Write Ahead Log), Checksums, Crash safety.
 
+### 🧹 Code Quality (ОБЯЗАТЕЛЬНО)
+1.  **cargo clippy --all-targets** - Проверить все предупреждения перед завершением работы
+2.  **cargo fmt** - Отформатировать код после завершения работы
+3.  **cargo test --lib** - Все тесты должны проходить
+
 ---
 
 ## 🛡️ PROTOCOL OF DEVELOPMENT (TDD)
