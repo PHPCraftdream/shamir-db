@@ -1,4 +1,4 @@
-use crate::db::error::DbResult;
+use crate::db::DbResult;
 use crate::db::storage::types::{Repo, Store};
 use std::sync::Arc;
 use crate::db::storage::storage_in_memory::InMemoryRepo;

@@ -1,6 +1,6 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use crate::db::error::{DbError, DbResult};
+use crate::db::{DbError, DbResult};
 use crate::db::storage::types::Store;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;

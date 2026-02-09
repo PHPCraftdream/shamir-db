@@ -38,21 +38,21 @@ impl TableIndexManager {
         data_store: Arc<dyn Store>,
         info_store: Arc<dyn Store>,
         interner: Arc<OnceCell<Interner>>,
-    ) -> Result<Self, crate::db::error::DbError> {
+    ) -> Result<Self, crate::db::DbError> {
         let indexes_key = RecordId::system("indexes").to_bytes();
         let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
 
         let indexes = match info_store.get(indexes_key.clone()).await {
             Ok(bytes) => bincode::deserialize::<IndexInfo>(&bytes)
                 .unwrap_or_else(|_| IndexInfo::disabled()),
-            Err(crate::db::error::DbError::NotFound(_)) => IndexInfo::disabled(),
+            Err(crate::db::DbError::NotFound(_)) => IndexInfo::disabled(),
             Err(e) => return Err(e),
         };
 
         let indexes_unique = match info_store.get(indexes_unique_key.clone()).await {
             Ok(bytes) => bincode::deserialize::<IndexInfo>(&bytes)
                 .unwrap_or_else(|_| IndexInfo::disabled()),
-            Err(crate::db::error::DbError::NotFound(_)) => IndexInfo::disabled(),
+            Err(crate::db::DbError::NotFound(_)) => IndexInfo::disabled(),
             Err(e) => return Err(e),
         };
 

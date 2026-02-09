@@ -1,4 +1,4 @@
-use crate::db::engine::dispatcher::types::{DbConfig, RepoConfig};
+use crate::db::engine::dispatcher::types::DbConfig;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
@@ -38,12 +38,6 @@ impl ConfigLoader {
 
         if config.repos.is_empty() {
             anyhow::bail!("Config must contain at least one repository");
-        }
-
-        for (repo_name, repo_config) in &config.repos {
-            if repo_config.tables.is_empty() {
-                anyhow::bail!("Repository '{}' must contain at least one table", repo_name);
-            }
         }
 
         Ok(())
