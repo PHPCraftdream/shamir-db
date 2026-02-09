@@ -1,91 +1,106 @@
-use super::super::table::{Table, TableConfig, TableContext};
-use super::super::table::interner_manager::InternerManager;
-use super::super::table::record_counter::RecordCounter;
-use super::super::index::table_index_manager::TableIndexManager;
+use crate::db::engine::repo::{RepoConfig, RepoManagerInstance};
+use super::super::table::TableContext;
 use crate::db::error::{DbError, DbResult};
-use crate::db::storage::types::Repo;
-use tokio::sync::OnceCell;
-use std::sync::Arc;
+use crate::types::common::TMap;
 
-pub struct Dispatcher<R: Repo> {
-    repo: Arc<R>,
-    configs: Arc<std::collections::HashMap<String, TableConfig>>,
-    tables: Arc<dashmap::DashMap<String, OnceCell<TableContext>>>,
+/// Manages multiple repositories
+pub struct Dispatcher {
+    repos: TMap<String, RepoManagerInstance>,
 }
 
-impl<R: Repo> Clone for Dispatcher<R> {
+impl Clone for Dispatcher {
     fn clone(&self) -> Self {
-        Self {
-            repo: Arc::clone(&self.repo),
-            configs: Arc::clone(&self.configs),
-            tables: Arc::clone(&self.tables),
-        }
+        let repos: TMap<String, RepoManagerInstance> = self.repos.iter()
+            .map(|(k, v): (&String, &RepoManagerInstance)| (k.clone(), v.clone()))
+            .collect();
+        Self { repos }
     }
 }
 
-impl<R: Repo> Dispatcher<R> {
-    pub fn new(repo: Arc<R>, configs: Vec<TableConfig>) -> Self {
-        let configs_map: std::collections::HashMap<String, TableConfig> = configs
+impl Dispatcher {
+    pub fn new(repos: Vec<RepoConfig>) -> Self {
+        let instances: TMap<String, RepoManagerInstance> = repos
             .into_iter()
-            .map(|cfg| (cfg.name.clone(), cfg))
+            .map(|config| {
+                let name = config.name.clone();
+                let instance = RepoManagerInstance::new(config.repo, config.tables);
+                (name, instance)
+            })
             .collect();
 
-        let tables: dashmap::DashMap<String, OnceCell<TableContext>> = dashmap::DashMap::new();
-
         Self {
-            repo,
-            configs: Arc::new(configs_map),
-            tables: Arc::new(tables),
+            repos: instances
         }
     }
 
-    pub async fn get_table(&self, table_name: &str) -> DbResult<TableContext> {
-        if !self.configs.contains_key(table_name) {
-            return Err(DbError::NotFound(format!(
-                "Table '{}' is not configured",
-                table_name
-            )));
-        }
-
-        let cell = self.tables.entry(table_name.to_string())
-            .or_insert_with(|| OnceCell::new());
-
-        cell.get_or_try_init(|| async move {
-            self.create_table_context(table_name).await
-        }).await.map(|ctx| ctx.clone())
+    /// Add a new repository
+    pub fn add_repo(&mut self, config: RepoConfig) {
+        let instance = RepoManagerInstance::new(config.repo, config.tables);
+        self.repos.insert(config.name, instance);
     }
 
-    async fn create_table_context(&self, table_name: &str) -> DbResult<TableContext> {
-        let data_store = self.repo.store_get(format!("__data__{}", table_name)).await?;
-        let info_store = self.repo.store_get(format!("__info__{}", table_name)).await?;
+    /// Get a table from a specific repository
+    pub async fn get_table(&self, repo_name: &str, table_name: &str) -> DbResult<TableContext> {
+        let repo_manager = self.repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!(
+                "Repository '{}' not found",
+                repo_name
+            )))?;
 
-        let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
-        let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
-
-        let interner_manager = InternerManager::new(Arc::clone(&info_store));
-        let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
-
-        let interner_cell = Arc::new(OnceCell::new());
-        let index_manager = TableIndexManager::new(
-            Arc::clone(&data_store),
-            Arc::clone(&info_store),
-            interner_cell,
-        ).await?;
-
-        let table = Table::new(Arc::clone(&data_store));
-
-        Ok(TableContext::new(table_name.to_string(), table, interner_manager, counter, index_manager))
+        repo_manager.get_table(table_name).await
     }
 
-    pub fn list_table_names(&self) -> Vec<String> {
-        self.configs.keys().cloned().collect()
+    /// Get a repository manager instance
+    pub fn get_repo(&self, repo_name: &str) -> DbResult<&RepoManagerInstance> {
+        self.repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!(
+                "Repository '{}' not found",
+                repo_name
+            )))
     }
 
-    pub fn has_table(&self, table_name: &str) -> bool {
-        self.configs.contains_key(table_name)
+    /// List all repository names
+    pub fn list_repos(&self) -> Vec<String> {
+        self.repos.keys().cloned().collect()
     }
 
+    /// List all tables in a repository
+    pub fn list_tables(&self, repo_name: &str) -> DbResult<Vec<String>> {
+        let repo_manager = self.repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!(
+                "Repository '{}' not found",
+                repo_name
+            )))?;
+
+        Ok(repo_manager.list_table_names())
+    }
+
+    /// Check if a repository exists
+    pub fn has_repo(&self, repo_name: &str) -> bool {
+        self.repos.contains_key(repo_name)
+    }
+
+    /// Check if a table exists in a repository
+    pub fn has_table(&self, repo_name: &str, table_name: &str) -> bool {
+        self.repos
+            .get(repo_name)
+            .map(|repo: &RepoManagerInstance| repo.has_table(table_name))
+            .unwrap_or(false)
+    }
+
+    /// Get total number of repositories
+    pub fn repo_count(&self) -> usize {
+        self.repos.len()
+    }
+
+    /// Get total number of tables across all repositories
     pub fn table_count(&self) -> usize {
-        self.configs.len()
+        self.repos
+            .values()
+            .map(|repo: &RepoManagerInstance| repo.table_count())
+            .sum()
     }
 }

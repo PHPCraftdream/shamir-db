@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::types::value::UserValue;
 use serde::{Deserialize, Serialize};
 

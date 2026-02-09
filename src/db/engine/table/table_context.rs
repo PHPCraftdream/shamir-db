@@ -1,12 +1,11 @@
-use super::table::Table;
 use super::interner_manager::InternerManager;
 use super::record_counter::RecordCounter;
+use super::table::Table;
 use crate::db::engine::index::table_index_manager::TableIndexManager;
 use crate::db::error::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
-use futures::Stream;
 
 pub struct TableContext {
     name: String,

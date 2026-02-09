@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;

@@ -1,5 +1,7 @@
 //! Concurrent access tests for Table
 
+#![allow(deprecated)]
+
 use crate::core::transform;
 use crate::db::engine::table::Table;
 use crate::db::engine::table::interner_manager::InternerManager;

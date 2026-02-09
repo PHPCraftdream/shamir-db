@@ -2,6 +2,8 @@ use crate::db::engine::table::TableContext;
 use crate::db::engine::table::TableConfig;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::storage::types::Repo;
+use crate::db::engine::repo::RepoConfig;
+use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
 
@@ -40,9 +42,14 @@ async fn test_table_context_clone() {
     let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     use crate::db::engine::dispatcher::Dispatcher;
-    let dispatcher = Dispatcher::new(repo, configs);
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
 
-    let ctx1 = dispatcher.get_table("users").await.unwrap();
+    let ctx1 = dispatcher.get_table("default", "users").await.unwrap();
     let ctx2 = ctx1.clone();
 
     assert_eq!(ctx1.name(), ctx2.name());
@@ -54,9 +61,14 @@ async fn test_table_context_components() {
     let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     use crate::db::engine::dispatcher::Dispatcher;
-    let dispatcher = Dispatcher::new(repo, configs);
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
 
-    let ctx = dispatcher.get_table("users").await.unwrap();
+    let ctx = dispatcher.get_table("default", "users").await.unwrap();
 
     assert_eq!(ctx.name(), "users");
 

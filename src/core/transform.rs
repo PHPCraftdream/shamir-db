@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use crate::core::interner::{Interner, InternedKey, UserKey};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
