@@ -4,6 +4,7 @@ This module contains fundamental abstractions used throughout S.H.A.M.I.R.:
 
 - **Interning** (`interner.rs`) - String → u64 mapping for memory efficiency
 - **Transformations** (`transform.rs`) - UserValue ↔ InnerValue conversions
+- **Configuration** (`config.rs`) - YAML configuration loader/saver
 
 ## Interning System
 
@@ -98,6 +99,32 @@ let user_value2: UserValue = transform::inner_to_user(&inner_value, &interner);
 - **Interner Required**: Both directions require interner reference
 - **Deterministic**: Same string always gets same ID
 - **Lossless**: Round-trip preserves original values
+
+---
+
+## Configuration
+
+### Purpose
+Load and save YAML configuration files for the database.
+
+### Features
+- **Atomic writes**: Uses temp file + rename for safe updates
+- **Validation**: Ensures config correctness on load
+- **Error handling**: Context-aware errors with `anyhow`
+
+### Example
+```rust
+use shamir_db::core::config::ConfigLoader;
+
+// Load from file
+let config = ConfigLoader::load_from_file("config/database.yaml").unwrap();
+
+// Save to file (atomic write)
+ConfigLoader::save_to_file("config/database.yaml", &config).unwrap();
+
+// Validate config
+ConfigLoader::validate_config(&config).unwrap();
+```
 
 ---
 

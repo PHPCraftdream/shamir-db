@@ -35,7 +35,7 @@ where
     T: serde::Serialize,
 {
     bincode::serialize(value)
-        .map(|v| Bytes::from(v))
+        .map(Bytes::from)
         .map_err(|e| CodecError::Serialize(e.to_string()))
 }
 

@@ -176,7 +176,7 @@ impl Store for CanopyStore {
                         DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e))
                     })?;
 
-                tree.insert(&key[..], &*value)
+                tree.insert(&key[..], &value)
                     .map_err(|e| DbError::Storage(format!("CanopyDB insert: {}", e)))?;
             }
 
@@ -211,7 +211,7 @@ impl Store for CanopyStore {
                     .map_err(|e| DbError::Storage(format!("CanopyDB get: {}", e)))?
                     .is_some();
 
-                tree.insert(&key[..], &*value)
+                tree.insert(&key[..], &value)
                     .map_err(|e| DbError::Storage(format!("CanopyDB insert: {}", e)))?;
 
                 created = !existed;

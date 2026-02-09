@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 pub type RecordKey = Bytes;
 
+type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
 /// An asynchronous, key-value store trait that operates on raw bytes.
 ///
 /// This trait provides a low-level storage abstraction. It is the responsibility
@@ -41,7 +43,7 @@ pub trait Store: Send + Sync {
     /// # Returns
     /// Stream that yields DbResult<Vec<(RecordKey, Bytes)>> - each batch has exactly batch_size items
     /// (except possibly the last batch which may be smaller)
-    fn iter_stream(&self, batch_size: usize) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+    fn iter_stream(&self, batch_size: usize) -> RecordStream;
 
     /// Returns all records with keys starting with the given prefix.
     ///
@@ -73,7 +75,7 @@ pub trait Store: Send + Sync {
         &self,
         prefix: Bytes,
         batch_size: usize,
-    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+    ) -> RecordStream;
 }
 
 /// A trait for a repository that can manage multiple `Store` instances.
