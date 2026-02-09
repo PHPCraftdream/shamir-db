@@ -1,17 +1,15 @@
-use crate::db::engine::repo::{RepoConfig, BoxRepo};
+use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
+use crate::db::engine::repo::{BoxRepo, RepoConfig};
 use crate::db::engine::table::TableConfig;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use std::sync::Arc;
-use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
 
 #[tokio::test]
 async fn test_dispatcher_new() {
     let repo = Arc::new(InMemoryRepo::new());
-    let configs = vec![
-        RepoConfig::new("default", BoxRepo::InMemory(repo.clone()))
-            .add_table(TableConfig::new("users"))
-            .add_table(TableConfig::new("products").with_indexes()),
-    ];
+    let configs = vec![RepoConfig::new("default", BoxRepo::InMemory(repo.clone()))
+        .add_table(TableConfig::new("users"))
+        .add_table(TableConfig::new("products").with_indexes())];
 
     let dispatcher = Dispatcher::new(configs);
 
@@ -29,8 +27,8 @@ async fn test_dispatcher_new() {
 #[tokio::test]
 async fn test_get_table_lazy_loading() {
     let repo = Arc::new(InMemoryRepo::new());
-    let config = RepoConfig::new("default", BoxRepo::InMemory(repo))
-        .add_table(TableConfig::new("users"));
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
     let dispatcher = Dispatcher::new(vec![config]);
 
     let ctx1 = dispatcher.get_table("default", "users").await.unwrap();
@@ -39,17 +37,14 @@ async fn test_get_table_lazy_loading() {
     let ctx2 = dispatcher.get_table("default", "users").await.unwrap();
     assert_eq!(ctx2.name(), "users");
 
-    assert_eq!(
-        ctx1.name(),
-        ctx2.name()
-    );
+    assert_eq!(ctx1.name(), ctx2.name());
 }
 
 #[tokio::test]
 async fn test_get_table_not_configured() {
     let repo = Arc::new(InMemoryRepo::new());
-    let config = RepoConfig::new("default", BoxRepo::InMemory(repo))
-        .add_table(TableConfig::new("users"));
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
     let dispatcher = Dispatcher::new(vec![config]);
 
     let result = dispatcher.get_table("default", "products").await;
@@ -72,8 +67,7 @@ async fn test_multiple_repositories() {
         RepoConfig::new("repo1", BoxRepo::InMemory(repo1))
             .add_table(TableConfig::new("users"))
             .add_table(TableConfig::new("orders")),
-        RepoConfig::new("repo2", BoxRepo::InMemory(repo2))
-            .add_table(TableConfig::new("products")),
+        RepoConfig::new("repo2", BoxRepo::InMemory(repo2)).add_table(TableConfig::new("products")),
     ];
 
     let dispatcher = Dispatcher::new(configs);
@@ -116,8 +110,8 @@ async fn test_multiple_tables() {
 #[tokio::test]
 async fn test_table_context_components() {
     let repo = Arc::new(InMemoryRepo::new());
-    let config = RepoConfig::new("default", BoxRepo::InMemory(repo))
-        .add_table(TableConfig::new("users"));
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
     let dispatcher = Dispatcher::new(vec![config]);
 
     let ctx = dispatcher.get_table("default", "users").await.unwrap();
@@ -136,8 +130,8 @@ async fn test_table_context_components() {
 #[tokio::test]
 async fn test_dispatcher_clone() {
     let repo = Arc::new(InMemoryRepo::new());
-    let config = RepoConfig::new("default", BoxRepo::InMemory(repo))
-        .add_table(TableConfig::new("users"));
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
     let dispatcher1 = Dispatcher::new(vec![config]);
 
     let dispatcher2 = dispatcher1.clone();
@@ -148,7 +142,10 @@ async fn test_dispatcher_clone() {
     assert!(dispatcher2.has_table("default", "users"));
 
     let ctx1 = dispatcher1.get_table("default", "users").await.unwrap();
-    let _ = ctx1.insert(&crate::types::value::InnerValue::Int(42)).await.unwrap();
+    let _ = ctx1
+        .insert(&crate::types::value::InnerValue::Int(42))
+        .await
+        .unwrap();
 
     let ctx2 = dispatcher2.get_table("default", "users").await.unwrap();
     assert_eq!(ctx2.count().await.unwrap(), 1);
@@ -167,7 +164,10 @@ async fn test_add_repo() {
     assert_eq!(dispatcher.repo_count(), 1);
     assert!(dispatcher.has_repo("new_repo"));
 
-    let ctx = dispatcher.get_table("new_repo", "test_table").await.unwrap();
+    let ctx = dispatcher
+        .get_table("new_repo", "test_table")
+        .await
+        .unwrap();
     assert_eq!(ctx.name(), "test_table");
 }
 

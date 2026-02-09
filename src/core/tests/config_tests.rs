@@ -49,9 +49,6 @@ mod tests {
 
         let table = repo.tables.get("users").unwrap();
         assert_eq!(table.indexes.len(), 1);
-        assert_eq!(
-            table.indexes["email_idx"].paths,
-            vec!["email".to_string()]
-        );
+        assert_eq!(table.indexes["email_idx"].paths, vec!["email".to_string()]);
     }
 }
