@@ -44,6 +44,20 @@ repos:
             paths:
               - sku
 
+      orders:
+        indexes:
+          # Nested field index using dot notation
+          # Indexes email field inside user object
+          user_email_idx:
+            paths:
+              - user.email
+          # Composite index with nested and flat fields
+          user_date_idx:
+            paths:
+              - user.email
+              - order_date
+        indexes_unique: {}
+
   # Secondary repository
   analytics:
     storage_type: Fjall
