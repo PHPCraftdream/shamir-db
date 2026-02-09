@@ -1,4 +1,4 @@
-use crate::db::engine::table::interner::InternerManager;
+use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::storage::storage_in_memory::InMemoryStore;
 use crate::core::interner::UserKey;
 use crate::db::storage::types::Store;

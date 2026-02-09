@@ -1,4 +1,4 @@
-use crate::db::engine::table::counter::RecordCounter;
+use crate::db::engine::table::record_counter::RecordCounter;
 use crate::db::storage::storage_in_memory::InMemoryStore;
 use std::sync::Arc;
 

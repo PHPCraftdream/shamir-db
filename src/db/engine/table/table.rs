@@ -1,6 +1,6 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use super::counter::RecordCounter;
+use super::record_counter::RecordCounter;
 use crate::db::error::{DbError, DbResult};
 use crate::db::storage::types::{Repo, Store};
 use crate::types::record_id::RecordId;
