@@ -1,13 +1,21 @@
 #![allow(deprecated)]
 
+//! DEPRECATED: Transform functionality for UserValue <-> InnerValue conversion.
+//!
+//! **This module is deprecated.** Use the newer codec-based approach in the parent
+//! `codecs` module instead.
+
 use crate::core::interner::{InternedKey, Interner, UserKey};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
 /// The result of a `user_to_inner` transformation.
 ///
-/// This struct contains the resulting `InnerValue` and an optional collection
-/// of any string keys that were newly interned during the transformation.
+/// **Deprecated.** Use newer codec-based approach instead.
+///
+/// This struct contains a resulting `InnerValue` and an optional collection
+/// of any string keys that were newly interned during transformation.
+#[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
 #[derive(Debug)]
 pub struct TransformResult {
     pub inner_value: InnerValue,
@@ -15,18 +23,27 @@ pub struct TransformResult {
 }
 
 impl TransformResult {
-    /// Checks if any new keys were created during the transformation.
+    /// Checks if any new keys were created during transformation.
+    ///
+    /// **Deprecated.** Use newer codec-based approach instead.
     /// Returns true if `new_keys` is `Some` and not empty.
+    #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
     pub fn has_new_keys(&self) -> bool {
         self.new_keys.as_ref().is_some_and(|v| !v.is_empty())
     }
 
-    /// Consumes the result and returns its constituent parts.
+    /// Consumes result and returns its constituent parts.
+    ///
+    /// **Deprecated.** Use newer codec-based approach instead.
+    #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
     pub fn into_parts(self) -> (InnerValue, Option<Vec<(InternedKey, UserKey)>>) {
         (self.inner_value, self.new_keys)
     }
 
-    /// Consumes the result and returns just the inner value.
+    /// Consumes result and returns just the inner value.
+    ///
+    /// **Deprecated.** Use newer codec-based approach instead.
+    #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
     pub fn into_inner_value(self) -> InnerValue {
         self.inner_value
     }
@@ -79,8 +96,11 @@ fn user_to_inner_rec(
 
 /// Transforms a UserValue to an InnerValue, collecting newly interned keys.
 ///
+/// **Deprecated.** Use newer codec-based approach instead.
+///
 /// This function is optimized to avoid heap allocations for the key collection
 /// if no new keys are found.
+#[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
 pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult {
     let mut new_keys: Option<Vec<(InternedKey, UserKey)>> = None;
     let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
@@ -90,6 +110,10 @@ pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult 
     }
 }
 
+/// Transforms an InnerValue to a UserValue, resolving interned keys.
+///
+/// **Deprecated.** Use newer codec-based approach instead.
+#[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
 pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
     match value {
         Value::Nil => Value::Nil,

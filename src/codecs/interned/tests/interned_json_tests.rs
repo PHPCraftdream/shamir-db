@@ -1,4 +1,4 @@
-use crate::codecs::interned_json::{inner_to_json, json_to_inner};
+use crate::codecs::interned::{inner_to_json, json_to_inner};
 use crate::core::interner::Interner;
 use crate::types::common::new_map;
 use crate::types::value::InnerValue;

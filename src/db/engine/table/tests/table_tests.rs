@@ -2,7 +2,7 @@
 
 #![allow(deprecated)]
 
-use crate::core::transform;
+use crate::codecs::transform;
 use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::engine::table::record_counter::RecordCounter;
 use crate::db::engine::table::Table;
