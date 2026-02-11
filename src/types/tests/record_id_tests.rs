@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::codecs::bytes;
+    use crate::codecs::basic::bincode;
     use crate::types::record_id::RecordId;
     use std::collections::HashSet;
     use std::thread;
@@ -62,16 +62,16 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         let id = RecordId::new();
-        let bytes = bytes::to_bytes(&id).unwrap();
-        let deserialized: RecordId = bytes::from_bytes(&bytes).unwrap();
+        let bytes = bincode::to_bytes(&id).unwrap();
+        let deserialized: RecordId = bincode::from_bytes(&bytes).unwrap();
         assert_eq!(id, deserialized);
     }
 
     #[test]
     fn test_bincode_roundtrip() {
         let id = RecordId::new();
-        let bytes = bytes::to_bytes(&id).unwrap();
-        let id2 = bytes::from_bytes::<RecordId>(&bytes).unwrap();
+        let bytes = bincode::to_bytes(&id).unwrap();
+        let id2 = bincode::from_bytes::<RecordId>(&bytes).unwrap();
         assert_eq!(id2.0, id.0);
     }
 }

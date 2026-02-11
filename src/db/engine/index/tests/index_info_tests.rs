@@ -1,4 +1,4 @@
-use crate::codecs::bytes;
+use crate::codecs::basic::bincode;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info::IndexInfo;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
@@ -66,8 +66,8 @@ fn test_serialization() {
     let target = IndexInfo::from_definitions(vec![index_def]);
     target.mark_pending();
 
-    let serialized = bincode::serialize(&target).unwrap();
-    let deserialized: IndexInfo = bincode::deserialize(&serialized).unwrap();
+    let serialized = bincode::to_bytes(&target).unwrap();
+    let deserialized: IndexInfo = bincode::from_bytes(&serialized).unwrap();
 
     // PartialEq compares indexes only
     assert_eq!(deserialized, target);
@@ -81,8 +81,8 @@ fn test_roundtrip() {
     let target = IndexInfo::from_definitions(vec![index_def]);
     target.mark_pending();
 
-    let bytes = bytes::to_bytes(&target).unwrap();
-    let deserialized: IndexInfo = bytes::from_bytes(&bytes).unwrap();
+    let bytes = bincode::to_bytes(&target).unwrap();
+    let deserialized: IndexInfo = bincode::from_bytes(&bytes).unwrap();
 
     // Indexes should be preserved
     assert_eq!(deserialized, target);
@@ -100,8 +100,8 @@ fn test_zero_copy() {
     );
     let target = IndexInfo::from_definitions(vec![index_def]);
 
-    let bytes = bytes::to_bytes(&target).unwrap();
-    let info2 = bytes::from_bytes::<IndexInfo>(&bytes).unwrap();
+    let bytes = bincode::to_bytes(&target).unwrap();
+    let info2 = bincode::from_bytes::<IndexInfo>(&bytes).unwrap();
 
     // Can access indexes without allocation - IndexInfo PartialEq compares indexes
     assert_eq!(info2, target);

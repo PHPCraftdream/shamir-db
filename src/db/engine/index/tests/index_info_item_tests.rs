@@ -1,4 +1,4 @@
-use crate::codecs::bytes;
+use crate::codecs::basic::bincode;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
 
 #[test]
@@ -13,8 +13,8 @@ fn test_index_info_item_bincode() {
         path: vec![1, 2, 3],
     };
 
-    let serialized = bincode::serialize(&item).unwrap();
-    let deserialized: IndexInfoItem = bincode::deserialize(&serialized).unwrap();
+    let serialized = bincode::to_bytes(&item).unwrap();
+    let deserialized: IndexInfoItem = bincode::from_bytes(&serialized).unwrap();
 
     assert_eq!(deserialized, item);
 }
@@ -25,8 +25,8 @@ fn test_index_info_item_roundtrip() {
         path: vec![1, 2, 3, 4, 5],
     };
 
-    let bytes = bytes::to_bytes(&item).unwrap();
-    let deserialized: IndexInfoItem = bytes::from_bytes(&bytes).unwrap();
+    let bytes = bincode::to_bytes(&item).unwrap();
+    let deserialized: IndexInfoItem = bincode::from_bytes(&bytes).unwrap();
     assert_eq!(deserialized, item);
 }
 
@@ -36,7 +36,7 @@ fn test_index_info_item_zero_copy() {
         path: vec![10, 20, 30],
     };
 
-    let bytes = bytes::to_bytes(&item).unwrap();
-    let item2 = bytes::from_bytes::<IndexInfoItem>(&bytes).unwrap();
+    let bytes = bincode::to_bytes(&item).unwrap();
+    let item2 = bincode::from_bytes::<IndexInfoItem>(&bytes).unwrap();
     assert_eq!(&item2.path[..], &[10, 20, 30]);
 }

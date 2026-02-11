@@ -1,10 +1,9 @@
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
-pub mod bytes;
+pub mod basic;
 pub mod interned;
-pub mod json;
-pub mod message_pack;
+pub mod legacy;
 pub mod transform;
 
 #[cfg(test)]
@@ -28,3 +27,9 @@ pub trait Codec<T: Serialize + DeserializeOwned> {
     /// Decodes a byte slice into a value of type `T`.
     fn decode(&self, bytes: &[u8]) -> Result<T, CodecError>;
 }
+
+// Re-export basic codecs for convenience
+pub use basic::{from_bytes, to_bytes, JsonCodec, MessagePackCodec};
+
+// Re-export interned codecs for convenience
+pub use interned::{CodecFormat, InternedCodec, JsonInternedCodec, MsgPackInternedCodec};

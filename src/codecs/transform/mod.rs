@@ -6,6 +6,6 @@
 #![allow(deprecated)]
 
 pub mod tests;
-pub mod transform_tools;
 
-pub use transform_tools::{inner_to_user, user_to_inner, TransformResult};
+// Re-export from legacy tools
+pub use crate::codecs::legacy::tools::{inner_to_user, user_to_inner, TransformResult};

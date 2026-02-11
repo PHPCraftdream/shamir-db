@@ -1,2 +1,1 @@
-#[cfg(test)]
-pub mod transform_tools_tests;
+// Tests are in legacy/tests/tools_tests.rs

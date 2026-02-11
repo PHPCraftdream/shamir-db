@@ -1,6 +1,6 @@
 //! Record counter for tracking number of records in a table
 
-use crate::codecs::bytes;
+use crate::codecs::basic::bincode;
 use crate::db::storage::types::Store;
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
@@ -35,7 +35,7 @@ impl RecordCounter {
         let key_bytes = count_key().to_bytes();
         match self.info_store.get(key_bytes).await {
             Ok(bytes) => {
-                let count: u64 = bytes::from_bytes(&bytes)
+                let count: u64 = bincode::from_bytes(&bytes)
                     .map_err(|e| DbError::Codec(format!("Failed to deserialize count: {}", e)))?;
                 Ok(count)
             }
@@ -47,7 +47,7 @@ impl RecordCounter {
     /// Set record count (useful for initialization or manual correction)
     pub async fn set(&self, count: u64) -> DbResult<()> {
         let key_bytes = count_key().to_bytes();
-        let bytes = bytes::to_bytes(&count)
+        let bytes = bincode::to_bytes(&count)
             .map_err(|e| DbError::Codec(format!("Failed to serialize count: {}", e)))?;
         self.info_store.set(key_bytes, bytes).await?;
         Ok(())
