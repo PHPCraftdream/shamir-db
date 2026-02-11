@@ -355,10 +355,10 @@ mod tests {
     fn test_bytes_serialization_roundtrip() {
         let mut map = new_map();
         map.insert(
-            InternedKey::from_str("2m"),
+            InternedKey::new(42, 1), // id=42, 1 byte
             InnerValue::Str("hello".to_string()),
         );
-        map.insert(InternedKey::from_str("4P"), InnerValue::Int(99));
+        map.insert(InternedKey::new(255, 1), InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
         let bytes = value.to_bytes();
@@ -611,14 +611,14 @@ mod tests {
     fn test_inner_value_with_numeric_keys() {
         let mut map = new_map();
         map.insert(
-            InternedKey::from_str("2"),
+            InternedKey::new(1, 1), // Small ID, 1 byte
             InnerValue::Str("zero".to_string()),
         );
         map.insert(
-            InternedKey::from_str("zzzzzzzzzz"),
+            InternedKey::new(1000, 2), // Medium ID, 2 bytes
             InnerValue::Str("max".to_string()),
         );
-        map.insert(InternedKey::from_str("4P"), InnerValue::Int(42));
+        map.insert(InternedKey::new(42, 1), InnerValue::Int(42));
 
         let value = InnerValue::Map(map);
         let bytes = value.to_bytes();

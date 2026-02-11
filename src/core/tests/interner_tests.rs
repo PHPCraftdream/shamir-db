@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests {
     use crate::core::interner::{InternedKey, Interner, TouchInd, UserKey};
-    use crate::types::string_int58::StringInt58;
     use std::sync::Arc;
     use std::thread;
 
@@ -16,50 +15,77 @@ mod tests {
         assert!(id2.is_new());
         assert!(!id3.is_new());
 
-        assert_eq!(id1.as_ref(), "2"); // First ID
-        assert_eq!(id2.as_ref(), "3");
-        assert_eq!(id3.as_ref(), "2"); // Same as id1
+        // IDs are now 1, 2, 1 (starting from 1, not 0)
+        assert_eq!(id1.key().id(), 1);
+        assert_eq!(id2.key().id(), 2);
+        assert_eq!(id3.key().id(), 1); // Same as id1
 
         assert_eq!(
-            interner.get_str(&InternedKey::from_str("2")),
+            interner.get_str(&InternedKey::new(1, 1)),
             Some(UserKey::from_str("hello"))
         );
         assert_eq!(
-            interner.get_str(&InternedKey::from_str("3")),
+            interner.get_str(&InternedKey::new(2, 1)),
             Some(UserKey::from_str("world"))
         );
-        assert_eq!(interner.get_ind("world"), Some(InternedKey::from_str("3")));
+        assert_eq!(interner.get_ind("world"), Some(InternedKey::new(2, 1)));
     }
 
     #[test]
     fn test_with_state_initialization() {
         let initial_data = vec![
-            (InternedKey::from_str("11"), UserKey::from_str("name")),
-            (InternedKey::from_str("111"), UserKey::from_str("age")),
-            (InternedKey::from_str("2111"), UserKey::from_str("city")),
+            (InternedKey::new(1, 1), UserKey::from_str("name")),
+            (InternedKey::new(50, 1), UserKey::from_str("age")),
+            (InternedKey::new(100, 1), UserKey::from_str("city")),
         ];
         let interner = Interner::with_state(initial_data);
 
         // Check that initial data is loaded correctly
-        assert_eq!(interner.get_ind("name"), Some(InternedKey::from_str("11")));
+        assert_eq!(interner.get_ind("name"), Some(InternedKey::new(1, 1)));
         assert_eq!(
-            interner.get_str(&InternedKey::from_str("111")),
+            interner.get_str(&InternedKey::new(50, 1)),
             Some(UserKey::from_str("age"))
         );
-        assert_eq!(
-            interner.get_ind("city"),
-            Some(InternedKey::from_str("2111"))
-        );
+        assert_eq!(interner.get_ind("city"), Some(InternedKey::new(100, 1)));
 
         // Check that touching an existing key returns correct ID
         let touch_existing = interner.touch_ind("name").unwrap();
         assert!(!touch_existing.is_new());
-        assert_eq!(touch_existing.as_ref(), "11");
+        assert_eq!(touch_existing.key().id(), 1);
 
         // Check that next ID is correctly assigned
         let next_id = interner.touch_ind("new_key").unwrap();
         assert!(next_id.is_new());
-        assert!(next_id.as_ref().len() >= 1);
+        assert_eq!(next_id.key().id(), 101);
+    }
+
+    #[test]
+    fn test_key_size_growth() {
+        let interner = Interner::new();
+
+        // Start with 1-byte keys
+        assert_eq!(interner.key_size(), 1);
+
+        // Add 255 keys (max for u8)
+        for i in 0..255 {
+            interner.touch_ind(format!("key_{}", i)).unwrap();
+        }
+
+        assert_eq!(interner.key_size(), 1);
+
+        // Add 256th key - should migrate to 2-byte keys
+        interner.touch_ind("key_255").unwrap();
+        assert_eq!(interner.key_size(), 2);
+
+        // Verify we can still access old keys
+        assert!(interner.get_ind("key_0").is_some());
+        assert!(interner.get_ind("key_255").is_some());
+
+        // Add more keys to trigger 4-byte migration
+        for i in 256..65536 {
+            interner.touch_ind(format!("key_{}", i)).unwrap();
+        }
+        assert_eq!(interner.key_size(), 4);
     }
 
     #[test]
@@ -84,15 +110,15 @@ mod tests {
         // across all threads (though not necessarily in insertion order)
         let first_result = &results[0];
         for i in 1..results.len() {
-            let id_map_1: std::collections::HashMap<&str, &str> = first_result
+            let id_map_1: std::collections::HashMap<&str, u64> = first_result
                 .iter()
                 .zip(keys.iter())
-                .map(|(result, key)| (*key, result.as_ref()))
+                .map(|(result, key)| (*key, result.key().id()))
                 .collect();
-            let id_map_2: std::collections::HashMap<&str, &str> = results[i]
+            let id_map_2: std::collections::HashMap<&str, u64> = results[i]
                 .iter()
                 .zip(keys.iter())
-                .map(|(result, key)| (*key, result.as_ref()))
+                .map(|(result, key)| (*key, result.key().id()))
                 .collect();
 
             // Verify that same keys got same IDs
@@ -170,7 +196,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for _ in 0..100 {
                     let _ = interner_clone.get_ind("write_0_0");
-                    let _ = interner_clone.get_str(&InternedKey::from_str("2"));
+                    let _ = interner_clone.get_str(&InternedKey::new(1, 1));
                     let _ = interner_clone.get_ind("nonexistent");
                 }
             }));
@@ -196,16 +222,16 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut ids = vec![];
                 for key in &["shared1", "shared2", "shared3", "shared1", "shared2"] {
-                    ids.push(interner_clone.touch_ind(key).unwrap().as_ref().to_string());
+                    ids.push(interner_clone.touch_ind(key).unwrap().key().id());
                 }
                 ids
             }));
         }
 
-        let results: Vec<Vec<String>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let results: Vec<Vec<u64>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All threads should get same IDs for same keys
-        let expected = vec!["2", "3", "4", "2", "3"];
+        let expected = vec![1, 2, 3, 1, 2];
         for result in results {
             assert_eq!(result, expected);
         }
@@ -241,7 +267,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for (id, expected_key) in id_lookup_clone {
                     let key = interner_clone.get_str(&id);
-                    assert!(key.is_some(), "Failed to look up ID: {}", id.as_str());
+                    assert!(key.is_some(), "Failed to look up ID: {:?}", id.as_bytes());
                     assert_eq!(key, Some(UserKey::from_str(expected_key)));
                 }
             }));
@@ -270,10 +296,7 @@ mod tests {
                     // Immediately verify with get_ind
                     let get_result = interner_clone.get_ind(&key);
 
-                    assert_eq!(
-                        Some(touch_result.as_ref()),
-                        get_result.as_ref().map(|k| k.as_str())
-                    );
+                    assert_eq!(Some(touch_result.key().id()), get_result.map(|k| k.id()));
 
                     // Also verify reverse lookup
                     let reverse = interner_clone.get_str(touch_result.key());
@@ -296,10 +319,10 @@ mod tests {
 
         // Empty string
         let id1 = interner.touch_ind("").unwrap();
-        assert_eq!(id1.as_ref(), "2");
-        assert_eq!(interner.get_ind(""), Some(InternedKey::from_str("2")));
+        assert_eq!(id1.key().id(), 1);
+        assert_eq!(interner.get_ind(""), Some(InternedKey::new(1, 1)));
         assert_eq!(
-            interner.get_str(&InternedKey::from_str("2")),
+            interner.get_str(&InternedKey::new(1, 1)),
             Some(UserKey::from_str(""))
         );
 
@@ -311,17 +334,14 @@ mod tests {
         }
 
         // Verify unicode keys work
-        assert_eq!(interner.get_ind("привет"), Some(InternedKey::from_str("3")));
-        assert_eq!(interner.get_ind("🚀🎉🔥"), Some(InternedKey::from_str("4")));
-        assert_eq!(interner.get_ind("مرحبا"), Some(InternedKey::from_str("5")));
+        assert_eq!(interner.get_ind("привет"), Some(InternedKey::new(2, 1)));
+        assert_eq!(interner.get_ind("🚀🎉🔥"), Some(InternedKey::new(3, 1)));
+        assert_eq!(interner.get_ind("مرحبا"), Some(InternedKey::new(4, 1)));
         assert_eq!(
-            interner.get_str(&InternedKey::from_str("6")),
+            interner.get_str(&InternedKey::new(5, 1)),
             Some(UserKey::from_str("مرحبا2"))
         );
-        assert_eq!(
-            interner.get_ind("😀😃😄😁"),
-            Some(InternedKey::from_str("7"))
-        );
+        assert_eq!(interner.get_ind("😀😃😄😁"), Some(InternedKey::new(6, 1)));
     }
 
     #[test]
@@ -331,13 +351,10 @@ mod tests {
         // Very long key (10KB)
         let long_key = "a".repeat(10_000);
         let id = interner.touch_ind(&long_key).unwrap();
-        assert_eq!(id.as_ref(), "2");
+        assert_eq!(id.key().id(), 1);
+        assert_eq!(interner.get_ind(&long_key), Some(InternedKey::new(1, 1)));
         assert_eq!(
-            interner.get_ind(&long_key),
-            Some(InternedKey::from_str("2"))
-        );
-        assert_eq!(
-            interner.get_str(&InternedKey::from_str("2")),
+            interner.get_str(&InternedKey::new(1, 1)),
             Some(UserKey::from_str(long_key.clone()))
         );
     }
@@ -347,7 +364,7 @@ mod tests {
         let initial_data: Vec<(InternedKey, UserKey)> = (0..100)
             .map(|i| {
                 (
-                    InternedKey::from_str(format!("{}", i + 2)),
+                    InternedKey::new(i + 1, 1),
                     UserKey::from_str(format!("initial_{}", i)),
                 )
             })
@@ -373,18 +390,17 @@ mod tests {
 
         // Initial 100 + 20*50 new = 1100
         assert_eq!(interner.len(), 1100);
+        // At 1100 keys, we should have migrated to 2-byte keys
+        assert_eq!(interner.key_size(), 2);
 
-        // Verify initial data still accessible
-        assert_eq!(
-            interner.get_ind("initial_0"),
-            Some(InternedKey::from_str("2"))
-        );
+        // Verify initial data still accessible (now with 2-byte keys)
+        assert_eq!(interner.get_ind("initial_0"), Some(InternedKey::new(1, 2)));
         assert_eq!(
             interner.get_ind("initial_99"),
-            Some(InternedKey::from_str("101"))
+            Some(InternedKey::new(100, 2))
         );
         assert_eq!(
-            interner.get_str(&InternedKey::from_str("2")),
+            interner.get_str(&InternedKey::new(1, 2)),
             Some(UserKey::from_str("initial_0"))
         );
     }
@@ -402,39 +418,24 @@ mod tests {
     }
 
     #[test]
-    fn test_base58_generator() {
-        let interner = Interner::new();
+    fn test_interned_key_serialization() {
+        // Test that InternedKey serializes/deserializes correctly
+        let key1 = InternedKey::new(42, 1);
+        let bytes1 = rmp_serde::to_vec(&key1).unwrap();
+        let decoded1: InternedKey = rmp_serde::from_slice(&bytes1).unwrap();
+        assert_eq!(key1.id(), decoded1.id());
+        assert_eq!(key1.as_bytes(), decoded1.as_bytes());
 
-        // Test current and next base58
-        assert_eq!(interner.current_base58(), "1");
-        assert_eq!(interner.next_base58(), "2");
-        assert_eq!(interner.next_base58(), "3");
-        assert_eq!(interner.current_base58(), "3");
+        let key2 = InternedKey::new(1000, 2);
+        let bytes2 = rmp_serde::to_vec(&key2).unwrap();
+        let decoded2: InternedKey = rmp_serde::from_slice(&bytes2).unwrap();
+        assert_eq!(key2.id(), decoded2.id());
+        assert_eq!(key2.as_bytes(), decoded2.as_bytes());
 
-        // Test multiple increments - from "3" to "z" (57 total positions, "3" is at index 2)
-        for _ in 0..55 {
-            interner.next_base58();
-        }
-        assert_eq!(interner.current_base58(), "z");
-        assert_eq!(interner.next_base58(), "21");
-    }
-
-    #[test]
-    fn test_base58_sequence() {
-        let interner = Interner::new();
-
-        // Generate a sequence of base58 IDs
-        let mut expected = StringInt58::new();
-
-        // First call to next_base58 should increment to "2"
-        assert_eq!(interner.next_base58(), "2");
-        expected.increment();
-        assert_eq!(expected.as_str(), "2");
-
-        for _ in 0..100 {
-            expected.increment();
-            let actual = interner.next_base58();
-            assert_eq!(actual, expected.as_str());
-        }
+        let key3 = InternedKey::new(100000, 4);
+        let bytes3 = rmp_serde::to_vec(&key3).unwrap();
+        let decoded3: InternedKey = rmp_serde::from_slice(&bytes3).unwrap();
+        assert_eq!(key3.id(), decoded3.id());
+        assert_eq!(key3.as_bytes(), decoded3.as_bytes());
     }
 }
