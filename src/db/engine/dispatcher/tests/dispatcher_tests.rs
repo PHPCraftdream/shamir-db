@@ -1,4 +1,4 @@
-use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
+use crate::db::engine::dispatcher::dispatcher::Dispatcher;
 use crate::db::engine::repo::{BoxRepo, RepoConfig};
 use crate::db::engine::table::TableConfig;
 use crate::db::storage::storage_in_memory::InMemoryRepo;

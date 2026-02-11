@@ -1,4 +1,4 @@
 #[cfg(test)]
 pub mod tests;
 
-pub mod dispatcher_impl;
+pub mod dispatcher;
