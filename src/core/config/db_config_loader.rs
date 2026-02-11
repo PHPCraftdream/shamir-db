@@ -1,4 +1,4 @@
-use crate::core::db_config::DbConfig;
+use crate::core::config::db_config::DbConfig;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
