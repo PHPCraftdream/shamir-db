@@ -85,7 +85,7 @@ impl InternerManager {
         };
 
         // Add new keys
-        current.extend_from_slice(new_keys);
+        current.extend_from_slice(&new_keys);
 
         // Serialize and save
         let bytes = bytes::to_bytes(&current).map_err(|e| {
