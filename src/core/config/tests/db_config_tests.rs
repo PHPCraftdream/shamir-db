@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::core::db_config::{DbConfig, DbRepoConfig, DbTableConfig, IndexConfig, StorageType};
+    use crate::core::config::db_config::{
+        DbConfig, DbRepoConfig, DbTableConfig, IndexConfig, StorageType,
+    };
     use crate::types::common::new_map;
 
     #[test]
