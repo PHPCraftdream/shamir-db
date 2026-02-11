@@ -3,10 +3,9 @@ use thiserror::Error;
 
 pub mod bytes;
 pub mod interned;
-pub mod interned_json;
-pub mod interned_msgpack;
 pub mod json;
 pub mod message_pack;
+pub mod transform;
 
 #[cfg(test)]
 pub mod tests;

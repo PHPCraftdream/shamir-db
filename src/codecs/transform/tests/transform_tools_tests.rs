@@ -1,11 +1,9 @@
-#![allow(deprecated)]
-
 #[cfg(test)]
 mod tests {
+    use crate::codecs::transform::transform_tools::{inner_to_user, user_to_inner};
     use crate::codecs::Codec;
     use crate::core::interner::Interner;
     use crate::core::interner::{InternedKey, UserKey};
-    use crate::core::transform::{inner_to_user, user_to_inner};
     use crate::types::common::{new_map, new_set};
     use crate::types::value::{InnerValue, UserValue};
     use num_bigint::BigInt;
