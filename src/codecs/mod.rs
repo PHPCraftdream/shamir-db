@@ -4,10 +4,11 @@ use thiserror::Error;
 pub mod basic;
 pub mod interned;
 pub mod legacy;
-pub mod transform;
-
 #[cfg(test)]
 pub mod tests;
+
+// Re-export transform functionality from legacy for backwards compatibility
+pub use legacy::tools as transform;
 
 #[derive(Error, Debug)]
 pub enum CodecError {
