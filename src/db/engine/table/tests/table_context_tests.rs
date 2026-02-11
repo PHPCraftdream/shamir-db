@@ -1,4 +1,4 @@
-use crate::db::engine::dispatcher::dispatcher_impl::Dispatcher;
+use crate::db::engine::dispatcher::dispatcher::Dispatcher;
 use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
