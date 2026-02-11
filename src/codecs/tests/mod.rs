@@ -1,3 +1,1 @@
-pub mod bytes_tests;
-pub mod json_tests;
-pub mod message_pack_tests;
+// No tests at this level - tests are in submodules

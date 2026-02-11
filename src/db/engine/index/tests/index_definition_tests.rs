@@ -1,4 +1,4 @@
-use crate::codecs::bytes;
+use crate::codecs::basic::bincode;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
 
@@ -12,8 +12,8 @@ fn test_index_definition_creation() {
 #[test]
 fn test_index_definition_bincode() {
     let def = IndexDefinition::new("by_name", vec![IndexInfoItem::new(vec![1, 2])]);
-    let serialized = bincode::serialize(&def).unwrap();
-    let deserialized: IndexDefinition = bincode::deserialize(&serialized).unwrap();
+    let serialized = bincode::to_bytes(&def).unwrap();
+    let deserialized: IndexDefinition = bincode::from_bytes(&serialized).unwrap();
     assert_eq!(def, deserialized);
 }
 
@@ -27,8 +27,8 @@ fn test_index_definition_roundtrip() {
         ],
     );
 
-    let bytes = bytes::to_bytes(&def).unwrap();
-    let deserialized: IndexDefinition = bytes::from_bytes(&bytes).unwrap();
+    let bytes = bincode::to_bytes(&def).unwrap();
+    let deserialized: IndexDefinition = bincode::from_bytes(&bytes).unwrap();
     assert_eq!(def, deserialized);
 }
 
@@ -36,8 +36,8 @@ fn test_index_definition_roundtrip() {
 fn test_index_definition_zero_copy() {
     let def = IndexDefinition::new("test_index", vec![IndexInfoItem::new(vec![10, 20, 30])]);
 
-    let bytes = bytes::to_bytes(&def).unwrap();
-    let def2 = bytes::from_bytes::<IndexDefinition>(&bytes).unwrap();
+    let bytes = bincode::to_bytes(&def).unwrap();
+    let def2 = bincode::from_bytes::<IndexDefinition>(&bytes).unwrap();
     assert_eq!(def2.name, "test_index");
     assert_eq!(def2.paths.len(), 1);
     assert_eq!(&def2.paths[0].path[..], &[10, 20, 30]);

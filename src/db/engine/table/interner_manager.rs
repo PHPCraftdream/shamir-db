@@ -1,6 +1,6 @@
 //! Interner manager for lazy loading and persistence
 
-use crate::codecs::bytes;
+use crate::codecs::basic::bincode;
 use crate::core::interner::{InternedKey, Interner, UserKey};
 use crate::db::storage::types::Store;
 use crate::db::DbResult;
@@ -53,7 +53,7 @@ impl InternerManager {
 
                 if let Ok(bytes) = inter_data {
                     // Deserialize
-                    let data: Vec<(InternedKey, UserKey)> = bytes::from_bytes(&bytes)
+                    let data: Vec<(InternedKey, UserKey)> = bincode::from_bytes(&bytes)
                         .unwrap_or_else(|e| {
                             log::error!("Failed to deserialize interner: {}", e);
                             Vec::new()
@@ -79,7 +79,7 @@ impl InternerManager {
         let internals_id = RecordId::system("internals");
         let existing = self.info_store.get(internals_id.to_bytes()).await;
         let mut current: Vec<(InternedKey, UserKey)> = if let Ok(bytes) = existing {
-            bytes::from_bytes(&bytes).unwrap_or_default()
+            bincode::from_bytes(&bytes).unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -88,7 +88,7 @@ impl InternerManager {
         current.extend_from_slice(new_keys);
 
         // Serialize and save
-        let bytes = bytes::to_bytes(&current).map_err(|e| {
+        let bytes = bincode::to_bytes(&current).map_err(|e| {
             crate::db::DbError::Codec(format!("Failed to serialize interner: {}", e))
         })?;
 

@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
-use crate::codecs::json::JsonCodec;
-use crate::codecs::message_pack::MessagePackCodec;
+use crate::codecs::basic::json::JsonCodec;
+use crate::codecs::basic::messagepack::MessagePackCodec;
 use crate::codecs::Codec;
 use crate::types::common::{new_map, new_set, TSet};
 use crate::types::value::UserValue;

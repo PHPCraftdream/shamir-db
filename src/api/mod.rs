@@ -43,7 +43,8 @@ pub struct Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::{message_pack::MessagePackCodec, Codec};
+    use crate::codecs::basic::MessagePackCodec;
+    use crate::codecs::Codec;
     use crate::types::common::new_map;
 
     #[test]
