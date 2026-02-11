@@ -3,7 +3,7 @@
 //! This module provides MessagePack encoding/decoding directly to/from InnerValue
 //! without using UserValue (which is deprecated and for tests only).
 
-use crate::codecs::interned::common::deintern_key;
+use crate::codecs::interned::common::{deintern_key, intern_string_key};
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::new_map;
@@ -87,8 +87,7 @@ fn rmpv_value_to_inner(
                 };
 
                 // Intern the key
-                let interned_key =
-                    crate::codecs::interned::common::intern_string_key(interner, &key_str)?;
+                let interned_key = intern_string_key(interner, &key_str)?;
 
                 // Convert value
                 let converted_val = rmpv_value_to_inner(val, interner)?;
