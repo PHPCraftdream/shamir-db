@@ -3,6 +3,7 @@
 //! This module provides MessagePack encoding/decoding directly to/from InnerValue
 //! without using UserValue (which is deprecated and for tests only).
 
+use crate::codecs::interned::common::deintern_key;
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::new_map;
@@ -86,11 +87,8 @@ fn rmpv_value_to_inner(
                 };
 
                 // Intern the key
-                let interned_key = interner
-                    .touch_ind(&key_str)
-                    .map_err(|e| CodecError::Decode(format!("Failed to intern key: {}", e)))?
-                    .key()
-                    .clone();
+                let interned_key =
+                    crate::codecs::interned::common::intern_string_key(interner, &key_str)?;
 
                 // Convert value
                 let converted_val = rmpv_value_to_inner(val, interner)?;
@@ -126,11 +124,7 @@ fn inner_to_rmpv_value(value: &InnerValue, interner: &Interner) -> RmpvValue {
         Value::Map(m) => {
             let mut map = Vec::new();
             for (interned_key, val) in m {
-                let key_str = interner
-                    .get_str(interned_key)
-                    .expect("Interned key not found in interner")
-                    .as_ref()
-                    .to_string();
+                let key_str = deintern_key(interner, interned_key);
                 let key = RmpvValue::String(key_str.into());
                 let rmpv_val = inner_to_rmpv_value(val, interner);
                 map.push((key, rmpv_val));

@@ -3,6 +3,7 @@
 //! This module provides JSON encoding/decoding directly to/from InnerValue
 //! without using UserValue (which is deprecated and for tests only).
 
+use crate::codecs::interned::common::{deintern_key, intern_string_key};
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::new_map;
@@ -71,11 +72,7 @@ fn json_value_to_inner(
         json::Value::Object(obj) => {
             let mut converted = new_map();
             for (key_str, val) in obj {
-                let interned_key = interner
-                    .touch_ind(key_str)
-                    .map_err(|e| CodecError::Decode(format!("Failed to intern key: {}", e)))?
-                    .key()
-                    .clone();
+                let interned_key = intern_string_key(interner, key_str)?;
                 let converted_val = json_value_to_inner(val, interner)?;
                 converted.insert(interned_key, converted_val);
             }
@@ -123,11 +120,7 @@ fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
         Value::Map(m) => {
             let mut obj = json::Map::new();
             for (interned_key, val) in m {
-                let key_str = interner
-                    .get_str(interned_key)
-                    .expect("Interned key not found in interner")
-                    .as_ref()
-                    .to_string();
+                let key_str = deintern_key(interner, interned_key);
                 obj.insert(key_str, inner_to_json_value(val, interner));
             }
             json::Value::Object(obj)
