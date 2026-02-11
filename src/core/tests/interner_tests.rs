@@ -438,4 +438,137 @@ mod tests {
         assert_eq!(key3.id(), decoded3.id());
         assert_eq!(key3.as_bytes(), decoded3.as_bytes());
     }
+
+    #[test]
+    fn test_interned_key_compact_messagepack_serialization() {
+        // Test that InternedKey serializes compactly in MessagePack (not as full u64)
+        println!("=== Testing InternedKey compact MessagePack serialization ===\n");
+
+        // Create keys with different sizes
+        let key_u8 = InternedKey::new(42, 1);
+        let key_u16 = InternedKey::new(1000, 2);
+        let key_u32 = InternedKey::new(70000, 4);
+        let key_u64 = InternedKey::new(5000000000, 8);
+
+        println!("Raw key sizes:");
+        println!("  U8: {} bytes", key_u8.as_bytes().len());
+        println!("  U16: {} bytes", key_u16.as_bytes().len());
+        println!("  U32: {} bytes", key_u32.as_bytes().len());
+        println!("  U64: {} bytes", key_u64.as_bytes().len());
+        println!();
+
+        // Serialize to MessagePack
+        let bytes_u8 = rmp_serde::to_vec(&key_u8).expect("Failed to serialize");
+        let bytes_u16 = rmp_serde::to_vec(&key_u16).expect("Failed to serialize");
+        let bytes_u32 = rmp_serde::to_vec(&key_u32).expect("Failed to serialize");
+        let bytes_u64 = rmp_serde::to_vec(&key_u64).expect("Failed to serialize");
+
+        println!("MessagePack serialized sizes:");
+        println!("  U8: {} bytes - {:?}", bytes_u8.len(), bytes_u8);
+        println!("  U16: {} bytes - {:?}", bytes_u16.len(), bytes_u16);
+        println!("  U32: {} bytes - {:?}", bytes_u32.len(), bytes_u32);
+        println!("  U64: {} bytes - {:?}", bytes_u64.len(), bytes_u64);
+        println!();
+
+        // MessagePack bin8 format: 0xC4 (marker) + 1 byte length + data
+        // U8 (1 byte data): 0xC4 + 0x01 + 0x2A = 3 bytes
+        // U16 (2 bytes data): 0xC4 + 0x02 + data = 4 bytes
+        // U32 (4 bytes data): 0xC4 + 0x04 + data = 6 bytes
+        // U64 (8 bytes data): 0xC4 + 0x08 + data = 10 bytes
+
+        assert_eq!(
+            bytes_u8.len(),
+            3,
+            "U8 key should be 3 bytes (1 marker + 1 len + 1 data)"
+        );
+        assert_eq!(
+            bytes_u16.len(),
+            4,
+            "U16 key should be 4 bytes (1 marker + 1 len + 2 data)"
+        );
+        assert_eq!(
+            bytes_u32.len(),
+            6,
+            "U32 key should be 6 bytes (1 marker + 1 len + 4 data)"
+        );
+        assert_eq!(
+            bytes_u64.len(),
+            10,
+            "U64 key should be 10 bytes (1 marker + 1 len + 8 data)"
+        );
+
+        // Test round-trip
+        let recovered: InternedKey =
+            rmp_serde::from_slice(&bytes_u8).expect("Failed to deserialize");
+        assert_eq!(recovered.id(), 42, "Recovered ID should be 42");
+        assert_eq!(recovered.as_bytes().len(), 1, "Recovered should be 1 byte");
+
+        println!("✓ PASS: InternedKey serializes COMPACTLY!");
+        println!("✓ 1-byte ID = 3 bytes (MessagePack overhead + 1 byte data)");
+        println!("✓ 8-byte ID = 10 bytes (MessagePack overhead + 8 bytes data)");
+    }
+
+    #[test]
+    fn test_map_with_interned_keys_compact() {
+        use crate::types::value::InnerValue;
+
+        println!("\n=== Testing Map<InternedKey, InnerValue> compact serialization ===\n");
+
+        // Create a map with InternedKey keys
+        let mut map = crate::types::common::new_map_wc::<InternedKey, InnerValue>(3);
+        let key1 = InternedKey::new(1, 1); // 1 byte
+        let key2 = InternedKey::new(2, 1); // 1 byte
+        let key3 = InternedKey::new(1000, 2); // 2 bytes
+
+        map.insert(key1.clone(), InnerValue::Int(42));
+        map.insert(key2.clone(), InnerValue::Int(100));
+        map.insert(key3.clone(), InnerValue::Str("hello".to_string()));
+
+        let val = InnerValue::Map(map);
+        let bytes = rmp_serde::to_vec(&val).expect("Failed to serialize");
+
+        println!(
+            "Map with 3 InternedKey keys serialized: {} bytes",
+            bytes.len()
+        );
+        println!("Bytes: {:?}", bytes);
+
+        // Verify keys are compact in serialized data
+        // Map format: marker (0x83 for fixmap with 3 entries) + [key, value] * 3
+        // Each InternedKey: bin8 marker (0xC4) + length + data
+        // U8 keys: 0xC4 + 0x01 + data = 3 bytes each
+        // U16 key: 0xC4 + 0x02 + data = 4 bytes
+
+        // Find 0xC4 markers (bin8) in output
+        let bin8_count = bytes.iter().filter(|&&b| b == 0xC4).count();
+        println!(
+            "Found {} bin8 markers (0xC4) - each represents an InternedKey",
+            bin8_count
+        );
+
+        assert_eq!(
+            bin8_count, 3,
+            "Should have 3 InternedKeys serialized with bin8 format"
+        );
+
+        // Round-trip test
+        let recovered: InnerValue = rmp_serde::from_slice(&bytes).expect("Failed to deserialize");
+
+        match recovered {
+            InnerValue::Map(recovered_map) => {
+                // Check we can retrieve values by InternedKey
+                assert_eq!(recovered_map.len(), 3);
+
+                let val1 = recovered_map.get(&key1);
+                assert!(val1.is_some(), "Should find key1");
+
+                let val3 = recovered_map.get(&key3);
+                assert!(val3.is_some(), "Should find key3");
+            }
+            _ => panic!("Expected Map variant"),
+        }
+
+        println!("✓ PASS: Map with InternedKey keys is COMPACT!");
+        println!("✓ InternedKeys stored as variable-size bytes (not full u64)!");
+    }
 }
