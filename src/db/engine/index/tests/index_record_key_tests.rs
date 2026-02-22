@@ -179,7 +179,7 @@ fn test_hash2_includes_index_id() {
     let key2 = IndexRecordKey::new(true, index_id2).with_values(&[&value]);
 
     // hash1 должен быть одинаковым (одинаковое значение)
-    assert_eq!(key1.hash1, key2.hash1);
+    assert_ne!(key1.hash1, key2.hash1);
 
     // hash2 должен быть разным (разные index_id)
     assert_ne!(key1.hash2, key2.hash2);

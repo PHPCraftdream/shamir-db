@@ -39,16 +39,27 @@ impl IndexRecordKey {
         }
     }
 
-    /// Set hash values from the provided values
+    /// Set hash values from the provided values using FxHasher with different seeds
+    /// for collision resistance:
+    /// - hash1: FxHasher with seed 0
+    /// - hash2: FxHasher with seed 0x9E3779B97F4A7C15 (golden ratio constant)
     pub fn with_values<T: Hash>(mut self, values: &[&T]) -> Self {
-        let mut hasher = FxHasher::default();
-        for value in values {
-            value.hash(&mut hasher);
-        }
-        self.hash1 = hasher.finish();
+        const SEED2: u64 = 0x9E3779B97F4A7C15;
 
-        // Mix index_name_interned into hash2 for additional uniqueness
-        self.hash2 = self.hash1.wrapping_neg() ^ self.index_name_interned;
+        let mut hasher1 = FxHasher::default();
+        let mut hasher2 = FxHasher::default();
+
+        SEED2.hash(&mut hasher2);
+        self.index_name_interned.hash(&mut hasher2);
+        self.index_name_interned.hash(&mut hasher1);
+
+        for value in values {
+            value.hash(&mut hasher1);
+            value.hash(&mut hasher2);
+        }
+
+        self.hash1 = hasher1.finish();
+        self.hash2 = hasher2.finish();
 
         self
     }
