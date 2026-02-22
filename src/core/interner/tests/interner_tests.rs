@@ -1,4 +1,4 @@
-use crate::core::interner::{InternerKey, Interner, TouchInd, UserKey};
+use crate::core::interner::{Interner, InternerKey, TouchInd, UserKey};
 use std::sync::Arc;
 use std::thread;
 

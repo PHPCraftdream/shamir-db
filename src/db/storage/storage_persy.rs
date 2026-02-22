@@ -290,53 +290,6 @@ impl Store for PersyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let db = self.db.clone();
-        let table_name = self.table_name.clone();
-        let index_name = self.index_name.clone();
-
-        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
-            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
-
-            // First: collect all RecordKey -> PersyId mappings
-            let mut mappings = Vec::new();
-            {
-                let index_iter = tx
-                    .range::<ByteVec, ByteVec, _>(&index_name, ..)
-                    .map_err(|e| DbError::Storage(e.to_string()))?;
-
-                for (key_bytes, mut val_iter) in index_iter {
-                    let key = RecordKey::copy_from_slice(key_bytes.as_ref());
-
-                    if let Some(val_bytes) = val_iter.next() {
-                        let persy_id_str = String::from_utf8(val_bytes.to_vec())
-                            .map_err(|e| DbError::Codec(e.to_string()))?;
-                        let persy_id: PersyId = persy_id_str
-                            .parse()
-                            .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
-                        mappings.push((key, persy_id));
-                    }
-                }
-            } // index_iter dropped here
-
-            // Second: read all data using collected mappings
-            let mut out = Vec::new();
-            for (key, persy_id) in mappings {
-                let content = tx
-                    .read(&table_name, &persy_id)
-                    .map_err(|e| DbError::Storage(e.to_string()))?
-                    .ok_or_else(|| {
-                        DbError::NotFound(format!("PersyId not found for key: {:?}", key))
-                    })?;
-                out.push((key, Bytes::copy_from_slice(&content)));
-            }
-
-            Ok(out)
-        })
-        .await
-        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
-    }
-
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -581,6 +534,7 @@ impl Store for PersyStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::collect_stream;
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
@@ -615,7 +569,7 @@ mod tests {
         // Test iter
         let value4 = InnerValue::Bool(true);
         let _key3 = store.insert(value4.to_bytes()).await.unwrap();
-        let all_records = store.iter().await.unwrap();
+        let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records
@@ -627,7 +581,7 @@ mod tests {
         assert!(store.get(key1.clone()).await.is_err());
         assert!(!store.remove(key1).await.unwrap()); // Already removed
 
-        let all_records_after_remove = store.iter().await.unwrap();
+        let all_records_after_remove = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
     }
 
@@ -693,8 +647,20 @@ mod tests {
         let value2 = InnerValue::Str("table2_value".to_string());
         let key2 = store2.insert(value2.to_bytes()).await.unwrap();
 
-        assert_eq!(store1.iter().await.unwrap().len(), 1);
-        assert_eq!(store2.iter().await.unwrap().len(), 1);
+        assert_eq!(
+            collect_stream(store1.iter_stream(1000))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            collect_stream(store2.iter_stream(1000))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         let retrieved_bytes1 = store1.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes1).unwrap(), value1);

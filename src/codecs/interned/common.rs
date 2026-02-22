@@ -4,7 +4,7 @@
 //! JSON and MessagePack codec implementations.
 
 use crate::codecs::CodecError;
-use crate::core::interner::{InternerKey, Interner};
+use crate::core::interner::{Interner, InternerKey};
 
 /// Helper function to intern a string key for map entries
 ///

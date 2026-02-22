@@ -51,10 +51,7 @@ mod tests {
     #[test]
     fn test_bytes_serialization_roundtrip() {
         let mut map = new_map();
-        map.insert(
-            InternerKey::new(42),
-            InnerValue::Str("hello".to_string()),
-        );
+        map.insert(InternerKey::new(42), InnerValue::Str("hello".to_string()));
         map.insert(InternerKey::new(255), InnerValue::Int(99));
         let value = InnerValue::Map(map);
 
@@ -307,14 +304,8 @@ mod tests {
     #[test]
     fn test_inner_value_with_numeric_keys() {
         let mut map = new_map();
-        map.insert(
-            InternerKey::new(1),
-            InnerValue::Str("zero".to_string()),
-        );
-        map.insert(
-            InternerKey::new(1000),
-            InnerValue::Str("max".to_string()),
-        );
+        map.insert(InternerKey::new(1), InnerValue::Str("zero".to_string()));
+        map.insert(InternerKey::new(1000), InnerValue::Str("max".to_string()));
         map.insert(InternerKey::new(42), InnerValue::Int(42));
 
         let value = InnerValue::Map(map);

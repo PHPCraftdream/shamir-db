@@ -1,13 +1,25 @@
 use crate::db::{DbError, DbResult};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 
 pub type RecordKey = Bytes;
 
 type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
+/// Collect all records from a stream into a single vector.
+/// Used to convert iter_stream() results to a flat Vec.
+pub async fn collect_stream(stream: RecordStream) -> DbResult<Vec<(RecordKey, Bytes)>> {
+    let mut all_records = Vec::new();
+    let mut stream = stream;
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result?;
+        all_records.extend(batch);
+    }
+    Ok(all_records)
+}
 
 /// An asynchronous, key-value store trait that operates on raw bytes.
 ///
@@ -28,10 +40,6 @@ pub trait Store: Send + Sync {
 
     /// Removes a record by its `RecordKey`.
     async fn remove(&self, key: RecordKey) -> DbResult<bool>;
-
-    /// Returns all records in the store.
-    /// Note: This can be an expensive operation on large stores.
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>>;
 
     /// Returns an async stream that yields batches of records.
     /// Like PHP generators but with batching - yields Vec of size batch_size.

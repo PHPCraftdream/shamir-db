@@ -154,29 +154,6 @@ impl Store for FjallStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let keyspace = self.keyspace.clone();
-        task::spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
-            let mut items = Vec::new();
-
-            // Iterate over all items - Guard::into_inner() returns key-value pair directly
-            for guard in keyspace.iter() {
-                let (key, value_slice) = guard
-                    .into_inner()
-                    .map_err(|e| DbError::Storage(e.to_string()))?;
-
-                items.push((
-                    Bytes::copy_from_slice(&key),
-                    Bytes::copy_from_slice(&value_slice),
-                ));
-            }
-
-            Ok(items)
-        })
-        .await
-        .map_err(|e| DbError::Internal(e.to_string()))?
-    }
-
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -332,6 +309,7 @@ impl Store for FjallStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::collect_stream;
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
@@ -366,7 +344,7 @@ mod tests {
         // Test iter
         let value4 = InnerValue::Bool(true);
         let _key3 = store.insert(value4.to_bytes()).await.unwrap();
-        let all_records = store.iter().await.unwrap();
+        let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records
@@ -378,7 +356,7 @@ mod tests {
         assert!(store.get(key1.clone()).await.is_err());
         assert!(!store.remove(key1).await.unwrap()); // Already removed
 
-        let all_records_after_remove = store.iter().await.unwrap();
+        let all_records_after_remove = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
     }
 

@@ -5,7 +5,7 @@
 //! **This module is deprecated.** Use the newer codec-based approach in the parent
 //! `codecs` module instead.
 
-use crate::core::interner::{InternerKey, Interner, UserKey};
+use crate::core::interner::{Interner, InternerKey, UserKey};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
