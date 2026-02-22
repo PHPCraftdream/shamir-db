@@ -144,9 +144,7 @@ impl TableIndexManager {
     }
 
     pub async fn create_index(&self, index_def: IndexDefinition) -> crate::db::DbResult<()> {
-        let index_name = index_def.name.clone();
         let index_name_interned = index_def.index_name_interned;
-
         let records = self.data_store.iter().await?;
 
         let mut count = 0usize;
@@ -176,7 +174,7 @@ impl TableIndexManager {
 
         self.save_index_info().await?;
 
-        log::info!("Created index '{}' with {} entries", index_name, count);
+        log::info!("Created index '{}' with {} entries", index_name_interned, count);
         Ok(())
     }
 
