@@ -78,7 +78,7 @@ impl IndexInfo {
         let items: Vec<_> = iter.into_iter().collect();
         let indexes = new_dash_map_wc(items.len().max(128));
         for def in items {
-            indexes.insert(def.index_name_interned, def);
+            indexes.insert(def.name_interned, def);
         }
         Self {
             indexes,
@@ -109,14 +109,14 @@ impl IndexInfo {
     /// Add or update an index definition
     pub fn add_index(&self, index_def: IndexDefinition) {
         self.indexes
-            .insert(index_def.index_name_interned, index_def);
+            .insert(index_def.name_interned, index_def);
         self.mark_pending();
     }
 
     /// Remove an index by its interned name.
     /// Returns true if an index was removed.
-    pub fn remove_index(&self, index_name_interned: u64) -> bool {
-        let removed = self.indexes.remove(&index_name_interned).is_some();
+    pub fn remove_index(&self, name_interned: u64) -> bool {
+        let removed = self.indexes.remove(&name_interned).is_some();
         if removed {
             self.mark_pending();
         }
@@ -134,8 +134,8 @@ impl IndexInfo {
     }
 
     /// Get an index definition by interned name
-    pub fn get_index(&self, index_name_interned: u64) -> Option<IndexDefinition> {
-        self.indexes.get(&index_name_interned).map(|v| v.clone())
+    pub fn get_index(&self, name_interned: u64) -> Option<IndexDefinition> {
+        self.indexes.get(&name_interned).map(|v| v.clone())
     }
 
     /// Iterate over all index definitions
@@ -144,8 +144,8 @@ impl IndexInfo {
     }
 
     /// Check if an index exists
-    pub fn contains(&self, index_name_interned: u64) -> bool {
-        self.indexes.contains_key(&index_name_interned)
+    pub fn contains(&self, name_interned: u64) -> bool {
+        self.indexes.contains_key(&name_interned)
     }
 }
 

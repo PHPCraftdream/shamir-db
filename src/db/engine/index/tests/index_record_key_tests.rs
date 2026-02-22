@@ -9,7 +9,7 @@ fn test_simple_index_key_creation() {
     let key = IndexRecordKey::new(true, index_id).with_values(&[&value]);
 
     assert_eq!(key.is_unique, 1);
-    assert_eq!(key.index_name_interned, index_id);
+    assert_eq!(key.name_interned, index_id);
     assert_ne!(key.hash1, 0);
     assert_ne!(key.hash2, 0);
     assert_ne!(key.hash1, key.hash2);
@@ -25,7 +25,7 @@ fn test_composite_index_key_creation() {
     let key = IndexRecordKey::new(false, index_id).with_values(&[&city, &age]);
 
     assert_eq!(key.is_unique, 0);
-    assert_eq!(key.index_name_interned, index_id);
+    assert_eq!(key.name_interned, index_id);
     assert_ne!(key.hash1, 0);
     assert_ne!(key.hash2, 0);
 }
@@ -77,7 +77,7 @@ fn test_simple_index_from_bytes_roundtrip() {
     let restored = IndexRecordKey::from_bytes(Bytes::from(bytes)).unwrap();
 
     assert_eq!(restored.is_unique, original.is_unique);
-    assert_eq!(restored.index_name_interned, original.index_name_interned);
+    assert_eq!(restored.name_interned, original.name_interned);
     assert_eq!(restored.hash1, original.hash1);
     assert_eq!(restored.hash2, original.hash2);
 }
@@ -93,7 +93,7 @@ fn test_composite_index_from_bytes_roundtrip() {
     let restored = IndexRecordKey::from_bytes(Bytes::from(bytes)).unwrap();
 
     assert_eq!(restored.is_unique, original.is_unique);
-    assert_eq!(restored.index_name_interned, original.index_name_interned);
+    assert_eq!(restored.name_interned, original.name_interned);
     assert_eq!(restored.hash1, original.hash1);
     assert_eq!(restored.hash2, original.hash2);
 }
@@ -160,17 +160,17 @@ fn test_doc_new() {
     // Простой уникальный индекс
     let key = IndexRecordKey::new(true, 1001);
     assert_eq!(key.is_unique, 1);
-    assert_eq!(key.index_name_interned, 1001);
+    assert_eq!(key.name_interned, 1001);
 
     // Неуникальный составной индекс
     let key2 = IndexRecordKey::new(false, 1002);
     assert_eq!(key2.is_unique, 0);
-    assert_eq!(key2.index_name_interned, 1002);
+    assert_eq!(key2.name_interned, 1002);
 }
 
 #[test]
 fn test_hash2_includes_index_id() {
-    // hash2 должен включать index_name_interned для уникальности
+    // hash2 должен включать name_interned для уникальности
     let value = "same_value";
     let index_id1 = 1000u64;
     let index_id2 = 2000u64;
@@ -186,9 +186,9 @@ fn test_hash2_includes_index_id() {
 }
 
 #[test]
-fn test_index_name_interned_getter() {
+fn test_name_interned_getter() {
     let index_id = 12345u64;
     let key = IndexRecordKey::new(false, index_id);
 
-    assert_eq!(key.index_name_interned(), index_id);
+    assert_eq!(key.name_interned(), index_id);
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexDefinition {
     /// Interned ID of the index name (used in IndexRecordKey)
-    pub index_name_interned: u64,
+    pub name_interned: u64,
 
     /// The list of paths that make up this index.
     /// A single path creates a simple index. Multiple paths create a composite index.
@@ -13,9 +13,9 @@ pub struct IndexDefinition {
 }
 
 impl IndexDefinition {
-    pub fn new(index_name_interned: u64, paths: Vec<IndexInfoItem>) -> Self {
+    pub fn new(name_interned: u64, paths: Vec<IndexInfoItem>) -> Self {
         Self {
-            index_name_interned,
+            name_interned,
             paths,
         }
     }
