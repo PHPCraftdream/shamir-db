@@ -47,7 +47,7 @@ fn test_add_and_remove_index() {
 
 #[test]
 fn test_add_duplicate_name_replaces() {
-    let target = IndexInfo::from_iter(vec![IndexDefinition::new(1005, vec![])]);
+    let target = IndexInfo::from_definitions(vec![IndexDefinition::new(1005, vec![])]);
     let index_v1 = IndexDefinition::new(1006, vec![IndexInfoItem::new(vec![1])]);
     let index_v2 = IndexDefinition::new(1006, vec![IndexInfoItem::new(vec![2])]);
 
@@ -63,7 +63,7 @@ fn test_add_duplicate_name_replaces() {
 #[test]
 fn test_serialization() {
     let index_def = IndexDefinition::new(1008, vec![IndexInfoItem::new(vec![1])]);
-    let target = IndexInfo::from_iter(vec![index_def]);
+    let target = IndexInfo::from_definitions(vec![index_def]);
     target.mark_pending();
 
     let serialized = bincode::to_bytes(&target).unwrap();
@@ -78,7 +78,7 @@ fn test_serialization() {
 #[test]
 fn test_roundtrip() {
     let index_def = IndexDefinition::new(1009, vec![IndexInfoItem::new(vec![1, 2])]);
-    let target = IndexInfo::from_iter(vec![index_def]);
+    let target = IndexInfo::from_definitions(vec![index_def]);
     target.mark_pending();
 
     let bytes = bincode::to_bytes(&target).unwrap();
@@ -98,7 +98,7 @@ fn test_zero_copy() {
         1010,
         vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2, 3])],
     );
-    let target = IndexInfo::from_iter(vec![index_def]);
+    let target = IndexInfo::from_definitions(vec![index_def]);
 
     let bytes = bincode::to_bytes(&target).unwrap();
     let info2 = bincode::from_bytes::<IndexInfo>(&bytes).unwrap();
