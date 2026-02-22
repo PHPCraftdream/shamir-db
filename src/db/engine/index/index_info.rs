@@ -74,7 +74,7 @@ impl IndexInfo {
     }
 
     /// Create IndexInfo with index definitions from iterator
-    pub fn from_iter<I: IntoIterator<Item = IndexDefinition>>(iter: I) -> Self {
+    pub fn from_definitions<I: IntoIterator<Item = IndexDefinition>>(iter: I) -> Self {
         let items: Vec<_> = iter.into_iter().collect();
         let indexes = new_dash_map_wc(items.len().max(128));
         for def in items {

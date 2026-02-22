@@ -214,10 +214,13 @@ while let Some(batch) = stream.next().await {
 table.add_index(&["email"]).await?;
 table.add_unique_index(&["username"]).await?;
 
-// Query with prefix scan (for index lookups)
-let results = store.scan_prefix(b"idx:email:".to_vec().into()).await?;
-for (key, value) in results {
-    // Process matching records
+// Query with prefix scan stream (for index lookups)
+let mut stream = store.scan_prefix_stream(b"idx:email:".to_vec().into(), 100);
+while let Some(batch_result) = stream.next().await {
+    let batch = batch_result?;
+    for (key, value) in batch {
+        // Process matching records
+    }
 }
 ```
 

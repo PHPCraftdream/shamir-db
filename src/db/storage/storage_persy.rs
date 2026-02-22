@@ -374,60 +374,6 @@ impl Store for PersyStore {
         })
     }
 
-    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let db = self.db.clone();
-        let table_name = self.table_name.clone();
-        let index_name = self.index_name.clone();
-
-        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
-            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
-
-            // Calculate upper bound for prefix scan
-            let mut prefix_end = prefix.to_vec();
-            if let Some(last_byte) = prefix_end.last_mut() {
-                *last_byte = last_byte.wrapping_add(1);
-            }
-
-            // Scan the index to find all keys with the given prefix
-            let mut mappings = Vec::new();
-            {
-                let prefix_bv = ByteVec::new(prefix.to_vec());
-                let prefix_end_bv = ByteVec::new(prefix_end);
-
-                let index_iter = tx
-                    .range::<ByteVec, ByteVec, _>(&index_name, prefix_bv..prefix_end_bv)
-                    .map_err(|e| DbError::Storage(e.to_string()))?;
-
-                for (key_bytes, mut val_iter) in index_iter {
-                    let key = RecordKey::copy_from_slice(key_bytes.as_ref());
-
-                    if let Some(val_bytes) = val_iter.next() {
-                        let persy_id_str = String::from_utf8(val_bytes.to_vec())
-                            .map_err(|e| DbError::Codec(e.to_string()))?;
-                        let persy_id: PersyId = persy_id_str
-                            .parse()
-                            .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
-                        mappings.push((key, persy_id));
-                    }
-                }
-            }
-
-            // Read all data using collected mappings
-            let mut out = Vec::new();
-            for (key, persy_id) in mappings {
-                let content = tx
-                    .read(&table_name, &persy_id)
-                    .map_err(|e| DbError::Storage(e.to_string()))?
-                    .ok_or_else(|| DbError::NotFound("PersyId not found".to_string()))?;
-                out.push((key, Bytes::copy_from_slice(&content)));
-            }
-
-            Ok(out)
-        })
-        .await
-        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
-    }
-
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
@@ -540,7 +486,6 @@ mod tests {
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
-    use futures::StreamExt;
     use std::fs;
     use tokio::time::{sleep, Duration};
 
@@ -590,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn test_persy_repo_basic() {
         let path = "./test_data/persy_repo_basic.persy";
-        if std::path::Path::new(path).exists() {
+        if Path::new(path).exists() {
             fs::remove_file(path).unwrap();
         }
 
@@ -605,7 +550,7 @@ mod tests {
     #[tokio::test]
     async fn test_persy_repo_list_stores() {
         let path = "./test_data/persy_repo_list.persy";
-        if std::path::Path::new(path).exists() {
+        if Path::new(path).exists() {
             fs::remove_file(path).unwrap();
         }
 
@@ -634,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn test_persy_repo_store_isolation() {
         let path = "./test_data/persy_repo_isolation.persy";
-        if std::path::Path::new(path).exists() {
+        if Path::new(path).exists() {
             fs::remove_file(path).unwrap();
         }
 
@@ -675,94 +620,5 @@ mod tests {
 
         repo.store_delete("isolated_table1").await.unwrap();
         repo.store_delete("isolated_table2").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_persy_prefix_scan() {
-        let path = "./test_data/persy_prefix_scan.persy";
-        if std::path::Path::new(path).exists() {
-            fs::remove_file(path).unwrap();
-        }
-
-        let repo = PersyRepo::new(path).unwrap();
-        let db = repo.db.clone();
-
-        // Create PersyStore directly to access PrefixScan
-        let table_name = "test_table";
-        let index_name = format!("{}_idx", table_name);
-        let mut tx = db.begin().unwrap();
-
-        tx.create_segment(table_name).unwrap();
-        tx.create_index::<ByteVec, ByteVec>(&index_name, persy::ValueMode::Replace)
-            .unwrap();
-        tx.prepare().unwrap().commit().unwrap();
-
-        let store = PersyStore {
-            db,
-            table_name: table_name.to_string(),
-            index_name,
-        };
-
-        // Insert records with composite keys
-        let data = vec![
-            (
-                b"country:Russia:Moscow:user1".to_vec(),
-                InnerValue::Str("Alice".to_string()),
-            ),
-            (
-                b"country:Russia:Moscow:user2".to_vec(),
-                InnerValue::Str("Bob".to_string()),
-            ),
-            (
-                b"country:Russia:SPb:user3".to_vec(),
-                InnerValue::Str("Charlie".to_string()),
-            ),
-            (
-                b"country:France:Paris:user4".to_vec(),
-                InnerValue::Str("David".to_string()),
-            ),
-        ];
-
-        for (key, value) in &data {
-            store
-                .set(key.clone().into(), value.to_bytes())
-                .await
-                .unwrap();
-        }
-
-        // Test prefix scan for "country:Russia:Moscow:"
-        let results = store
-            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:Moscow:"))
-            .await
-            .unwrap();
-
-        assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user1"));
-        assert!(results
-            .iter()
-            .any(|(k, _)| k.as_ref() == b"country:Russia:Moscow:user2"));
-
-        // Test prefix scan for "country:Russia:"
-        let results_russia = store
-            .scan_prefix(Bytes::copy_from_slice(b"country:Russia:"))
-            .await
-            .unwrap();
-        assert_eq!(results_russia.len(), 3);
-
-        // Test streaming prefix scan
-        let mut stream = store.scan_prefix_stream(Bytes::copy_from_slice(b"country:Russia:"), 2);
-        let mut all_records = Vec::new();
-        let mut batch_count = 0;
-
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.unwrap();
-            batch_count += 1;
-            all_records.extend(batch);
-        }
-
-        assert_eq!(all_records.len(), 3);
-        assert_eq!(batch_count, 2); // 2 + 1 = 3
     }
 }

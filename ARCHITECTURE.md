@@ -42,7 +42,6 @@ Store trait (low-level key-value store):
 - remove(key: RecordId) -> bool
 - iter() -> Vec<(RecordId, Bytes)>
 - iter_stream(batch_size) -> Stream of batches (PHP-style generators)
-- scan_prefix(prefix) -> Vec<(RecordId, Bytes)>
 - scan_prefix_stream(prefix, batch_size) -> Stream of batches
 
 Repo trait (manages multiple stores):

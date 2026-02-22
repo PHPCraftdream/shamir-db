@@ -1,4 +1,5 @@
 pub mod interned_key;
+#[allow(clippy::module_inception)]
 pub mod interner;
 pub mod touch_ind;
 pub mod user_key;

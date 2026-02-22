@@ -12,7 +12,7 @@ fn test_selective_mode_with_definitions() {
         vec![IndexInfoItem::new(vec![2]), IndexInfoItem::new(vec![3])],
     );
 
-    let target = IndexInfo::from_iter(vec![simple_index.clone()]);
+    let target = IndexInfo::from_definitions(vec![simple_index.clone()]);
     assert!(target.is_enabled());
     assert_eq!(target.len(), 1);
 
