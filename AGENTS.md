@@ -1,5 +1,8 @@
 בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
 
+Use "хрома"(mpc Chroma-db "chroma-db") to save data, thoughts, facts, meanings, interesting notes, and to retrieve, search, and analyze them.
+Before adding new knowledge, you need to avoid repeating information; you need to check that the database already knows about it.
+
 **S.H.A.M.I.R. Database**
 
 **S** - Secure (Безопасная - Rust)  
