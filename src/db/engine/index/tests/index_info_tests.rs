@@ -6,9 +6,10 @@ use crate::db::engine::index::index_status::IndexStatus;
 
 #[test]
 fn test_selective_mode_with_definitions() {
-    let simple_index = IndexDefinition::new("by_email", vec![IndexInfoItem::new(vec![1])]);
+    let simple_index = IndexDefinition::new("by_email", 1001, vec![IndexInfoItem::new(vec![1])]);
     let composite_index = IndexDefinition::new(
         "by_city_and_age",
+        1002,
         vec![IndexInfoItem::new(vec![2]), IndexInfoItem::new(vec![3])],
     );
 
@@ -25,8 +26,8 @@ fn test_selective_mode_with_definitions() {
 #[test]
 fn test_add_and_remove_index() {
     let mut target = IndexInfo::new();
-    let index1 = IndexDefinition::new("by_name", vec![IndexInfoItem::new(vec![1])]);
-    let index2 = IndexDefinition::new("by_age", vec![IndexInfoItem::new(vec![2])]);
+    let index1 = IndexDefinition::new("by_name", 1003, vec![IndexInfoItem::new(vec![1])]);
+    let index2 = IndexDefinition::new("by_age", 1004, vec![IndexInfoItem::new(vec![2])]);
 
     target.add_index(index1.clone());
     assert!(target.is_enabled());
@@ -47,9 +48,9 @@ fn test_add_and_remove_index() {
 
 #[test]
 fn test_add_duplicate_name_replaces() {
-    let mut target = IndexInfo::from_definitions(vec![IndexDefinition::new("other", vec![])]);
-    let index_v1 = IndexDefinition::new("my_index", vec![IndexInfoItem::new(vec![1])]);
-    let index_v2 = IndexDefinition::new("my_index", vec![IndexInfoItem::new(vec![2])]);
+    let mut target = IndexInfo::from_definitions(vec![IndexDefinition::new("other", 1005, vec![])]);
+    let index_v1 = IndexDefinition::new("my_index", 1006, vec![IndexInfoItem::new(vec![1])]);
+    let index_v2 = IndexDefinition::new("my_index", 1007, vec![IndexInfoItem::new(vec![2])]);
 
     target.add_index(index_v1);
     assert_eq!(target.definitions().len(), 2);
@@ -62,7 +63,7 @@ fn test_add_duplicate_name_replaces() {
 
 #[test]
 fn test_serialization() {
-    let index_def = IndexDefinition::new("by_email", vec![IndexInfoItem::new(vec![1])]);
+    let index_def = IndexDefinition::new("by_email", 1008, vec![IndexInfoItem::new(vec![1])]);
     let target = IndexInfo::from_definitions(vec![index_def]);
     target.mark_pending();
 
@@ -77,7 +78,7 @@ fn test_serialization() {
 
 #[test]
 fn test_roundtrip() {
-    let index_def = IndexDefinition::new("by_email", vec![IndexInfoItem::new(vec![1, 2])]);
+    let index_def = IndexDefinition::new("by_email", 1009, vec![IndexInfoItem::new(vec![1, 2])]);
     let target = IndexInfo::from_definitions(vec![index_def]);
     target.mark_pending();
 
@@ -96,6 +97,7 @@ fn test_roundtrip() {
 fn test_zero_copy() {
     let index_def = IndexDefinition::new(
         "composite",
+        1010,
         vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2, 3])],
     );
     let target = IndexInfo::from_definitions(vec![index_def]);

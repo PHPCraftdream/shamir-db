@@ -28,7 +28,7 @@ async fn test_has_indexes_true_after_load() {
     let info_store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let interner = Arc::new(OnceCell::new());
 
-    let index_def = IndexDefinition::new("by_email", vec![IndexInfoItem::new(vec![1])]);
+    let index_def = IndexDefinition::new("by_email", 1001, vec![IndexInfoItem::new(vec![1])]);
     let indexes = IndexInfo::from_definitions(vec![index_def]);
     let indexes_key = RecordId::system("indexes").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
@@ -48,7 +48,7 @@ async fn test_has_unique_indexes_true_after_load() {
     let info_store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let interner = Arc::new(OnceCell::new());
 
-    let index_def = IndexDefinition::new("unique_email", vec![IndexInfoItem::new(vec![1])]);
+    let index_def = IndexDefinition::new("unique_email", 1002, vec![IndexInfoItem::new(vec![1])]);
     let indexes = IndexInfo::from_definitions(vec![index_def]);
     let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
