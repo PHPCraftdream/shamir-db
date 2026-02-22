@@ -1,4 +1,4 @@
-use crate::core::interner::Interner;
+use crate::core::interner::InternerKey;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info::IndexInfo;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
@@ -9,11 +9,9 @@ use crate::types::value::InnerValue;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::{OnceCell, RwLock};
+use tokio::sync::RwLock;
 
 pub struct TableIndexManager {
-    interner: Arc<OnceCell<Interner>>,
-
     data_store: Arc<dyn Store>,
     info_store: Arc<dyn Store>,
 
@@ -27,7 +25,6 @@ pub struct TableIndexManager {
 impl Clone for TableIndexManager {
     fn clone(&self) -> Self {
         Self {
-            interner: Arc::clone(&self.interner),
             data_store: Arc::clone(&self.data_store),
             info_store: Arc::clone(&self.info_store),
             indexes: Arc::clone(&self.indexes),
@@ -42,7 +39,6 @@ impl TableIndexManager {
     pub async fn new(
         data_store: Arc<dyn Store>,
         info_store: Arc<dyn Store>,
-        interner: Arc<OnceCell<Interner>>,
     ) -> Result<Self, crate::db::DbError> {
         let indexes_key = RecordId::system("indexes").to_bytes();
         let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
@@ -67,7 +63,6 @@ impl TableIndexManager {
         let has_indexes_unique = AtomicBool::new(indexes_unique.is_enabled());
 
         Ok(Self {
-            interner,
             data_store,
             info_store,
             indexes: Arc::new(RwLock::new(indexes)),
@@ -85,29 +80,29 @@ impl TableIndexManager {
         self.has_indexes_unique.load(Ordering::Relaxed)
     }
 
-    fn extract_value_by_path(interner: &Interner, value: &InnerValue, path: &[u64]) -> Option<InnerValue> {
+    fn extract_value_by_path(value: &InnerValue, path: &[u64]) -> Option<InnerValue> {
         if path.is_empty() {
             return Some(value.clone());
         }
 
         match value {
             InnerValue::Map(map) => {
-                let key = interner.make_key(path[0]);
+                let key = InternerKey::new(path[0]);
                 let next_value = map.get(&key)?;
                 if path.len() == 1 {
                     Some(next_value.clone())
                 } else {
-                    Self::extract_value_by_path(interner, next_value, &path[1..])
+                    Self::extract_value_by_path(next_value, &path[1..])
                 }
             }
             _ => None,
         }
     }
 
-    fn extract_index_values(interner: &Interner, value: &InnerValue, paths: &[IndexInfoItem]) -> Option<Vec<InnerValue>> {
+    fn extract_index_values(value: &InnerValue, paths: &[IndexInfoItem]) -> Option<Vec<InnerValue>> {
         let mut values = Vec::with_capacity(paths.len());
         for item in paths {
-            match Self::extract_value_by_path(interner, value, &item.path) {
+            match Self::extract_value_by_path(value, &item.path) {
                 Some(v) => values.push(v),
                 None => return None,
             }
@@ -149,11 +144,6 @@ impl TableIndexManager {
     }
 
     pub async fn create_index(&self, index_def: IndexDefinition) -> crate::db::DbResult<()> {
-        let interner = match self.interner.get() {
-            Some(i) => i,
-            None => return Err(crate::db::DbError::Internal("Interner not initialized".to_string())),
-        };
-
         let index_name = index_def.name.clone();
         let index_name_interned = index_def.index_name_interned;
 
@@ -172,7 +162,7 @@ impl TableIndexManager {
                 Err(_) => continue,
             };
 
-            if let Some(values) = Self::extract_index_values(interner, &value, &index_def.paths) {
+            if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
                 self.add_index_entry(index_name_interned, &values, &record_id).await?;
                 count += 1;
             }
@@ -234,14 +224,9 @@ impl TableIndexManager {
             return Ok(());
         }
 
-        let interner = match self.interner.get() {
-            Some(i) => i,
-            None => return Err(crate::db::DbError::Internal("Interner not initialized".to_string())),
-        };
-
         let indexes = self.indexes.read().await;
         for def in indexes.definitions() {
-            if let Some(values) = Self::extract_index_values(interner, value, &def.paths) {
+            if let Some(values) = Self::extract_index_values(value, &def.paths) {
                 self.add_index_entry(def.index_name_interned, &values, record_id).await?;
             }
         }
@@ -259,15 +244,10 @@ impl TableIndexManager {
             return Ok(());
         }
 
-        let interner = match self.interner.get() {
-            Some(i) => i,
-            None => return Err(crate::db::DbError::Internal("Interner not initialized".to_string())),
-        };
-
         let indexes = self.indexes.read().await;
         for def in indexes.definitions() {
-            let old_values = Self::extract_index_values(interner, old_value, &def.paths);
-            let new_values = Self::extract_index_values(interner, new_value, &def.paths);
+            let old_values = Self::extract_index_values(old_value, &def.paths);
+            let new_values = Self::extract_index_values(new_value, &def.paths);
 
             match (old_values, new_values) {
                 (None, None) => {}
@@ -294,14 +274,9 @@ impl TableIndexManager {
             return Ok(());
         }
 
-        let interner = match self.interner.get() {
-            Some(i) => i,
-            None => return Err(crate::db::DbError::Internal("Interner not initialized".to_string())),
-        };
-
         let indexes = self.indexes.read().await;
         for def in indexes.definitions() {
-            if let Some(values) = Self::extract_index_values(interner, old_value, &def.paths) {
+            if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
                 self.remove_index_entry(def.index_name_interned, &values, record_id).await?;
             }
         }

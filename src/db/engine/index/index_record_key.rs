@@ -55,22 +55,22 @@ impl IndexRecordKey {
 
     /// Convert to bytes for storage
     pub fn to_bytes(&self) -> Bytes {
-        let mut bytes = Vec::with_capacity(25);
-        bytes.push(self.is_unique);
-        bytes.extend_from_slice(&self.index_name_interned.to_le_bytes());
-        bytes.extend_from_slice(&self.hash1.to_le_bytes());
-        bytes.extend_from_slice(&self.hash2.to_le_bytes());
+        let mut bytes = [0u8; 25];
+        bytes[0] = self.is_unique;
+        bytes[1..9].copy_from_slice(&self.index_name_interned.to_le_bytes());
+        bytes[9..17].copy_from_slice(&self.hash1.to_le_bytes());
+        bytes[17..25].copy_from_slice(&self.hash2.to_le_bytes());
 
-        Bytes::from(bytes)
+        Bytes::copy_from_slice(&bytes)
     }
 
     /// Convert to prefix bytes (without hash values) for scanning
     pub fn to_prefix_bytes(&self) -> Bytes {
-        let mut bytes = Vec::with_capacity(9);
-        bytes.push(self.is_unique);
-        bytes.extend_from_slice(&self.index_name_interned.to_le_bytes());
+        let mut bytes = [0u8; 9];
+        bytes[0] = self.is_unique;
+        bytes[1..9].copy_from_slice(&self.index_name_interned.to_le_bytes());
 
-        Bytes::from(bytes)
+        Bytes::copy_from_slice(&bytes)
     }
 
     /// Create from bytes

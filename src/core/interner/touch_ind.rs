@@ -1,10 +1,10 @@
-use super::InternedKey;
+use super::InternerKey;
 
 /// Result of touching a key - indicates if it was newly created or already existed.
 #[derive(PartialEq, Eq, Hash, Debug, Clone)]
 pub enum TouchInd {
-    New(InternedKey),
-    Exists(InternedKey),
+    New(InternerKey),
+    Exists(InternerKey),
 }
 
 impl AsRef<[u8]> for TouchInd {
@@ -18,7 +18,7 @@ impl AsRef<[u8]> for TouchInd {
 
 impl TouchInd {
     /// Returns the interned key.
-    pub fn key(&self) -> &InternedKey {
+    pub fn key(&self) -> &InternerKey {
         match self {
             TouchInd::New(key) => key,
             TouchInd::Exists(key) => key,

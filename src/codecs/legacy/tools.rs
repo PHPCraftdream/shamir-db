@@ -5,7 +5,7 @@
 //! **This module is deprecated.** Use the newer codec-based approach in the parent
 //! `codecs` module instead.
 
-use crate::core::interner::{InternedKey, Interner, UserKey};
+use crate::core::interner::{InternerKey, Interner, UserKey};
 use crate::types::common::{new_map_wc, new_set_wc};
 use crate::types::value::{InnerValue, UserValue, Value};
 
@@ -19,7 +19,7 @@ use crate::types::value::{InnerValue, UserValue, Value};
 #[derive(Debug)]
 pub struct TransformResult {
     pub inner_value: InnerValue,
-    pub new_keys: Option<Vec<(InternedKey, UserKey)>>,
+    pub new_keys: Option<Vec<(InternerKey, UserKey)>>,
 }
 
 impl TransformResult {
@@ -36,7 +36,7 @@ impl TransformResult {
     ///
     /// **Deprecated.** Use newer codec-based approach instead.
     #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
-    pub fn into_parts(self) -> (InnerValue, Option<Vec<(InternedKey, UserKey)>>) {
+    pub fn into_parts(self) -> (InnerValue, Option<Vec<(InternerKey, UserKey)>>) {
         (self.inner_value, self.new_keys)
     }
 
@@ -52,7 +52,7 @@ impl TransformResult {
 fn user_to_inner_rec(
     value: &UserValue,
     interner: &Interner,
-    new_keys: &mut Option<Vec<(InternedKey, UserKey)>>,
+    new_keys: &mut Option<Vec<(InternerKey, UserKey)>>,
 ) -> InnerValue {
     match value {
         Value::Nil => Value::Nil,
@@ -102,7 +102,7 @@ fn user_to_inner_rec(
 /// if no new keys are found.
 #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
 pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult {
-    let mut new_keys: Option<Vec<(InternedKey, UserKey)>> = None;
+    let mut new_keys: Option<Vec<(InternerKey, UserKey)>> = None;
     let inner_value = user_to_inner_rec(value, interner, &mut new_keys);
     TransformResult {
         inner_value,
