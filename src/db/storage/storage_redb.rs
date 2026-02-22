@@ -371,6 +371,8 @@ impl Store for RedbStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+
     use super::super::types::collect_stream;
     use super::*;
     use crate::types::record_id::RecordId;

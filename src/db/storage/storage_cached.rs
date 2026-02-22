@@ -1,4 +1,4 @@
-use super::types::{collect_stream, RecordKey, Store};
+use super::types::{RecordKey, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_dash_map, TDashMap};
 use async_stream::stream;
@@ -48,12 +48,17 @@ pub struct CachedStore {
 
 impl CachedStore {
     async fn new_with_mode(inner: Arc<dyn Store>, mode: WriteMode) -> DbResult<Self> {
+        use futures::StreamExt;
+
         let cache = Arc::new(new_dash_map());
 
-        // Load ALL data from inner store into cache
-        let all_data = collect_stream(inner.iter_stream(1000)).await?;
-        for (key, value) in all_data {
-            cache.insert(key, value);
+        // Load ALL data from inner store into cache (streaming to avoid double allocation)
+        let mut stream = inner.iter_stream(1000);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (key, value) in batch {
+                cache.insert(key, value);
+            }
         }
 
         Ok(Self {
@@ -104,13 +109,18 @@ impl CachedStore {
     /// Reload all data from inner store (re-sync cache).
     /// Useful if inner store was modified externally.
     pub async fn reload(&self) -> DbResult<()> {
+        use futures::StreamExt;
+
         // Clear current cache
         self.cache.clear();
 
-        // Reload all data from inner
-        let all_data = collect_stream(self.inner.iter_stream(1000)).await?;
-        for (key, value) in all_data {
-            self.cache.insert(key, value);
+        // Reload all data from inner (streaming)
+        let mut stream = self.inner.iter_stream(1000);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (key, value) in batch {
+                self.cache.insert(key, value);
+            }
         }
 
         Ok(())
@@ -283,8 +293,11 @@ impl Store for CachedStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+
     use super::*;
     use crate::db::storage::storage_in_memory::InMemoryStore;
+    use crate::db::storage::types::collect_stream;
     use crate::types::value::InnerValue;
     use futures::StreamExt;
     use tokio::time::{sleep, Duration};

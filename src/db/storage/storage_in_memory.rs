@@ -215,6 +215,8 @@ impl Store for InMemoryStore {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+
     use super::super::types::collect_stream;
     use super::*;
     use crate::types::value::InnerValue;
