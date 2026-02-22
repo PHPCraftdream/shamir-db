@@ -168,8 +168,8 @@ pub struct IndexRecordKey {
 | `matches_paths(&self, paths: &[Vec<u64>]) -> bool` | Проверка соответствия путей |
 
 **Вычисление хешей:**
-- `hash1` — хеш значений через `FxHasher`
-- `hash2` — комбинация `(hash1.wrapping_neg() ^ path_hash)` для защиты от коллизий
+- `hash1` — FxHasher с seed 0
+- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `index_name_interned`
 
 ---
 

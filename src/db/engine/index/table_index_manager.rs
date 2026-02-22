@@ -110,11 +110,10 @@ impl TableIndexManager {
         Some(values)
     }
 
-    fn build_index_key(index_name_interned: u64, values: &[InnerValue]) -> Bytes {
+    fn build_index_key(index_name_interned: u64, values: &[InnerValue]) -> IndexRecordKey {
         let value_refs: Vec<&InnerValue> = values.iter().collect();
         IndexRecordKey::new(false, index_name_interned)
             .with_values(&value_refs)
-            .to_bytes()
     }
 
     async fn add_index_entry(
@@ -123,7 +122,7 @@ impl TableIndexManager {
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> crate::db::DbResult<()> {
-        let index_key = Self::build_index_key(index_name_interned, values);
+        let index_key = Self::build_index_key(index_name_interned, values).to_bytes();
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
         self.info_store.set(Bytes::from(key), Bytes::new()).await?;
@@ -136,7 +135,7 @@ impl TableIndexManager {
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> crate::db::DbResult<()> {
-        let index_key = Self::build_index_key(index_name_interned, values);
+        let index_key = Self::build_index_key(index_name_interned, values).to_bytes();
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
         self.info_store.remove(Bytes::from(key)).await?;
