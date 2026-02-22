@@ -169,7 +169,7 @@ pub struct IndexRecordKey {
 
 **Вычисление хешей:**
 - `hash1` — FxHasher с seed 0
-- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `index_name_interned`
+- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `name_interned`
 
 ---
 

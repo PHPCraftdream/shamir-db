@@ -19,7 +19,7 @@ pub struct IndexRecordKey {
     pub is_unique: u8,
 
     /// Interned ID of the index name (uniquely identifies the index and its fields)
-    pub index_name_interned: u64,
+    pub name_interned: u64,
 
     /// Hash of the indexed values
     pub hash1: u64,
@@ -30,10 +30,10 @@ pub struct IndexRecordKey {
 
 impl IndexRecordKey {
     /// Create a new index record key
-    pub fn new(is_unique: bool, index_name_interned: u64) -> Self {
+    pub fn new(is_unique: bool, name_interned: u64) -> Self {
         Self {
             is_unique: if is_unique { 1 } else { 0 },
-            index_name_interned,
+            name_interned,
             hash1: 0,
             hash2: 0,
         }
@@ -50,8 +50,8 @@ impl IndexRecordKey {
         let mut hasher2 = FxHasher::default();
 
         SEED2.hash(&mut hasher2);
-        self.index_name_interned.hash(&mut hasher2);
-        self.index_name_interned.hash(&mut hasher1);
+        self.name_interned.hash(&mut hasher2);
+        self.name_interned.hash(&mut hasher1);
 
         for value in values {
             value.hash(&mut hasher1);
@@ -68,7 +68,7 @@ impl IndexRecordKey {
     pub fn to_bytes(&self) -> Bytes {
         let mut bytes = [0u8; 25];
         bytes[0] = self.is_unique;
-        bytes[1..9].copy_from_slice(&self.index_name_interned.to_le_bytes());
+        bytes[1..9].copy_from_slice(&self.name_interned.to_le_bytes());
         bytes[9..17].copy_from_slice(&self.hash1.to_le_bytes());
         bytes[17..25].copy_from_slice(&self.hash2.to_le_bytes());
 
@@ -79,7 +79,7 @@ impl IndexRecordKey {
     pub fn to_prefix_bytes(&self) -> Bytes {
         let mut bytes = [0u8; 9];
         bytes[0] = self.is_unique;
-        bytes[1..9].copy_from_slice(&self.index_name_interned.to_le_bytes());
+        bytes[1..9].copy_from_slice(&self.name_interned.to_le_bytes());
 
         Bytes::copy_from_slice(&bytes)
     }
@@ -91,25 +91,25 @@ impl IndexRecordKey {
         }
 
         let is_unique = bytes[0];
-        let index_name_interned = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
+        let name_interned = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
         let hash1 = u64::from_le_bytes(bytes[9..17].try_into().unwrap());
         let hash2 = u64::from_le_bytes(bytes[17..25].try_into().unwrap());
 
         Ok(Self {
             is_unique,
-            index_name_interned,
+            name_interned,
             hash1,
             hash2,
         })
     }
 
     /// Returns the index name interned ID
-    pub fn index_name_interned(&self) -> u64 {
-        self.index_name_interned
+    pub fn name_interned(&self) -> u64 {
+        self.name_interned
     }
 
     /// Проверяет, что ключ соответствует указанному индексу
-    pub fn matches_index(&self, index_name_interned: u64) -> bool {
-        self.index_name_interned == index_name_interned
+    pub fn matches_index(&self, name_interned: u64) -> bool {
+        self.name_interned == name_interned
     }
 }

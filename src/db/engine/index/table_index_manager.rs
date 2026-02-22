@@ -110,19 +110,19 @@ impl TableIndexManager {
         Some(values)
     }
 
-    fn build_index_key(index_name_interned: u64, values: &[InnerValue]) -> IndexRecordKey {
+    fn build_index_key(name_interned: u64, values: &[InnerValue]) -> IndexRecordKey {
         let value_refs: Vec<&InnerValue> = values.iter().collect();
-        IndexRecordKey::new(false, index_name_interned)
+        IndexRecordKey::new(false, name_interned)
             .with_values(&value_refs)
     }
 
     async fn add_index_entry(
         &self,
-        index_name_interned: u64,
+        name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> crate::db::DbResult<()> {
-        let index_key = Self::build_index_key(index_name_interned, values).to_bytes();
+        let index_key = Self::build_index_key(name_interned, values).to_bytes();
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
         self.info_store.set(Bytes::from(key), Bytes::new()).await?;
@@ -131,11 +131,11 @@ impl TableIndexManager {
 
     async fn remove_index_entry(
         &self,
-        index_name_interned: u64,
+        name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> crate::db::DbResult<()> {
-        let index_key = Self::build_index_key(index_name_interned, values).to_bytes();
+        let index_key = Self::build_index_key(name_interned, values).to_bytes();
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
         self.info_store.remove(Bytes::from(key)).await?;
@@ -143,7 +143,7 @@ impl TableIndexManager {
     }
 
     pub async fn create_index(&self, index_def: IndexDefinition) -> crate::db::DbResult<()> {
-        let index_name_interned = index_def.index_name_interned;
+        let name_interned = index_def.name_interned;
         let records = self.data_store.iter().await?;
 
         let mut count = 0usize;
@@ -160,7 +160,7 @@ impl TableIndexManager {
             };
 
             if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
-                self.add_index_entry(index_name_interned, &values, &record_id).await?;
+                self.add_index_entry(name_interned, &values, &record_id).await?;
                 count += 1;
             }
         }
@@ -173,19 +173,19 @@ impl TableIndexManager {
 
         self.save_index_info().await?;
 
-        log::info!("Created index '{}' with {} entries", index_name_interned, count);
+        log::info!("Created index '{}' with {} entries", name_interned, count);
         Ok(())
     }
 
-    pub async fn drop_index(&self, index_name_interned: u64) -> crate::db::DbResult<bool> {
+    pub async fn drop_index(&self, name_interned: u64) -> crate::db::DbResult<bool> {
         {
             let indexes = self.indexes.read().await;
-            if !indexes.contains(index_name_interned) {
+            if !indexes.contains(name_interned) {
                 return Ok(false);
             }
         }
 
-        let prefix = IndexRecordKey::new(false, index_name_interned).to_prefix_bytes();
+        let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
         let entries = self.info_store.scan_prefix(prefix).await?;
 
         for (key, _) in entries {
@@ -194,7 +194,7 @@ impl TableIndexManager {
 
         let removed = {
             let indexes = self.indexes.write().await;
-            let was_removed = indexes.remove_index(index_name_interned);
+            let was_removed = indexes.remove_index(name_interned);
             self.has_indexes.store(indexes.is_enabled(), Ordering::Release);
             was_removed
         };
@@ -223,7 +223,7 @@ impl TableIndexManager {
         let indexes = self.indexes.read().await;
         for def in indexes.iter() {
             if let Some(values) = Self::extract_index_values(value, &def.paths) {
-                self.add_index_entry(def.index_name_interned, &values, record_id).await?;
+                self.add_index_entry(def.name_interned, &values, record_id).await?;
             }
         }
 
@@ -248,15 +248,15 @@ impl TableIndexManager {
             match (old_values, new_values) {
                 (None, None) => {}
                 (None, Some(new)) => {
-                    self.add_index_entry(def.index_name_interned, &new, record_id).await?;
+                    self.add_index_entry(def.name_interned, &new, record_id).await?;
                 }
                 (Some(old), None) => {
-                    self.remove_index_entry(def.index_name_interned, &old, record_id).await?;
+                    self.remove_index_entry(def.name_interned, &old, record_id).await?;
                 }
                 (Some(old), Some(new)) => {
                     if old != new {
-                        self.remove_index_entry(def.index_name_interned, &old, record_id).await?;
-                        self.add_index_entry(def.index_name_interned, &new, record_id).await?;
+                        self.remove_index_entry(def.name_interned, &old, record_id).await?;
+                        self.add_index_entry(def.name_interned, &new, record_id).await?;
                     }
                 }
             }
@@ -273,7 +273,7 @@ impl TableIndexManager {
         let indexes = self.indexes.read().await;
         for def in indexes.iter() {
             if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
-                self.remove_index_entry(def.index_name_interned, &values, record_id).await?;
+                self.remove_index_entry(def.name_interned, &values, record_id).await?;
             }
         }
 
