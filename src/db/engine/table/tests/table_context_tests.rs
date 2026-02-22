@@ -17,13 +17,13 @@ async fn test_table_context_creation() {
     let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
     let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
 
-    use crate::db::engine::index::table_index_manager::TableIndexManager;
+    use crate::db::engine::index::index_manager::IndexManager;
     use crate::db::engine::table::interner_manager::InternerManager;
     use crate::db::engine::table::record_counter::RecordCounter;
 
     let interner = InternerManager::new(Arc::clone(&info_store));
     let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
-    let index_manager = TableIndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
+    let index_manager = IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
         .await
         .unwrap();
 

@@ -1,7 +1,7 @@
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info::IndexInfo;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
-use crate::db::engine::index::table_index_manager::TableIndexManager;
+use crate::db::engine::index::index_manager::IndexManager;
 use crate::db::storage::storage_in_memory::InMemoryStore;
 use crate::db::storage::types::Store;
 use crate::types::record_id::RecordId;
@@ -12,7 +12,7 @@ async fn test_has_indexes_initially_false() {
     let data_store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let info_store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
 
-    let manager = TableIndexManager::new(data_store, info_store)
+    let manager = IndexManager::new(data_store, info_store)
         .await
         .unwrap();
 
@@ -31,7 +31,7 @@ async fn test_has_indexes_true_after_load() {
     let bytes = bincode::serialize(&indexes).unwrap();
     info_store.set(indexes_key, bytes.into()).await.unwrap();
 
-    let manager = TableIndexManager::new(data_store, info_store)
+    let manager = IndexManager::new(data_store, info_store)
         .await
         .unwrap();
 
@@ -53,7 +53,7 @@ async fn test_has_unique_indexes_true_after_load() {
         .await
         .unwrap();
 
-    let manager = TableIndexManager::new(data_store, info_store)
+    let manager = IndexManager::new(data_store, info_store)
         .await
         .unwrap();
 

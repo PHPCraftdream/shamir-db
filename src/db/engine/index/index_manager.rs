@@ -34,7 +34,7 @@ use tokio::sync::RwLock;
 /// - Хранит метаданные индексов в памяти
 /// - Синхронизирует изменения с диском
 /// - Обновляет индексы при изменении данных
-pub struct TableIndexManager {
+pub struct IndexManager {
     /// Хранилище данных таблицы (для чтения записей при построении индекса)
     data_store: Arc<dyn Store>,
     /// Служебное хранилище для метаданных и записей индексов
@@ -52,7 +52,7 @@ pub struct TableIndexManager {
     has_indexes_unique: AtomicBool,
 }
 
-impl Clone for TableIndexManager {
+impl Clone for IndexManager {
     /// Создаёт клон менеджера индексов.
     ///
     /// Клонируются только Arc-ссылки на хранилища и данные индексов,
@@ -70,7 +70,7 @@ impl Clone for TableIndexManager {
     }
 }
 
-impl TableIndexManager {
+impl IndexManager {
     /// Создаёт новый менеджер индексов.
     ///
     /// Загружает существующие индексы из служебного хранилища.
