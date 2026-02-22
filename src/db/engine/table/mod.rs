@@ -1,5 +1,6 @@
 pub mod interner_manager;
 pub mod record_counter;
+#[allow(clippy::module_inception)]
 pub mod table;
 pub mod table_config;
 pub mod table_context;

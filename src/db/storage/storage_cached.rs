@@ -244,20 +244,6 @@ impl Store for CachedStore {
         })
     }
 
-    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let prefix_slice = &prefix[..];
-
-        // Scan only cache (all data is already there)
-        let items: Vec<(RecordKey, Bytes)> = self
-            .cache
-            .iter()
-            .filter(|ref_| ref_.key().starts_with(prefix_slice))
-            .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
-            .collect();
-
-        Ok(items)
-    }
-
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
@@ -494,52 +480,6 @@ mod tests {
         // Should be removed from both
         assert!(cached.get(key1.clone()).await.is_err());
         assert!(inner.get(key1).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_cached_scan_prefix_from_cache() {
-        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
-
-        // Insert data with composite keys
-        let data = vec![
-            b"country:Russia:Moscow:user1".to_vec(),
-            b"country:Russia:Moscow:user2".to_vec(),
-            b"country:Russia:SPb:user3".to_vec(),
-            b"country:France:Paris:user4".to_vec(),
-        ];
-
-        for key in &data {
-            inner
-                .set(key.clone().into(), Bytes::copy_from_slice(key))
-                .await
-                .unwrap();
-        }
-
-        // Create cached store - loads all data
-        let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
-        assert_eq!(cached.cache_size(), 4);
-
-        // Scan prefix from cache (no inner access)
-        let results = cached
-            .scan_prefix(b"country:Russia:".to_vec().into())
-            .await
-            .unwrap();
-
-        assert_eq!(results.len(), 3);
-
-        // Even if we modify inner, cache still has original data
-        inner
-            .set(
-                b"country:Russia:NEW:user5".to_vec().into(),
-                Bytes::from(&b"new"[..]),
-            )
-            .await
-            .unwrap();
-        let results2 = cached
-            .scan_prefix(b"country:Russia:".to_vec().into())
-            .await
-            .unwrap();
-        assert_eq!(results2.len(), 3); // Still 3, not 4 (cache is out of sync)
     }
 
     #[tokio::test]

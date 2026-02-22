@@ -61,22 +61,6 @@ pub trait Store: Send + Sync {
     /// (except possibly the last batch which may be smaller)
     fn iter_stream(&self, batch_size: usize) -> RecordStream;
 
-    /// Returns all records with keys starting with the given prefix.
-    ///
-    /// This enables efficient retrieval of records with composite keys like "idx:field:value:record_id".
-    ///
-    /// # Arguments
-    /// * `prefix` - The prefix to search for (e.g., b"idx:city:Moscow:")
-    ///
-    /// # Returns
-    /// All (key, value) pairs where key starts with the prefix
-    ///
-    /// # Performance
-    /// - For Sled: O(log n + k) using native `scan_prefix()`
-    /// - For others: O(log n + k) using `range(prefix..)` + filtering
-    /// where k is the number of matching records
-    async fn scan_prefix(&self, prefix: Bytes) -> DbResult<Vec<(RecordKey, Bytes)>>;
-
     /// Returns an async stream that yields batches of records with keys starting with the given prefix.
     ///
     /// Like `iter_stream()` but filtered by prefix. More efficient than loading all results into memory.

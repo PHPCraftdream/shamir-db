@@ -26,7 +26,7 @@ async fn test_has_indexes_true_after_load() {
     let info_store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
 
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
-    let indexes = IndexInfo::from_iter(vec![index_def]);
+    let indexes = IndexInfo::from_definitions(vec![index_def]);
     let indexes_key = RecordId::system("indexes").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
     info_store.set(indexes_key, bytes.into()).await.unwrap();
@@ -45,7 +45,7 @@ async fn test_has_unique_indexes_true_after_load() {
     let info_store = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
 
     let index_def = IndexDefinition::new(1002, vec![IndexInfoItem::new(vec![1])]);
-    let indexes = IndexInfo::from_iter(vec![index_def]);
+    let indexes = IndexInfo::from_definitions(vec![index_def]);
     let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
     info_store
