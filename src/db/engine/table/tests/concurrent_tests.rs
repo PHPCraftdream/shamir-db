@@ -12,7 +12,6 @@ use crate::db::storage::types::Repo;
 use crate::types::common::new_map;
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
-use futures::StreamExt;
 use std::sync::Arc;
 
 async fn create_test_table() -> (
