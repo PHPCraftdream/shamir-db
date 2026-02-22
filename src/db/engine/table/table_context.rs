@@ -1,7 +1,7 @@
 use super::interner_manager::InternerManager;
 use super::record_counter::RecordCounter;
 use super::table::Table;
-use crate::db::engine::index::table_index_manager::TableIndexManager;
+use crate::db::engine::index::index_manager::IndexManager;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
@@ -12,7 +12,7 @@ pub struct TableContext {
     table: Arc<Table>,
     interner: InternerManager,
     counter: Arc<RecordCounter>,
-    index_manager: TableIndexManager,
+    index_manager: IndexManager,
 }
 
 impl Clone for TableContext {
@@ -33,7 +33,7 @@ impl TableContext {
         table: Table,
         interner: InternerManager,
         counter: Arc<RecordCounter>,
-        index_manager: TableIndexManager,
+        index_manager: IndexManager,
     ) -> Self {
         Self {
             name,
@@ -56,7 +56,7 @@ impl TableContext {
         &self.counter
     }
 
-    pub fn index_manager(&self) -> &TableIndexManager {
+    pub fn index_manager(&self) -> &IndexManager {
         &self.index_manager
     }
 

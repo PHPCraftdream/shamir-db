@@ -1,4 +1,4 @@
-use super::super::index::table_index_manager::TableIndexManager;
+use super::super::index::index_manager::IndexManager;
 use super::super::table::interner_manager::InternerManager;
 use super::super::table::record_counter::RecordCounter;
 use super::super::table::{Table, TableConfig, TableContext};
@@ -77,7 +77,7 @@ impl RepoManagerInstance {
         let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
 
         let index_manager =
-            TableIndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
+            IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
 
         let table = Table::new(Arc::clone(&data_store));
 
