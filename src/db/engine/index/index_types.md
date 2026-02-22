@@ -4,35 +4,14 @@
 
 ## Обзор архитектуры
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    TableIndexManager                             │
-│  ┌─────────────────────┐    ┌─────────────────────────┐         │
-│  │ indexes (обычные)    │    │ indexes_unique (уник.)  │         │
-│  │   RwLock<IndexInfo>  │    │   RwLock<IndexInfo>     │         │
-│  └─────────────────────┘    └─────────────────────────┘         │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         IndexInfo                                │
-│  - indexes: Vec<IndexDefinition>                                 │
-│  - status: AtomicU8 (IndexStatus)                               │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      IndexDefinition                             │
-│  - name: String                    (имя индекса)                 │
-│  - paths: Vec<IndexInfoItem>       (индексируемые пути)          │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       IndexInfoItem                              │
-│  - path: Vec<u64>                 (путь к полю через ID)         │
-└─────────────────────────────────────────────────────────────────┘
-```
+| Уровень | Компонент | Поля | Описание |
+|---------|-----------|------|----------|
+| 1 | **TableIndexManager** | `indexes`, `indexes_unique` | Менеджер индексов таблицы |
+| 2 | **IndexInfo** | `indexes: Vec<IndexDefinition>`, `status: AtomicU8` | Конфигурация индексов |
+| 3 | **IndexDefinition** | `name: String`, `paths: Vec<IndexInfoItem>` | Определение индекса |
+| 4 | **IndexInfoItem** | `path: Vec<u64>` | Путь к полю через ID |
+
+**Иерархия:** TableIndexManager → IndexInfo → IndexDefinition → IndexInfoItem
 
 ---
 
@@ -169,12 +148,13 @@ pub struct IndexRecordKey {
 
 **Формат хранения (байты):**
 
-```
-┌──────────┬──────────┬─────────────────────────────┬──────────┬──────────┐
-│ is_unique │ num_paths│    path data (variable)     │  hash1   │  hash2   │
-│  1 byte   │  1 byte  │  len(4) + ids(8*n) per path │  8 bytes │  8 bytes │
-└──────────┴──────────┴─────────────────────────────┴──────────┴──────────┘
-```
+| Поле | Размер | Описание |
+|------|--------|----------|
+| `is_unique` | 1 byte | Флаг уникальности |
+| `num_paths` | 1 byte | Количество путей |
+| `path data` | variable | `len(4) + ids(8*n)` на каждый путь |
+| `hash1` | 8 bytes | Хеш значений |
+| `hash2` | 8 bytes | Хеш для коллизий |
 
 **Методы:**
 
@@ -241,21 +221,31 @@ pub struct TableIndexManager {
 
 ---
 
-## Диаграмма зависимостей
+## Зависимости
 
-```
-TableIndexManager
-    ├── Interner (core::interner)
-    ├── Store (db::storage::types)
-    ├── RecordId (types::record_id)
-    └── IndexInfo
-            └── IndexDefinition
-                    └── IndexInfoItem
+### TableIndexManager
 
-IndexRecordKey (независимый тип для B-Tree)
-    └── Bytes (bytes crate)
-    └── FxHasher (fxhash crate)
-```
+| Зависимость | Модуль |
+|-------------|--------|
+| `Interner` | `core::interner` |
+| `Store` | `db::storage::types` |
+| `RecordId` | `types::record_id` |
+| `IndexInfo` | `db::engine::index` |
+
+### Цепочка IndexInfo
+
+| Компонент | Содержит |
+|-----------|----------|
+| `IndexInfo` | `Vec<IndexDefinition>` |
+| `IndexDefinition` | `Vec<IndexInfoItem>` |
+| `IndexInfoItem` | `Vec<u64>` |
+
+### IndexRecordKey (независимый)
+
+| Зависимость | Crate |
+|-------------|-------|
+| `Bytes` | `bytes` |
+| `FxHasher` | `fxhash` |
 
 ---
 
