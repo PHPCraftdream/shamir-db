@@ -110,25 +110,6 @@ impl Table {
         self.data_store.remove(key_bytes).await
     }
 
-    /// List all records (returns InnerValues)
-    ///
-    /// No conversion - returns InnerValues directly.
-    /// Uses streaming internally to avoid loading all keys into memory at once.
-    pub async fn list(&self) -> DbResult<Vec<(RecordId, InnerValue)>> {
-        use futures::StreamExt;
-
-        let mut result = Vec::new();
-        let stream = self.list_stream(1000);
-        futures::pin_mut!(stream);
-
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            result.extend(batch);
-        }
-
-        Ok(result)
-    }
-
     /// Stream records in batches, returning InnerValues
     ///
     /// This is memory-efficient for large tables as it doesn't load all records at once.
