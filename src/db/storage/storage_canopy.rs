@@ -305,14 +305,19 @@ impl Store for CanopyStore {
                         let mut out = Vec::new();
                         let mut next_cursor = None;
 
-                        // Use range starting from cursor
-                        let iter_result = if let Some(start) = start_key {
-                            tree.range(start.as_slice()..)
+                        // Use range with exclusive start to avoid duplicates
+                        use std::ops::Bound;
+
+                        let excluded_key = start_key;
+                        let range_bounds: (Bound<&[u8]>, Bound<&[u8]>) = if let Some(ref start) = excluded_key {
+                            (Bound::Excluded(start.as_slice()), Bound::Unbounded)
                         } else {
-                            tree.iter()
+                            (Bound::Unbounded, Bound::Unbounded)
                         };
 
-                        let mut iter = iter_result.map_err(|e| DbError::Storage(format!("CanopyDB iter: {}", e)))?;
+                        let mut iter = tree
+                            .range::<&[u8]>(range_bounds)
+                            .map_err(|e| DbError::Storage(format!("CanopyDB iter: {}", e)))?;
 
                         // Collect up to batch_size items
                         for _ in 0..batch_size {
