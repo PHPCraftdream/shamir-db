@@ -5,6 +5,7 @@
 use crate::codecs::transform;
 use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::engine::table::record_counter::RecordCounter;
+use crate::db::engine::table::tests::stream_utils::collect_list_stream;
 use crate::db::engine::table::Table;
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
@@ -13,7 +14,6 @@ use crate::types::common::new_map;
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
-use crate::db::engine::table::tests::stream_utils::collect_list_stream;
 
 async fn create_test_table() -> DbResult<(
     Table,
