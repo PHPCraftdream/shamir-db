@@ -4,9 +4,6 @@ use serde::{Deserialize, Serialize};
 /// Defines a single index, which can be simple (one path) or composite (multiple paths).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexDefinition {
-    /// A unique name for the index.
-    pub name: String,
-
     /// Interned ID of the index name (used in IndexRecordKey)
     pub index_name_interned: u64,
 
