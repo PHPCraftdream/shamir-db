@@ -23,12 +23,9 @@ async fn test_table_context_creation() {
 
     let interner = InternerManager::new(Arc::clone(&info_store));
     let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
-    use tokio::sync::OnceCell;
-    let interner_cell = Arc::new(OnceCell::new());
     let index_manager = TableIndexManager::new(
         Arc::clone(&data_store),
         Arc::clone(&info_store),
-        interner_cell,
     )
     .await
     .unwrap();

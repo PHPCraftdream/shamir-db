@@ -1,7 +1,7 @@
 //! Interner manager for lazy loading and persistence
 
 use crate::codecs::basic::bincode;
-use crate::core::interner::{InternedKey, Interner, UserKey};
+use crate::core::interner::{InternerKey, Interner, UserKey};
 use crate::db::storage::types::Store;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;
@@ -53,7 +53,7 @@ impl InternerManager {
 
                 if let Ok(bytes) = inter_data {
                     // Deserialize
-                    let data: Vec<(InternedKey, UserKey)> = bincode::from_bytes(&bytes)
+                    let data: Vec<(InternerKey, UserKey)> = bincode::from_bytes(&bytes)
                         .unwrap_or_else(|e| {
                             log::error!("Failed to deserialize interner: {}", e);
                             Vec::new()
@@ -70,7 +70,7 @@ impl InternerManager {
     }
 
     /// Save new interned keys to storage
-    pub async fn save_new_keys(&self, new_keys: &[(InternedKey, UserKey)]) -> DbResult<()> {
+    pub async fn save_new_keys(&self, new_keys: &[(InternerKey, UserKey)]) -> DbResult<()> {
         if new_keys.is_empty() {
             return Ok(());
         }
@@ -78,7 +78,7 @@ impl InternerManager {
         // Read existing
         let internals_id = RecordId::system("internals");
         let existing = self.info_store.get(internals_id.to_bytes()).await;
-        let mut current: Vec<(InternedKey, UserKey)> = if let Ok(bytes) = existing {
+        let mut current: Vec<(InternerKey, UserKey)> = if let Ok(bytes) = existing {
             bincode::from_bytes(&bytes).unwrap_or_default()
         } else {
             Vec::new()

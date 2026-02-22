@@ -1,4 +1,4 @@
-use crate::core::interner::{InternedKey, Interner, TouchInd, UserKey};
+use crate::core::interner::{InternerKey, Interner, TouchInd, UserKey};
 use std::sync::Arc;
 use std::thread;
 
@@ -19,32 +19,32 @@ fn test_basic_interning() {
     assert_eq!(id3.key().id(), 1); // Same as id1
 
     assert_eq!(
-        interner.get_str(&InternedKey::new(1, 1)),
+        interner.get_str(&InternerKey::new(1)),
         Some(UserKey::from_str("hello"))
     );
     assert_eq!(
-        interner.get_str(&InternedKey::new(2, 1)),
+        interner.get_str(&InternerKey::new(2)),
         Some(UserKey::from_str("world"))
     );
-    assert_eq!(interner.get_ind("world"), Some(InternedKey::new(2, 1)));
+    assert_eq!(interner.get_ind("world"), Some(InternerKey::new(2)));
 }
 
 #[test]
 fn test_with_state_initialization() {
     let initial_data = vec![
-        (InternedKey::new(1, 1), UserKey::from_str("name")),
-        (InternedKey::new(50, 1), UserKey::from_str("age")),
-        (InternedKey::new(100, 1), UserKey::from_str("city")),
+        (InternerKey::new(1), UserKey::from_str("name")),
+        (InternerKey::new(50), UserKey::from_str("age")),
+        (InternerKey::new(100), UserKey::from_str("city")),
     ];
     let interner = Interner::with_state(initial_data);
 
     // Check that initial data is loaded correctly
-    assert_eq!(interner.get_ind("name"), Some(InternedKey::new(1, 1)));
+    assert_eq!(interner.get_ind("name"), Some(InternerKey::new(1)));
     assert_eq!(
-        interner.get_str(&InternedKey::new(50, 1)),
+        interner.get_str(&InternerKey::new(50)),
         Some(UserKey::from_str("age"))
     );
-    assert_eq!(interner.get_ind("city"), Some(InternedKey::new(100, 1)));
+    assert_eq!(interner.get_ind("city"), Some(InternerKey::new(100)));
 
     // Check that touching an existing key returns correct ID
     let touch_existing = interner.touch_ind("name").unwrap();
@@ -58,32 +58,28 @@ fn test_with_state_initialization() {
 }
 
 #[test]
-fn test_key_size_growth() {
-    let interner = Interner::new();
+fn test_interned_key_size() {
+    // Test that InternedKey uses minimal size based on id value
+    let key_u8 = InternerKey::new(42);
+    assert_eq!(key_u8.as_bytes().len(), 1);
 
-    // Start with 1-byte keys
-    assert_eq!(interner.key_size(), 1);
+    let key_u16 = InternerKey::new(256);
+    assert_eq!(key_u16.as_bytes().len(), 2);
 
-    // Add 255 keys (max for u8)
-    for i in 0..255 {
-        interner.touch_ind(format!("key_{}", i)).unwrap();
-    }
+    let key_u32 = InternerKey::new(65536);
+    assert_eq!(key_u32.as_bytes().len(), 4);
 
-    assert_eq!(interner.key_size(), 1);
+    let key_u64 = InternerKey::new(4294967296);
+    assert_eq!(key_u64.as_bytes().len(), 8);
+}
 
-    // Add 256th key - should migrate to 2-byte keys
-    interner.touch_ind("key_255").unwrap();
-    assert_eq!(interner.key_size(), 2);
-
-    // Verify we can still access old keys
-    assert!(interner.get_ind("key_0").is_some());
-    assert!(interner.get_ind("key_255").is_some());
-
-    // Add more keys to trigger 4-byte migration
-    for i in 256..65536 {
-        interner.touch_ind(format!("key_{}", i)).unwrap();
-    }
-    assert_eq!(interner.key_size(), 4);
+#[test]
+fn test_interned_key_equality_by_id() {
+    // Keys with different byte sizes but same id should be equal
+    let key1 = InternerKey::new(42);
+    let key2 = InternerKey::new(42);
+    assert_eq!(key1, key2);
+    assert_eq!(key1.id(), key2.id());
 }
 
 #[test]
@@ -194,7 +190,7 @@ fn test_concurrent_read_while_write() {
         handles.push(thread::spawn(move || {
             for _ in 0..100 {
                 let _ = interner_clone.get_ind("write_0_0");
-                let _ = interner_clone.get_str(&InternedKey::new(1, 1));
+                let _ = interner_clone.get_str(&InternerKey::new(1));
                 let _ = interner_clone.get_ind("nonexistent");
             }
         }));
@@ -245,7 +241,7 @@ fn test_concurrent_reverse_lookup() {
     let mut handles = vec![];
 
     // Populate first and collect actual IDs
-    let mut key_to_id: Vec<(String, InternedKey)> = vec![];
+    let mut key_to_id: Vec<(String, InternerKey)> = vec![];
     for i in 0..100 {
         let key = format!("key_{}", i);
         let touch_result = interner.touch_ind(key.clone()).unwrap();
@@ -253,7 +249,7 @@ fn test_concurrent_reverse_lookup() {
     }
 
     // Create a mapping for easy lookup
-    let id_lookup: std::collections::HashMap<InternedKey, String> = key_to_id
+    let id_lookup: std::collections::HashMap<InternerKey, String> = key_to_id
         .iter()
         .map(|(k, v)| (v.clone(), k.clone()))
         .collect();
@@ -318,9 +314,9 @@ fn test_edge_cases_empty_and_unicode() {
     // Empty string
     let id1 = interner.touch_ind("").unwrap();
     assert_eq!(id1.key().id(), 1);
-    assert_eq!(interner.get_ind(""), Some(InternedKey::new(1, 1)));
+    assert_eq!(interner.get_ind(""), Some(InternerKey::new(1)));
     assert_eq!(
-        interner.get_str(&InternedKey::new(1, 1)),
+        interner.get_str(&InternerKey::new(1)),
         Some(UserKey::from_str(""))
     );
 
@@ -332,14 +328,14 @@ fn test_edge_cases_empty_and_unicode() {
     }
 
     // Verify unicode keys work
-    assert_eq!(interner.get_ind("привет"), Some(InternedKey::new(2, 1)));
-    assert_eq!(interner.get_ind("🚀🎉🔥"), Some(InternedKey::new(3, 1)));
-    assert_eq!(interner.get_ind("مرحبا"), Some(InternedKey::new(4, 1)));
+    assert_eq!(interner.get_ind("привет"), Some(InternerKey::new(2)));
+    assert_eq!(interner.get_ind("🚀🎉🔥"), Some(InternerKey::new(3)));
+    assert_eq!(interner.get_ind("مرحبا"), Some(InternerKey::new(4)));
     assert_eq!(
-        interner.get_str(&InternedKey::new(5, 1)),
+        interner.get_str(&InternerKey::new(5)),
         Some(UserKey::from_str("مرحبا2"))
     );
-    assert_eq!(interner.get_ind("😀😃😄😁"), Some(InternedKey::new(6, 1)));
+    assert_eq!(interner.get_ind("😀😃😄😁"), Some(InternerKey::new(6)));
 }
 
 #[test]
@@ -350,19 +346,19 @@ fn test_edge_cases_very_long_keys() {
     let long_key = "a".repeat(10_000);
     let id = interner.touch_ind(&long_key).unwrap();
     assert_eq!(id.key().id(), 1);
-    assert_eq!(interner.get_ind(&long_key), Some(InternedKey::new(1, 1)));
+    assert_eq!(interner.get_ind(&long_key), Some(InternerKey::new(1)));
     assert_eq!(
-        interner.get_str(&InternedKey::new(1, 1)),
+        interner.get_str(&InternerKey::new(1)),
         Some(UserKey::from_str(long_key.clone()))
     );
 }
 
 #[test]
 fn test_concurrent_with_state() {
-    let initial_data: Vec<(InternedKey, UserKey)> = (0..100)
+    let initial_data: Vec<(InternerKey, UserKey)> = (0..100)
         .map(|i| {
             (
-                InternedKey::new(i + 1, 1),
+                InternerKey::new(i + 1),
                 UserKey::from_str(format!("initial_{}", i)),
             )
         })
@@ -388,17 +384,12 @@ fn test_concurrent_with_state() {
 
     // Initial 100 + 20*50 new = 1100
     assert_eq!(interner.len(), 1100);
-    // At 1100 keys, we should have migrated to 2-byte keys
-    assert_eq!(interner.key_size(), 2);
 
-    // Verify initial data still accessible (now with 2-byte keys)
-    assert_eq!(interner.get_ind("initial_0"), Some(InternedKey::new(1, 2)));
+    // Verify initial data still accessible
+    assert_eq!(interner.get_ind("initial_0"), Some(InternerKey::new(1)));
+    assert_eq!(interner.get_ind("initial_99"), Some(InternerKey::new(100)));
     assert_eq!(
-        interner.get_ind("initial_99"),
-        Some(InternedKey::new(100, 2))
-    );
-    assert_eq!(
-        interner.get_str(&InternedKey::new(1, 2)),
+        interner.get_str(&InternerKey::new(1)),
         Some(UserKey::from_str("initial_0"))
     );
 }
@@ -418,21 +409,21 @@ fn test_len_and_is_empty() {
 #[test]
 fn test_interned_key_serialization() {
     // Test that InternedKey serializes/deserializes correctly
-    let key1 = InternedKey::new(42, 1);
+    let key1 = InternerKey::new(42);
     let bytes1 = rmp_serde::to_vec(&key1).unwrap();
-    let decoded1: InternedKey = rmp_serde::from_slice(&bytes1).unwrap();
+    let decoded1: InternerKey = rmp_serde::from_slice(&bytes1).unwrap();
     assert_eq!(key1.id(), decoded1.id());
     assert_eq!(key1.as_bytes(), decoded1.as_bytes());
 
-    let key2 = InternedKey::new(1000, 2);
+    let key2 = InternerKey::new(1000);
     let bytes2 = rmp_serde::to_vec(&key2).unwrap();
-    let decoded2: InternedKey = rmp_serde::from_slice(&bytes2).unwrap();
+    let decoded2: InternerKey = rmp_serde::from_slice(&bytes2).unwrap();
     assert_eq!(key2.id(), decoded2.id());
     assert_eq!(key2.as_bytes(), decoded2.as_bytes());
 
-    let key3 = InternedKey::new(100000, 4);
+    let key3 = InternerKey::new(100000);
     let bytes3 = rmp_serde::to_vec(&key3).unwrap();
-    let decoded3: InternedKey = rmp_serde::from_slice(&bytes3).unwrap();
+    let decoded3: InternerKey = rmp_serde::from_slice(&bytes3).unwrap();
     assert_eq!(key3.id(), decoded3.id());
     assert_eq!(key3.as_bytes(), decoded3.as_bytes());
 }
@@ -442,11 +433,11 @@ fn test_interned_key_compact_messagepack_serialization() {
     // Test that InternedKey serializes compactly in MessagePack (not as full u64)
     println!("=== Testing InternedKey compact MessagePack serialization ===\n");
 
-    // Create keys with different sizes
-    let key_u8 = InternedKey::new(42, 1);
-    let key_u16 = InternedKey::new(1000, 2);
-    let key_u32 = InternedKey::new(70000, 4);
-    let key_u64 = InternedKey::new(5000000000, 8);
+    // Create keys with different sizes (auto-determined by id value)
+    let key_u8 = InternerKey::new(42);
+    let key_u16 = InternerKey::new(1000);
+    let key_u32 = InternerKey::new(70000);
+    let key_u64 = InternerKey::new(5000000000);
 
     println!("Raw key sizes:");
     println!("  U8: {} bytes", key_u8.as_bytes().len());
@@ -496,13 +487,13 @@ fn test_interned_key_compact_messagepack_serialization() {
     );
 
     // Test round-trip
-    let recovered: InternedKey = rmp_serde::from_slice(&bytes_u8).expect("Failed to deserialize");
+    let recovered: InternerKey = rmp_serde::from_slice(&bytes_u8).expect("Failed to deserialize");
     assert_eq!(recovered.id(), 42, "Recovered ID should be 42");
     assert_eq!(recovered.as_bytes().len(), 1, "Recovered should be 1 byte");
 
-    println!("✓ PASS: InternedKey serializes COMPACTLY!");
-    println!("✓ 1-byte ID = 3 bytes (MessagePack overhead + 1 byte data)");
-    println!("✓ 8-byte ID = 10 bytes (MessagePack overhead + 8 bytes data)");
+    println!("PASS: InternedKey serializes COMPACTLY!");
+    println!("1-byte ID = 3 bytes (MessagePack overhead + 1 byte data)");
+    println!("8-byte ID = 10 bytes (MessagePack overhead + 8 bytes data)");
 }
 
 #[test]
@@ -512,10 +503,10 @@ fn test_map_with_interned_keys_compact() {
     println!("\n=== Testing Map<InternedKey, InnerValue> compact serialization ===\n");
 
     // Create a map with InternedKey keys
-    let mut map = crate::types::common::new_map_wc::<InternedKey, InnerValue>(3);
-    let key1 = InternedKey::new(1, 1); // 1 byte
-    let key2 = InternedKey::new(2, 1); // 1 byte
-    let key3 = InternedKey::new(1000, 2); // 2 bytes
+    let mut map = crate::types::common::new_map_wc::<InternerKey, InnerValue>(3);
+    let key1 = InternerKey::new(1);
+    let key2 = InternerKey::new(2);
+    let key3 = InternerKey::new(1000);
 
     map.insert(key1.clone(), InnerValue::Int(42));
     map.insert(key2.clone(), InnerValue::Int(100));
@@ -565,6 +556,6 @@ fn test_map_with_interned_keys_compact() {
         _ => panic!("Expected Map variant"),
     }
 
-    println!("✓ PASS: Map with InternedKey keys is COMPACT!");
-    println!("✓ InternedKeys stored as variable-size bytes (not full u64)!");
+    println!("PASS: Map with InternedKey keys is COMPACT!");
+    println!("InternedKeys stored as variable-size bytes (not full u64)!");
 }

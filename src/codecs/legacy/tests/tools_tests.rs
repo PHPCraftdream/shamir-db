@@ -3,7 +3,7 @@ mod tests {
     use crate::codecs::transform::{inner_to_user, user_to_inner};
     use crate::codecs::Codec;
     use crate::core::interner::Interner;
-    use crate::core::interner::{InternedKey, UserKey};
+    use crate::core::interner::{InternerKey, UserKey};
     use crate::types::common::{new_map, new_set};
     use crate::types::value::{InnerValue, UserValue};
     use num_bigint::BigInt;
@@ -31,13 +31,13 @@ mod tests {
         assert_eq!(keys.len(), 3);
         assert!(keys
             .iter()
-            .any(|(_, s): &(InternedKey, UserKey)| s.as_str() == "name"));
+            .any(|(_, s): &(InternerKey, UserKey)| s.as_str() == "name"));
         assert!(keys
             .iter()
-            .any(|(_, s): &(InternedKey, UserKey)| s.as_str() == "age"));
+            .any(|(_, s): &(InternerKey, UserKey)| s.as_str() == "age"));
         assert!(keys
             .iter()
-            .any(|(_, s): &(InternedKey, UserKey)| s.as_str() == "balance"));
+            .any(|(_, s): &(InternerKey, UserKey)| s.as_str() == "balance"));
 
         // Verify that calling again with same keys yields no new keys
         let result_again = user_to_inner(&original_value, &interner);

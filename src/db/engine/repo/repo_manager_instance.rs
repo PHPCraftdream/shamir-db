@@ -76,11 +76,9 @@ impl RepoManagerInstance {
         let interner_manager = InternerManager::new(Arc::clone(&info_store));
         let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
 
-        let interner_cell = Arc::new(OnceCell::new());
         let index_manager = TableIndexManager::new(
             Arc::clone(&data_store),
             Arc::clone(&info_store),
-            interner_cell,
         )
         .await?;
 

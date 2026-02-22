@@ -182,7 +182,7 @@ fn test_hash2_includes_index_id() {
     assert_eq!(key1.hash1, key2.hash1);
 
     // hash2 должен быть разным (разные index_id)
-    assert_ne!(key2.hash2, key2.hash2);
+    assert_ne!(key1.hash2, key2.hash2);
 }
 
 #[test]

@@ -25,14 +25,6 @@
       "args": ["run", "chroma-mcp", "--client-type", "persistent", "--data-dir", "./chroma_data"],
       "env": {}
     },
-    "claude-flow": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["tsx", "D:\\dev\\claude-flow\\v3\\@claude-flow\\cli\\bin\\cli.js", "mcp", "start"],
-      "env": {
-        "CLAUDE_FLOW_LOG_LEVEL": "info"
-      }
-    },
     "shamir-db": {
       "type": "stdio",
       "env": {
