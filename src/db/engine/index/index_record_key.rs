@@ -19,7 +19,7 @@ pub struct IndexRecordKey {
 
     /// Paths to indexed fields (vector of path components)
     /// Each path is a vector of field IDs (e.g., [1] for top-level field, [1, 2] for nested)
-    pub path: Vec<Vec<u64>>,
+    pub paths: Vec<Vec<u64>>,
 
     /// Hash of the indexed values
     pub hash1: u64,
@@ -30,10 +30,10 @@ pub struct IndexRecordKey {
 
 impl IndexRecordKey {
     /// Create a new index record key
-    pub fn new(is_unique: bool, path: Vec<Vec<u64>>) -> Self {
+    pub fn new(is_unique: bool, paths: Vec<Vec<u64>>) -> Self {
         Self {
             is_unique: if is_unique { 1 } else { 0 },
-            path,
+            paths,
             hash1: 0,
             hash2: 0,
         }
@@ -48,7 +48,7 @@ impl IndexRecordKey {
         self.hash1 = hasher.finish();
 
         let path_hash: u64 = self
-            .path
+            .paths
             .iter()
             .flat_map(|p| p.iter())
             .fold(0u64, |acc, &id| acc.wrapping_add(id));
@@ -61,9 +61,9 @@ impl IndexRecordKey {
     pub fn to_bytes(&self) -> Bytes {
         let mut bytes = Vec::new();
         bytes.push(self.is_unique);
-        bytes.push(self.path.len() as u8);
+        bytes.push(self.paths.len() as u8);
 
-        for path in &self.path {
+        for path in &self.paths {
             bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
             bytes.extend_from_slice(
                 &path
@@ -75,6 +75,25 @@ impl IndexRecordKey {
 
         bytes.extend_from_slice(&self.hash1.to_le_bytes());
         bytes.extend_from_slice(&self.hash2.to_le_bytes());
+
+        Bytes::from(bytes)
+    }
+
+    /// Convert to prefix bytes (without hash values) for scanning
+    pub fn to_prefix_bytes(&self) -> Bytes {
+        let mut bytes = Vec::new();
+        bytes.push(self.is_unique);
+        bytes.push(self.paths.len() as u8);
+
+        for path in &self.paths {
+            bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(
+                &path
+                    .iter()
+                    .flat_map(|&id| id.to_le_bytes().to_vec())
+                    .collect::<Vec<_>>(),
+            );
+        }
 
         Bytes::from(bytes)
     }
@@ -120,7 +139,7 @@ impl IndexRecordKey {
 
         Ok(Self {
             is_unique,
-            path,
+            paths: path,
             hash1,
             hash2,
         })
@@ -128,14 +147,14 @@ impl IndexRecordKey {
 
     /// Возвращает ссылку на пути индекса.
     pub fn paths(&self) -> &[Vec<u64>] {
-        &self.path
+        &self.paths
     }
 
     /// Проверяет, что ключ соответствует указанным путям
     pub fn matches_paths(&self, paths: &[Vec<u64>]) -> bool {
-        if self.path.len() != paths.len() {
+        if self.paths.len() != paths.len() {
             return false;
         }
-        self.path.iter().zip(paths.iter()).all(|(a, b)| a == b)
+        self.paths.iter().zip(paths.iter()).all(|(a, b)| a == b)
     }
 }

@@ -180,4 +180,10 @@ impl Interner {
     pub fn key_size(&self) -> u8 {
         *self.key_size.lock().unwrap()
     }
+
+    /// Create an InternedKey from a numeric ID using current key size.
+    pub fn make_key(&self, id: u64) -> InternedKey {
+        let size = self.key_size();
+        InternedKey::new(id, size)
+    }
 }
