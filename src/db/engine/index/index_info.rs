@@ -96,6 +96,11 @@ impl IndexInfo {
         &self.indexes
     }
 
+    /// Get an index definition by name
+    pub fn get_index(&self, name: &str) -> Option<&IndexDefinition> {
+        self.indexes.iter().find(|idx| idx.name == name)
+    }
+
     /// Get mutable reference to indexes
     pub fn definitions_mut(&mut self) -> &mut Vec<IndexDefinition> {
         &mut self.indexes
