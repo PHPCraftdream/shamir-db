@@ -2,10 +2,11 @@
 
 use super::index_definition::IndexDefinition;
 use crate::db::engine::index::index_status::IndexStatus;
-use serde::{Deserialize, Serialize};
+use crate::types::common::{new_dash_map_wc, TDashMap};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use crate::types::common::{new_dash_map_wc, TDashMap};
 
 /// Wrapper around Arc<AtomicU8> that implements Default for deserialization.
 /// The default value is IndexStatus::Actual.
@@ -29,11 +30,38 @@ impl std::ops::Deref for StatusAtom {
 /// Index configuration with list of index definitions and sync status
 ///
 /// Status is NOT serialized - it's runtime-only state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// For serialization, indexes are converted to/from BTreeMap.
+#[derive(Debug, Clone)]
 pub struct IndexInfo {
     indexes: TDashMap<u64, IndexDefinition>,
-    #[serde(skip)]
     status: StatusAtom,
+}
+
+impl Serialize for IndexInfo {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Convert DashMap to BTreeMap for serialization
+        let map: BTreeMap<u64, IndexDefinition> = self
+            .indexes
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect();
+        map.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for IndexInfo {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Deserialize as BTreeMap, then convert to DashMap
+        let map: BTreeMap<u64, IndexDefinition> = BTreeMap::deserialize(deserializer)?;
+        let indexes = new_dash_map_wc(map.len().max(128));
+        for (k, v) in map {
+            indexes.insert(k, v);
+        }
+        Ok(Self {
+            indexes,
+            status: StatusAtom::default(),
+        })
+    }
 }
 
 impl IndexInfo {
@@ -45,8 +73,13 @@ impl IndexInfo {
         }
     }
 
-    /// Create IndexInfo with index definitions
-    pub fn from_definitions(indexes: TDashMap<u64, IndexDefinition>) -> Self {
+    /// Create IndexInfo with index definitions from iterator
+    pub fn from_iter<I: IntoIterator<Item = IndexDefinition>>(iter: I) -> Self {
+        let items: Vec<_> = iter.into_iter().collect();
+        let indexes = new_dash_map_wc(items.len().max(128));
+        for def in items {
+            indexes.insert(def.index_name_interned, def);
+        }
         Self {
             indexes,
             status: StatusAtom(Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8()))),
@@ -74,37 +107,45 @@ impl IndexInfo {
     }
 
     /// Add or update an index definition
-    pub fn add_index(&mut self, index_def: IndexDefinition) {
-        self.indexes.retain(|idx| idx.index_name_interned != index_def.index_name_interned);
-        self.indexes.push(index_def);
+    pub fn add_index(&self, index_def: IndexDefinition) {
+        self.indexes
+            .insert(index_def.index_name_interned, index_def);
         self.mark_pending();
     }
 
-    /// Remove an index by its name.
+    /// Remove an index by its interned name.
     /// Returns true if an index was removed.
-    pub fn remove_index(&mut self, index_name_interned: u64) -> bool {
-        let initial_len = self.indexes.len();
-        self.indexes.retain(|idx| idx.index_name_interned != index_name_interned);
-        let removed = self.indexes.len() < initial_len;
+    pub fn remove_index(&self, index_name_interned: u64) -> bool {
+        let removed = self.indexes.remove(&index_name_interned).is_some();
         if removed {
             self.mark_pending();
         }
         removed
     }
 
-    /// Get all index definitions
-    pub fn definitions(&self) -> &[IndexDefinition] {
-        &self.indexes
+    /// Get the number of index definitions
+    pub fn len(&self) -> usize {
+        self.indexes.len()
     }
 
-    /// Get an index definition by name
-    pub fn get_index(&self, index_name_interned: u64) -> Option<&IndexDefinition> {
-        self.indexes.iter().find(|idx| idx.index_name_interned == index_name_interned)
+    /// Check if there are no indexes
+    pub fn is_empty(&self) -> bool {
+        self.indexes.is_empty()
     }
 
-    /// Get mutable reference to indexes
-    pub fn definitions_mut(&mut self) -> &mut Vec<IndexDefinition> {
-        &mut self.indexes
+    /// Get an index definition by interned name
+    pub fn get_index(&self, index_name_interned: u64) -> Option<IndexDefinition> {
+        self.indexes.get(&index_name_interned).map(|v| v.clone())
+    }
+
+    /// Iterate over all index definitions
+    pub fn iter(&self) -> impl Iterator<Item = IndexDefinition> + '_ {
+        self.indexes.iter().map(|entry| entry.value().clone())
+    }
+
+    /// Check if an index exists
+    pub fn contains(&self, index_name_interned: u64) -> bool {
+        self.indexes.contains_key(&index_name_interned)
     }
 }
 
@@ -117,7 +158,20 @@ impl Default for IndexInfo {
 // PartialEq based on indexes only (status is runtime state)
 impl PartialEq for IndexInfo {
     fn eq(&self, other: &Self) -> bool {
-        self.indexes == other.indexes
+        if self.indexes.len() != other.indexes.len() {
+            return false;
+        }
+        for entry in self.indexes.iter() {
+            let key = *entry.key();
+            if let Some(other_val) = other.indexes.get(&key) {
+                if entry.value() != other_val.value() {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
     }
 }
 

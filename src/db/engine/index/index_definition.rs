@@ -13,9 +13,8 @@ pub struct IndexDefinition {
 }
 
 impl IndexDefinition {
-    pub fn new(name: &str, index_name_interned: u64, paths: Vec<IndexInfoItem>) -> Self {
+    pub fn new(index_name_interned: u64, paths: Vec<IndexInfoItem>) -> Self {
         Self {
-            name: name.to_string(),
             index_name_interned,
             paths,
         }
