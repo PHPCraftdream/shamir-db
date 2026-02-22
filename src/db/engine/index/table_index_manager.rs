@@ -115,20 +115,20 @@ impl TableIndexManager {
         Some(values)
     }
 
-    fn build_index_key(paths: &[Vec<u64>], values: &[InnerValue]) -> Bytes {
+    fn build_index_key(index_name_interned: u64, values: &[InnerValue]) -> Bytes {
         let value_refs: Vec<&InnerValue> = values.iter().collect();
-        IndexRecordKey::new(false, paths.to_vec())
+        IndexRecordKey::new(false, index_name_interned)
             .with_values(&value_refs)
             .to_bytes()
     }
 
     async fn add_index_entry(
         &self,
-        paths: &[Vec<u64>],
+        index_name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> crate::db::DbResult<()> {
-        let index_key = Self::build_index_key(paths, values);
+        let index_key = Self::build_index_key(index_name_interned, values);
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
         self.info_store.set(Bytes::from(key), Bytes::new()).await?;
@@ -137,11 +137,11 @@ impl TableIndexManager {
 
     async fn remove_index_entry(
         &self,
-        paths: &[Vec<u64>],
+        index_name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> crate::db::DbResult<()> {
-        let index_key = Self::build_index_key(paths, values);
+        let index_key = Self::build_index_key(index_name_interned, values);
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
         self.info_store.remove(Bytes::from(key)).await?;
@@ -155,8 +155,7 @@ impl TableIndexManager {
         };
 
         let index_name = index_def.name.clone();
-        let paths: Vec<Vec<u64>> = index_def.paths.iter().map(|p| p.path.clone()).collect();
-        let paths_ref = &paths;
+        let index_name_interned = index_def.index_name_interned;
 
         let records = self.data_store.iter().await?;
 
@@ -174,7 +173,7 @@ impl TableIndexManager {
             };
 
             if let Some(values) = Self::extract_index_values(interner, &value, &index_def.paths) {
-                self.add_index_entry(paths_ref, &values, &record_id).await?;
+                self.add_index_entry(index_name_interned, &values, &record_id).await?;
                 count += 1;
             }
         }
@@ -192,15 +191,15 @@ impl TableIndexManager {
     }
 
     pub async fn drop_index(&self, name: &str) -> crate::db::DbResult<bool> {
-        let paths = {
+        let index_name_interned = {
             let indexes = self.indexes.read().await;
             match indexes.get_index(name) {
-                Some(def) => def.paths.iter().map(|p| p.path.clone()).collect::<Vec<_>>(),
+                Some(def) => def.index_name_interned,
                 None => return Ok(false),
             }
         };
 
-        let prefix = IndexRecordKey::new(false, paths).to_prefix_bytes();
+        let prefix = IndexRecordKey::new(false, index_name_interned).to_prefix_bytes();
         let entries = self.info_store.scan_prefix(prefix).await?;
 
         for (key, _) in entries {
@@ -243,8 +242,7 @@ impl TableIndexManager {
         let indexes = self.indexes.read().await;
         for def in indexes.definitions() {
             if let Some(values) = Self::extract_index_values(interner, value, &def.paths) {
-                let paths: Vec<Vec<u64>> = def.paths.iter().map(|p| p.path.clone()).collect();
-                self.add_index_entry(&paths, &values, record_id).await?;
+                self.add_index_entry(def.index_name_interned, &values, record_id).await?;
             }
         }
 
@@ -270,20 +268,19 @@ impl TableIndexManager {
         for def in indexes.definitions() {
             let old_values = Self::extract_index_values(interner, old_value, &def.paths);
             let new_values = Self::extract_index_values(interner, new_value, &def.paths);
-            let paths: Vec<Vec<u64>> = def.paths.iter().map(|p| p.path.clone()).collect();
 
             match (old_values, new_values) {
                 (None, None) => {}
                 (None, Some(new)) => {
-                    self.add_index_entry(&paths, &new, record_id).await?;
+                    self.add_index_entry(def.index_name_interned, &new, record_id).await?;
                 }
                 (Some(old), None) => {
-                    self.remove_index_entry(&paths, &old, record_id).await?;
+                    self.remove_index_entry(def.index_name_interned, &old, record_id).await?;
                 }
                 (Some(old), Some(new)) => {
                     if old != new {
-                        self.remove_index_entry(&paths, &old, record_id).await?;
-                        self.add_index_entry(&paths, &new, record_id).await?;
+                        self.remove_index_entry(def.index_name_interned, &old, record_id).await?;
+                        self.add_index_entry(def.index_name_interned, &new, record_id).await?;
                     }
                 }
             }
@@ -305,8 +302,7 @@ impl TableIndexManager {
         let indexes = self.indexes.read().await;
         for def in indexes.definitions() {
             if let Some(values) = Self::extract_index_values(interner, old_value, &def.paths) {
-                let paths: Vec<Vec<u64>> = def.paths.iter().map(|p| p.path.clone()).collect();
-                self.remove_index_entry(&paths, &values, record_id).await?;
+                self.remove_index_entry(def.index_name_interned, &values, record_id).await?;
             }
         }
 
