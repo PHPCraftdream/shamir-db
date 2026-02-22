@@ -1,6 +1,6 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use crate::db::storage::types::{collect_stream, Store};
+use crate::db::storage::types::Store;
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
@@ -112,26 +112,18 @@ impl Table {
 
     /// List all records (returns InnerValues)
     ///
-    /// No conversion - returns InnerValues directly
+    /// No conversion - returns InnerValues directly.
+    /// Uses streaming internally to avoid loading all keys into memory at once.
     pub async fn list(&self) -> DbResult<Vec<(RecordId, InnerValue)>> {
-        let items = collect_stream(self.data_store.iter_stream(1000)).await?;
+        use futures::StreamExt;
+
         let mut result = Vec::new();
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
 
-        for (key_bytes, bytes) in items {
-            // Convert Bytes to RecordId
-            let arr: [u8; 16] = key_bytes.as_ref().try_into().map_err(|_| {
-                DbError::Internal("Failed to convert key bytes to RecordId".to_string())
-            })?;
-            let id = RecordId(arr);
-
-            match InnerValue::from_bytes(bytes) {
-                Ok(inner_value) => {
-                    result.push((id, inner_value));
-                }
-                Err(e) => {
-                    log::warn!("Failed to deserialize record: {}", e);
-                }
-            }
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            result.extend(batch);
         }
 
         Ok(result)

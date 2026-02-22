@@ -1,7 +1,9 @@
 use crate::db::{DbError, DbResult};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::{Stream, StreamExt};
+use futures::stream::Stream;
+#[cfg(test)]
+use futures::stream::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -11,6 +13,12 @@ type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, Db
 
 /// Collect all records from a stream into a single vector.
 /// Used to convert iter_stream() results to a flat Vec.
+///
+/// **DEPRECATED & FOR TESTS ONLY**
+///
+/// WARNING: Only use in tests! Can consume all memory on large datasets.
+#[cfg(test)]
+#[deprecated(since = "0.1.0", note = "FOR TESTS ONLY.")]
 pub async fn collect_stream(stream: RecordStream) -> DbResult<Vec<(RecordKey, Bytes)>> {
     let mut all_records = Vec::new();
     let mut stream = stream;

@@ -3,7 +3,8 @@ use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info::IndexInfo;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
 use crate::db::engine::index::index_record_key::IndexRecordKey;
-use crate::db::storage::types::{collect_stream, Store};
+use crate::db::storage::types::Store;
+use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use bytes::Bytes;
@@ -123,7 +124,7 @@ impl TableIndexManager {
         name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
-    ) -> crate::db::DbResult<()> {
+    ) -> DbResult<()> {
         let index_key = Self::build_index_key(name_interned, values).to_bytes();
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
@@ -136,7 +137,7 @@ impl TableIndexManager {
         name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
-    ) -> crate::db::DbResult<()> {
+    ) -> DbResult<()> {
         let index_key = Self::build_index_key(name_interned, values).to_bytes();
         let mut key = index_key.to_vec();
         key.extend_from_slice(&record_id.to_bytes());
@@ -144,27 +145,33 @@ impl TableIndexManager {
         Ok(())
     }
 
-    pub async fn create_index(&self, index_def: IndexDefinition) -> crate::db::DbResult<()> {
+    pub async fn create_index(&self, index_def: IndexDefinition) -> DbResult<()> {
+        use futures::StreamExt;
+
         let name_interned = index_def.name_interned;
-        let records = collect_stream(self.data_store.iter_stream(1000)).await?;
+        let mut stream = self.data_store.iter_stream(1000);
 
         let mut count = 0usize;
-        for (key_bytes, value_bytes) in records {
-            let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
-                Ok(a) => a,
-                Err(_) => continue,
-            };
-            let record_id = RecordId(arr);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
 
-            let value = match InnerValue::from_bytes(value_bytes) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+            for (key_bytes, value_bytes) in batch {
+                let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                let record_id = RecordId(arr);
 
-            if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
-                self.add_index_entry(name_interned, &values, &record_id)
-                    .await?;
-                count += 1;
+                let value = match InnerValue::from_bytes(value_bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
+                    self.add_index_entry(name_interned, &values, &record_id)
+                        .await?;
+                    count += 1;
+                }
             }
         }
 
@@ -180,7 +187,7 @@ impl TableIndexManager {
         Ok(())
     }
 
-    pub async fn drop_index(&self, name_interned: u64) -> crate::db::DbResult<bool> {
+    pub async fn drop_index(&self, name_interned: u64) -> DbResult<bool> {
         {
             let indexes = self.indexes.read().await;
             if !indexes.contains(name_interned) {
@@ -210,7 +217,7 @@ impl TableIndexManager {
         Ok(removed)
     }
 
-    async fn save_index_info(&self) -> crate::db::DbResult<()> {
+    async fn save_index_info(&self) -> DbResult<()> {
         let indexes_key = RecordId::system("indexes").to_bytes();
         let indexes = self.indexes.read().await.clone();
         let bytes =
@@ -223,7 +230,7 @@ impl TableIndexManager {
         &self,
         record_id: &RecordId,
         value: &InnerValue,
-    ) -> crate::db::DbResult<()> {
+    ) -> DbResult<()> {
         if !self.has_indexes() {
             return Ok(());
         }
@@ -244,7 +251,7 @@ impl TableIndexManager {
         record_id: &RecordId,
         old_value: &InnerValue,
         new_value: &InnerValue,
-    ) -> crate::db::DbResult<()> {
+    ) -> DbResult<()> {
         if !self.has_indexes() {
             return Ok(());
         }
@@ -282,7 +289,7 @@ impl TableIndexManager {
         &self,
         record_id: &RecordId,
         old_value: &InnerValue,
-    ) -> crate::db::DbResult<()> {
+    ) -> DbResult<()> {
         if !self.has_indexes() {
             return Ok(());
         }
