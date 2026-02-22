@@ -13,6 +13,7 @@ use crate::types::common::new_map;
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
+use crate::db::engine::table::tests::stream_utils::collect_list_stream;
 
 async fn create_test_table() -> DbResult<(
     Table,
@@ -185,7 +186,7 @@ async fn test_table_list() {
         table.insert(&inner).await.unwrap();
     }
 
-    let records = table.list().await.unwrap();
+    let records = collect_list_stream(&table).await.unwrap();
     assert_eq!(records.len(), 3);
 }
 
@@ -279,7 +280,7 @@ async fn test_table_with_special_characters() {
     }
 
     // Retrieve all and verify
-    let records = table.list().await.unwrap();
+    let records = collect_list_stream(&table).await.unwrap();
     assert_eq!(records.len(), special_keys.len());
 
     for (_id, value) in records {
