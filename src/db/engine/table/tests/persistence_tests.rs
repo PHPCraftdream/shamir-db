@@ -5,6 +5,7 @@
 use crate::codecs::transform;
 use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::engine::table::record_counter::RecordCounter;
+use crate::db::engine::table::tests::stream_utils::collect_list_stream;
 use crate::db::engine::table::Table;
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
@@ -157,7 +158,7 @@ async fn test_interner_persistence_after_restart() {
     );
 
     // List all records and verify
-    let all_records = table2.list().await.unwrap();
+    let all_records = collect_list_stream(&table2).await.unwrap();
     assert_eq!(all_records.len(), 3);
 
     // Verify each record has correct structure
@@ -234,7 +235,7 @@ async fn test_counter_persistence_after_restart() {
     assert_eq!(count2, 5, "Counter should persist after restart");
 
     // Verify actual records match counter
-    let records = table2.list().await.unwrap();
+    let records = collect_list_stream(&table2).await.unwrap();
     assert_eq!(records.len(), 5, "Actual record count should match counter");
 
     // Insert more records
@@ -275,7 +276,7 @@ async fn test_counter_persistence_after_restart() {
     );
 
     // Verify counter matches actual record count
-    let records = table3.list().await.unwrap();
+    let records = collect_list_stream(&table3).await.unwrap();
     assert_eq!(
         records.len(),
         10,
@@ -305,7 +306,7 @@ async fn test_counter_matches_actual_record_count() {
 
     // Initial state
     assert_eq!(counter.get().await.unwrap() as usize, 0);
-    assert_eq!(table.list().await.unwrap().len(), 0);
+    assert_eq!(collect_list_stream(&table).await.unwrap().len(), 0);
 
     // Insert 10 records
     for i in 0..10 {
@@ -318,7 +319,7 @@ async fn test_counter_matches_actual_record_count() {
     }
 
     assert_eq!(counter.get().await.unwrap() as usize, 10);
-    assert_eq!(table.list().await.unwrap().len(), 10);
+    assert_eq!(collect_list_stream(&table).await.unwrap().len(), 10);
 
     // Delete 3 records
     table.delete(ids[0]).await.unwrap();
@@ -329,7 +330,7 @@ async fn test_counter_matches_actual_record_count() {
     counter.increment(-1).await.unwrap();
 
     assert_eq!(counter.get().await.unwrap() as usize, 7);
-    assert_eq!(table.list().await.unwrap().len(), 7);
+    assert_eq!(collect_list_stream(&table).await.unwrap().len(), 7);
 
     // Update 2 records
     let mut data = new_map();
@@ -340,7 +341,7 @@ async fn test_counter_matches_actual_record_count() {
 
     // Count should not change on update
     assert_eq!(counter.get().await.unwrap() as usize, 7);
-    assert_eq!(table.list().await.unwrap().len(), 7);
+    assert_eq!(collect_list_stream(&table).await.unwrap().len(), 7);
 
     // Insert 5 more
     for i in 10..15 {
@@ -352,5 +353,5 @@ async fn test_counter_matches_actual_record_count() {
     }
 
     assert_eq!(counter.get().await.unwrap() as usize, 12);
-    assert_eq!(table.list().await.unwrap().len(), 12);
+    assert_eq!(collect_list_stream(&table).await.unwrap().len(), 12);
 }

@@ -5,12 +5,14 @@
 use crate::codecs::transform;
 use crate::db::engine::table::interner_manager::InternerManager;
 use crate::db::engine::table::record_counter::RecordCounter;
+use crate::db::engine::table::tests::stream_utils::collect_list_stream;
 use crate::db::engine::table::Table;
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::Repo;
 use crate::types::common::new_map;
 use crate::types::record_id::RecordId;
 use crate::types::value::{InnerValue, UserValue};
+use futures::StreamExt;
 use std::sync::Arc;
 
 async fn create_test_table() -> (
@@ -130,7 +132,8 @@ async fn test_concurrent_insert_and_read() {
         let counter_clone = counter.clone();
         handles.push(tokio::spawn(async move {
             for _ in 0..10 {
-                let _ = table_clone.list().await;
+                // Just verify streaming works without panic
+                let _ = collect_list_stream(&table_clone).await;
                 let _ = counter_clone.get().await;
             }
         }));
@@ -181,7 +184,7 @@ async fn test_concurrent_same_keys_interning() {
     }
 
     // Verify all records are correct
-    let records = table.list().await.unwrap();
+    let records = collect_list_stream(&table).await.unwrap();
     assert_eq!(records.len(), (num_threads * 10) as usize);
 
     // All records should have same 4 keys (name, age, email, index)
@@ -277,7 +280,7 @@ async fn test_concurrent_clone_and_operations() {
                 }
                 1 => {
                     // List
-                    let _ = table_clone.list().await;
+                    let _ = collect_list_stream(&table_clone).await;
                 }
                 2 => {
                     // Count
@@ -388,6 +391,6 @@ async fn test_counter_with_concurrent_operations() {
 
     // Counter should still be accurate
     let count = counter.get().await.unwrap() as usize;
-    let actual = table.list().await.unwrap().len();
+    let actual = collect_list_stream(&table).await.unwrap().len();
     assert_eq!(count, actual);
 }

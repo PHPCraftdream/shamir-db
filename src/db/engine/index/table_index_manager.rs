@@ -196,10 +196,15 @@ impl TableIndexManager {
         }
 
         let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
-        let entries = self.info_store.scan_prefix(prefix).await?;
 
-        for (key, _) in entries {
-            self.info_store.remove(key).await?;
+        // Use stream to avoid loading all index entries into memory
+        use futures::StreamExt;
+        let mut stream = self.info_store.scan_prefix_stream(prefix, 1000);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (key, _) in batch {
+                self.info_store.remove(key).await?;
+            }
         }
 
         let removed = {
