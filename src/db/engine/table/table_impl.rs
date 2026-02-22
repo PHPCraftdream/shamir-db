@@ -1,6 +1,6 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use crate::db::storage::types::Store;
+use crate::db::storage::types::{collect_stream, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
@@ -114,7 +114,7 @@ impl Table {
     ///
     /// No conversion - returns InnerValues directly
     pub async fn list(&self) -> DbResult<Vec<(RecordId, InnerValue)>> {
-        let items = self.data_store.iter().await?;
+        let items = collect_stream(self.data_store.iter_stream(1000)).await?;
         let mut result = Vec::new();
 
         for (key_bytes, bytes) in items {

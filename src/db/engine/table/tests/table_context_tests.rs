@@ -23,12 +23,9 @@ async fn test_table_context_creation() {
 
     let interner = InternerManager::new(Arc::clone(&info_store));
     let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
-    let index_manager = TableIndexManager::new(
-        Arc::clone(&data_store),
-        Arc::clone(&info_store),
-    )
-    .await
-    .unwrap();
+    let index_manager = TableIndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store))
+        .await
+        .unwrap();
 
     use crate::db::engine::table::Table;
     let table = Table::new(Arc::clone(&data_store));

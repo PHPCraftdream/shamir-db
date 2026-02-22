@@ -120,15 +120,6 @@ impl Store for InMemoryStore {
         Ok(self.data.remove(&key).is_some())
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let items: Vec<(RecordKey, Bytes)> = self
-            .data
-            .iter()
-            .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
-            .collect();
-        Ok(items)
-    }
-
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -224,6 +215,7 @@ impl Store for InMemoryStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::collect_stream;
     use super::*;
     use crate::types::value::InnerValue;
     use futures::StreamExt;
@@ -256,7 +248,7 @@ mod tests {
         // Test iter
         let value4 = InnerValue::Bool(true);
         let _key3 = store.insert(value4.to_bytes()).await.unwrap();
-        let all_records = store.iter().await.unwrap();
+        let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records
@@ -268,7 +260,7 @@ mod tests {
         assert!(store.get(key1.clone()).await.is_err());
         assert!(!store.remove(key1).await.unwrap()); // Already removed
 
-        let all_records_after_remove = store.iter().await.unwrap();
+        let all_records_after_remove = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
     }
 
@@ -444,7 +436,7 @@ mod tests {
         }
 
         // Verify all writes succeeded
-        let all_records = store.iter().await.unwrap();
+        let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 100);
     }
 }

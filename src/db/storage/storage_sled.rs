@@ -162,22 +162,6 @@ impl Store for SledStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let tree = self.tree.clone();
-
-        spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
-            let mut out = Vec::new();
-            for item in tree.iter() {
-                let (key, val) =
-                    item.map_err(|e| DbError::Storage(format!("SledDB iter item: {}", e)))?;
-                out.push((Bytes::copy_from_slice(&key), Bytes::copy_from_slice(&val)));
-            }
-            Ok(out)
-        })
-        .await
-        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
-    }
-
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -320,6 +304,7 @@ impl Store for SledStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::collect_stream;
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
@@ -354,7 +339,7 @@ mod tests {
         // Test iter
         let value4 = InnerValue::Bool(true);
         let _key3 = store.insert(value4.to_bytes()).await.unwrap();
-        let all_records = store.iter().await.unwrap();
+        let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records
@@ -366,7 +351,7 @@ mod tests {
         assert!(store.get(key1.clone()).await.is_err());
         assert!(!store.remove(key1).await.unwrap()); // Already removed
 
-        let all_records_after_remove = store.iter().await.unwrap();
+        let all_records_after_remove = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
     }
 
@@ -436,8 +421,20 @@ mod tests {
         let key2 = store2.insert(value2.to_bytes()).await.unwrap();
 
         // Verify isolation - each table should have only 1 record
-        assert_eq!(store1.iter().await.unwrap().len(), 1);
-        assert_eq!(store2.iter().await.unwrap().len(), 1);
+        assert_eq!(
+            collect_stream(store1.iter_stream(1000))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            collect_stream(store2.iter_stream(1000))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Verify correct values
         let retrieved_bytes1 = store1.get(key1.clone()).await.unwrap();

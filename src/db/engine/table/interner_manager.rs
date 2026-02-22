@@ -1,7 +1,7 @@
 //! Interner manager for lazy loading and persistence
 
 use crate::codecs::basic::bincode;
-use crate::core::interner::{InternerKey, Interner, UserKey};
+use crate::core::interner::{Interner, InternerKey, UserKey};
 use crate::db::storage::types::Store;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;

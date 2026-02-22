@@ -1,4 +1,4 @@
-use super::types::{RecordKey, Store};
+use super::types::{collect_stream, RecordKey, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_dash_map, TDashMap};
 use async_stream::stream;
@@ -51,7 +51,7 @@ impl CachedStore {
         let cache = Arc::new(new_dash_map());
 
         // Load ALL data from inner store into cache
-        let all_data = inner.iter().await?;
+        let all_data = collect_stream(inner.iter_stream(1000)).await?;
         for (key, value) in all_data {
             cache.insert(key, value);
         }
@@ -108,7 +108,7 @@ impl CachedStore {
         self.cache.clear();
 
         // Reload all data from inner
-        let all_data = self.inner.iter().await?;
+        let all_data = collect_stream(self.inner.iter_stream(1000)).await?;
         for (key, value) in all_data {
             self.cache.insert(key, value);
         }
@@ -207,16 +207,6 @@ impl Store for CachedStore {
                 Ok(existed)
             }
         }
-    }
-
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        // Return all items from cache (no need to query inner)
-        let items: Vec<(RecordKey, Bytes)> = self
-            .cache
-            .iter()
-            .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
-            .collect();
-        Ok(items)
     }
 
     fn iter_stream(
@@ -350,7 +340,10 @@ mod tests {
         assert_eq!(cached.pending_writes(), 0);
 
         // All data should be in inner now
-        assert_eq!(inner.iter().await.unwrap().len(), 10);
+        assert_eq!(
+            collect_stream(inner.iter_stream(1000)).await.unwrap().len(),
+            10
+        );
     }
 
     #[tokio::test]
@@ -385,7 +378,7 @@ mod tests {
         assert_eq!(cached.cache_size(), 10);
 
         // Can retrieve all items without touching inner store
-        let all_from_cache = cached.iter().await.unwrap();
+        let all_from_cache = collect_stream(cached.iter_stream(1000)).await.unwrap();
         assert_eq!(all_from_cache.len(), 10);
     }
 
@@ -624,7 +617,10 @@ mod tests {
 
         // All writes mirrored to both cache and inner
         assert_eq!(cached.cache_size(), 50);
-        assert_eq!(inner.iter().await.unwrap().len(), 50);
+        assert_eq!(
+            collect_stream(inner.iter_stream(1000)).await.unwrap().len(),
+            50
+        );
     }
 
     #[tokio::test]
@@ -643,11 +639,14 @@ mod tests {
         assert_eq!(cached.cache_size(), 5);
 
         // But may not be fully written to inner yet
-        let inner_count = inner.iter().await.unwrap().len();
+        let inner_count = collect_stream(inner.iter_stream(1000)).await.unwrap().len();
         assert!(inner_count <= 5); // May be less due to async writes
 
         // After flush, all should be in inner
         cached.flush().await.unwrap();
-        assert_eq!(inner.iter().await.unwrap().len(), 5);
+        assert_eq!(
+            collect_stream(inner.iter_stream(1000)).await.unwrap().len(),
+            5
+        );
     }
 }

@@ -209,27 +209,6 @@ impl Store for RedbStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
-    async fn iter(&self) -> DbResult<Vec<(RecordKey, Bytes)>> {
-        let db = self.db.clone();
-        let table_name = self.table_name.clone();
-        task::spawn_blocking(move || -> DbResult<Vec<(RecordKey, Bytes)>> {
-            let read_txn = db.begin_read()?;
-            let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
-            let table = read_txn.open_table(table_def)?;
-            let mut result = Vec::new();
-            for item in table.iter()? {
-                let (key, val) = item?;
-                result.push((
-                    Bytes::copy_from_slice(key.value()),
-                    Bytes::copy_from_slice(val.value()),
-                ));
-            }
-            Ok(result)
-        })
-        .await
-        .map_err(|e| DbError::Internal(e.to_string()))?
-    }
-
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -392,6 +371,7 @@ impl Store for RedbStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::collect_stream;
     use super::*;
     use crate::types::record_id::RecordId;
     use crate::types::value::InnerValue;
@@ -426,7 +406,7 @@ mod tests {
         // Test iter
         let value4 = InnerValue::Bool(true);
         let _key3 = store.insert(value4.to_bytes()).await.unwrap();
-        let all_records = store.iter().await.unwrap();
+        let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));
         assert!(all_records
@@ -438,7 +418,7 @@ mod tests {
         assert!(store.get(key1.clone()).await.is_err());
         assert!(!store.remove(key1).await.unwrap()); // Already removed
 
-        let all_records_after_remove = store.iter().await.unwrap();
+        let all_records_after_remove = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records_after_remove.len(), 2);
     }
 

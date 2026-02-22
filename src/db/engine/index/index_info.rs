@@ -108,8 +108,7 @@ impl IndexInfo {
 
     /// Add or update an index definition
     pub fn add_index(&self, index_def: IndexDefinition) {
-        self.indexes
-            .insert(index_def.name_interned, index_def);
+        self.indexes.insert(index_def.name_interned, index_def);
         self.mark_pending();
     }
 
