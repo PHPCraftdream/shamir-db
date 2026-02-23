@@ -222,13 +222,14 @@ impl IndexManager {
     /// Строит ключ записи индекса.
     ///
     /// Ключ индекса состоит из:
-    /// - Идентификатора индекса (интернированное имя)
-    /// - Хешей значений проиндексированных полей
+    /// - Флага is_unique (1 байт)
+    /// - Идентификатора индекса (интернированное имя, 8 байт)
+    /// - Хешей значений проиндексированных полей (16 байт)
     ///
     /// Это позволяет быстро находить записи по значению индексируемых полей.
-    fn build_index_key(name_interned: u64, values: &[InnerValue]) -> IndexRecordKey {
+    fn build_index_key(is_unique: bool, name_interned: u64, values: &[InnerValue]) -> IndexRecordKey {
         let value_refs: Vec<&InnerValue> = values.iter().collect();
-        IndexRecordKey::new(false, name_interned).with_values(&value_refs)
+        IndexRecordKey::new(is_unique, name_interned).with_values(&value_refs)
     }
 
     /// Добавляет запись в индекс.
@@ -250,7 +251,7 @@ impl IndexManager {
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> DbResult<()> {
-        let index_key = Self::build_index_key(name_interned, values).to_bytes();
+        let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
 
         // Читаем существующее множество RecordId или создаём пустое
         let mut record_ids = match self.info_store.get(index_key.clone()).await {
@@ -281,7 +282,7 @@ impl IndexManager {
     ) -> DbResult<()> {
         use std::collections::BTreeSet;
 
-        let index_key = Self::build_index_key(name_interned, values).to_bytes();
+        let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
 
         // Читаем существующее множество RecordId
         let mut record_ids = match self.info_store.get(index_key.clone()).await {
@@ -557,7 +558,7 @@ impl IndexManager {
         name_interned: u64,
         values: &[InnerValue],
     ) -> DbResult<BTreeSet<RecordId>> {
-        let index_key = Self::build_index_key(name_interned, values).to_bytes();
+        let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
 
         match self.info_store.get(index_key).await {
             Ok(bytes) => {
@@ -578,5 +579,384 @@ impl IndexManager {
     /// Возвращает определение индекса по его имени.
     pub fn get_index_definition(&self, name_interned: u64) -> Option<IndexDefinition> {
         self.indexes.get_index(name_interned)
+    }
+
+    // ============================================================================
+    // UNIQUE INDEXES - Validation (BEFORE write)
+    // ============================================================================
+
+    /// Проверяет уникальность перед созданием записи.
+    ///
+    /// Должен вызываться ДО записи в таблицу.
+    /// Возвращает `Err(DuplicateKey)` если хотя бы один уникальный индекс нарушен.
+    ///
+    /// # Аргументы
+    ///
+    /// * `value` — значение новой записи
+    pub async fn validate_unique_for_create(&self, value: &InnerValue) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+
+        for def in self.indexes_unique.iter() {
+            if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                if let Some(existing_id) = self.check_unique_constraint(def.name_interned, &values).await? {
+                    return Err(crate::db::DbError::DuplicateKey(format!(
+                        "Unique index '{}' violated: value already exists for record {:?}",
+                        def.name_interned, existing_id
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Проверяет уникальность перед обновлением записи.
+    ///
+    /// Должен вызываться ДО записи в таблицу.
+    /// Возвращает `Err(DuplicateKey)` если хотя бы один уникальный индекс нарушен.
+    /// Исключает саму обновляемую запись из проверки.
+    ///
+    /// # Аргументы
+    ///
+    /// * `record_id` — идентификатор обновляемой записи
+    /// * `old_value` — старое значение (до обновления)
+    /// * `new_value` — новое значение (после обновления)
+    pub async fn validate_unique_for_update(
+        &self,
+        record_id: &RecordId,
+        old_value: &InnerValue,
+        new_value: &InnerValue,
+    ) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+
+        for def in self.indexes_unique.iter() {
+            let old_values = Self::extract_index_values(old_value, &def.paths);
+            let new_values = Self::extract_index_values(new_value, &def.paths);
+
+            // Если значение не изменилось или оба отсутствуют — пропускаем
+            match (&old_values, &new_values) {
+                (None, None) => continue,
+                (Some(old), Some(new)) if old == new => continue,
+                _ => {}
+            }
+
+            // Проверяем новое значение (если оно есть)
+            if let Some(new) = &new_values {
+                if let Some(existing_id) = self.check_unique_constraint(def.name_interned, new).await? {
+                    // Если существующая запись — это не мы сами, то нарушение
+                    if &existing_id != record_id {
+                        return Err(crate::db::DbError::DuplicateKey(format!(
+                            "Unique index '{}' violated: value already exists for record {:?}",
+                            def.name_interned, existing_id
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Проверяет, существует ли запись с данным значением в уникальном индексе.
+    ///
+    /// # Возвращает
+    ///
+    /// - `Ok(Some(RecordId))` — запись существует
+    /// - `Ok(None)` — значение свободно
+    /// - `Err` — ошибка чтения
+    async fn check_unique_constraint(
+        &self,
+        name_interned: u64,
+        values: &[InnerValue],
+    ) -> DbResult<Option<RecordId>> {
+        let index_key = Self::build_index_key(true, name_interned, values).to_bytes();
+
+        match self.info_store.get(index_key).await {
+            Ok(bytes) => {
+                if bytes.len() == 16 {
+                    let arr: [u8; 16] = bytes.as_ref().try_into().unwrap();
+                    Ok(Some(RecordId(arr)))
+                } else {
+                    // Коррупция данных — считаем что занято
+                    log::warn!("Invalid unique index value length: {}", bytes.len());
+                    Ok(None)
+                }
+            }
+            Err(crate::db::DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    // ============================================================================
+    // UNIQUE INDEXES - Storage helpers
+    // ============================================================================
+
+    /// Добавляет запись в уникальный индекс.
+    ///
+    /// Ключ: `[index_key with is_unique=true]` (25 байт)
+    /// Значение: `RecordId` (16 байт)
+    ///
+    /// # Важно
+    ///
+    /// Не проверяет уникальность! Вызывай `validate_unique_*` перед этим методом.
+    async fn add_unique_entry(
+        &self,
+        name_interned: u64,
+        values: &[InnerValue],
+        record_id: &RecordId,
+    ) -> DbResult<()> {
+        let index_key = Self::build_index_key(true, name_interned, values).to_bytes();
+        self.info_store.set(index_key, record_id.to_bytes()).await?;
+        Ok(())
+    }
+
+    /// Удаляет запись из уникального индекса.
+    async fn remove_unique_entry(
+        &self,
+        name_interned: u64,
+        values: &[InnerValue],
+    ) -> DbResult<()> {
+        let index_key = Self::build_index_key(true, name_interned, values).to_bytes();
+        self.info_store.remove(index_key).await?;
+        Ok(())
+    }
+
+    // ============================================================================
+    // UNIQUE INDEXES - Event handlers (AFTER write)
+    // ============================================================================
+
+    /// Обработчик события создания записи для уникальных индексов.
+    ///
+    /// Добавляет новую запись во все уникальные индексы.
+    /// Вызывается ПОСЛЕ успешной вставки записи в таблицу.
+    ///
+    /// # Важно
+    ///
+    /// Перед вызовом должна быть выполнена валидация через `validate_unique_for_create`!
+    pub async fn on_record_created_unique(
+        &self,
+        record_id: &RecordId,
+        value: &InnerValue,
+    ) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+
+        for def in self.indexes_unique.iter() {
+            if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                self.add_unique_entry(def.name_interned, &values, record_id)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Обработчик события обновления записи для уникальных индексов.
+    ///
+    /// Обновляет уникальные индексы при изменении записи.
+    /// Вызывается ПОСЛЕ успешного обновления записи в таблице.
+    ///
+    /// # Важно
+    ///
+    /// Перед вызовом должна быть выполнена валидация через `validate_unique_for_update`!
+    pub async fn on_record_updated_unique(
+        &self,
+        record_id: &RecordId,
+        old_value: &InnerValue,
+        new_value: &InnerValue,
+    ) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+
+        for def in self.indexes_unique.iter() {
+            let old_values = Self::extract_index_values(old_value, &def.paths);
+            let new_values = Self::extract_index_values(new_value, &def.paths);
+
+            match (old_values, new_values) {
+                (None, None) => {}
+                (None, Some(new)) => {
+                    self.add_unique_entry(def.name_interned, &new, record_id)
+                        .await?;
+                }
+                (Some(old), None) => {
+                    self.remove_unique_entry(def.name_interned, &old).await?;
+                }
+                (Some(old), Some(new)) => {
+                    if old != new {
+                        self.remove_unique_entry(def.name_interned, &old).await?;
+                        self.add_unique_entry(def.name_interned, &new, record_id)
+                            .await?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Обработчик события удаления записи для уникальных индексов.
+    ///
+    /// Удаляет запись из всех уникальных индексов.
+    /// Вызывается ПОСЛЕ успешного удаления записи из таблицы.
+    pub async fn on_record_deleted_unique(
+        &self,
+        _record_id: &RecordId,
+        old_value: &InnerValue,
+    ) -> DbResult<()> {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+
+        for def in self.indexes_unique.iter() {
+            if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
+                self.remove_unique_entry(def.name_interned, &values).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    // ============================================================================
+    // UNIQUE INDEXES - Management
+    // ============================================================================
+
+    /// Создаёт новый уникальный индекс для таблицы.
+    ///
+    /// Процесс создания:
+    /// 1. Проверяет уникальность всех существующих значений
+    /// 2. Если есть дубликаты — возвращает ошибку
+    /// 3. Иначе создаёт индекс
+    ///
+    /// # Возвращает
+    ///
+    /// - `Ok(())` — индекс успешно создан
+    /// - `Err(DuplicateKey)` — найдены дубликаты в существующих данных
+    pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
+        use futures::StreamExt;
+
+        let name_interned = index_def.name_interned;
+        let mut seen_values: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+
+        // Читаем данные таблицы потоком
+        let mut stream = self.data_store.iter_stream(1000);
+
+        let mut count = 0usize;
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+
+            for (key_bytes, value_bytes) in batch {
+                let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                let record_id = RecordId(arr);
+
+                let value = match InnerValue::from_bytes(value_bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
+                    // Сериализуем значения для проверки уникальности
+                    let values_key = bincode::serialize(&values)
+                        .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+
+                    if !seen_values.insert(values_key) {
+                        return Err(crate::db::DbError::DuplicateKey(format!(
+                            "Cannot create unique index '{}': duplicate values found",
+                            name_interned
+                        )));
+                    }
+
+                    self.add_unique_entry(name_interned, &values, &record_id)
+                        .await?;
+                    count += 1;
+                }
+            }
+        }
+
+        // Добавляем определение индекса в метаданные и сохраняем
+        self.indexes_unique.add_index(index_def);
+        self.has_indexes_unique.store(true, Ordering::Release);
+        self.save_index_info_unique().await?;
+
+        log::info!("Created unique index '{}' with {} entries", name_interned, count);
+        Ok(())
+    }
+
+    /// Удаляет уникальный индекс по его имени.
+    ///
+    /// # Возвращает
+    ///
+    /// `true` — индекс существовал и был удалён
+    /// `false` — индекс не найден
+    pub async fn drop_unique_index(&self, name_interned: u64) -> DbResult<bool> {
+        if !self.indexes_unique.contains(name_interned) {
+            return Ok(false);
+        }
+
+        // Формируем префикс для сканирования всех записей данного индекса
+        let prefix = IndexRecordKey::new(true, name_interned).to_prefix_bytes();
+
+        // Потоковое удаление записей индекса
+        use futures::StreamExt;
+        let mut stream = self.info_store.scan_prefix_stream(prefix, 1000);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (key, _) in batch {
+                self.info_store.remove(key).await?;
+            }
+        }
+
+        // Удаляем определение индекса из метаданных
+        let was_removed = self.indexes_unique.remove_index(name_interned);
+        self.has_indexes_unique
+            .store(self.indexes_unique.is_enabled(), Ordering::Release);
+
+        if was_removed {
+            self.save_index_info_unique().await?;
+        }
+
+        Ok(was_removed)
+    }
+
+    /// Сохраняет метаданные уникальных индексов в служебное хранилище.
+    async fn save_index_info_unique(&self) -> DbResult<()> {
+        let indexes_key = RecordId::system("indexes_unique").to_bytes();
+        let bytes = bincode::serialize(&*self.indexes_unique)
+            .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+        self.info_store.set(indexes_key, Bytes::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// Ищет запись по значению уникального индекса.
+    ///
+    /// # Возвращает
+    ///
+    /// - `Ok(Some(RecordId))` — найдена одна запись
+    /// - `Ok(None)` — запись не найдена
+    /// - `Err` — ошибка чтения
+    pub async fn lookup_by_unique_index(
+        &self,
+        name_interned: u64,
+        values: &[InnerValue],
+    ) -> DbResult<Option<RecordId>> {
+        self.check_unique_constraint(name_interned, values).await
+    }
+
+    /// Проверяет существование уникального индекса по его имени.
+    pub fn unique_index_exists(&self, name_interned: u64) -> bool {
+        self.indexes_unique.contains(name_interned)
+    }
+
+    /// Возвращает определение уникального индекса по его имени.
+    pub fn get_unique_index_definition(&self, name_interned: u64) -> Option<IndexDefinition> {
+        self.indexes_unique.get_index(name_interned)
     }
 }
