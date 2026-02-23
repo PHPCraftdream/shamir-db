@@ -26,7 +26,6 @@ use crate::types::value::InnerValue;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Менеджер индексов для одной таблицы.
 ///
@@ -34,6 +33,11 @@ use tokio::sync::RwLock;
 /// - Хранит метаданные индексов в памяти
 /// - Синхронизирует изменения с диском
 /// - Обновляет индексы при изменении данных
+///
+/// # Clone semantics
+///
+/// Клонирование создаёт shared reference на те же данные.
+/// Все клоны видят изменения друг друга.
 pub struct IndexManager {
     /// Хранилище данных таблицы (для чтения записей при построении индекса)
     data_store: Arc<dyn Store>,
@@ -41,31 +45,27 @@ pub struct IndexManager {
     info_store: Arc<dyn Store>,
 
     /// Метаданные обычных индексов (неуникальных)
-    indexes: Arc<RwLock<IndexInfo>>,
+    /// IndexInfo использует DashMap внутри, поэтому thread-safe без дополнительной синхронизации
+    indexes: Arc<IndexInfo>,
     /// Метаданные уникальных индексов
-    indexes_unique: Arc<RwLock<IndexInfo>>,
+    indexes_unique: Arc<IndexInfo>,
 
     /// Атомарный флаг: есть ли хоть один обычный индекс
-    /// Используется для быстрой проверки без захвата RwLock
-    has_indexes: AtomicBool,
+    /// Arc позволяет всем клонам видеть одно и то же состояние
+    has_indexes: Arc<AtomicBool>,
     /// Атомарный флаг: есть ли хоть один уникальный индекс
-    has_indexes_unique: AtomicBool,
+    has_indexes_unique: Arc<AtomicBool>,
 }
 
 impl Clone for IndexManager {
-    /// Создаёт клон менеджера индексов.
-    ///
-    /// Клонируются только Arc-ссылки на хранилища и данные индексов,
-    /// а также копируются значения атомарных флагов.
-    /// Это позволяет нескольким потокам работать с одним менеджером.
     fn clone(&self) -> Self {
         Self {
             data_store: Arc::clone(&self.data_store),
             info_store: Arc::clone(&self.info_store),
             indexes: Arc::clone(&self.indexes),
             indexes_unique: Arc::clone(&self.indexes_unique),
-            has_indexes: AtomicBool::new(self.has_indexes.load(Ordering::Relaxed)),
-            has_indexes_unique: AtomicBool::new(self.has_indexes_unique.load(Ordering::Relaxed)),
+            has_indexes: Arc::clone(&self.has_indexes),
+            has_indexes_unique: Arc::clone(&self.has_indexes_unique),
         }
     }
 }
@@ -112,18 +112,29 @@ impl IndexManager {
             Err(e) => return Err(e),
         };
 
-        // Инициализируем атомарные флаги на основе загруженных данных
-        let has_indexes = AtomicBool::new(indexes.is_enabled());
-        let has_indexes_unique = AtomicBool::new(indexes_unique.is_enabled());
+        // Сохраняем флаги наличия индексов до заворачивания в Arc
+        let has_indexes_flag = indexes.is_enabled();
+        let has_indexes_unique_flag = indexes_unique.is_enabled();
 
-        Ok(Self {
+        let manager = Self {
             data_store,
             info_store,
-            indexes: Arc::new(RwLock::new(indexes)),
-            indexes_unique: Arc::new(RwLock::new(indexes_unique)),
-            has_indexes,
-            has_indexes_unique,
-        })
+            indexes: Arc::new(indexes),
+            indexes_unique: Arc::new(indexes_unique),
+            has_indexes: Arc::new(AtomicBool::new(has_indexes_flag)),
+            has_indexes_unique: Arc::new(AtomicBool::new(has_indexes_unique_flag)),
+        };
+
+        // Синхронизируем флаги с состоянием IndexInfo
+        manager.sync_flags();
+
+        Ok(manager)
+    }
+
+    /// Синхронизирует атомарные флаги с реальным состоянием индексов.
+    fn sync_flags(&self) {
+        self.has_indexes.store(self.indexes.is_enabled(), Ordering::Release);
+        self.has_indexes_unique.store(self.indexes_unique.is_enabled(), Ordering::Release);
     }
 
     /// Проверяет, есть ли хоть один обычный индекс.
@@ -316,12 +327,8 @@ impl IndexManager {
         }
 
         // Добавляем определение индекса в метаданные и сохраняем
-        {
-            let indexes = self.indexes.write().await;
-            indexes.add_index(index_def);
-            self.has_indexes.store(true, Ordering::Release);
-        }
-
+        self.indexes.add_index(index_def);
+        self.has_indexes.store(true, Ordering::Release);
         self.save_index_info().await?;
 
         log::info!("Created index '{}' with {} entries", name_interned, count);
@@ -342,11 +349,8 @@ impl IndexManager {
     /// `false` — индекс не найден
     pub async fn drop_index(&self, name_interned: u64) -> DbResult<bool> {
         // Быстрая проверка существования индекса
-        {
-            let indexes = self.indexes.read().await;
-            if !indexes.contains(name_interned) {
-                return Ok(false);
-            }
+        if !self.indexes.contains(name_interned) {
+            return Ok(false);
         }
 
         // Формируем префикс для сканирования всех записей данного индекса
@@ -363,30 +367,26 @@ impl IndexManager {
         }
 
         // Удаляем определение индекса из метаданных
-        let removed = {
-            let indexes = self.indexes.write().await;
-            let was_removed = indexes.remove_index(name_interned);
-            // Обновляем флаг наличия индексов
-            self.has_indexes
-                .store(indexes.is_enabled(), Ordering::Release);
-            was_removed
-        };
+        let was_removed = self.indexes.remove_index(name_interned);
+        self.has_indexes
+            .store(self.indexes.is_enabled(), Ordering::Release);
 
-        if removed {
+        if was_removed {
             self.save_index_info().await?;
         }
 
-        Ok(removed)
+        Ok(was_removed)
     }
 
     /// Сохраняет метаданные индексов в служебное хранилище.
     ///
     /// Сериализует IndexInfo через bincode и сохраняет под системным ключом.
+    /// Сериализует напрямую без клонирования — IndexInfo::serialize конвертирует
+    /// DashMap в BTreeMap внутри себя.
     async fn save_index_info(&self) -> DbResult<()> {
         let indexes_key = RecordId::system("indexes").to_bytes();
-        let indexes = self.indexes.read().await.clone();
-        let bytes =
-            bincode::serialize(&indexes).map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+        let bytes = bincode::serialize(&*self.indexes)
+            .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
         self.info_store.set(indexes_key, Bytes::from(bytes)).await?;
         Ok(())
     }
@@ -410,10 +410,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        let indexes = self.indexes.read().await;
-
         // Для каждого индекса извлекаем значения и добавляем запись
-        for def in indexes.iter() {
+        for def in self.indexes.iter() {
             if let Some(values) = Self::extract_index_values(value, &def.paths) {
                 self.add_index_entry(def.name_interned, &values, record_id)
                     .await?;
@@ -444,9 +442,7 @@ impl IndexManager {
             return Ok(());
         }
 
-        let indexes = self.indexes.read().await;
-
-        for def in indexes.iter() {
+        for def in self.indexes.iter() {
             // Извлекаем старые и новые значения для данного индекса
             let old_values = Self::extract_index_values(old_value, &def.paths);
             let new_values = Self::extract_index_values(new_value, &def.paths);
@@ -499,10 +495,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        let indexes = self.indexes.read().await;
-
         // Для каждого индекса удаляем запись
-        for def in indexes.iter() {
+        for def in self.indexes.iter() {
             if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
                 self.remove_index_entry(def.name_interned, &values, record_id)
                     .await?;
