@@ -24,6 +24,7 @@ use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use bytes::Bytes;
+use futures::StreamExt;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -227,7 +228,11 @@ impl IndexManager {
     /// - Хешей значений проиндексированных полей (16 байт)
     ///
     /// Это позволяет быстро находить записи по значению индексируемых полей.
-    fn build_index_key(is_unique: bool, name_interned: u64, values: &[InnerValue]) -> IndexRecordKey {
+    fn build_index_key(
+        is_unique: bool,
+        name_interned: u64,
+        values: &[InnerValue],
+    ) -> IndexRecordKey {
         let value_refs: Vec<&InnerValue> = values.iter().collect();
         IndexRecordKey::new(is_unique, name_interned).with_values(&value_refs)
     }
@@ -600,7 +605,10 @@ impl IndexManager {
 
         for def in self.indexes_unique.iter() {
             if let Some(values) = Self::extract_index_values(value, &def.paths) {
-                if let Some(existing_id) = self.check_unique_constraint(def.name_interned, &values).await? {
+                if let Some(existing_id) = self
+                    .check_unique_constraint(def.name_interned, &values)
+                    .await?
+                {
                     return Err(crate::db::DbError::DuplicateKey(format!(
                         "Unique index '{}' violated: value already exists for record {:?}",
                         def.name_interned, existing_id
@@ -646,7 +654,9 @@ impl IndexManager {
 
             // Проверяем новое значение (если оно есть)
             if let Some(new) = &new_values {
-                if let Some(existing_id) = self.check_unique_constraint(def.name_interned, new).await? {
+                if let Some(existing_id) =
+                    self.check_unique_constraint(def.name_interned, new).await?
+                {
                     // Если существующая запись — это не мы сами, то нарушение
                     if &existing_id != record_id {
                         return Err(crate::db::DbError::DuplicateKey(format!(
@@ -715,11 +725,7 @@ impl IndexManager {
     }
 
     /// Удаляет запись из уникального индекса.
-    async fn remove_unique_entry(
-        &self,
-        name_interned: u64,
-        values: &[InnerValue],
-    ) -> DbResult<()> {
+    async fn remove_unique_entry(&self, name_interned: u64, values: &[InnerValue]) -> DbResult<()> {
         let index_key = Self::build_index_key(true, name_interned, values).to_bytes();
         self.info_store.remove(index_key).await?;
         Ok(())
@@ -830,55 +836,83 @@ impl IndexManager {
     ///
     /// Процесс создания:
     /// 1. Проверяет уникальность всех существующих значений
-    /// 2. Если есть дубликаты — возвращает ошибку
+    /// 2. Если есть дубликаты — возвращает ошибку с количеством дубликатов
     /// 3. Иначе создаёт индекс
     ///
     /// # Возвращает
     ///
     /// - `Ok(())` — индекс успешно создан
-    /// - `Err(DuplicateKey)` — найдены дубликаты в существующих данных
+    /// - `Err(UniqueIndexCreationFailed)` — найдены дубликаты, содержит:
+    ///   - имя индекса
+    ///   - количество записей с дублирующимися значениями
+    ///   - пример дублирующегося значения
     pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use futures::StreamExt;
+        use std::collections::HashMap;
 
         let name_interned = index_def.name_interned;
-        let mut seen_values: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+        // HashMap для отслеживания количества каждого значения
+        let mut value_counts: HashMap<Vec<u8>, usize> = HashMap::new();
+        // Записи для добавления в индекс (RecordId, values_key)
+        let mut entries: Vec<(RecordId, Vec<u8>, Vec<InnerValue>)> = Vec::new();
 
-        // Читаем данные таблицы потоком
-        let mut stream = self.data_store.iter_stream(1000);
+        // Первый проход: подсчёт значений
+        {
+            use futures::StreamExt;
+            let mut stream = self.data_store.iter_stream(1000);
 
-        let mut count = 0usize;
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result?;
 
-            for (key_bytes, value_bytes) in batch {
-                let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
-                let record_id = RecordId(arr);
+                for (key_bytes, value_bytes) in batch {
+                    let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                        Ok(a) => a,
+                        Err(_) => continue,
+                    };
+                    let record_id = RecordId(arr);
 
-                let value = match InnerValue::from_bytes(value_bytes) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                    let value = match InnerValue::from_bytes(value_bytes) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
 
-                if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
-                    // Сериализуем значения для проверки уникальности
-                    let values_key = bincode::serialize(&values)
-                        .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+                    if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
+                        let values_key = bincode::serialize(&values)
+                            .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
 
-                    if !seen_values.insert(values_key) {
-                        return Err(crate::db::DbError::DuplicateKey(format!(
-                            "Cannot create unique index '{}': duplicate values found",
-                            name_interned
-                        )));
+                        *value_counts.entry(values_key.clone()).or_insert(0) += 1;
+                        entries.push((record_id, values_key, values));
                     }
-
-                    self.add_unique_entry(name_interned, &values, &record_id)
-                        .await?;
-                    count += 1;
                 }
             }
+        }
+
+        // Проверяем наличие дубликатов
+        let duplicates: Vec<(&Vec<u8>, &usize)> = value_counts.iter().filter(|(_, &c)| c > 1).collect();
+
+        if !duplicates.is_empty() {
+            // Считаем общее количество записей с дублирующимися значениями
+            let duplicate_record_count: usize = duplicates.iter().map(|(_, &c)| c).sum();
+
+            // Получаем пример дублирующегося значения для сообщения об ошибке
+            let sample_key = duplicates[0].0;
+            let sample_values: Vec<InnerValue> = bincode::deserialize(sample_key)
+                .unwrap_or_else(|_| vec![InnerValue::Nil]);
+
+            // Форматируем пример значения
+            let sample_str = Self::format_values_for_error(&sample_values);
+
+            return Err(crate::db::DbError::UniqueIndexCreationFailed(
+                name_interned.to_string(),
+                duplicate_record_count,
+                sample_str,
+            ));
+        }
+
+        // Дубликатов нет — добавляем записи в индекс
+        let mut count = 0usize;
+        for (record_id, _values_key, values) in entries {
+            self.add_unique_entry(name_interned, &values, &record_id).await?;
+            count += 1;
         }
 
         // Добавляем определение индекса в метаданные и сохраняем
@@ -888,6 +922,30 @@ impl IndexManager {
 
         log::info!("Created unique index '{}' with {} entries", name_interned, count);
         Ok(())
+    }
+
+    /// Форматирует значения для сообщения об ошибке.
+    fn format_values_for_error(values: &[InnerValue]) -> String {
+        let formatted: Vec<String> = values.iter().map(|v| match v {
+            InnerValue::Nil => "null".to_string(),
+            InnerValue::Bool(b) => b.to_string(),
+            InnerValue::Int(n) => n.to_string(),
+            InnerValue::F64(n) => n.to_string(),
+            InnerValue::Dec(d) => d.to_string(),
+            InnerValue::Big(b) => b.to_string(),
+            InnerValue::Str(s) => format!("\"{}\"", s),
+            InnerValue::Bin(_) => "<binary>".to_string(),
+            InnerValue::List(arr) => {
+                if arr.len() <= 5 {
+                    format!("[{}]", arr.len())
+                } else {
+                    format!("[{}...]", arr.len())
+                }
+            }
+            InnerValue::Set(s) => format!("{{{} items}}", s.len()),
+            InnerValue::Map(map) => format!("{{{} fields}}", map.len()),
+        }).collect();
+        formatted.join(", ")
     }
 
     /// Удаляет уникальный индекс по его имени.
