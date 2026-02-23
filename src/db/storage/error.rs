@@ -15,6 +15,11 @@ pub enum DbError {
     #[error("Duplicate key: {0}")]
     DuplicateKey(String),
 
+    /// Cannot create unique index due to duplicate values.
+    /// Contains: (index_name, duplicate_count, sample_value)
+    #[error("Cannot create unique index '{0}': found {1} records with duplicate values (example: {2})")]
+    UniqueIndexCreationFailed(String, usize, String),
+
     /// An error originating from the underlying storage backend.
     #[error("Storage backend error: {0}")]
     Storage(String),
