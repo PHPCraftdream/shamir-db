@@ -1,3 +1,4 @@
+use crate::core::interner::InternerKey;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info::IndexInfo;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
@@ -7,7 +8,6 @@ use crate::db::storage::types::Store;
 use crate::types::common::new_map;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
-use crate::core::interner::InternerKey;
 use std::sync::Arc;
 
 // ============================================================================
@@ -197,10 +197,7 @@ async fn test_create_composite_index() {
     // Create composite index on fields [1, 2]
     let index_def = IndexDefinition::new(
         1001,
-        vec![
-            IndexInfoItem::new(vec![1]),
-            IndexInfoItem::new(vec![2]),
-        ],
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
     );
     manager.create_index(index_def).await.unwrap();
 
@@ -472,10 +469,7 @@ async fn test_on_record_deleted_with_index() {
     let value = create_test_value(&[(1, InnerValue::Str("to_delete".to_string()))]);
     let record_id = RecordId::new();
 
-    manager
-        .on_record_deleted(&record_id, &value)
-        .await
-        .unwrap();
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
 }
 
 #[tokio::test]
@@ -485,10 +479,7 @@ async fn test_on_record_deleted_without_index() {
     let value = create_test_value(&[(1, InnerValue::Str("test".to_string()))]);
     let record_id = RecordId::new();
 
-    manager
-        .on_record_deleted(&record_id, &value)
-        .await
-        .unwrap();
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
 }
 
 #[tokio::test]
@@ -502,10 +493,7 @@ async fn test_on_record_deleted_missing_field() {
     let value = create_test_value(&[(2, InnerValue::Int(42))]);
     let record_id = RecordId::new();
 
-    manager
-        .on_record_deleted(&record_id, &value)
-        .await
-        .unwrap();
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
 }
 
 // ============================================================================
@@ -603,4 +591,347 @@ async fn test_various_value_types_in_index() {
     }
 
     assert!(manager.has_indexes());
+}
+
+// ============================================================================
+// Multiple records with same indexed value (BTreeSet tests)
+// ============================================================================
+
+#[tokio::test]
+async fn test_multiple_records_same_indexed_value() {
+    let (_, _, manager) = create_manager();
+
+    // Create index
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Add multiple records with same indexed value
+    let value = create_test_value(&[(1, InnerValue::Str("same_value".to_string()))]);
+    let record_id1 = RecordId::new();
+    let record_id2 = RecordId::new();
+    let record_id3 = RecordId::new();
+
+    manager
+        .on_record_created(&record_id1, &value)
+        .await
+        .unwrap();
+    manager
+        .on_record_created(&record_id2, &value)
+        .await
+        .unwrap();
+    manager
+        .on_record_created(&record_id3, &value)
+        .await
+        .unwrap();
+
+    // All three should be indexed
+    // Remove one - other two should remain
+    manager
+        .on_record_deleted(&record_id2, &value)
+        .await
+        .unwrap();
+
+    // Remove another
+    manager
+        .on_record_deleted(&record_id1, &value)
+        .await
+        .unwrap();
+
+    // Last one should still be indexed
+    // Remove last - index entry should be deleted entirely
+    manager
+        .on_record_deleted(&record_id3, &value)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_duplicate_record_id_not_added_twice() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let value = create_test_value(&[(1, InnerValue::Str("test".to_string()))]);
+    let record_id = RecordId::new();
+
+    // Add same record twice - should be idempotent
+    manager.on_record_created(&record_id, &value).await.unwrap();
+    manager.on_record_created(&record_id, &value).await.unwrap();
+
+    // Remove once - should work
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
+
+    // Remove again - should be idempotent (no error)
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_update_moves_record_between_index_values() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let record_id = RecordId::new();
+
+    // Old value: field 1 = "old"
+    let old_value = create_test_value(&[(1, InnerValue::Str("old".to_string()))]);
+    manager
+        .on_record_created(&record_id, &old_value)
+        .await
+        .unwrap();
+
+    // New value: field 1 = "new"
+    let new_value = create_test_value(&[(1, InnerValue::Str("new".to_string()))]);
+    manager
+        .on_record_updated(&record_id, &old_value, &new_value)
+        .await
+        .unwrap();
+
+    // Delete with new value - should work
+    manager
+        .on_record_deleted(&record_id, &new_value)
+        .await
+        .unwrap();
+}
+
+// ============================================================================
+// lookup_by_index tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_lookup_by_index_empty_result() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Lookup non-existent value
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Str("nonexistent".to_string())])
+        .await
+        .unwrap();
+
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn test_lookup_by_index_single_record() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
+    let record_id = RecordId::new();
+    manager.on_record_created(&record_id, &value).await.unwrap();
+
+    // Lookup by indexed value
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert!(result.contains(&record_id));
+}
+
+#[tokio::test]
+async fn test_lookup_by_index_multiple_records() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Add multiple records with same indexed value
+    let value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
+    let record_id1 = RecordId::new();
+    let record_id2 = RecordId::new();
+    let record_id3 = RecordId::new();
+
+    manager
+        .on_record_created(&record_id1, &value)
+        .await
+        .unwrap();
+    manager
+        .on_record_created(&record_id2, &value)
+        .await
+        .unwrap();
+    manager
+        .on_record_created(&record_id3, &value)
+        .await
+        .unwrap();
+
+    // Lookup should return all three
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Str("Bob".to_string())])
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 3);
+    assert!(result.contains(&record_id1));
+    assert!(result.contains(&record_id2));
+    assert!(result.contains(&record_id3));
+}
+
+#[tokio::test]
+async fn test_lookup_by_index_after_delete() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let value = create_test_value(&[(1, InnerValue::Str("Charlie".to_string()))]);
+    let record_id = RecordId::new();
+
+    manager.on_record_created(&record_id, &value).await.unwrap();
+
+    // Lookup - should find
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Str("Charlie".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+
+    // Delete record
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
+
+    // Lookup - should be empty
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Str("Charlie".to_string())])
+        .await
+        .unwrap();
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn test_lookup_by_index_composite() {
+    let (_, _, manager) = create_manager();
+
+    // Composite index on [field 1, field 2]
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
+    );
+    manager.create_index(index_def).await.unwrap();
+
+    let value = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+    let record_id = RecordId::new();
+    manager.on_record_created(&record_id, &value).await.unwrap();
+
+    // Lookup with both values
+    let result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert!(result.contains(&record_id));
+
+    // Lookup with wrong second value
+    let result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(25)],
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn test_lookup_by_index_different_values() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Add records with different values
+    let value_a = create_test_value(&[(1, InnerValue::Str("A".to_string()))]);
+    let value_b = create_test_value(&[(1, InnerValue::Str("B".to_string()))]);
+    let record_id_a = RecordId::new();
+    let record_id_b = RecordId::new();
+
+    manager
+        .on_record_created(&record_id_a, &value_a)
+        .await
+        .unwrap();
+    manager
+        .on_record_created(&record_id_b, &value_b)
+        .await
+        .unwrap();
+
+    // Lookup A
+    let result_a = manager
+        .lookup_by_index(1001, &[InnerValue::Str("A".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(result_a.len(), 1);
+    assert!(result_a.contains(&record_id_a));
+
+    // Lookup B
+    let result_b = manager
+        .lookup_by_index(1001, &[InnerValue::Str("B".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(result_b.len(), 1);
+    assert!(result_b.contains(&record_id_b));
+}
+
+#[tokio::test]
+async fn test_lookup_by_index_non_existing_index() {
+    let (_, _, manager) = create_manager();
+
+    // No index created - lookup should return empty (no error)
+    let result = manager
+        .lookup_by_index(9999, &[InnerValue::Str("test".to_string())])
+        .await
+        .unwrap();
+
+    assert!(result.is_empty());
+}
+
+// ============================================================================
+// index_exists and get_index_definition tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_index_exists() {
+    let (_, _, manager) = create_manager();
+
+    assert!(!manager.index_exists(1001));
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    assert!(manager.index_exists(1001));
+    assert!(!manager.index_exists(1002));
+}
+
+#[tokio::test]
+async fn test_get_index_definition() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1, 2])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let retrieved = manager.get_index_definition(1001);
+    assert!(retrieved.is_some());
+
+    let def = retrieved.unwrap();
+    assert_eq!(def.name_interned, 1001);
+    assert_eq!(def.paths.len(), 1);
+    assert_eq!(def.paths[0].path, vec![1, 2]);
+
+    // Non-existent
+    let missing = manager.get_index_definition(9999);
+    assert!(missing.is_none());
 }
