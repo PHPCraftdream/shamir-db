@@ -64,27 +64,41 @@ impl TableContext {
         &self.name
     }
 
-    /// Insert an InnerValue, returns RecordId (with counter update)
+    /// Insert an InnerValue, returns RecordId (with counter and index update)
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         let id = self.table.insert(value).await?;
         self.counter.increment(1).await?;
+        self.index_manager.on_record_created(&id, value).await?;
         Ok(id)
     }
 
-    /// Delete a record by RecordId (with counter update)
+    /// Delete a record by RecordId (with counter and index update)
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
+        // Get old value before deletion for index cleanup
+        let old_value = self.table.get(id).await.ok();
         let removed = self.table.delete(id).await?;
         if removed {
             self.counter.increment(-1).await?;
+            if let Some(old) = old_value {
+                self.index_manager.on_record_deleted(&id, &old).await?;
+            }
         }
         Ok(removed)
     }
 
-    /// Set a record by RecordId - creates if not exists, updates if exists (with counter update)
+    /// Set a record by RecordId - creates if not exists, updates if exists (with counter and index update)
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
+        // Get old value before update for index maintenance
+        let old_value = self.table.get(id).await.ok();
         let created = self.table.set(id, value).await?;
+
         if created {
             self.counter.increment(1).await?;
+            self.index_manager.on_record_created(&id, value).await?;
+        } else if let Some(old) = old_value {
+            self.index_manager
+                .on_record_updated(&id, &old, value)
+                .await?;
         }
         Ok(created)
     }

@@ -24,6 +24,7 @@ use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use bytes::Bytes;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -133,8 +134,10 @@ impl IndexManager {
 
     /// Синхронизирует атомарные флаги с реальным состоянием индексов.
     fn sync_flags(&self) {
-        self.has_indexes.store(self.indexes.is_enabled(), Ordering::Release);
-        self.has_indexes_unique.store(self.indexes_unique.is_enabled(), Ordering::Release);
+        self.has_indexes
+            .store(self.indexes.is_enabled(), Ordering::Release);
+        self.has_indexes_unique
+            .store(self.indexes_unique.is_enabled(), Ordering::Release);
     }
 
     /// Проверяет, есть ли хоть один обычный индекс.
@@ -230,10 +233,11 @@ impl IndexManager {
 
     /// Добавляет запись в индекс.
     ///
-    /// Создаёт ключ вида: `[index_key][record_id]` и сохраняет пустое значение.
-    /// Это позволяет:
-    /// - Сканировать индекс по префиксу (все записи с данным значением)
-    /// - Получить record_id из хвоста ключа
+    /// Ключ индекса: `[index_key]` (25 байт)
+    /// Значение: сериализованный `BTreeSet<RecordId>` (множество идентификаторов записей)
+    ///
+    /// Если запись с таким index_key уже существует, добавляет record_id в множество.
+    /// Иначе создаёт новое множество с одним record_id.
     ///
     /// # Аргументы
     ///
@@ -246,32 +250,59 @@ impl IndexManager {
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> DbResult<()> {
-        // Строим ключ индекса (хеш значений)
         let index_key = Self::build_index_key(name_interned, values).to_bytes();
 
-        // Добавляем record_id в конец ключа для уникальности
-        // и возможности восстановления связи с записью
-        let mut key = index_key.to_vec();
-        key.extend_from_slice(&record_id.to_bytes());
+        // Читаем существующее множество RecordId или создаём пустое
+        let mut record_ids = match self.info_store.get(index_key.clone()).await {
+            Ok(bytes) => bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default(),
+            Err(crate::db::DbError::NotFound(_)) => BTreeSet::new(),
+            Err(e) => return Err(e),
+        };
 
-        // Сохраняем с пустым значением (ключ сам содержит всю информацию)
-        self.info_store.set(Bytes::from(key), Bytes::new()).await?;
+        // Добавляем новый RecordId (BTreeSet автоматически гарантирует уникальность)
+        record_ids.insert(*record_id);
+
+        // Сериализуем и сохраняем
+        let bytes = bincode::serialize(&record_ids)
+            .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+        self.info_store.set(index_key, Bytes::from(bytes)).await?;
         Ok(())
     }
 
     /// Удаляет запись из индекса.
     ///
-    /// Удаляет ключ вида `[index_key][record_id]` из служебного хранилища.
+    /// Читает множество RecordId из значения индекса, удаляет указанный record_id
+    /// и сохраняет обратно. Если множество становится пустым — удаляет ключ целиком.
     async fn remove_index_entry(
         &self,
         name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> DbResult<()> {
+        use std::collections::BTreeSet;
+
         let index_key = Self::build_index_key(name_interned, values).to_bytes();
-        let mut key = index_key.to_vec();
-        key.extend_from_slice(&record_id.to_bytes());
-        self.info_store.remove(Bytes::from(key)).await?;
+
+        // Читаем существующее множество RecordId
+        let mut record_ids = match self.info_store.get(index_key.clone()).await {
+            Ok(bytes) => bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default(),
+            Err(crate::db::DbError::NotFound(_)) => return Ok(()), // Нечего удалять
+            Err(e) => return Err(e),
+        };
+
+        // Удаляем RecordId из множества
+        record_ids.remove(record_id);
+
+        if record_ids.is_empty() {
+            // Если множество пусто — удаляем ключ целиком
+            self.info_store.remove(index_key).await?;
+        } else {
+            // Иначе сохраняем обновлённое множество
+            let bytes = bincode::serialize(&record_ids)
+                .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+            self.info_store.set(index_key, Bytes::from(bytes)).await?;
+        }
+
         Ok(())
     }
 
@@ -504,5 +535,48 @@ impl IndexManager {
         }
 
         Ok(())
+    }
+
+    /// Ищет записи по значению индекса.
+    ///
+    /// Возвращает множество RecordId, у которых проиндексированные поля
+    /// соответствуют указанным значениям.
+    ///
+    /// # Аргументы
+    ///
+    /// * `name_interned` — интернированный идентификатор имени индекса
+    /// * `values` — значения для поиска (должны соответствовать полям индекса)
+    ///
+    /// # Возвращает
+    ///
+    /// - `Ok(BTreeSet<RecordId>)` — множество идентификаторов записей
+    /// - `Ok(empty)` — если нет записей с таким значением индекса
+    /// - `Err` — ошибка чтения из хранилища
+    pub async fn lookup_by_index(
+        &self,
+        name_interned: u64,
+        values: &[InnerValue],
+    ) -> DbResult<BTreeSet<RecordId>> {
+        let index_key = Self::build_index_key(name_interned, values).to_bytes();
+
+        match self.info_store.get(index_key).await {
+            Ok(bytes) => {
+                let record_ids =
+                    bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default();
+                Ok(record_ids)
+            }
+            Err(crate::db::DbError::NotFound(_)) => Ok(BTreeSet::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Проверяет существование индекса по его имени.
+    pub fn index_exists(&self, name_interned: u64) -> bool {
+        self.indexes.contains(name_interned)
+    }
+
+    /// Возвращает определение индекса по его имени.
+    pub fn get_index_definition(&self, name_interned: u64) -> Option<IndexDefinition> {
+        self.indexes.get_index(name_interned)
     }
 }
