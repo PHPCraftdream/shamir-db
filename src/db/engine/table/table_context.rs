@@ -65,10 +65,20 @@ impl TableContext {
     }
 
     /// Insert an InnerValue, returns RecordId (with counter and index update)
+    ///
+    /// Validates unique indexes BEFORE insert, returns error if constraint violated.
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+        // 1. Validate unique indexes BEFORE write
+        self.index_manager.validate_unique_for_create(value).await?;
+
+        // 2. Write to table
         let id = self.table.insert(value).await?;
         self.counter.increment(1).await?;
+
+        // 3. Update indexes AFTER write
         self.index_manager.on_record_created(&id, value).await?;
+        self.index_manager.on_record_created_unique(&id, value).await?;
+
         Ok(id)
     }
 
@@ -79,25 +89,44 @@ impl TableContext {
         let removed = self.table.delete(id).await?;
         if removed {
             self.counter.increment(-1).await?;
-            if let Some(old) = old_value {
-                self.index_manager.on_record_deleted(&id, &old).await?;
+            if let Some(ref old) = old_value {
+                self.index_manager.on_record_deleted(&id, old).await?;
+                self.index_manager.on_record_deleted_unique(&id, old).await?;
             }
         }
         Ok(removed)
     }
 
     /// Set a record by RecordId - creates if not exists, updates if exists (with counter and index update)
+    ///
+    /// Validates unique indexes BEFORE write, returns error if constraint violated.
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
         // Get old value before update for index maintenance
         let old_value = self.table.get(id).await.ok();
+
+        // 1. Validate unique indexes BEFORE write
+        if let Some(ref old) = old_value {
+            self.index_manager
+                .validate_unique_for_update(&id, old, value)
+                .await?;
+        } else {
+            self.index_manager.validate_unique_for_create(value).await?;
+        }
+
+        // 2. Write to table
         let created = self.table.set(id, value).await?;
 
+        // 3. Update indexes AFTER write
         if created {
             self.counter.increment(1).await?;
             self.index_manager.on_record_created(&id, value).await?;
+            self.index_manager.on_record_created_unique(&id, value).await?;
         } else if let Some(old) = old_value {
             self.index_manager
                 .on_record_updated(&id, &old, value)
+                .await?;
+            self.index_manager
+                .on_record_updated_unique(&id, &old, value)
                 .await?;
         }
         Ok(created)
