@@ -20,14 +20,14 @@ db/
 │   │   ├── index_info.rs         # Index metadata & status
 │   │   ├── index_info_item.rs    # Single index path item
 │   │   ├── index_record.rs       # Index record representation
-│   │   ├── table_index_manager.rs # Index manager for tables
+│   │   ├── index_manager.rs      # Index manager for tables (renamed from table_index_manager)
 │   │   └── tests/              # ✅ REORGANIZED (2025-02-08)
 │   │       ├── mod.rs
 │   │       ├── index_definition_tests.rs
 │   │       ├── index_info_item_tests.rs
 │   │       ├── index_info_tests.rs
 │   │       ├── index_record_tests.rs
-│   │       └── table_index_manager_tests.rs
+│   │       └── index_manager_tests.rs
 │   ├── table/        # ✅ MODULARIZED (2025-02-08)
 │   │   ├── counter.rs           # RecordCounter service
 │   │   ├── interner.rs          # InternerManager service
@@ -71,12 +71,13 @@ db/
 - `Dispatcher` - ✅ NEW: Multi-repo management with YAML configuration (2025-02-08)
 - `RepoManager` - ✅ NEW: Repository and table management (2025-02-08)
 - `Table<R>` - Main table abstraction (modularized 2025-02-08)
-- `TableIndexManager` - Index management system
+- `IndexManager` (formerly TableIndexManager) - Index management system
 - `RecordCounter` - Counter service (separate module)
 - `InternerManager` - Interning service (separate module)
 - Manages key interning transparently
 - Transforms UserValue ↔ InnerValue
 - Provides memory-efficient async streaming
+- **56 index tests**, UniqueIndexCreationFailed error
 
 **New Modular Structure (2025-02-08):**
 ```
@@ -100,19 +101,21 @@ engine/
     ├── index_info.rs
     ├── index_record.rs
     ├── table_index_manager.rs
-    └── tests/            # 33 index tests
+    └── tests/            # 56 index tests
 ```
 
 See `engine/README.md` for details.
 
 ### Index System (`db/engine/index/`)
 **Index management** for tables:
-- `IndexDefinition` - Simple and composite index definitions
+- `IndexManager` (renamed from TableIndexManager) - Index operations and validation
+- `IndexDefinition` - Simple and composite index definitions (name_interned: u64)
 - `IndexInfo` - Index metadata with sync status tracking
-- `TableIndexManager` - Index operations and validation
 - Atomic flags for fast path optimization (O(1) existence check)
+- Unique indexes: validation BEFORE write, update AFTER write
+- UniqueIndexCreationFailed(name, count, sample) error for duplicates
 - Three indexing modes: Disabled, All, Selective
-- **33 tests** organized by entity in `tests/` folder
+- **56 tests** organized by entity in `tests/` folder
 
 ### Dispatcher (`db/engine/dispatcher/`)
 **Multi-repo management** with YAML configuration:
@@ -159,6 +162,8 @@ pub enum DbError {
     Codec(String),             // Serialization error
     Internal(String),          // Internal logic error
     KeyExists(String),         // Primary key collision
+    DuplicateKey(String),      // Unique index violation
+    UniqueIndexCreationFailed(String, usize, String), // (name, count, sample)
 }
 ```
 
@@ -436,7 +441,7 @@ let inner_value = InnerValue::from_bytes(bytes)?;
   - Extracted RecordCounter to separate module
   - Extracted InternerManager to separate module
   - Organized tests by type (CRUD, concurrent, persistence)
-  - 240 tests passing
+  - **280 tests passing**
 - [x] ✅ **Test reorganization** (2025-02-08)
   - Tests moved to separate `tests/` folders
   - One entity per test file
@@ -445,11 +450,14 @@ let inner_value = InnerValue::from_bytes(bytes)?;
   - RepoManager for repository operations
   - Lazy table initialization
   - Default repo support
-- [x] Index system with simple/composite indexes
-- [x] Unique constraint validation
-- [x] Atomic flags for fast path optimization
+- [x] ✅ **Index system** (2026-02-22)
+  - Simple and composite indexes
+  - Unique constraint validation
+  - Atomic flags for O(1) existence check
+  - **56 index tests**
+  - UniqueIndexCreationFailed error with duplicate count
 - [ ] Query planner integration
 - [ ] Transaction support across tables
 - [ ] Migration system
 - [ ] Backup/restore utilities
-- [ ] Extract IndexManager to separate module (planned)
+- [ ] Garbage collection for unused interned strings
