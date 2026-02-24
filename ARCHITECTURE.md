@@ -133,8 +133,8 @@ Value Type System
 
 Table Engine Architecture
 
-**Table Context (High-level):**
-- Manages table name, interner, record counter
+**TableContext (High-level):**
+- Manages table name, interner, record counter, index manager
 - Handles UserValue <-> InnerValue transformation
 - Provides convenient API: insert_user(), get_user(), list_stream_user()
 
@@ -153,6 +153,11 @@ Table Engine Architecture
 - Monotonically increasing record IDs
 - Persistent storage
 - Thread-safe using Mutex
+
+**IndexManager:**
+- Secondary index management (simple and unique)
+- Atomic flags for O(1) index existence check
+- See arch-011-indexes for details
 
 ## arch-006-async-streaming
 
@@ -260,8 +265,17 @@ Error Handling Strategy
 **DbError Variants:**
 - Storage: Backend-specific errors
 - NotFound: Key doesn't exist
+- KeyExists: Primary key collision
+- DuplicateKey: Unique index violation
+- UniqueIndexCreationFailed(name, count, sample): Cannot create unique index due to duplicates
 - Codec: Serialization errors
 - Internal: Internal logic errors
+
+**UniqueIndexCreationFailed Details:**
+- Signature: UniqueIndexCreationFailed(String, usize, String)
+- Contains: (index_name, duplicate_count, sample_value)
+- Example: Cannot create unique index 'by_email': found 3 records with duplicate values (example: alice@example.com)
+- Returned by: IndexManager::create_unique_index()
 
 **Best Practices:**
 - Use specific error types (DbError over anyhow)
@@ -298,3 +312,50 @@ Development Protocol (TDD)
 - Separate test files for logically related tests
 - mod.rs in tests/ only contains exports
 - Parent module contains #[cfg(test)] mod tests;
+
+## arch-011-indexes
+
+Index System Architecture
+
+**IndexManager (formerly TableIndexManager):**
+- Manages secondary indexes for tables
+- Supports regular and unique indexes
+- Uses atomic flags for O(1) existence check
+
+**Index Modes:**
+- Disabled: No indexing
+- All: Index all Map fields (simple indexes)
+- Selective: Custom index definitions
+
+**Index Types:**
+- Simple: Single field path
+- Composite: Multiple field paths
+
+**IndexDefinition:**
+- name_interned: u64 (interned index name, NOT String)
+- paths: Vec<IndexInfoItem> (field paths as Vec<u64>)
+
+**Unique Index Behavior:**
+1. Validation BEFORE write: Check for existing duplicates
+2. Update AFTER write: Add to index on successful insert
+3. Error on duplicates: UniqueIndexCreationFailed(name, count, sample)
+
+**IndexRecordKey Format:**
+- Fixed 26 bytes: [is_unique:1][index_id:8][hash1:8][hash2:8]
+- is_unique: 1 byte flag
+- index_id: 8 bytes (interned index name)
+- hash1: 8 bytes (FxHasher of values)
+- hash2: 8 bytes (collision resistance)
+
+**Status Tracking:**
+- Actual: Index is up-to-date
+- Pending: Index needs sync
+- Saving: Index is being saved
+
+**System Records:**
+- RecordId::system("indexes"): Regular index definitions
+- RecordId::system("indexes_unique"): Unique index definitions
+
+**Test Coverage:**
+- 56 index manager tests
+- 280 total lib tests passing

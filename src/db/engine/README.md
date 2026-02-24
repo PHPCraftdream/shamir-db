@@ -2,11 +2,13 @@
 
 High-level table abstraction with automatic key interning, value transformations, and index management.
 
+**Updated:** 2026-02-22
+
 ## Architecture
 
 ```
 engine/
-├── dispatcher/               # ✅ NEW (2025-02-08) - Multi-repo dispatcher
+├── dispatcher/               # ✅ Multi-repo dispatcher
 │   ├── config.rs             # YAML configuration loader
 │   ├── dispatcher.rs         # Dispatcher implementation
 │   ├── types.rs              # Config types (DbConfig, RepoConfig, etc.)
@@ -18,36 +20,40 @@ engine/
 │   ├── index_definition.rs   # Index definition (simple/composite)
 │   ├── index_info.rs         # Index metadata with sync status
 │   ├── index_info_item.rs    # Single index path item
-│   ├── index_record.rs       # Index record representation
-│   ├── table_index_manager.rs # Index manager for tables
-│   └── tests/                # ✅ REORGANIZED (2025-02-08)
+│   ├── index_record_key.rs   # Index record key for B-Tree storage
+│   ├── index_status.rs       # Index sync status enum
+│   ├── index_manager.rs      # ✅ RENAMED from table_index_manager (~1020 lines)
+│   ├── index_types.md        # Documentation for index types
+│   └── tests/                # Index tests (56 tests)
 │       ├── mod.rs
-│       ├── index_definition_tests.rs    # 4 tests
-│       ├── index_info_item_tests.rs    # 4 tests
-│       ├── index_info_tests.rs          # 6 tests
-│       ├── index_record_tests.rs        # 16 tests
-│       └── table_index_manager_tests.rs # 3 tests
-├── repo/                     # ✅ NEW (2025-02-08) - Repo management
+│       ├── index_definition_tests.rs
+│       ├── index_info_item_tests.rs
+│       ├── index_info_tests.rs
+│       ├── index_record_key_tests.rs
+│       └── index_manager_tests.rs    # 56 tests (41 regular + 15 unique)
+├── repo/                     # Repo management
 │   ├── repo_config.rs        # Repo configuration types
 │   ├── repo_manager.rs      # RepoManager (manages repos)
 │   ├── repo_manager_instance.rs # RepoManagerInstance
 │   ├── repo_types.rs        # Repo types
 │   └── tests/                # Repo tests
 │       ├── mod.rs
-│       ├── repo_config_tests.rs          # 5 tests
-│       └── repo_manager_tests.rs         # 9 tests
-├── table/                    # ✅ MODULARIZED (2025-02-08)
-│   ├── counter.rs           # RecordCounter service (170 lines)
-│   ├── interner.rs          # InternerManager service (185 lines)
-│   ├── table.rs             # Main Table facade (270 lines)
+│       ├── repo_config_tests.rs
+│       └── repo_manager_tests.rs
+├── table/                    # Modular table architecture
+│   ├── counter.rs           # RecordCounter service
+│   ├── interner_manager.rs  # InternerManager service
+│   ├── table.rs             # Main Table facade
+│   ├── table_config.rs      # Table configuration
+│   ├── table_context.rs     # Table with index integration
 │   ├── mod.rs               # Public API exports
-│   └── tests/              # Organized test suites
-│       ├── mod.rs           # Test module organizer
-│       ├── crud_tests.rs    # 15 CRUD tests
-│       ├── concurrent_tests.rs  # 7 concurrent tests
-│       └── persistence_tests.rs # 3 persistence tests
+│   └── tests/              # Table tests
+│       ├── mod.rs
+│       ├── crud_tests.rs
+│       ├── concurrent_tests.rs
+│       └── persistence_tests.rs
 ├── README.md     # Engine documentation
-└── table.md     # Table refactoring documentation (updated 2025-02-08)
+└── table.md      # Table refactoring documentation
 ```
 
 ## Purpose
@@ -101,35 +107,35 @@ pub enum IndexMode {
 Indexes can be **simple** (single path) or **composite** (multiple paths):
 
 ```rust
-// Simple index
-let email_idx = IndexDefinition::new("by_email", vec![
+// Simple index (name_interned is u64 from interner)
+let email_idx = IndexDefinition::new(email_name_interned, vec![
     IndexInfoItem::new(vec![2])  // Path to email field
 ]);
 
 // Composite index
-let name_age_idx = IndexDefinition::new("by_name_and_age", vec![
+let name_age_idx = IndexDefinition::new(name_age_name_interned, vec![
     IndexInfoItem::new(vec![1]),  // Path to name field
     IndexInfoItem::new(vec![3])   // Path to age field
 ]);
 ```
 
-### TableIndexManager
+### IndexManager
 
-The `TableIndexManager` handles index operations:
+The `IndexManager` handles index operations:
 
 - **Atomic flags** for O(1) existence check (no locks!)
-- **Lazy loading** of index metadata
+- **Two index types**: regular and unique
+- **Unique indexes**: validation BEFORE write, update AFTER write
 - **Status tracking**: Actual, Pending, Saving
 
 ```rust
-pub struct TableIndexManager {
+pub struct IndexManager {
     data_store: Arc<dyn Store>,
-    interner: Arc<OnceCell<Interner>>,
-    indexes: Arc<RwLock<IndexInfo>>,
-    indexes_unique: Arc<RwLock<IndexInfo>>,
-    has_indexes: AtomicBool,        // O(1) check!
-    has_indexes_unique: AtomicBool, // O(1) check!
     info_store: Arc<dyn Store>,
+    indexes: Arc<IndexInfo>,           // Regular indexes (DashMap-based)
+    indexes_unique: Arc<IndexInfo>,    // Unique indexes
+    has_indexes: Arc<AtomicBool>,      // O(1) check!
+    has_indexes_unique: Arc<AtomicBool>, // O(1) check!
 }
 ```
 
@@ -437,17 +443,19 @@ Interned strings live as long as the table exists:
 - [x] ✅ **Modular architecture** (2025-02-08)
   - RecordCounter, InternerManager separated
   - Tests organized by type
-  - 240 tests passing
+  - **280 tests passing**
 - [x] ✅ **Test reorganization** (2025-02-08)
   - Tests in separate `tests/` folders
   - One entity per file
   - Names match content
-- [x] Index system with simple/composite indexes
-- [x] Atomic flags for fast path optimization
-- [x] Unique constraint validation
+- [x] ✅ **Index system** (2026-02-22)
+  - Simple and composite indexes
+  - Unique constraint validation (BEFORE write)
+  - Atomic flags for O(1) existence check
+  - **56 index tests**
+  - `UniqueIndexCreationFailed` error with duplicate count
 - [ ] Garbage collection for unused interned strings
 - [ ] Automatic batch size tuning
 - [ ] Statistics (record count, interned strings count)
 - [ ] Query planner integration
-- [ ] In-memory index for O(1) unique validation
-- [ ] Extract IndexManager to separate module (planned)
+- [ ] Transaction support across tables

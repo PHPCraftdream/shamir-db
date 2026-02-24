@@ -2,16 +2,33 @@
 
 Модуль предоставляет систему индексации для таблиц базы данных S.H.A.M.I.R.
 
+**Обновлено:** 2026-02-22
+
 ## Обзор архитектуры
 
-| Уровень | Компонент | Поля | Описание |
-|---------|-----------|------|----------|
-| 1 | **TableIndexManager** | `indexes`, `indexes_unique` | Менеджер индексов таблицы |
-| 2 | **IndexInfo** | `indexes: Vec<IndexDefinition>`, `status: AtomicU8` | Конфигурация индексов |
-| 3 | **IndexDefinition** | `name: String`, `paths: Vec<IndexInfoItem>` | Определение индекса |
-| 4 | **IndexInfoItem** | `path: Vec<u64>` | Путь к полю через ID |
+|| Уровень | Компонент | Поля | Описание |
+||---------|-----------|------|----------|
+|| 1 | **IndexManager** | `indexes`, `indexes_unique` | Менеджер индексов таблицы |
+|| 2 | **IndexInfo** | `indexes: Vec<IndexDefinition>`, `status: AtomicU8` | Конфигурация индексов |
+|| 3 | **IndexDefinition** | `name_interned: u64`, `paths: Vec<IndexInfoItem>` | Определение индекса |
+|| 4 | **IndexInfoItem** | `path: Vec<u64>` | Путь к полю через ID |
 
-**Иерархия:** TableIndexManager → IndexInfo → IndexDefinition → IndexInfoItem
+**Иерархия:** IndexManager → IndexInfo → IndexDefinition → IndexInfoItem
+
+---
+
+## Типы индексов
+
+### Обычные индексы (`indexes`)
+- Позволяют быстро находить записи по значению
+- Значение в хранилище: `BTreeSet<RecordId>` (множество ID)
+- Используются для оптимизации запросов
+
+### Уникальные индексы (`indexes_unique`)
+- Гарантируют уникальность значения
+- Значение в хранилище: `RecordId` (16 байт, один ID)
+- Проверка **ДО** записи, обновление **ПОСЛЕ** записи
+- При создании сканирует таблицу и возвращает ошибку с количеством дубликатов
 
 ---
 
@@ -55,11 +72,11 @@ pub struct IndexInfoItem {
 
 **Примеры путей:**
 
-| Путь в документе | Интернированный путь |
-|------------------|---------------------|
-| `name` | `[42]` |
-| `user.email` | `[10, 55]` |
-| `address.city.name` | `[5, 12, 42]` |
+|| Путь в документе | Интернированный путь |
+||------------------|---------------------|
+|| `name` | `[42]` |
+|| `user.email` | `[10, 55]` |
+|| `address.city.name` | `[5, 12, 42]` |
 
 **Методы:**
 - `new(path: Vec<u64>) -> Self` — создание определения индекса
@@ -76,20 +93,20 @@ pub struct IndexInfoItem {
 
 ```rust
 pub struct IndexDefinition {
-    pub name: String,              // Уникальное имя индекса
+    pub name_interned: u64,        // Интернированный ID имени индекса
     pub paths: Vec<IndexInfoItem>, // Список путей индекса
 }
 ```
 
 **Типы индексов:**
 
-| paths.len() | Тип индекса | Пример |
-|-------------|-------------|--------|
-| 1 | Простой | Индекс по `email` |
-| >1 | Составной | Индекс по `(city, street)` |
+|| paths.len() | Тип индекса | Пример |
+||-------------|-------------|--------|
+|| 1 | Простой | Индекс по `email` |
+|| >1 | Составной | Индекс по `(city, street)` |
 
 **Методы:**
-- `new(name: &str, paths: Vec<IndexInfoItem>) -> Self`
+- `new(name_interned: u64, paths: Vec<IndexInfoItem>) -> Self`
 
 **Трейты:** `Debug`, `Clone`, `PartialEq`, `Eq`, `Serialize`, `Deserialize`
 
@@ -111,18 +128,18 @@ pub struct IndexInfo {
 
 **Методы:**
 
-| Метод | Описание |
-|-------|----------|
-| `new() -> Self` | Создание пустой конфигурации |
-| `from_definitions(indexes) -> Self` | Создание с определениями |
-| `is_enabled(&self) -> bool` | Проверка наличия индексов |
-| `status(&self) -> IndexStatus` | Получение текущего статуса |
-| `set_status(&self, status)` | Установка статуса |
-| `mark_pending(&self)` | Пометить как требующий синхронизации |
-| `add_index(&mut self, index_def)` | Добавить/обновить индекс |
-| `remove_index(&mut self, name) -> bool` | Удалить индекс по имени |
-| `definitions(&self) -> &[IndexDefinition]` | Получить все определения |
-| `definitions_mut(&mut self) -> &mut Vec<IndexDefinition>` | Мутабельный доступ |
+|| Метод | Описание |
+||-------|----------|
+|| `new() -> Self` | Создание пустой конфигурации |
+|| `from_definitions(indexes) -> Self` | Создание с определениями |
+|| `is_enabled(&self) -> bool` | Проверка наличия индексов |
+|| `status(&self) -> IndexStatus` | Получение текущего статуса |
+|| `set_status(&self, status)` | Установка статуса |
+|| `mark_pending(&self)` | Пометить как требующий синхронизации |
+|| `add_index(&mut self, index_def)` | Добавить/обновить индекс |
+|| `remove_index(&mut self, name) -> bool` | Удалить индекс по имени |
+|| `definitions(&self) -> &[IndexDefinition]` | Получить все определения |
+|| `definitions_mut(&mut self) -> &mut Vec<IndexDefinition>` | Мутабельный доступ |
 
 **Особенности:**
 - `PartialEq` сравнивает только `indexes`, игнорируя `status`
@@ -140,7 +157,7 @@ pub struct IndexInfo {
 ```rust
 pub struct IndexRecordKey {
     pub is_unique: u8,           // Флаг уникальности (1 или 0)
-    pub path: Vec<Vec<u64>>,     // Пути к индексируемым полям
+    pub index_id: u64,           // ID индекса (интернированное имя)
     pub hash1: u64,              // Хеш индексируемых значений
     pub hash2: u64,              // Второй хеш (защита от коллизий)
 }
@@ -148,46 +165,48 @@ pub struct IndexRecordKey {
 
 **Формат хранения (байты):**
 
-| Поле | Размер | Описание |
-|------|--------|----------|
-| `is_unique` | 1 byte | Флаг уникальности |
-| `num_paths` | 1 byte | Количество путей |
-| `path data` | variable | `len(4) + ids(8*n)` на каждый путь |
-| `hash1` | 8 bytes | Хеш значений |
-| `hash2` | 8 bytes | Хеш для коллизий |
+|| Поле | Размер | Описание |
+||------|--------|----------|
+|| `is_unique` | 1 byte | Флаг уникальности (0=обычный, 1=уникальный) |
+|| `index_id` | 8 bytes | ID индекса |
+|| `hash1` | 8 bytes | Хеш значений |
+|| `hash2` | 8 bytes | Хеш для коллизий |
+
+**Разделение ключей:**
+- Обычные индексы: `is_unique=0` → значение = `BTreeSet<RecordId>`
+- Уникальные индексы: `is_unique=1` → значение = `RecordId`
 
 **Методы:**
 
-| Метод | Описание |
-|-------|----------|
-| `new(is_unique: bool, path: Vec<Vec<u64>>) -> Self` | Создание ключа |
-| `with_values<T: Hash>(self, values: &[&T]) -> Self` | Вычисление хешей |
-| `to_bytes(&self) -> Bytes` | Сериализация в байты |
-| `from_bytes(bytes: Bytes) -> Result<Self, String>` | Десериализация |
-| `paths(&self) -> &[Vec<u64>]` | Получить пути |
-| `matches_paths(&self, paths: &[Vec<u64>]) -> bool` | Проверка соответствия путей |
+|| Метод | Описание |
+||-------|----------|
+|| `new(is_unique: bool, index_id: u64) -> Self` | Создание префикса ключа |
+|| `with_values<T: Hash>(self, values: &[&T]) -> Self` | Вычисление хешей |
+|| `to_bytes(&self) -> Bytes` | Сериализация в байты |
+|| `from_bytes(bytes: Bytes) -> Result<Self, String>` | Десериализация |
+|| `to_prefix_bytes(&self) -> Bytes` | Префикс для сканирования |
+|| `index_id(&self) -> u64` | Получить ID индекса |
 
 **Вычисление хешей:**
 - `hash1` — FxHasher с seed 0
-- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `name_interned`
+- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `index_id`
 
 ---
 
-### TableIndexManager
+### IndexManager
 
-**Файл:** `table_index_manager.rs`
+**Файл:** `index_manager.rs` (~1020 строк)
 
 Менеджер индексов таблицы. Управляет обычными и уникальными индексами.
 
 ```rust
-pub struct TableIndexManager {
-    interner: Arc<OnceCell<Interner>>,     // Интернатор строк
-    data_store: Arc<dyn Store>,             // Хранилище данных
+pub struct IndexManager {
+    data_store: Arc<dyn Store>,             // Хранилище данных таблицы
     info_store: Arc<dyn Store>,             // Хранилище метаданных
-    indexes: Arc<RwLock<IndexInfo>>,        // Обычные индексы
-    indexes_unique: Arc<RwLock<IndexInfo>>, // Уникальные индексы
-    has_indexes: AtomicBool,                // Флаг наличия обычных
-    has_indexes_unique: AtomicBool,         // Флаг наличия уникальных
+    indexes: Arc<IndexInfo>,                // Обычные индексы (DashMap внутри)
+    indexes_unique: Arc<IndexInfo>,         // Уникальные индексы
+    has_indexes: Arc<AtomicBool>,           // Флаг наличия обычных
+    has_indexes_unique: Arc<AtomicBool>,    // Флаг наличия уникальных
 }
 ```
 
@@ -195,57 +214,99 @@ pub struct TableIndexManager {
 - Обычные индексы: `RecordId::system("indexes").to_bytes()`
 - Уникальные индексы: `RecordId::system("indexes_unique").to_bytes()`
 
-**Методы:**
+**Основные методы:**
 
-| Метод | Описание |
-|-------|----------|
-| `new(data_store, info_store, interner) -> Result<Self, DbError>` | Создание менеджера |
-| `has_indexes(&self) -> bool` | Проверка наличия обычных индексов |
-| `has_unique_indexes(&self) -> bool` | Проверка наличия уникальных индексов |
+|| Метод | Описание |
+||-------|----------|
+|| `new(data_store, info_store) -> Result<Self, DbError>` | Создание менеджера |
+|| `has_indexes(&self) -> bool` | O(1) проверка обычных индексов |
+|| `has_unique_indexes(&self) -> bool` | O(1) проверка уникальных индексов |
+
+**Обычные индексы:**
+
+|| Метод | Описание |
+||-------|----------|
+|| `create_index(&self, index_def) -> DbResult<()>` | Создать индекс |
+|| `drop_index(&self, name_interned) -> DbResult<bool>` | Удалить индекс |
+|| `lookup_by_index(&self, name, values) -> DbResult<BTreeSet<RecordId>>` | Поиск по индексу |
+|| `on_record_created(&self, record_id, value)` | Обновление после вставки |
+|| `on_record_updated(&self, record_id, old, new)` | Обновление после изменения |
+|| `on_record_deleted(&self, record_id, old_value)` | Обновление после удаления |
+
+**Уникальные индексы:**
+
+|| Метод | Описание |
+||-------|----------|
+|| `create_unique_index(&self, index_def) -> DbResult<()>` | Создать уникальный индекс |
+|| `drop_unique_index(&self, name_interned) -> DbResult<bool>` | Удалить уникальный индекс |
+|| `lookup_by_unique_index(&self, name, values) -> DbResult<Option<RecordId>>` | Поиск |
+|| `validate_unique_for_create(&self, value) -> DbResult<()>` | Валидация ДО вставки |
+|| `validate_unique_for_update(&self, record_id, old, new) -> DbResult<()>` | Валидация ДО изменения |
+|| `on_record_created_unique(&self, record_id, value)` | Обновление ПОСЛЕ вставки |
+|| `on_record_updated_unique(&self, record_id, old, new)` | Обновление ПОСЛЕ изменения |
+|| `on_record_deleted_unique(&self, record_id, old_value)` | Обновление ПОСЛЕ удаления |
 
 **Особенности:**
-- `Clone` создаёт новые `Arc` ссылки и атомарные флаги
+- `Clone` создаёт новые `Arc` ссылки (дешёвая операция)
 - При инициализации загружает индексы из `info_store`
 - Сериализация через `bincode`
+- Атомарные флаги для O(1) проверки наличия индексов
+
+---
+
+## Ошибки
+
+### UniqueIndexCreationFailed
+
+```rust
+pub enum DbError {
+    // ...
+    UniqueIndexCreationFailed(String, usize, String),
+    // (index_name, duplicate_count, sample_value)
+}
+```
+
+Возвращается при попытке создать уникальный индекс на таблице с дубликатами.
+Содержит имя индекса, количество записей с дублирующимися значениями и пример значения.
 
 ---
 
 ## Потокобезопасность
 
-| Компонент | Механизм синхронизации |
-|-----------|----------------------|
-| `IndexStatus` | `AtomicU8` через `StatusAtom` |
-| `IndexInfo` | `Arc<RwLock<IndexInfo>>` в `TableIndexManager` |
-| `has_indexes` | `AtomicBool` |
-| `Interner` | `Arc<OnceCell<Interner>>` |
+|| Компонент | Механизм синхронизации |
+||-----------|----------------------|
+|| `IndexStatus` | `AtomicU8` через `StatusAtom` |
+|| `IndexInfo` | `Arc<IndexInfo>` (DashMap внутри) |
+|| `has_indexes` | `Arc<AtomicBool>` |
+|| `has_indexes_unique` | `Arc<AtomicBool>` |
 
 ---
 
 ## Зависимости
 
-### TableIndexManager
+### IndexManager
 
-| Зависимость | Модуль |
-|-------------|--------|
-| `Interner` | `core::interner` |
-| `Store` | `db::storage::types` |
-| `RecordId` | `types::record_id` |
-| `IndexInfo` | `db::engine::index` |
+|| Зависимость | Модуль |
+||-------------|--------|
+|| `Store` | `db::storage::types` |
+|| `RecordId` | `types::record_id` |
+|| `InnerValue` | `types::value` |
+|| `IndexInfo` | `db::engine::index` |
 
 ### Цепочка IndexInfo
 
-| Компонент | Содержит |
-|-----------|----------|
-| `IndexInfo` | `Vec<IndexDefinition>` |
-| `IndexDefinition` | `Vec<IndexInfoItem>` |
-| `IndexInfoItem` | `Vec<u64>` |
+|| Компонент | Содержит |
+||-----------|----------|
+|| `IndexInfo` | `Vec<IndexDefinition>` |
+|| `IndexDefinition` | `name_interned: u64`, `Vec<IndexInfoItem>` |
+|| `IndexInfoItem` | `Vec<u64>` |
 
 ### IndexRecordKey (независимый)
 
-| Зависимость | Crate |
-|-------------|-------|
-| `Bytes` | `bytes` |
-| `FxHasher` | `fxhash` |
+|| Зависимость | Crate |
+||-------------|-------|
+|| `Bytes` | `bytes` |
+|| `FxHasher` | `fxhash` |
 
 ---
 
@@ -254,16 +315,28 @@ pub struct TableIndexManager {
 ```rust
 // Создание определения индекса
 let email_path = IndexInfoItem::new(vec![42]); // ID для "email"
-let index_def = IndexDefinition::new("email_idx", vec![email_path]);
+let index_def = IndexDefinition::new(1001, vec![email_path]);
 
-// Добавление в конфигурацию
-let mut index_info = IndexInfo::new();
-index_info.add_index(index_def);
+// Создание обычного индекса
+manager.create_index(index_def).await?;
 
-// Проверка статуса
-assert_eq!(index_info.status(), IndexStatus::Pending);
+// Создание уникального индекса
+manager.create_unique_index(unique_index_def).await?;
 
-// Создание ключа для поиска
-let key = IndexRecordKey::new(true, vec![vec![42]])
-    .with_values(&[&"user@example.com"]);
+// Поиск по индексу
+let records = manager.lookup_by_index(1001, &[InnerValue::Str("test".into())]).await?;
+
+// Поиск по уникальному индексу
+let record = manager.lookup_by_unique_index(1002, &[InnerValue::Str("user@example.com".into())]).await?;
+
+// Валидация перед вставкой (для уникальных индексов)
+manager.validate_unique_for_create(&new_value).await?;
 ```
+
+---
+
+## Статистика
+
+- **Файлов:** 7 (+ tests/)
+- **Тестов:** 56 (index_manager)
+- **Строк кода:** ~1020 (index_manager.rs)
