@@ -24,7 +24,6 @@ use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use bytes::Bytes;
-use futures::StreamExt;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

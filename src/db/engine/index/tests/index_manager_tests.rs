@@ -1306,3 +1306,837 @@ async fn test_regular_and_unique_indexes_coexist() {
         .unwrap();
     assert!(unique_result.is_some());
 }
+
+// ============================================================================
+// create_index with lookup verification - records actually indexed
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_index_actually_indexes_records() {
+    let (data_store, _, manager) = create_manager();
+
+    // Insert 5 records with different values
+    let mut record_ids = Vec::new();
+    for i in 0..5i64 {
+        let value = create_test_value(&[(1, InnerValue::Str(format!("value_{}", i)))]);
+        let record_id = RecordId::new();
+        data_store
+            .set(record_id.to_bytes(), value.to_bytes())
+            .await
+            .unwrap();
+        record_ids.push(record_id);
+    }
+
+    // Create index AFTER data exists
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Verify each record is indexed and findable
+    for (i, expected_id) in record_ids.iter().enumerate() {
+        let result = manager
+            .lookup_by_index(1001, &[InnerValue::Str(format!("value_{}", i))])
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1, "Expected 1 result for value_{}", i);
+        assert!(
+            result.contains(expected_id),
+            "Record {} not found in index",
+            i
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_create_index_with_many_records() {
+    let (data_store, _, manager) = create_manager();
+
+    // Insert 100 records
+    let mut record_ids = Vec::new();
+    for i in 0..100i64 {
+        let value = create_test_value(&[(1, InnerValue::Int(i))]);
+        let record_id = RecordId::new();
+        data_store
+            .set(record_id.to_bytes(), value.to_bytes())
+            .await
+            .unwrap();
+        record_ids.push(record_id);
+    }
+
+    // Create index
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Verify random records
+    for i in [0usize, 25, 50, 75, 99] {
+        let result = manager
+            .lookup_by_index(1001, &[InnerValue::Int(i as i64)])
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&record_ids[i]));
+    }
+}
+
+#[tokio::test]
+async fn test_create_index_with_duplicate_values() {
+    let (data_store, _, manager) = create_manager();
+
+    // Insert 10 records, 5 with same value
+    let shared_value = InnerValue::Str("shared".to_string());
+    let mut shared_ids = Vec::new();
+    for _ in 0..5 {
+        let value = create_test_value(&[(1, shared_value.clone())]);
+        let record_id = RecordId::new();
+        data_store
+            .set(record_id.to_bytes(), value.to_bytes())
+            .await
+            .unwrap();
+        shared_ids.push(record_id);
+    }
+
+    // Create index
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Lookup should return all 5
+    let result = manager
+        .lookup_by_index(1001, &[shared_value])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 5);
+    for id in &shared_ids {
+        assert!(result.contains(id));
+    }
+}
+
+// ============================================================================
+// Tests with various value types (Null, List, Map, Set)
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_index_with_null_value() {
+    let (data_store, _, manager) = create_manager();
+
+    let value = create_test_value(&[(1, InnerValue::Nil)]);
+    let record_id = RecordId::new();
+    data_store
+        .set(record_id.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let result = manager
+        .lookup_by_index(1001, &[InnerValue::Nil])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result.contains(&record_id));
+}
+
+#[tokio::test]
+async fn test_create_index_with_list_value() {
+    let (data_store, _, manager) = create_manager();
+
+    let list = InnerValue::List(vec![
+        InnerValue::Int(1),
+        InnerValue::Int(2),
+        InnerValue::Int(3),
+    ]);
+    let value = create_test_value(&[(1, list.clone())]);
+    let record_id = RecordId::new();
+    data_store
+        .set(record_id.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let result = manager
+        .lookup_by_index(1001, &[list])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result.contains(&record_id));
+}
+
+#[tokio::test]
+async fn test_create_index_with_map_value() {
+    let (data_store, _, manager) = create_manager();
+
+    let mut inner_map = crate::types::common::new_map();
+    inner_map.insert(InternerKey::new(100), InnerValue::Str("inner".to_string()));
+    let map = InnerValue::Map(inner_map);
+
+    let value = create_test_value(&[(1, map.clone())]);
+    let record_id = RecordId::new();
+    data_store
+        .set(record_id.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let result = manager
+        .lookup_by_index(1001, &[map])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result.contains(&record_id));
+}
+
+#[tokio::test]
+async fn test_create_index_with_set_value() {
+    // Note: Set values are hashable but cloning may produce different hashes
+    // due to IndexSet internal ordering. This test verifies Set can be indexed.
+    let (_, _, manager) = create_manager();
+
+    use crate::types::common::TSet;
+
+    let mut set: TSet<InnerValue> = TSet::default();
+    set.insert(InnerValue::Int(1));
+    set.insert(InnerValue::Int(2));
+    let set_value = InnerValue::Set(set);
+
+    // Just verify Set can be used as indexed value without error
+    let value = create_test_value(&[(1, set_value)]);
+    let record_id = RecordId::new();
+
+    // Create index first (empty table)
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Add record - should not panic
+    manager.on_record_created(&record_id, &value).await.unwrap();
+}
+
+// ============================================================================
+// Composite index update tests - partial field change
+// ============================================================================
+
+#[tokio::test]
+async fn test_composite_index_update_one_field() {
+    let (_, _, manager) = create_manager();
+
+    // Composite index on [field 1, field 2]
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
+    );
+    manager.create_index(index_def).await.unwrap();
+
+    // Initial record: name=Alice, age=30
+    let old_value = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+    // Updated record: name=Alice, age=31 (only age changed)
+    let new_value = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(31)),
+    ]);
+    let record_id = RecordId::new();
+
+    manager.on_record_created(&record_id, &old_value).await.unwrap();
+
+    // Verify initial index entry
+    let result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+
+    // Update
+    manager
+        .on_record_updated(&record_id, &old_value, &new_value)
+        .await
+        .unwrap();
+
+    // Old composite key should be empty
+    let old_result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
+        )
+        .await
+        .unwrap();
+    assert!(old_result.is_empty());
+
+    // New composite key should have the record
+    let new_result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(31)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_result.len(), 1);
+    assert!(new_result.contains(&record_id));
+}
+
+#[tokio::test]
+async fn test_composite_index_update_both_fields() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
+    );
+    manager.create_index(index_def).await.unwrap();
+
+    let old_value = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+    let new_value = create_test_value(&[
+        (1, InnerValue::Str("Bob".to_string())),
+        (2, InnerValue::Int(25)),
+    ]);
+    let record_id = RecordId::new();
+
+    manager.on_record_created(&record_id, &old_value).await.unwrap();
+    manager
+        .on_record_updated(&record_id, &old_value, &new_value)
+        .await
+        .unwrap();
+
+    // Both fields changed - both old and new keys should be correct
+    let old_result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
+        )
+        .await
+        .unwrap();
+    assert!(old_result.is_empty());
+
+    let new_result = manager
+        .lookup_by_index(
+            1001,
+            &[InnerValue::Str("Bob".to_string()), InnerValue::Int(25)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(new_result.len(), 1);
+}
+
+// ============================================================================
+// Unique index update tests - None↔Some transitions
+// ============================================================================
+
+#[tokio::test]
+async fn test_unique_index_update_field_appears() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def).await.unwrap();
+
+    // Old value: no indexed field
+    let old_value = create_test_value(&[(2, InnerValue::Int(42))]);
+    // New value: indexed field appears
+    let new_value = create_test_value(&[(1, InnerValue::Str("appeared".to_string()))]);
+    let record_id = RecordId::new();
+
+    manager
+        .on_record_created_unique(&record_id, &old_value)
+        .await
+        .unwrap();
+
+    // Should not find with new value before update
+    let before = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("appeared".to_string())])
+        .await
+        .unwrap();
+    assert!(before.is_none());
+
+    // Update: field appears
+    manager
+        .on_record_updated_unique(&record_id, &old_value, &new_value)
+        .await
+        .unwrap();
+
+    // Now should find
+    let after = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("appeared".to_string())])
+        .await
+        .unwrap();
+    assert!(after.is_some());
+    assert_eq!(after.unwrap(), record_id);
+}
+
+#[tokio::test]
+async fn test_unique_index_update_field_disappears() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def).await.unwrap();
+
+    // Old value: indexed field exists
+    let old_value = create_test_value(&[(1, InnerValue::Str("will_disappear".to_string()))]);
+    // New value: indexed field gone
+    let new_value = create_test_value(&[(2, InnerValue::Int(42))]);
+    let record_id = RecordId::new();
+
+    manager
+        .on_record_created_unique(&record_id, &old_value)
+        .await
+        .unwrap();
+
+    // Should find before update
+    let before = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("will_disappear".to_string())])
+        .await
+        .unwrap();
+    assert!(before.is_some());
+
+    // Update: field disappears
+    manager
+        .on_record_updated_unique(&record_id, &old_value, &new_value)
+        .await
+        .unwrap();
+
+    // Should not find after update
+    let after = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Str("will_disappear".to_string())])
+        .await
+        .unwrap();
+    assert!(after.is_none());
+}
+
+#[tokio::test]
+async fn test_unique_index_validate_update_field_appears() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def).await.unwrap();
+
+    // Existing record with value
+    let existing = create_test_value(&[(1, InnerValue::Str("existing".to_string()))]);
+    let existing_id = RecordId::new();
+    manager
+        .on_record_created_unique(&existing_id, &existing)
+        .await
+        .unwrap();
+
+    // Another record without the field
+    let old_value = create_test_value(&[(2, InnerValue::Int(42))]);
+    let record_id = RecordId::new();
+    manager
+        .on_record_created_unique(&record_id, &old_value)
+        .await
+        .unwrap();
+
+    // Try to update to existing value - should fail
+    let result = manager
+        .validate_unique_for_update(&record_id, &old_value, &existing)
+        .await;
+    assert!(result.is_err());
+
+    // Update to new unique value - should pass
+    let new_value = create_test_value(&[(1, InnerValue::Str("new_unique".to_string()))]);
+    let result = manager
+        .validate_unique_for_update(&record_id, &old_value, &new_value)
+        .await;
+    assert!(result.is_ok());
+}
+
+// ============================================================================
+// Composite unique index tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_composite_unique_index_lookup() {
+    let (_, _, manager) = create_manager();
+
+    // Unique composite index on [field 1, field 2]
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
+    );
+    manager.create_unique_index(index_def).await.unwrap();
+
+    // Add record
+    let value = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+    let record_id = RecordId::new();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
+
+    // Lookup with both fields
+    let result = manager
+        .lookup_by_unique_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(30)],
+        )
+        .await
+        .unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), record_id);
+
+    // Lookup with wrong second field
+    let result = manager
+        .lookup_by_unique_index(
+            1001,
+            &[InnerValue::Str("Alice".to_string()), InnerValue::Int(25)],
+        )
+        .await
+        .unwrap();
+    assert!(result.is_none());
+
+    // Lookup with wrong first field
+    let result = manager
+        .lookup_by_unique_index(
+            1001,
+            &[InnerValue::Str("Bob".to_string()), InnerValue::Int(30)],
+        )
+        .await
+        .unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn test_composite_unique_index_creation_fails_with_duplicates() {
+    let (data_store, _, manager) = create_manager();
+
+    // Insert two records with same composite value
+    let value = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+    let id1 = RecordId::new();
+    let id2 = RecordId::new();
+    data_store.set(id1.to_bytes(), value.to_bytes()).await.unwrap();
+    data_store.set(id2.to_bytes(), value.to_bytes()).await.unwrap();
+
+    // Create unique composite index - should fail
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
+    );
+    let result = manager.create_unique_index(index_def).await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        crate::db::DbError::UniqueIndexCreationFailed(name, count, _sample) => {
+            assert_eq!(name, "1001");
+            assert_eq!(count, 2);
+        }
+        _ => panic!("Expected UniqueIndexCreationFailed"),
+    }
+}
+
+#[tokio::test]
+async fn test_composite_unique_index_creation_succeeds_with_unique_data() {
+    let (data_store, _, manager) = create_manager();
+
+    // Insert records with different composite values
+    let value1 = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+    let value2 = create_test_value(&[
+        (1, InnerValue::Str("Alice".to_string())),
+        (2, InnerValue::Int(25)),
+    ]);
+    let value3 = create_test_value(&[
+        (1, InnerValue::Str("Bob".to_string())),
+        (2, InnerValue::Int(30)),
+    ]);
+
+    for v in [&value1, &value2, &value3] {
+        let id = RecordId::new();
+        data_store.set(id.to_bytes(), v.to_bytes()).await.unwrap();
+    }
+
+    // Create unique composite index - should succeed
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![1]), IndexInfoItem::new(vec![2])],
+    );
+    let result = manager.create_unique_index(index_def).await;
+    assert!(result.is_ok());
+}
+
+// ============================================================================
+// Duplicate index creation test
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_same_index_twice() {
+    let (_, _, manager) = create_manager();
+
+    let index_def1 = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def1).await.unwrap();
+    assert!(manager.has_indexes());
+
+    // Create same index again - should add duplicate entry in IndexInfo
+    let index_def2 = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def2).await.unwrap();
+
+    // Index should still exist
+    assert!(manager.has_indexes());
+    assert!(manager.index_exists(1001));
+}
+
+#[tokio::test]
+async fn test_create_same_unique_index_twice() {
+    let (_, _, manager) = create_manager();
+
+    let index_def1 = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def1).await.unwrap();
+    assert!(manager.has_unique_indexes());
+
+    // Create same unique index again
+    let index_def2 = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def2).await.unwrap();
+
+    assert!(manager.has_unique_indexes());
+    assert!(manager.unique_index_exists(1001));
+}
+
+// ============================================================================
+// Deep nesting path test
+// ============================================================================
+
+#[tokio::test]
+async fn test_deeply_nested_path_index() {
+    let (data_store, _, manager) = create_manager();
+
+    // Create deeply nested structure: level1.level2.level3.level4.level5 = "deep"
+    let deep_value = InnerValue::Str("deep_value".to_string());
+    let level5 = create_nested_value(&[50], deep_value.clone());
+    let level4 = create_nested_value(&[40], level5);
+    let level3 = create_nested_value(&[30], level4);
+    let level2 = create_nested_value(&[20], level3);
+    let level1 = create_test_value(&[(10, level2)]);
+
+    let record_id = RecordId::new();
+    data_store
+        .set(record_id.to_bytes(), level1.to_bytes())
+        .await
+        .unwrap();
+
+    // Create index on path [10, 20, 30, 40, 50]
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![10, 20, 30, 40, 50])],
+    );
+    manager.create_index(index_def).await.unwrap();
+
+    // Lookup by deep value
+    let result = manager
+        .lookup_by_index(1001, &[deep_value])
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result.contains(&record_id));
+}
+
+#[tokio::test]
+async fn test_deeply_nested_unique_index() {
+    let (_, _, manager) = create_manager();
+
+    let deep_value = InnerValue::Int(999);
+    let level5 = create_nested_value(&[50], deep_value.clone());
+    let level4 = create_nested_value(&[40], level5);
+    let level3 = create_nested_value(&[30], level4);
+    let level2 = create_nested_value(&[20], level3);
+    let level1 = create_test_value(&[(10, level2)]);
+
+    // Create unique index on deep path
+    let index_def = IndexDefinition::new(
+        1001,
+        vec![IndexInfoItem::new(vec![10, 20, 30, 40, 50])],
+    );
+    manager.create_unique_index(index_def).await.unwrap();
+
+    let record_id = RecordId::new();
+    manager
+        .on_record_created_unique(&record_id, &level1)
+        .await
+        .unwrap();
+
+    // Lookup
+    let result = manager
+        .lookup_by_unique_index(1001, &[deep_value])
+        .await
+        .unwrap();
+    assert!(result.is_some());
+    assert_eq!(result.unwrap(), record_id);
+}
+
+// ============================================================================
+// Delete last record from BTreeSet - verify key cleanup
+// ============================================================================
+
+#[tokio::test]
+async fn test_delete_last_record_removes_index_key() {
+    let (_, info_store, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    let value = create_test_value(&[(1, InnerValue::Str("unique_value".to_string()))]);
+    let record_id = RecordId::new();
+
+    // Add record
+    manager.on_record_created(&record_id, &value).await.unwrap();
+
+    // Verify index entry exists by lookup
+    let before = manager
+        .lookup_by_index(1001, &[InnerValue::Str("unique_value".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 1);
+
+    // Delete the only record
+    manager.on_record_deleted(&record_id, &value).await.unwrap();
+
+    // Verify index entry is gone
+    let after = manager
+        .lookup_by_index(1001, &[InnerValue::Str("unique_value".to_string())])
+        .await
+        .unwrap();
+    assert!(after.is_empty());
+
+    // Verify key is actually removed from store (not just empty BTreeSet)
+    // The index key should not exist at all
+    use crate::db::engine::index::index_record_key::IndexRecordKey;
+    let index_key = IndexRecordKey::new(false, 1001)
+        .with_values(&[&InnerValue::Str("unique_value".to_string())])
+        .to_bytes();
+    let store_result = info_store.get(index_key).await;
+    assert!(
+        matches!(store_result, Err(crate::db::DbError::NotFound(_))),
+        "Index key should be removed from store after last record deleted"
+    );
+}
+
+// ============================================================================
+// Concurrency test
+// ============================================================================
+
+#[tokio::test]
+async fn test_concurrent_index_operations() {
+    let (_, _, manager) = create_manager();
+
+    // Create index first
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Spawn multiple concurrent tasks
+    let mut handles = Vec::new();
+    for i in 0..10 {
+        let mgr = manager.clone();
+        let handle = tokio::spawn(async move {
+            let value = create_test_value(&[(1, InnerValue::Int(i))]);
+            let record_id = RecordId::new();
+
+            // Create
+            mgr.on_record_created(&record_id, &value).await.unwrap();
+
+            // Lookup
+            let result = mgr
+                .lookup_by_index(1001, &[InnerValue::Int(i)])
+                .await
+                .unwrap();
+            assert_eq!(result.len(), 1);
+
+            // Delete
+            mgr.on_record_deleted(&record_id, &value).await.unwrap();
+
+            // Verify deleted
+            let result = mgr
+                .lookup_by_index(1001, &[InnerValue::Int(i)])
+                .await
+                .unwrap();
+            assert!(result.is_empty());
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all tasks
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_unique_index_validation() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_unique_index(index_def).await.unwrap();
+
+    // One record exists
+    let existing = create_test_value(&[(1, InnerValue::Str("exists".to_string()))]);
+    let existing_id = RecordId::new();
+    manager
+        .on_record_created_unique(&existing_id, &existing)
+        .await
+        .unwrap();
+
+    // Multiple concurrent validations
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let mgr = manager.clone();
+        let val = existing.clone();
+        let handle = tokio::spawn(async move {
+            // All should fail because value exists
+            let result = mgr.validate_unique_for_create(&val).await;
+            result
+        });
+        handles.push(handle);
+    }
+
+    // All should fail
+    for handle in handles {
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+    }
+}
+
+#[tokio::test]
+async fn test_concurrent_reads_with_index() {
+    let (_, _, manager) = create_manager();
+
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(index_def).await.unwrap();
+
+    // Add some records
+    for i in 0..20i64 {
+        let value = create_test_value(&[(1, InnerValue::Int(i))]);
+        let record_id = RecordId::new();
+        manager.on_record_created(&record_id, &value).await.unwrap();
+    }
+
+    // Concurrent reads
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let mgr = manager.clone();
+        let handle = tokio::spawn(async move {
+            for j in 0..20i64 {
+                let result = mgr
+                    .lookup_by_index(1001, &[InnerValue::Int(j)])
+                    .await
+                    .unwrap();
+                assert_eq!(result.len(), 1);
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+}
