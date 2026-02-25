@@ -233,14 +233,50 @@ fn test_empty_value() {
 }
 
 #[test]
-fn test_nil_value() {
+fn test_null_value() {
     let interner = Interner::new();
 
-    let inner = InnerValue::Nil;
+    let inner = InnerValue::Null;
     let msgpack = inner_to_msgpack(&interner, &inner).unwrap();
 
     let decoded: rmpv::Value = rmpv::decode::read_value(&mut &*msgpack).unwrap();
     assert_eq!(decoded, rmpv::Value::Nil);
+}
+
+#[test]
+fn test_null_roundtrip() {
+    let interner = Interner::new();
+
+    let original = InnerValue::Null;
+    let msgpack = inner_to_msgpack(&interner, &original).unwrap();
+    let decoded = msgpack_to_inner(&interner, &msgpack).unwrap();
+    assert_eq!(original, decoded);
+}
+
+#[test]
+fn test_null_in_map_roundtrip() {
+    let interner = Interner::new();
+
+    let test_data = rmpv::Value::Map(vec![(
+        rmpv::Value::from("field"),
+        rmpv::Value::Nil,
+    )]);
+
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &test_data).unwrap();
+
+    let inner = msgpack_to_inner(&interner, &buf).unwrap();
+    let result = inner_to_msgpack(&interner, &inner).unwrap();
+
+    assert_eq!(buf, result);
+
+    match inner {
+        InnerValue::Map(m) => {
+            let key = interner.touch_ind("field").unwrap().key().clone();
+            assert_eq!(m.get(&key), Some(&InnerValue::Null));
+        }
+        _ => panic!("Expected Map"),
+    }
 }
 
 #[test]

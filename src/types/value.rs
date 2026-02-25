@@ -30,7 +30,7 @@ pub type InnerValue = Value<InternerKey>;
 
 #[derive(Debug, Clone)]
 pub enum Value<Key: Eq + Hash + Ord + Clone + Serialize + Debug> {
-    Nil,
+    Null,
     Bool(bool),
     Int(i64),
     F64(f64),
@@ -63,7 +63,7 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Serialize for Value<Key> 
         S: Serializer,
     {
         match self {
-            Value::Nil => serializer.serialize_unit(),
+            Value::Null => serializer.serialize_unit(),
             Value::Bool(b) => serializer.serialize_bool(*b),
             Value::Int(i) => serializer.serialize_i64(*i),
             Value::F64(f) => serializer.serialize_f64(*f),
@@ -152,7 +152,7 @@ where
         Ok(Value::Bin(value))
     }
     fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(Value::Nil)
+        Ok(Value::Null)
     }
     fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -161,7 +161,7 @@ where
         deserializer.deserialize_any(self)
     }
     fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(Value::Nil)
+        Ok(Value::Null)
     }
 
     fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -249,7 +249,7 @@ where
 impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> PartialEq for Value<Key> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Value::Nil, Value::Nil) => true,
+            (Value::Null, Value::Null) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::F64(a), Value::F64(b)) => {
@@ -277,7 +277,7 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Hash for Value<Key> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            Value::Nil => {}
+            Value::Null => {}
             Value::Bool(b) => b.hash(state),
             Value::Int(i) => i.hash(state),
             Value::F64(f) => f.to_bits().hash(state),

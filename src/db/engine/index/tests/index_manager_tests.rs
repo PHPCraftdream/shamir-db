@@ -572,7 +572,7 @@ async fn test_various_value_types_in_index() {
         (1, InnerValue::Int(42)),
         (2, InnerValue::Str("hello".to_string())),
         (3, InnerValue::Bool(true)),
-        (4, InnerValue::Nil),
+        (4, InnerValue::Null),
     ];
 
     for (key, val) in &test_values {
@@ -1478,7 +1478,7 @@ async fn test_create_index_with_duplicate_values() {
 async fn test_create_index_with_null_value() {
     let (data_store, _, manager) = create_manager();
 
-    let value = create_test_value(&[(1, InnerValue::Nil)]);
+    let value = create_test_value(&[(1, InnerValue::Null)]);
     let record_id = RecordId::new();
     data_store
         .set(record_id.to_bytes(), value.to_bytes())
@@ -1489,7 +1489,7 @@ async fn test_create_index_with_null_value() {
     manager.create_index(index_def).await.unwrap();
 
     let result = manager
-        .lookup_by_index(1001, &[InnerValue::Nil])
+        .lookup_by_index(1001, &[InnerValue::Null])
         .await
         .unwrap();
     assert_eq!(result.len(), 1);

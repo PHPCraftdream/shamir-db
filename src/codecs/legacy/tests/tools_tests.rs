@@ -136,7 +136,7 @@ mod tests {
                 UserValue::Str("one".to_string()),
                 UserValue::Int(2),
                 UserValue::Bool(false),
-                UserValue::Nil,
+                UserValue::Null,
             ]),
         );
         expected_map.insert("user".to_string(), UserValue::Map(user_sub_map));

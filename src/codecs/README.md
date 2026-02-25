@@ -228,7 +228,7 @@ pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>,
 
 | Rust Type | JSON Handling |
 |-----------|---------------|
-| Nil | `null` |
+| Null | `null` |
 | Bool | `true`/`false` |
 | Int(i64) | number |
 | UInt(u64) | number (if > i64::MAX, store as string) |

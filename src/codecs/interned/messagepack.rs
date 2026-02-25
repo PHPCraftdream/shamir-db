@@ -44,7 +44,7 @@ fn rmpv_value_to_inner(
     interner: &Interner,
 ) -> Result<InnerValue, CodecError> {
     match rmpv_value {
-        RmpvValue::Nil => Ok(InnerValue::Nil),
+        RmpvValue::Nil => Ok(InnerValue::Null),
         RmpvValue::Boolean(b) => Ok(InnerValue::Bool(*b)),
         RmpvValue::Integer(n) => {
             if n.is_u64() {
@@ -105,7 +105,7 @@ fn rmpv_value_to_inner(
 /// Converts InnerValue to rmpv::Value, de-interning all keys
 fn inner_to_rmpv_value(value: &InnerValue, interner: &Interner) -> RmpvValue {
     match value {
-        Value::Nil => RmpvValue::Nil,
+        Value::Null => RmpvValue::Nil,
         Value::Bool(b) => RmpvValue::Boolean(*b),
         Value::Int(i) => RmpvValue::Integer((*i).into()),
         Value::F64(f) => RmpvValue::F64(*f),

@@ -34,7 +34,7 @@ fn test_json_roundtrip() {
     map.insert("key1".to_string(), UserValue::Int(123));
     map.insert("key2".to_string(), UserValue::Str("value".to_string()));
     let values = vec![
-        UserValue::Nil,
+        UserValue::Null,
         UserValue::Bool(true),
         UserValue::Int(42),
         UserValue::F64(123.456),
@@ -73,7 +73,7 @@ fn test_decode_from_raw_json_string() {
         ]),
     );
     expected_map.insert("prefs".to_string(), UserValue::Map(prefs_map));
-    expected_map.insert("last_login".to_string(), UserValue::Nil);
+    expected_map.insert("last_login".to_string(), UserValue::Null);
     let expected_value = UserValue::Map(expected_map);
     let decoded_value: UserValue = codec.decode(raw_json.as_bytes()).unwrap();
     assert_eq!(decoded_value, expected_value);

@@ -43,7 +43,7 @@ fn json_value_to_inner(
     interner: &Interner,
 ) -> Result<InnerValue, CodecError> {
     match json_value {
-        json::Value::Null => Ok(InnerValue::Nil),
+        json::Value::Null => Ok(InnerValue::Null),
         json::Value::Bool(b) => Ok(InnerValue::Bool(*b)),
         json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -84,7 +84,7 @@ fn json_value_to_inner(
 /// Converts InnerValue to serde_json::Value, de-interning all keys
 fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
     match value {
-        Value::Nil => json::Value::Null,
+        Value::Null => json::Value::Null,
         Value::Bool(b) => json::Value::Bool(*b),
         Value::Int(i) => json::Value::Number((*i).into()),
         Value::F64(f) => {
