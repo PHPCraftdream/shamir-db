@@ -18,7 +18,7 @@ S.H.A.M.I.R. Database Architecture Overview
 1. Self-contained: Single binary file (<50MB), no external dependencies
 2. Hybrid Storage: MessagePack data with interning (String -> u64) for speed and compression
 3. WASM-First: Database logic as WASM modules
-4. Reliability: WAL, Checksums, Crash safety
+4. Reliability: Checksums, Crash safety (storage backends handle durability)
 
 **Key Technologies:**
 - Async: Tokio with full features
@@ -357,5 +357,649 @@ Index System Architecture
 - RecordId::system("indexes_unique"): Unique index definitions
 
 **Test Coverage:**
-- 56 index manager tests
-- 280 total lib tests passing
+- 79 index manager tests
+- 303 total lib tests passing
+
+## arch-012-query-language
+
+Query Language (SDBQL - S.H.A.M.I.R. Database Query Language)
+
+**Design Philosophy:**
+- JSON-native: Queries are JSON objects
+- Familiar: MongoDB-style find/update syntax
+- Index-aware: Query planner uses indexes automatically
+- Pipeline-based: Composable operations
+
+**Query Types:**
+
+### Data Query Commands
+
+```json
+// FIND - Query records with filter
+{
+  "find": {
+    "from": "users",
+    "where": { "name": "Alice" },
+    "select": ["name", "email"],
+    "limit": 10,
+    "offset": 0,
+    "sort": { "name": 1 }
+  }
+}
+
+// FIND ONE - Single record
+{
+  "findOne": {
+    "from": "users",
+    "where": { "_id": "record_id" }
+  }
+}
+
+// INSERT - Create new record
+{
+  "insert": {
+    "into": "users",
+    "data": { "name": "Alice", "email": "alice@example.com" }
+  }
+}
+
+// INSERT MANY - Bulk insert
+{
+  "insertMany": {
+    "into": "users",
+    "data": [
+      { "name": "Alice" },
+      { "name": "Bob" }
+    ]
+  }
+}
+
+// UPDATE - Modify records
+{
+  "update": {
+    "in": "users",
+    "where": { "status": "active" },
+    "set": { "last_login": "2024-01-15" },
+    "inc": { "login_count": 1 }
+  }
+}
+
+// DELETE - Remove records
+{
+  "delete": {
+    "from": "users",
+    "where": { "status": "inactive" }
+  }
+}
+
+// COUNT - Count records
+{
+  "count": {
+    "from": "users",
+    "where": { "status": "active" }
+  }
+}
+```
+
+### Filter Operators
+
+```json
+{
+  "where": {
+    "age": { "$gt": 18 },
+    "name": { "$like": "A%" },
+    "status": { "$in": ["active", "pending"] },
+    "email": { "$ne": null },
+    "tags": { "$contains": "admin" },
+    "$and": [
+      { "age": { "$gte": 18 } },
+      { "age": { "$lte": 65 } }
+    ],
+    "$or": [
+      { "role": "admin" },
+      { "role": "moderator" }
+    ]
+  }
+}
+```
+
+**Supported Operators:**
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$eq` | Equal | `{ "status": { "$eq": "active" } }` |
+| `$ne` | Not equal | `{ "status": { "$ne": "deleted" } }` |
+| `$gt` | Greater than | `{ "age": { "$gt": 18 } }` |
+| `$gte` | Greater or equal | `{ "age": { "$gte": 18 } }` |
+| `$lt` | Less than | `{ "age": { "$lt": 65 } }` |
+| `$lte` | Less or equal | `{ "age": { "$lte": 65 } }` |
+| `$in` | In array | `{ "status": { "$in": ["a", "b"] } }` |
+| `$nin` | Not in array | `{ "status": { "$nin": ["a", "b"] } }` |
+| `$like` | Pattern match | `{ "name": { "$like": "A%" } }` |
+| `$contains` | Array contains | `{ "tags": { "$contains": "admin" } }` |
+| `$exists` | Field exists | `{ "email": { "$exists": true } }` |
+| `$and` | Logical AND | `{ "$and": [...] }` |
+| `$or` | Logical OR | `{ "$or": [...] }` |
+| `$not` | Logical NOT | `{ "$not": { "status": "deleted" } }` |
+
+### Update Operators
+
+```json
+{
+  "set": { "name": "New Name" },       // Set field
+  "unset": ["temp_field"],              // Remove field
+  "inc": { "count": 1 },                // Increment number
+  "push": { "tags": "new_tag" },        // Add to array
+  "pull": { "tags": "old_tag" },        // Remove from array
+  "rename": { "old_name": "new_name" }  // Rename field
+}
+```
+
+## arch-013-query-planner
+
+Query Planner - Index-Aware Query Execution
+
+**Purpose:** Transform queries into efficient execution plans using available indexes.
+
+**Planning Process:**
+1. Parse query AST
+2. Analyze filter conditions
+3. Check available indexes
+4. Select optimal index (or full scan)
+5. Generate execution plan
+
+**Index Selection Strategy:**
+
+```
+Query: { "where": { "email": "alice@example.com" } }
+Available Indexes: ["by_email" (unique), "by_name" (regular)]
+
+Plan:
+  - Use index: "by_email" (unique)
+  - Estimated cost: O(1)
+  - Execution: Index lookup -> Single record
+```
+
+**Composite Index Usage:**
+
+```
+Query: { "where": { "status": "active", "department": "engineering" } }
+Available Indexes: ["by_status_dept" (composite: status, department)]
+
+Plan:
+  - Use index: "by_status_dept"
+  - Estimated cost: O(log n)
+  - Execution: Index range scan
+```
+
+**Full Scan Fallback:**
+
+```
+Query: { "where": { "temp_field": "value" } }
+No index on "temp_field"
+
+Plan:
+  - Full table scan
+  - Estimated cost: O(n)
+  - Execution: Stream all records, filter in memory
+```
+
+**Query Planner API:**
+
+```rust
+pub struct QueryPlan {
+    pub table: String,
+    pub index_used: Option<String>,
+    pub scan_type: ScanType,
+    pub estimated_cost: f64,
+    pub filter: Filter,
+}
+
+pub enum ScanType {
+    IndexLookup { key: Value },
+    IndexRangeScan { from: Value, to: Value },
+    FullScan,
+}
+
+impl QueryPlanner {
+    pub async fn plan(&self, query: &FindQuery) -> DbResult<QueryPlan>;
+    pub async fn execute(&self, plan: &QueryPlan) -> DbResult<Vec<Record>>;
+}
+```
+
+## arch-014-authentication
+
+Authentication System
+
+**Authentication Methods:**
+
+### 1. Password Authentication
+```json
+{
+  "auth": {
+    "method": "password",
+    "username": "admin",
+    "password": "secure_hash"
+  }
+}
+```
+
+### 2. Token Authentication
+```json
+{
+  "auth": {
+    "method": "token",
+    "token": "eyJhbGciOiJIUzI1NiIs..."
+  }
+}
+```
+
+### 3. API Key Authentication
+```json
+{
+  "auth": {
+    "method": "api_key",
+    "key": "sk_live_xxx"
+  }
+}
+```
+
+**Session Management:**
+
+```json
+// Login
+{ "login": { "username": "admin", "password": "***" } }
+// Response
+{ "token": "xxx", "expires_at": "2024-01-16T00:00:00Z" }
+
+// Logout
+{ "logout": {} }
+
+// Refresh token
+{ "refreshToken": {} }
+```
+
+**Password Storage:**
+- Algorithm: Argon2id (memory-hard)
+- Salt: 16 bytes random
+- Hash: 32 bytes
+
+**System Users:**
+| Username | Role | Description |
+|----------|------|-------------|
+| `root` | superuser | Created on first init |
+| `system` | system | Internal operations |
+| `public` | anonymous | Unauthenticated access |
+
+## arch-015-authorization
+
+Authorization (RBAC - Role-Based Access Control)
+
+**Permission Model:**
+
+```
+User -> Role -> Permission -> Resource
+```
+
+**Resource Types:**
+- `server` - Server-level operations
+- `database` - Database-level operations
+- `store` - Store-level operations
+- `table` - Table-level operations
+- `index` - Index-level operations
+
+**Permission Actions:**
+| Action | Description |
+|--------|-------------|
+| `create` | Create new resource |
+| `read` | Read/query data |
+| `update` | Modify data |
+| `delete` | Delete data |
+| `manage` | Full control (includes all above) |
+| `grant` | Grant permissions to others |
+| `revoke` | Revoke permissions |
+
+**Predefined Roles:**
+
+| Role | Permissions |
+|------|-------------|
+| `superuser` | Full access to everything |
+| `admin` | Manage databases, users, roles |
+| `db_owner` | Full access to specific database |
+| `read_write` | Read and write data |
+| `read_only` | Read data only |
+| `public` | Minimal access |
+
+**Permission Commands:**
+
+```json
+// Create role
+{
+  "createRole": {
+    "name": "analyst",
+    "permissions": [
+      { "resource": "database:analytics", "action": "read" },
+      { "resource": "table:analytics.*", "action": "read" }
+    ]
+  }
+}
+
+// Grant role to user
+{
+  "grantRole": {
+    "user": "john",
+    "role": "analyst"
+  }
+}
+
+// Revoke role from user
+{
+  "revokeRole": {
+    "user": "john",
+    "role": "analyst"
+  }
+}
+
+// Check permission
+{
+  "checkPermission": {
+    "user": "john",
+    "resource": "table:analytics.users",
+    "action": "read"
+  }
+}
+```
+
+**Permission Resolution:**
+1. Check user's direct permissions
+2. Check user's role permissions
+3. Check inherited roles
+4. Default: deny
+
+## arch-016-admin-commands
+
+Administration Commands
+
+### Server Management
+
+```json
+// Server status
+{ "serverStatus": {} }
+
+// Server configuration
+{ "serverConfig": { "get": "max_connections" } }
+{ "serverConfig": { "set": { "max_connections": 100 } } }
+
+// Shutdown server
+{ "shutdown": { "delay": 5000 } }
+```
+
+### Database Management
+
+```json
+// Create database
+{
+  "createDatabase": {
+    "name": "mydb",
+    "options": {
+      "backend": "sled",
+      "path": "./data/mydb"
+    }
+  }
+}
+
+// Drop database
+{
+  "dropDatabase": {
+    "name": "mydb",
+    "confirm": true
+  }
+}
+
+// Rename database
+{
+  "renameDatabase": {
+    "from": "old_name",
+    "to": "new_name"
+  }
+}
+
+// List databases
+{ "listDatabases": {} }
+
+// Use database (switch context)
+{ "use": "mydb" }
+```
+
+### Store Management
+
+```json
+// Create store
+{
+  "createStore": {
+    "name": "users",
+    "database": "mydb"
+  }
+}
+
+// Drop store
+{
+  "dropStore": {
+    "name": "users",
+    "database": "mydb"
+  }
+}
+
+// Rename store
+{
+  "renameStore": {
+    "database": "mydb",
+    "from": "old_name",
+    "to": "new_name"
+  }
+}
+
+// List stores
+{ "listStores": { "database": "mydb" } }
+```
+
+### Table Management
+
+```json
+// Create table
+{
+  "createTable": {
+    "name": "users",
+    "store": "default",
+    "schema": {
+      "name": { "type": "string", "required": true },
+      "email": { "type": "string", "unique": true },
+      "age": { "type": "integer", "min": 0 }
+    }
+  }
+}
+
+// Drop table
+{
+  "dropTable": {
+    "name": "users",
+    "confirm": true
+  }
+}
+
+// Rename table
+{
+  "renameTable": {
+    "from": "old_name",
+    "to": "new_name"
+  }
+}
+
+// Truncate table (delete all records)
+{
+  "truncateTable": {
+    "name": "users"
+  }
+}
+
+// List tables
+{ "listTables": {} }
+
+// Table info
+{ "tableInfo": { "name": "users" } }
+```
+
+### Index Management
+
+```json
+// Create index
+{
+  "createIndex": {
+    "table": "users",
+    "name": "by_email",
+    "fields": ["email"],
+    "unique": true
+  }
+}
+
+// Create composite index
+{
+  "createIndex": {
+    "table": "orders",
+    "name": "by_user_date",
+    "fields": ["user_id", "created_at"],
+    "unique": false
+  }
+}
+
+// Drop index
+{
+  "dropIndex": {
+    "table": "users",
+    "name": "by_email"
+  }
+}
+
+// Rebuild index
+{
+  "rebuildIndex": {
+    "table": "users",
+    "name": "by_email"
+  }
+}
+
+// List indexes
+{ "listIndexes": { "table": "users" } }
+```
+
+### User Management
+
+```json
+// Create user
+{
+  "createUser": {
+    "username": "john",
+    "password": "***",
+    "roles": ["read_write"]
+  }
+}
+
+// Drop user
+{
+  "dropUser": {
+    "username": "john"
+  }
+}
+
+// Update user password
+{
+  "updatePassword": {
+    "username": "john",
+    "oldPassword": "***",
+    "newPassword": "***"
+  }
+}
+
+// List users
+{ "listUsers": {} }
+
+// User info
+{ "userInfo": { "username": "john" } }
+```
+
+## arch-017-transaction-manager
+
+Transaction Manager (Future)
+
+**Purpose:** Atomic multi-operation transactions.
+
+**ACID Guarantees:**
+- Atomicity: All or nothing
+- Consistency: Data integrity maintained
+- Isolation: Concurrent transactions don't interfere
+- Durability: Committed transactions survive crashes
+
+**Transaction Commands:**
+
+```json
+// Begin transaction
+{ "begin": {} }
+// Response: { "transaction_id": "tx_123" }
+
+// Execute in transaction
+{ "execute": { "tx": "tx_123", "query": { ... } } }
+
+// Commit transaction
+{ "commit": { "tx": "tx_123" } }
+
+// Rollback transaction
+{ "rollback": { "tx": "tx_123" } }
+```
+
+**Isolation Levels:**
+| Level | Description |
+|-------|-------------|
+| `read_uncommitted` | Can read uncommitted changes |
+| `read_committed` | Only committed data visible |
+| `repeatable_read` | Consistent reads within transaction |
+| `serializable` | Full isolation |
+
+**Implementation Status:** NOT IMPLEMENTED
+- Storage backends have their own transaction support
+- S.H.A.M.I.R. layer will provide unified API
+- Priority: After Query Planner
+
+## arch-018-network-layer
+
+Network Layer (Future)
+
+**Supported Protocols:**
+
+### 1. TCP (Binary Protocol)
+- MessagePack-framed messages
+- Connection pooling
+- TLS support
+
+### 2. HTTP/REST
+- JSON API
+- WebSocket for real-time
+- OpenAPI documentation
+
+### 3. gRPC (Optional)
+- Protocol Buffers
+- Streaming support
+
+**Connection Command:**
+
+```
+# TCP
+shamir-cli connect --host localhost --port 7331
+
+# HTTP
+curl http://localhost:7331/api/v1/query \
+  -H "Authorization: Bearer xxx" \
+  -d '{"find": {"from": "users"}}'
+```
+
+**Implementation Status:** NOT IMPLEMENTED
+- Priority: After Query Language
+- Required for production use

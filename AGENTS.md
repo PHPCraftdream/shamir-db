@@ -23,7 +23,7 @@ Before adding new knowledge, you need to avoid repeating information; you need t
 1.  **Self-contained:** Один бинарный файл (<50MB). Никаких внешних зависимостей.
 2.  **Hybrid Storage:** Данные — это MessagePack, но ключи полей (Schema) интернируются в числа (`u64`) для скорости и сжатия.
 3.  **WASM-First:** Логика БД — это WASM модули.
-4.  **Reliability:** WAL (Write Ahead Log), Checksums, Crash safety.
+4.  **Reliability:** Checksums, Crash safety (storage backends handle durability).
 
 ### 🧹 Code Quality (ОБЯЗАТЕЛЬНО)
 1.  **cargo clippy --all-targets** - Проверить все предупреждения перед завершением работы
@@ -122,13 +122,3 @@ src/types/
 *   **Components:** `DashMap<String, u64>` и `DashMap<u64, String>`.
 *   **TEST:** Конкурентный доступ (много потоков читают/пишут одни и те же строки).
 
-#### Task 1.4: Persisted Interner (WAL)
-*   **Goal:** Сохранять новые ключи на диск, чтобы пережить рестарт.
-*   **Format:** Append-Only файл.
-    *   Запись: `[len: varint] [id: varint] [key_bytes] [crc32: u32]`.
-    *   *Примечание:* Использовать `unsigned-varint` или аналог для записи чисел, чтобы экономить место (ID 1 занимает 1 байт, а не 8).
-*   **Safety:** `fsync` (sync_data) после каждой записи нового ключа.
-*   **Recovery:** При старте читать файл, проверять CRC32. Если последняя запись битая — обрезать файл (truncate).
-*   **TEST:**
-    1.  Записать ключи, рестарт, проверить чтение.
-    2.  Simulate Corruption: записать, обрезать файл на 1 байт с конца, рестарт -> база должна восстановиться (отбросив битую запись) и работать дальше.

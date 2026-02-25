@@ -961,8 +961,14 @@ async fn test_create_unique_index_with_unique_data() {
     let id1 = RecordId::new();
     let id2 = RecordId::new();
 
-    data_store.set(id1.to_bytes(), value1.to_bytes()).await.unwrap();
-    data_store.set(id2.to_bytes(), value2.to_bytes()).await.unwrap();
+    data_store
+        .set(id1.to_bytes(), value1.to_bytes())
+        .await
+        .unwrap();
+    data_store
+        .set(id2.to_bytes(), value2.to_bytes())
+        .await
+        .unwrap();
 
     // Create unique index - should succeed
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
@@ -981,9 +987,18 @@ async fn test_create_unique_index_with_duplicate_data_fails() {
     let id2 = RecordId::new();
     let id3 = RecordId::new();
 
-    data_store.set(id1.to_bytes(), value.to_bytes()).await.unwrap();
-    data_store.set(id2.to_bytes(), value.to_bytes()).await.unwrap();
-    data_store.set(id3.to_bytes(), value.to_bytes()).await.unwrap();
+    data_store
+        .set(id1.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
+    data_store
+        .set(id2.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
+    data_store
+        .set(id3.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
 
     // Create unique index - should fail
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
@@ -998,7 +1013,11 @@ async fn test_create_unique_index_with_duplicate_data_fails() {
             assert_eq!(*count, 3, "Expected 3 duplicate records");
             // The sample contains the Str value formatted as "Same"
             // Since Str uses InternerKey, the actual format may show the key number
-            assert!(!sample.is_empty(), "Sample should not be empty, got: {}", sample);
+            assert!(
+                !sample.is_empty(),
+                "Sample should not be empty, got: {}",
+                sample
+            );
         }
         _ => panic!("Expected UniqueIndexCreationFailed, got: {:?}", err),
     }
@@ -1014,7 +1033,10 @@ async fn test_validate_unique_for_create_ok() {
     // Add one record
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Validate different value - should pass
     let new_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
@@ -1032,12 +1054,18 @@ async fn test_validate_unique_for_create_fails() {
     // Add one record
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Validate same value - should fail
     let result = manager.validate_unique_for_create(&value).await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), crate::db::DbError::DuplicateKey(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        crate::db::DbError::DuplicateKey(_)
+    ));
 }
 
 #[tokio::test]
@@ -1049,7 +1077,10 @@ async fn test_validate_unique_for_update_same_value_ok() {
 
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Update to same value - should pass (same record)
     let result = manager
@@ -1067,7 +1098,10 @@ async fn test_validate_unique_for_update_different_value_ok() {
 
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Update to different value - should pass
     let new_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
@@ -1089,15 +1123,24 @@ async fn test_validate_unique_for_update_duplicate_fails() {
     let value2 = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
     let id1 = RecordId::new();
     let id2 = RecordId::new();
-    manager.on_record_created_unique(&id1, &value1).await.unwrap();
-    manager.on_record_created_unique(&id2, &value2).await.unwrap();
+    manager
+        .on_record_created_unique(&id1, &value1)
+        .await
+        .unwrap();
+    manager
+        .on_record_created_unique(&id2, &value2)
+        .await
+        .unwrap();
 
     // Try to update id2 to "Alice" - should fail
     let result = manager
         .validate_unique_for_update(&id2, &value2, &value1)
         .await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), crate::db::DbError::DuplicateKey(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        crate::db::DbError::DuplicateKey(_)
+    ));
 }
 
 #[tokio::test]
@@ -1109,7 +1152,10 @@ async fn test_lookup_by_unique_index() {
 
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Lookup
     let result = manager
@@ -1155,7 +1201,10 @@ async fn test_unique_index_on_record_deleted() {
 
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Should find
     let result = manager
@@ -1188,7 +1237,10 @@ async fn test_unique_index_on_record_updated() {
     let old_value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let new_value = create_test_value(&[(1, InnerValue::Str("Bob".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &old_value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &old_value)
+        .await
+        .unwrap();
 
     // Update
     manager
@@ -1227,7 +1279,10 @@ async fn test_unique_index_persistence() {
 
     let value = create_test_value(&[(1, InnerValue::Str("Alice".to_string()))]);
     let record_id = RecordId::new();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Reload manager
     let manager2 = IndexManager::new(data_store, info_store).await.unwrap();
@@ -1260,7 +1315,10 @@ async fn test_unique_index_missing_field() {
     assert!(result.is_ok());
 
     // Should not add to index
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Should not find
     let result = manager
@@ -1290,7 +1348,10 @@ async fn test_regular_and_unique_indexes_coexist() {
     ]);
     let record_id = RecordId::new();
     manager.on_record_created(&record_id, &value).await.unwrap();
-    manager.on_record_created_unique(&record_id, &value).await.unwrap();
+    manager
+        .on_record_created_unique(&record_id, &value)
+        .await
+        .unwrap();
 
     // Lookup regular
     let regular_result = manager
@@ -1454,10 +1515,7 @@ async fn test_create_index_with_list_value() {
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
     manager.create_index(index_def).await.unwrap();
 
-    let result = manager
-        .lookup_by_index(1001, &[list])
-        .await
-        .unwrap();
+    let result = manager.lookup_by_index(1001, &[list]).await.unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
 }
@@ -1480,10 +1538,7 @@ async fn test_create_index_with_map_value() {
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
     manager.create_index(index_def).await.unwrap();
 
-    let result = manager
-        .lookup_by_index(1001, &[map])
-        .await
-        .unwrap();
+    let result = manager.lookup_by_index(1001, &[map]).await.unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
 }
@@ -1540,7 +1595,10 @@ async fn test_composite_index_update_one_field() {
     ]);
     let record_id = RecordId::new();
 
-    manager.on_record_created(&record_id, &old_value).await.unwrap();
+    manager
+        .on_record_created(&record_id, &old_value)
+        .await
+        .unwrap();
 
     // Verify initial index entry
     let result = manager
@@ -1600,7 +1658,10 @@ async fn test_composite_index_update_both_fields() {
     ]);
     let record_id = RecordId::new();
 
-    manager.on_record_created(&record_id, &old_value).await.unwrap();
+    manager
+        .on_record_created(&record_id, &old_value)
+        .await
+        .unwrap();
     manager
         .on_record_updated(&record_id, &old_value, &new_value)
         .await
@@ -1815,8 +1876,14 @@ async fn test_composite_unique_index_creation_fails_with_duplicates() {
     ]);
     let id1 = RecordId::new();
     let id2 = RecordId::new();
-    data_store.set(id1.to_bytes(), value.to_bytes()).await.unwrap();
-    data_store.set(id2.to_bytes(), value.to_bytes()).await.unwrap();
+    data_store
+        .set(id1.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
+    data_store
+        .set(id2.to_bytes(), value.to_bytes())
+        .await
+        .unwrap();
 
     // Create unique composite index - should fail
     let index_def = IndexDefinition::new(
@@ -1927,17 +1994,11 @@ async fn test_deeply_nested_path_index() {
         .unwrap();
 
     // Create index on path [10, 20, 30, 40, 50]
-    let index_def = IndexDefinition::new(
-        1001,
-        vec![IndexInfoItem::new(vec![10, 20, 30, 40, 50])],
-    );
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![10, 20, 30, 40, 50])]);
     manager.create_index(index_def).await.unwrap();
 
     // Lookup by deep value
-    let result = manager
-        .lookup_by_index(1001, &[deep_value])
-        .await
-        .unwrap();
+    let result = manager.lookup_by_index(1001, &[deep_value]).await.unwrap();
     assert_eq!(result.len(), 1);
     assert!(result.contains(&record_id));
 }
@@ -1954,10 +2015,7 @@ async fn test_deeply_nested_unique_index() {
     let level1 = create_test_value(&[(10, level2)]);
 
     // Create unique index on deep path
-    let index_def = IndexDefinition::new(
-        1001,
-        vec![IndexInfoItem::new(vec![10, 20, 30, 40, 50])],
-    );
+    let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![10, 20, 30, 40, 50])]);
     manager.create_unique_index(index_def).await.unwrap();
 
     let record_id = RecordId::new();

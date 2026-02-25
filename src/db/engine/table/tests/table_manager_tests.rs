@@ -14,8 +14,8 @@ async fn test_table_manager_creation() {
     let data_store = repo.store_get("__data__test".to_string()).await.unwrap();
     let info_store = repo.store_get("__info__test".to_string()).await.unwrap();
 
-    let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
-    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
+    let data_store: Arc<dyn crate::db::storage::types::Store> = data_store;
+    let info_store: Arc<dyn crate::db::storage::types::Store> = info_store;
 
     use crate::db::engine::index::index_manager::IndexManager;
     use crate::db::engine::table::interner_manager::InternerManager;

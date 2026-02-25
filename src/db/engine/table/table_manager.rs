@@ -77,7 +77,9 @@ impl TableManager {
 
         // 3. Update indexes AFTER write
         self.index_manager.on_record_created(&id, value).await?;
-        self.index_manager.on_record_created_unique(&id, value).await?;
+        self.index_manager
+            .on_record_created_unique(&id, value)
+            .await?;
 
         Ok(id)
     }
@@ -91,7 +93,9 @@ impl TableManager {
             self.counter.increment(-1).await?;
             if let Some(ref old) = old_value {
                 self.index_manager.on_record_deleted(&id, old).await?;
-                self.index_manager.on_record_deleted_unique(&id, old).await?;
+                self.index_manager
+                    .on_record_deleted_unique(&id, old)
+                    .await?;
             }
         }
         Ok(removed)
@@ -120,7 +124,9 @@ impl TableManager {
         if created {
             self.counter.increment(1).await?;
             self.index_manager.on_record_created(&id, value).await?;
-            self.index_manager.on_record_created_unique(&id, value).await?;
+            self.index_manager
+                .on_record_created_unique(&id, value)
+                .await?;
         } else if let Some(old) = old_value {
             self.index_manager
                 .on_record_updated(&id, &old, value)

@@ -103,13 +103,13 @@ fn test_concurrent_interning() {
     // Each thread should get consistent results - same keys get same IDs
     // across all threads (though not necessarily in insertion order)
     let first_result = &results[0];
-    for i in 1..results.len() {
+    for result in results.iter().skip(1) {
         let id_map_1: std::collections::HashMap<&str, u64> = first_result
             .iter()
             .zip(keys.iter())
             .map(|(result, key)| (*key, result.key().id()))
             .collect();
-        let id_map_2: std::collections::HashMap<&str, u64> = results[i]
+        let id_map_2: std::collections::HashMap<&str, u64> = result
             .iter()
             .zip(keys.iter())
             .map(|(result, key)| (*key, result.key().id()))

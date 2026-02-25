@@ -74,7 +74,7 @@ fn test_simple_index_from_bytes_roundtrip() {
     let original = IndexRecordKey::new(true, index_id).with_values(&[&value]);
 
     let bytes = original.to_bytes();
-    let restored = IndexRecordKey::from_bytes(Bytes::from(bytes)).unwrap();
+    let restored = IndexRecordKey::from_bytes(bytes).unwrap();
 
     assert_eq!(restored.is_unique, original.is_unique);
     assert_eq!(restored.name_interned, original.name_interned);
@@ -90,7 +90,7 @@ fn test_composite_index_from_bytes_roundtrip() {
     let original = IndexRecordKey::new(false, index_id).with_values(&[&value1, &value2]);
 
     let bytes = original.to_bytes();
-    let restored = IndexRecordKey::from_bytes(Bytes::from(bytes)).unwrap();
+    let restored = IndexRecordKey::from_bytes(bytes).unwrap();
 
     assert_eq!(restored.is_unique, original.is_unique);
     assert_eq!(restored.name_interned, original.name_interned);
