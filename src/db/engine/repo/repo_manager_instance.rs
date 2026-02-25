@@ -1,7 +1,7 @@
 use super::super::index::index_manager::IndexManager;
 use super::super::table::interner_manager::InternerManager;
 use super::super::table::record_counter::RecordCounter;
-use super::super::table::{Table, TableConfig, TableContext};
+use super::super::table::{Table, TableConfig, TableManager};
 use super::repo_types::BoxRepo;
 use crate::db::storage::types::Repo;
 use crate::db::{DbError, DbResult};
@@ -13,7 +13,7 @@ use tokio::sync::OnceCell;
 pub struct RepoManagerInstance {
     repo: BoxRepo,
     configs: Arc<TMap<String, TableConfig>>,
-    tables: Arc<TDashMap<String, OnceCell<TableContext>>>,
+    tables: Arc<TDashMap<String, OnceCell<TableManager>>>,
 }
 
 impl Clone for RepoManagerInstance {
@@ -33,7 +33,7 @@ impl RepoManagerInstance {
             .map(|cfg| (cfg.name.clone(), cfg))
             .collect();
 
-        let tables: TDashMap<String, OnceCell<TableContext>> = new_dash_map_wc(100);
+        let tables: TDashMap<String, OnceCell<TableManager>> = new_dash_map_wc(100);
 
         Self {
             repo,
@@ -42,7 +42,7 @@ impl RepoManagerInstance {
         }
     }
 
-    pub async fn get_table(&self, table_name: &str) -> DbResult<TableContext> {
+    pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         if !self.configs.contains_key(table_name) {
             return Err(DbError::NotFound(format!(
                 "Table '{}' is not configured in this repository",
@@ -60,7 +60,7 @@ impl RepoManagerInstance {
             .cloned()
     }
 
-    async fn create_table_context(&self, table_name: &str) -> DbResult<TableContext> {
+    async fn create_table_context(&self, table_name: &str) -> DbResult<TableManager> {
         let data_store = self
             .repo
             .store_get(format!("__data__{}", table_name))
@@ -81,7 +81,7 @@ impl RepoManagerInstance {
 
         let table = Table::new(Arc::clone(&data_store));
 
-        Ok(TableContext::new(
+        Ok(TableManager::new(
             table_name.to_string(),
             table,
             interner_manager,

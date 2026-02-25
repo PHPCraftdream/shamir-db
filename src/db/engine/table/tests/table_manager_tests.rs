@@ -2,14 +2,14 @@ use crate::db::engine::dispatcher::dispatcher::Dispatcher;
 use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
-use crate::db::engine::table::TableContext;
+use crate::db::engine::table::TableManager;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::storage::types::Repo;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn test_table_context_creation() {
+async fn test_table_manager_creation() {
     let repo = Arc::new(InMemoryRepo::new());
     let data_store = repo.store_get("__data__test".to_string()).await.unwrap();
     let info_store = repo.store_get("__info__test".to_string()).await.unwrap();
@@ -30,12 +30,12 @@ async fn test_table_context_creation() {
     use crate::db::engine::table::Table;
     let table = Table::new(Arc::clone(&data_store));
 
-    let ctx = TableContext::new("test".to_string(), table, interner, counter, index_manager);
+    let ctx = TableManager::new("test".to_string(), table, interner, counter, index_manager);
     assert_eq!(ctx.name(), "test");
 }
 
 #[tokio::test]
-async fn test_table_context_clone() {
+async fn test_table_manager_clone() {
     let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
@@ -53,7 +53,7 @@ async fn test_table_context_clone() {
 }
 
 #[tokio::test]
-async fn test_table_context_components() {
+async fn test_table_manager_components() {
     let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
