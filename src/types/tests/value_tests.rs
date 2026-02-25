@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_all_value_types_serialization() {
         let test_cases = vec![
-            UserValue::Nil,
+            UserValue::Null,
             UserValue::Bool(true),
             UserValue::Bool(false),
             UserValue::Int(42),
@@ -153,7 +153,7 @@ mod tests {
                 UserValue::Str("item1".to_string()),
                 UserValue::Int(100),
             ]),
-            UserValue::List(vec![UserValue::Bool(true), UserValue::Nil]),
+            UserValue::List(vec![UserValue::Bool(true), UserValue::Null]),
         ]);
 
         let bytes = value.to_bytes();
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn test_equality_for_all_types() {
-        assert_eq!(UserValue::Nil, UserValue::Nil);
+        assert_eq!(UserValue::Null, UserValue::Null);
 
         assert_eq!(UserValue::Bool(true), UserValue::Bool(true));
         assert_ne!(UserValue::Bool(true), UserValue::Bool(false));
@@ -189,6 +189,26 @@ mod tests {
         // Different types are not equal
         assert_ne!(UserValue::Int(42), UserValue::Str("42".to_string()));
         assert_ne!(UserValue::Bool(true), UserValue::Int(1));
+    }
+
+    #[test]
+    fn test_null_serialization_roundtrip() {
+        let value = UserValue::Null;
+        let bytes = value.to_bytes();
+        let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+        assert_eq!(value, reconstructed);
+    }
+
+    #[test]
+    fn test_null_in_list_roundtrip() {
+        let value = UserValue::List(vec![
+            UserValue::Int(1),
+            UserValue::Null,
+            UserValue::Str("test".to_string()),
+        ]);
+        let bytes = value.to_bytes();
+        let reconstructed = UserValue::from_bytes(&bytes).unwrap();
+        assert_eq!(value, reconstructed);
     }
 
     #[test]

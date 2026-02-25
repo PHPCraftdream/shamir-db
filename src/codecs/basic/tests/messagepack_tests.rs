@@ -36,7 +36,7 @@ fn test_messagepack_roundtrip() {
     map.insert("key1".to_string(), UserValue::Int(123));
     map.insert("key2".to_string(), UserValue::Str("value".to_string()));
     let values = vec![
-        UserValue::Nil,
+        UserValue::Null,
         UserValue::Bool(true),
         UserValue::Int(42),
         UserValue::F64(123.456),

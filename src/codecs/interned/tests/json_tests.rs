@@ -179,3 +179,38 @@ fn test_special_numbers() {
         _ => panic!("Expected Map"),
     }
 }
+
+#[test]
+fn test_null_roundtrip() {
+    let interner = Interner::new();
+
+    let inner = InnerValue::Null;
+    let json = inner_to_json(&interner, &inner).unwrap();
+    let json_str = String::from_utf8(json).unwrap();
+    assert_eq!(json_str, "null");
+
+    let decoded = json_to_inner(&interner, json_str.as_bytes()).unwrap();
+    assert_eq!(decoded, InnerValue::Null);
+}
+
+#[test]
+fn test_null_in_map_roundtrip() {
+    let interner = Interner::new();
+
+    let json = r#"{"field": null}"#;
+
+    let inner = json_to_inner(&interner, json.as_bytes()).unwrap();
+    let result_json = inner_to_json(&interner, &inner).unwrap();
+
+    let original_val: serde_json::Value = serde_json::from_str(json).unwrap();
+    let result_val: serde_json::Value = serde_json::from_slice(&result_json).unwrap();
+    assert_eq!(original_val, result_val);
+
+    match inner {
+        InnerValue::Map(m) => {
+            let key = interner.touch_ind("field").unwrap().key().clone();
+            assert_eq!(m.get(&key), Some(&InnerValue::Null));
+        }
+        _ => panic!("Expected Map"),
+    }
+}

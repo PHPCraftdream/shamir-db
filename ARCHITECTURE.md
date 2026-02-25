@@ -103,7 +103,7 @@ Value Type System
 - InnerValue<Value<InternedKey>>: Production format with interning
 
 **Supported Types:**
-- Nil: null value
+- Null: null value
 - Bool: boolean
 - Int: i64 integer
 - F64: float64

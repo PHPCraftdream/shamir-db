@@ -896,7 +896,7 @@ impl IndexManager {
             // Получаем пример дублирующегося значения для сообщения об ошибке
             let sample_key = duplicates[0].0;
             let sample_values: Vec<InnerValue> =
-                bincode::deserialize(sample_key).unwrap_or_else(|_| vec![InnerValue::Nil]);
+                bincode::deserialize(sample_key).unwrap_or_else(|_| vec![InnerValue::Null]);
 
             // Форматируем пример значения
             let sample_str = Self::format_values_for_error(&sample_values);
@@ -934,7 +934,7 @@ impl IndexManager {
         let formatted: Vec<String> = values
             .iter()
             .map(|v| match v {
-                InnerValue::Nil => "null".to_string(),
+                InnerValue::Null => "null".to_string(),
                 InnerValue::Bool(b) => b.to_string(),
                 InnerValue::Int(n) => n.to_string(),
                 InnerValue::F64(n) => n.to_string(),

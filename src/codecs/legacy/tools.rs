@@ -55,7 +55,7 @@ fn user_to_inner_rec(
     new_keys: &mut Option<Vec<(InternerKey, UserKey)>>,
 ) -> InnerValue {
     match value {
-        Value::Nil => Value::Nil,
+        Value::Null => Value::Null,
         Value::Bool(b) => Value::Bool(*b),
         Value::Int(i) => Value::Int(*i),
         Value::F64(f) => Value::F64(*f),
@@ -116,7 +116,7 @@ pub fn user_to_inner(value: &UserValue, interner: &Interner) -> TransformResult 
 #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
 pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
     match value {
-        Value::Nil => Value::Nil,
+        Value::Null => Value::Null,
         Value::Bool(b) => Value::Bool(*b),
         Value::Int(i) => Value::Int(*i),
         Value::F64(f) => Value::F64(*f),
