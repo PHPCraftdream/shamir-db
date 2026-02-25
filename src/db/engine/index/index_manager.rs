@@ -886,7 +886,8 @@ impl IndexManager {
         }
 
         // Проверяем наличие дубликатов
-        let duplicates: Vec<(&Vec<u8>, &usize)> = value_counts.iter().filter(|(_, &c)| c > 1).collect();
+        let duplicates: Vec<(&Vec<u8>, &usize)> =
+            value_counts.iter().filter(|(_, &c)| c > 1).collect();
 
         if !duplicates.is_empty() {
             // Считаем общее количество записей с дублирующимися значениями
@@ -894,8 +895,8 @@ impl IndexManager {
 
             // Получаем пример дублирующегося значения для сообщения об ошибке
             let sample_key = duplicates[0].0;
-            let sample_values: Vec<InnerValue> = bincode::deserialize(sample_key)
-                .unwrap_or_else(|_| vec![InnerValue::Nil]);
+            let sample_values: Vec<InnerValue> =
+                bincode::deserialize(sample_key).unwrap_or_else(|_| vec![InnerValue::Nil]);
 
             // Форматируем пример значения
             let sample_str = Self::format_values_for_error(&sample_values);
@@ -910,7 +911,8 @@ impl IndexManager {
         // Дубликатов нет — добавляем записи в индекс
         let mut count = 0usize;
         for (record_id, _values_key, values) in entries {
-            self.add_unique_entry(name_interned, &values, &record_id).await?;
+            self.add_unique_entry(name_interned, &values, &record_id)
+                .await?;
             count += 1;
         }
 
@@ -919,31 +921,38 @@ impl IndexManager {
         self.has_indexes_unique.store(true, Ordering::Release);
         self.save_index_info_unique().await?;
 
-        log::info!("Created unique index '{}' with {} entries", name_interned, count);
+        log::info!(
+            "Created unique index '{}' with {} entries",
+            name_interned,
+            count
+        );
         Ok(())
     }
 
     /// Форматирует значения для сообщения об ошибке.
     fn format_values_for_error(values: &[InnerValue]) -> String {
-        let formatted: Vec<String> = values.iter().map(|v| match v {
-            InnerValue::Nil => "null".to_string(),
-            InnerValue::Bool(b) => b.to_string(),
-            InnerValue::Int(n) => n.to_string(),
-            InnerValue::F64(n) => n.to_string(),
-            InnerValue::Dec(d) => d.to_string(),
-            InnerValue::Big(b) => b.to_string(),
-            InnerValue::Str(s) => format!("\"{}\"", s),
-            InnerValue::Bin(_) => "<binary>".to_string(),
-            InnerValue::List(arr) => {
-                if arr.len() <= 5 {
-                    format!("[{}]", arr.len())
-                } else {
-                    format!("[{}...]", arr.len())
+        let formatted: Vec<String> = values
+            .iter()
+            .map(|v| match v {
+                InnerValue::Nil => "null".to_string(),
+                InnerValue::Bool(b) => b.to_string(),
+                InnerValue::Int(n) => n.to_string(),
+                InnerValue::F64(n) => n.to_string(),
+                InnerValue::Dec(d) => d.to_string(),
+                InnerValue::Big(b) => b.to_string(),
+                InnerValue::Str(s) => format!("\"{}\"", s),
+                InnerValue::Bin(_) => "<binary>".to_string(),
+                InnerValue::List(arr) => {
+                    if arr.len() <= 5 {
+                        format!("[{}]", arr.len())
+                    } else {
+                        format!("[{}...]", arr.len())
+                    }
                 }
-            }
-            InnerValue::Set(s) => format!("{{{} items}}", s.len()),
-            InnerValue::Map(map) => format!("{{{} fields}}", map.len()),
-        }).collect();
+                InnerValue::Set(s) => format!("{{{} items}}", s.len()),
+                InnerValue::Map(map) => format!("{{{} fields}}", map.len()),
+            })
+            .collect();
         formatted.join(", ")
     }
 

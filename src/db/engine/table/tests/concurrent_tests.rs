@@ -25,12 +25,11 @@ async fn create_test_table() -> (
     let repo = Arc::new(SledRepo::new(path).unwrap());
     let table_name = "users";
 
-    let data_store = Arc::from(repo.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo.store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store = repo.store_get(table_name.to_string()).await.unwrap();
+    let info_store: Arc<dyn crate::db::storage::types::Store> = repo
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table = Table::new(data_store);
     let interner = InternerManager::new(info_store.clone());
     let counter = Arc::new(RecordCounter::new(info_store));

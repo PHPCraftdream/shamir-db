@@ -28,8 +28,8 @@ async fn create_test_table() -> DbResult<(
     let data_store = repo.store_get("__data__users".to_string()).await?;
     let info_store = repo.store_get("__info__users".to_string()).await?;
 
-    let data_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(data_store);
-    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(info_store);
+    let data_store: Arc<dyn crate::db::storage::types::Store> = data_store;
+    let info_store: Arc<dyn crate::db::storage::types::Store> = info_store;
 
     let table = Table::new(Arc::clone(&data_store));
     let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));

@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod query;
 pub mod storage;
 
 // Re-export error for convenience and backwards compatibility

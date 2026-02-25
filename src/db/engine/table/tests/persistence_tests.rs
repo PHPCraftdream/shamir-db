@@ -48,13 +48,11 @@ async fn test_interner_persistence_after_restart() {
 
     // === First session: write data ===
     let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let data_store1 = Arc::from(repo1.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store1: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo1
-            .store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store1 = repo1.store_get(table_name.to_string()).await.unwrap();
+    let info_store1: Arc<dyn crate::db::storage::types::Store> = repo1
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table1 = Table::new(data_store1);
     let interner1 = create_interner_manager(info_store1.clone());
     let counter1 = create_record_counter(info_store1);
@@ -105,13 +103,11 @@ async fn test_interner_persistence_after_restart() {
 
     // === Second session: reopen and verify ===
     let repo2 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let data_store2 = Arc::from(repo2.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store2: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo2
-            .store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store2 = repo2.store_get(table_name.to_string()).await.unwrap();
+    let info_store2: Arc<dyn crate::db::storage::types::Store> = repo2
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table2 = Table::new(data_store2);
     let interner2 = create_interner_manager(info_store2.clone());
     let counter2 = create_record_counter(info_store2);
@@ -188,13 +184,11 @@ async fn test_counter_persistence_after_restart() {
 
     // === First session: insert records ===
     let repo1 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let data_store1 = Arc::from(repo1.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store1: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo1
-            .store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store1 = repo1.store_get(table_name.to_string()).await.unwrap();
+    let info_store1: Arc<dyn crate::db::storage::types::Store> = repo1
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table1 = Table::new(data_store1);
     let interner1 = create_interner_manager(info_store1.clone());
     let counter1 = create_record_counter(info_store1);
@@ -220,13 +214,11 @@ async fn test_counter_persistence_after_restart() {
 
     // === Second session: reopen and verify ===
     let repo2 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let data_store2 = Arc::from(repo2.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store2: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo2
-            .store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store2 = repo2.store_get(table_name.to_string()).await.unwrap();
+    let info_store2: Arc<dyn crate::db::storage::types::Store> = repo2
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table2 = Table::new(data_store2);
     let interner2 = create_interner_manager(info_store2.clone());
     let counter2 = create_record_counter(info_store2);
@@ -259,13 +251,11 @@ async fn test_counter_persistence_after_restart() {
 
     // === Third session: verify final state ===
     let repo3 = Arc::new(SledRepo::new(path.clone()).unwrap());
-    let data_store3 = Arc::from(repo3.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store3: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo3
-            .store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store3 = repo3.store_get(table_name.to_string()).await.unwrap();
+    let info_store3: Arc<dyn crate::db::storage::types::Store> = repo3
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table3 = Table::new(data_store3);
     let counter3 = create_record_counter(info_store3);
 
@@ -291,12 +281,11 @@ async fn test_counter_matches_actual_record_count() {
     let table_name = "accuracy_test";
 
     let repo = Arc::new(SledRepo::new(path).unwrap());
-    let data_store = Arc::from(repo.store_get(format!("{}", table_name)).await.unwrap());
-    let info_store: Arc<dyn crate::db::storage::types::Store> = Arc::from(
-        repo.store_get(format!("__info__{}", table_name))
-            .await
-            .unwrap(),
-    );
+    let data_store = repo.store_get(table_name.to_string()).await.unwrap();
+    let info_store: Arc<dyn crate::db::storage::types::Store> = repo
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
     let table = Table::new(data_store);
     let interner = create_interner_manager(info_store.clone());
     let counter = create_record_counter(info_store);
