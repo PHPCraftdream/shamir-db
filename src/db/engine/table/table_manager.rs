@@ -7,7 +7,7 @@ use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
 use std::sync::Arc;
 
-pub struct TableContext {
+pub struct TableManager {
     name: String,
     table: Arc<Table>,
     interner: InternerManager,
@@ -15,7 +15,7 @@ pub struct TableContext {
     index_manager: IndexManager,
 }
 
-impl Clone for TableContext {
+impl Clone for TableManager {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
@@ -27,7 +27,7 @@ impl Clone for TableContext {
     }
 }
 
-impl TableContext {
+impl TableManager {
     pub fn new(
         name: String,
         table: Table,

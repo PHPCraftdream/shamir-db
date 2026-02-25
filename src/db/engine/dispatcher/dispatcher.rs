@@ -1,4 +1,4 @@
-use super::super::table::TableContext;
+use super::super::table::TableManager;
 use crate::db::engine::repo::{RepoConfig, RepoManagerInstance};
 use crate::db::{DbError, DbResult};
 use crate::types::common::TMap;
@@ -40,7 +40,7 @@ impl Dispatcher {
     }
 
     /// Get a table from a specific repository
-    pub async fn get_table(&self, repo_name: &str, table_name: &str) -> DbResult<TableContext> {
+    pub async fn get_table(&self, repo_name: &str, table_name: &str) -> DbResult<TableManager> {
         let repo_manager = self
             .repos
             .get(repo_name)
