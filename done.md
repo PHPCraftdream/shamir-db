@@ -59,3 +59,62 @@
 - **`codecs`**: Модуль для форматов данных.
     - `json.rs`, `message_pack.rs`: Заготовки для кодеков, которые могут преобразовывать внутренний `Value` в JSON, MessagePack и обратно.
 - **`api`**: Заготовка для внешнего API (например, HTTP или P2P).
+
+## 5. Query Parser (Парсер запросов)
+
+### Задача 1: Создание инфраструктуры для JSON-based тестов запросов
+
+**Выполнено:**
+
+1. **Рефакторинг архитектуры парсеров:**
+   - Создан модуль `src/db/query/common/` с общими парсерами
+   - `common/mod.rs` — экспорты общих функций
+   - `common/parser.rs` — реализация общих парсеров:
+     - `filter_from_value()` — парсер WHERE-условий
+     - `order_by_from_value()` — парсер сортировки
+     - `limit_offset_from_value()` — парсер LIMIT/OFFSET
+     - `group_by_from_value()` — парсер GROUP BY
+     - `expr_from_value()` — парсер выражений
+     - `QueryParseError` — ошибки парсинга
+
+2. **SELECT-specific парсер:**
+   - Переписан `read/query_parser.rs` → `read/parser.rs`
+   - Использует общие парсеры из `common::parser`
+   - Остаточно SELECT-specific функции:
+     - `query_from_value()` — полный SELECT запрос
+     - `select_from_value()` — парсер SELECT-выражений
+     - `item_from_value()` — парсер элементов выборки (field, aggregate, expr, etc.)
+
+3. **Поддержка вложенных WHERE-условий:**
+   - Рекурсивная обработка `and`/`or` операторов
+   - Поддержка произвольной глубины вложенности
+   - Пример:
+   ```json
+   {
+     "where": {
+       "op": "and",
+       "filters": [
+         {
+           "op": "or",
+           "filters": [...]
+         },
+         {
+           "op": "gt",
+           "field": "age",
+           "value": 18
+         }
+       ]
+     }
+   }
+   ```
+
+4. **Тесты:**
+   - 5 новых тестов в `read/parser.rs`:
+     - `test_parse_simple_query_from_json` — базовый SELECT
+     - `test_parse_select_fields` — выборка полей
+     - `test_parse_select_with_aggregation` — агрегации
+     - `test_parse_complex_filter` — сложные WHERE
+     - `test_parse_deeply_nested_filters` — глубокая вложенность
+   - Все 326 тестов проходят
+
+**Итог:** JSON → Value<Map> → Query работает для всех типов запросов. Общие парсеры могут быть использованы в future для UPDATE, DELETE и других типов запросов.

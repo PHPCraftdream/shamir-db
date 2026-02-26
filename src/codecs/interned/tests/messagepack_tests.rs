@@ -257,10 +257,7 @@ fn test_null_roundtrip() {
 fn test_null_in_map_roundtrip() {
     let interner = Interner::new();
 
-    let test_data = rmpv::Value::Map(vec![(
-        rmpv::Value::from("field"),
-        rmpv::Value::Nil,
-    )]);
+    let test_data = rmpv::Value::Map(vec![(rmpv::Value::from("field"), rmpv::Value::Nil)]);
 
     let mut buf = Vec::new();
     rmpv::encode::write_value(&mut buf, &test_data).unwrap();
