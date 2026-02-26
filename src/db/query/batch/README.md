@@ -173,6 +173,37 @@ Batch API поддерживает операции записи: `insert`, `upd
 | `update` | `string` | ✅ | Имя таблицы |
 | `where` | `Filter` | ❌ | Условие фильтрации (все если опущено) |
 | `set` | `Value` | ✅ | Поля для обновления (частичное или полное) |
+| `select` | `UpdateSelect` | ❌ | Вернуть обновлённые записи |
+
+#### UpdateSelect — возврат обновлённых записей
+
+Опциональное поле `select` возвращает записи, которые были обновлены:
+
+```json
+{
+  "queries": {
+    "update_vips": {
+      "update": "users",
+      "where": { "op": "gte", "field": "login_count", "value": 100 },
+      "set": { "is_vip": true },
+      "select": {
+        "return_mode": "changed",
+        "fields": ["id", "name", "is_vip"]
+      }
+    }
+  }
+}
+```
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `return_mode` | `"all"` / `"changed"` / `"unchanged"` | Режим возврата (default: `"changed"`) |
+| `fields` | `string[]` | Список полей для возврата (все если опущено) |
+
+**Режимы возврата:**
+- `"all"` — Все записи, попавшие под фильтр
+- `"changed"` — Только записи с фактическими изменениями (default)
+- `"unchanged"` — Записи под фильтром, но данные не изменились
 
 ### Set — upsert по ключу
 
@@ -595,6 +626,9 @@ BatchResponse { results, execution_plan, execution_time_us }
 
 ## См. также
 
+- [Write Operations](../write/README.md) — операции записи (Insert, Update, Set, Delete)
+- [Write Examples](../examples/write.md) — примеры JSON для операций записи
+- [Filter Examples](../examples/filter.md) — примеры фильтров WHERE
 - [Query Reference](./reference.rs) — парсинг `$query` ссылок
 - [Batch Types](./types.rs) — типы данных
 - [Batch Planner](./planner.rs) — планировщик выполнения

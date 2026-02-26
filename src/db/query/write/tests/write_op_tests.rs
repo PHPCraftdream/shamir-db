@@ -237,6 +237,209 @@ fn test_update_serializes_without_optional_where() {
 }
 
 // ============================================================================
+// UPDATE SELECT TESTS
+// ============================================================================
+
+#[test]
+fn test_update_select_changed_mode() {
+    let json = json!({
+        "update": "users",
+        "where": {
+            "op": "eq",
+            "field": "status",
+            "value": "inactive"
+        },
+        "set": {
+            "status": "active"
+        },
+        "select": {
+            "return_mode": "changed"
+        }
+    });
+
+    let op = parse_update(json);
+
+    assert_eq!(op.update, "users");
+    assert!(op.select.is_some());
+    let select = op.select.unwrap();
+    assert_eq!(
+        select.return_mode,
+        crate::db::query::write::UpdateReturnMode::Changed
+    );
+    assert!(select.fields.is_none());
+}
+
+#[test]
+fn test_update_select_all_mode() {
+    let json = json!({
+        "update": "users",
+        "where": {
+            "op": "eq",
+            "field": "id",
+            "value": 1
+        },
+        "set": {
+            "name": "Updated"
+        },
+        "select": {
+            "return_mode": "all"
+        }
+    });
+
+    let op = parse_update(json);
+
+    let select = op.select.unwrap();
+    assert_eq!(
+        select.return_mode,
+        crate::db::query::write::UpdateReturnMode::All
+    );
+}
+
+#[test]
+fn test_update_select_unchanged_mode() {
+    let json = json!({
+        "update": "users",
+        "where": {
+            "op": "eq",
+            "field": "id",
+            "value": 1
+        },
+        "set": {
+            "status": "active"
+        },
+        "select": {
+            "return_mode": "unchanged"
+        }
+    });
+
+    let op = parse_update(json);
+
+    let select = op.select.unwrap();
+    assert_eq!(
+        select.return_mode,
+        crate::db::query::write::UpdateReturnMode::Unchanged
+    );
+}
+
+#[test]
+fn test_update_select_with_fields() {
+    let json = json!({
+        "update": "users",
+        "where": {
+            "op": "eq",
+            "field": "id",
+            "value": 1
+        },
+        "set": {
+            "name": "Updated",
+            "status": "active"
+        },
+        "select": {
+            "return_mode": "changed",
+            "fields": ["id", "name", "status"]
+        }
+    });
+
+    let op = parse_update(json);
+
+    let select = op.select.unwrap();
+    assert_eq!(
+        select.return_mode,
+        crate::db::query::write::UpdateReturnMode::Changed
+    );
+    assert_eq!(
+        select.fields,
+        Some(vec![
+            "id".to_string(),
+            "name".to_string(),
+            "status".to_string()
+        ])
+    );
+}
+
+#[test]
+fn test_update_select_roundtrip() {
+    let json = json!({
+        "update": "users",
+        "where": {
+            "op": "eq",
+            "field": "id",
+            "value": 1
+        },
+        "set": {
+            "name": "Updated"
+        },
+        "select": {
+            "return_mode": "changed",
+            "fields": ["id", "name"]
+        }
+    });
+
+    let op: UpdateOp = serde_json::from_value(json.clone()).unwrap();
+    let serialized = serde_json::to_value(&op).unwrap();
+
+    assert_eq!(json, serialized);
+}
+
+#[test]
+fn test_update_without_select() {
+    let json = json!({
+        "update": "users",
+        "where": {
+            "op": "eq",
+            "field": "id",
+            "value": 1
+        },
+        "set": {
+            "name": "Updated"
+        }
+    });
+
+    let op = parse_update(json);
+
+    assert!(op.select.is_none());
+}
+
+#[test]
+fn test_update_select_serializes_without_optional_fields() {
+    let json = json!({
+        "update": "users",
+        "set": {
+            "status": "active"
+        },
+        "select": {
+            "return_mode": "changed"
+        }
+    });
+
+    let op: UpdateOp = serde_json::from_value(json).unwrap();
+    let serialized = serde_json::to_string(&op).unwrap();
+
+    assert!(serialized.contains("select"));
+    assert!(serialized.contains("changed"));
+    assert!(!serialized.contains("fields"));
+}
+
+#[test]
+fn test_update_select_default_mode() {
+    let json = json!({
+        "update": "users",
+        "set": {
+            "status": "active"
+        },
+        "select": {}
+    });
+
+    let op = parse_update(json);
+
+    let select = op.select.unwrap();
+    assert_eq!(
+        select.return_mode,
+        crate::db::query::write::UpdateReturnMode::Changed
+    );
+}
+
+// ============================================================================
 // SET (UPSERT) TESTS
 // ============================================================================
 
