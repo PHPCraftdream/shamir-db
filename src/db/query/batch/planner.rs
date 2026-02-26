@@ -28,10 +28,10 @@
 //! Stage 2 runs `orders` after Stage 1 completes.
 //! Stage 3 runs `stats` after Stage 2 completes.
 
-use crate::db::query::batch::{BatchError, BatchLimits, BatchPlan, QueryEntry};
+use crate::db::query::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
 use crate::db::query::filter::Filter;
-use crate::db::query::read::Query;
 use crate::types::common::{new_map, new_set, TMap, TSet};
+use serde_json::Value;
 
 /// Batch query planner.
 ///
@@ -87,7 +87,7 @@ impl BatchPlanner {
         let mut dependencies: TMap<String, TSet<String>> = new_map();
 
         for (alias, entry) in queries {
-            let deps = Self::extract_dependencies(&entry.query);
+            let deps = Self::extract_dependencies(&entry.op);
 
             // Validate all referenced aliases exist
             for dep in &deps {
@@ -126,15 +126,62 @@ impl BatchPlanner {
         })
     }
 
-    /// Extract all query references from a query.
-    fn extract_dependencies(query: &Query) -> TSet<String> {
+    /// Extract all query references from a batch operation.
+    fn extract_dependencies(op: &BatchOp) -> TSet<String> {
         let mut deps = new_set();
 
-        if let Some(filter) = &query.r#where {
-            Self::extract_deps_from_filter(filter, &mut deps);
+        match op {
+            BatchOp::Query(query) => {
+                if let Some(filter) = &query.r#where {
+                    Self::extract_deps_from_filter(filter, &mut deps);
+                }
+            }
+            BatchOp::Update(update) => {
+                if let Some(filter) = &update.where_clause {
+                    Self::extract_deps_from_filter(filter, &mut deps);
+                }
+                Self::extract_deps_from_value(&update.set, &mut deps);
+            }
+            BatchOp::Set(set) => {
+                Self::extract_deps_from_value(&set.key, &mut deps);
+                Self::extract_deps_from_value(&set.value, &mut deps);
+            }
+            BatchOp::Delete(delete) => {
+                Self::extract_deps_from_filter(&delete.where_clause, &mut deps);
+            }
+            BatchOp::Insert(insert) => {
+                for value in &insert.values {
+                    Self::extract_deps_from_value(value, &mut deps);
+                }
+            }
         }
 
         deps
+    }
+
+    /// Extract dependencies from a JSON value.
+    fn extract_deps_from_value(value: &Value, deps: &mut TSet<String>) {
+        match value {
+            Value::Object(map) => {
+                // Check for $query reference
+                if let Some(query_ref) = map.get("$query") {
+                    if let Some(alias) = query_ref.as_str() {
+                        let base_alias = Self::extract_base_alias(alias);
+                        deps.insert(base_alias);
+                    }
+                }
+                // Recurse into nested objects
+                for v in map.values() {
+                    Self::extract_deps_from_value(v, deps);
+                }
+            }
+            Value::Array(arr) => {
+                for v in arr {
+                    Self::extract_deps_from_value(v, deps);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Extract dependencies from a filter.

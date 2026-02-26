@@ -517,3 +517,235 @@ fn test_plan_not_filter() {
     assert_eq!(plan.stages[0], vec!["active_users"]);
     assert_eq!(plan.stages[1], vec!["inactive_users"]);
 }
+
+// ============================================================================
+// WRITE OPERATIONS TESTS
+// ============================================================================
+
+#[test]
+fn test_plan_insert_operation() {
+    let json = json!({
+        "queries": {
+            "insert_user": {
+                "insert_into": "users",
+                "values": [
+                    { "name": "Alice", "email": "alice@example.com" }
+                ]
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 1);
+    assert_eq!(plan.stages[0], vec!["insert_user"]);
+    assert!(plan.dependencies["insert_user"].is_empty());
+}
+
+#[test]
+fn test_plan_update_operation() {
+    let json = json!({
+        "queries": {
+            "users": { "from": "users" },
+            "update_orders": {
+                "update": "orders",
+                "where": {
+                    "op": "eq",
+                    "field": "user_id",
+                    "value": { "$query": "users[0].id" }
+                },
+                "set": { "status": "processed" }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.stages[0], vec!["users"]);
+    assert_eq!(plan.stages[1], vec!["update_orders"]);
+    assert!(plan.dependencies["update_orders"].contains("users"));
+}
+
+#[test]
+fn test_plan_set_operation() {
+    let json = json!({
+        "queries": {
+            "users": { "from": "users" },
+            "set_user": {
+                "set": "users",
+                "key": { "id": { "$query": "users[0].id" } },
+                "value": { "status": "updated" }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.stages[0], vec!["users"]);
+    assert_eq!(plan.stages[1], vec!["set_user"]);
+    assert!(plan.dependencies["set_user"].contains("users"));
+}
+
+#[test]
+fn test_plan_delete_operation() {
+    let json = json!({
+        "queries": {
+            "inactive_users": {
+                "from": "users",
+                "where": {
+                    "op": "eq",
+                    "field": "status",
+                    "value": "inactive"
+                }
+            },
+            "delete_orders": {
+                "delete_from": "orders",
+                "where": {
+                    "op": "in",
+                    "field": "user_id",
+                    "values": [{ "$query": "inactive_users[].id" }]
+                }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.stages[0], vec!["inactive_users"]);
+    assert_eq!(plan.stages[1], vec!["delete_orders"]);
+    assert!(plan.dependencies["delete_orders"].contains("inactive_users"));
+}
+
+#[test]
+fn test_plan_set_with_value_reference() {
+    let json = json!({
+        "queries": {
+            "source": { "from": "source_table" },
+            "set_target": {
+                "set": "target_table",
+                "key": { "id": 1 },
+                "value": {
+                    "name": { "$query": "source[0].name" },
+                    "status": "copied"
+                }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert!(plan.dependencies["set_target"].contains("source"));
+}
+
+#[test]
+fn test_plan_insert_with_value_reference() {
+    let json = json!({
+        "queries": {
+            "user": {
+                "from": "users",
+                "where": { "op": "eq", "field": "id", "value": 1 }
+            },
+            "insert_order": {
+                "insert_into": "orders",
+                "values": [
+                    {
+                        "user_id": { "$query": "user[0].id" },
+                        "product": "Widget"
+                    }
+                ]
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.stages[0], vec!["user"]);
+    assert_eq!(plan.stages[1], vec!["insert_order"]);
+}
+
+#[test]
+fn test_plan_mixed_read_and_write() {
+    let json = json!({
+        "queries": {
+            "users": { "from": "users" },
+            "products": { "from": "products" },
+            "insert_order": {
+                "insert_into": "orders",
+                "values": [{ "user_id": 1, "product_id": 1 }]
+            },
+            "update_inventory": {
+                "update": "inventory",
+                "where": { "op": "eq", "field": "product_id", "value": 1 },
+                "set": { "quantity": 0 }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 1);
+    assert_eq!(plan.stages[0].len(), 4);
+}
+
+#[test]
+fn test_plan_update_without_filter() {
+    let json = json!({
+        "queries": {
+            "update_all": {
+                "update": "users",
+                "set": { "status": "active" }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 1);
+    assert!(plan.dependencies["update_all"].is_empty());
+}
+
+#[test]
+fn test_plan_write_operations_serialization() {
+    let json = json!({
+        "queries": {
+            "insert": {
+                "insert_into": "users",
+                "values": [{ "name": "Test" }]
+            },
+            "update": {
+                "update": "users",
+                "where": { "op": "eq", "field": "name", "value": "Test" },
+                "set": { "name": "Updated" }
+            },
+            "set": {
+                "set": "users",
+                "key": { "id": 1 },
+                "value": { "name": "Set" }
+            },
+            "delete": {
+                "delete_from": "users",
+                "where": { "op": "eq", "field": "id", "value": 999 }
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    assert_eq!(request.queries.len(), 4);
+
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+    assert_eq!(plan.stages.len(), 1);
+    assert_eq!(plan.stages[0].len(), 4);
+}

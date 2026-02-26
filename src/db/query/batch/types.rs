@@ -5,32 +5,124 @@
 use serde::{Deserialize, Serialize};
 
 use crate::db::query::read::{Query, QueryResult};
+use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::types::common::{TMap, TSet};
 
-/// Query entry for batch requests.
+// ============================================================================
+// BATCH OPERATION ENUM
+// ============================================================================
+
+/// Batch operation - can be a query or a write operation.
+///
+/// Uses untagged serde to automatically detect operation type by unique fields:
+/// - `from` → Query
+/// - `insert_into` → Insert
+/// - `update` → Update
+/// - `set` → Set
+/// - `delete_from` → Delete
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BatchOp {
+    /// Read query.
+    Query(Query),
+
+    /// Insert new records.
+    Insert(InsertOp),
+
+    /// Update existing records.
+    Update(UpdateOp),
+
+    /// Upsert by key.
+    Set(SetOp),
+
+    /// Delete records.
+    Delete(DeleteOp),
+}
+
+impl BatchOp {
+    /// Returns the table name for this operation.
+    pub fn table_name(&self) -> &str {
+        match self {
+            BatchOp::Query(q) => q.from.as_str(),
+            BatchOp::Insert(i) => i.insert_into.as_str(),
+            BatchOp::Update(u) => u.update.as_str(),
+            BatchOp::Set(s) => s.set.as_str(),
+            BatchOp::Delete(d) => d.delete_from.as_str(),
+        }
+    }
+
+    /// Returns true if this is a read operation.
+    pub fn is_read(&self) -> bool {
+        matches!(self, BatchOp::Query(_))
+    }
+
+    /// Returns true if this is a write operation.
+    pub fn is_write(&self) -> bool {
+        !self.is_read()
+    }
+}
+
+impl From<Query> for BatchOp {
+    fn from(q: Query) -> Self {
+        BatchOp::Query(q)
+    }
+}
+
+impl From<InsertOp> for BatchOp {
+    fn from(i: InsertOp) -> Self {
+        BatchOp::Insert(i)
+    }
+}
+
+impl From<UpdateOp> for BatchOp {
+    fn from(u: UpdateOp) -> Self {
+        BatchOp::Update(u)
+    }
+}
+
+impl From<SetOp> for BatchOp {
+    fn from(s: SetOp) -> Self {
+        BatchOp::Set(s)
+    }
+}
+
+impl From<DeleteOp> for BatchOp {
+    fn from(d: DeleteOp) -> Self {
+        BatchOp::Delete(d)
+    }
+}
+
+// ============================================================================
+// QUERY ENTRY (updated to use BatchOp)
+// ============================================================================
+
+/// Operation entry for batch requests.
 ///
 /// Used as the value in the `queries` map where the key is the alias.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```json
-/// // Full format
-/// {
-///   "query": { "from": "users" },
-///   "return_result": true
-/// }
+/// // Query
+/// { "from": "users", "where": { "op": "eq", "field": "status", "value": "active" } }
 ///
-/// // Shorthand (Query fields directly)
-/// {
-///   "from": "users",
-///   "where": { "op": "eq", "field": "status", "value": "active" }
-/// }
+/// // Insert
+/// { "insert_into": "users", "values": [{ "name": "Alice" }] }
+///
+/// // Update
+/// { "update": "users", "where": { "op": "eq", "field": "id", "value": 1 }, "set": { "name": "Bob" } }
+///
+/// // Set (upsert)
+/// { "set": "users", "key": { "id": 1 }, "value": { "name": "Charlie" } }
+///
+/// // Delete
+/// { "delete_from": "users", "where": { "op": "eq", "field": "id", "value": 1 } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryEntry {
-    /// The query to execute (flattened for shorthand syntax).
+    /// The operation to execute (flattened for shorthand syntax).
     #[serde(flatten)]
-    pub query: Query,
+    pub op: BatchOp,
 
     /// Whether to include this result in the response.
     ///
@@ -47,7 +139,7 @@ fn default_return() -> bool {
 impl From<Query> for QueryEntry {
     fn from(query: Query) -> Self {
         QueryEntry {
-            query,
+            op: BatchOp::Query(query),
             return_result: true,
         }
     }
