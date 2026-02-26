@@ -142,7 +142,9 @@ mod types;
 
 pub use planner::BatchPlanner;
 pub use reference::{QueryPath, QueryReference};
-pub use types::{BatchError, BatchLimits, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
+pub use types::{
+    BatchError, BatchLimits, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
+};
 
 #[cfg(test)]
 mod tests;

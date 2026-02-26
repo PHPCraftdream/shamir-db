@@ -113,6 +113,154 @@ Batch API предоставляет унифицированный интерф
 | `limit` | `number` | Лимит записей |
 | `offset` | `number` | Смещение |
 
+## Операции записи (Write Operations)
+
+Batch API поддерживает операции записи: `insert`, `update`, `set`, `delete`.
+
+### Insert — вставка записей
+
+```json
+{
+  "queries": {
+    "new_user": {
+      "insert_into": "users",
+      "values": [
+        { "name": "Alice", "email": "alice@example.com" },
+        { "name": "Bob", "email": "bob@example.com" }
+      ]
+    }
+  }
+}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `insert_into` | `string` | ✅ | Имя таблицы |
+| `values` | `Value[]` | ✅ | Массив записей для вставки |
+
+### Update — обновление записей
+
+Обновляет записи, соответствующие фильтру. Если фильтр не указан — обновляет все записи.
+
+```json
+{
+  "queries": {
+    "activate_users": {
+      "update": "users",
+      "where": { "op": "eq", "field": "status", "value": "pending" },
+      "set": { "status": "active", "activated_at": "2024-01-15" }
+    }
+  }
+}
+```
+
+```json
+// Обновление с использованием результата другого запроса
+{
+  "queries": {
+    "user": { "from": "users", "where": { "op": "eq", "field": "id", "value": 1 } },
+    "update_orders": {
+      "update": "orders",
+      "where": { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
+      "set": { "status": "processed" }
+    }
+  }
+}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `update` | `string` | ✅ | Имя таблицы |
+| `where` | `Filter` | ❌ | Условие фильтрации (все если опущено) |
+| `set` | `Value` | ✅ | Поля для обновления (частичное или полное) |
+
+### Set — upsert по ключу
+
+Обновляет запись если существует, создаёт если нет. Работает только с первичным ключом (`id`) или уникальными полями.
+
+```json
+{
+  "queries": {
+    "upsert_user": {
+      "set": "users",
+      "key": { "id": 1 },
+      "value": { "name": "Alice Updated", "email": "alice@new.com" }
+    }
+  }
+}
+```
+
+```json
+// Upsert по уникальному полю (email)
+{
+  "queries": {
+    "upsert_by_email": {
+      "set": "users",
+      "key": { "email": "alice@example.com" },
+      "value": { "name": "Alice", "status": "active" }
+    }
+  }
+}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `set` | `string` | ✅ | Имя таблицы |
+| `key` | `Value` | ✅ | Ключ для поиска (id или уникальное поле) |
+| `value` | `Value` | ✅ | Значения для установки |
+
+### Delete — удаление записей
+
+Удаляет записи по фильтру. **Фильтр обязателен** для безопасности.
+
+```json
+{
+  "queries": {
+    "delete_inactive": {
+      "delete_from": "users",
+      "where": { "op": "eq", "field": "status", "value": "inactive" }
+    }
+  }
+}
+```
+
+```json
+// Удаление с использованием результата запроса
+{
+  "queries": {
+    "expired": {
+      "from": "sessions",
+      "where": { "op": "lt", "field": "expires_at", "value": "2024-01-01" }
+    },
+    "cleanup": {
+      "delete_from": "sessions",
+      "where": {
+        "op": "in",
+        "field": "id",
+        "values": [{ "$query": "expired[].id" }]
+      }
+    }
+  }
+}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `delete_from` | `string` | ✅ | Имя таблицы |
+| `where` | `Filter` | ✅ | Условие фильтрации (обязательно!) |
+
+### BatchOp — автоматическое определение
+
+Serde автоматически определяет тип операции по уникальным полям:
+
+| Поле | Операция |
+|------|----------|
+| `from` | Query (чтение) |
+| `insert_into` | Insert (вставка) |
+| `update` | Update (обновление) |
+| `set` | Set (upsert) |
+| `delete_from` | Delete (удаление) |
+
 ## Ссылки на результаты ($query)
 
 ### Синтаксис
