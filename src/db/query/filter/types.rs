@@ -126,11 +126,21 @@ pub enum FilterValue {
     String(String),
     Binary(Vec<u8>),
     Array(Vec<FilterValue>),
+    /// Reference to another field in the same document
+    FieldRef {
+        #[serde(rename = "$ref")]
+        path: FieldPath,
+    },
 }
 
 impl FilterValue {
     pub fn is_null(&self) -> bool {
         matches!(self, FilterValue::Null)
+    }
+
+    /// Create a field reference
+    pub fn field_ref(path: impl Into<String>) -> Self {
+        FilterValue::FieldRef { path: path.into() }
     }
 }
 

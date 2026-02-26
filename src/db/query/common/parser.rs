@@ -240,6 +240,16 @@ pub fn filter_value_from_value(value: &QueryValue) -> Result<FilterValue, QueryP
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(FilterValue::Array(parsed))
         }
+        Value::Map(map) => {
+            // Check for field reference: { "$ref": "path.to.field" }
+            if let Some(Value::Str(path)) = map.get(&"$ref".to_string()) {
+                return Ok(FilterValue::FieldRef { path: path.clone() });
+            }
+            Err(QueryParseError::InvalidType(
+                "filter.value",
+                "primitive or $ref",
+            ))
+        }
         _ => Err(QueryParseError::InvalidType("filter.value", "primitive")),
     }
 }
