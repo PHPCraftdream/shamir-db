@@ -10,13 +10,13 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 /// Manages a single repository and its tables
-pub struct RepoManagerInstance {
+pub struct RepoInstance {
     repo: BoxRepo,
     configs: Arc<TMap<String, TableConfig>>,
     tables: Arc<TDashMap<String, OnceCell<TableManager>>>,
 }
 
-impl Clone for RepoManagerInstance {
+impl Clone for RepoInstance {
     fn clone(&self) -> Self {
         Self {
             repo: self.repo.clone(),
@@ -26,7 +26,7 @@ impl Clone for RepoManagerInstance {
     }
 }
 
-impl RepoManagerInstance {
+impl RepoInstance {
     pub fn new(repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         let configs_map: TMap<String, TableConfig> = configs
             .into_iter()
