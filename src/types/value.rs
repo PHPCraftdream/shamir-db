@@ -26,6 +26,7 @@ use std::str::FromStr;
     note = "Use InnerValue instead. UserValue is for tests only."
 )]
 pub type UserValue = Value<String>;
+pub type QueryValue = Value<String>;
 pub type InnerValue = Value<InternerKey>;
 
 #[derive(Debug, Clone)]
