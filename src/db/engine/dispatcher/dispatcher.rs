@@ -1,19 +1,19 @@
 use super::super::table::TableManager;
-use crate::db::engine::repo::{RepoConfig, RepoManagerInstance};
+use crate::db::engine::repo::{RepoConfig, RepoInstance};
 use crate::db::{DbError, DbResult};
 use crate::types::common::TMap;
 
 /// Manages multiple repositories
 pub struct Dispatcher {
-    repos: TMap<String, RepoManagerInstance>,
+    repos: TMap<String, RepoInstance>,
 }
 
 impl Clone for Dispatcher {
     fn clone(&self) -> Self {
-        let repos: TMap<String, RepoManagerInstance> = self
+        let repos: TMap<String, RepoInstance> = self
             .repos
             .iter()
-            .map(|(k, v): (&String, &RepoManagerInstance)| (k.clone(), v.clone()))
+            .map(|(k, v): (&String, &RepoInstance)| (k.clone(), v.clone()))
             .collect();
         Self { repos }
     }
@@ -21,11 +21,11 @@ impl Clone for Dispatcher {
 
 impl Dispatcher {
     pub fn new(repos: Vec<RepoConfig>) -> Self {
-        let instances: TMap<String, RepoManagerInstance> = repos
+        let instances: TMap<String, RepoInstance> = repos
             .into_iter()
             .map(|config| {
                 let name = config.name.clone();
-                let instance = RepoManagerInstance::new(config.repo, config.tables);
+                let instance = RepoInstance::new(config.repo, config.tables);
                 (name, instance)
             })
             .collect();
@@ -35,7 +35,7 @@ impl Dispatcher {
 
     /// Add a new repository
     pub fn add_repo(&mut self, config: RepoConfig) {
-        let instance = RepoManagerInstance::new(config.repo, config.tables);
+        let instance = RepoInstance::new(config.repo, config.tables);
         self.repos.insert(config.name, instance);
     }
 
@@ -50,7 +50,7 @@ impl Dispatcher {
     }
 
     /// Get a repository manager instance
-    pub fn get_repo(&self, repo_name: &str) -> DbResult<&RepoManagerInstance> {
+    pub fn get_repo(&self, repo_name: &str) -> DbResult<&RepoInstance> {
         self.repos
             .get(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))
@@ -80,7 +80,7 @@ impl Dispatcher {
     pub fn has_table(&self, repo_name: &str, table_name: &str) -> bool {
         self.repos
             .get(repo_name)
-            .map(|repo: &RepoManagerInstance| repo.has_table(table_name))
+            .map(|repo: &RepoInstance| repo.has_table(table_name))
             .unwrap_or(false)
     }
 
@@ -93,7 +93,7 @@ impl Dispatcher {
     pub fn table_count(&self) -> usize {
         self.repos
             .values()
-            .map(|repo: &RepoManagerInstance| repo.table_count())
+            .map(|repo: &RepoInstance| repo.table_count())
             .sum()
     }
 }
