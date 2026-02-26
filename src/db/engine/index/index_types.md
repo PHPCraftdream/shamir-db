@@ -191,6 +191,39 @@ pub struct IndexRecordKey {
 - `hash1` — FxHasher с seed 0
 - `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `index_id`
 
+**⚠️ ВАЖНО: Проверка данных при коллизиях хешей**
+
+Хеш имеет фиксированный размер (128 бит = hash1 + hash2), поэтому возможны коллизии.
+При извлечении данных по ключу **ОБЯЗАТЕЛЬНО** проверять фактическое значение:
+
+```rust
+// ❌ НЕПРАВИЛЬНО: доверяем хешу без проверки
+let key = IndexRecordKey::new(false, index_id).with_values(&[&value]);
+if let Some(record_ids) = store.get(key.to_bytes())? {
+    return Ok(record_ids);  // Может вернуть чужие записи!
+}
+
+// ✅ ПРАВИЛЬНО: проверяем фактическое значение
+let key = IndexRecordKey::new(false, index_id).with_values(&[&value]);
+if let Some(record_ids) = store.get(key.to_bytes())? {
+    let mut result = BTreeSet::new();
+    for record_id in record_ids {
+        let record = data_store.get(record_id.to_bytes())?;
+        if extract_field(&record, &path) == value {
+            result.insert(record_id);  // Точное совпадение
+        }
+        // Иначе: коллизия хеша, пропускаем
+    }
+    return Ok(result);
+}
+```
+
+**Почему это важно:**
+- FxHasher — быстрый, но не криптографический хеш
+- Вероятность коллизии: ~1/2^128 (низкая, но не нулевая)
+- При больших объёмах данных (миллиарды записей) коллизии неизбежны
+- Без проверки можно вернуть или перезаписать чужую запись
+
 ---
 
 ### IndexManager
