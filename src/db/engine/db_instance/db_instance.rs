@@ -1,42 +1,39 @@
 use super::super::table::TableManager;
 use crate::db::engine::repo::{RepoConfig, RepoInstance};
 use crate::db::{DbError, DbResult};
-use crate::types::common::TMap;
 use crate::types::value::InnerValue;
+use dashmap::DashMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 /// Manages multiple repositories
-pub struct Dispatcher {
-    repos: TMap<String, RepoInstance>,
+#[derive(Clone)]
+pub struct DbInstance {
+    repos: Arc<DashMap<String, RepoInstance>>,
 }
 
-impl Clone for Dispatcher {
-    fn clone(&self) -> Self {
-        let repos: TMap<String, RepoInstance> = self
-            .repos
-            .iter()
-            .map(|(k, v): (&String, &RepoInstance)| (k.clone(), v.clone()))
-            .collect();
-        Self { repos }
+impl Default for DbInstance {
+    fn default() -> Self {
+        Self::new(vec![])
     }
 }
 
-impl Dispatcher {
+impl DbInstance {
     pub fn new(repos: Vec<RepoConfig>) -> Self {
-        let instances: TMap<String, RepoInstance> = repos
-            .into_iter()
-            .map(|config| {
-                let name = config.name.clone();
-                let instance = RepoInstance::new(config.repo, config.tables);
-                (name, instance)
-            })
-            .collect();
+        let instances: DashMap<String, RepoInstance> = DashMap::new();
+        for config in repos {
+            let name = config.name.clone();
+            let instance = RepoInstance::new(config.repo, config.tables);
+            instances.insert(name, instance);
+        }
 
-        Self { repos: instances }
+        Self {
+            repos: Arc::new(instances),
+        }
     }
 
     /// Add a new repository
-    pub fn add_repo(&mut self, config: RepoConfig) {
+    pub fn add_repo(&self, config: RepoConfig) {
         let instance = RepoInstance::new(config.repo, config.tables);
         self.repos.insert(config.name, instance);
     }
@@ -51,16 +48,9 @@ impl Dispatcher {
         repo_manager.get_table(table_name).await
     }
 
-    /// Get a repository manager instance
-    pub fn get_repo(&self, repo_name: &str) -> DbResult<&RepoInstance> {
-        self.repos
-            .get(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))
-    }
-
     /// List all repository names
     pub fn list_repos(&self) -> Vec<String> {
-        self.repos.keys().cloned().collect()
+        self.repos.iter().map(|r| r.key().clone()).collect()
     }
 
     /// List all tables in a repository
@@ -82,7 +72,7 @@ impl Dispatcher {
     pub fn has_table(&self, repo_name: &str, table_name: &str) -> bool {
         self.repos
             .get(repo_name)
-            .map(|repo: &RepoInstance| repo.has_table(table_name))
+            .map(|repo| repo.has_table(table_name))
             .unwrap_or(false)
     }
 
@@ -93,10 +83,7 @@ impl Dispatcher {
 
     /// Get total number of tables across all repositories
     pub fn table_count(&self) -> usize {
-        self.repos
-            .values()
-            .map(|repo: &RepoInstance| repo.table_count())
-            .sum()
+        self.repos.iter().map(|r| r.table_count()).sum()
     }
 
     // ============================================================================
@@ -111,7 +98,10 @@ impl Dispatcher {
         index_name: &str,
         paths: &[&str],
     ) -> DbResult<()> {
-        let repo = self.get_repo(repo_name)?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.create_index(table_name, index_name, paths).await
     }
 
@@ -123,8 +113,12 @@ impl Dispatcher {
         index_name: &str,
         paths: &[&str],
     ) -> DbResult<()> {
-        let repo = self.get_repo(repo_name)?;
-        repo.create_unique_index(table_name, index_name, paths).await
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        repo.create_unique_index(table_name, index_name, paths)
+            .await
     }
 
     /// Drop a regular index from a table.
@@ -134,7 +128,10 @@ impl Dispatcher {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
-        let repo = self.get_repo(repo_name)?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.drop_index(table_name, index_name).await
     }
 
@@ -145,7 +142,10 @@ impl Dispatcher {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
-        let repo = self.get_repo(repo_name)?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.drop_unique_index(table_name, index_name).await
     }
 
@@ -156,7 +156,10 @@ impl Dispatcher {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
-        let repo = self.get_repo(repo_name)?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.index_exists(table_name, index_name).await
     }
 
@@ -167,7 +170,10 @@ impl Dispatcher {
         table_name: &str,
         index_name: &str,
     ) -> DbResult<bool> {
-        let repo = self.get_repo(repo_name)?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.unique_index_exists(table_name, index_name).await
     }
 
@@ -179,7 +185,10 @@ impl Dispatcher {
         index_name: &str,
         values: &[InnerValue],
     ) -> DbResult<BTreeSet<crate::types::record_id::RecordId>> {
-        let repo = self.get_repo(repo_name)?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.lookup_by_index(table_name, index_name, values).await
     }
 }

@@ -1,4 +1,4 @@
-use crate::db::engine::dispatcher::dispatcher::Dispatcher;
+use crate::db::engine::db_instance::db_instance::DbInstance;
 use crate::db::engine::repo::repo_types::BoxRepo;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
@@ -43,9 +43,9 @@ async fn test_table_manager_clone() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let ctx1 = dispatcher.get_table("default", "users").await.unwrap();
+    let ctx1 = db.get_table("default", "users").await.unwrap();
     let ctx2 = ctx1.clone();
 
     assert_eq!(ctx1.name(), ctx2.name());
@@ -61,9 +61,9 @@ async fn test_table_manager_components() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let ctx = dispatcher.get_table("default", "users").await.unwrap();
+    let ctx = db.get_table("default", "users").await.unwrap();
 
     assert_eq!(ctx.name(), "users");
 
@@ -88,9 +88,9 @@ async fn test_create_index_simple() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Create index with string path
     table.create_index("email_idx", &["email"]).await.unwrap();
@@ -109,9 +109,9 @@ async fn test_create_index_composite() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Create composite index
     table
@@ -131,9 +131,9 @@ async fn test_create_index_nested_path() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Create index with nested path
     table
@@ -153,9 +153,9 @@ async fn test_drop_index() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Create and drop
     table.create_index("email_idx", &["email"]).await.unwrap();
@@ -179,9 +179,9 @@ async fn test_unique_index() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Create unique index
     table
@@ -203,9 +203,9 @@ async fn test_lookup_by_index() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Create index
     table.create_index("status_idx", &["status"]).await.unwrap();
@@ -227,9 +227,9 @@ async fn test_get_record() {
         repo: BoxRepo::InMemory(repo),
         tables: configs,
     };
-    let dispatcher = Dispatcher::new(vec![repo_config]);
+    let db = DbInstance::new(vec![repo_config]);
 
-    let table = dispatcher.get_table("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
 
     // Insert and retrieve
     let value = InnerValue::Str("hello".to_string());

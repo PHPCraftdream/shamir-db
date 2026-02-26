@@ -292,7 +292,11 @@ impl TableManager {
     }
 
     /// Build IndexDefinition from string name and paths.
-    async fn build_index_definition(&self, name: &str, paths: &[&str]) -> DbResult<IndexDefinition> {
+    async fn build_index_definition(
+        &self,
+        name: &str,
+        paths: &[&str],
+    ) -> DbResult<IndexDefinition> {
         let name_id = self.intern_string(name).await?;
 
         let mut interned_paths = Vec::with_capacity(paths.len());

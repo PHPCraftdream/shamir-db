@@ -1,6 +1,9 @@
 use super::repo_config::RepoConfig;
+use super::repo_types::BoxRepo;
+use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_map_wc, TMap};
+use std::sync::Arc;
 
 pub struct RepoManager {
     repos: TMap<String, RepoConfig>,
@@ -53,9 +56,6 @@ impl RepoManager {
             return self.get_repo_config("default").unwrap();
         }
 
-        use super::repo_types::BoxRepo;
-        use crate::db::storage::storage_in_memory::InMemoryRepo;
-        use std::sync::Arc;
         let config = RepoConfig::new("default", BoxRepo::InMemory(Arc::new(InMemoryRepo::new())));
         self.add_repo(config.clone());
         config

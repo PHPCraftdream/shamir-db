@@ -2,4 +2,4 @@
 pub mod tests;
 
 #[allow(clippy::module_inception)]
-pub mod dispatcher;
+pub mod db_instance;

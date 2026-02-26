@@ -66,12 +66,7 @@ async fn test_repo_instance_create_index() {
         .unwrap();
 
     assert!(instance.index_exists("users", "email_idx").await.unwrap());
-    assert!(
-        !instance
-            .index_exists("users", "nonexistent")
-            .await
-            .unwrap()
-    );
+    assert!(!instance.index_exists("users", "nonexistent").await.unwrap());
 }
 
 #[tokio::test]
@@ -83,12 +78,10 @@ async fn test_repo_instance_create_composite_index() {
         .await
         .unwrap();
 
-    assert!(
-        instance
-            .index_exists("users", "name_city_idx")
-            .await
-            .unwrap()
-    );
+    assert!(instance
+        .index_exists("users", "name_city_idx")
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -113,18 +106,14 @@ async fn test_repo_instance_create_unique_index() {
         .unwrap();
 
     // Unique index exists in unique collection, not regular
-    assert!(
-        !instance
-            .index_exists("users", "email_unique")
-            .await
-            .unwrap()
-    );
-    assert!(
-        instance
-            .unique_index_exists("users", "email_unique")
-            .await
-            .unwrap()
-    );
+    assert!(!instance
+        .index_exists("users", "email_unique")
+        .await
+        .unwrap());
+    assert!(instance
+        .unique_index_exists("users", "email_unique")
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -157,12 +146,10 @@ async fn test_repo_instance_drop_unique_index() {
         .create_unique_index("users", "email_unique", &["email"])
         .await
         .unwrap();
-    assert!(
-        instance
-            .unique_index_exists("users", "email_unique")
-            .await
-            .unwrap()
-    );
+    assert!(instance
+        .unique_index_exists("users", "email_unique")
+        .await
+        .unwrap());
 
     // Drop unique index
     let dropped = instance
@@ -170,12 +157,10 @@ async fn test_repo_instance_drop_unique_index() {
         .await
         .unwrap();
     assert!(dropped);
-    assert!(
-        !instance
-            .unique_index_exists("users", "email_unique")
-            .await
-            .unwrap()
-    );
+    assert!(!instance
+        .unique_index_exists("users", "email_unique")
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -190,7 +175,11 @@ async fn test_repo_instance_lookup_by_index() {
 
     // Lookup with no data returns empty
     let results = instance
-        .lookup_by_index("users", "status_idx", &[InnerValue::Str("active".to_string())])
+        .lookup_by_index(
+            "users",
+            "status_idx",
+            &[InnerValue::Str("active".to_string())],
+        )
         .await
         .unwrap();
     assert!(results.is_empty());
@@ -214,24 +203,12 @@ async fn test_repo_instance_index_isolation_between_tables() {
 
     // Check isolation
     assert!(instance.index_exists("users", "email_idx").await.unwrap());
-    assert!(
-        !instance
-            .index_exists("users", "user_id_idx")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !instance
-            .index_exists("orders", "email_idx")
-            .await
-            .unwrap()
-    );
-    assert!(
-        instance
-            .index_exists("orders", "user_id_idx")
-            .await
-            .unwrap()
-    );
+    assert!(!instance.index_exists("users", "user_id_idx").await.unwrap());
+    assert!(!instance.index_exists("orders", "email_idx").await.unwrap());
+    assert!(instance
+        .index_exists("orders", "user_id_idx")
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
@@ -246,12 +223,7 @@ async fn test_repo_instance_clone_shares_state() {
         .unwrap();
 
     // Check visible through second instance
-    assert!(
-        instance2
-            .index_exists("users", "email_idx")
-            .await
-            .unwrap()
-    );
+    assert!(instance2.index_exists("users", "email_idx").await.unwrap());
 }
 
 #[tokio::test]
