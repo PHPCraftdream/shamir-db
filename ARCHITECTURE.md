@@ -347,6 +347,36 @@ Index System Architecture
 - hash1: 8 bytes (FxHasher of values)
 - hash2: 8 bytes (collision resistance)
 
+**⚠️ Hash Collision Safety:**
+При извлечении данных по хешу (hash1, hash2) **ОБЯЗАТЕЛЬНО** проверять фактическое значение данных:
+
+```rust
+// ❌ НЕПРАВИЛЬНО: доверяем хешу без проверки
+let record_id = index.lookup(hash)?;
+return Ok(record_id);
+
+// ✅ ПРАВИЛЬНО: проверяем фактическое значение
+let candidates = index.lookup(hash)?;
+for record_id in candidates {
+    let record = table.get(record_id)?;
+    if record.get(field_path) == expected_value {
+        return Ok(Some(record_id));  // Точное совпадение
+    }
+}
+return Ok(None);  // Хеш совпал, но данные разные (коллизия)
+}
+```
+
+**Почему это важно:**
+- Хеши имеют фиксированный размер → возможны коллизии
+- FxHasher быстрый, но не криптографический
+- Два разных значения могут дать одинаковый hash1 + hash2
+- Без проверки можно вернуть чужую запись
+
+**Статус:**
+- hash2 добавлен для снижения вероятности коллизии (2^128 комбинаций)
+- Но проверка данных всё равно обязательна для корректности
+
 **Status Tracking:**
 - Actual: Index is up-to-date
 - Pending: Index needs sync

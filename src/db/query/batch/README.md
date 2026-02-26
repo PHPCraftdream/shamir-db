@@ -117,6 +117,21 @@ Batch API предоставляет унифицированный интерф
 
 Batch API поддерживает операции записи: `insert`, `update`, `set`, `delete`.
 
+### BatchOp — именование операций
+
+| BatchOp Variant | JSON поле | Тип | Описание |
+|-----------------|-----------|-----|----------|
+| `Read(Query)` | `from` | `ReadQuery` | SELECT запрос |
+| `Insert(InsertOp)` | `insert_into` | `InsertOp` | Вставка записей |
+| `Update(UpdateOp)` | `update` | `UpdateOp` | Обновление записей |
+| `Set(SetOp)` | `set` | `SetOp` | Upsert по ключу |
+| `Delete(DeleteOp)` | `delete_from` | `DeleteOp` | Удаление записей |
+
+**Примечание:** `ReadQuery` — это type alias для `Query`, используется для ясности API:
+```rust
+pub type ReadQuery = Query;  // в read/mod.rs
+```
+
 ### Insert — вставка записей
 
 ```json
@@ -335,6 +350,106 @@ Serde автоматически определяет тип операции п
 {
   "$query": "users",
   "path": "[0].id"
+}
+```
+
+## Select from Alias (TODO: не реализовано)
+
+Можно использовать результат другого запроса как источник данных.
+
+### Синтаксис
+
+Поле `from` начинается с `@` — это ссылка на алиас:
+
+```json
+{
+  "queries": {
+    "all_users": {
+      "from": "users"
+    },
+    "active_only": {
+      "from": "@all_users",
+      "where": { "op": "eq", "field": "active", "value": true }
+    }
+  }
+}
+```
+
+### Когда использовать
+
+| Сценарий | Пример |
+|----------|--------|
+| Фильтрация подмножества | `from: "@users"` + WHERE |
+| Каскадная обработка | chain → filter → transform |
+| CTE-подобные запросы | WITH-like patterns |
+
+### Зависимости
+
+Алиас в `from` автоматически добавляется в зависимости:
+
+```rust
+// В planner.rs::extract_dependencies()
+BatchOp::Read(query) => {
+    // Если from начинается с '@' — это ссылка на алиас
+    if query.from.starts_with('@') {
+        let alias = &query.from[1..];  // убираем '@'
+        deps.insert(alias.to_string());
+    }
+    // ... плюс существующая логика для $query в filter
+}
+```
+
+### Примеры
+
+#### Каскадная фильтрация
+
+```json
+{
+  "queries": {
+    "users": {
+      "from": "users"
+    },
+    "active": {
+      "from": "@users",
+      "where": { "op": "eq", "field": "status", "value": "active" }
+    },
+    "vip": {
+      "from": "@active",
+      "where": { "op": "gte", "field": "score", "value": 100 }
+    }
+  }
+}
+```
+
+План выполнения:
+```
+Stage 1: [users]        // читаем из таблицы
+Stage 2: [active]       // фильтруем users
+Stage 3: [vip]          // фильтруем active
+```
+
+#### Комбинирование с $query
+
+```json
+{
+  "queries": {
+    "orders": {
+      "from": "orders",
+      "where": { "op": "gte", "field": "total", "value": 1000 }
+    },
+    "order_items": {
+      "from": "order_items",
+      "where": {
+        "op": "in",
+        "field": "order_id",
+        "values": [{ "$query": "orders[].id" }]
+      }
+    },
+    "expensive_items": {
+      "from": "@order_items",
+      "where": { "op": "gt", "field": "price", "value": 500 }
+    }
+  }
 }
 ```
 
