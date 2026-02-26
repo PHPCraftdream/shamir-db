@@ -131,6 +131,14 @@ pub enum FilterValue {
         #[serde(rename = "$ref")]
         path: FieldPath,
     },
+    /// Reference to another query's result in the same batch
+    QueryRef {
+        #[serde(rename = "$query")]
+        alias: String,
+        /// Optional path into the result
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 impl FilterValue {
@@ -141,6 +149,22 @@ impl FilterValue {
     /// Create a field reference
     pub fn field_ref(path: impl Into<String>) -> Self {
         FilterValue::FieldRef { path: path.into() }
+    }
+
+    /// Create a query reference (references another query's result in a batch)
+    pub fn query_ref(alias: impl Into<String>) -> Self {
+        FilterValue::QueryRef {
+            alias: alias.into(),
+            path: None,
+        }
+    }
+
+    /// Create a query reference with a path
+    pub fn query_ref_with_path(alias: impl Into<String>, path: impl Into<String>) -> Self {
+        FilterValue::QueryRef {
+            alias: alias.into(),
+            path: Some(path.into()),
+        }
     }
 }
 
