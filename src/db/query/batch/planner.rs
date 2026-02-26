@@ -10,6 +10,20 @@
 //! 3. **Calculate Depth**: Ensures dependency chain isn't too deep
 //! 4. **Topological Sort**: Groups queries into parallel stages
 //!
+//! # $query Validation Strategy
+//!
+//! We use **strict validation**: all `$query` references must point to aliases
+//! that exist in the same batch. If a reference is invalid, we return
+//! `BatchError::UnknownAlias` at planning time.
+//!
+//! **Why strict validation?**
+//! - Catches typos immediately (e.g., `"usres"` instead of `"users"`)
+//! - Prevents silent data corruption in write operations
+//! - Fails fast with clear error instead of producing wrong results
+//! - Dependencies are auto-extracted, so there's no way to "lie" about them
+//!
+//! See `batch/README.md` for detailed rationale.
+//!
 //! # Example
 //!
 //! ```text
@@ -131,7 +145,7 @@ impl BatchPlanner {
         let mut deps = new_set();
 
         match op {
-            BatchOp::Query(query) => {
+            BatchOp::Read(query) => {
                 if let Some(filter) = &query.r#where {
                     Self::extract_deps_from_filter(filter, &mut deps);
                 }

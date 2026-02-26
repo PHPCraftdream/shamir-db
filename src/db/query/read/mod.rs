@@ -12,5 +12,8 @@ pub use parser::query_from_value;
 pub use query::{Query, QueryResult, QueryStats, TableName};
 pub use select::{AggFunc, AggregateField, Expr, ExprValue, Select, SelectItem};
 
+/// Alias for Query - makes API clearer when distinguishing read vs write operations.
+pub type ReadQuery = Query;
+
 #[cfg(test)]
 mod tests;
