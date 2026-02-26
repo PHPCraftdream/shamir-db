@@ -4,7 +4,7 @@ pub mod filter;
 pub mod read;
 
 pub use batch::{
-    BatchError, BatchLimits, BatchPlan, BatchPlanner, BatchRequest, BatchResponse, NamedQuery,
+    BatchError, BatchLimits, BatchPlan, BatchPlanner, BatchRequest, BatchResponse, QueryEntry,
     QueryPath, QueryReference,
 };
 pub use common::QueryParseError;

@@ -6,14 +6,14 @@
 //! # How It Works
 //!
 //! 1. **Extract Dependencies**: Scans all filters for `$query` references
-//! 2. **Validate**: Checks for duplicates, unknown aliases, and cycles
+//! 2. **Validate**: Checks for unknown aliases and cycles
 //! 3. **Calculate Depth**: Ensures dependency chain isn't too deep
 //! 4. **Topological Sort**: Groups queries into parallel stages
 //!
 //! # Example
 //!
 //! ```text
-//! Input queries: [users, products, orders, stats]
+//! Input queries: { users: {...}, products: {...}, orders: {...}, stats: {...} }
 //!
 //! Dependencies:
 //!   users -> {}
@@ -28,25 +28,25 @@
 //! Stage 2 runs `orders` after Stage 1 completes.
 //! Stage 3 runs `stats` after Stage 2 completes.
 
-use crate::db::query::batch::{BatchError, BatchLimits, BatchPlan, NamedQuery};
+use crate::db::query::batch::{BatchError, BatchLimits, BatchPlan, QueryEntry};
 use crate::db::query::filter::Filter;
 use crate::db::query::read::Query;
 use crate::types::common::{new_map, new_set, TMap, TSet};
 
 /// Batch query planner.
 ///
-/// Creates execution plans from named queries with automatic
+/// Creates execution plans from query entries with automatic
 /// dependency detection and parallel stage grouping.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use shamir_db::db::query::batch::{BatchPlanner, BatchLimits, NamedQuery};
+/// use shamir_db::db::query::batch::{BatchPlanner, BatchLimits, QueryEntry};
+/// use shamir_db::types::common::new_map;
 ///
-/// let queries = vec![
-///     NamedQuery { alias: "users".into(), query: Query::new("users"), return_result: true },
-///     NamedQuery { alias: "orders".into(), query: Query::new("orders"), return_result: true },
-/// ];
+/// let mut queries = new_map();
+/// queries.insert("users".to_string(), QueryEntry::from(Query::new("users")));
+/// queries.insert("orders".to_string(), QueryEntry::from(Query::new("orders")));
 ///
 /// let plan = BatchPlanner::plan(&queries, &BatchLimits::default())?;
 /// println!("Stages: {:?}", plan.stages);
@@ -54,7 +54,7 @@ use crate::types::common::{new_map, new_set, TMap, TSet};
 pub struct BatchPlanner;
 
 impl BatchPlanner {
-    /// Create an execution plan from named queries.
+    /// Create an execution plan from query entries.
     ///
     /// # Returns
     ///
@@ -64,11 +64,13 @@ impl BatchPlanner {
     /// # Errors
     ///
     /// - `TooManyQueries`: More queries than `limits.max_queries`
-    /// - `DuplicateAlias`: Same alias used twice
     /// - `UnknownAlias`: Reference to non-existent alias
     /// - `CircularDependency`: Cycle in dependency graph
     /// - `TooDeep`: Dependency chain exceeds `limits.max_dependency_depth`
-    pub fn plan(queries: &[NamedQuery], limits: &BatchLimits) -> Result<BatchPlan, BatchError> {
+    pub fn plan(
+        queries: &TMap<String, QueryEntry>,
+        limits: &BatchLimits,
+    ) -> Result<BatchPlan, BatchError> {
         // Check query count
         if queries.len() > limits.max_queries {
             return Err(BatchError::TooManyQueries {
@@ -77,37 +79,27 @@ impl BatchPlanner {
             });
         }
 
-        // Build alias set and check duplicates
-        let mut aliases: TSet<String> = new_set();
-        let mut alias_order: Vec<String> = Vec::new();
-
-        for q in queries {
-            if aliases.contains(&q.alias) {
-                return Err(BatchError::DuplicateAlias {
-                    alias: q.alias.clone(),
-                });
-            }
-            aliases.insert(q.alias.clone());
-            alias_order.push(q.alias.clone());
-        }
+        // Aliases are keys in the map (no duplicates possible)
+        let aliases: TSet<String> = queries.keys().cloned().collect();
+        let alias_order: Vec<String> = queries.keys().cloned().collect();
 
         // Extract dependencies for each query
         let mut dependencies: TMap<String, TSet<String>> = new_map();
 
-        for q in queries {
-            let deps = Self::extract_dependencies(&q.query);
+        for (alias, entry) in queries {
+            let deps = Self::extract_dependencies(&entry.query);
 
             // Validate all referenced aliases exist
             for dep in &deps {
                 if !aliases.contains(dep) {
                     return Err(BatchError::UnknownAlias {
                         alias: dep.clone(),
-                        referenced_by: q.alias.clone(),
+                        referenced_by: alias.clone(),
                     });
                 }
             }
 
-            dependencies.insert(q.alias.clone(), deps);
+            dependencies.insert(alias.clone(), deps);
         }
 
         // Check for cycles
@@ -310,10 +302,7 @@ impl BatchPlanner {
     ///
     /// Each stage contains queries whose dependencies are all satisfied
     /// by previous stages.
-    fn topological_sort(
-        deps: &TMap<String, TSet<String>>,
-        order: &[String],
-    ) -> Vec<Vec<String>> {
+    fn topological_sort(deps: &TMap<String, TSet<String>>, order: &[String]) -> Vec<Vec<String>> {
         let mut stages: Vec<Vec<String>> = Vec::new();
         let mut completed: TSet<String> = new_set();
         let mut remaining: TSet<String> = deps.keys().cloned().collect();

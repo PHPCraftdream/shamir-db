@@ -7,29 +7,29 @@ use serde::{Deserialize, Serialize};
 use crate::db::query::read::{Query, QueryResult};
 use crate::types::common::{TMap, TSet};
 
-/// Named query with alias for result referencing.
+/// Query entry for batch requests.
 ///
-/// Each query in a batch has a unique alias that can be referenced
-/// by other queries using the `$query` syntax.
+/// Used as the value in the `queries` map where the key is the alias.
 ///
 /// # Example
 ///
 /// ```json
+/// // Full format
 /// {
-///   "alias": "users",
 ///   "query": { "from": "users" },
 ///   "return_result": true
 /// }
+///
+/// // Shorthand (Query fields directly)
+/// {
+///   "from": "users",
+///   "where": { "op": "eq", "field": "status", "value": "active" }
+/// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NamedQuery {
-    /// Unique alias for referencing results.
-    ///
-    /// Must be alphanumeric with underscores, unique within the batch.
-    /// Used in `$query` references like `@users[0].id`.
-    pub alias: String,
-
-    /// The query to execute.
+pub struct QueryEntry {
+    /// The query to execute (flattened for shorthand syntax).
+    #[serde(flatten)]
     pub query: Query,
 
     /// Whether to include this result in the response.
@@ -44,6 +44,15 @@ fn default_return() -> bool {
     true
 }
 
+impl From<Query> for QueryEntry {
+    fn from(query: Query) -> Self {
+        QueryEntry {
+            query,
+            return_result: true,
+        }
+    }
+}
+
 /// Batch request containing multiple queries.
 ///
 /// # JSON Format
@@ -52,9 +61,15 @@ fn default_return() -> bool {
 /// {
 ///   "name": "my_batch",
 ///   "transactional": false,
-///   "queries": [...],
+///   "queries": {
+///     "users": { "from": "users" },
+///     "orders": {
+///       "query": { "from": "orders" },
+///       "return_result": false
+///     }
+///   },
 ///   "return_all": true,
-///   "return_only": ["users", "orders"],
+///   "return_only": ["users"],
 ///   "limits": { ... }
 /// }
 /// ```
@@ -63,7 +78,7 @@ fn default_return() -> bool {
 ///
 /// - `name`: Optional name for logging/debugging
 /// - `transactional`: Enable MVCC transaction semantics
-/// - `queries`: Array of named queries
+/// - `queries`: Map of alias -> query entry
 /// - `return_all`: Return all results (default: true)
 /// - `return_only`: Specific aliases to return (overrides return_all)
 /// - `limits`: Security limits
@@ -79,8 +94,11 @@ pub struct BatchRequest {
     #[serde(default)]
     pub transactional: bool,
 
-    /// Queries with aliases.
-    pub queries: Vec<NamedQuery>,
+    /// Queries map: alias -> query entry.
+    ///
+    /// Each key is the alias used in `$query` references.
+    /// The value can be just a `Query` or a `QueryEntry` with options.
+    pub queries: TMap<String, QueryEntry>,
 
     /// Return all results (default: true).
     #[serde(default = "default_return_all")]
@@ -250,11 +268,6 @@ pub enum BatchError {
         referenced_by: String,
     },
 
-    /// Duplicate alias in batch.
-    ///
-    /// Each alias must be unique within a batch.
-    DuplicateAlias { alias: String },
-
     /// Execution timeout.
     ///
     /// Total execution time exceeded `BatchLimits::max_execution_time_secs`.
@@ -290,9 +303,6 @@ impl std::fmt::Display for BatchError {
                     "Unknown alias '{}' referenced by '{}'",
                     alias, referenced_by
                 )
-            }
-            BatchError::DuplicateAlias { alias } => {
-                write!(f, "Duplicate alias: '{}'", alias)
             }
             BatchError::Timeout { elapsed_secs } => {
                 write!(f, "Execution timeout after {}s", elapsed_secs)
