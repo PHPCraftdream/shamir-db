@@ -3,9 +3,10 @@
 //! This module provides parsers for query components that are used by
 //! multiple query types (SELECT, UPDATE, DELETE, etc.).
 
-use crate::db::query::filter::{Filter, FilterValue};
+use crate::db::query::filter::{Cond, Expr, ExprOp, Filter, FilterValue, FnCall};
 use crate::db::query::read::{
-    AggFunc, AggregateField, Expr, ExprValue, GroupBy, LimitOffset, OrderBy, OrderByItem,
+    AggFunc, AggregateField, Expr as ReadExpr, ExprValue, GroupBy, LimitOffset, OrderBy,
+    OrderByItem,
 };
 use crate::types::value::{QueryValue, Value};
 
@@ -51,7 +52,7 @@ impl std::fmt::Display for QueryParseError {
 impl std::error::Error for QueryParseError {}
 
 /// Parse Expr from QueryValue (placeholder for future)
-pub fn expr_from_value(value: &QueryValue) -> Result<Expr, QueryParseError> {
+pub fn expr_from_value(value: &QueryValue) -> Result<ReadExpr, QueryParseError> {
     match value {
         Value::Map(map) => {
             let type_str = match map.get(&"type".to_string()) {
@@ -65,7 +66,7 @@ pub fn expr_from_value(value: &QueryValue) -> Result<Expr, QueryParseError> {
                         Some(Value::Str(s)) => s.clone(),
                         _ => return Err(QueryParseError::MissingField("expr.name")),
                     };
-                    Ok(Expr::Field { path: name })
+                    Ok(ReadExpr::Field { path: name })
                 }
                 "literal" => {
                     let value = map
@@ -73,7 +74,7 @@ pub fn expr_from_value(value: &QueryValue) -> Result<Expr, QueryParseError> {
                         .cloned()
                         .ok_or(QueryParseError::MissingField("expr.value"))?;
                     let expr_value = expr_value_from_value(&value)?;
-                    Ok(Expr::Literal { value: expr_value })
+                    Ok(ReadExpr::Literal { value: expr_value })
                 }
                 _ => Err(QueryParseError::UnknownType(type_str.to_string())),
             }
@@ -274,12 +275,130 @@ pub fn filter_value_from_value(value: &QueryValue) -> Result<FilterValue, QueryP
                 });
             }
 
+            // Check for function call: { "$fn": "NOW" } or { "$fn": { "name": "COALESCE", "args": [...] } }
+            if let Some(fn_val) = map.get(&"$fn".to_string()) {
+                let fn_call = fn_call_from_value(fn_val)?;
+                return Ok(FilterValue::FnCall { call: fn_call });
+            }
+
+            // Check for expression: { "$expr": { "op": "add", "args": [...] } }
+            if let Some(expr_val) = map.get(&"$expr".to_string()) {
+                let expr = expr_filter_from_value(expr_val)?;
+                return Ok(FilterValue::Expr { expr });
+            }
+
+            // Check for conditional: { "$cond": { "if": ..., "then": ..., "else": ... } }
+            if let Some(cond_val) = map.get(&"$cond".to_string()) {
+                let cond = cond_from_value(cond_val)?;
+                return Ok(FilterValue::Cond {
+                    cond: Box::new(cond),
+                });
+            }
+
             Err(QueryParseError::InvalidType(
                 "filter.value",
-                "primitive, $ref, or $query",
+                "primitive, $ref, $query, $fn, $expr, or $cond",
             ))
         }
         _ => Err(QueryParseError::InvalidType("filter.value", "primitive")),
+    }
+}
+
+/// Parse FnCall from QueryValue
+fn fn_call_from_value(value: &QueryValue) -> Result<FnCall, QueryParseError> {
+    match value {
+        // Simple form: { "$fn": "NOW" }
+        Value::Str(name) => Ok(FnCall::simple(name)),
+        // Complex form: { "$fn": { "name": "COALESCE", "args": [...] } }
+        Value::Map(map) => {
+            let name = match map.get(&"name".to_string()) {
+                Some(Value::Str(s)) => s.clone(),
+                _ => return Err(QueryParseError::MissingField("$fn.name")),
+            };
+            let args = match map.get(&"args".to_string()) {
+                Some(Value::List(list)) => list
+                    .iter()
+                    .map(filter_value_from_value)
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => Vec::new(),
+            };
+            Ok(FnCall::complex(name, args))
+        }
+        _ => Err(QueryParseError::InvalidType("$fn", "string or object")),
+    }
+}
+
+/// Parse Expr (filter expression) from QueryValue
+fn expr_filter_from_value(value: &QueryValue) -> Result<Expr, QueryParseError> {
+    match value {
+        Value::Map(map) => {
+            let op = match map.get(&"op".to_string()) {
+                Some(Value::Str(s)) => expr_op_from_str(s)?,
+                _ => return Err(QueryParseError::MissingField("$expr.op")),
+            };
+            let args = match map.get(&"args".to_string()) {
+                Some(Value::List(list)) => list
+                    .iter()
+                    .map(filter_value_from_value)
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => return Err(QueryParseError::MissingField("$expr.args")),
+            };
+            Ok(Expr::new(op, args))
+        }
+        _ => Err(QueryParseError::InvalidType("$expr", "object")),
+    }
+}
+
+/// Parse ExprOp from string
+fn expr_op_from_str(s: &str) -> Result<ExprOp, QueryParseError> {
+    match s {
+        // Math
+        "add" => Ok(ExprOp::Add),
+        "sub" => Ok(ExprOp::Sub),
+        "mul" => Ok(ExprOp::Mul),
+        "div" => Ok(ExprOp::Div),
+        "mod" => Ok(ExprOp::Mod),
+        "neg" => Ok(ExprOp::Neg),
+        // String
+        "concat" => Ok(ExprOp::Concat),
+        "lower" => Ok(ExprOp::Lower),
+        "upper" => Ok(ExprOp::Upper),
+        "trim" => Ok(ExprOp::Trim),
+        "length" => Ok(ExprOp::Length),
+        // Logic
+        "and" => Ok(ExprOp::And),
+        "or" => Ok(ExprOp::Or),
+        "not" => Ok(ExprOp::Not),
+        // Comparison
+        "eq" => Ok(ExprOp::Eq),
+        "ne" => Ok(ExprOp::Ne),
+        "gt" => Ok(ExprOp::Gt),
+        "gte" => Ok(ExprOp::Gte),
+        "lt" => Ok(ExprOp::Lt),
+        "lte" => Ok(ExprOp::Lte),
+        _ => Err(QueryParseError::UnknownType(format!("expr.op: {}", s))),
+    }
+}
+
+/// Parse Cond from QueryValue
+fn cond_from_value(value: &QueryValue) -> Result<Cond, QueryParseError> {
+    match value {
+        Value::Map(map) => {
+            let condition = match map.get(&"if".to_string()) {
+                Some(v) => filter_from_value(v)?,
+                _ => return Err(QueryParseError::MissingField("$cond.if")),
+            };
+            let then = match map.get(&"then".to_string()) {
+                Some(v) => filter_value_from_value(v)?,
+                _ => return Err(QueryParseError::MissingField("$cond.then")),
+            };
+            let or_else = match map.get(&"else".to_string()) {
+                Some(v) => filter_value_from_value(v)?,
+                _ => return Err(QueryParseError::MissingField("$cond.else")),
+            };
+            Ok(Cond::new(condition, then, or_else))
+        }
+        _ => Err(QueryParseError::InvalidType("$cond", "object")),
     }
 }
 

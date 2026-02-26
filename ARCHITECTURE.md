@@ -402,6 +402,121 @@ Query Language (SDBQL - S.H.A.M.I.R. Database Query Language)
 
 **Query Types:**
 
+### Special Value References
+
+SDBQL поддерживает специальные ссылки в значениях:
+
+| Ссылка | Описание | Пример |
+|--------|----------|--------|
+| `$query` | Ссылка на результат другого запроса | `{ "$query": "users[0].id" }` |
+| `$ref` | Ссылка на другое поле записи | `{ "$ref": "other_field" }` |
+| `$fn` | Системная функция | `{ "$fn": "NOW" }` |
+| `$expr` | Выражение (арифметика, строки) | `{ "$expr": { "op": "add", "args": [1, 2] } }` |
+| `$cond` | Условный оператор | `{ "$cond": { "if": {...}, "then": "a", "else": "b" } }` |
+
+### Системные функции ($fn)
+
+**Категории:**
+- Дата/время: `NOW`, `TODAY`, `UNIX_TIMESTAMP`
+- Генерация: `UUID`, `RANDOM`, `RANDOM_INT`
+- Строки: `LENGTH`, `UPPER`, `LOWER`, `TRIM`, `SUBSTRING`
+- Логические: `COALESCE`, `IFNULL`, `NULLIF`
+- Хеширование: `MD5`, `SHA256`
+- Математика: `ABS`, `ROUND`, `FLOOR`, `CEIL`
+
+**Синтаксис:**
+```json
+// Без аргументов
+{ "$fn": "NOW" }
+{ "$fn": "UUID" }
+
+// С аргументами
+{ "$fn": { "name": "COALESCE", "args": [null, "default"] } }
+```
+
+**Использование:**
+```json
+// В WHERE
+{ "where": { "op": "lt", "field": "expires_at", "value": { "$fn": "NOW" } } }
+
+// В SET
+{ "set": { "created_at": { "$fn": "NOW" }, "token": { "$fn": "UUID" } } }
+```
+
+### Выражения ($expr)
+
+Арифметические и строковые операции.
+
+**Операторы:**
+- Математика: `add`, `sub`, `mul`, `div`, `mod`, `neg`
+- Строки: `concat`, `lower`, `upper`, `trim`, `length`
+- Логика: `and`, `or`, `not`
+- Сравнение: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`
+
+**Синтаксис:**
+```json
+{ "$expr": { "op": "add", "args": [10, 20] } }
+{ "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
+{ "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
+```
+
+**Использование:**
+```json
+// В SET
+{ "set": { "price": { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } } } }
+
+// Вложенные выражения
+{ "set": { "total": { "$expr": { "op": "mul", "args": [
+  { "$expr": { "op": "add", "args": [{ "$ref": "a" }, { "$ref": "b" }] } },
+  2
+] } } } }
+```
+
+### Условия ($cond)
+
+Условный оператор (тернарный).
+
+**Синтаксис:**
+```json
+{
+  "$cond": {
+    "if": { "op": "eq", "field": "active", "value": true },
+    "then": "yes",
+    "else": "no"
+  }
+}
+```
+
+**Условие `if` использует существующий синтаксис Filter.**
+
+**Использование:**
+```json
+// Простой выбор
+{ "set": { "label": { "$cond": {
+  "if": { "op": "gte", "field": "score", "value": 100 },
+  "then": "vip",
+  "else": "regular"
+} } } }
+
+// С $expr в then/else
+{ "set": { "price": { "$cond": {
+  "if": { "op": "eq", "field": "is_vip", "value": true },
+  "then": { "$expr": { "op": "mul", "args": [{ "$ref": "base" }, 0.9] } },
+  "else": { "$ref": "base" }
+} } } }
+
+// Вложенные $cond
+{ "set": { "tier": { "$cond": {
+  "if": { "op": "gte", "field": "score", "value": 1000 },
+  "then": "platinum",
+  "else": { "$cond": {
+    "if": { "op": "gte", "field": "score", "value": 500 },
+    "then": "gold",
+    "else": "silver"
+  } }
+} } } }
+```
+
 ### Data Query Commands
 
 ```json

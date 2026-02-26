@@ -3,7 +3,7 @@
 //! All tests use JSON strings as source, parse to QueryValue, then convert to Filter.
 
 use crate::db::query::common::{filter_from_value, filter_value_from_value, QueryParseError};
-use crate::db::query::filter::{Filter, FilterValue};
+use crate::db::query::filter::{ExprOp, Filter, FilterValue};
 use crate::types::value::QueryValue;
 
 /// Parse JSON string to QueryValue, then to Filter
@@ -447,4 +447,224 @@ fn test_filter_value_array_with_field_refs() {
 fn test_field_ref_helper() {
     let v = FilterValue::field_ref("address.city");
     assert!(matches!(v, FilterValue::FieldRef { path } if path == "address.city"));
+}
+
+// ============================================================================
+// System Function Tests ($fn)
+// ============================================================================
+
+#[test]
+fn test_fn_call_simple() {
+    let json = r#"{ "$fn": "NOW" }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::FnCall { call } => {
+            assert_eq!(call.name(), "NOW");
+            assert!(call.args().is_empty());
+        }
+        _ => panic!("Expected FnCall"),
+    }
+}
+
+#[test]
+fn test_fn_call_complex_with_args() {
+    let json = r#"{
+        "$fn": {
+            "name": "COALESCE",
+            "args": [null, "default"]
+        }
+    }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::FnCall { call } => {
+            assert_eq!(call.name(), "COALESCE");
+            assert_eq!(call.args().len(), 2);
+        }
+        _ => panic!("Expected FnCall"),
+    }
+}
+
+#[test]
+fn test_fn_call_in_filter() {
+    let json = r#"{
+        "op": "gte",
+        "field": "created_at",
+        "value": { "$fn": "NOW" }
+    }"#;
+    let filter = parse_filter(json).unwrap();
+    match filter {
+        Filter::Gte { field, value } => {
+            assert_eq!(field, "created_at");
+            assert!(matches!(value, FilterValue::FnCall { .. }));
+        }
+        _ => panic!("Expected Gte filter"),
+    }
+}
+
+// ============================================================================
+// Expression Tests ($expr)
+// ============================================================================
+
+#[test]
+fn test_expr_add() {
+    let json = r#"{ "$expr": { "op": "add", "args": [10, 20] } }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Expr { expr } => {
+            assert!(matches!(expr.op, ExprOp::Add));
+            assert_eq!(expr.args.len(), 2);
+        }
+        _ => panic!("Expected Expr"),
+    }
+}
+
+#[test]
+fn test_expr_mul_with_field_ref() {
+    let json = r#"{
+        "$expr": {
+            "op": "mul",
+            "args": [{ "$ref": "price" }, 1.1]
+        }
+    }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Expr { expr } => {
+            assert!(matches!(expr.op, ExprOp::Mul));
+            assert_eq!(expr.args.len(), 2);
+        }
+        _ => panic!("Expected Expr"),
+    }
+}
+
+#[test]
+fn test_expr_concat() {
+    let json = r#"{
+        "$expr": {
+            "op": "concat",
+            "args": [{ "$ref": "first" }, " ", { "$ref": "last" }]
+        }
+    }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Expr { expr } => {
+            assert!(matches!(expr.op, ExprOp::Concat));
+            assert_eq!(expr.args.len(), 3);
+        }
+        _ => panic!("Expected Expr"),
+    }
+}
+
+#[test]
+fn test_expr_in_filter() {
+    let json = r#"{
+        "op": "gt",
+        "field": "total",
+        "value": {
+            "$expr": {
+                "op": "mul",
+                "args": [{ "$ref": "price" }, { "$ref": "quantity" }]
+            }
+        }
+    }"#;
+    let filter = parse_filter(json).unwrap();
+    match filter {
+        Filter::Gt { field, value } => {
+            assert_eq!(field, "total");
+            assert!(matches!(value, FilterValue::Expr { .. }));
+        }
+        _ => panic!("Expected Gt filter"),
+    }
+}
+
+// ============================================================================
+// Conditional Tests ($cond)
+// ============================================================================
+
+#[test]
+fn test_cond_simple() {
+    let json = r#"{
+        "$cond": {
+            "if": { "op": "eq", "field": "active", "value": true },
+            "then": "yes",
+            "else": "no"
+        }
+    }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Cond { cond } => {
+            assert!(matches!(*cond.condition, Filter::Eq { .. }));
+            assert!(matches!(cond.then, FilterValue::String(ref s) if s == "yes"));
+            assert!(matches!(cond.or_else, FilterValue::String(ref s) if s == "no"));
+        }
+        _ => panic!("Expected Cond"),
+    }
+}
+
+#[test]
+fn test_cond_with_expr_in_branches() {
+    let json = r#"{
+        "$cond": {
+            "if": { "op": "gte", "field": "score", "value": 100 },
+            "then": { "$expr": { "op": "mul", "args": [{ "$ref": "score" }, 2] } },
+            "else": { "$ref": "score" }
+        }
+    }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Cond { cond } => {
+            assert!(matches!(*cond.condition, Filter::Gte { .. }));
+            assert!(matches!(cond.then, FilterValue::Expr { .. }));
+            assert!(matches!(cond.or_else, FilterValue::FieldRef { .. }));
+        }
+        _ => panic!("Expected Cond"),
+    }
+}
+
+#[test]
+fn test_cond_nested() {
+    let json = r#"{
+        "$cond": {
+            "if": { "op": "gte", "field": "score", "value": 100 },
+            "then": "vip",
+            "else": {
+                "$cond": {
+                    "if": { "op": "gte", "field": "score", "value": 50 },
+                    "then": "regular",
+                    "else": "newbie"
+                }
+            }
+        }
+    }"#;
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Cond { cond } => {
+            assert!(matches!(*cond.condition, Filter::Gte { .. }));
+            assert!(matches!(cond.then, FilterValue::String(s) if s == "vip"));
+            assert!(matches!(cond.or_else, FilterValue::Cond { .. }));
+        }
+        _ => panic!("Expected Cond"),
+    }
+}
+
+#[test]
+fn test_cond_in_filter() {
+    let json = r#"{
+        "op": "eq",
+        "field": "tier",
+        "value": {
+            "$cond": {
+                "if": { "op": "gte", "field": "score", "value": 100 },
+                "then": "vip",
+                "else": "regular"
+            }
+        }
+    }"#;
+    let filter = parse_filter(json).unwrap();
+    match filter {
+        Filter::Eq { field, value } => {
+            assert_eq!(field, "tier");
+            assert!(matches!(value, FilterValue::Cond { .. }));
+        }
+        _ => panic!("Expected Eq filter"),
+    }
 }
