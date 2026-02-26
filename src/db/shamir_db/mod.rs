@@ -3,4 +3,4 @@ mod tests;
 
 pub mod shamir_db;
 
-pub use shamir_db::ShamirDb;
+pub use shamir_db::{DatabaseRecord, RepositoryRecord, ShamirDb};

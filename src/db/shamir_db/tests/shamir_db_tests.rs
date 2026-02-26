@@ -7,7 +7,9 @@ use std::sync::Arc;
 #[tokio::test]
 async fn test_shamir_db_creation() {
     let shamir = ShamirDb::new();
-    assert_eq!(shamir.db_count(), 0);
+    // System DB is auto-created
+    assert_eq!(shamir.db_count(), 1);
+    assert!(shamir.has_db("__system__"));
 }
 
 #[tokio::test]
@@ -15,12 +17,13 @@ async fn test_create_db() {
     let shamir = ShamirDb::new();
 
     let _db = shamir.create_db("production");
-    assert_eq!(shamir.db_count(), 1);
+    // System DB + production
+    assert_eq!(shamir.db_count(), 2);
     assert!(shamir.has_db("production"));
 
     // Creating same db again returns existing
     let _db2 = shamir.create_db("production");
-    assert_eq!(shamir.db_count(), 1);
+    assert_eq!(shamir.db_count(), 2);
 }
 
 #[tokio::test]
@@ -40,25 +43,29 @@ async fn test_get_or_create_db() {
 
     // Creates if not exists
     let _db1 = shamir.get_or_create_db("production");
-    assert_eq!(shamir.db_count(), 1);
+    // System DB + production
+    assert_eq!(shamir.db_count(), 2);
 
     // Returns existing if exists
     let _db2 = shamir.get_or_create_db("production");
-    assert_eq!(shamir.db_count(), 1);
+    assert_eq!(shamir.db_count(), 2);
 }
 
 #[tokio::test]
 async fn test_list_dbs() {
     let shamir = ShamirDb::new();
 
-    assert!(shamir.list_dbs().is_empty());
+    // Only system DB exists
+    assert_eq!(shamir.list_dbs().len(), 1);
 
     shamir.create_db("production");
     shamir.create_db("test");
     shamir.create_db("dev");
 
     let dbs = shamir.list_dbs();
-    assert_eq!(dbs.len(), 3);
+    // System + 3 user DBs
+    assert_eq!(dbs.len(), 4);
+    assert!(dbs.contains(&"__system__".to_string()));
     assert!(dbs.contains(&"production".to_string()));
     assert!(dbs.contains(&"test".to_string()));
     assert!(dbs.contains(&"dev".to_string()));
@@ -69,16 +76,28 @@ async fn test_remove_db() {
     let shamir = ShamirDb::new();
 
     shamir.create_db("production");
-    assert_eq!(shamir.db_count(), 1);
+    // System DB + production
+    assert_eq!(shamir.db_count(), 2);
 
     // Remove existing
     let removed = shamir.remove_db("production");
     assert!(removed);
-    assert_eq!(shamir.db_count(), 0);
+    // Only system DB remains
+    assert_eq!(shamir.db_count(), 1);
 
     // Remove non-existent
     let removed = shamir.remove_db("production");
     assert!(!removed);
+}
+
+#[tokio::test]
+async fn test_remove_system_db_forbidden() {
+    let shamir = ShamirDb::new();
+
+    // Cannot remove system DB
+    let removed = shamir.remove_db("__system__");
+    assert!(!removed);
+    assert_eq!(shamir.db_count(), 1);
 }
 
 #[tokio::test]
@@ -95,7 +114,8 @@ async fn test_shamir_db_clone_shares_state() {
 
     // Mutations are shared
     shamir2.create_db("test");
-    assert_eq!(shamir1.db_count(), 2);
+    // System + production + test = 3
+    assert_eq!(shamir1.db_count(), 3);
     assert!(shamir1.has_db("test"));
 }
 
