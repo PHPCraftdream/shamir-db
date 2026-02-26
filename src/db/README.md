@@ -60,6 +60,30 @@ db/
 │   ├── storage_persy.rs
 │   ├── storage_canopy.rs
 │   └── README.md     # Storage documentation
+├── query/            # ✅ NEW (2026-02-24) - Query system
+│   ├── batch/        # Batch query API
+│   │   ├── mod.rs
+│   │   ├── types.rs  # BatchRequest, BatchResponse, BatchOp
+│   │   ├── planner.rs
+│   │   └── README.md
+│   ├── read/         # Read operations (SELECT)
+│   │   ├── mod.rs
+│   │   ├── types.rs  # Query, Select, Filter, etc.
+│   │   └── README.md
+│   ├── write/        # ✅ NEW (2026-02-24) - Write operations
+│   │   ├── mod.rs
+│   │   ├── types.rs  # InsertOp, UpdateOp, SetOp, DeleteOp
+│   │   └── README.md
+│   ├── filter/       # Filter (WHERE clause)
+│   │   ├── mod.rs
+│   │   └── types.rs
+│   ├── common/       # Common types
+│   │   └── mod.rs
+│   └── examples/     # JSON examples
+│       ├── filter.md
+│       ├── select.md
+│       ├── aggregate.md
+│       └── write.md  # ✅ NEW (2026-02-24)
 ├── mod.rs
 └── error.rs          # DbError, DbResult types
 ```
@@ -148,6 +172,22 @@ See `engine/README.md` for details.
 - **CachedStore** - Wrapper with write-through or write-behind modes
 
 See `storage/README.md` for details.
+
+### Query System (`db/query/`)
+**Unified query interface** for read and write operations:
+- `BatchRequest/BatchResponse` - Batch API for multiple queries
+- `BatchPlanner` - Automatic parallelization and dependency resolution
+- `Query` - SELECT queries with filters, ordering, pagination
+- `Filter` - WHERE clause with AND/OR/NOT/comparison operators
+- **Write Operations** (NEW 2026-02-24):
+  - `InsertOp` - Insert records into table
+  - `UpdateOp` - Update records with optional `select` for returning
+  - `SetOp` - Upsert by key (create or update)
+  - `DeleteOp` - Delete records by filter
+- `UpdateSelect` - Return updated records with modes: `all`, `changed`, `unchanged`
+- **465+ tests** covering all query operations
+
+See `query/batch/README.md` and `query/write/README.md` for details.
 
 ## Error Handling
 
@@ -456,6 +496,12 @@ let inner_value = InnerValue::from_bytes(bytes)?;
   - Atomic flags for O(1) existence check
   - **56 index tests**
   - UniqueIndexCreationFailed error with duplicate count
+- [x] ✅ **Query system with write operations** (2026-02-24)
+  - Batch API for multiple queries with dependencies
+  - Insert, Update, Set, Delete operations
+  - `UpdateSelect` for returning updated records
+  - Modes: `all`, `changed`, `unchanged`
+  - **465+ tests**
 - [ ] Query planner integration
 - [ ] Transaction support across tables
 - [ ] Migration system

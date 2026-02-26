@@ -8,6 +8,52 @@ use serde_json::Value;
 use crate::db::query::filter::Filter;
 
 // ============================================================================
+// UPDATE SELECT TYPES
+// ============================================================================
+
+/// Mode for returning records from UPDATE operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateReturnMode {
+    /// Return all records that matched the filter.
+    All,
+
+    /// Return only records that were actually changed.
+    #[default]
+    Changed,
+
+    /// Return only records that matched but were not changed.
+    Unchanged,
+}
+
+/// Configuration for selecting results from UPDATE operation.
+///
+/// Controls which records are returned and which fields.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "return": "changed",
+///   "fields": ["id", "name", "status"]
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSelect {
+    /// Which records to return: "all", "changed", or "unchanged".
+    ///
+    /// - `"all"` - All records that matched the filter
+    /// - `"changed"` - Only records that were actually modified
+    /// - `"unchanged"` - Only records that matched but data was already the same
+    #[serde(default)]
+    pub return_mode: UpdateReturnMode,
+
+    /// Fields to return (optional, all fields if omitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+}
+
+// ============================================================================
 // WRITE OPERATIONS
 // ============================================================================
 
@@ -51,6 +97,17 @@ pub struct InsertOp {
 ///   "where": { "op": "eq", "field": "id", "value": 1 },
 ///   "set": { "id": 1, "name": "Full", "email": "full@example.com", "status": "active" }
 /// }
+///
+/// // Update with returning changed records
+/// {
+///   "update": "users",
+///   "where": { "op": "eq", "field": "status", "value": "inactive" },
+///   "set": { "status": "active" },
+///   "select": {
+///     "return_mode": "changed",
+///     "fields": ["id", "name", "status"]
+///   }
+/// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpdateOp {
@@ -63,6 +120,15 @@ pub struct UpdateOp {
 
     /// Fields to update (partial) or full record.
     pub set: Value,
+
+    /// Optional select configuration for returning updated records.
+    ///
+    /// When specified, the update operation returns records based on the mode:
+    /// - `"all"` - All records that matched the filter
+    /// - `"changed"` - Only records that were actually modified (default)
+    /// - `"unchanged"` - Only records that matched but data was already the same
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select: Option<UpdateSelect>,
 }
 
 /// Set operation - upsert by key (update if exists, insert if not).

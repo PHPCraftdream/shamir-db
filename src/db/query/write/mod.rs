@@ -4,7 +4,7 @@
 
 mod types;
 
-pub use types::{DeleteOp, InsertOp, SetOp, UpdateOp};
+pub use types::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect};
 
 #[cfg(test)]
 mod tests;

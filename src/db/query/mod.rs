@@ -14,4 +14,4 @@ pub use read::{
     AggFunc, AggregateField, Expr, ExprValue, GroupBy, LimitOffset, NullsOrder, OrderBy,
     OrderByItem, OrderDirection, Query, QueryResult, QueryStats, Select, SelectItem, TableName,
 };
-pub use write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+pub use write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect};
