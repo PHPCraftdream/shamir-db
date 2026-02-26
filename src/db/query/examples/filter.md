@@ -8,6 +8,7 @@ This document contains JSON examples for WHERE filters.
 - [Logical Operators](#logical-operators)
 - [NULL Checks](#null-checks)
 - [Array Operations](#array-operations)
+- [Field References ($ref)](#field-references-ref)
 - [Nested Conditions](#nested-conditions)
 
 ---
@@ -210,6 +211,76 @@ Null:
     "field": "age",
     "from": 18,
     "to": 65
+}
+```
+
+## Field References ($ref)
+
+Field references allow comparing a field with another field in the same document.
+
+### Basic Field Reference
+
+Compare `billing_city` with `address.city`:
+
+```json
+{
+    "op": "eq",
+    "field": "billing_city",
+    "value": { "$ref": "address.city" }
+}
+```
+
+### Nested Field Reference
+
+Compare `end_date` with `start_date`:
+
+```json
+{
+    "op": "gt",
+    "field": "end_date",
+    "value": { "$ref": "start_date" }
+}
+```
+
+### Deeply Nested Path
+
+Reference a deeply nested field:
+
+```json
+{
+    "op": "eq",
+    "field": "shipping.city",
+    "value": { "$ref": "user.profile.address.city" }
+}
+```
+
+### Mixed with Literal Values
+
+Combine field references with literal values in AND:
+
+```json
+{
+    "op": "and",
+    "filters": [
+        { "op": "eq", "field": "billing_city", "value": { "$ref": "address.city" } },
+        { "op": "eq", "field": "status", "value": "active" }
+    ]
+}
+```
+
+### Array with Field References
+
+Use field references inside arrays (for `in` operator):
+
+```json
+{
+    "op": "in",
+    "field": "category",
+    "values": [
+        { "$ref": "default_category" },
+        "fallback_category",
+        42
+    ]
 }
 ```
 

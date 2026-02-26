@@ -353,3 +353,98 @@ fn test_complex_permission_check() {
     let filter = parse_filter(json).unwrap();
     assert!(matches!(filter, Filter::And { filters } if filters.len() == 2));
 }
+
+// ============================================================================
+// Field Reference Tests ($ref)
+// ============================================================================
+
+#[test]
+fn test_filter_value_field_ref() {
+    let json = r#"{ "$ref": "address.city" }"#;
+    let v = parse_filter_value(json).unwrap();
+    assert!(matches!(v, FilterValue::FieldRef { path } if path == "address.city"));
+}
+
+#[test]
+fn test_filter_value_field_ref_nested() {
+    let json = r#"{ "$ref": "user.profile.bio" }"#;
+    let v = parse_filter_value(json).unwrap();
+    assert!(matches!(v, FilterValue::FieldRef { path } if path == "user.profile.bio"));
+}
+
+#[test]
+fn test_filter_eq_with_field_ref() {
+    let json = r#"{
+        "op": "eq",
+        "field": "billing_city",
+        "value": { "$ref": "address.city" }
+    }"#;
+
+    let filter = parse_filter(json).unwrap();
+    match filter {
+        Filter::Eq { field, value } => {
+            assert_eq!(field, "billing_city");
+            assert!(matches!(value, FilterValue::FieldRef { path } if path == "address.city"));
+        }
+        _ => panic!("Expected Eq filter"),
+    }
+}
+
+#[test]
+fn test_filter_gt_with_field_ref() {
+    let json = r#"{
+        "op": "gt",
+        "field": "end_date",
+        "value": { "$ref": "start_date" }
+    }"#;
+
+    let filter = parse_filter(json).unwrap();
+    match filter {
+        Filter::Gt { field, value } => {
+            assert_eq!(field, "end_date");
+            assert!(matches!(value, FilterValue::FieldRef { path } if path == "start_date"));
+        }
+        _ => panic!("Expected Gt filter"),
+    }
+}
+
+#[test]
+fn test_filter_with_mixed_values() {
+    // Mix of literal and field reference
+    let json = r#"{
+        "op": "and",
+        "filters": [
+            { "op": "eq", "field": "status", "value": "active" },
+            { "op": "gte", "field": "salary", "value": { "$ref": "min_salary" } }
+        ]
+    }"#;
+
+    let filter = parse_filter(json).unwrap();
+    assert!(matches!(filter, Filter::And { filters } if filters.len() == 2));
+}
+
+#[test]
+fn test_filter_value_array_with_field_refs() {
+    let json = r#"[
+        { "$ref": "user.id" },
+        42,
+        "literal"
+    ]"#;
+
+    let v = parse_filter_value(json).unwrap();
+    match v {
+        FilterValue::Array(arr) => {
+            assert_eq!(arr.len(), 3);
+            assert!(matches!(&arr[0], FilterValue::FieldRef { path } if path == "user.id"));
+            assert!(matches!(&arr[1], FilterValue::Int(42)));
+            assert!(matches!(&arr[2], FilterValue::String(s) if s == "literal"));
+        }
+        _ => panic!("Expected Array"),
+    }
+}
+
+#[test]
+fn test_field_ref_helper() {
+    let v = FilterValue::field_ref("address.city");
+    assert!(matches!(v, FilterValue::FieldRef { path } if path == "address.city"));
+}
