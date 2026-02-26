@@ -245,9 +245,38 @@ pub fn filter_value_from_value(value: &QueryValue) -> Result<FilterValue, QueryP
             if let Some(Value::Str(path)) = map.get(&"$ref".to_string()) {
                 return Ok(FilterValue::FieldRef { path: path.clone() });
             }
+
+            // Check for query reference: { "$query": "@alias.path" }
+            if let Some(Value::Str(query_ref)) = map.get(&"$query".to_string()) {
+                // Parse @alias[...].path format
+                let ref_str = query_ref.trim();
+                if !ref_str.starts_with('@') {
+                    return Err(QueryParseError::InvalidField("$query", "must start with @"));
+                }
+
+                let rest = &ref_str[1..];
+                if rest.is_empty() {
+                    return Err(QueryParseError::InvalidField("$query", "missing alias"));
+                }
+
+                // Find where alias ends
+                let pos = rest.find(['[', '.']).unwrap_or(rest.len());
+                let alias = &rest[..pos];
+                let path = if pos < rest.len() {
+                    Some(rest[pos..].to_string())
+                } else {
+                    None
+                };
+
+                return Ok(FilterValue::QueryRef {
+                    alias: alias.to_string(),
+                    path,
+                });
+            }
+
             Err(QueryParseError::InvalidType(
                 "filter.value",
-                "primitive or $ref",
+                "primitive, $ref, or $query",
             ))
         }
         _ => Err(QueryParseError::InvalidType("filter.value", "primitive")),
