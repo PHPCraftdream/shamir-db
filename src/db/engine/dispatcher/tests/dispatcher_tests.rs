@@ -188,3 +188,172 @@ async fn test_list_repos() {
     assert!(repos.contains(&"repo1".to_string()));
     assert!(repos.contains(&"repo2".to_string()));
 }
+
+// ============================================================================
+// Index API tests through Dispatcher
+// ============================================================================
+
+#[tokio::test]
+async fn test_dispatcher_create_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let dispatcher = Dispatcher::new(vec![config]);
+
+    // Create index through dispatcher
+    dispatcher
+        .create_index("default", "users", "email_idx", &["email"])
+        .await
+        .unwrap();
+
+    // Check index exists
+    assert!(
+        dispatcher
+            .index_exists("default", "users", "email_idx")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !dispatcher
+            .index_exists("default", "users", "nonexistent")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_dispatcher_create_composite_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let dispatcher = Dispatcher::new(vec![config]);
+
+    // Create composite index
+    dispatcher
+        .create_index("default", "users", "name_city_idx", &["name", "city"])
+        .await
+        .unwrap();
+
+    assert!(
+        dispatcher
+            .index_exists("default", "users", "name_city_idx")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_dispatcher_create_unique_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let dispatcher = Dispatcher::new(vec![config]);
+
+    // Create unique index
+    dispatcher
+        .create_unique_index("default", "users", "email_unique", &["email"])
+        .await
+        .unwrap();
+
+    // Check unique index exists (not regular)
+    assert!(
+        !dispatcher
+            .index_exists("default", "users", "email_unique")
+            .await
+            .unwrap()
+    );
+    assert!(
+        dispatcher
+            .unique_index_exists("default", "users", "email_unique")
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_dispatcher_drop_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("default", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let dispatcher = Dispatcher::new(vec![config]);
+
+    // Create and drop
+    dispatcher
+        .create_index("default", "users", "email_idx", &["email"])
+        .await
+        .unwrap();
+    assert!(
+        dispatcher
+            .index_exists("default", "users", "email_idx")
+            .await
+            .unwrap()
+    );
+
+    let dropped = dispatcher
+        .drop_index("default", "users", "email_idx")
+        .await
+        .unwrap();
+    assert!(dropped);
+    assert!(
+        !dispatcher
+            .index_exists("default", "users", "email_idx")
+            .await
+            .unwrap()
+    );
+
+    // Drop non-existent returns false
+    let dropped_again = dispatcher
+        .drop_index("default", "users", "email_idx")
+        .await
+        .unwrap();
+    assert!(!dropped_again);
+}
+
+#[tokio::test]
+async fn test_dispatcher_index_multiple_repos() {
+    let repo1 = Arc::new(InMemoryRepo::new());
+    let repo2 = Arc::new(InMemoryRepo::new());
+
+    let configs = vec![
+        RepoConfig::new("repo1", BoxRepo::InMemory(repo1)).add_table(TableConfig::new("users")),
+        RepoConfig::new("repo2", BoxRepo::InMemory(repo2)).add_table(TableConfig::new("users")),
+    ];
+
+    let dispatcher = Dispatcher::new(configs);
+
+    // Create indexes in different repos
+    dispatcher
+        .create_index("repo1", "users", "email_idx", &["email"])
+        .await
+        .unwrap();
+    dispatcher
+        .create_index("repo2", "users", "name_idx", &["name"])
+        .await
+        .unwrap();
+
+    // Check isolation
+    assert!(
+        dispatcher
+            .index_exists("repo1", "users", "email_idx")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !dispatcher
+            .index_exists("repo1", "users", "name_idx")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !dispatcher
+            .index_exists("repo2", "users", "email_idx")
+            .await
+            .unwrap()
+    );
+    assert!(
+        dispatcher
+            .index_exists("repo2", "users", "name_idx")
+            .await
+            .unwrap()
+    );
+}

@@ -1,10 +1,14 @@
 use super::interner_manager::InternerManager;
 use super::record_counter::RecordCounter;
 use super::table::Table;
+use crate::core::interner::TouchInd;
+use crate::db::engine::index::index_definition::IndexDefinition;
+use crate::db::engine::index::index_info_item::IndexInfoItem;
 use crate::db::engine::index::index_manager::IndexManager;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 pub struct TableManager {
@@ -158,5 +162,145 @@ impl TableManager {
         batch_size: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
         self.table.list_stream(batch_size)
+    }
+
+    /// Get a record by RecordId
+    pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
+        self.table.get(id).await
+    }
+
+    // ============================================================================
+    // Index Management API (string paths → interned internally)
+    // ============================================================================
+
+    /// Create a regular index on specified paths.
+    ///
+    /// # Arguments
+    /// * `name` - Index name (will be interned)
+    /// * `paths` - Field paths, e.g. `["email"]` or `["user", "address.city"]`
+    ///
+    /// # Example
+    /// ```ignore
+    /// table.create_index("email_idx", &["email"]).await?;
+    /// table.create_index("name_city_idx", &["name", "address.city"]).await?;
+    /// ```
+    pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        let index_def = self.build_index_definition(name, paths).await?;
+        self.index_manager.create_index(index_def).await
+    }
+
+    /// Create a unique index on specified paths.
+    ///
+    /// # Arguments
+    /// * `name` - Index name (will be interned)
+    /// * `paths` - Field paths, e.g. `["email"]`
+    ///
+    /// # Errors
+    /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
+    pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
+        let index_def = self.build_index_definition(name, paths).await?;
+        self.index_manager.create_unique_index(index_def).await
+    }
+
+    /// Drop a regular index by name.
+    ///
+    /// # Returns
+    /// `true` if index existed and was removed, `false` if not found.
+    pub async fn drop_index(&self, name: &str) -> DbResult<bool> {
+        let name_id = self.intern_string(name).await?;
+        self.index_manager.drop_index(name_id).await
+    }
+
+    /// Drop a unique index by name.
+    ///
+    /// # Returns
+    /// `true` if index existed and was removed, `false` if not found.
+    pub async fn drop_unique_index(&self, name: &str) -> DbResult<bool> {
+        let name_id = self.intern_string(name).await?;
+        self.index_manager.drop_unique_index(name_id).await
+    }
+
+    /// Look up records by index value.
+    ///
+    /// # Arguments
+    /// * `name` - Index name
+    /// * `values` - Values to search for (must match index paths count)
+    ///
+    /// # Returns
+    /// Set of RecordIds matching the index values.
+    pub async fn lookup_by_index(
+        &self,
+        name: &str,
+        values: &[InnerValue],
+    ) -> DbResult<BTreeSet<RecordId>> {
+        let name_id = self.intern_string(name).await?;
+        self.index_manager.lookup_by_index(name_id, values).await
+    }
+
+    /// Check if a regular index exists.
+    ///
+    /// Note: This method is async because it may need to load the interner.
+    pub async fn index_exists(&self, name: &str) -> bool {
+        // Try to get interned ID; if not interned, index doesn't exist
+        if let Ok(interner) = self.interner.get().await {
+            if let Some(key) = interner.get_ind(name) {
+                return self.index_manager.index_exists(key.id());
+            }
+        }
+        false
+    }
+
+    /// Check if a unique index exists.
+    ///
+    /// Note: This method is async because it may need to load the interner.
+    pub async fn unique_index_exists(&self, name: &str) -> bool {
+        if let Ok(interner) = self.interner.get().await {
+            if let Some(key) = interner.get_ind(name) {
+                return self.index_manager.unique_index_exists(key.id());
+            }
+        }
+        false
+    }
+
+    // ============================================================================
+    // Internal helpers
+    // ============================================================================
+
+    /// Intern a single string, returning its u64 ID.
+    async fn intern_string(&self, s: &str) -> DbResult<u64> {
+        let interner = self.interner.get().await?;
+        match interner.touch_ind(s) {
+            Ok(TouchInd::New(key)) | Ok(TouchInd::Exists(key)) => Ok(key.id()),
+            Err(e) => Err(crate::db::DbError::Codec(e.to_string())),
+        }
+    }
+
+    /// Intern a path string like "user.address.city" into Vec<u64>.
+    async fn intern_path(&self, path: &str) -> DbResult<Vec<u64>> {
+        let interner = self.interner.get().await?;
+        let mut result = Vec::new();
+
+        for component in path.split('.') {
+            let id = match interner.touch_ind(component) {
+                Ok(TouchInd::New(key)) | Ok(TouchInd::Exists(key)) => key.id(),
+                Err(e) => return Err(crate::db::DbError::Codec(e.to_string())),
+            };
+            result.push(id);
+        }
+
+        Ok(result)
+    }
+
+    /// Build IndexDefinition from string name and paths.
+    async fn build_index_definition(&self, name: &str, paths: &[&str]) -> DbResult<IndexDefinition> {
+        let name_id = self.intern_string(name).await?;
+
+        let mut interned_paths = Vec::with_capacity(paths.len());
+        for path in paths {
+            let path_components = self.intern_path(path).await?;
+            interned_paths.push(IndexInfoItem::new(path_components));
+        }
+
+        Ok(IndexDefinition::new(name_id, interned_paths))
     }
 }
