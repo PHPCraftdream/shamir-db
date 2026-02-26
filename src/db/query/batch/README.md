@@ -453,6 +453,150 @@ Stage 3: [vip]          // фильтруем active
 }
 ```
 
+## Системные функции ($fn) (TODO: не реализовано)
+
+Системные функции вычисляются на стороне БД во время выполнения запроса.
+
+### Синтаксис
+
+```json
+// Без аргументов
+{ "$fn": "NOW" }
+{ "$fn": "UUID" }
+
+// С аргументами
+{ "$fn": { "name": "COALESCE", "args": [null, "default"] } }
+{ "$fn": { "name": "SUBSTRING", "args": [{ "$ref": "name" }, 0, 10] } }
+```
+
+### Категории функций
+
+#### Дата/время
+
+| Функция | Описание | Пример |
+|---------|----------|--------|
+| `NOW` | Текущее время (UTC) | `2024-01-15T10:30:00Z` |
+| `TODAY` | Начало текущего дня | `2024-01-15T00:00:00Z` |
+| `UNIX_TIMESTAMP` | Unix timestamp | `1705315800` |
+
+#### Генерация
+
+| Функция | Описание | Пример |
+|---------|----------|--------|
+| `UUID` | Новый UUID v4 | `"550e8400-e29b-41d4-a716-446655440000"` |
+| `RANDOM` | Случайное число [0, 1) | `0.7234...` |
+| `RANDOM_INT` | Случайное число [min, max] | `42` |
+
+#### Строки
+
+| Функция | Описание | Пример |
+|---------|----------|--------|
+| `LENGTH(str)` | Длина строки | `5` |
+| `UPPER(str)` | В верхний регистр | `"HELLO"` |
+| `LOWER(str)` | В нижний регистр | `"hello"` |
+| `TRIM(str)` | Удалить пробелы | `"hello"` |
+| `SUBSTRING(str, start, len)` | Подстрока | `"hel"` |
+
+#### Логические
+
+| Функция | Описание | Пример |
+|---------|----------|--------|
+| `COALESCE(a, b, ...)` | Первый не-null | `"default"` |
+| `IFNULL(a, b)` | Если null, то b | `"default"` |
+| `NULLIF(a, b)` | null если a == b | `null` |
+
+#### Хеширование
+
+| Функция | Описание | Пример |
+|---------|----------|--------|
+| `MD5(str)` | MD5 хеш | `"5d41402abc4b2a76b9719d911017c592"` |
+| `SHA256(str)` | SHA-256 хеш | `"2c26b46b68ffc68ff99b453c1d304134..."` |
+
+#### Математика
+
+| Функция | Описание | Пример |
+|---------|----------|--------|
+| `ABS(n)` | Модуль числа | `42` |
+| `ROUND(n, precision)` | Округление | `3.14` |
+| `FLOOR(n)` | Округление вниз | `3` |
+| `CEIL(n)` | Округление вверх | `4` |
+
+### Примеры использования
+
+#### В WHERE
+
+```json
+{
+  "from": "sessions",
+  "where": {
+    "op": "lt",
+    "field": "expires_at",
+    "value": { "$fn": "NOW" }
+  }
+}
+```
+
+#### В SET (INSERT/UPDATE)
+
+```json
+{
+  "insert_into": "users",
+  "values": [{
+    "name": "Alice",
+    "created_at": { "$fn": "NOW" },
+    "api_key": { "$fn": "UUID" }
+  }]
+}
+```
+
+```json
+{
+  "update": "users",
+  "where": { "op": "eq", "field": "id", "value": 1 },
+  "set": { "last_login": { "$fn": "NOW" } }
+}
+```
+
+#### В SET с аргументами
+
+```json
+{
+  "update": "products",
+  "where": { "op": "eq", "field": "id", "value": 1 },
+  "set": {
+    "display_name": { "$fn": { "name": "COALESCE", "args": [{ "$ref": "name" }, "Unnamed"] } }
+  }
+}
+```
+
+### Комбинация с $query
+
+```json
+{
+  "queries": {
+    "user": {
+      "from": "users",
+      "where": { "op": "eq", "field": "id", "value": 1 }
+    },
+    "update_session": {
+      "update": "sessions",
+      "where": { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
+      "set": {
+        "last_active": { "$fn": "NOW" },
+        "token": { "$fn": "UUID" }
+      }
+    }
+  }
+}
+```
+
+### Безопасность
+
+- Функции выполняются на сервере
+- Нет доступа к файловой системе
+- Нет выполнения произвольного кода
+- Детерминированные функции кешируются в рамках запроса
+
 ## Фильтры (Filter)
 
 ### Операторы сравнения
@@ -745,6 +889,238 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 }
 ```
 
+## Выражения ($expr)
+
+Выражения для арифметических и строковых операций.
+
+### Синтаксис
+
+```json
+{ "$expr": { "op": "add", "args": [10, 20] } }
+{ "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
+{ "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
+```
+
+### Операторы
+
+#### Математика
+
+| Оператор | Описание | Пример | Результат |
+|----------|----------|--------|-----------|
+| `add` | Сложение | `{ "op": "add", "args": [10, 5] }` | `15` |
+| `sub` | Вычитание | `{ "op": "sub", "args": [10, 5] }` | `5` |
+| `mul` | Умножение | `{ "op": "mul", "args": [10, 5] }` | `50` |
+| `div` | Деление | `{ "op": "div", "args": [10, 5] }` | `2` |
+| `mod` | Остаток | `{ "op": "mod", "args": [10, 3] }` | `1` |
+| `neg` | Унарный минус | `{ "op": "neg", "args": [5] }` | `-5` |
+
+#### Строки
+
+| Оператор | Описание | Пример | Результат |
+|----------|----------|--------|-----------|
+| `concat` | Конкатенация | `{ "op": "concat", "args": ["a", "b", "c"] }` | `"abc"` |
+| `lower` | Нижний регистр | `{ "op": "lower", "args": ["HELLO"] }` | `"hello"` |
+| `upper` | Верхний регистр | `{ "op": "upper", "args": ["hello"] }` | `"HELLO"` |
+| `trim` | Удалить пробелы | `{ "op": "trim", "args": ["  hi  "] }` | `"hi"` |
+| `length` | Длина строки | `{ "op": "length", "args": ["hello"] }` | `5` |
+
+#### Логика
+
+| Оператор | Описание | Пример | Результат |
+|----------|----------|--------|-----------|
+| `and` | Логическое И | `{ "op": "and", "args": [true, false] }` | `false` |
+| `or` | Логическое ИЛИ | `{ "op": "or", "args": [true, false] }` | `true` |
+| `not` | Логическое НЕ | `{ "op": "not", "args": [true] }` | `false` |
+
+#### Сравнение (возвращает bool)
+
+| Оператор | Описание | Пример | Результат |
+|----------|----------|--------|-----------|
+| `eq` | Равно | `{ "op": "eq", "args": [1, 1] }` | `true` |
+| `ne` | Не равно | `{ "op": "ne", "args": [1, 2] }` | `true` |
+| `gt` | Больше | `{ "op": "gt", "args": [5, 3] }` | `true` |
+| `gte` | Больше или равно | `{ "op": "gte", "args": [5, 5] }` | `true` |
+| `lt` | Меньше | `{ "op": "lt", "args": [3, 5] }` | `true` |
+| `lte` | Меньше или равно | `{ "op": "lte", "args": [5, 5] }` | `true` |
+
+### Использование
+
+#### В WHERE
+
+```json
+{
+  "from": "products",
+  "where": {
+    "op": "gt",
+    "field": "price",
+    "value": { "$expr": { "op": "mul", "args": [{ "$ref": "base_price" }, 1.2] } }
+  }
+}
+```
+
+#### В SET (Update)
+
+```json
+{
+  "update": "products",
+  "where": { "op": "eq", "field": "id", "value": 1 },
+  "set": {
+    "price": { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } },
+    "full_name": { "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
+  }
+}
+```
+
+#### В INSERT
+
+```json
+{
+  "insert_into": "orders",
+  "values": [{
+    "total": { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, { "$ref": "quantity" }] } },
+    "created_at": { "$fn": "NOW" }
+  }]
+}
+```
+
+### Вложенные выражения
+
+```json
+{
+  "set": {
+    "final_price": {
+      "$expr": {
+        "op": "mul",
+        "args": [
+          { "$expr": { "op": "sub", "args": [{ "$ref": "price" }, { "$ref": "discount" }] } },
+          { "$expr": { "op": "add", "args": [1, { "$ref": "tax_rate" }] } }
+        ]
+      }
+    }
+  }
+}
+```
+
+## Условия ($cond)
+
+Условный оператор (тернарный) — возвращает `then` или `else` в зависимости от условия.
+
+### Синтаксис
+
+```json
+{
+  "$cond": {
+    "if": { "op": "eq", "field": "active", "value": true },
+    "then": "yes",
+    "else": "no"
+  }
+}
+```
+
+### Условие (if)
+
+Поле `if` использует **существующий синтаксис Filter**:
+
+```json
+// Простое сравнение
+"if": { "op": "eq", "field": "status", "value": "active" }
+
+// Сравнение с $ref
+"if": { "op": "gt", "field": "score", "value": { "$ref": "threshold" } }
+
+// Логические операторы
+"if": { "op": "and", "filters": [
+  { "op": "eq", "field": "active", "value": true },
+  { "op": "gte", "field": "level", "value": 5 }
+]}
+
+// С выражением $expr
+"if": { "op": "gt", "field": "total", "value": { "$expr": { "op": "mul", "args": [100, 2] } } }
+```
+
+### Примеры
+
+#### Простой статус
+
+```json
+{
+  "update": "users",
+  "where": { "op": "eq", "field": "id", "value": 1 },
+  "set": {
+    "label": {
+      "$cond": {
+        "if": { "op": "gte", "field": "score", "value": 100 },
+        "then": "vip",
+        "else": "regular"
+      }
+    }
+  }
+}
+```
+
+#### С $expr в then/else
+
+```json
+{
+  "set": {
+    "price": {
+      "$cond": {
+        "if": { "op": "eq", "field": "is_vip", "value": true },
+        "then": { "$expr": { "op": "mul", "args": [{ "$ref": "base_price" }, 0.9] } },
+        "else": { "$ref": "base_price" }
+      }
+    }
+  }
+}
+```
+
+#### Вложенные $cond
+
+```json
+{
+  "set": {
+    "tier": {
+      "$cond": {
+        "if": { "op": "gte", "field": "score", "value": 1000 },
+        "then": "platinum",
+        "else": {
+          "$cond": {
+            "if": { "op": "gte", "field": "score", "value": 500 },
+            "then": "gold",
+            "else": {
+              "$cond": {
+                "if": { "op": "gte", "field": "score", "value": 100 },
+                "then": "silver",
+                "else": "bronze"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+#### В WHERE
+
+```json
+{
+  "from": "products",
+  "where": {
+    "op": "eq",
+    "field": "category",
+    "value": {
+      "$cond": {
+        "if": { "op": "gt", "field": "price", "value": 1000 },
+        "then": "premium",
+        "else": "standard"
+      }
+    }
+  }
+}
+```
+
 ## Типы данных
 
 ### FilterValue
@@ -760,6 +1136,9 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 | `array` | `[1, 2, 3]` |
 | `field_ref` | `{ "$ref": "other_field" }` |
 | `query_ref` | `{ "$query": "@users[0].id" }` |
+| `fn_call` | `{ "$fn": "NOW" }` |
+| `expr` | `{ "$expr": { "op": "add", "args": [1, 2] } }` |
+| `cond` | `{ "$cond": { "if": {...}, "then": "a", "else": "b" } }` |
 
 ## Архитектура
 
