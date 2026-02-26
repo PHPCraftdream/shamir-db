@@ -1,131 +1,148 @@
 //! Batch query execution module.
 //!
-//! This module provides the ability to execute multiple queries in a single request,
-//! with automatic dependency detection and parallel execution optimization.
+//! **Batch — единая точка входа для всех запросов к S.H.A.M.I.R. Database.**
 //!
-//! # Features
+//! Этот мод предоставляет унифицированный JSON-интерфейс для выполнения запросов.
+//! Используйте Batch API для всех операций — от простых запросов до сложных
+//! многозапросных транзакций с зависимостями.
 //!
-//! - **Named queries**: Each query has a unique alias for result referencing
-//! - **Query references**: Use `$query` to reference other query results
-//! - **Automatic dependency detection**: Builds a dependency graph from references
-//! - **Parallel execution**: Independent queries run in parallel stages
-//! - **Cycle detection**: Prevents circular dependencies
-//! - **Security limits**: Configurable limits for query count, depth, and time
+//! # Почему Batch?
+//!
+//! | Подход | Пример |
+//! |--------|--------|
+//! | Один запрос | `{ "queries": { "q": { "from": "table" } } }` |
+//! | Несколько запросов | Map с автоматическим параллелизмом |
+//! | С зависимостями | `{ "$query": "@users[0].id" }` |
+//!
+//! ## Преимущества
+//!
+//! - **Единый формат** — все запросы через JSON
+//! - **Автоматический параллелизм** — независимые запросы выполняются одновременно
+//! - **Ссылки на результаты** — используй результаты одного запроса в другом
+//! - **Валидация** — проверка зависимостей, циклов, лимитов
+//! - **Транзакции** — опциональная MVCC изоляция
 //!
 //! # Quick Start
 //!
-//! ## JSON Request Format
+//! ## Простой запрос (аналог обычного Query)
 //!
 //! ```json
 //! {
-//!   "queries": [
-//!     {
-//!       "alias": "users",
-//!       "query": { "from": "users" }
-//!     },
-//!     {
-//!       "alias": "orders",
-//!       "query": {
-//!         "from": "orders",
-//!         "where": {
-//!           "op": "eq",
-//!           "field": "user_id",
-//!           "value": { "$query": "users[0].id" }
-//!         }
-//!       }
+//!   "queries": {
+//!     "users": {
+//!       "from": "users",
+//!       "where": { "op": "eq", "field": "status", "value": "active" },
+//!       "limit": 10
 //!     }
-//!   ]
+//!   }
 //! }
 //! ```
 //!
-//! ## Query Reference Syntax
+//! ## Запросы с зависимостями
 //!
-//! Reference other query results using the `$query` syntax:
+//! ```json
+//! {
+//!   "queries": {
+//!     "user": { "from": "users", "where": { "op": "eq", "field": "id", "value": 123 } },
+//!     "orders": {
+//!       "from": "orders",
+//!       "where": {
+//!         "op": "eq",
+//!         "field": "user_id",
+//!         "value": { "$query": "user[0].id" }
+//!       }
+//!     }
+//!   }
+//! }
+//! ```
+//!
+//! # Query Reference Syntax
+//!
+//! Ссылка на результаты других запросов через `$query`:
 //!
 //! | Syntax | Description |
 //! |--------|-------------|
-//! | `{ "$query": "@users" }` | Entire result array |
-//! | `{ "$query": "@users[0]" }` | First record |
-//! | `{ "$query": "@users[]" }` | All records (for extraction) |
-//! | `{ "$query": "@users[].id" }` | Column of IDs |
-//! | `{ "$query": "@users[0].name" }` | Specific field |
-//! | `{ "$query": "@users.count" }` | Result count |
+//! | `{ "$query": "@users" }` | Весь массив результатов |
+//! | `{ "$query": "@users[0]" }` | Первая запись |
+//! | `{ "$query": "@users[]" }` | Все записи (для извлечения) |
+//! | `{ "$query": "@users[].id" }` | Массив ID |
+//! | `{ "$query": "@users[0].name" }` | Поле из первой записи |
+//! | `{ "$query": "@users.count" }` | Количество записей |
 //!
-//! ## Execution Plan
+//! # Execution Plan
 //!
-//! The planner creates stages for parallel execution:
+//! Планировщик автоматически создаёт стадии для параллельного выполнения:
 //!
 //! ```text
-//! queries: [users, products, orders, stats]
+//! queries: { users, products, orders, stats }
 //! dependencies:
-//!   users -> {}
+//!   users    -> {}
 //!   products -> {}
-//!   orders -> {users, products}
-//!   stats -> {orders}
+//!   orders   -> {users, products}
+//!   stats    -> {orders}
 //!
 //! stages: [[users, products], [orders], [stats]]
 //! ```
+//!
+//! Stage 1: `users` и `products` параллельно
+//! Stage 2: `orders` после Stage 1
+//! Stage 3: `stats` после Stage 2
+//!
+//! # Полная документация
+//!
+//! См. [README.md](./README.md) для:
+//! - Полного описания формата запроса
+//! - Всех операторов фильтрации
+//! - Лимитов безопасности
+//! - Примеров использования
+//! - Архитектуры модуля
 //!
 //! # Example: E-commerce Dashboard
 //!
 //! ```json
 //! {
 //!   "name": "dashboard",
-//!   "queries": [
-//!     {
-//!       "alias": "user",
-//!       "query": {
-//!         "from": "users",
-//!         "where": { "op": "eq", "field": "id", "value": 123 }
+//!   "queries": {
+//!     "user": {
+//!       "from": "users",
+//!       "where": { "op": "eq", "field": "id", "value": 123 }
+//!     },
+//!     "orders": {
+//!       "from": "orders",
+//!       "where": {
+//!         "op": "eq",
+//!         "field": "user_id",
+//!         "value": { "$query": "user[0].id" }
 //!       }
 //!     },
-//!     {
-//!       "alias": "orders",
-//!       "query": {
-//!         "from": "orders",
-//!         "where": {
-//!           "op": "eq",
-//!           "field": "user_id",
-//!           "value": { "$query": "user[0].id" }
-//!         }
+//!     "items": {
+//!       "from": "order_items",
+//!       "where": {
+//!         "op": "in",
+//!         "field": "order_id",
+//!         "values": [{ "$query": "orders[].id" }]
 //!       }
 //!     },
-//!     {
-//!       "alias": "order_items",
-//!       "query": {
-//!         "from": "order_items",
-//!         "where": {
-//!           "op": "in",
-//!           "field": "order_id",
-//!           "values": [{ "$query": "orders[].id" }]
-//!         }
-//!       }
-//!     },
-//!     {
-//!       "alias": "products",
-//!       "query": {
-//!         "from": "products",
-//!         "where": {
-//!           "op": "in",
-//!           "field": "id",
-//!           "values": [{ "$query": "order_items[].product_id" }]
-//!         }
+//!     "products": {
+//!       "from": "products",
+//!       "where": {
+//!         "op": "in",
+//!         "field": "id",
+//!         "values": [{ "$query": "items[].product_id" }]
 //!       }
 //!     }
-//!   ],
+//!   },
 //!   "return_all": true
 //! }
 //! ```
 
-mod types;
-mod reference;
 mod planner;
+mod reference;
+mod types;
 
-pub use types::{
-    BatchError, BatchLimits, BatchPlan, BatchRequest, BatchResponse, NamedQuery,
-};
-pub use reference::{QueryPath, QueryReference};
 pub use planner::BatchPlanner;
+pub use reference::{QueryPath, QueryReference};
+pub use types::{BatchError, BatchLimits, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 
 #[cfg(test)]
 mod tests;

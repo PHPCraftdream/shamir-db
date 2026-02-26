@@ -1,6 +1,6 @@
 //! Tests for BatchPlanner using JSON input
 //!
-//! All tests use JSON format to demonstrate real-world usage.
+//! All tests use JSON format with map syntax where alias is the key.
 
 use serde_json::json;
 
@@ -13,7 +13,7 @@ fn parse_request(json: serde_json::Value) -> BatchRequest {
 #[test]
 fn test_plan_empty() {
     let json = json!({
-        "queries": []
+        "queries": {}
     });
 
     let request = parse_request(json);
@@ -26,14 +26,11 @@ fn test_plan_empty() {
 #[test]
 fn test_plan_single_query() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": {
-                    "from": "users"
-                }
+        "queries": {
+            "users": {
+                "from": "users"
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -47,20 +44,11 @@ fn test_plan_single_query() {
 #[test]
 fn test_plan_parallel_queries() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "products",
-                "query": { "from": "products" }
-            },
-            {
-                "alias": "orders",
-                "query": { "from": "orders" }
-            }
-        ]
+        "queries": {
+            "users": { "from": "users" },
+            "products": { "from": "products" },
+            "orders": { "from": "orders" }
+        }
     });
 
     let request = parse_request(json);
@@ -77,23 +65,17 @@ fn test_plan_parallel_queries() {
 #[test]
 fn test_plan_sequential_dependencies() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "orders",
-                "query": {
-                    "from": "orders",
-                    "where": {
-                        "op": "eq",
-                        "field": "user_id",
-                        "value": { "$query": "users" }
-                    }
+        "queries": {
+            "users": { "from": "users" },
+            "orders": {
+                "from": "orders",
+                "where": {
+                    "op": "eq",
+                    "field": "user_id",
+                    "value": { "$query": "users" }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -110,48 +92,36 @@ fn test_plan_sequential_dependencies() {
 #[test]
 fn test_plan_complex_dependencies() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "products",
-                "query": { "from": "products" }
-            },
-            {
-                "alias": "orders",
-                "query": {
-                    "from": "orders",
-                    "where": {
-                        "op": "and",
-                        "filters": [
-                            {
-                                "op": "eq",
-                                "field": "user_id",
-                                "value": { "$query": "users" }
-                            },
-                            {
-                                "op": "eq",
-                                "field": "product_id",
-                                "value": { "$query": "products" }
-                            }
-                        ]
-                    }
+        "queries": {
+            "users": { "from": "users" },
+            "products": { "from": "products" },
+            "orders": {
+                "from": "orders",
+                "where": {
+                    "op": "and",
+                    "filters": [
+                        {
+                            "op": "eq",
+                            "field": "user_id",
+                            "value": { "$query": "users" }
+                        },
+                        {
+                            "op": "eq",
+                            "field": "product_id",
+                            "value": { "$query": "products" }
+                        }
+                    ]
                 }
             },
-            {
-                "alias": "stats",
-                "query": {
-                    "from": "stats",
-                    "where": {
-                        "op": "eq",
-                        "field": "order_count",
-                        "value": { "$query": "orders" }
-                    }
+            "stats": {
+                "from": "stats",
+                "where": {
+                    "op": "eq",
+                    "field": "order_count",
+                    "value": { "$query": "orders" }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -168,43 +138,18 @@ fn test_plan_complex_dependencies() {
 }
 
 #[test]
-fn test_plan_duplicate_alias() {
-    let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "users",
-                "query": { "from": "other" }
-            }
-        ]
-    });
-
-    let request = parse_request(json);
-    let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
-    assert!(
-        matches!(err, crate::db::query::batch::BatchError::DuplicateAlias { alias } if alias == "users")
-    );
-}
-
-#[test]
 fn test_plan_unknown_alias() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "orders",
-                "query": {
-                    "from": "orders",
-                    "where": {
-                        "op": "eq",
-                        "field": "user_id",
-                        "value": { "$query": "nonexistent" }
-                    }
+        "queries": {
+            "orders": {
+                "from": "orders",
+                "where": {
+                    "op": "eq",
+                    "field": "user_id",
+                    "value": { "$query": "nonexistent" }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -216,14 +161,10 @@ fn test_plan_unknown_alias() {
 
 #[test]
 fn test_plan_too_many_queries() {
-    let queries: Vec<_> = (0..60)
-        .map(|i| {
-            json!({
-                "alias": format!("q{}", i),
-                "query": { "from": "table" }
-            })
-        })
-        .collect();
+    let mut queries = serde_json::Map::new();
+    for i in 0..60 {
+        queries.insert(format!("q{}", i), json!({ "from": "table" }));
+    }
 
     let json = json!({
         "queries": queries
@@ -240,12 +181,12 @@ fn test_plan_too_many_queries() {
 #[test]
 fn test_plan_custom_limits() {
     let json = json!({
-        "queries": [
-            { "alias": "a", "query": { "from": "t" } },
-            { "alias": "b", "query": { "from": "t" } },
-            { "alias": "c", "query": { "from": "t" } },
-            { "alias": "d", "query": { "from": "t" } }
-        ],
+        "queries": {
+            "a": { "from": "t" },
+            "b": { "from": "t" },
+            "c": { "from": "t" },
+            "d": { "from": "t" }
+        },
         "limits": {
             "max_queries": 3,
             "max_dependency_depth": 10,
@@ -265,41 +206,32 @@ fn test_plan_custom_limits() {
 #[test]
 fn test_plan_circular_dependency() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "a",
-                "query": {
-                    "from": "a",
-                    "where": {
-                        "op": "eq",
-                        "field": "x",
-                        "value": { "$query": "c" }
-                    }
+        "queries": {
+            "a": {
+                "from": "a",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": "c" }
                 }
             },
-            {
-                "alias": "b",
-                "query": {
-                    "from": "b",
-                    "where": {
-                        "op": "eq",
-                        "field": "x",
-                        "value": { "$query": "a" }
-                    }
+            "b": {
+                "from": "b",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": "a" }
                 }
             },
-            {
-                "alias": "c",
-                "query": {
-                    "from": "c",
-                    "where": {
-                        "op": "eq",
-                        "field": "x",
-                        "value": { "$query": "b" }
-                    }
+            "c": {
+                "from": "c",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": "b" }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -313,19 +245,16 @@ fn test_plan_circular_dependency() {
 #[test]
 fn test_plan_self_dependency() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "self_ref",
-                "query": {
-                    "from": "t",
-                    "where": {
-                        "op": "eq",
-                        "field": "x",
-                        "value": { "$query": "self_ref" }
-                    }
+        "queries": {
+            "self_ref": {
+                "from": "t",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": "self_ref" }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -338,28 +267,23 @@ fn test_plan_self_dependency() {
 
 #[test]
 fn test_plan_dependency_depth() {
-    let queries: Vec<_> = (0..15)
-        .map(|i| {
-            if i == 0 {
-                json!({
-                    "alias": format!("q{}", i),
-                    "query": { "from": "t" }
-                })
-            } else {
-                json!({
-                    "alias": format!("q{}", i),
-                    "query": {
-                        "from": "t",
-                        "where": {
-                            "op": "eq",
-                            "field": "x",
-                            "value": { "$query": format!("q{}", i - 1) }
-                        }
-                    }
-                })
-            }
-        })
-        .collect();
+    let mut queries = serde_json::Map::new();
+
+    queries.insert("q0".to_string(), json!({ "from": "t" }));
+
+    for i in 1..15 {
+        queries.insert(
+            format!("q{}", i),
+            json!({
+                "from": "t",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": format!("q{}", i - 1) }
+                }
+            }),
+        );
+    }
 
     let json = json!({
         "queries": queries,
@@ -382,26 +306,20 @@ fn test_plan_dependency_depth() {
 #[test]
 fn test_plan_mixed_in_filter() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "orders",
-                "query": {
-                    "from": "orders",
-                    "where": {
-                        "op": "in",
-                        "field": "user_id",
-                        "values": [
-                            { "$query": "users" },
-                            42
-                        ]
-                    }
+        "queries": {
+            "users": { "from": "users" },
+            "orders": {
+                "from": "orders",
+                "where": {
+                    "op": "in",
+                    "field": "user_id",
+                    "values": [
+                        { "$query": "users" },
+                        42
+                    ]
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -415,37 +333,28 @@ fn test_plan_mixed_in_filter() {
 #[test]
 fn test_plan_or_filter() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "admins",
-                "query": { "from": "admins" }
-            },
-            {
-                "alias": "results",
-                "query": {
-                    "from": "results",
-                    "where": {
-                        "op": "or",
-                        "filters": [
-                            {
-                                "op": "eq",
-                                "field": "user_id",
-                                "value": { "$query": "users" }
-                            },
-                            {
-                                "op": "eq",
-                                "field": "admin_id",
-                                "value": { "$query": "admins" }
-                            }
-                        ]
-                    }
+        "queries": {
+            "users": { "from": "users" },
+            "admins": { "from": "admins" },
+            "results": {
+                "from": "results",
+                "where": {
+                    "op": "or",
+                    "filters": [
+                        {
+                            "op": "eq",
+                            "field": "user_id",
+                            "value": { "$query": "users" }
+                        },
+                        {
+                            "op": "eq",
+                            "field": "admin_id",
+                            "value": { "$query": "admins" }
+                        }
+                    ]
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -459,55 +368,43 @@ fn test_plan_or_filter() {
 #[test]
 fn test_plan_diamond_dependency() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "a",
-                "query": { "from": "t" }
-            },
-            {
-                "alias": "b",
-                "query": {
-                    "from": "t",
-                    "where": {
-                        "op": "eq",
-                        "field": "x",
-                        "value": { "$query": "a" }
-                    }
+        "queries": {
+            "a": { "from": "t" },
+            "b": {
+                "from": "t",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": "a" }
                 }
             },
-            {
-                "alias": "c",
-                "query": {
-                    "from": "t",
-                    "where": {
-                        "op": "eq",
-                        "field": "x",
-                        "value": { "$query": "a" }
-                    }
+            "c": {
+                "from": "t",
+                "where": {
+                    "op": "eq",
+                    "field": "x",
+                    "value": { "$query": "a" }
                 }
             },
-            {
-                "alias": "d",
-                "query": {
-                    "from": "t",
-                    "where": {
-                        "op": "and",
-                        "filters": [
-                            {
-                                "op": "eq",
-                                "field": "x",
-                                "value": { "$query": "b" }
-                            },
-                            {
-                                "op": "eq",
-                                "field": "y",
-                                "value": { "$query": "c" }
-                            }
-                        ]
-                    }
+            "d": {
+                "from": "t",
+                "where": {
+                    "op": "and",
+                    "filters": [
+                        {
+                            "op": "eq",
+                            "field": "x",
+                            "value": { "$query": "b" }
+                        },
+                        {
+                            "op": "eq",
+                            "field": "y",
+                            "value": { "$query": "c" }
+                        }
+                    ]
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -522,26 +419,20 @@ fn test_plan_diamond_dependency() {
 #[test]
 fn test_plan_with_query_path() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "orders",
-                "query": {
-                    "from": "orders",
-                    "where": {
-                        "op": "eq",
-                        "field": "user_id",
-                        "value": {
-                            "$query": "users",
-                            "path": "[0].id"
-                        }
+        "queries": {
+            "users": { "from": "users" },
+            "orders": {
+                "from": "orders",
+                "where": {
+                    "op": "eq",
+                    "field": "user_id",
+                    "value": {
+                        "$query": "users",
+                        "path": "[0].id"
                     }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -555,26 +446,24 @@ fn test_plan_with_query_path() {
 #[test]
 fn test_plan_return_flags() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" },
+        "queries": {
+            "users": {
+                "from": "users",
                 "return_result": true
             },
-            {
-                "alias": "internal",
-                "query": { "from": "internal" },
+            "internal": {
+                "from": "internal",
                 "return_result": false
             }
-        ],
+        },
         "return_all": false,
         "return_only": ["users"]
     });
 
     let request = parse_request(json);
     assert_eq!(request.queries.len(), 2);
-    assert!(request.queries[0].return_result);
-    assert!(!request.queries[1].return_result);
+    assert!(request.queries.get("users").unwrap().return_result);
+    assert!(!request.queries.get("internal").unwrap().return_result);
     assert!(!request.return_all);
     assert_eq!(request.return_only, Some(vec!["users".to_string()]));
 }
@@ -584,23 +473,17 @@ fn test_plan_transactional_batch() {
     let json = json!({
         "name": "user_order_transaction",
         "transactional": true,
-        "queries": [
-            {
-                "alias": "users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "orders",
-                "query": {
-                    "from": "orders",
-                    "where": {
-                        "op": "eq",
-                        "field": "user_id",
-                        "value": { "$query": "users[0].id" }
-                    }
+        "queries": {
+            "users": { "from": "users" },
+            "orders": {
+                "from": "orders",
+                "where": {
+                    "op": "eq",
+                    "field": "user_id",
+                    "value": { "$query": "users[0].id" }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
@@ -611,26 +494,20 @@ fn test_plan_transactional_batch() {
 #[test]
 fn test_plan_not_filter() {
     let json = json!({
-        "queries": [
-            {
-                "alias": "active_users",
-                "query": { "from": "users" }
-            },
-            {
-                "alias": "inactive_users",
-                "query": {
-                    "from": "users",
-                    "where": {
-                        "op": "not",
-                        "filter": {
-                            "op": "eq",
-                            "field": "id",
-                            "value": { "$query": "active_users[0].id" }
-                        }
+        "queries": {
+            "active_users": { "from": "users" },
+            "inactive_users": {
+                "from": "users",
+                "where": {
+                    "op": "not",
+                    "filter": {
+                        "op": "eq",
+                        "field": "id",
+                        "value": { "$query": "active_users[0].id" }
                     }
                 }
             }
-        ]
+        }
     });
 
     let request = parse_request(json);
