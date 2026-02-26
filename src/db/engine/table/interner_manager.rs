@@ -12,16 +12,18 @@ use tokio::sync::OnceCell;
 ///
 /// The interner is loaded lazily on first access and persisted
 /// to storage when new keys are added.
+///
+/// Uses `Arc<OnceCell>` so all clones share the same interner.
 pub struct InternerManager {
     info_store: Arc<dyn Store>,
-    interner: OnceCell<Interner>,
+    interner: Arc<OnceCell<Interner>>,
 }
 
 impl Clone for InternerManager {
     fn clone(&self) -> Self {
         Self {
             info_store: Arc::clone(&self.info_store),
-            interner: OnceCell::new(),
+            interner: Arc::clone(&self.interner),
         }
     }
 }
@@ -31,7 +33,7 @@ impl InternerManager {
     pub fn new(info_store: Arc<dyn Store>) -> Self {
         Self {
             info_store,
-            interner: OnceCell::new(),
+            interner: Arc::new(OnceCell::new()),
         }
     }
 

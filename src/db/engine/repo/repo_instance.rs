@@ -6,6 +6,8 @@ use super::repo_types::BoxRepo;
 use crate::db::storage::types::Repo;
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_dash_map_wc, TDashMap, TMap};
+use crate::types::value::InnerValue;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -100,5 +102,66 @@ impl RepoInstance {
 
     pub fn table_count(&self) -> usize {
         self.configs.len()
+    }
+
+    // ============================================================================
+    // Index Management API (proxy to TableManager)
+    // ============================================================================
+
+    /// Create a regular index on a table.
+    pub async fn create_index(
+        &self,
+        table_name: &str,
+        index_name: &str,
+        paths: &[&str],
+    ) -> DbResult<()> {
+        let table = self.get_table(table_name).await?;
+        table.create_index(index_name, paths).await
+    }
+
+    /// Create a unique index on a table.
+    pub async fn create_unique_index(
+        &self,
+        table_name: &str,
+        index_name: &str,
+        paths: &[&str],
+    ) -> DbResult<()> {
+        let table = self.get_table(table_name).await?;
+        table.create_unique_index(index_name, paths).await
+    }
+
+    /// Drop a regular index from a table.
+    pub async fn drop_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
+        let table = self.get_table(table_name).await?;
+        table.drop_index(index_name).await
+    }
+
+    /// Drop a unique index from a table.
+    pub async fn drop_unique_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
+        let table = self.get_table(table_name).await?;
+        table.drop_unique_index(index_name).await
+    }
+
+    /// Check if a regular index exists on a table.
+    pub async fn index_exists(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
+        let table = self.get_table(table_name).await?;
+        Ok(table.index_exists(index_name).await)
+    }
+
+    /// Check if a unique index exists on a table.
+    pub async fn unique_index_exists(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
+        let table = self.get_table(table_name).await?;
+        Ok(table.unique_index_exists(index_name).await)
+    }
+
+    /// Look up records by index value.
+    pub async fn lookup_by_index(
+        &self,
+        table_name: &str,
+        index_name: &str,
+        values: &[InnerValue],
+    ) -> DbResult<BTreeSet<crate::types::record_id::RecordId>> {
+        let table = self.get_table(table_name).await?;
+        table.lookup_by_index(index_name, values).await
     }
 }

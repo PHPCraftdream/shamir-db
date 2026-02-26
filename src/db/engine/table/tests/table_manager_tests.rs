@@ -74,3 +74,167 @@ async fn test_table_manager_components() {
     let retrieved = ctx.table().get(record_id).await.unwrap();
     assert_eq!(retrieved, value);
 }
+
+// ============================================================================
+// Index API tests (string paths)
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_index_simple() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Create index with string path
+    table.create_index("email_idx", &["email"]).await.unwrap();
+
+    // Check index exists
+    assert!(table.index_exists("email_idx").await);
+    assert!(!table.index_exists("nonexistent").await);
+}
+
+#[tokio::test]
+async fn test_create_index_composite() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Create composite index
+    table
+        .create_index("name_city_idx", &["name", "city"])
+        .await
+        .unwrap();
+
+    assert!(table.index_exists("name_city_idx").await);
+}
+
+#[tokio::test]
+async fn test_create_index_nested_path() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Create index with nested path
+    table
+        .create_index("city_idx", &["address.city"])
+        .await
+        .unwrap();
+
+    assert!(table.index_exists("city_idx").await);
+}
+
+#[tokio::test]
+async fn test_drop_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Create and drop
+    table.create_index("email_idx", &["email"]).await.unwrap();
+    assert!(table.index_exists("email_idx").await);
+
+    let dropped = table.drop_index("email_idx").await.unwrap();
+    assert!(dropped);
+    assert!(!table.index_exists("email_idx").await);
+
+    // Drop non-existent returns false
+    let dropped_again = table.drop_index("email_idx").await.unwrap();
+    assert!(!dropped_again);
+}
+
+#[tokio::test]
+async fn test_unique_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Create unique index
+    table
+        .create_unique_index("email_unique", &["email"])
+        .await
+        .unwrap();
+
+    // Check unique index exists (not regular index)
+    assert!(!table.index_exists("email_unique").await);
+    assert!(table.unique_index_exists("email_unique").await);
+}
+
+#[tokio::test]
+async fn test_lookup_by_index() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Create index
+    table.create_index("status_idx", &["status"]).await.unwrap();
+
+    // Lookup with no data returns empty
+    let results = table
+        .lookup_by_index("status_idx", &[InnerValue::Str("active".to_string())])
+        .await
+        .unwrap();
+    assert!(results.is_empty());
+}
+
+#[tokio::test]
+async fn test_get_record() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        repo: BoxRepo::InMemory(repo),
+        tables: configs,
+    };
+    let dispatcher = Dispatcher::new(vec![repo_config]);
+
+    let table = dispatcher.get_table("default", "users").await.unwrap();
+
+    // Insert and retrieve
+    let value = InnerValue::Str("hello".to_string());
+    let id = table.insert(&value).await.unwrap();
+
+    let retrieved = table.get(id).await.unwrap();
+    assert_eq!(retrieved, value);
+}
