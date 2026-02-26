@@ -5,3 +5,6 @@
 mod types;
 
 pub use types::{DeleteOp, InsertOp, SetOp, UpdateOp};
+
+#[cfg(test)]
+mod tests;
