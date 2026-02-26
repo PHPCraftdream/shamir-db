@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::query::read::{Query, QueryResult};
+use crate::db::query::read::{Query, QueryResult, ReadQuery};
 use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::types::common::{TMap, TSet};
 
@@ -12,10 +12,10 @@ use crate::types::common::{TMap, TSet};
 // BATCH OPERATION ENUM
 // ============================================================================
 
-/// Batch operation - can be a query or a write operation.
+/// Batch operation - can be a read or a write operation.
 ///
 /// Uses untagged serde to automatically detect operation type by unique fields:
-/// - `from` → Query
+/// - `from` → Read
 /// - `insert_into` → Insert
 /// - `update` → Update
 /// - `set` → Set
@@ -23,8 +23,8 @@ use crate::types::common::{TMap, TSet};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BatchOp {
-    /// Read query.
-    Query(Query),
+    /// Read query (SELECT).
+    Read(Query),
 
     /// Insert new records.
     Insert(InsertOp),
@@ -43,7 +43,7 @@ impl BatchOp {
     /// Returns the table name for this operation.
     pub fn table_name(&self) -> &str {
         match self {
-            BatchOp::Query(q) => q.from.as_str(),
+            BatchOp::Read(q) => q.from.as_str(),
             BatchOp::Insert(i) => i.insert_into.as_str(),
             BatchOp::Update(u) => u.update.as_str(),
             BatchOp::Set(s) => s.set.as_str(),
@@ -53,7 +53,7 @@ impl BatchOp {
 
     /// Returns true if this is a read operation.
     pub fn is_read(&self) -> bool {
-        matches!(self, BatchOp::Query(_))
+        matches!(self, BatchOp::Read(_))
     }
 
     /// Returns true if this is a write operation.
@@ -62,9 +62,9 @@ impl BatchOp {
     }
 }
 
-impl From<Query> for BatchOp {
-    fn from(q: Query) -> Self {
-        BatchOp::Query(q)
+impl From<ReadQuery> for BatchOp {
+    fn from(q: ReadQuery) -> Self {
+        BatchOp::Read(q)
     }
 }
 
@@ -136,10 +136,10 @@ fn default_return() -> bool {
     true
 }
 
-impl From<Query> for QueryEntry {
-    fn from(query: Query) -> Self {
+impl From<ReadQuery> for QueryEntry {
+    fn from(query: ReadQuery) -> Self {
         QueryEntry {
-            op: BatchOp::Query(query),
+            op: BatchOp::Read(query),
             return_result: true,
         }
     }

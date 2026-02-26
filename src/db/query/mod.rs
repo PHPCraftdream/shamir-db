@@ -12,6 +12,7 @@ pub use common::QueryParseError;
 pub use filter::{FieldPath, Filter, FilterValue};
 pub use read::{
     AggFunc, AggregateField, Expr, ExprValue, GroupBy, LimitOffset, NullsOrder, OrderBy,
-    OrderByItem, OrderDirection, Query, QueryResult, QueryStats, Select, SelectItem, TableName,
+    OrderByItem, OrderDirection, Query, QueryResult, QueryStats, ReadQuery, Select, SelectItem,
+    TableName,
 };
 pub use write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect};
