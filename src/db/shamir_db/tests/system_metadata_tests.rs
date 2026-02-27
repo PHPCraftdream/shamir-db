@@ -19,7 +19,7 @@ async fn test_system_repo_exists_after_creation() {
 async fn test_create_db_persists_to_system() {
     let shamir = ShamirDb::new();
 
-    shamir.create_db("production");
+    shamir.create_db("production").await;
 
     let db_names = shamir.list_databases_metadata();
     assert!(db_names.contains(&"production".to_string()));
@@ -30,12 +30,12 @@ async fn test_create_db_persists_to_system() {
 async fn test_remove_db_removes_from_system() {
     let shamir = ShamirDb::new();
 
-    shamir.create_db("production");
+    shamir.create_db("production").await;
     assert!(shamir
         .list_databases_metadata()
         .contains(&"production".to_string()));
 
-    shamir.remove_db("production");
+    shamir.remove_db("production").await;
 
     let db_names = shamir.list_databases_metadata();
     assert!(!db_names.contains(&"production".to_string()));
@@ -44,7 +44,7 @@ async fn test_remove_db_removes_from_system() {
 #[tokio::test]
 async fn test_add_repo_persists_to_system() {
     let shamir = ShamirDb::new();
-    shamir.create_db("production");
+    shamir.create_db("production").await;
 
     let repo = Arc::new(InMemoryRepo::new());
     let config =
@@ -61,7 +61,7 @@ async fn test_add_repo_persists_to_system() {
 #[tokio::test]
 async fn test_list_tables_for_admin() {
     let shamir = ShamirDb::new();
-    shamir.create_db("production");
+    shamir.create_db("production").await;
 
     let repo = Arc::new(InMemoryRepo::new());
     let config = RepoConfig::new("users_db", BoxRepo::InMemory(repo))
@@ -83,7 +83,7 @@ async fn test_list_tables_for_admin() {
 async fn test_restore_from_system_metadata() {
     let shamir1 = ShamirDb::new();
 
-    shamir1.create_db("production");
+    shamir1.create_db("production").await;
 
     let repo = Arc::new(InMemoryRepo::new());
     let config =
@@ -115,7 +115,7 @@ async fn test_system_metadata_repo_has_tables() {
 #[tokio::test]
 async fn test_multiple_repos_in_same_db() {
     let shamir = ShamirDb::new();
-    shamir.create_db("production");
+    shamir.create_db("production").await;
 
     let repo1 = Arc::new(InMemoryRepo::new());
     let config1 =

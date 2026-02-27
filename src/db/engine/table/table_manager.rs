@@ -5,6 +5,7 @@ use crate::core::interner::TouchInd;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
 use crate::db::engine::index::index_manager::IndexManager;
+use crate::db::storage::types::Store;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
@@ -32,6 +33,34 @@ impl Clone for TableManager {
 }
 
 impl TableManager {
+    /// Create a new TableManager with all internal components.
+    ///
+    /// This is the preferred way to create a TableManager - it handles
+    /// internal Table creation and all component initialization.
+    pub async fn create(
+        name: String,
+        data_store: Arc<dyn Store>,
+        info_store: Arc<dyn Store>,
+    ) -> DbResult<Self> {
+        let interner = InternerManager::new(Arc::clone(&info_store));
+        let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
+        let index_manager =
+            IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
+        let table = Table::new(data_store);
+
+        Ok(Self {
+            name,
+            table: Arc::new(table),
+            interner,
+            counter,
+            index_manager,
+        })
+    }
+
+    /// Create a TableManager from existing components.
+    ///
+    /// This is primarily for testing or advanced use cases.
+    #[cfg(test)]
     pub fn new(
         name: String,
         table: Table,
@@ -48,18 +77,22 @@ impl TableManager {
         }
     }
 
+    #[cfg(test)]
     pub fn table(&self) -> &Table {
         &self.table
     }
 
+    #[cfg(test)]
     pub fn interner(&self) -> &InternerManager {
         &self.interner
     }
 
+    #[cfg(test)]
     pub fn counter(&self) -> &Arc<RecordCounter> {
         &self.counter
     }
 
+    #[cfg(test)]
     pub fn index_manager(&self) -> &IndexManager {
         &self.index_manager
     }
