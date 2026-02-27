@@ -159,7 +159,7 @@ async fn test_add_repo() {
     let config = RepoConfig::new("new_repo", BoxRepo::InMemory(repo))
         .add_table(TableConfig::new("test_table"));
 
-    db.add_repo(config);
+    db.add_repo(config).await;
 
     assert_eq!(db.repo_count(), 1);
     assert!(db.has_repo("new_repo"));

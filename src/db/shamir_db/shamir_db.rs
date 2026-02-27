@@ -82,7 +82,7 @@ impl ShamirDb {
         self.dbs.contains_key(name)
     }
 
-    pub fn create_db(&self, name: &str) -> DbInstance {
+    pub async fn create_db(&self, name: &str) -> DbInstance {
         let db = DbInstance::new(vec![]);
         self.dbs.insert(name.to_string(), db.clone());
 
@@ -106,7 +106,7 @@ impl ShamirDb {
         self.dbs.get(name).map(|r| r.clone())
     }
 
-    pub fn get_or_create_db(&self, name: &str) -> DbInstance {
+    pub async fn get_or_create_db(&self, name: &str) -> DbInstance {
         self.dbs
             .entry(name.to_string())
             .or_insert_with(|| {
@@ -134,7 +134,7 @@ impl ShamirDb {
         self.dbs.iter().map(|r| r.key().clone()).collect()
     }
 
-    pub fn remove_db(&self, name: &str) -> bool {
+    pub async fn remove_db(&self, name: &str) -> bool {
         if name == SYSTEM_DB_NAME {
             return false;
         }
@@ -160,7 +160,7 @@ impl ShamirDb {
         let storage_type = Self::extract_storage_type(&config.repo);
         let path = Self::extract_path(&config.repo);
 
-        db.add_repo(config);
+        db.add_repo(config).await;
 
         let key = format!("{}:{}", db_name, repo_name);
         self.repositories_metadata.insert(
@@ -210,9 +210,9 @@ impl ShamirDb {
     }
 
     /// Remove a repository from a database with metadata cleanup
-    pub fn remove_repo(&self, db_name: &str, repo_name: &str) -> bool {
+    pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> bool {
         if let Some(db) = self.get_db(db_name) {
-            let removed = db.remove_repo(repo_name);
+            let removed = db.remove_repo(repo_name).await;
             if removed {
                 let key = format!("{}:{}", db_name, repo_name);
                 self.repositories_metadata.remove(&key);

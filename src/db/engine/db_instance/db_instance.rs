@@ -33,7 +33,7 @@ impl DbInstance {
     }
 
     /// Add a new repository
-    pub fn add_repo(&self, config: RepoConfig) {
+    pub async fn add_repo(&self, config: RepoConfig) {
         let instance = RepoInstance::new(config.repo, config.tables);
         self.repos.insert(config.name, instance);
     }
@@ -92,7 +92,7 @@ impl DbInstance {
     }
 
     /// Remove a repository from the instance
-    pub fn remove_repo(&self, repo_name: &str) -> bool {
+    pub async fn remove_repo(&self, repo_name: &str) -> bool {
         self.repos.remove(repo_name).is_some()
     }
 

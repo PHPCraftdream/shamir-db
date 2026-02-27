@@ -1,7 +1,3 @@
-use super::super::index::index_manager::IndexManager;
-use super::super::table::interner_manager::InternerManager;
-use super::super::table::record_counter::RecordCounter;
-use super::super::table::table::Table;
 use super::super::table::{TableConfig, TableManager};
 use super::repo_types::BoxRepo;
 use crate::db::storage::types::Repo;
@@ -76,21 +72,7 @@ impl RepoInstance {
         let data_store: Arc<dyn crate::db::storage::types::Store> = data_store;
         let info_store: Arc<dyn crate::db::storage::types::Store> = info_store;
 
-        let interner_manager = InternerManager::new(Arc::clone(&info_store));
-        let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
-
-        let index_manager =
-            IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
-
-        let table = Table::new(Arc::clone(&data_store));
-
-        Ok(TableManager::new(
-            table_name.to_string(),
-            table,
-            interner_manager,
-            counter,
-            index_manager,
-        ))
+        TableManager::create(table_name.to_string(), data_store, info_store).await
     }
 
     pub fn list_table_names(&self) -> Vec<String> {
