@@ -86,6 +86,16 @@ impl DbInstance {
         self.repos.iter().map(|r| r.table_count()).sum()
     }
 
+    /// Get a repository instance directly
+    pub fn get_repo(&self, repo_name: &str) -> Option<RepoInstance> {
+        self.repos.get(repo_name).map(|r| r.clone())
+    }
+
+    /// Remove a repository from the instance
+    pub fn remove_repo(&self, repo_name: &str) -> bool {
+        self.repos.remove(repo_name).is_some()
+    }
+
     // ============================================================================
     // Index Management API (routing to RepoInstance)
     // ============================================================================
