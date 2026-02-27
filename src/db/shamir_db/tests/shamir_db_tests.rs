@@ -1,6 +1,6 @@
 use crate::db::engine::repo::{BoxRepo, RepoConfig};
 use crate::db::engine::table::TableConfig;
-use crate::db::shamir_db::shamir_db::ShamirDb;
+use crate::db::shamir_db::ShamirDb;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use std::sync::Arc;
 
@@ -193,4 +193,111 @@ async fn test_shamir_db_index_api() {
         .index_exists("users_db", "users", "email_idx")
         .await
         .unwrap());
+}
+
+// ============================================================================
+// Tests for new hierarchy methods
+// ============================================================================
+
+#[tokio::test]
+async fn test_remove_repo_from_shamir_db() {
+    let shamir = ShamirDb::new();
+    shamir.create_db("production");
+
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+
+    shamir.add_repo("production", config).await.unwrap();
+
+    let db = shamir.get_db("production").unwrap();
+    assert!(db.has_repo("users_db"));
+
+    // Remove repo
+    let removed = shamir.remove_repo("production", "users_db");
+    assert!(removed);
+    assert!(!db.has_repo("users_db"));
+
+    // Remove non-existent repo
+    let removed = shamir.remove_repo("production", "users_db");
+    assert!(!removed);
+
+    // Remove from non-existent db
+    let removed = shamir.remove_repo("nonexistent", "users_db");
+    assert!(!removed);
+}
+
+#[tokio::test]
+async fn test_get_table_shortcut() {
+    let shamir = ShamirDb::new();
+    shamir.create_db("production");
+
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+
+    shamir.add_repo("production", config).await.unwrap();
+
+    // Direct table access through ShamirDb
+    let table = shamir
+        .get_table("production", "users_db", "users")
+        .await
+        .unwrap();
+    assert_eq!(table.name(), "users");
+
+    // Non-existent db
+    let result = shamir.get_table("nonexistent", "users_db", "users").await;
+    assert!(result.is_err());
+
+    // Non-existent repo
+    let result = shamir.get_table("production", "nonexistent", "users").await;
+    assert!(result.is_err());
+
+    // Non-existent table
+    let result = shamir
+        .get_table("production", "users_db", "nonexistent")
+        .await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn test_db_instance_get_repo() {
+    let shamir = ShamirDb::new();
+    let db = shamir.create_db("production");
+
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+
+    db.add_repo(config);
+
+    // Get repo
+    let repo_instance = db.get_repo("users_db");
+    assert!(repo_instance.is_some());
+
+    // Non-existent repo
+    let repo_instance = db.get_repo("nonexistent");
+    assert!(repo_instance.is_none());
+}
+
+#[tokio::test]
+async fn test_db_instance_remove_repo() {
+    let shamir = ShamirDb::new();
+    let db = shamir.create_db("production");
+
+    let repo = Arc::new(InMemoryRepo::new());
+    let config =
+        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+
+    db.add_repo(config);
+    assert!(db.has_repo("users_db"));
+
+    // Remove repo
+    let removed = db.remove_repo("users_db");
+    assert!(removed);
+    assert!(!db.has_repo("users_db"));
+
+    // Remove non-existent repo
+    let removed = db.remove_repo("users_db");
+    assert!(!removed);
 }

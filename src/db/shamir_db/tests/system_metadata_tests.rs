@@ -1,6 +1,6 @@
 use crate::db::engine::repo::{BoxRepo, RepoConfig};
 use crate::db::engine::table::TableConfig;
-use crate::db::shamir_db::shamir_db::ShamirDb;
+use crate::db::shamir_db::ShamirDb;
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use std::sync::Arc;
 

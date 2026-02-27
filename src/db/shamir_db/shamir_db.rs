@@ -1,6 +1,6 @@
 use crate::db::engine::db_instance::db_instance::DbInstance;
 use crate::db::engine::repo::{BoxRepo, RepoConfig};
-use crate::db::engine::table::TableConfig;
+use crate::db::engine::table::{TableConfig, TableManager};
 use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::{DbError, DbResult};
 use dashmap::DashMap;
@@ -207,5 +207,32 @@ impl ShamirDb {
             .filter(|r| r.db_name == db_name)
             .map(|r| r.value().clone())
             .collect()
+    }
+
+    /// Remove a repository from a database with metadata cleanup
+    pub fn remove_repo(&self, db_name: &str, repo_name: &str) -> bool {
+        if let Some(db) = self.get_db(db_name) {
+            let removed = db.remove_repo(repo_name);
+            if removed {
+                let key = format!("{}:{}", db_name, repo_name);
+                self.repositories_metadata.remove(&key);
+            }
+            removed
+        } else {
+            false
+        }
+    }
+
+    /// Direct table access shortcut
+    pub async fn get_table(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<TableManager> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        db.get_table(repo_name, table_name).await
     }
 }

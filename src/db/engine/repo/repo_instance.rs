@@ -1,7 +1,8 @@
 use super::super::index::index_manager::IndexManager;
 use super::super::table::interner_manager::InternerManager;
 use super::super::table::record_counter::RecordCounter;
-use super::super::table::{Table, TableConfig, TableManager};
+use super::super::table::table::Table;
+use super::super::table::{TableConfig, TableManager};
 use super::repo_types::BoxRepo;
 use crate::db::storage::types::Repo;
 use crate::db::{DbError, DbResult};
