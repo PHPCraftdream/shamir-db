@@ -31,35 +31,48 @@ impl FjallRepo {
 #[async_trait]
 impl Repo for FjallRepo {
     async fn store_get<S: AsRef<str> + Send>(&self, name: S) -> DbResult<Arc<dyn Store>> {
-        let keyspace = self
-            .db
-            .keyspace(name.as_ref(), KeyspaceCreateOptions::default)
-            .map_err(|e| DbError::Storage(e.to_string()))?;
+        let db = self.db.clone();
+        let table_name = name.as_ref().to_string();
+
+        let keyspace = task::spawn_blocking(move || -> DbResult<Keyspace> {
+            db.keyspace(&table_name, KeyspaceCreateOptions::default)
+                .map_err(|e| DbError::Storage(e.to_string()))
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))??;
+
         Ok(Arc::new(FjallStore { keyspace }))
     }
 
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
-        // Get the keyspace first
-        let keyspace = self
-            .db
-            .keyspace(name.as_ref(), KeyspaceCreateOptions::default)
-            .map_err(|e| DbError::Storage(e.to_string()))?;
+        let db = self.db.clone();
+        let table_name = name.as_ref().to_string();
 
-        // Then delete it using the keyspace handle
-        self.db
-            .delete_keyspace(keyspace)
-            .map_err(|e| DbError::Storage(e.to_string()))?;
-        Ok(true)
+        task::spawn_blocking(move || -> DbResult<bool> {
+            let keyspace = db
+                .keyspace(&table_name, KeyspaceCreateOptions::default)
+                .map_err(|e| DbError::Storage(e.to_string()))?;
+
+            db.delete_keyspace(keyspace)
+                .map_err(|e| DbError::Storage(e.to_string()))?;
+            Ok(true)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
     async fn stores_list(&self) -> DbResult<Vec<String>> {
-        let names: Vec<String> = self
-            .db
-            .list_keyspace_names()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect();
-        Ok(names)
+        let db = self.db.clone();
+        task::spawn_blocking(move || -> DbResult<Vec<String>> {
+            let names: Vec<String> = db
+                .list_keyspace_names()
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            Ok(names)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 }
 

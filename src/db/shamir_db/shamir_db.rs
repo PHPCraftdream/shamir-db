@@ -1,7 +1,6 @@
 use crate::db::engine::db_instance::db_instance::DbInstance;
-use crate::db::engine::repo::{BoxRepo, RepoConfig};
+use crate::db::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::db::engine::table::{TableConfig, TableManager};
-use crate::db::storage::storage_in_memory::InMemoryRepo;
 use crate::db::{DbError, DbResult};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -54,7 +53,7 @@ impl ShamirDb {
     pub fn new() -> Self {
         let dbs = Arc::new(DashMap::new());
 
-        let system_db = Self::create_system_db();
+        let system_db = DbInstance::new();
         dbs.insert(SYSTEM_DB_NAME.to_string(), system_db);
 
         Self {
@@ -64,14 +63,18 @@ impl ShamirDb {
         }
     }
 
-    fn create_system_db() -> DbInstance {
-        let system_repo = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
-
-        let config = RepoConfig::new("metadata", system_repo)
+    pub async fn init(self) -> DbResult<Self> {
+        let config = RepoConfig::new("metadata", BoxRepoFactory::in_memory())
             .add_table(TableConfig::new("databases"))
             .add_table(TableConfig::new("repositories"));
 
-        DbInstance::new(vec![config])
+        self.dbs
+            .get(SYSTEM_DB_NAME)
+            .unwrap()
+            .add_repo(config)
+            .await?;
+
+        Ok(self)
     }
 
     pub fn db_count(&self) -> usize {
@@ -83,7 +86,7 @@ impl ShamirDb {
     }
 
     pub async fn create_db(&self, name: &str) -> DbInstance {
-        let db = DbInstance::new(vec![]);
+        let db = DbInstance::new();
         self.dbs.insert(name.to_string(), db.clone());
 
         let created_at = SystemTime::now()
@@ -110,7 +113,7 @@ impl ShamirDb {
         self.dbs
             .entry(name.to_string())
             .or_insert_with(|| {
-                let db = DbInstance::new(vec![]);
+                let db = DbInstance::new();
 
                 let created_at = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -157,10 +160,10 @@ impl ShamirDb {
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
 
         let repo_name = config.name.clone();
-        let storage_type = Self::extract_storage_type(&config.repo);
-        let path = Self::extract_path(&config.repo);
+        let storage_type = Self::extract_storage_type(&config.factory);
+        let path = Self::extract_path(&config.factory);
 
-        db.add_repo(config).await;
+        db.add_repo(config).await?;
 
         let key = format!("{}:{}", db_name, repo_name);
         self.repositories_metadata.insert(
@@ -176,21 +179,29 @@ impl ShamirDb {
         Ok(())
     }
 
-    fn extract_storage_type(repo: &BoxRepo) -> String {
-        match repo {
-            BoxRepo::InMemory(_) => "in_memory",
-            BoxRepo::Sled(_) => "sled",
-            BoxRepo::Redb(_) => "redb",
-            BoxRepo::Fjall(_) => "fjall",
-            BoxRepo::Nebari(_) => "nebari",
-            BoxRepo::Persy(_) => "persy",
-            BoxRepo::Canopy(_) => "canopy",
+    fn extract_storage_type(factory: &BoxRepoFactory) -> String {
+        match factory {
+            BoxRepoFactory::InMemory(_) => "in_memory",
+            BoxRepoFactory::Sled(_) => "sled",
+            BoxRepoFactory::Redb(_) => "redb",
+            BoxRepoFactory::Fjall(_) => "fjall",
+            BoxRepoFactory::Nebari(_) => "nebari",
+            BoxRepoFactory::Persy(_) => "persy",
+            BoxRepoFactory::Canopy(_) => "canopy",
         }
         .to_string()
     }
 
-    fn extract_path(_repo: &BoxRepo) -> Option<String> {
-        None
+    fn extract_path(factory: &BoxRepoFactory) -> Option<String> {
+        match factory {
+            BoxRepoFactory::InMemory(_) => None,
+            BoxRepoFactory::Sled(f) => Some(f.path.to_string_lossy().to_string()),
+            BoxRepoFactory::Redb(f) => Some(f.path.to_string_lossy().to_string()),
+            BoxRepoFactory::Fjall(f) => Some(f.path.to_string_lossy().to_string()),
+            BoxRepoFactory::Nebari(f) => Some(f.path.to_string_lossy().to_string()),
+            BoxRepoFactory::Persy(f) => Some(f.path.to_string_lossy().to_string()),
+            BoxRepoFactory::Canopy(f) => Some(f.path.to_string_lossy().to_string()),
+        }
     }
 
     pub fn list_databases_metadata(&self) -> Vec<String> {

@@ -1,5 +1,5 @@
 use super::super::table::TableManager;
-use crate::db::engine::repo::{RepoConfig, RepoInstance};
+use crate::db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use crate::db::{DbError, DbResult};
 use crate::types::value::InnerValue;
 use dashmap::DashMap;
@@ -14,28 +14,36 @@ pub struct DbInstance {
 
 impl Default for DbInstance {
     fn default() -> Self {
-        Self::new(vec![])
+        Self::new()
     }
 }
 
 impl DbInstance {
-    pub fn new(repos: Vec<RepoConfig>) -> Self {
-        let instances: DashMap<String, RepoInstance> = DashMap::new();
-        for config in repos {
-            let name = config.name.clone();
-            let instance = RepoInstance::new(config.repo, config.tables);
-            instances.insert(name, instance);
-        }
-
+    pub fn new() -> Self {
         Self {
-            repos: Arc::new(instances),
+            repos: Arc::new(DashMap::new()),
         }
     }
 
-    /// Add a new repository
-    pub async fn add_repo(&self, config: RepoConfig) {
-        let instance = RepoInstance::new(config.repo, config.tables);
+    /// Creates a DbInstance with pre-configured repos (async for factory creation)
+    pub async fn with_repos(configs: Vec<RepoConfig>) -> DbResult<Self> {
+        let instances: DashMap<String, RepoInstance> = DashMap::new();
+        for config in configs {
+            let name = config.name.clone();
+            let instance = RepoInstance::from_factory(config.factory, config.tables).await?;
+            instances.insert(name, instance);
+        }
+
+        Ok(Self {
+            repos: Arc::new(instances),
+        })
+    }
+
+    /// Add a new repository asynchronously
+    pub async fn add_repo(&self, config: RepoConfig) -> DbResult<()> {
+        let instance = RepoInstance::from_factory(config.factory, config.tables).await?;
         self.repos.insert(config.name, instance);
+        Ok(())
     }
 
     /// Get a table from a specific repository

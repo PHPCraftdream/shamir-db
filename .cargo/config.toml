@@ -1,0 +1,11 @@
+[profile.dev]
+codegen-units = 1
+debug = 0
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.shamir_db]
+opt-level = 0
+debug = false

@@ -1,6 +1,6 @@
 use super::super::table::{TableConfig, TableManager};
-use super::repo_types::BoxRepo;
-use crate::db::storage::types::Repo;
+use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
+use crate::db::storage::types::{Repo, Store};
 use crate::db::{DbError, DbResult};
 use crate::types::common::{new_dash_map_wc, TDashMap, TMap};
 use crate::types::value::InnerValue;
@@ -27,6 +27,10 @@ impl Clone for RepoInstance {
 
 impl RepoInstance {
     pub fn new(repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
+        Self::from_box_repo(repo, configs)
+    }
+
+    fn from_box_repo(repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         let configs_map: TMap<String, TableConfig> = configs
             .into_iter()
             .map(|cfg| (cfg.name.clone(), cfg))
@@ -39,6 +43,13 @@ impl RepoInstance {
             configs: Arc::new(configs_map),
             tables: Arc::new(tables),
         }
+    }
+
+    /// Creates a RepoInstance asynchronously from a factory.
+    /// This is the preferred method as it properly handles blocking I/O.
+    pub async fn from_factory(factory: BoxRepoFactory, configs: Vec<TableConfig>) -> DbResult<Self> {
+        let repo = factory.create().await?;
+        Ok(Self::from_box_repo(repo, configs))
     }
 
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
@@ -69,8 +80,8 @@ impl RepoInstance {
             .store_get(format!("__info__{}", table_name))
             .await?;
 
-        let data_store: Arc<dyn crate::db::storage::types::Store> = data_store;
-        let info_store: Arc<dyn crate::db::storage::types::Store> = info_store;
+        let data_store: Arc<dyn Store> = data_store;
+        let info_store: Arc<dyn Store> = info_store;
 
         TableManager::create(table_name.to_string(), data_store, info_store).await
     }

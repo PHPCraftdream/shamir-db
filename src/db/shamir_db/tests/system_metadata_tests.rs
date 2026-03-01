@@ -1,8 +1,6 @@
-use crate::db::engine::repo::{BoxRepo, RepoConfig};
+use crate::db::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::db::engine::table::TableConfig;
 use crate::db::shamir_db::ShamirDb;
-use crate::db::storage::storage_in_memory::InMemoryRepo;
-use std::sync::Arc;
 
 // ============================================================================
 // System repo tests - metadata persistence
@@ -46,9 +44,8 @@ async fn test_add_repo_persists_to_system() {
     let shamir = ShamirDb::new();
     shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
     shamir.add_repo("production", config).await.unwrap();
 
@@ -63,8 +60,7 @@ async fn test_list_tables_for_admin() {
     let shamir = ShamirDb::new();
     shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config = RepoConfig::new("users_db", BoxRepo::InMemory(repo))
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"))
         .add_table(TableConfig::new("sessions"))
         .add_table(TableConfig::new("tokens"));
@@ -85,9 +81,8 @@ async fn test_restore_from_system_metadata() {
 
     shamir1.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
     shamir1.add_repo("production", config).await.unwrap();
 
@@ -100,7 +95,7 @@ async fn test_restore_from_system_metadata() {
 
 #[tokio::test]
 async fn test_system_metadata_repo_has_tables() {
-    let shamir = ShamirDb::new();
+    let shamir = ShamirDb::new().init().await.unwrap();
 
     let system_db = shamir.get_db("__system__").unwrap();
     let repos = system_db.list_repos();
@@ -117,12 +112,10 @@ async fn test_multiple_repos_in_same_db() {
     let shamir = ShamirDb::new();
     shamir.create_db("production").await;
 
-    let repo1 = Arc::new(InMemoryRepo::new());
-    let config1 =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo1)).add_table(TableConfig::new("users"));
+    let config1 = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
-    let repo2 = Arc::new(InMemoryRepo::new());
-    let config2 = RepoConfig::new("products_db", BoxRepo::InMemory(repo2))
+    let config2 = RepoConfig::new("products_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("products"));
 
     shamir.add_repo("production", config1).await.unwrap();
