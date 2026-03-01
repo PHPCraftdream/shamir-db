@@ -1,4 +1,5 @@
 pub mod concurrent_tests;
+pub mod filter_stream_tests;
 pub mod interner_manager_tests;
 pub mod persistence_tests;
 pub mod record_counter_tests;

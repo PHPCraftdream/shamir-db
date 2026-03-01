@@ -5,10 +5,14 @@ use crate::core::interner::TouchInd;
 use crate::db::engine::index::index_definition::IndexDefinition;
 use crate::db::engine::index::index_info_item::IndexInfoItem;
 use crate::db::engine::index::index_manager::IndexManager;
+use crate::db::query::filter::eval::{compile_filter, FilterCallback};
+use crate::db::query::filter::eval_context::FilterContext;
+use crate::db::query::filter::Filter;
 use crate::db::storage::types::Store;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
+use futures::StreamExt;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -195,6 +199,50 @@ impl TableManager {
         batch_size: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
         self.table.list_stream(batch_size)
+    }
+
+    /// Stream records filtered by a compiled filter callback.
+    ///
+    /// Compiles the Filter AST into a callback network, then streams
+    /// records in batches, applying the filter to each record.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch from storage
+    /// * `filter` - Filter AST to compile and apply
+    /// * `ctx` - Filter context with interner and resolved query refs
+    pub async fn filter_stream(
+        &self,
+        batch_size: usize,
+        filter: &Filter,
+        ctx: &FilterContext<'_>,
+    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
+        let interner = self.interner.get().await?;
+        let callback = compile_filter(filter, interner);
+        self.filter_stream_with_callback(batch_size, &*callback, ctx)
+            .await
+    }
+
+    /// Stream records filtered by a pre-compiled callback.
+    ///
+    /// Use this when you want to compile the filter once and reuse it.
+    pub async fn filter_stream_with_callback(
+        &self,
+        batch_size: usize,
+        callback: &dyn FilterCallback,
+        ctx: &FilterContext<'_>,
+    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
+        let mut result = Vec::new();
+        let stream = self.table.list_stream(batch_size);
+        futures::pin_mut!(stream);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (id, record) in batch {
+                if callback.matches(&record, ctx) {
+                    result.push((id, record));
+                }
+            }
+        }
+        Ok(result)
     }
 
     /// Get a record by RecordId
