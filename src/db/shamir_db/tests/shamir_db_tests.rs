@@ -1,8 +1,6 @@
-use crate::db::engine::repo::{BoxRepo, RepoConfig};
+use crate::db::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::db::engine::table::TableConfig;
 use crate::db::shamir_db::ShamirDb;
-use crate::db::storage::storage_in_memory::InMemoryRepo;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_shamir_db_creation() {
@@ -129,11 +127,10 @@ async fn test_db_with_repo_and_table() {
     let db = shamir.create_db("production").await;
 
     // Configure repo with table
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
-    db.add_repo(config).await;
+    db.add_repo(config).await.unwrap();
 
     // Access table through shamir -> db -> table
     let table = db.get_table("users_db", "users").await.unwrap();
@@ -148,17 +145,18 @@ async fn test_multiple_dbs_isolation() {
     let db2 = shamir.create_db("test").await;
 
     // Configure each db independently
-    let repo1 = Arc::new(InMemoryRepo::new());
-    let repo2 = Arc::new(InMemoryRepo::new());
-
     db1.add_repo(
-        RepoConfig::new("data", BoxRepo::InMemory(repo1)).add_table(TableConfig::new("users")),
+        RepoConfig::new("data", BoxRepoFactory::in_memory())
+            .add_table(TableConfig::new("users")),
     )
-    .await;
+    .await
+    .unwrap();
     db2.add_repo(
-        RepoConfig::new("data", BoxRepo::InMemory(repo2)).add_table(TableConfig::new("users")),
+        RepoConfig::new("data", BoxRepoFactory::in_memory())
+            .add_table(TableConfig::new("users")),
     )
-    .await;
+    .await
+    .unwrap();
 
     // Each db has its own table
     let table1 = db1.get_table("data", "users").await.unwrap();
@@ -181,11 +179,12 @@ async fn test_shamir_db_index_api() {
     let shamir = ShamirDb::new();
     let db = shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
     db.add_repo(
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users")),
+        RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+            .add_table(TableConfig::new("users")),
     )
-    .await;
+    .await
+    .unwrap();
 
     // Create index through db
     db.create_index("users_db", "users", "email_idx", &["email"])
@@ -207,9 +206,8 @@ async fn test_remove_repo_from_shamir_db() {
     let shamir = ShamirDb::new();
     shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
     shamir.add_repo("production", config).await.unwrap();
 
@@ -235,9 +233,8 @@ async fn test_get_table_shortcut() {
     let shamir = ShamirDb::new();
     shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
     shamir.add_repo("production", config).await.unwrap();
 
@@ -268,11 +265,10 @@ async fn test_db_instance_get_repo() {
     let shamir = ShamirDb::new();
     let db = shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
-    db.add_repo(config).await;
+    db.add_repo(config).await.unwrap();
 
     // Get repo
     let repo_instance = db.get_repo("users_db");
@@ -288,11 +284,10 @@ async fn test_db_instance_remove_repo() {
     let shamir = ShamirDb::new();
     let db = shamir.create_db("production").await;
 
-    let repo = Arc::new(InMemoryRepo::new());
-    let config =
-        RepoConfig::new("users_db", BoxRepo::InMemory(repo)).add_table(TableConfig::new("users"));
+    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("users"));
 
-    db.add_repo(config).await;
+    db.add_repo(config).await.unwrap();
     assert!(db.has_repo("users_db"));
 
     // Remove repo

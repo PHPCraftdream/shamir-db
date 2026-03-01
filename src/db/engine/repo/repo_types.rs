@@ -7,7 +7,9 @@ use crate::db::storage::storage_redb::RedbRepo;
 use crate::db::storage::storage_sled::SledRepo;
 use crate::db::storage::types::{Repo, Store};
 use crate::db::DbResult;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::task;
 
 #[derive(Clone)]
 pub enum BoxRepo {
@@ -101,5 +103,201 @@ impl From<Arc<PersyRepo>> for BoxRepo {
 impl From<Arc<CanopyRepo>> for BoxRepo {
     fn from(repo: Arc<CanopyRepo>) -> Self {
         BoxRepo::Canopy(repo)
+    }
+}
+
+// ============================================================================
+// RepoFactory trait for async repo creation
+// ============================================================================
+
+/// Factory trait for asynchronously creating repositories.
+/// Used to defer blocking file I/O operations to spawn_blocking.
+#[async_trait::async_trait]
+pub trait RepoFactory: Send + Sync {
+    /// Creates a new repository, performing any blocking I/O in a separate thread.
+    async fn create(&self) -> DbResult<BoxRepo>;
+}
+
+// ============================================================================
+// RepoFactory implementations for async repo creation
+// ============================================================================
+
+/// Factory for InMemoryRepo - no blocking I/O needed
+pub struct InMemoryRepoFactory;
+
+#[async_trait::async_trait]
+impl RepoFactory for InMemoryRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        Ok(BoxRepo::InMemory(Arc::new(InMemoryRepo::new())))
+    }
+}
+
+/// Factory for SledRepo - uses spawn_blocking for file I/O
+pub struct SledRepoFactory {
+    pub path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for SledRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let path = self.path.clone();
+        let repo = task::spawn_blocking(move || SledRepo::new(path))
+            .await
+            .map_err(|e| crate::db::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Sled(Arc::new(repo)))
+    }
+}
+
+/// Factory for RedbRepo - uses spawn_blocking for file I/O
+pub struct RedbRepoFactory {
+    pub path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for RedbRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let path = self.path.clone();
+        let repo = task::spawn_blocking(move || RedbRepo::new(path))
+            .await
+            .map_err(|e| crate::db::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Redb(Arc::new(repo)))
+    }
+}
+
+/// Factory for FjallRepo - uses spawn_blocking for file I/O
+pub struct FjallRepoFactory {
+    pub path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for FjallRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let path = self.path.clone();
+        let repo = task::spawn_blocking(move || FjallRepo::new(path))
+            .await
+            .map_err(|e| crate::db::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Fjall(Arc::new(repo)))
+    }
+}
+
+/// Factory for NebariRepo - uses spawn_blocking for file I/O
+pub struct NebariRepoFactory {
+    pub path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for NebariRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let path = self.path.clone();
+        let repo = task::spawn_blocking(move || NebariRepo::new(path))
+            .await
+            .map_err(|e| crate::db::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Nebari(Arc::new(repo)))
+    }
+}
+
+/// Factory for PersyRepo - uses spawn_blocking for file I/O
+pub struct PersyRepoFactory {
+    pub path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for PersyRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let path = self.path.clone();
+        let repo = task::spawn_blocking(move || PersyRepo::new(path))
+            .await
+            .map_err(|e| crate::db::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Persy(Arc::new(repo)))
+    }
+}
+
+/// Factory for CanopyRepo - uses spawn_blocking for file I/O
+pub struct CanopyRepoFactory {
+    pub path: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for CanopyRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        let path = self.path.clone();
+        let repo = task::spawn_blocking(move || CanopyRepo::new(path))
+            .await
+            .map_err(|e| crate::db::DbError::Internal(e.to_string()))??;
+        Ok(BoxRepo::Canopy(Arc::new(repo)))
+    }
+}
+
+// ============================================================================
+// BoxRepoFactory - enum for type-erased factory
+// ============================================================================
+
+/// Type-erased factory that can create any repo type
+pub enum BoxRepoFactory {
+    InMemory(InMemoryRepoFactory),
+    Sled(SledRepoFactory),
+    Redb(RedbRepoFactory),
+    Fjall(FjallRepoFactory),
+    Nebari(NebariRepoFactory),
+    Persy(PersyRepoFactory),
+    Canopy(CanopyRepoFactory),
+}
+
+impl BoxRepoFactory {
+    pub fn in_memory() -> Self {
+        BoxRepoFactory::InMemory(InMemoryRepoFactory)
+    }
+
+    pub fn sled(path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Sled(SledRepoFactory { path: path.into() })
+    }
+
+    pub fn redb(path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Redb(RedbRepoFactory { path: path.into() })
+    }
+
+    pub fn fjall(path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Fjall(FjallRepoFactory { path: path.into() })
+    }
+
+    pub fn nebari(path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Nebari(NebariRepoFactory { path: path.into() })
+    }
+
+    pub fn persy(path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Persy(PersyRepoFactory { path: path.into() })
+    }
+
+    pub fn canopy(path: impl Into<PathBuf>) -> Self {
+        BoxRepoFactory::Canopy(CanopyRepoFactory { path: path.into() })
+    }
+}
+
+#[async_trait::async_trait]
+impl RepoFactory for BoxRepoFactory {
+    async fn create(&self) -> DbResult<BoxRepo> {
+        match self {
+            BoxRepoFactory::InMemory(f) => f.create().await,
+            BoxRepoFactory::Sled(f) => f.create().await,
+            BoxRepoFactory::Redb(f) => f.create().await,
+            BoxRepoFactory::Fjall(f) => f.create().await,
+            BoxRepoFactory::Nebari(f) => f.create().await,
+            BoxRepoFactory::Persy(f) => f.create().await,
+            BoxRepoFactory::Canopy(f) => f.create().await,
+        }
+    }
+}
+
+impl Clone for BoxRepoFactory {
+    fn clone(&self) -> Self {
+        match self {
+            BoxRepoFactory::InMemory(_) => BoxRepoFactory::in_memory(),
+            BoxRepoFactory::Sled(f) => BoxRepoFactory::sled(f.path.clone()),
+            BoxRepoFactory::Redb(f) => BoxRepoFactory::redb(f.path.clone()),
+            BoxRepoFactory::Fjall(f) => BoxRepoFactory::fjall(f.path.clone()),
+            BoxRepoFactory::Nebari(f) => BoxRepoFactory::nebari(f.path.clone()),
+            BoxRepoFactory::Persy(f) => BoxRepoFactory::persy(f.path.clone()),
+            BoxRepoFactory::Canopy(f) => BoxRepoFactory::canopy(f.path.clone()),
+        }
     }
 }

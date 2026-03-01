@@ -1,21 +1,17 @@
 use crate::db::engine::repo::repo_config::RepoConfig;
-use crate::db::engine::repo::repo_types::BoxRepo;
+use crate::db::engine::repo::repo_types::BoxRepoFactory;
 use crate::db::engine::table::TableConfig;
-use crate::db::storage::storage_in_memory::InMemoryRepo;
-use std::sync::Arc;
 
 #[test]
 fn test_repo_config_new() {
-    let repo = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
-    let config = RepoConfig::new("test", repo);
+    let config = RepoConfig::new("test", BoxRepoFactory::in_memory());
     assert_eq!(config.name, "test");
     assert!(config.tables.is_empty());
 }
 
 #[test]
 fn test_repo_config_add_table() {
-    let repo = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
-    let config = RepoConfig::new("test", repo)
+    let config = RepoConfig::new("test", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"))
         .add_table(TableConfig::new("products"));
 
@@ -26,21 +22,20 @@ fn test_repo_config_add_table() {
 
 #[test]
 fn test_repo_config_add_tables() {
-    let repo = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
     let tables = vec![
         TableConfig::new("users"),
         TableConfig::new("products"),
         TableConfig::new("orders"),
     ];
-    let config = RepoConfig::new("test", repo).add_tables(tables);
+    let config = RepoConfig::new("test", BoxRepoFactory::in_memory()).add_tables(tables);
 
     assert_eq!(config.tables.len(), 3);
 }
 
 #[test]
 fn test_repo_config_clone() {
-    let repo = BoxRepo::InMemory(Arc::new(InMemoryRepo::new()));
-    let config1 = RepoConfig::new("test", repo.clone()).add_table(TableConfig::new("users"));
+    let config1 =
+        RepoConfig::new("test", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     let config2 = config1.clone();
 
     assert_eq!(config1.name, config2.name);

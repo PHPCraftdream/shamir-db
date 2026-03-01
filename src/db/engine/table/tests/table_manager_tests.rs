@@ -1,5 +1,5 @@
 use crate::db::engine::db_instance::db_instance::DbInstance;
-use crate::db::engine::repo::repo_types::BoxRepo;
+use crate::db::engine::repo::repo_types::BoxRepoFactory;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
 use crate::db::engine::table::TableManager;
@@ -36,14 +36,13 @@ async fn test_table_manager_creation() {
 
 #[tokio::test]
 async fn test_table_manager_clone() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let ctx1 = db.get_table("default", "users").await.unwrap();
     let ctx2 = ctx1.clone();
@@ -54,14 +53,13 @@ async fn test_table_manager_clone() {
 
 #[tokio::test]
 async fn test_table_manager_components() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let ctx = db.get_table("default", "users").await.unwrap();
 
@@ -81,14 +79,13 @@ async fn test_table_manager_components() {
 
 #[tokio::test]
 async fn test_create_index_simple() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
@@ -102,14 +99,13 @@ async fn test_create_index_simple() {
 
 #[tokio::test]
 async fn test_create_index_composite() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
@@ -124,14 +120,13 @@ async fn test_create_index_composite() {
 
 #[tokio::test]
 async fn test_create_index_nested_path() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
@@ -146,14 +141,13 @@ async fn test_create_index_nested_path() {
 
 #[tokio::test]
 async fn test_drop_index() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
@@ -172,14 +166,13 @@ async fn test_drop_index() {
 
 #[tokio::test]
 async fn test_unique_index() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
@@ -196,14 +189,13 @@ async fn test_unique_index() {
 
 #[tokio::test]
 async fn test_lookup_by_index() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
@@ -220,14 +212,13 @@ async fn test_lookup_by_index() {
 
 #[tokio::test]
 async fn test_get_record() {
-    let repo = Arc::new(InMemoryRepo::new());
     let configs = vec![TableConfig::new("users")];
     let repo_config = RepoConfig {
         name: "default".to_string(),
-        repo: BoxRepo::InMemory(repo),
+        factory: BoxRepoFactory::in_memory(),
         tables: configs,
     };
-    let db = DbInstance::new(vec![repo_config]);
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
 
     let table = db.get_table("default", "users").await.unwrap();
 
