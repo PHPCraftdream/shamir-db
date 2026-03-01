@@ -1,37 +1,8 @@
-//! Grouping, ordering, and pagination types.
+//! OrderBy — ORDER BY clause and related types.
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::query::filter::{FieldPath, Filter};
-
-/// GROUP BY clause
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GroupBy {
-    /// Fields to group by
-    pub fields: Vec<FieldPath>,
-    /// HAVING filter (applied after grouping)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub having: Option<Filter>,
-}
-
-impl GroupBy {
-    pub fn new(fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        GroupBy {
-            fields: fields.into_iter().map(|f| f.into()).collect(),
-            having: None,
-        }
-    }
-
-    pub fn having(mut self, filter: Filter) -> Self {
-        self.having = Some(filter);
-        self
-    }
-
-    pub fn having_opt(mut self, filter: Option<Filter>) -> Self {
-        self.having = filter;
-        self
-    }
-}
+use crate::db::query::filter::FieldPath;
 
 /// ORDER BY clause
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,42 +85,4 @@ pub enum OrderDirection {
 pub enum NullsOrder {
     First,
     Last,
-}
-
-/// LIMIT and OFFSET
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LimitOffset {
-    /// Maximum records to return
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<u64>,
-    /// Records to skip
-    #[serde(default)]
-    pub offset: u64,
-}
-
-impl LimitOffset {
-    pub fn new(limit: impl Into<Option<u64>>) -> Self {
-        LimitOffset {
-            limit: limit.into(),
-            offset: 0,
-        }
-    }
-
-    pub fn offset(mut self, offset: u64) -> Self {
-        self.offset = offset;
-        self
-    }
-
-    pub fn no_limit() -> Self {
-        LimitOffset {
-            limit: None,
-            offset: 0,
-        }
-    }
-}
-
-impl Default for LimitOffset {
-    fn default() -> Self {
-        Self::no_limit()
-    }
 }

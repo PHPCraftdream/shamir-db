@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::db::query::read::{Query, QueryResult, ReadQuery};
+use crate::db::query::read::{ReadQuery, QueryResult};
 use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::types::common::{TMap, TSet};
 
@@ -24,7 +24,7 @@ use crate::types::common::{TMap, TSet};
 #[serde(untagged)]
 pub enum BatchOp {
     /// Read query (SELECT).
-    Read(Query),
+    Read(ReadQuery),
 
     /// Insert new records.
     Insert(InsertOp),

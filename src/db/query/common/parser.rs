@@ -3,9 +3,9 @@
 //! This module provides parsers for query components that are used by
 //! multiple query types (SELECT, UPDATE, DELETE, etc.).
 
-use crate::db::query::filter::{Cond, Expr, ExprOp, Filter, FilterValue, FnCall};
+use crate::db::query::filter::{Cond, FilterExpr, FilterExprOp, Filter, FilterValue, FnCall};
 use crate::db::query::read::{
-    AggFunc, AggregateField, Expr as ReadExpr, ExprValue, GroupBy, LimitOffset, OrderBy,
+    AggFunc, AggregateField, SelectExpr, SelectExprValue, GroupBy, LimitOffset, OrderBy,
     OrderByItem,
 };
 use crate::types::value::{QueryValue, Value};
@@ -52,7 +52,7 @@ impl std::fmt::Display for QueryParseError {
 impl std::error::Error for QueryParseError {}
 
 /// Parse Expr from QueryValue (placeholder for future)
-pub fn expr_from_value(value: &QueryValue) -> Result<ReadExpr, QueryParseError> {
+pub fn expr_from_value(value: &QueryValue) -> Result<SelectExpr, QueryParseError> {
     match value {
         Value::Map(map) => {
             let type_str = match map.get(&"type".to_string()) {
@@ -66,7 +66,7 @@ pub fn expr_from_value(value: &QueryValue) -> Result<ReadExpr, QueryParseError> 
                         Some(Value::Str(s)) => s.clone(),
                         _ => return Err(QueryParseError::MissingField("expr.name")),
                     };
-                    Ok(ReadExpr::Field { path: name })
+                    Ok(SelectExpr::Field { path: name })
                 }
                 "literal" => {
                     let value = map
@@ -74,7 +74,7 @@ pub fn expr_from_value(value: &QueryValue) -> Result<ReadExpr, QueryParseError> 
                         .cloned()
                         .ok_or(QueryParseError::MissingField("expr.value"))?;
                     let expr_value = expr_value_from_value(&value)?;
-                    Ok(ReadExpr::Literal { value: expr_value })
+                    Ok(SelectExpr::Literal { value: expr_value })
                 }
                 _ => Err(QueryParseError::UnknownType(type_str.to_string())),
             }
@@ -83,14 +83,14 @@ pub fn expr_from_value(value: &QueryValue) -> Result<ReadExpr, QueryParseError> 
     }
 }
 
-/// Parse ExprValue from QueryValue
-pub fn expr_value_from_value(value: &QueryValue) -> Result<ExprValue, QueryParseError> {
+/// Parse SelectExprValue from QueryValue
+pub fn expr_value_from_value(value: &QueryValue) -> Result<SelectExprValue, QueryParseError> {
     match value {
-        Value::Null => Ok(ExprValue::Null),
-        Value::Bool(b) => Ok(ExprValue::Bool(*b)),
-        Value::Int(i) => Ok(ExprValue::Int(*i)),
-        Value::F64(f) => Ok(ExprValue::Float(*f)),
-        Value::Str(s) => Ok(ExprValue::String(s.clone())),
+        Value::Null => Ok(SelectExprValue::Null),
+        Value::Bool(b) => Ok(SelectExprValue::Bool(*b)),
+        Value::Int(i) => Ok(SelectExprValue::Int(*i)),
+        Value::F64(f) => Ok(SelectExprValue::Float(*f)),
+        Value::Str(s) => Ok(SelectExprValue::String(s.clone())),
         _ => Err(QueryParseError::InvalidType("expr.value", "primitive")),
     }
 }
@@ -328,8 +328,8 @@ fn fn_call_from_value(value: &QueryValue) -> Result<FnCall, QueryParseError> {
     }
 }
 
-/// Parse Expr (filter expression) from QueryValue
-fn expr_filter_from_value(value: &QueryValue) -> Result<Expr, QueryParseError> {
+/// Parse FilterExpr (filter expression) from QueryValue
+fn expr_filter_from_value(value: &QueryValue) -> Result<FilterExpr, QueryParseError> {
     match value {
         Value::Map(map) => {
             let op = match map.get(&"op".to_string()) {
@@ -343,39 +343,39 @@ fn expr_filter_from_value(value: &QueryValue) -> Result<Expr, QueryParseError> {
                     .collect::<Result<Vec<_>, _>>()?,
                 _ => return Err(QueryParseError::MissingField("$expr.args")),
             };
-            Ok(Expr::new(op, args))
+            Ok(FilterExpr::new(op, args))
         }
         _ => Err(QueryParseError::InvalidType("$expr", "object")),
     }
 }
 
-/// Parse ExprOp from string
-fn expr_op_from_str(s: &str) -> Result<ExprOp, QueryParseError> {
+/// Parse FilterExprOp from string
+fn expr_op_from_str(s: &str) -> Result<FilterExprOp, QueryParseError> {
     match s {
         // Math
-        "add" => Ok(ExprOp::Add),
-        "sub" => Ok(ExprOp::Sub),
-        "mul" => Ok(ExprOp::Mul),
-        "div" => Ok(ExprOp::Div),
-        "mod" => Ok(ExprOp::Mod),
-        "neg" => Ok(ExprOp::Neg),
+        "add" => Ok(FilterExprOp::Add),
+        "sub" => Ok(FilterExprOp::Sub),
+        "mul" => Ok(FilterExprOp::Mul),
+        "div" => Ok(FilterExprOp::Div),
+        "mod" => Ok(FilterExprOp::Mod),
+        "neg" => Ok(FilterExprOp::Neg),
         // String
-        "concat" => Ok(ExprOp::Concat),
-        "lower" => Ok(ExprOp::Lower),
-        "upper" => Ok(ExprOp::Upper),
-        "trim" => Ok(ExprOp::Trim),
-        "length" => Ok(ExprOp::Length),
+        "concat" => Ok(FilterExprOp::Concat),
+        "lower" => Ok(FilterExprOp::Lower),
+        "upper" => Ok(FilterExprOp::Upper),
+        "trim" => Ok(FilterExprOp::Trim),
+        "length" => Ok(FilterExprOp::Length),
         // Logic
-        "and" => Ok(ExprOp::And),
-        "or" => Ok(ExprOp::Or),
-        "not" => Ok(ExprOp::Not),
+        "and" => Ok(FilterExprOp::And),
+        "or" => Ok(FilterExprOp::Or),
+        "not" => Ok(FilterExprOp::Not),
         // Comparison
-        "eq" => Ok(ExprOp::Eq),
-        "ne" => Ok(ExprOp::Ne),
-        "gt" => Ok(ExprOp::Gt),
-        "gte" => Ok(ExprOp::Gte),
-        "lt" => Ok(ExprOp::Lt),
-        "lte" => Ok(ExprOp::Lte),
+        "eq" => Ok(FilterExprOp::Eq),
+        "ne" => Ok(FilterExprOp::Ne),
+        "gt" => Ok(FilterExprOp::Gt),
+        "gte" => Ok(FilterExprOp::Gte),
+        "lt" => Ok(FilterExprOp::Lt),
+        "lte" => Ok(FilterExprOp::Lte),
         _ => Err(QueryParseError::UnknownType(format!("expr.op: {}", s))),
     }
 }

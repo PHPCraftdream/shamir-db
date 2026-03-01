@@ -3,7 +3,7 @@
 //! All tests use JSON strings as source, parse to QueryValue, then convert to Filter.
 
 use crate::db::query::common::{filter_from_value, filter_value_from_value, QueryParseError};
-use crate::db::query::filter::{ExprOp, Filter, FilterValue};
+use crate::db::query::filter::{FilterExprOp, Filter, FilterValue};
 use crate::types::value::QueryValue;
 
 /// Parse JSON string to QueryValue, then to Filter
@@ -511,7 +511,7 @@ fn test_expr_add() {
     let v = parse_filter_value(json).unwrap();
     match v {
         FilterValue::Expr { expr } => {
-            assert!(matches!(expr.op, ExprOp::Add));
+            assert!(matches!(expr.op, FilterExprOp::Add));
             assert_eq!(expr.args.len(), 2);
         }
         _ => panic!("Expected Expr"),
@@ -529,7 +529,7 @@ fn test_expr_mul_with_field_ref() {
     let v = parse_filter_value(json).unwrap();
     match v {
         FilterValue::Expr { expr } => {
-            assert!(matches!(expr.op, ExprOp::Mul));
+            assert!(matches!(expr.op, FilterExprOp::Mul));
             assert_eq!(expr.args.len(), 2);
         }
         _ => panic!("Expected Expr"),
@@ -547,7 +547,7 @@ fn test_expr_concat() {
     let v = parse_filter_value(json).unwrap();
     match v {
         FilterValue::Expr { expr } => {
-            assert!(matches!(expr.op, ExprOp::Concat));
+            assert!(matches!(expr.op, FilterExprOp::Concat));
             assert_eq!(expr.args.len(), 3);
         }
         _ => panic!("Expected Expr"),

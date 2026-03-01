@@ -1,9 +1,8 @@
 //! Select types for query projections.
-//!
-//! Supports fields, aggregations, aliases, and expressions.
 
 use serde::{Deserialize, Serialize};
 
+use super::{AggFunc, AggregateField, SelectExpr};
 use crate::db::query::filter::FieldPath;
 
 /// What to select/return from a query
@@ -79,57 +78,8 @@ pub enum SelectItem {
     /// Expression (future: computed fields)
     #[serde(rename = "expr")]
     Expression {
-        expr: Expr,
+        expr: SelectExpr,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
     },
-}
-
-/// Aggregation functions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AggFunc {
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-/// Field for aggregation
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum AggregateField {
-    /// Regular field
-    Field(FieldPath),
-    /// All fields (*)
-    All,
-}
-
-/// Simple expressions (for future expansion)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum Expr {
-    // Arithmetic
-    Add { left: Box<Expr>, right: Box<Expr> },
-    Sub { left: Box<Expr>, right: Box<Expr> },
-    Mul { left: Box<Expr>, right: Box<Expr> },
-    Div { left: Box<Expr>, right: Box<Expr> },
-
-    // Field reference
-    Field { path: FieldPath },
-
-    // Literal value
-    Literal { value: ExprValue },
-}
-
-/// Expression values
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ExprValue {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    String(String),
 }

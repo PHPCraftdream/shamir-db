@@ -8,7 +8,7 @@ use crate::db::query::common::{
     order_by_item_from_value, QueryParseError,
 };
 use crate::db::query::read::{
-    AggFunc, AggregateField, Expr, ExprValue, NullsOrder, OrderDirection,
+    AggFunc, AggregateField, SelectExpr, SelectExprValue, NullsOrder, OrderDirection,
 };
 use crate::types::value::QueryValue;
 
@@ -201,7 +201,7 @@ fn test_expr_field() {
     let json = r#"{ "type": "field", "name": "price" }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let expr = expr_from_value(&value).unwrap();
-    assert!(matches!(expr, Expr::Field { path } if path == "price"));
+    assert!(matches!(expr, SelectExpr::Field { path } if path == "price"));
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn test_expr_literal_string() {
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
-        Expr::Literal { value: ExprValue::String(s) } if s == "hello"
+        SelectExpr::Literal { value: SelectExprValue::String(s) } if s == "hello"
     ));
 }
 
@@ -222,8 +222,8 @@ fn test_expr_literal_int() {
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
-        Expr::Literal {
-            value: ExprValue::Int(42)
+        SelectExpr::Literal {
+            value: SelectExprValue::Int(42)
         }
     ));
 }
@@ -235,8 +235,8 @@ fn test_expr_literal_bool() {
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
-        Expr::Literal {
-            value: ExprValue::Bool(true)
+        SelectExpr::Literal {
+            value: SelectExprValue::Bool(true)
         }
     ));
 }
@@ -248,8 +248,8 @@ fn test_expr_literal_null() {
     let expr = expr_from_value(&value).unwrap();
     assert!(matches!(
         expr,
-        Expr::Literal {
-            value: ExprValue::Null
+        SelectExpr::Literal {
+            value: SelectExprValue::Null
         }
     ));
 }
@@ -258,26 +258,26 @@ fn test_expr_literal_null() {
 fn test_expr_value_types() {
     // Null
     let v: QueryValue = serde_json::from_str("null").unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(ExprValue::Null)));
+    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::Null)));
 
     // Bool
     let v: QueryValue = serde_json::from_str("true").unwrap();
     assert!(matches!(
         expr_value_from_value(&v),
-        Ok(ExprValue::Bool(true))
+        Ok(SelectExprValue::Bool(true))
     ));
 
     // Int
     let v: QueryValue = serde_json::from_str("42").unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(ExprValue::Int(42))));
+    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::Int(42))));
 
     // Float
     let v: QueryValue = serde_json::from_str("3.14").unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(ExprValue::Float(_))));
+    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::Float(_))));
 
     // String
     let v: QueryValue = serde_json::from_str(r#""hello""#).unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(ExprValue::String(s)) if s == "hello"));
+    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::String(s)) if s == "hello"));
 }
 
 // ============================================================================
