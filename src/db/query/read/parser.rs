@@ -4,9 +4,9 @@
 
 use crate::db::query::common::{
     agg_func_from_str, aggregate_field_from_value, filter_from_value, group_by_from_value,
-    limit_offset_from_value, order_by_from_value, QueryParseError,
+    pagination_from_value, order_by_from_value, QueryParseError,
 };
-use crate::db::query::read::{LimitOffset, ReadQuery, Select, SelectItem};
+use crate::db::query::read::{Pagination, ReadQuery, Select, SelectItem};
 use crate::types::value::{QueryValue, Value};
 
 /// Parse SELECT Query from QueryValue (Value<Map<String, Value>>)
@@ -41,9 +41,14 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
         None => None,
     };
 
-    let limit = match map.get(&"limit".to_string()) {
-        Some(v) => limit_offset_from_value(v)?,
-        None => LimitOffset::no_limit(),
+    let pagination = match map.get(&"limit".to_string()) {
+        Some(v) => pagination_from_value(v)?,
+        None => Pagination::None,
+    };
+
+    let count_total = match map.get(&"count_total".to_string()) {
+        Some(Value::Bool(b)) => *b,
+        _ => false,
     };
 
     Ok(ReadQuery {
@@ -52,7 +57,8 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
         r#where,
         group_by,
         order_by,
-        limit,
+        pagination,
+        count_total,
     })
 }
 

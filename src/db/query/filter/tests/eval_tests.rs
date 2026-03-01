@@ -552,7 +552,7 @@ fn test_query_ref_eq() {
         QueryResult {
             records: vec![serde_json::json!({"id": 42, "name": "Alice"})],
             stats: None,
-            has_more: false,
+            pagination: None,
         },
     );
 
@@ -584,7 +584,7 @@ fn test_query_ref_no_match() {
         QueryResult {
             records: vec![serde_json::json!({"id": 42})],
             stats: None,
-            has_more: false,
+            pagination: None,
         },
     );
 
@@ -689,4 +689,171 @@ fn test_nested_field_path_gt() {
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&record, &ctx)); // 85 > 80
+}
+
+// ============================================================================
+// Step 7: In / NotIn
+// ============================================================================
+
+#[test]
+fn test_in_literal_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::In {
+        field: "status".to_string(),
+        values: vec![
+            FilterValue::String("active".to_string()),
+            FilterValue::String("pending".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_in_literal_no_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::In {
+        field: "status".to_string(),
+        values: vec![
+            FilterValue::String("deleted".to_string()),
+            FilterValue::String("banned".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_not_in_literal() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::NotIn {
+        field: "status".to_string(),
+        values: vec![
+            FilterValue::String("deleted".to_string()),
+            FilterValue::String("banned".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "active" not in ["deleted", "banned"]
+}
+
+#[test]
+fn test_in_query_ref_column() {
+    let interner = Interner::new();
+
+    // Record: {user_id: 2}
+    let mut map = new_map();
+    let k = interner.touch_ind("user_id").unwrap().key().clone();
+    map.insert(k, InnerValue::Int(2));
+    let record = InnerValue::Map(map);
+
+    // Query result: "allowed_users" => [{id: 1}, {id: 2}, {id: 5}]
+    let mut refs: TMap<String, QueryResult> = new_map();
+    refs.insert(
+        "allowed_users".to_string(),
+        QueryResult {
+            records: vec![
+                serde_json::json!({"id": 1}),
+                serde_json::json!({"id": 2}),
+                serde_json::json!({"id": 5}),
+            ],
+            stats: None,
+            pagination: None,
+        },
+    );
+
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // user_id IN @allowed_users[].id
+    let filter = Filter::In {
+        field: "user_id".to_string(),
+        values: vec![FilterValue::QueryRef {
+            alias: "allowed_users".to_string(),
+            path: Some("[].id".to_string()),
+        }],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // 2 is in [1, 2, 5]
+}
+
+#[test]
+fn test_in_query_ref_column_no_match() {
+    let interner = Interner::new();
+
+    let mut map = new_map();
+    let k = interner.touch_ind("user_id").unwrap().key().clone();
+    map.insert(k, InnerValue::Int(99));
+    let record = InnerValue::Map(map);
+
+    let mut refs: TMap<String, QueryResult> = new_map();
+    refs.insert(
+        "allowed_users".to_string(),
+        QueryResult {
+            records: vec![
+                serde_json::json!({"id": 1}),
+                serde_json::json!({"id": 2}),
+            ],
+            stats: None,
+            pagination: None,
+        },
+    );
+
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::In {
+        field: "user_id".to_string(),
+        values: vec![FilterValue::QueryRef {
+            alias: "allowed_users".to_string(),
+            path: Some("[].id".to_string()),
+        }],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // 99 not in [1, 2]
+}
+
+#[test]
+fn test_not_in_query_ref_column() {
+    let interner = Interner::new();
+
+    let mut map = new_map();
+    let k = interner.touch_ind("user_id").unwrap().key().clone();
+    map.insert(k, InnerValue::Int(99));
+    let record = InnerValue::Map(map);
+
+    let mut refs: TMap<String, QueryResult> = new_map();
+    refs.insert(
+        "blocked".to_string(),
+        QueryResult {
+            records: vec![
+                serde_json::json!({"id": 1}),
+                serde_json::json!({"id": 2}),
+            ],
+            stats: None,
+            pagination: None,
+        },
+    );
+
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::NotIn {
+        field: "user_id".to_string(),
+        values: vec![FilterValue::QueryRef {
+            alias: "blocked".to_string(),
+            path: Some("[].id".to_string()),
+        }],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // 99 not in [1, 2]
 }

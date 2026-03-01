@@ -5,7 +5,7 @@
 
 use crate::db::query::filter::{Cond, FilterExpr, FilterExprOp, Filter, FilterValue, FnCall};
 use crate::db::query::read::{
-    AggFunc, AggregateField, SelectExpr, SelectExprValue, GroupBy, LimitOffset, OrderBy,
+    AggFunc, AggregateField, SelectExpr, SelectExprValue, GroupBy, Pagination, OrderBy,
     OrderByItem,
 };
 use crate::types::value::{QueryValue, Value};
@@ -204,6 +204,43 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::Not {
                         filter: Box::new(filter),
                     })
+                }
+                "in" => {
+                    let field = match map.get(&"field".to_string()) {
+                        Some(Value::Str(s)) => s.clone(),
+                        _ => return Err(QueryParseError::MissingField("filter.field")),
+                    };
+                    let values = match map.get(&"values".to_string()) {
+                        Some(Value::List(list)) => list
+                            .iter()
+                            .map(filter_value_from_value)
+                            .collect::<Result<Vec<_>, _>>()?,
+                        // Single QueryRef value — wrap in vec
+                        Some(v @ Value::Map(_)) => vec![filter_value_from_value(v)?],
+                        None => return Err(QueryParseError::MissingField("filter.values")),
+                        Some(_) => {
+                            return Err(QueryParseError::InvalidType("values", "array or $query"))
+                        }
+                    };
+                    Ok(Filter::In { field, values })
+                }
+                "not_in" => {
+                    let field = match map.get(&"field".to_string()) {
+                        Some(Value::Str(s)) => s.clone(),
+                        _ => return Err(QueryParseError::MissingField("filter.field")),
+                    };
+                    let values = match map.get(&"values".to_string()) {
+                        Some(Value::List(list)) => list
+                            .iter()
+                            .map(filter_value_from_value)
+                            .collect::<Result<Vec<_>, _>>()?,
+                        Some(v @ Value::Map(_)) => vec![filter_value_from_value(v)?],
+                        None => return Err(QueryParseError::MissingField("filter.values")),
+                        Some(_) => {
+                            return Err(QueryParseError::InvalidType("values", "array or $query"))
+                        }
+                    };
+                    Ok(Filter::NotIn { field, values })
                 }
                 "is_null" => {
                     let field = match map.get(&"field".to_string()) {
@@ -500,10 +537,27 @@ pub fn order_by_item_from_value(value: &QueryValue) -> Result<OrderByItem, Query
     }
 }
 
-/// Parse LimitOffset from QueryValue
-pub fn limit_offset_from_value(value: &QueryValue) -> Result<LimitOffset, QueryParseError> {
+/// Parse Pagination from QueryValue.
+///
+/// Determines mode by keys present:
+/// - `page` + `page_size` → `Pagination::Page`
+/// - `limit` and/or `offset` → `Pagination::LimitOffset`
+pub fn pagination_from_value(value: &QueryValue) -> Result<Pagination, QueryParseError> {
     match value {
         Value::Map(map) => {
+            // Check for page-based pagination first
+            if let Some(Value::Int(page)) = map.get(&"page".to_string()) {
+                let page_size = match map.get(&"page_size".to_string()) {
+                    Some(Value::Int(ps)) => *ps as u64,
+                    _ => return Err(QueryParseError::MissingField("limit.page_size")),
+                };
+                return Ok(Pagination::Page {
+                    page: *page as u64,
+                    page_size,
+                });
+            }
+
+            // Fall back to limit/offset
             let limit = match map.get(&"limit".to_string()) {
                 Some(Value::Int(i)) => Some(*i as u64),
                 _ => None,
@@ -514,13 +568,16 @@ pub fn limit_offset_from_value(value: &QueryValue) -> Result<LimitOffset, QueryP
                 _ => 0,
             };
 
-            let mut lo = LimitOffset::new(limit.unwrap_or(0));
-            lo.offset = offset;
-
-            Ok(lo)
+            Ok(Pagination::LimitOffset { limit, offset })
         }
         _ => Err(QueryParseError::InvalidType("limit", "object")),
     }
+}
+
+/// Backward-compatible alias
+#[deprecated(note = "Use pagination_from_value instead")]
+pub fn limit_offset_from_value(value: &QueryValue) -> Result<Pagination, QueryParseError> {
+    pagination_from_value(value)
 }
 
 /// Parse AggFunc from string (used by SELECT-specific parsers)

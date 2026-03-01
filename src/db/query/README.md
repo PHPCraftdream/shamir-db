@@ -6,7 +6,7 @@
 
 | Модуль | Описание |
 |--------|----------|
-| [read](./read/) | SELECT запросы (Query, ReadQuery) |
+| [read](./read/) | SELECT запросы (ReadQuery) |
 | [write](./write/) | Операции записи (Insert, Update, Set, Delete) |
 | [batch](./batch/) | Batch API — выполнение нескольких запросов |
 | [filter](./filter/) | WHERE условия и фильтры |
@@ -18,14 +18,14 @@
 
 ```rust
 pub use read::{
-    Query,        // Основной тип SELECT запроса
-    ReadQuery,    // Alias для Query (для ясности API)
-    Select,       // SELECT clause
-    GroupBy,      // GROUP BY
-    OrderBy,      // ORDER BY
-    LimitOffset,  // Пагинация
-    QueryResult,  // Результат запроса
-    QueryStats,   // Статистика выполнения
+    ReadQuery,       // Полный SELECT запрос
+    Select,          // SELECT clause
+    GroupBy,         // GROUP BY
+    OrderBy,         // ORDER BY
+    Pagination,      // Пагинация (limit/offset или page-based)
+    PaginationInfo,  // Метаданные пагинации в ответе
+    QueryResult,     // Результат запроса
+    QueryStats,      // Статистика выполнения
 };
 ```
 
@@ -72,7 +72,7 @@ pub use filter::{
 
 ```rust
 pub enum BatchOp {
-    Read(Query),      // SELECT (определяется по полю "from")
+    Read(ReadQuery),  // SELECT (определяется по полю "from")
     Insert(InsertOp), // INSERT (определяется по "insert_into")
     Update(UpdateOp), // UPDATE (определяется по "update")
     Set(SetOp),       // UPSERT (определяется по "set")
@@ -102,7 +102,21 @@ Serde автоматически определяет тип операции п
     "users": {
       "from": "users",
       "where": { "op": "eq", "field": "status", "value": "active" },
-      "limit": 10
+      "limit": { "limit": 10 }
+    }
+  }
+}
+```
+
+### Read Query with Page-based Pagination
+
+```json
+{
+  "queries": {
+    "users": {
+      "from": "users",
+      "limit": { "page": 2, "page_size": 20 },
+      "count_total": true
     }
   }
 }
@@ -183,6 +197,6 @@ BatchResponse { results, execution_plan, execution_time_us }
 
 ## См. также
 
+- [Read README](./read/README.md) — SELECT запросы и пагинация
 - [Batch README](./batch/README.md) — полная документация Batch API
 - [Write README](./write/README.md) — операции записи
-- [Examples](./examples/) — примеры JSON

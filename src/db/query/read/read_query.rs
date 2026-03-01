@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{GroupBy, LimitOffset, OrderBy, Select};
+use super::{GroupBy, OrderBy, Pagination, Select};
 use crate::db::query::filter::Filter;
 
 /// Table or store identifier
@@ -27,17 +27,20 @@ pub struct ReadQuery {
     /// ORDER BY clause
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_by: Option<OrderBy>,
-    /// LIMIT and OFFSET
-    #[serde(default, skip_serializing_if = "is_default_limit")]
-    pub limit: LimitOffset,
+    /// Pagination (LIMIT/OFFSET or page-based)
+    #[serde(default, skip_serializing_if = "Pagination::is_none")]
+    pub pagination: Pagination,
+    /// Whether to compute and return total count (expensive)
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub count_total: bool,
 }
 
 fn default_select() -> Select {
     Select::all()
 }
 
-fn is_default_limit(lo: &LimitOffset) -> bool {
-    lo.limit.is_none() && lo.offset == 0
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 impl ReadQuery {
@@ -49,7 +52,8 @@ impl ReadQuery {
             r#where: None,
             group_by: None,
             order_by: None,
-            limit: LimitOffset::no_limit(),
+            pagination: Pagination::None,
+            count_total: false,
         }
     }
 
@@ -77,15 +81,43 @@ impl ReadQuery {
         self
     }
 
-    /// Set LIMIT
+    /// Set LIMIT (creates LimitOffset pagination)
     pub fn limit(mut self, limit: u64) -> Self {
-        self.limit.limit = Some(limit);
+        match &mut self.pagination {
+            Pagination::LimitOffset { limit: l, .. } => *l = Some(limit),
+            _ => {
+                self.pagination = Pagination::LimitOffset {
+                    limit: Some(limit),
+                    offset: 0,
+                };
+            }
+        }
         self
     }
 
-    /// Set OFFSET
+    /// Set OFFSET (creates LimitOffset pagination)
     pub fn offset(mut self, offset: u64) -> Self {
-        self.limit.offset = offset;
+        match &mut self.pagination {
+            Pagination::LimitOffset { offset: o, .. } => *o = offset,
+            _ => {
+                self.pagination = Pagination::LimitOffset {
+                    limit: None,
+                    offset,
+                };
+            }
+        }
+        self
+    }
+
+    /// Set pagination
+    pub fn pagination(mut self, pagination: Pagination) -> Self {
+        self.pagination = pagination;
+        self
+    }
+
+    /// Request total count computation
+    pub fn count_total(mut self, count: bool) -> Self {
+        self.count_total = count;
         self
     }
 }
