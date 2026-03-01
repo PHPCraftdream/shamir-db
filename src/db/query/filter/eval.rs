@@ -123,6 +123,41 @@ fn resolve_query_ref_value(
     json_to_inner_value(field_val)
 }
 
+/// Extract a column of values from all records in a QueryResult.
+///
+/// Supports `[].field` pattern — iterates all records, extracts `field` from each.
+fn resolve_query_ref_column(
+    qr: &QueryResult,
+    path: Option<&str>,
+) -> Vec<InnerValue> {
+    let path = match path {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    // Parse "[].field" pattern
+    if !path.starts_with("[]") {
+        return Vec::new();
+    }
+    let rest = &path[2..];
+    let field = match rest.strip_prefix('.') {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+
+    qr.records
+        .iter()
+        .filter_map(|record| {
+            let val = record.get(field)?;
+            json_to_inner_value(val)
+        })
+        .collect()
+}
+
+/// Check if a QueryRef path uses the column selector pattern `[]`.
+fn is_column_query_ref(fv: &FilterValue) -> bool {
+    matches!(fv, FilterValue::QueryRef { path: Some(p), .. } if p.starts_with("[]"))
+}
+
 /// Convert a serde_json::Value into an InnerValue (simple scalar conversion).
 fn json_to_inner_value(v: &serde_json::Value) -> Option<InnerValue> {
     match v {
@@ -248,6 +283,44 @@ impl FilterCallback for IsNotNullCallback {
     }
 }
 
+/// In — field value must be in the resolved values list
+struct InCallback {
+    field_path: Vec<u64>,
+    values: Vec<FilterValue>,
+    negate: bool,
+}
+
+impl FilterCallback for InCallback {
+    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
+        let field_val = match resolve_field(record, &self.field_path) {
+            Some(v) => v,
+            None => return self.negate, // missing field: not in any set
+        };
+
+        let found = self.values.iter().any(|fv| {
+            // Column QueryRef: expand to all values from the query result
+            if is_column_query_ref(fv) {
+                if let FilterValue::QueryRef { alias, path } = fv {
+                    if let Some(qr) = ctx.resolved_refs.get(alias.as_str()) {
+                        let column = resolve_query_ref_column(qr, path.as_deref());
+                        return column
+                            .iter()
+                            .any(|cv| compare_values(&field_val, cv) == Some(Ordering::Equal));
+                    }
+                }
+                return false;
+            }
+            // Single value
+            match resolve_filter_value(fv, record, ctx) {
+                Some(resolved) => compare_values(&field_val, &resolved) == Some(Ordering::Equal),
+                None => false,
+            }
+        });
+
+        if self.negate { !found } else { found }
+    }
+}
+
 /// Always-true callback
 struct TrueCallback;
 
@@ -316,12 +389,27 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCal
             None => Box::new(FalseCallback),
         },
 
+        Filter::In { field, values } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(InCallback {
+                field_path: path,
+                values: values.clone(),
+                negate: false,
+            }),
+            None => Box::new(FalseCallback),
+        },
+        Filter::NotIn { field, values } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(InCallback {
+                field_path: path,
+                values: values.clone(),
+                negate: true,
+            }),
+            None => Box::new(TrueCallback),
+        },
+
         // Not yet implemented — always false
         Filter::Like { .. }
         | Filter::ILike { .. }
         | Filter::Regex { .. }
-        | Filter::In { .. }
-        | Filter::NotIn { .. }
         | Filter::Contains { .. }
         | Filter::ContainsAny { .. }
         | Filter::ContainsAll { .. }
