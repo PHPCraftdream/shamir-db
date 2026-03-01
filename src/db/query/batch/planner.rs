@@ -59,8 +59,8 @@ use serde_json::Value;
 /// use shamir_db::types::common::new_map;
 ///
 /// let mut queries = new_map();
-/// queries.insert("users".to_string(), QueryEntry::from(Query::new("users")));
-/// queries.insert("orders".to_string(), QueryEntry::from(Query::new("orders")));
+/// queries.insert("users".to_string(), QueryEntry::from(ReadQuery::new("users")));
+/// queries.insert("orders".to_string(), QueryEntry::from(ReadQuery::new("orders")));
 ///
 /// let plan = BatchPlanner::plan(&queries, &BatchLimits::default())?;
 /// println!("Stages: {:?}", plan.stages);

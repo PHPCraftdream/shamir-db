@@ -6,11 +6,11 @@ use crate::db::query::common::{
     agg_func_from_str, aggregate_field_from_value, filter_from_value, group_by_from_value,
     limit_offset_from_value, order_by_from_value, QueryParseError,
 };
-use crate::db::query::read::{LimitOffset, Query, Select, SelectItem};
+use crate::db::query::read::{LimitOffset, ReadQuery, Select, SelectItem};
 use crate::types::value::{QueryValue, Value};
 
 /// Parse SELECT Query from QueryValue (Value<Map<String, Value>>)
-pub fn query_from_value(value: &QueryValue) -> Result<Query, QueryParseError> {
+pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError> {
     let map = match value {
         Value::Map(m) => m,
         _ => return Err(QueryParseError::NotAnObject),
@@ -46,7 +46,7 @@ pub fn query_from_value(value: &QueryValue) -> Result<Query, QueryParseError> {
         None => LimitOffset::no_limit(),
     };
 
-    Ok(Query {
+    Ok(ReadQuery {
         from,
         select,
         r#where,

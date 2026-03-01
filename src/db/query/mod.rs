@@ -9,10 +9,10 @@ pub use batch::{
     QueryEntry, QueryPath, QueryReference,
 };
 pub use common::QueryParseError;
-pub use filter::{FieldPath, Filter, FilterValue};
+pub use filter::{FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue};
 pub use read::{
-    AggFunc, AggregateField, Expr, ExprValue, GroupBy, LimitOffset, NullsOrder, OrderBy,
-    OrderByItem, OrderDirection, Query, QueryResult, QueryStats, ReadQuery, Select, SelectItem,
-    TableName,
+    AggFunc, AggregateField, GroupBy, LimitOffset, NullsOrder, OrderBy,
+    OrderByItem, OrderDirection, QueryResult, QueryStats, ReadQuery, Select, SelectExpr,
+    SelectExprValue, SelectItem, TableName,
 };
 pub use write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect};

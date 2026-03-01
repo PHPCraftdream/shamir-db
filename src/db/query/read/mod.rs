@@ -2,18 +2,25 @@
 //!
 //! Types for building SELECT queries.
 
-mod group;
+mod agg;
+mod group_by;
+mod limit;
+mod order_by;
 mod parser;
-mod query;
+mod query_result;
+mod read_query;
 mod select;
+mod select_expr;
 
-pub use group::{GroupBy, LimitOffset, NullsOrder, OrderBy, OrderByItem, OrderDirection};
+pub use agg::{AggFunc, AggregateField};
+pub use group_by::GroupBy;
+pub use limit::LimitOffset;
+pub use order_by::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
 pub use parser::query_from_value;
-pub use query::{Query, QueryResult, QueryStats, TableName};
-pub use select::{AggFunc, AggregateField, Expr, ExprValue, Select, SelectItem};
-
-/// Alias for Query - makes API clearer when distinguishing read vs write operations.
-pub type ReadQuery = Query;
+pub use query_result::{QueryResult, QueryStats};
+pub use read_query::{ReadQuery, TableName};
+pub use select::{Select, SelectItem};
+pub use select_expr::{SelectExpr, SelectExprValue};
 
 #[cfg(test)]
 mod tests;

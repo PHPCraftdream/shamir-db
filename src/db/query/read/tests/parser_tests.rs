@@ -4,11 +4,11 @@
 
 use crate::db::query::filter::Filter;
 use crate::db::query::read::query_from_value;
-use crate::db::query::read::{Query, SelectItem};
+use crate::db::query::read::{ReadQuery, SelectItem};
 use crate::types::value::QueryValue;
 
 /// Parse JSON string to QueryValue, then to Query
-fn parse_query(json: &str) -> Query {
+fn parse_query(json: &str) -> ReadQuery {
     let query_value: QueryValue = serde_json::from_str(json).expect("Invalid JSON");
     query_from_value(&query_value).expect("Failed to parse query")
 }

@@ -1,4 +1,4 @@
-//! Query AST - complete read query definition.
+//! ReadQuery — complete read query definition.
 //!
 //! This is the main entry point for SDBQL SELECT queries.
 
@@ -12,7 +12,7 @@ pub type TableName = String;
 
 /// Complete read query definition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Query {
+pub struct ReadQuery {
     /// Table to query
     pub from: TableName,
     /// What to select (fields, aggregations)
@@ -40,10 +40,10 @@ fn is_default_limit(lo: &LimitOffset) -> bool {
     lo.limit.is_none() && lo.offset == 0
 }
 
-impl Query {
+impl ReadQuery {
     /// Create a new query for the given table
     pub fn new(table: impl Into<String>) -> Self {
-        Query {
+        ReadQuery {
             from: table.into(),
             select: Select::all(),
             r#where: None,
@@ -88,30 +88,4 @@ impl Query {
         self.limit.offset = offset;
         self
     }
-}
-
-/// Query execution statistics
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct QueryStats {
-    /// Was an index used?
-    pub index_used: Option<String>,
-    /// Number of records scanned
-    pub records_scanned: u64,
-    /// Number of records returned
-    pub records_returned: u64,
-    /// Execution time in microseconds
-    pub execution_time_us: u64,
-}
-
-/// Query result
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct QueryResult {
-    /// Result records (as JSON values)
-    pub records: Vec<serde_json::Value>,
-    /// Execution statistics
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stats: Option<QueryStats>,
-    /// Has more results (for pagination)
-    #[serde(default)]
-    pub has_more: bool,
 }
