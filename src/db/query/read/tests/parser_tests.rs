@@ -40,7 +40,10 @@ fn test_parse_simple_query_from_json() {
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(query.select.items[0], SelectItem::All));
     assert!(query.r#where.is_some());
-    assert_eq!(query.limit.limit, Some(10));
+    assert!(matches!(
+        query.pagination,
+        crate::db::query::read::Pagination::LimitOffset { limit: Some(10), .. }
+    ));
 }
 
 #[test]

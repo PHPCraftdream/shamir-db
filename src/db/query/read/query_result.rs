@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::PaginationInfo;
+
 /// Query execution statistics
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueryStats {
@@ -23,7 +25,7 @@ pub struct QueryResult {
     /// Execution statistics
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<QueryStats>,
-    /// Has more results (for pagination)
-    #[serde(default)]
-    pub has_more: bool,
+    /// Pagination metadata (present when pagination was used)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagination: Option<PaginationInfo>,
 }

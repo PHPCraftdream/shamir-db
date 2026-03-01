@@ -4,11 +4,11 @@
 
 use crate::db::query::common::{
     agg_func_from_str, aggregate_field_from_value, expr_from_value, expr_value_from_value,
-    filter_from_value, group_by_from_value, limit_offset_from_value, order_by_from_value,
+    filter_from_value, group_by_from_value, pagination_from_value, order_by_from_value,
     order_by_item_from_value, QueryParseError,
 };
 use crate::db::query::read::{
-    AggFunc, AggregateField, SelectExpr, SelectExprValue, NullsOrder, OrderDirection,
+    AggFunc, AggregateField, Pagination, SelectExpr, SelectExprValue, NullsOrder, OrderDirection,
 };
 use crate::types::value::QueryValue;
 
@@ -85,34 +85,67 @@ fn test_order_by_item_desc() {
 }
 
 // ============================================================================
-// LIMIT/OFFSET Tests
+// PAGINATION Tests (limit/offset)
 // ============================================================================
 
 #[test]
 fn test_limit_only() {
     let json = r#"{ "limit": 10 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
-    let lo = limit_offset_from_value(&value).unwrap();
-    assert_eq!(lo.limit, Some(10));
-    assert_eq!(lo.offset, 0);
+    let p = pagination_from_value(&value).unwrap();
+    assert_eq!(p, Pagination::LimitOffset { limit: Some(10), offset: 0 });
 }
 
 #[test]
 fn test_limit_with_offset() {
     let json = r#"{ "limit": 10, "offset": 20 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
-    let lo = limit_offset_from_value(&value).unwrap();
-    assert_eq!(lo.limit, Some(10));
-    assert_eq!(lo.offset, 20);
+    let p = pagination_from_value(&value).unwrap();
+    assert_eq!(p, Pagination::LimitOffset { limit: Some(10), offset: 20 });
 }
 
 #[test]
 fn test_offset_only() {
     let json = r#"{ "offset": 50 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
-    let lo = limit_offset_from_value(&value).unwrap();
-    assert_eq!(lo.limit, Some(0));
-    assert_eq!(lo.offset, 50);
+    let p = pagination_from_value(&value).unwrap();
+    assert_eq!(p, Pagination::LimitOffset { limit: None, offset: 50 });
+}
+
+// ============================================================================
+// PAGINATION Tests (page-based)
+// ============================================================================
+
+#[test]
+fn test_page_based() {
+    let json = r#"{ "page": 2, "page_size": 10 }"#;
+    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let p = pagination_from_value(&value).unwrap();
+    assert_eq!(p, Pagination::Page { page: 2, page_size: 10 });
+}
+
+#[test]
+fn test_page_based_page_1() {
+    let json = r#"{ "page": 1, "page_size": 25 }"#;
+    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let p = pagination_from_value(&value).unwrap();
+    assert_eq!(p, Pagination::Page { page: 1, page_size: 25 });
+}
+
+#[test]
+fn test_page_based_missing_page_size() {
+    let json = r#"{ "page": 2 }"#;
+    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let result = pagination_from_value(&value);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_not_an_object_pagination() {
+    let json = r#""not an object""#;
+    let value: QueryValue = serde_json::from_str(json).unwrap();
+    let result = pagination_from_value(&value);
+    assert!(matches!(result, Err(QueryParseError::InvalidType(_, _))));
 }
 
 // ============================================================================

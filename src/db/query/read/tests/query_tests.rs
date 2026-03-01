@@ -132,8 +132,10 @@ fn test_select_with_limit_offset() {
 
     let query = parse_query(json);
 
-    assert_eq!(query.limit.limit, Some(10));
-    assert_eq!(query.limit.offset, 20);
+    assert!(matches!(
+        query.pagination,
+        crate::db::query::read::Pagination::LimitOffset { limit: Some(10), offset: 20 }
+    ));
 }
 
 #[test]
@@ -429,8 +431,10 @@ fn test_complex_query() {
     assert!(query.r#where.is_some());
     assert!(query.group_by.is_some());
     assert!(query.order_by.is_some());
-    assert_eq!(query.limit.limit, Some(100));
-    assert_eq!(query.limit.offset, 0);
+    assert!(matches!(
+        query.pagination,
+        crate::db::query::read::Pagination::LimitOffset { limit: Some(100), offset: 0 }
+    ));
 }
 
 #[test]
