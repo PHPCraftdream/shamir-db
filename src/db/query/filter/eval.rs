@@ -48,7 +48,7 @@ pub fn resolve_field(record: &InnerValue, path: &[u64]) -> Option<InnerValue> {
 }
 
 /// Resolve a field path string (e.g. "user.email") into interned u64 keys.
-fn intern_field_path(field: &str, interner: &Interner) -> Option<Vec<u64>> {
+pub fn intern_field_path(field: &str, interner: &Interner) -> Option<Vec<u64>> {
     let mut keys = Vec::new();
     for part in field.split('.') {
         let interned = interner.get_ind(part)?;

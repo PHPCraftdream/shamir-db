@@ -1,3 +1,9 @@
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use futures::StreamExt;
+
 use super::interner_manager::InternerManager;
 use super::record_counter::RecordCounter;
 use super::table::Table;
@@ -8,13 +14,12 @@ use crate::db::engine::index::index_manager::IndexManager;
 use crate::db::query::filter::eval::{compile_filter, FilterCallback};
 use crate::db::query::filter::eval_context::FilterContext;
 use crate::db::query::filter::Filter;
+use crate::db::query::read::exec;
+use crate::db::query::read::{PaginationInfo, QueryResult, QueryStats, ReadQuery};
 use crate::db::storage::types::Store;
 use crate::db::DbResult;
 use crate::types::record_id::RecordId;
 use crate::types::value::InnerValue;
-use futures::StreamExt;
-use std::collections::BTreeSet;
-use std::sync::Arc;
 
 pub struct TableManager {
     name: String,
@@ -341,6 +346,309 @@ impl TableManager {
             }
         }
         false
+    }
+
+    // ============================================================================
+    // Read query execution
+    // ============================================================================
+
+    /// Execute a full read query pipeline via streaming.
+    ///
+    /// Three strategies depending on query shape:
+    ///
+    /// 1. **Streaming** (no ORDER BY, GROUP BY, DISTINCT, aggregates, count_total):
+    ///    projects on-the-fly, fetches `limit + 1` for accurate `has_next`,
+    ///    early termination. Memory ≈ page_size.
+    ///
+    /// 2. **Counting** (count_total + simple SELECT — no ORDER BY, GROUP BY,
+    ///    DISTINCT, aggregates): streams all records counting matched total,
+    ///    but only keeps the requested page in memory. Memory ≈ page_size.
+    ///
+    /// 3. **Collecting** (ORDER BY, GROUP BY, DISTINCT, aggregates): must
+    ///    accumulate records — raw InnerValues for GROUP BY / aggregates,
+    ///    projected JSON for ORDER BY / DISTINCT.
+    pub async fn read(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+    ) -> DbResult<QueryResult> {
+        let start = Instant::now();
+        let batch_size = 1000;
+        let interner = self.interner.get().await?;
+
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+        let has_order = query.order_by.is_some();
+        let has_distinct = query.select.distinct;
+
+        // Compile WHERE filter once (if present)
+        let filter_cb: Option<Box<dyn FilterCallback>> =
+            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+
+        let needs_full_collect = has_group_by || has_agg || has_order || has_distinct;
+
+        if needs_full_collect {
+            // Path 3: must accumulate for GROUP BY / ORDER BY / DISTINCT / aggregates
+            self.read_collecting(query, ctx, interner, filter_cb.as_deref(), batch_size, start)
+                .await
+        } else if query.count_total {
+            // Path 2: count all matched, keep only the page
+            self.read_counting(query, interner, filter_cb.as_deref(), ctx, batch_size, start)
+                .await
+        } else {
+            // Path 1: pure streaming, early termination
+            self.read_streaming(query, interner, filter_cb.as_deref(), ctx, batch_size, start)
+                .await
+        }
+    }
+
+    /// Collecting path: streams batches, accumulates what's needed, then applies
+    /// GROUP BY / aggregates / ORDER BY / DISTINCT / PAGINATION.
+    ///
+    /// For GROUP BY / aggregates — accumulates raw InnerValues (needed for
+    /// field extraction). For plain SELECT + ORDER BY / DISTINCT — accumulates
+    /// already-projected JSON values (smaller footprint than raw records).
+    async fn read_collecting(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &crate::core::interner::Interner,
+        filter_cb: Option<&dyn FilterCallback>,
+        batch_size: usize,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+        let needs_raw = has_group_by || has_agg;
+
+        let stream = self.table.list_stream(batch_size);
+        futures::pin_mut!(stream);
+
+        let mut records_scanned: u64 = 0;
+
+        // Two accumulation modes — raw InnerValues or projected JSON
+        let mut raw_acc: Vec<(RecordId, InnerValue)> = Vec::new();
+        let mut json_acc: Vec<serde_json::Value> = Vec::new();
+        let proj = if !needs_raw {
+            Some(exec::SelectProjection::new(&query.select, interner))
+        } else {
+            None
+        };
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            records_scanned += batch.len() as u64;
+            for (id, record) in batch {
+                let passes = match filter_cb {
+                    Some(cb) => cb.matches(&record, ctx),
+                    None => true,
+                };
+                if passes {
+                    if needs_raw {
+                        raw_acc.push((id, record));
+                    } else {
+                        json_acc.push(proj.as_ref().unwrap().project(&record, interner));
+                    }
+                }
+            }
+        }
+
+        let mut result = if has_group_by {
+            let group_by = query.group_by.as_ref().unwrap();
+            exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
+        } else if has_agg {
+            exec::apply_aggregate_all(&raw_acc, &query.select, interner)
+        } else {
+            json_acc
+        };
+
+        if query.select.distinct {
+            result = exec::apply_distinct(result);
+        }
+        if let Some(ref order_by) = query.order_by {
+            exec::apply_order_by(&mut result, order_by);
+        }
+
+        let (records, pagination) =
+            exec::apply_pagination(result, &query.pagination, query.count_total);
+
+        let elapsed = start.elapsed();
+        let records_returned = records.len() as u64;
+
+        Ok(QueryResult {
+            records,
+            stats: Some(QueryStats {
+                index_used: None,
+                records_scanned,
+                records_returned,
+                execution_time_us: elapsed.as_micros() as u64,
+            }),
+            pagination,
+        })
+    }
+
+    /// Counting path: streams all records, counts total matched, but only
+    /// keeps the requested page in memory. Memory ≈ page_size (not total).
+    ///
+    /// Used when `count_total = true` but no ORDER BY / GROUP BY / DISTINCT /
+    /// aggregates — i.e. the order is natural (insertion order) so we can
+    /// paginate on-the-fly while still counting everything.
+    async fn read_counting(
+        &self,
+        query: &ReadQuery,
+        interner: &crate::core::interner::Interner,
+        filter_cb: Option<&dyn FilterCallback>,
+        ctx: &FilterContext<'_>,
+        batch_size: usize,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let (skip, take) = query.pagination.resolve();
+        let skip = skip as usize;
+        let limit = take.map(|t| t as usize);
+
+        let proj = exec::SelectProjection::new(&query.select, interner);
+
+        let stream = self.table.list_stream(batch_size);
+        futures::pin_mut!(stream);
+
+        let mut records_scanned: u64 = 0;
+        let mut matched_total: u64 = 0;
+        let mut result: Vec<serde_json::Value> = Vec::new();
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            records_scanned += batch.len() as u64;
+
+            for (_, record) in &batch {
+                let passes = match filter_cb {
+                    Some(cb) => cb.matches(record, ctx),
+                    None => true,
+                };
+                if !passes {
+                    continue;
+                }
+
+                let idx = matched_total as usize;
+                matched_total += 1;
+
+                // Only project and keep records that fall within the page
+                if idx >= skip {
+                    if let Some(lim) = limit {
+                        if idx < skip + lim {
+                            result.push(proj.project(record, interner));
+                        }
+                        // Beyond the page — still count, but don't store
+                    } else {
+                        // No limit — keep everything from skip onwards
+                        result.push(proj.project(record, interner));
+                    }
+                }
+            }
+        }
+
+        let elapsed = start.elapsed();
+        let records_returned = result.len() as u64;
+
+        let pagination = Some(PaginationInfo::compute(
+            &query.pagination,
+            Some(matched_total),
+        ));
+
+        Ok(QueryResult {
+            records: result,
+            stats: Some(QueryStats {
+                index_used: None,
+                records_scanned,
+                records_returned,
+                execution_time_us: elapsed.as_micros() as u64,
+            }),
+            pagination,
+        })
+    }
+
+    /// Streaming path: SELECT + PAGINATION only (no ORDER BY, GROUP BY, DISTINCT,
+    /// aggregates, count_total). Projects on-the-fly, fetches up to `limit + 1`
+    /// to determine `has_next` accurately, then stops. Memory ≈ page_size.
+    async fn read_streaming(
+        &self,
+        query: &ReadQuery,
+        interner: &crate::core::interner::Interner,
+        filter_cb: Option<&dyn FilterCallback>,
+        ctx: &FilterContext<'_>,
+        batch_size: usize,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let (skip, take) = query.pagination.resolve();
+        let skip = skip as usize;
+        let limit = take.map(|t| t as usize);
+
+        let proj = exec::SelectProjection::new(&query.select, interner);
+
+        let stream = self.table.list_stream(batch_size);
+        futures::pin_mut!(stream);
+
+        let mut records_scanned: u64 = 0;
+        let mut skipped: usize = 0;
+        let mut result: Vec<serde_json::Value> = Vec::new();
+        let mut has_next = false;
+        let mut done = false;
+
+        while let Some(batch_result) = stream.next().await {
+            if done {
+                break;
+            }
+            let batch = batch_result?;
+            records_scanned += batch.len() as u64;
+
+            for (_, record) in &batch {
+                let passes = match filter_cb {
+                    Some(cb) => cb.matches(record, ctx),
+                    None => true,
+                };
+                if !passes {
+                    continue;
+                }
+
+                if skipped < skip {
+                    skipped += 1;
+                    continue;
+                }
+
+                if let Some(lim) = limit {
+                    if result.len() >= lim {
+                        // This is the limit+1 record — confirms has_next
+                        has_next = true;
+                        done = true;
+                        break;
+                    }
+                }
+
+                result.push(proj.project(record, interner));
+            }
+        }
+
+        let elapsed = start.elapsed();
+        let records_returned = result.len() as u64;
+
+        let pagination = if query.pagination.is_none() {
+            None
+        } else {
+            Some(
+                PaginationInfo::compute(&query.pagination, None)
+                    .with_has_next(has_next),
+            )
+        };
+
+        Ok(QueryResult {
+            records: result,
+            stats: Some(QueryStats {
+                index_used: None,
+                records_scanned,
+                records_returned,
+                execution_time_us: elapsed.as_micros() as u64,
+            }),
+            pagination,
+        })
     }
 
     // ============================================================================

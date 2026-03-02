@@ -82,7 +82,7 @@ fn json_value_to_inner(
 }
 
 /// Converts InnerValue to serde_json::Value, de-interning all keys
-fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
+pub fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
     match value {
         Value::Null => json::Value::Null,
         Value::Bool(b) => json::Value::Bool(*b),
