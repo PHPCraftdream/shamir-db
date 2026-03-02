@@ -3,6 +3,7 @@
 //! Types for building SELECT queries.
 
 mod agg;
+pub mod exec;
 mod group_by;
 mod limit;
 mod order_by;
