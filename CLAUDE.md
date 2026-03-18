@@ -33,6 +33,7 @@
 - NEVER create methods that collect all records into Vec — always use streams with bounded memory
 - `mod.rs` files must contain ONLY module declarations (`mod`, `pub mod`) and re-exports (`pub use`). No types, no functions, no logic.
 - Each `.rs` file (not `mod.rs`) should export ONE primary entity (struct, enum, trait, or a small cohesive group of closely related items like a struct + its builder)
+- Integration tests MUST use JSON text → parse → execute → verify (full parsing cycle), not construct structs directly
 
 ## Project Architecture
 

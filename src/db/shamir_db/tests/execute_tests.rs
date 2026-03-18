@@ -5,13 +5,8 @@ use serde_json::json;
 use crate::db::engine::repo::repo_types::BoxRepoFactory;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
-use crate::db::query::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
-use crate::db::query::filter::{Filter, FilterValue};
-use crate::db::query::read::ReadQuery;
-use crate::db::query::write::{DeleteOp, InsertOp, UpdateOp, UpdateSelect, UpdateReturnMode};
-use crate::db::query::TableRef;
+use crate::db::query::batch::BatchRequest;
 use crate::db::ShamirDb;
-use crate::types::common::new_map;
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::new().init().await.unwrap();
@@ -25,17 +20,6 @@ async fn setup_shamir() -> ShamirDb {
     shamir
 }
 
-fn batch(queries: crate::types::common::TMap<String, QueryEntry>) -> BatchRequest {
-    BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    }
-}
-
 // ============================================================================
 // Basic single operations
 // ============================================================================
@@ -44,22 +28,19 @@ fn batch(queries: crate::types::common::TMap<String, QueryEntry>) -> BatchReques
 async fn test_execute_single_insert() {
     let shamir = setup_shamir().await;
 
-    let mut q = new_map();
-    q.insert(
-        "ins".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "age": 30}),
-                    json!({"name": "Bob", "age": 25}),
-                ],
-            }),
-            return_result: true,
-        },
-    );
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "age": 30},
+                    {"name": "Bob", "age": 25}
+                ]
+            }
+        }
+    })).unwrap();
 
-    let resp = shamir.execute("testdb", &batch(q)).await.unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
 }
 
@@ -68,23 +49,24 @@ async fn test_execute_single_read() {
     let shamir = setup_shamir().await;
 
     // Seed
-    let mut seed = new_map();
-    seed.insert(
-        "s".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![json!({"name": "Alice"}), json!({"name": "Bob"})],
-            }),
-            return_result: false,
-        },
-    );
-    shamir.execute("testdb", &batch(seed)).await.unwrap();
+    let seed: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "s": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}, {"name": "Bob"}],
+                "return_result": false
+            }
+        }
+    })).unwrap();
+    shamir.execute("testdb", &seed).await.unwrap();
 
     // Read
-    let mut q = new_map();
-    q.insert("users".to_string(), ReadQuery::new("users").into());
-    let resp = shamir.execute("testdb", &batch(q)).await.unwrap();
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "users": {"from": "users"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
 
     assert_eq!(resp.results["users"].records.len(), 2);
 }
@@ -98,64 +80,49 @@ async fn test_execute_crud_pipeline() {
     let shamir = setup_shamir().await;
 
     // 1. Insert users
-    let mut q1 = new_map();
-    q1.insert(
-        "ins".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "status": "active"}),
-                    json!({"name": "Bob", "status": "inactive"}),
-                    json!({"name": "Carol", "status": "active"}),
+    let q1: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"},
+                    {"name": "Carol", "status": "active"}
                 ],
-            }),
-            return_result: false,
-        },
-    );
-    shamir.execute("testdb", &batch(q1)).await.unwrap();
+                "return_result": false
+            }
+        }
+    })).unwrap();
+    shamir.execute("testdb", &q1).await.unwrap();
 
     // 2. Update: activate Bob
-    let mut q2 = new_map();
-    q2.insert(
-        "upd".to_string(),
-        QueryEntry {
-            op: BatchOp::Update(UpdateOp {
-                update: TableRef::new("users"),
-                where_clause: Some(Filter::Eq {
-                    field: vec!["name".into()],
-                    value: FilterValue::String("Bob".into()),
-                }),
-                set: json!({"status": "active"}),
-                select: Some(UpdateSelect {
-                    return_mode: UpdateReturnMode::Changed,
-                    fields: None,
-                }),
-            }),
-            return_result: true,
-        },
-    );
-    let resp = shamir.execute("testdb", &batch(q2)).await.unwrap();
+    let q2: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "upd": {
+                "update": "users",
+                "where": {"op": "eq", "field": ["name"], "value": "Bob"},
+                "set": {"status": "active"},
+                "select": {
+                    "return_mode": "changed"
+                }
+            }
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &q2).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
     assert_eq!(resp.results["upd"].records[0]["status"], "active");
 
     // 3. Delete Carol + read remaining
-    let mut q3 = new_map();
-    q3.insert(
-        "del".to_string(),
-        QueryEntry {
-            op: BatchOp::Delete(DeleteOp {
-                delete_from: TableRef::new("users"),
-                where_clause: Filter::Eq {
-                    field: vec!["name".into()],
-                    value: FilterValue::String("Carol".into()),
-                },
-            }),
-            return_result: true,
-        },
-    );
-    q3.insert("remaining".to_string(), ReadQuery::new("users").into());
-    let resp = shamir.execute("testdb", &batch(q3)).await.unwrap();
+    let q3: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "del": {
+                "delete_from": "users",
+                "where": {"op": "eq", "field": ["name"], "value": "Carol"}
+            },
+            "remaining": {"from": "users"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &q3).await.unwrap();
 
     assert_eq!(resp.results["remaining"].records.len(), 2);
 }
@@ -169,62 +136,48 @@ async fn test_execute_multi_table_with_dependency() {
     let shamir = setup_shamir().await;
 
     // Seed users and orders
-    let mut seed = new_map();
-    seed.insert(
-        "s1".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "tier": "vip"}),
-                    json!({"name": "Bob", "tier": "basic"}),
+    let seed: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "s1": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "tier": "vip"},
+                    {"name": "Bob", "tier": "basic"}
                 ],
-            }),
-            return_result: false,
-        },
-    );
-    seed.insert(
-        "s2".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("orders"),
-                values: vec![
-                    json!({"user": "Alice", "amount": 100}),
-                    json!({"user": "Bob", "amount": 50}),
-                    json!({"user": "Alice", "amount": 200}),
+                "return_result": false
+            },
+            "s2": {
+                "insert_into": "orders",
+                "values": [
+                    {"user": "Alice", "amount": 100},
+                    {"user": "Bob", "amount": 50},
+                    {"user": "Alice", "amount": 200}
                 ],
-            }),
-            return_result: false,
-        },
-    );
-    shamir.execute("testdb", &batch(seed)).await.unwrap();
+                "return_result": false
+            }
+        }
+    })).unwrap();
+    shamir.execute("testdb", &seed).await.unwrap();
 
     // Query: find VIP users, then find their orders
-    let mut q = new_map();
-    q.insert(
-        "vips".to_string(),
-        ReadQuery::new("users")
-            .filter(Filter::Eq {
-                field: vec!["tier".into()],
-                value: FilterValue::String("vip".into()),
-            })
-            .into(),
-    );
-    q.insert(
-        "vip_orders".to_string(),
-        QueryEntry {
-            op: BatchOp::Read(ReadQuery::new("orders").filter(Filter::Eq {
-                field: vec!["user".into()],
-                value: FilterValue::QueryRef {
-                    alias: "vips".into(),
-                    path: Some("[0].name".into()),
-                },
-            })),
-            return_result: true,
-        },
-    );
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "vips": {
+                "from": "users",
+                "where": {"op": "eq", "field": ["tier"], "value": "vip"}
+            },
+            "vip_orders": {
+                "from": "orders",
+                "where": {
+                    "op": "eq",
+                    "field": ["user"],
+                    "value": {"$query": "vips", "path": "[0].name"}
+                }
+            }
+        }
+    })).unwrap();
 
-    let resp = shamir.execute("testdb", &batch(q)).await.unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
 
     // Stage 1: vips → Alice
     assert_eq!(resp.results["vips"].records.len(), 1);
@@ -241,11 +194,14 @@ async fn test_execute_multi_table_with_dependency() {
 async fn test_execute_unknown_db() {
     let shamir = setup_shamir().await;
 
-    let mut q = new_map();
-    q.insert("r".to_string(), ReadQuery::new("users").into());
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "r": {"from": "users"}
+        }
+    })).unwrap();
 
     let err = shamir
-        .execute("nonexistent", &batch(q))
+        .execute("nonexistent", &req)
         .await
         .unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
@@ -259,14 +215,17 @@ async fn test_execute_unknown_db() {
 async fn test_execute_unknown_repo() {
     let shamir = setup_shamir().await;
 
-    // Use a TableRef with a nonexistent repo
-    let mut q = new_map();
-    let mut read = ReadQuery::new("users");
-    read.from = TableRef::with_repo("nonexistent", "users");
-    q.insert("r".to_string(), QueryEntry { op: BatchOp::Read(read), return_result: true });
+    // Use a TableRef with a nonexistent repo (array format: ["repo", "table"])
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "r": {
+                "from": ["nonexistent", "users"]
+            }
+        }
+    })).unwrap();
 
     let err = shamir
-        .execute("testdb", &batch(q))
+        .execute("testdb", &req)
         .await
         .unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
