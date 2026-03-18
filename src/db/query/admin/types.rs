@@ -98,4 +98,8 @@ pub enum ListOp {
         #[serde(default = "default_repo")]
         repo: String,
     },
+    #[serde(rename = "users")]
+    Users,
+    #[serde(rename = "roles")]
+    Roles,
 }
