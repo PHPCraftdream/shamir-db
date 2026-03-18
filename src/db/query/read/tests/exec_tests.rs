@@ -4,7 +4,6 @@ use serde_json::json;
 
 use crate::core::interner::{InternerKey, Interner, TouchInd};
 use crate::db::query::filter::eval_context::FilterContext;
-use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::read::exec::*;
 use crate::db::query::read::*;
 use crate::types::common::new_map;
@@ -45,7 +44,9 @@ fn make_records(interner: &Interner) -> Vec<(RecordId, InnerValue)> {
 fn select_all() {
     let interner = Interner::default();
     let records = make_records(&interner);
-    let select = Select::all();
+    let select: Select = serde_json::from_value(json!({
+        "items": [{"type": "all"}]
+    })).unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result.len(), 4);
@@ -57,13 +58,17 @@ fn select_all() {
 fn select_specific_fields() {
     let interner = Interner::default();
     let records = make_records(&interner);
-    let select = Select::fields(["name", "age"]);
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["name"]},
+            {"type": "field", "path": ["age"]}
+        ]
+    })).unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result.len(), 4);
     assert_eq!(result[0]["name"], "Alice");
     assert_eq!(result[0]["age"], 30);
-    // city should not be present
     assert!(result[0].get("city").is_none());
 }
 
@@ -71,13 +76,9 @@ fn select_specific_fields() {
 fn select_with_alias() {
     let interner = Interner::default();
     let records = make_records(&interner);
-    let select = Select {
-        items: vec![SelectItem::Field {
-            path: vec!["name".into()],
-            alias: Some("user_name".into()),
-        }],
-        distinct: false,
-    };
+    let select: Select = serde_json::from_value(json!({
+        "items": [{"type": "field", "path": ["name"], "alias": "user_name"}]
+    })).unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result[0]["user_name"], "Alice");
@@ -88,7 +89,12 @@ fn select_with_alias() {
 fn select_nonexistent_field_returns_null() {
     let interner = Interner::default();
     let records = make_records(&interner);
-    let select = Select::fields(["name", "nonexistent"]);
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["name"]},
+            {"type": "field", "path": ["nonexistent"]}
+        ]
+    })).unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result[0]["name"], "Alice");
@@ -106,24 +112,18 @@ fn group_by_count() {
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
 
-    let group_by = GroupBy::new(["city"]);
-    let select = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["city".into()],
-                alias: None,
-            },
-            SelectItem::CountAll {
-                alias: Some("cnt".into()),
-            },
-        ],
-        distinct: false,
-    };
+    let group_by: GroupBy = serde_json::from_value(json!({
+        "fields": [["city"]]
+    })).unwrap();
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["city"]},
+            {"type": "count_all", "alias": "cnt"}
+        ]
+    })).unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert_eq!(result.len(), 2);
-
-    // BTreeMap is sorted by serialized key, so "LA" < "NYC"
     assert_eq!(result[0]["city"], "LA");
     assert_eq!(result[0]["cnt"], 2);
     assert_eq!(result[1]["city"], "NYC");
@@ -137,36 +137,19 @@ fn group_by_sum_avg() {
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
 
-    let group_by = GroupBy::new(["city"]);
-    let select = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["city".into()],
-                alias: None,
-            },
-            SelectItem::Aggregate {
-                func: AggFunc::Sum,
-                field: AggregateField::Field(vec!["age".into()]),
-                alias: Some("total_age".into()),
-                distinct: false,
-            },
-            SelectItem::Aggregate {
-                func: AggFunc::Avg,
-                field: AggregateField::Field(vec!["age".into()]),
-                alias: Some("avg_age".into()),
-                distinct: false,
-            },
-        ],
-        distinct: false,
-    };
+    let group_by: GroupBy = serde_json::from_value(json!({"fields": [["city"]]})).unwrap();
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["city"]},
+            {"type": "aggregate", "func": "sum", "field": ["age"], "alias": "total_age"},
+            {"type": "aggregate", "func": "avg", "field": ["age"], "alias": "avg_age"}
+        ]
+    })).unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    // LA: Bob(25) + Dave(25) = 50, avg = 25
     assert_eq!(result[0]["city"], "LA");
     assert_eq!(result[0]["total_age"], 50);
     assert_eq!(result[0]["avg_age"], 25.0);
-
-    // NYC: Alice(30) + Carol(35) = 65, avg = 32.5
     assert_eq!(result[1]["city"], "NYC");
     assert_eq!(result[1]["total_age"], 65);
     assert_eq!(result[1]["avg_age"], 32.5);
@@ -179,34 +162,18 @@ fn group_by_min_max() {
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
 
-    let group_by = GroupBy::new(["city"]);
-    let select = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["city".into()],
-                alias: None,
-            },
-            SelectItem::Aggregate {
-                func: AggFunc::Min,
-                field: AggregateField::Field(vec!["age".into()]),
-                alias: Some("min_age".into()),
-                distinct: false,
-            },
-            SelectItem::Aggregate {
-                func: AggFunc::Max,
-                field: AggregateField::Field(vec!["age".into()]),
-                alias: Some("max_age".into()),
-                distinct: false,
-            },
-        ],
-        distinct: false,
-    };
+    let group_by: GroupBy = serde_json::from_value(json!({"fields": [["city"]]})).unwrap();
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["city"]},
+            {"type": "aggregate", "func": "min", "field": ["age"], "alias": "min_age"},
+            {"type": "aggregate", "func": "max", "field": ["age"], "alias": "max_age"}
+        ]
+    })).unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    // LA: min=25, max=25
     assert_eq!(result[0]["min_age"], 25);
     assert_eq!(result[0]["max_age"], 25);
-    // NYC: min=30, max=35
     assert_eq!(result[1]["min_age"], 30);
     assert_eq!(result[1]["max_age"], 35);
 }
@@ -218,30 +185,18 @@ fn group_by_having() {
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
 
-    // HAVING total_age > 55
-    let group_by = GroupBy::new(["city"]).having(Filter::Gt {
-        field: vec!["total_age".into()],
-        value: FilterValue::Int(55),
-    });
-
-    let select = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["city".into()],
-                alias: None,
-            },
-            SelectItem::Aggregate {
-                func: AggFunc::Sum,
-                field: AggregateField::Field(vec!["age".into()]),
-                alias: Some("total_age".into()),
-                distinct: false,
-            },
-        ],
-        distinct: false,
-    };
+    let group_by: GroupBy = serde_json::from_value(json!({
+        "fields": [["city"]],
+        "having": {"op": "gt", "field": ["total_age"], "value": 55}
+    })).unwrap();
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["city"]},
+            {"type": "aggregate", "func": "sum", "field": ["age"], "alias": "total_age"}
+        ]
+    })).unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    // Only NYC (65) passes, LA (50) doesn't
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["city"], "NYC");
 }
@@ -257,26 +212,19 @@ fn group_by_multiple_fields() {
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
 
-    let group_by = GroupBy::new(["city", "age"]);
-    let select = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["city".into()],
-                alias: None,
-            },
-            SelectItem::Field {
-                path: vec!["age".into()],
-                alias: None,
-            },
-            SelectItem::CountAll {
-                alias: Some("cnt".into()),
-            },
-        ],
-        distinct: false,
-    };
+    let group_by: GroupBy = serde_json::from_value(json!({
+        "fields": [["city"], ["age"]]
+    })).unwrap();
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["city"]},
+            {"type": "field", "path": ["age"]},
+            {"type": "count_all", "alias": "cnt"}
+        ]
+    })).unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
-    assert_eq!(result.len(), 2); // (NYC,25) and (NYC,30)
+    assert_eq!(result.len(), 2);
 }
 
 #[test]
@@ -285,11 +233,11 @@ fn group_by_empty_input() {
     let records: Vec<(RecordId, InnerValue)> = vec![];
     let refs = new_map();
     let ctx = FilterContext::new(&interner, &refs);
-    let group_by = GroupBy::new(["city"]);
-    let select = Select {
-        items: vec![SelectItem::CountAll { alias: None }],
-        distinct: false,
-    };
+
+    let group_by: GroupBy = serde_json::from_value(json!({"fields": [["city"]]})).unwrap();
+    let select: Select = serde_json::from_value(json!({
+        "items": [{"type": "count_all"}]
+    })).unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert!(result.is_empty());
@@ -304,25 +252,17 @@ fn aggregate_all_count_sum() {
     let interner = Interner::default();
     let records = make_records(&interner);
 
-    let select = Select {
-        items: vec![
-            SelectItem::CountAll {
-                alias: Some("total".into()),
-            },
-            SelectItem::Aggregate {
-                func: AggFunc::Sum,
-                field: AggregateField::Field(vec!["age".into()]),
-                alias: Some("sum_age".into()),
-                distinct: false,
-            },
-        ],
-        distinct: false,
-    };
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "count_all", "alias": "total"},
+            {"type": "aggregate", "func": "sum", "field": ["age"], "alias": "sum_age"}
+        ]
+    })).unwrap();
 
     let result = apply_aggregate_all(&records, &select, &interner);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["total"], 4);
-    assert_eq!(result[0]["sum_age"], 115); // 30+25+35+25
+    assert_eq!(result[0]["sum_age"], 115);
 }
 
 // ============================================================================
@@ -337,7 +277,10 @@ fn order_by_asc() {
         json!({"name": "Bob", "age": 25}),
     ];
 
-    apply_order_by(&mut records, &OrderBy::asc("age"));
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "asc"}]
+    })).unwrap();
+    apply_order_by(&mut records, &order);
     assert_eq!(records[0]["age"], 25);
     assert_eq!(records[1]["age"], 30);
     assert_eq!(records[2]["age"], 35);
@@ -351,7 +294,10 @@ fn order_by_desc() {
         json!({"name": "Carol", "age": 35}),
     ];
 
-    apply_order_by(&mut records, &OrderBy::desc("age"));
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "desc"}]
+    })).unwrap();
+    apply_order_by(&mut records, &order);
     assert_eq!(records[0]["age"], 35);
     assert_eq!(records[1]["age"], 30);
     assert_eq!(records[2]["age"], 25);
@@ -366,9 +312,13 @@ fn order_by_multiple_fields() {
         json!({"city": "NYC", "age": 30}),
     ];
 
-    let order = OrderBy::new([OrderByItem::asc("city"), OrderByItem::asc("age")]);
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [
+            {"field": ["city"], "direction": "asc"},
+            {"field": ["age"], "direction": "asc"}
+        ]
+    })).unwrap();
     apply_order_by(&mut records, &order);
-
     assert_eq!(records[0]["city"], "LA");
     assert_eq!(records[0]["age"], 25);
     assert_eq!(records[1]["city"], "LA");
@@ -387,9 +337,10 @@ fn order_by_nulls_first() {
         json!({"name": "Carol", "age": 25}),
     ];
 
-    let order = OrderBy::new([OrderByItem::asc("age").nulls_first()]);
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "asc", "nulls": "first"}]
+    })).unwrap();
     apply_order_by(&mut records, &order);
-
     assert!(records[0].get("age").is_none() || records[0]["age"].is_null());
     assert_eq!(records[1]["age"], 25);
     assert_eq!(records[2]["age"], 30);
@@ -403,9 +354,10 @@ fn order_by_nulls_last() {
         json!({"name": "Carol", "age": 25}),
     ];
 
-    let order = OrderBy::new([OrderByItem::asc("age").nulls_last()]);
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "asc", "nulls": "last"}]
+    })).unwrap();
     apply_order_by(&mut records, &order);
-
     assert_eq!(records[0]["age"], 25);
     assert_eq!(records[1]["age"], 30);
     assert!(records[2].get("age").is_none() || records[2]["age"].is_null());
@@ -419,10 +371,9 @@ fn order_by_nulls_last() {
 fn pagination_limit_offset() {
     let records = vec![json!(1), json!(2), json!(3), json!(4), json!(5)];
 
-    let pagination = Pagination::LimitOffset {
-        limit: Some(2),
-        offset: 1,
-    };
+    let pagination: Pagination = serde_json::from_value(json!({
+        "mode": "LimitOffset", "limit": 2, "offset": 1
+    })).unwrap();
     let (result, info) = apply_pagination(records, &pagination, true);
 
     assert_eq!(result, vec![json!(2), json!(3)]);
@@ -436,7 +387,9 @@ fn pagination_limit_offset() {
 fn pagination_page_based() {
     let records = vec![json!(1), json!(2), json!(3), json!(4), json!(5)];
 
-    let pagination = Pagination::page(2, 2);
+    let pagination: Pagination = serde_json::from_value(json!({
+        "mode": "Page", "page": 2, "page_size": 2
+    })).unwrap();
     let (result, info) = apply_pagination(records, &pagination, true);
 
     assert_eq!(result, vec![json!(3), json!(4)]);
@@ -451,10 +404,9 @@ fn pagination_page_based() {
 fn pagination_count_total_false() {
     let records = vec![json!(1), json!(2), json!(3)];
 
-    let pagination = Pagination::LimitOffset {
-        limit: Some(2),
-        offset: 0,
-    };
+    let pagination: Pagination = serde_json::from_value(json!({
+        "mode": "LimitOffset", "limit": 2, "offset": 0
+    })).unwrap();
     let (result, info) = apply_pagination(records, &pagination, false);
 
     assert_eq!(result, vec![json!(1), json!(2)]);
@@ -465,7 +417,8 @@ fn pagination_count_total_false() {
 #[test]
 fn pagination_none_no_count() {
     let records = vec![json!(1), json!(2)];
-    let (result, info) = apply_pagination(records, &Pagination::None, false);
+    let pagination: Pagination = serde_json::from_value(json!({"mode": "None"})).unwrap();
+    let (result, info) = apply_pagination(records, &pagination, false);
     assert_eq!(result, vec![json!(1), json!(2)]);
     assert!(info.is_none());
 }
@@ -497,21 +450,22 @@ fn distinct_removes_duplicates() {
 
 #[test]
 fn has_aggregates_true() {
-    let select = Select {
-        items: vec![
-            SelectItem::Field {
-                path: vec!["name".into()],
-                alias: None,
-            },
-            SelectItem::CountAll { alias: None },
-        ],
-        distinct: false,
-    };
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["name"]},
+            {"type": "count_all"}
+        ]
+    })).unwrap();
     assert!(has_aggregates(&select));
 }
 
 #[test]
 fn has_aggregates_false() {
-    let select = Select::fields(["name", "age"]);
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["name"]},
+            {"type": "field", "path": ["age"]}
+        ]
+    })).unwrap();
     assert!(!has_aggregates(&select));
 }

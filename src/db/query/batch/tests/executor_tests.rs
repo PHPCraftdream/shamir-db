@@ -7,14 +7,10 @@ use crate::db::engine::repo::repo_types::BoxRepoFactory;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::{TableConfig, TableManager};
 use crate::db::query::batch::{
-    execute_batch, BatchLimits, BatchOp, BatchRequest, QueryEntry, TableResolver,
+    execute_batch, BatchRequest, TableResolver,
 };
-use crate::db::query::filter::{Filter, FilterValue};
-use crate::db::query::read::ReadQuery;
-use crate::db::query::write::{DeleteOp, InsertOp, UpdateOp};
 use crate::db::query::TableRef;
 use crate::db::DbResult;
-use crate::types::common::new_map;
 
 /// Simple resolver that wraps a DbInstance + repo name.
 struct TestResolver {
@@ -54,42 +50,26 @@ async fn test_single_read_query() {
     let resolver = setup_resolver().await;
 
     // Insert some data first
-    let mut queries = new_map();
-    queries.insert(
-        "insert".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "age": 30}),
-                    json!({"name": "Bob", "age": 25}),
-                ],
-            }),
-            return_result: true,
-        },
-    );
-    let insert_req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let insert_req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "insert": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "age": 30},
+                    {"name": "Bob", "age": 25}
+                ]
+            }
+        }
+    })).unwrap();
     let resp = execute_batch(&insert_req, &resolver).await.unwrap();
     assert_eq!(resp.results["insert"].records.len(), 2);
 
     // Now read
-    let mut queries = new_map();
-    queries.insert("users".to_string(), ReadQuery::new("users").into());
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "users": {"from": "users"}
+        }
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
 
@@ -107,49 +87,29 @@ async fn test_independent_queries_same_stage() {
     let resolver = setup_resolver().await;
 
     // Seed data
-    let mut seed = new_map();
-    seed.insert(
-        "s1".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![json!({"name": "Alice"})],
-            }),
-            return_result: false,
-        },
-    );
-    seed.insert(
-        "s2".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("orders"),
-                values: vec![json!({"item": "Book"})],
-            }),
-            return_result: false,
-        },
-    );
-    let seed_req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries: seed,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "s1": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}],
+                "return_result": false
+            },
+            "s2": {
+                "insert_into": "orders",
+                "values": [{"item": "Book"}],
+                "return_result": false
+            }
+        }
+    })).unwrap();
     execute_batch(&seed_req, &resolver).await.unwrap();
 
     // Two independent reads
-    let mut queries = new_map();
-    queries.insert("users".to_string(), ReadQuery::new("users").into());
-    queries.insert("orders".to_string(), ReadQuery::new("orders").into());
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "users": {"from": "users"},
+            "orders": {"from": "orders"}
+        }
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
 
@@ -168,64 +128,39 @@ async fn test_dependent_query_ref() {
     let resolver = setup_resolver().await;
 
     // Seed users
-    let mut seed = new_map();
-    seed.insert(
-        "seed".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "status": "active"}),
-                    json!({"name": "Bob", "status": "inactive"}),
-                    json!({"name": "Carol", "status": "active"}),
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"},
+                    {"name": "Carol", "status": "active"}
                 ],
-            }),
-            return_result: false,
-        },
-    );
-    let seed_req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries: seed,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+                "return_result": false
+            }
+        }
+    })).unwrap();
     execute_batch(&seed_req, &resolver).await.unwrap();
 
     // Query 1: get active users
     // Query 2: get users where name == first active user's name (via $query ref)
-    let mut queries = new_map();
-    queries.insert(
-        "active".to_string(),
-        ReadQuery::new("users")
-            .filter(Filter::Eq {
-                field: vec!["status".into()],
-                value: FilterValue::String("active".into()),
-            })
-            .into(),
-    );
-    queries.insert(
-        "first_active".to_string(),
-        QueryEntry {
-            op: BatchOp::Read(ReadQuery::new("users").filter(Filter::Eq {
-                field: vec!["name".into()],
-                value: FilterValue::QueryRef {
-                    alias: "active".into(),
-                    path: Some("[0].name".into()),
-                },
-            })),
-            return_result: true,
-        },
-    );
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "active": {
+                "from": "users",
+                "where": {"op": "eq", "field": ["status"], "value": "active"}
+            },
+            "first_active": {
+                "from": "users",
+                "where": {
+                    "op": "eq",
+                    "field": ["name"],
+                    "value": {"$query": "active", "path": "[0].name"}
+                }
+            }
+        }
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
 
@@ -243,34 +178,18 @@ async fn test_dependent_query_ref() {
 async fn test_insert_then_read() {
     let resolver = setup_resolver().await;
 
-    let mut queries = new_map();
-    queries.insert(
-        "insert".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "score": 100}),
-                    json!({"name": "Bob", "score": 50}),
-                ],
-            }),
-            return_result: true,
-        },
-    );
-    // Read depends on insert implicitly (no $query ref, but same table)
-    // Actually this is independent — reads all users after insert completes
-    // But since no $query ref, they'll be in the same stage
-    // The insert runs first because of map ordering
-    queries.insert("read".to_string(), ReadQuery::new("users").into());
-
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "insert": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "score": 100},
+                    {"name": "Bob", "score": 50}
+                ]
+            },
+            "read": {"from": "users"}
+        }
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
 
@@ -289,27 +208,16 @@ async fn test_insert_then_read() {
 async fn test_return_only() {
     let resolver = setup_resolver().await;
 
-    let mut queries = new_map();
-    queries.insert(
-        "insert".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![json!({"name": "Alice"})],
-            }),
-            return_result: true,
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "insert": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}]
+            },
+            "read": {"from": "users"}
         },
-    );
-    queries.insert("read".to_string(), ReadQuery::new("users").into());
-
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: Some(vec!["read".to_string()]),
-        limits: BatchLimits::default(),
-    };
+        "return_only": ["read"]
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
 
@@ -326,27 +234,17 @@ async fn test_return_only() {
 async fn test_return_result_false() {
     let resolver = setup_resolver().await;
 
-    let mut queries = new_map();
-    queries.insert(
-        "setup".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![json!({"name": "Alice"})],
-            }),
-            return_result: false,
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "setup": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}],
+                "return_result": false
+            },
+            "read": {"from": "users"}
         },
-    );
-    queries.insert("read".to_string(), ReadQuery::new("users").into());
-
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: false, // respect per-entry return_result
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+        "return_all": false
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
 
@@ -364,57 +262,29 @@ async fn test_batch_with_delete() {
     let resolver = setup_resolver().await;
 
     // Seed
-    let mut seed = new_map();
-    seed.insert(
-        "seed".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![
-                    json!({"name": "Alice", "status": "active"}),
-                    json!({"name": "Bob", "status": "inactive"}),
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"}
                 ],
-            }),
-            return_result: false,
-        },
-    );
-    execute_batch(
-        &BatchRequest {
-            name: None,
-            transactional: false,
-            queries: seed,
-            return_all: true,
-            return_only: None,
-            limits: BatchLimits::default(),
-        },
-        &resolver,
-    )
-    .await
-    .unwrap();
+                "return_result": false
+            }
+        }
+    })).unwrap();
+    execute_batch(&seed_req, &resolver).await.unwrap();
 
     // Delete inactive, then read
-    let mut queries = new_map();
-    queries.insert(
-        "cleanup".to_string(),
-        QueryEntry {
-            op: BatchOp::Delete(DeleteOp {
-                delete_from: TableRef::new("users"),
-                where_clause: Filter::Eq {
-                    field: vec!["status".into()],
-                    value: FilterValue::String("inactive".into()),
-                },
-            }),
-            return_result: true,
-        },
-    );
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "cleanup": {
+                "delete_from": "users",
+                "where": {"op": "eq", "field": ["status"], "value": "inactive"}
+            }
+        }
+    })).unwrap();
 
     let resp = execute_batch(&req, &resolver).await.unwrap();
     // 1 record deleted (Bob)
@@ -429,42 +299,27 @@ async fn test_batch_with_delete() {
 async fn test_circular_dependency_error() {
     let resolver = setup_resolver().await;
 
-    let mut queries = new_map();
     // a depends on b, b depends on a
-    queries.insert(
-        "a".to_string(),
-        QueryEntry {
-            op: BatchOp::Read(ReadQuery::new("users").filter(Filter::Eq {
-                field: vec!["id".into()],
-                value: FilterValue::QueryRef {
-                    alias: "b".into(),
-                    path: Some("[0].id".into()),
-                },
-            })),
-            return_result: true,
-        },
-    );
-    queries.insert(
-        "b".to_string(),
-        QueryEntry {
-            op: BatchOp::Read(ReadQuery::new("users").filter(Filter::Eq {
-                field: vec!["id".into()],
-                value: FilterValue::QueryRef {
-                    alias: "a".into(),
-                    path: Some("[0].id".into()),
-                },
-            })),
-            return_result: true,
-        },
-    );
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "a": {
+                "from": "users",
+                "where": {
+                    "op": "eq",
+                    "field": ["id"],
+                    "value": {"$query": "b", "path": "[0].id"}
+                }
+            },
+            "b": {
+                "from": "users",
+                "where": {
+                    "op": "eq",
+                    "field": ["id"],
+                    "value": {"$query": "a", "path": "[0].id"}
+                }
+            }
+        }
+    })).unwrap();
 
     let err = execute_batch(&req, &resolver).await.unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::CircularDependency { .. }));
@@ -478,29 +333,15 @@ async fn test_circular_dependency_error() {
 async fn test_unknown_table_fails_early() {
     let resolver = setup_resolver().await;
 
-    let mut queries = new_map();
-    queries.insert(
-        "good".to_string(),
-        QueryEntry {
-            op: BatchOp::Insert(InsertOp {
-                insert_into: TableRef::new("users"),
-                values: vec![serde_json::json!({"name": "Alice"})],
-            }),
-            return_result: true,
-        },
-    );
-    queries.insert(
-        "bad".to_string(),
-        ReadQuery::new("nonexistent_table").into(),
-    );
-    let req = BatchRequest {
-        name: None,
-        transactional: false,
-        queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-    };
+    let req: BatchRequest = serde_json::from_value(json!({
+        "queries": {
+            "good": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}]
+            },
+            "bad": {"from": "nonexistent_table"}
+        }
+    })).unwrap();
 
     let err = execute_batch(&req, &resolver).await.unwrap_err();
     // Should fail with table not found error BEFORE any execution

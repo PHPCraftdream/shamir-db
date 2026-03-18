@@ -6,14 +6,15 @@
 
 #![allow(deprecated)]
 
+use serde_json::json;
+
 use crate::codecs::transform;
 use crate::db::engine::db_instance::db_instance::DbInstance;
 use crate::db::engine::repo::repo_types::BoxRepoFactory;
 use crate::db::engine::repo::RepoConfig;
 use crate::db::engine::table::TableConfig;
 use crate::db::query::filter::eval_context::FilterContext;
-use crate::db::query::filter::{Filter, FilterValue};
-use crate::db::query::read::{OrderBy, ReadQuery};
+use crate::db::query::read::ReadQuery;
 use crate::types::common::new_map;
 use crate::types::value::UserValue;
 
@@ -102,10 +103,10 @@ async fn test_read_uses_index_for_eq_filter() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::Eq {
-        field: vec!["status".into()],
-        value: FilterValue::String("active".into()),
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -128,18 +129,16 @@ async fn test_read_uses_index_for_and_with_eq() {
     let ctx = FilterContext::new(interner, &refs);
 
     // status == "active" AND age > 25
-    let query = ReadQuery::new("users").filter(Filter::And {
-        filters: vec![
-            Filter::Eq {
-                field: vec!["status".into()],
-                value: FilterValue::String("active".into()),
-            },
-            Filter::Gt {
-                field: vec!["age".into()],
-                value: FilterValue::Int(25),
-            },
-        ],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {
+            "op": "and",
+            "filters": [
+                {"op": "eq", "field": ["status"], "value": "active"},
+                {"op": "gt", "field": ["age"], "value": 25}
+            ]
+        }
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -170,18 +169,16 @@ async fn test_read_composite_index() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::And {
-        filters: vec![
-            Filter::Eq {
-                field: vec!["status".into()],
-                value: FilterValue::String("active".into()),
-            },
-            Filter::Eq {
-                field: vec!["city".into()],
-                value: FilterValue::String("LA".into()),
-            },
-        ],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {
+            "op": "and",
+            "filters": [
+                {"op": "eq", "field": ["status"], "value": "active"},
+                {"op": "eq", "field": ["city"], "value": "LA"}
+            ]
+        }
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -204,10 +201,10 @@ async fn test_read_no_index_for_gt() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::Gt {
-        field: vec!["age".into()],
-        value: FilterValue::Int(25),
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "gt", "field": ["age"], "value": 25}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -226,18 +223,16 @@ async fn test_read_no_index_for_or() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::Or {
-        filters: vec![
-            Filter::Eq {
-                field: vec!["status".into()],
-                value: FilterValue::String("active".into()),
-            },
-            Filter::Eq {
-                field: vec!["status".into()],
-                value: FilterValue::String("deleted".into()),
-            },
-        ],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {
+            "op": "or",
+            "filters": [
+                {"op": "eq", "field": ["status"], "value": "active"},
+                {"op": "eq", "field": ["status"], "value": "deleted"}
+            ]
+        }
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
     assert_eq!(result.stats.as_ref().unwrap().index_used, None);
@@ -254,10 +249,10 @@ async fn test_read_index_with_no_results() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::Eq {
-        field: vec!["status".into()],
-        value: FilterValue::String("banned".into()),
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "banned"}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -279,13 +274,12 @@ async fn test_read_index_with_pagination() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users")
-        .filter(Filter::Eq {
-            field: vec!["status".into()],
-            value: FilterValue::String("active".into()),
-        })
-        .limit(2)
-        .count_total(true);
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"},
+        "pagination": {"mode": "LimitOffset", "limit": 2},
+        "count_total": true
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -311,12 +305,11 @@ async fn test_read_index_with_order_by() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users")
-        .filter(Filter::Eq {
-            field: vec!["status".into()],
-            value: FilterValue::String("active".into()),
-        })
-        .order_by(OrderBy::desc("age"));
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"},
+        "order_by": {"items": [{"field": ["age"], "direction": "desc"}]}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -344,15 +337,13 @@ async fn test_read_index_with_field_ref_falls_through() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::Eq {
-        field: vec!["status".into()],
-        value: FilterValue::FieldRef {
-            path: vec!["name".into()],
-        },
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": {"$ref": ["name"]}}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
-    // FieldRef can't be used for index lookup → full scan
+    // FieldRef can't be used for index lookup -> full scan
     assert_eq!(result.stats.as_ref().unwrap().index_used, None);
 }
 
@@ -367,13 +358,10 @@ async fn test_read_uses_index_for_in() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::In {
-        field: vec!["status".into()],
-        values: vec![
-            FilterValue::String("active".into()),
-            FilterValue::String("deleted".into()),
-        ],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "in", "field": ["status"], "values": ["active", "deleted"]}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -395,10 +383,10 @@ async fn test_read_uses_index_for_in_single_value() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::In {
-        field: vec!["status".into()],
-        values: vec![FilterValue::String("inactive".into())],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "in", "field": ["status"], "values": ["inactive"]}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -416,13 +404,10 @@ async fn test_read_uses_index_for_in_no_match() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query = ReadQuery::new("users").filter(Filter::In {
-        field: vec!["status".into()],
-        values: vec![
-            FilterValue::String("banned".into()),
-            FilterValue::String("suspended".into()),
-        ],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "in", "field": ["status"], "values": ["banned", "suspended"]}
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -445,21 +430,16 @@ async fn test_read_uses_index_for_and_with_in() {
     let ctx = FilterContext::new(interner, &refs);
 
     // status IN ["active", "inactive"] AND age > 25
-    let query = ReadQuery::new("users").filter(Filter::And {
-        filters: vec![
-            Filter::In {
-                field: vec!["status".into()],
-                values: vec![
-                    FilterValue::String("active".into()),
-                    FilterValue::String("inactive".into()),
-                ],
-            },
-            Filter::Gt {
-                field: vec!["age".into()],
-                value: FilterValue::Int(25),
-            },
-        ],
-    });
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {
+            "op": "and",
+            "filters": [
+                {"op": "in", "field": ["status"], "values": ["active", "inactive"]},
+                {"op": "gt", "field": ["age"], "value": 25}
+            ]
+        }
+    })).unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
