@@ -15,7 +15,7 @@ pub use cond::Cond;
 pub use filter_enum::Filter;
 pub use filter_expr::{FilterExpr, FilterExprOp};
 pub use filter_value::FilterValue;
-pub use eval::{compile_filter, compare_values, intern_field_path, resolve_field, FilterCallback};
+pub use eval::{compile_filter, compare_values, filter_value_to_inner, intern_field_path, resolve_field, FilterCallback};
 pub use eval_context::FilterContext;
 pub use fn_call::FnCall;
 

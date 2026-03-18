@@ -21,6 +21,19 @@
 - Use `/scripts` for utility scripts
 - Use `/examples` for example code
 
+## Rust Code Style
+
+- ALWAYS use imports (`use`) instead of inline full paths (e.g., `use crate::types::common::new_set;` then `new_set()`, NOT `crate::types::common::new_set()`)
+- ALWAYS use our fast hasher types from `types::common` instead of std collections where possible:
+  - `TMap<K,V>` (IndexMap + FxHasher) instead of `HashMap` or `BTreeMap` for in-memory maps
+  - `TSet<T>` (IndexSet + FxHasher) instead of `HashSet` for in-memory sets
+  - `TDashMap<K,V>` instead of `DashMap` for concurrent maps
+  - Use `new_map()`, `new_set()`, `new_dash_map()` constructors
+  - Exception: `BTreeSet`/`BTreeMap` is OK when data is serialized/persisted via bincode (deterministic order required)
+- NEVER create methods that collect all records into Vec — always use streams with bounded memory
+- `mod.rs` files must contain ONLY module declarations (`mod`, `pub mod`) and re-exports (`pub use`). No types, no functions, no logic.
+- Each `.rs` file (not `mod.rs`) should export ONE primary entity (struct, enum, trait, or a small cohesive group of closely related items like a struct + its builder)
+
 ## Project Architecture
 
 - Follow Domain-Driven Design with bounded contexts
