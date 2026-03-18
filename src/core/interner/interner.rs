@@ -111,4 +111,12 @@ impl Interner {
     pub fn make_key(&self, id: u64) -> InternerKey {
         InternerKey::new(id)
     }
+
+    /// Returns all interned entries as (InternerKey, UserKey) pairs.
+    pub fn all_entries(&self) -> Vec<(InternerKey, UserKey)> {
+        self.map_interned_to_user
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect()
+    }
 }
