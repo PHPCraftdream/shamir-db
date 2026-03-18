@@ -6,6 +6,7 @@
 use std::time::Instant;
 
 use crate::db::engine::table::TableManager;
+use crate::db::query::auth::SessionPermissions;
 use crate::db::query::batch::{
     BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
 };
@@ -61,6 +62,32 @@ pub async fn execute_batch(
         execution_time_us: elapsed.as_micros() as u64,
         transaction: None,
     })
+}
+
+/// Execute a batch request with permission checks.
+///
+/// Same as [`execute_batch`] but runs `SessionPermissions::check_batch`
+/// before planning/execution. Returns `BatchError::QueryError` if any
+/// operation is denied.
+pub async fn execute_batch_with_permissions(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    permissions: &SessionPermissions,
+    db_name: &str,
+) -> Result<BatchResponse, BatchError> {
+    // 0. Permission check — fail fast before any work
+    permissions
+        .check_batch(&request.queries, db_name)
+        .map_err(|(alias, action, resource)| BatchError::QueryError {
+            alias,
+            message: format!(
+                "Permission denied: {:?} on {:?}",
+                action, resource
+            ),
+        })?;
+
+    execute_batch(request, resolver, admin).await
 }
 
 /// Validate that all referenced tables exist before execution.

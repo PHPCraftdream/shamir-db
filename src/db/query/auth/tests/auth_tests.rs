@@ -340,3 +340,520 @@ async fn test_grant_role_to_nonexistent_user() {
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
 }
+
+// ============================================================================
+// SessionPermissions — unit tests
+// ============================================================================
+
+use crate::db::query::auth::{
+    Action, Effect, Permission, Resource, Role, SessionPermissions,
+};
+use crate::db::query::filter::Filter;
+
+#[test]
+fn test_superadmin_allows_everything() {
+    let roles = vec![Role {
+        name: "superadmin".into(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::All],
+            resource: Resource::Global,
+            row_filter: None,
+        }],
+    }];
+    let session = SessionPermissions::build(&roles);
+    assert_eq!(session.check(Action::Read, &Resource::Global), Effect::Allow);
+    assert_eq!(
+        session.check(
+            Action::Delete,
+            &Resource::Table {
+                database: "x".into(),
+                repo: "y".into(),
+                table: "z".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    assert_eq!(
+        session.check(Action::ManageUsers, &Resource::Global),
+        Effect::Allow
+    );
+    assert_eq!(
+        session.check(Action::ManageRoles, &Resource::Global),
+        Effect::Allow
+    );
+}
+
+#[test]
+fn test_no_permissions_denies() {
+    let session = SessionPermissions::build(&[]);
+    assert_eq!(session.check(Action::Read, &Resource::Global), Effect::Deny);
+    assert_eq!(
+        session.check(
+            Action::Insert,
+            &Resource::Table {
+                database: "db".into(),
+                repo: "main".into(),
+                table: "t".into(),
+            }
+        ),
+        Effect::Deny
+    );
+}
+
+#[test]
+fn test_specific_deny_overrides_general_allow() {
+    let roles = vec![
+        Role {
+            name: "a".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        },
+        Role {
+            name: "b".into(),
+            permissions: vec![Permission {
+                effect: Effect::Deny,
+                actions: vec![Action::Read],
+                resource: Resource::Table {
+                    database: "db".into(),
+                    repo: "main".into(),
+                    table: "secrets".into(),
+                },
+                row_filter: None,
+            }],
+        },
+    ];
+    let session = SessionPermissions::build(&roles);
+    // General read allowed
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "db".into(),
+                repo: "main".into(),
+                table: "users".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    // Specific table denied
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "db".into(),
+                repo: "main".into(),
+                table: "secrets".into(),
+            }
+        ),
+        Effect::Deny
+    );
+}
+
+#[test]
+fn test_same_specificity_deny_wins() {
+    let roles = vec![
+        Role {
+            name: "a".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Delete],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        },
+        Role {
+            name: "b".into(),
+            permissions: vec![Permission {
+                effect: Effect::Deny,
+                actions: vec![Action::Delete],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        },
+    ];
+    let session = SessionPermissions::build(&roles);
+    assert_eq!(
+        session.check(Action::Delete, &Resource::Global),
+        Effect::Deny
+    );
+}
+
+#[test]
+fn test_database_level_permission() {
+    let roles = vec![Role {
+        name: "db_reader".into(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::Read],
+            resource: Resource::Database {
+                database: "mydb".into(),
+            },
+            row_filter: None,
+        }],
+    }];
+    let session = SessionPermissions::build(&roles);
+    // Allowed within database
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "mydb".into(),
+                repo: "main".into(),
+                table: "users".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    // Denied for other database
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "other".into(),
+                repo: "main".into(),
+                table: "users".into(),
+            }
+        ),
+        Effect::Deny
+    );
+    // Write not allowed
+    assert_eq!(
+        session.check(
+            Action::Insert,
+            &Resource::Table {
+                database: "mydb".into(),
+                repo: "main".into(),
+                table: "users".into(),
+            }
+        ),
+        Effect::Deny
+    );
+}
+
+#[test]
+fn test_action_all_expands() {
+    let roles = vec![Role {
+        name: "full".into(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::All],
+            resource: Resource::Database {
+                database: "mydb".into(),
+            },
+            row_filter: None,
+        }],
+    }];
+    let session = SessionPermissions::build(&roles);
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "mydb".into(),
+                repo: "main".into(),
+                table: "t".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    assert_eq!(
+        session.check(
+            Action::Delete,
+            &Resource::Table {
+                database: "mydb".into(),
+                repo: "main".into(),
+                table: "t".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    assert_eq!(
+        session.check(
+            Action::ManageRoles,
+            &Resource::Database {
+                database: "mydb".into(),
+            }
+        ),
+        Effect::Allow
+    );
+}
+
+#[test]
+fn test_row_filter_merging_or() {
+    // Two permissions with different row filters on same action+resource → OR
+    let roles = vec![
+        Role {
+            name: "eu".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Table {
+                    database: "db".into(),
+                    repo: "main".into(),
+                    table: "users".into(),
+                },
+                row_filter: Some(Filter::Eq {
+                    field: vec!["region".into()],
+                    value: crate::db::query::filter::FilterValue::String("eu".into()),
+                }),
+            }],
+        },
+        Role {
+            name: "us".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Table {
+                    database: "db".into(),
+                    repo: "main".into(),
+                    table: "users".into(),
+                },
+                row_filter: Some(Filter::Eq {
+                    field: vec!["region".into()],
+                    value: crate::db::query::filter::FilterValue::String("us".into()),
+                }),
+            }],
+        },
+    ];
+    let session = SessionPermissions::build(&roles);
+    let filter = session.row_filter(
+        Action::Read,
+        &Resource::Table {
+            database: "db".into(),
+            repo: "main".into(),
+            table: "users".into(),
+        },
+    );
+    assert!(filter.is_some());
+    match filter.unwrap() {
+        Filter::Or { filters } => assert_eq!(filters.len(), 2),
+        other => panic!("Expected Filter::Or, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_row_filter_unrestricted_wins() {
+    // One permission with filter + one without → unrestricted (None)
+    let roles = vec![
+        Role {
+            name: "restricted".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Table {
+                    database: "db".into(),
+                    repo: "main".into(),
+                    table: "users".into(),
+                },
+                row_filter: Some(Filter::Eq {
+                    field: vec!["region".into()],
+                    value: crate::db::query::filter::FilterValue::String("eu".into()),
+                }),
+            }],
+        },
+        Role {
+            name: "full_reader".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Table {
+                    database: "db".into(),
+                    repo: "main".into(),
+                    table: "users".into(),
+                },
+                row_filter: None,
+            }],
+        },
+    ];
+    let session = SessionPermissions::build(&roles);
+    let filter = session.row_filter(
+        Action::Read,
+        &Resource::Table {
+            database: "db".into(),
+            repo: "main".into(),
+            table: "users".into(),
+        },
+    );
+    assert!(filter.is_none(), "Expected None (unrestricted), got {:?}", filter);
+}
+
+#[test]
+fn test_check_batch_allows() {
+    use crate::db::query::batch::{BatchOp, QueryEntry};
+    use crate::db::query::read::ReadQuery;
+    use crate::types::common::new_map;
+
+    let roles = vec![Role {
+        name: "reader".into(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::Read],
+            resource: Resource::Global,
+            row_filter: None,
+        }],
+    }];
+    let session = SessionPermissions::build(&roles);
+
+    let mut queries = new_map();
+    queries.insert(
+        "q1".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(ReadQuery::new("users")),
+            return_result: true,
+        },
+    );
+
+    assert!(session.check_batch(&queries, "testdb").is_ok());
+}
+
+#[test]
+fn test_check_batch_denies() {
+    use crate::db::query::batch::{BatchOp, QueryEntry};
+    use crate::db::query::write::InsertOp;
+    use crate::db::query::TableRef;
+    use crate::types::common::new_map;
+
+    let roles = vec![Role {
+        name: "reader".into(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::Read],
+            resource: Resource::Global,
+            row_filter: None,
+        }],
+    }];
+    let session = SessionPermissions::build(&roles);
+
+    let mut queries = new_map();
+    queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("users"),
+                values: vec![],
+            }),
+            return_result: true,
+        },
+    );
+
+    let result = session.check_batch(&queries, "testdb");
+    assert!(result.is_err());
+    let (alias, action, _resource) = result.unwrap_err();
+    assert_eq!(alias, "ins");
+    assert_eq!(action, Action::Insert);
+}
+
+#[test]
+fn test_repo_level_permission() {
+    let roles = vec![Role {
+        name: "repo_rw".into(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::Read, Action::Insert, Action::Update],
+            resource: Resource::Repo {
+                database: "db".into(),
+                repo: "main".into(),
+            },
+            row_filter: None,
+        }],
+    }];
+    let session = SessionPermissions::build(&roles);
+
+    // Allowed: read in main repo
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "db".into(),
+                repo: "main".into(),
+                table: "orders".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    // Denied: read in different repo
+    assert_eq!(
+        session.check(
+            Action::Read,
+            &Resource::Table {
+                database: "db".into(),
+                repo: "archive".into(),
+                table: "orders".into(),
+            }
+        ),
+        Effect::Deny
+    );
+    // Denied: delete (not granted)
+    assert_eq!(
+        session.check(
+            Action::Delete,
+            &Resource::Table {
+                database: "db".into(),
+                repo: "main".into(),
+                table: "orders".into(),
+            }
+        ),
+        Effect::Deny
+    );
+}
+
+#[test]
+fn test_multiple_roles_combined() {
+    let roles = vec![
+        Role {
+            name: "reader".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        },
+        Role {
+            name: "writer".into(),
+            permissions: vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Insert, Action::Update],
+                resource: Resource::Database {
+                    database: "app".into(),
+                },
+                row_filter: None,
+            }],
+        },
+    ];
+    let session = SessionPermissions::build(&roles);
+
+    // Read allowed globally
+    assert_eq!(
+        session.check(Action::Read, &Resource::Global),
+        Effect::Allow
+    );
+    // Insert allowed in "app" db
+    assert_eq!(
+        session.check(
+            Action::Insert,
+            &Resource::Table {
+                database: "app".into(),
+                repo: "main".into(),
+                table: "t".into(),
+            }
+        ),
+        Effect::Allow
+    );
+    // Insert denied in other db
+    assert_eq!(
+        session.check(
+            Action::Insert,
+            &Resource::Table {
+                database: "other".into(),
+                repo: "main".into(),
+                table: "t".into(),
+            }
+        ),
+        Effect::Deny
+    );
+}
