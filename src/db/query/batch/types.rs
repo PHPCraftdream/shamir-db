@@ -2,6 +2,8 @@
 //!
 //! Core types for batch request/response and execution planning.
 
+use serde::de::Deserializer;
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::db::query::read::{ReadQuery, QueryResult};
@@ -14,14 +16,13 @@ use crate::types::common::{TMap, TSet};
 
 /// Batch operation - can be a read or a write operation.
 ///
-/// Uses untagged serde to automatically detect operation type by unique fields:
+/// Detected by unique key in JSON object:
 /// - `from` → Read
 /// - `insert_into` → Insert
-/// - `update` → Update
-/// - `set` → Set
+/// - `update` → Update (has `set` field too, but `update` is the discriminator)
+/// - `set` (without `update`) → Set (upsert)
 /// - `delete_from` → Delete
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BatchOp {
     /// Read query (SELECT).
     Read(ReadQuery),
@@ -37,6 +38,45 @@ pub enum BatchOp {
 
     /// Delete records.
     Delete(DeleteOp),
+}
+
+impl Serialize for BatchOp {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            BatchOp::Read(q) => q.serialize(serializer),
+            BatchOp::Insert(i) => i.serialize(serializer),
+            BatchOp::Update(u) => u.serialize(serializer),
+            BatchOp::Set(s) => s.serialize(serializer),
+            BatchOp::Delete(d) => d.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchOp {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let obj = value.as_object().ok_or_else(|| {
+            serde::de::Error::custom("BatchOp must be a JSON object")
+        })?;
+
+        // Dispatch by unique key
+        if obj.contains_key("from") {
+            serde_json::from_value(value).map(BatchOp::Read).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("insert_into") {
+            serde_json::from_value(value).map(BatchOp::Insert).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("update") {
+            serde_json::from_value(value).map(BatchOp::Update).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("delete_from") {
+            serde_json::from_value(value).map(BatchOp::Delete).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("set") {
+            // "set" checked last because UpdateOp also has a "set" field
+            serde_json::from_value(value).map(BatchOp::Set).map_err(serde::de::Error::custom)
+        } else {
+            Err(serde::de::Error::custom(
+                "Unknown operation: expected 'from', 'insert_into', 'update', 'delete_from', or 'set' key"
+            ))
+        }
+    }
 }
 
 impl BatchOp {

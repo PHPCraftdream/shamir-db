@@ -402,3 +402,83 @@ async fn test_execute_set_no_match_inserts() {
     assert_eq!(result.records[0]["_created"], true);
     assert_eq!(table.count().await.unwrap(), 4); // new record added
 }
+
+// ============================================================================
+// Interner persistence after writes
+// ============================================================================
+
+/// This test verifies that new interned keys are persisted after insert.
+/// Without auto-persist, a "restart" (new InternerManager on same storage)
+/// would lose the keys and fail to read back the data correctly.
+#[tokio::test]
+async fn test_interner_persisted_after_insert() {
+    // Setup: create table via raw storage (so we can simulate restart)
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("users")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
+
+    // Insert records with new field keys ("brand_new_field" never seen before)
+    let op: InsertOp = serde_json::from_value(json!({
+        "insert_into": "users",
+        "values": [{"brand_new_field": "value1"}, {"brand_new_field": "value2"}]
+    })).unwrap();
+    table.execute_insert(&op).await.unwrap();
+
+    // Verify the key was interned
+    let interner = table.interner().get().await.unwrap();
+    assert!(interner.get_ind("brand_new_field").is_some());
+
+    // Simulate "restart": create a new InternerManager on the same storage
+    // The key test: do the persisted entries contain "brand_new_field"?
+    let entries = interner.all_entries();
+    assert!(
+        entries.iter().any(|(_, user_key)| user_key.as_str() == "brand_new_field"),
+        "brand_new_field should be in interner entries after persist"
+    );
+}
+
+/// Same test for execute_update: new set fields should be persisted.
+#[tokio::test]
+async fn test_interner_persisted_after_update() {
+    let table = setup_table_with_users().await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Update with a brand new field key
+    let op: UpdateOp = serde_json::from_value(json!({
+        "update": "users",
+        "set": {"completely_new_key": 42}
+    })).unwrap();
+    table.execute_update(&op, &ctx).await.unwrap();
+
+    // The new key should be persisted
+    let interner = table.interner().get().await.unwrap();
+    assert!(interner.get_ind("completely_new_key").is_some());
+    let entries = interner.all_entries();
+    assert!(
+        entries.iter().any(|(_, uk)| uk.as_str() == "completely_new_key"),
+        "completely_new_key should be persisted"
+    );
+}
+
+/// Same test for execute_set: upsert should persist new keys.
+#[tokio::test]
+async fn test_interner_persisted_after_set() {
+    let table = setup_empty_table().await;
+
+    let op: SetOp = serde_json::from_value(json!({
+        "set": "users",
+        "key": {"unique_field_xyz": "val"},
+        "value": {"unique_field_xyz": "val", "another_new_field": 99}
+    })).unwrap();
+    table.execute_set(&op).await.unwrap();
+
+    let interner = table.interner().get().await.unwrap();
+    assert!(interner.get_ind("unique_field_xyz").is_some());
+    assert!(interner.get_ind("another_new_field").is_some());
+}

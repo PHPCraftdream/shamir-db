@@ -43,6 +43,9 @@ impl TableManager {
             records.push(json::Value::Object(obj));
         }
 
+        // Persist any newly interned keys
+        self.interner().persist().await?;
+
         let affected = records.len() as u64;
         Ok(WriteResult {
             affected,
@@ -132,6 +135,11 @@ impl TableManager {
                     result_records.push(inner_to_json_value(&new_record, interner));
                 }
             }
+        }
+
+        // Persist any newly interned keys (set fields may have new keys)
+        if affected > 0 {
+            self.interner().persist().await?;
         }
 
         Ok(WriteResult {
@@ -276,6 +284,9 @@ impl TableManager {
             }
         };
         result_obj.insert("_created".to_string(), json::Value::Bool(created));
+
+        // Persist any newly interned keys
+        self.interner().persist().await?;
 
         Ok(WriteResult {
             affected: 1,

@@ -98,4 +98,24 @@ impl InternerManager {
 
         Ok(())
     }
+
+    /// Persist the full interner state to storage.
+    ///
+    /// Saves all current entries, replacing whatever was stored before.
+    /// Call this after operations that may have interned new keys
+    /// (e.g., insert, update, set).
+    pub async fn persist(&self) -> DbResult<()> {
+        let interner = self.get().await?;
+        let entries = interner.all_entries();
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let internals_id = RecordId::system("internals");
+        let bytes = bincode::to_bytes(&entries).map_err(|e| {
+            crate::db::DbError::Codec(format!("Failed to serialize interner: {}", e))
+        })?;
+        self.info_store.set(internals_id.to_bytes(), bytes).await?;
+        Ok(())
+    }
 }
