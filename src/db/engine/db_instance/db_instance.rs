@@ -1,4 +1,4 @@
-use super::super::table::TableManager;
+use super::super::table::{TableConfig, TableManager};
 use crate::db::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use crate::db::{DbError, DbResult};
 use crate::types::value::InnerValue;
@@ -102,6 +102,27 @@ impl DbInstance {
     /// Remove a repository from the instance
     pub async fn remove_repo(&self, repo_name: &str) -> bool {
         self.repos.remove(repo_name).is_some()
+    }
+
+    // ============================================================================
+    // Table Management
+    // ============================================================================
+
+    /// Create a table in a repository.
+    pub fn create_table(&self, repo_name: &str, table_name: &str) -> DbResult<()> {
+        let repo = self.repos.get(repo_name).ok_or_else(|| {
+            DbError::NotFound(format!("Repository '{}' not found", repo_name))
+        })?;
+        repo.add_table(TableConfig::new(table_name));
+        Ok(())
+    }
+
+    /// Drop a table from a repository.
+    pub fn drop_table(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
+        let repo = self.repos.get(repo_name).ok_or_else(|| {
+            DbError::NotFound(format!("Repository '{}' not found", repo_name))
+        })?;
+        Ok(repo.remove_table(table_name))
     }
 
     // ============================================================================

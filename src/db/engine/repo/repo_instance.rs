@@ -11,7 +11,7 @@ use tokio::sync::OnceCell;
 /// Manages a single repository and its tables
 pub struct RepoInstance {
     repo: BoxRepo,
-    configs: Arc<TMap<String, TableConfig>>,
+    configs: Arc<TDashMap<String, TableConfig>>,
     tables: Arc<TDashMap<String, OnceCell<TableManager>>>,
 }
 
@@ -31,10 +31,10 @@ impl RepoInstance {
     }
 
     fn from_box_repo(repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
-        let configs_map: TMap<String, TableConfig> = configs
-            .into_iter()
-            .map(|cfg| (cfg.name.clone(), cfg))
-            .collect();
+        let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
+        for cfg in configs {
+            configs_map.insert(cfg.name.clone(), cfg);
+        }
 
         let tables: TDashMap<String, OnceCell<TableManager>> = new_dash_map_wc(100);
 
@@ -87,7 +87,7 @@ impl RepoInstance {
     }
 
     pub fn list_table_names(&self) -> Vec<String> {
-        self.configs.keys().cloned().collect()
+        self.configs.iter().map(|e| e.key().clone()).collect()
     }
 
     pub fn has_table(&self, table_name: &str) -> bool {
@@ -96,6 +96,22 @@ impl RepoInstance {
 
     pub fn table_count(&self) -> usize {
         self.configs.len()
+    }
+
+    /// Register a new table in the repository.
+    /// The table is lazily created on first access via get_table().
+    pub fn add_table(&self, config: TableConfig) {
+        self.configs.insert(config.name.clone(), config);
+    }
+
+    /// Remove a table from the repository.
+    /// Returns true if the table existed and was removed.
+    pub fn remove_table(&self, table_name: &str) -> bool {
+        let removed = self.configs.remove(table_name).is_some();
+        if removed {
+            self.tables.remove(table_name);
+        }
+        removed
     }
 
     // ============================================================================

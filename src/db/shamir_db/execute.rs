@@ -83,19 +83,17 @@ impl AdminExecutor for ShamirAdminExecutor {
             BatchOp::CreateTable(op) => {
                 let db = self.shamir.get_db(&self.db_name)
                     .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
-                // Tables are lazily created when accessed. We just need to ensure
-                // the repo exists and the table config is registered.
-                // For now, verify repo exists:
-                if !db.has_repo(&op.repo) {
-                    return Err(err(format!("Repository '{}' not found", op.repo)));
-                }
-                // Table will be created on first access via RepoInstance
+                db.create_table(&op.repo, &op.create_table)
+                    .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(json!({"created_table": op.create_table, "repo": op.repo})))
             }
 
-            BatchOp::DropTable(_op) => {
-                // Table drop not yet implemented at storage level
-                Err(err("drop_table not yet implemented".to_string()))
+            BatchOp::DropTable(op) => {
+                let db = self.shamir.get_db(&self.db_name)
+                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+                let removed = db.drop_table(&op.repo, &op.drop_table)
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"dropped_table": op.drop_table, "existed": removed})))
             }
 
             BatchOp::CreateIndex(op) => {

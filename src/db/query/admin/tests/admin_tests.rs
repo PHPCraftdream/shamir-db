@@ -319,6 +319,104 @@ async fn test_list_indexes() {
 }
 
 // ============================================================================
+// Create/drop table — actually works
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_table_then_use_it() {
+    let shamir = setup_shamir().await;
+
+    // Create a new table via DDL
+    let create: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "ct": {"create_table": "products", "repo": "main"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &create).await.unwrap();
+    assert_eq!(resp.results["ct"].records[0]["created_table"], "products");
+
+    // Verify it appears in list
+    let list: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "tables": {"list": "tables", "repo": "main"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &list).await.unwrap();
+    let tables = resp.results["tables"].records[0]["tables"].as_array().unwrap();
+    assert!(tables.contains(&json!("products")));
+
+    // Actually insert data into the new table
+    let insert: BatchRequest = serde_json::from_value(json!({
+        "id": 3,
+        "queries": {
+            "ins": {
+                "insert_into": "products",
+                "values": [
+                    {"name": "Widget", "price": 10},
+                    {"name": "Gadget", "price": 25}
+                ]
+            }
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &insert).await.unwrap();
+    assert_eq!(resp.results["ins"].records.len(), 2);
+
+    // Read back
+    let read: BatchRequest = serde_json::from_value(json!({
+        "id": 4,
+        "queries": {
+            "all": {"from": "products"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &read).await.unwrap();
+    assert_eq!(resp.results["all"].records.len(), 2);
+}
+
+#[tokio::test]
+async fn test_drop_table() {
+    let shamir = setup_shamir().await;
+
+    // Drop existing table
+    let drop: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "dt": {"drop_table": "users", "repo": "main"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &drop).await.unwrap();
+    assert_eq!(resp.results["dt"].records[0]["existed"], true);
+
+    // Verify it's gone — insert should fail with table not found
+    let insert: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}]
+            }
+        }
+    })).unwrap();
+    let err = shamir.execute("testdb", &insert).await.unwrap_err();
+    assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
+}
+
+#[tokio::test]
+async fn test_drop_nonexistent_table() {
+    let shamir = setup_shamir().await;
+
+    let drop: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "dt": {"drop_table": "nonexistent", "repo": "main"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &drop).await.unwrap();
+    assert_eq!(resp.results["dt"].records[0]["existed"], false);
+}
+
+// ============================================================================
 // Error cases
 // ============================================================================
 
