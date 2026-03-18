@@ -262,6 +262,63 @@ async fn test_ddl_then_dml_pipeline() {
 }
 
 // ============================================================================
+// List indexes
+// ============================================================================
+
+#[tokio::test]
+async fn test_list_indexes() {
+    let shamir = setup_shamir().await;
+
+    // Seed + create indexes
+    let setup: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [{"name": "Alice", "email": "a@test.com"}]
+            },
+            "idx1": {
+                "create_index": "name_idx",
+                "table": "users",
+                "fields": [["name"]]
+            },
+            "idx2": {
+                "create_index": "email_idx",
+                "table": "users",
+                "fields": [["email"]],
+                "unique": true
+            }
+        }
+    })).unwrap();
+    shamir.execute("testdb", &setup).await.unwrap();
+
+    // List indexes
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "idxs": {"list": "indexes", "table": "users"}
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+
+    let indexes = resp.results["idxs"].records[0]["indexes"].as_array().unwrap();
+    assert_eq!(indexes.len(), 2);
+
+    // Check we have both regular and unique
+    let names: Vec<&str> = indexes.iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"name_idx"));
+    assert!(names.contains(&"email_idx"));
+
+    // Check unique flags
+    let email_idx = indexes.iter().find(|i| i["name"] == "email_idx").unwrap();
+    assert_eq!(email_idx["unique"], true);
+    let name_idx = indexes.iter().find(|i| i["name"] == "name_idx").unwrap();
+    assert_eq!(name_idx["unique"], false);
+}
+
+// ============================================================================
 // Error cases
 // ============================================================================
 
