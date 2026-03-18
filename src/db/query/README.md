@@ -414,6 +414,7 @@ Engines: `in_memory`. Disk engines (sled, redb, fjall) требуют конфи
 ```
 
 `where` — row-level security. Тот же синтаксис фильтров. Автоматически добавляется ко всем запросам пользователя.
+`$user` — ссылка на поля текущего пользователя: `{"$user": ["office", "region"]}`.
 
 ---
 
