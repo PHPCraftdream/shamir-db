@@ -575,6 +575,11 @@ impl IndexManager {
         }
     }
 
+    /// Iterate over all regular index definitions.
+    pub fn iter_indexes(&self) -> impl Iterator<Item = IndexDefinition> + '_ {
+        self.indexes.iter()
+    }
+
     /// Проверяет существование индекса по его имени.
     pub fn index_exists(&self, name_interned: u64) -> bool {
         self.indexes.contains(name_interned)

@@ -71,6 +71,21 @@ pub fn compare_values(a: &InnerValue, b: &InnerValue) -> Option<Ordering> {
     }
 }
 
+/// Convert a literal FilterValue to InnerValue without record/context.
+///
+/// Returns `None` for non-literal variants (FieldRef, QueryRef, FnCall, Expr, Cond).
+pub fn filter_value_to_inner(fv: &FilterValue) -> Option<InnerValue> {
+    match fv {
+        FilterValue::Null => Some(InnerValue::Null),
+        FilterValue::Bool(b) => Some(InnerValue::Bool(*b)),
+        FilterValue::Int(i) => Some(InnerValue::Int(*i)),
+        FilterValue::Float(f) => Some(InnerValue::F64(*f)),
+        FilterValue::String(s) => Some(InnerValue::Str(s.clone())),
+        FilterValue::Binary(b) => Some(InnerValue::Bin(b.clone())),
+        _ => None,
+    }
+}
+
 /// Resolve a FilterValue into an InnerValue for comparison.
 fn resolve_filter_value(
     fv: &FilterValue,
