@@ -1,3 +1,5 @@
+use serde_json::json;
+
 use crate::db::engine::db_instance::db_instance::DbInstance;
 use crate::db::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::db::engine::table::{TableConfig, TableManager};
@@ -6,75 +8,95 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::system_store::{SystemStore, SystemStoreConfig};
+
 const SYSTEM_DB_NAME: &str = "__system__";
-
-/// Database metadata record
-#[derive(Debug, Clone)]
-pub struct DatabaseRecord {
-    pub name: String,
-    pub created_at: u64,
-}
-
-/// Repository metadata record
-#[derive(Debug, Clone)]
-pub struct RepositoryRecord {
-    pub db_name: String,
-    pub repo_name: String,
-    pub storage_type: String,
-    pub path: Option<String>,
-}
 
 /// Top-level manager for multiple database instances.
 ///
 /// Hierarchy:
 /// ```text
 /// ShamirDb
-///   ├── __system__ (DbInstance - metadata)
-///   │   └── metadata (repo with databases/repositories tables)
+///   ├── SystemStore (persistent metadata: databases, repos, settings, users, roles)
 ///   │
-///   └── production (DbInstance)
-///       └── users_db (RepoInstance)
-///           └── users (TableManager)
+///   ├── production (DbInstance)
+///   │   └── main (RepoInstance)
+///   │       └── users (TableManager)
+///   │
+///   └── analytics (DbInstance)
+///       └── archive (RepoInstance)
+///           └── logs (TableManager)
 /// ```
 #[derive(Clone)]
 pub struct ShamirDb {
     dbs: Arc<DashMap<String, DbInstance>>,
-    databases_metadata: Arc<DashMap<String, DatabaseRecord>>,
-    repositories_metadata: Arc<DashMap<String, RepositoryRecord>>,
-}
-
-impl Default for ShamirDb {
-    fn default() -> Self {
-        Self::new()
-    }
+    system_store: SystemStore,
 }
 
 impl ShamirDb {
-    pub fn new() -> Self {
+    /// Initialize ShamirDb with a system store.
+    ///
+    /// # Arguments
+    /// * `config` — system store config (InMemory for tests, Redb(path) for production)
+    pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
+        let system_store = SystemStore::init(config).await?;
+
         let dbs = Arc::new(DashMap::new());
 
-        let system_db = DbInstance::new();
-        dbs.insert(SYSTEM_DB_NAME.to_string(), system_db);
+        let shamir = Self { dbs, system_store };
 
-        Self {
-            dbs,
-            databases_metadata: Arc::new(DashMap::new()),
-            repositories_metadata: Arc::new(DashMap::new()),
+        // Load existing databases from system store
+        let db_records = shamir.system_store.load_databases().await?;
+        for record in &db_records {
+            if let Some(name) = record["name"].as_str() {
+                if name != SYSTEM_DB_NAME {
+                    shamir.dbs.insert(name.to_string(), DbInstance::new());
+                }
+            }
         }
+
+        // Load existing repositories and register them
+        let repo_records = shamir.system_store.load_repositories().await?;
+        for record in &repo_records {
+            let db_name = record["db_name"].as_str().unwrap_or_default();
+            let repo_name = record["repo_name"].as_str().unwrap_or_default();
+            let engine = record["engine"].as_str().unwrap_or("in_memory");
+            let path = record["path"].as_str();
+
+            if let Some(db) = shamir.dbs.get(db_name) {
+                let factory = Self::factory_from_meta(engine, path);
+                if let Some(factory) = factory {
+                    // Load table configs for this repo (tables will be loaded lazily)
+                    let config = RepoConfig::new(repo_name, factory);
+                    let _ = db.add_repo(config).await;
+                }
+            }
+        }
+
+        Ok(shamir)
     }
 
-    pub async fn init(self) -> DbResult<Self> {
-        let config = RepoConfig::new("metadata", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("databases"))
-            .add_table(TableConfig::new("repositories"));
+    /// Initialize with in-memory system store (convenience for tests).
+    pub async fn init_memory() -> DbResult<Self> {
+        Self::init(SystemStoreConfig::InMemory).await
+    }
 
-        self.dbs
-            .get(SYSTEM_DB_NAME)
-            .unwrap()
-            .add_repo(config)
-            .await?;
+    /// Get the system store.
+    pub fn system_store(&self) -> &SystemStore {
+        &self.system_store
+    }
 
-        Ok(self)
+    fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {
+        match engine {
+            "in_memory" => Some(BoxRepoFactory::in_memory()),
+            "redb" => path.map(|p| BoxRepoFactory::redb(p)),
+            "sled" => path.map(|p| BoxRepoFactory::sled(p)),
+            "fjall" => path.map(|p| BoxRepoFactory::fjall(p)),
+            "nebari" => path.map(|p| BoxRepoFactory::nebari(p)),
+            "persy" => path.map(|p| BoxRepoFactory::persy(p)),
+            "canopy" => path.map(|p| BoxRepoFactory::canopy(p)),
+            _ => None,
+        }
     }
 
     pub fn db_count(&self) -> usize {
@@ -94,43 +116,17 @@ impl ShamirDb {
             .unwrap_or_default()
             .as_secs();
 
-        self.databases_metadata.insert(
-            name.to_string(),
-            DatabaseRecord {
-                name: name.to_string(),
-                created_at,
-            },
-        );
+        // Persist to system store
+        let _ = self.system_store.save_database(name, &json!({
+            "name": name,
+            "created_at": created_at,
+        })).await;
 
         db
     }
 
     pub fn get_db(&self, name: &str) -> Option<DbInstance> {
         self.dbs.get(name).map(|r| r.clone())
-    }
-
-    pub async fn get_or_create_db(&self, name: &str) -> DbInstance {
-        self.dbs
-            .entry(name.to_string())
-            .or_insert_with(|| {
-                let db = DbInstance::new();
-
-                let created_at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-
-                self.databases_metadata.insert(
-                    name.to_string(),
-                    DatabaseRecord {
-                        name: name.to_string(),
-                        created_at,
-                    },
-                );
-
-                db
-            })
-            .clone()
     }
 
     pub fn list_dbs(&self) -> Vec<String> {
@@ -145,9 +141,7 @@ impl ShamirDb {
         let removed = self.dbs.remove(name).is_some();
 
         if removed {
-            self.databases_metadata.remove(name);
-
-            self.repositories_metadata.retain(|_, r| r.db_name != name);
+            let _ = self.system_store.remove_database(name).await;
         }
 
         removed
@@ -165,16 +159,13 @@ impl ShamirDb {
 
         db.add_repo(config).await?;
 
-        let key = format!("{}:{}", db_name, repo_name);
-        self.repositories_metadata.insert(
-            key,
-            RepositoryRecord {
-                db_name: db_name.to_string(),
-                repo_name,
-                storage_type,
-                path,
-            },
-        );
+        // Persist to system store
+        let _ = self.system_store.save_repository(
+            db_name,
+            &repo_name,
+            &storage_type,
+            path.as_deref(),
+        ).await;
 
         Ok(())
     }
@@ -204,29 +195,11 @@ impl ShamirDb {
         }
     }
 
-    pub fn list_databases_metadata(&self) -> Vec<String> {
-        self.databases_metadata
-            .iter()
-            .filter(|r| r.key() != SYSTEM_DB_NAME)
-            .map(|r| r.key().clone())
-            .collect()
-    }
-
-    pub fn list_repositories_metadata(&self, db_name: &str) -> Vec<RepositoryRecord> {
-        self.repositories_metadata
-            .iter()
-            .filter(|r| r.db_name == db_name)
-            .map(|r| r.value().clone())
-            .collect()
-    }
-
-    /// Remove a repository from a database with metadata cleanup
     pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> bool {
         if let Some(db) = self.get_db(db_name) {
             let removed = db.remove_repo(repo_name).await;
             if removed {
-                let key = format!("{}:{}", db_name, repo_name);
-                self.repositories_metadata.remove(&key);
+                let _ = self.system_store.remove_repository(db_name, repo_name).await;
             }
             removed
         } else {

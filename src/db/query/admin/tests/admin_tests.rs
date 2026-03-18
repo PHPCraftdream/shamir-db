@@ -9,7 +9,7 @@ use crate::db::query::batch::BatchRequest;
 use crate::db::ShamirDb;
 
 async fn setup_shamir() -> ShamirDb {
-    let shamir = ShamirDb::new().init().await.unwrap();
+    let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await;
 
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -208,7 +208,7 @@ async fn test_drop_index_via_query() {
 
 #[tokio::test]
 async fn test_ddl_then_dml_pipeline() {
-    let shamir = ShamirDb::new().init().await.unwrap();
+    let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("app").await;
 
     // Step 1: Create repo with tables
