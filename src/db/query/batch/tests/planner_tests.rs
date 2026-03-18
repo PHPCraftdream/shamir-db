@@ -13,6 +13,7 @@ fn parse_request(json: serde_json::Value) -> BatchRequest {
 #[test]
 fn test_plan_empty() {
     let json = json!({
+        "id": 1,
         "queries": {}
     });
 
@@ -26,6 +27,7 @@ fn test_plan_empty() {
 #[test]
 fn test_plan_single_query() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": {
                 "from": "users"
@@ -44,6 +46,7 @@ fn test_plan_single_query() {
 #[test]
 fn test_plan_parallel_queries() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "products": { "from": "products" },
@@ -65,6 +68,7 @@ fn test_plan_parallel_queries() {
 #[test]
 fn test_plan_sequential_dependencies() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "orders": {
@@ -92,6 +96,7 @@ fn test_plan_sequential_dependencies() {
 #[test]
 fn test_plan_complex_dependencies() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "products": { "from": "products" },
@@ -140,6 +145,7 @@ fn test_plan_complex_dependencies() {
 #[test]
 fn test_plan_unknown_alias() {
     let json = json!({
+        "id": 1,
         "queries": {
             "orders": {
                 "from": "orders",
@@ -167,6 +173,7 @@ fn test_plan_too_many_queries() {
     }
 
     let json = json!({
+        "id": 1,
         "queries": queries
     });
 
@@ -181,6 +188,7 @@ fn test_plan_too_many_queries() {
 #[test]
 fn test_plan_custom_limits() {
     let json = json!({
+        "id": 1,
         "queries": {
             "a": { "from": "t" },
             "b": { "from": "t" },
@@ -206,6 +214,7 @@ fn test_plan_custom_limits() {
 #[test]
 fn test_plan_circular_dependency() {
     let json = json!({
+        "id": 1,
         "queries": {
             "a": {
                 "from": "a",
@@ -245,6 +254,7 @@ fn test_plan_circular_dependency() {
 #[test]
 fn test_plan_self_dependency() {
     let json = json!({
+        "id": 1,
         "queries": {
             "self_ref": {
                 "from": "t",
@@ -286,6 +296,7 @@ fn test_plan_dependency_depth() {
     }
 
     let json = json!({
+        "id": 1,
         "queries": queries,
         "limits": {
             "max_queries": 50,
@@ -306,6 +317,7 @@ fn test_plan_dependency_depth() {
 #[test]
 fn test_plan_mixed_in_filter() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "orders": {
@@ -333,6 +345,7 @@ fn test_plan_mixed_in_filter() {
 #[test]
 fn test_plan_or_filter() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "admins": { "from": "admins" },
@@ -368,6 +381,7 @@ fn test_plan_or_filter() {
 #[test]
 fn test_plan_diamond_dependency() {
     let json = json!({
+        "id": 1,
         "queries": {
             "a": { "from": "t" },
             "b": {
@@ -419,6 +433,7 @@ fn test_plan_diamond_dependency() {
 #[test]
 fn test_plan_with_query_path() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "orders": {
@@ -446,6 +461,7 @@ fn test_plan_with_query_path() {
 #[test]
 fn test_plan_return_flags() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": {
                 "from": "users",
@@ -471,6 +487,7 @@ fn test_plan_return_flags() {
 #[test]
 fn test_plan_transactional_batch() {
     let json = json!({
+        "id": 1,
         "name": "user_order_transaction",
         "transactional": true,
         "queries": {
@@ -494,6 +511,7 @@ fn test_plan_transactional_batch() {
 #[test]
 fn test_plan_not_filter() {
     let json = json!({
+        "id": 1,
         "queries": {
             "active_users": { "from": "users" },
             "inactive_users": {
@@ -525,6 +543,7 @@ fn test_plan_not_filter() {
 #[test]
 fn test_plan_insert_operation() {
     let json = json!({
+        "id": 1,
         "queries": {
             "insert_user": {
                 "insert_into": "users",
@@ -546,6 +565,7 @@ fn test_plan_insert_operation() {
 #[test]
 fn test_plan_update_operation() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "update_orders": {
@@ -572,6 +592,7 @@ fn test_plan_update_operation() {
 #[test]
 fn test_plan_set_operation() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "set_user": {
@@ -594,6 +615,7 @@ fn test_plan_set_operation() {
 #[test]
 fn test_plan_delete_operation() {
     let json = json!({
+        "id": 1,
         "queries": {
             "inactive_users": {
                 "from": "users",
@@ -626,6 +648,7 @@ fn test_plan_delete_operation() {
 #[test]
 fn test_plan_set_with_value_reference() {
     let json = json!({
+        "id": 1,
         "queries": {
             "source": { "from": "source_table" },
             "set_target": {
@@ -649,6 +672,7 @@ fn test_plan_set_with_value_reference() {
 #[test]
 fn test_plan_insert_with_value_reference() {
     let json = json!({
+        "id": 1,
         "queries": {
             "user": {
                 "from": "users",
@@ -677,6 +701,7 @@ fn test_plan_insert_with_value_reference() {
 #[test]
 fn test_plan_mixed_read_and_write() {
     let json = json!({
+        "id": 1,
         "queries": {
             "users": { "from": "users" },
             "products": { "from": "products" },
@@ -702,6 +727,7 @@ fn test_plan_mixed_read_and_write() {
 #[test]
 fn test_plan_update_without_filter() {
     let json = json!({
+        "id": 1,
         "queries": {
             "update_all": {
                 "update": "users",
@@ -720,6 +746,7 @@ fn test_plan_update_without_filter() {
 #[test]
 fn test_plan_write_operations_serialization() {
     let json = json!({
+        "id": 1,
         "queries": {
             "insert": {
                 "insert_into": "users",

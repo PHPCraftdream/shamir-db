@@ -51,6 +51,7 @@ async fn test_single_read_query() {
 
     // Insert some data first
     let insert_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "insert": {
                 "insert_into": "users",
@@ -66,6 +67,7 @@ async fn test_single_read_query() {
 
     // Now read
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "users": {"from": "users"}
         }
@@ -88,6 +90,7 @@ async fn test_independent_queries_same_stage() {
 
     // Seed data
     let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "s1": {
                 "insert_into": "users",
@@ -105,6 +108,7 @@ async fn test_independent_queries_same_stage() {
 
     // Two independent reads
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "users": {"from": "users"},
             "orders": {"from": "orders"}
@@ -129,6 +133,7 @@ async fn test_dependent_query_ref() {
 
     // Seed users
     let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "seed": {
                 "insert_into": "users",
@@ -146,6 +151,7 @@ async fn test_dependent_query_ref() {
     // Query 1: get active users
     // Query 2: get users where name == first active user's name (via $query ref)
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "active": {
                 "from": "users",
@@ -179,6 +185,7 @@ async fn test_insert_then_read() {
     let resolver = setup_resolver().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "insert": {
                 "insert_into": "users",
@@ -209,6 +216,7 @@ async fn test_return_only() {
     let resolver = setup_resolver().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "insert": {
                 "insert_into": "users",
@@ -235,6 +243,7 @@ async fn test_return_result_false() {
     let resolver = setup_resolver().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "setup": {
                 "insert_into": "users",
@@ -263,6 +272,7 @@ async fn test_batch_with_delete() {
 
     // Seed
     let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "seed": {
                 "insert_into": "users",
@@ -278,6 +288,7 @@ async fn test_batch_with_delete() {
 
     // Delete inactive, then read
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "cleanup": {
                 "delete_from": "users",
@@ -301,6 +312,7 @@ async fn test_circular_dependency_error() {
 
     // a depends on b, b depends on a
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "a": {
                 "from": "users",
@@ -334,6 +346,7 @@ async fn test_unknown_table_fails_early() {
     let resolver = setup_resolver().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "good": {
                 "insert_into": "users",
@@ -346,4 +359,33 @@ async fn test_unknown_table_fails_early() {
     let err = execute_batch(&req, &resolver).await.unwrap_err();
     // Should fail with table not found error BEFORE any execution
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
+}
+
+// ============================================================================
+// Request ID echoed in response
+// ============================================================================
+
+#[tokio::test]
+async fn test_request_id_echoed() {
+    let resolver = setup_resolver().await;
+
+    // String ID
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "req-42",
+        "queries": {
+            "q": {"from": "users"}
+        }
+    })).unwrap();
+    let resp = execute_batch(&req, &resolver).await.unwrap();
+    assert_eq!(resp.id, json!("req-42"));
+
+    // Numeric ID
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 123,
+        "queries": {
+            "q": {"from": "users"}
+        }
+    })).unwrap();
+    let resp = execute_batch(&req, &resolver).await.unwrap();
+    assert_eq!(resp.id, json!(123));
 }
