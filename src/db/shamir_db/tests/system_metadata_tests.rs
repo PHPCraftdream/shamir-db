@@ -3,128 +3,91 @@ use crate::db::engine::table::TableConfig;
 use crate::db::shamir_db::ShamirDb;
 
 // ============================================================================
-// System repo tests - metadata persistence
+// System store persistence tests
 // ============================================================================
 
 #[tokio::test]
-async fn test_system_repo_exists_after_creation() {
-    let shamir = ShamirDb::new();
-
-    assert!(shamir.has_db("__system__"));
-}
-
-#[tokio::test]
-async fn test_create_db_persists_to_system() {
-    let shamir = ShamirDb::new();
+async fn test_create_db_persists() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
 
     shamir.create_db("production").await;
+    assert!(shamir.has_db("production"));
 
-    let db_names = shamir.list_databases_metadata();
-    assert!(db_names.contains(&"production".to_string()));
-    assert!(!db_names.contains(&"__system__".to_string()));
+    // Verify persisted in system store
+    let dbs = shamir.system_store().load_databases().await.unwrap();
+    assert!(dbs.iter().any(|d| d["name"] == "production"));
 }
 
 #[tokio::test]
-async fn test_remove_db_removes_from_system() {
-    let shamir = ShamirDb::new();
+async fn test_remove_db_removes_from_system_store() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.create_db("production").await;
-    assert!(shamir
-        .list_databases_metadata()
-        .contains(&"production".to_string()));
+    shamir.create_db("temp").await;
+    shamir.remove_db("temp").await;
 
-    shamir.remove_db("production").await;
-
-    let db_names = shamir.list_databases_metadata();
-    assert!(!db_names.contains(&"production".to_string()));
+    let dbs = shamir.system_store().load_databases().await.unwrap();
+    assert!(!dbs.iter().any(|d| d["name"] == "temp"));
 }
 
 #[tokio::test]
-async fn test_add_repo_persists_to_system() {
-    let shamir = ShamirDb::new();
+async fn test_add_repo_persists() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("production").await;
 
     let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
-
     shamir.add_repo("production", config).await.unwrap();
 
-    let repo_records = shamir.list_repositories_metadata("production");
-    assert_eq!(repo_records.len(), 1);
-    assert_eq!(repo_records[0].repo_name, "users_db");
-    assert_eq!(repo_records[0].db_name, "production");
+    let repos = shamir.system_store().load_repositories().await.unwrap();
+    assert!(repos.iter().any(|r| r["repo_name"] == "users_db" && r["db_name"] == "production"));
 }
 
 #[tokio::test]
-async fn test_list_tables_for_admin() {
-    let shamir = ShamirDb::new();
+async fn test_remove_repo_removes_from_system_store() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("production").await;
 
-    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("users"))
-        .add_table(TableConfig::new("sessions"))
-        .add_table(TableConfig::new("tokens"));
-
+    let config = RepoConfig::new("temp_repo", BoxRepoFactory::in_memory());
     shamir.add_repo("production", config).await.unwrap();
+    shamir.remove_repo("production", "temp_repo").await;
 
-    let db = shamir.get_db("production").unwrap();
-    let tables = db.list_tables("users_db").unwrap();
-    assert_eq!(tables.len(), 3);
-    assert!(tables.contains(&"users".to_string()));
-    assert!(tables.contains(&"sessions".to_string()));
-    assert!(tables.contains(&"tokens".to_string()));
+    let repos = shamir.system_store().load_repositories().await.unwrap();
+    assert!(!repos.iter().any(|r| r["repo_name"] == "temp_repo"));
 }
 
 #[tokio::test]
-async fn test_restore_from_system_metadata() {
-    let shamir1 = ShamirDb::new();
+async fn test_system_store_has_tables() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir1.create_db("production").await;
-
-    let config = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("users"));
-
-    shamir1.add_repo("production", config).await.unwrap();
-
-    let cloned = shamir1.clone();
-    assert_eq!(cloned.db_count(), 2);
-
-    let restored_db = cloned.get_db("production").unwrap();
-    assert!(restored_db.has_repo("users_db"));
+    // System store should have settings, users, roles tables accessible
+    let settings = shamir.system_store().load_setting("nonexistent").await.unwrap();
+    assert!(settings.is_none());
 }
 
 #[tokio::test]
-async fn test_system_metadata_repo_has_tables() {
-    let shamir = ShamirDb::new().init().await.unwrap();
+async fn test_settings_persistence() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
 
-    let system_db = shamir.get_db("__system__").unwrap();
-    let repos = system_db.list_repos();
+    shamir.system_store().save_setting("max_connections", &serde_json::json!(100)).await.unwrap();
 
-    assert!(repos.contains(&"metadata".to_string()));
-
-    let tables = system_db.list_tables("metadata").unwrap();
-    assert!(tables.contains(&"databases".to_string()));
-    assert!(tables.contains(&"repositories".to_string()));
+    let val = shamir.system_store().load_setting("max_connections").await.unwrap();
+    assert_eq!(val, Some(serde_json::json!(100)));
 }
 
 #[tokio::test]
-async fn test_multiple_repos_in_same_db() {
-    let shamir = ShamirDb::new();
+async fn test_multiple_repos_persist() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("production").await;
 
     let config1 = RepoConfig::new("users_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("users"));
-
     let config2 = RepoConfig::new("products_db", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("products"));
 
     shamir.add_repo("production", config1).await.unwrap();
     shamir.add_repo("production", config2).await.unwrap();
 
-    let repo_records = shamir.list_repositories_metadata("production");
-    assert_eq!(repo_records.len(), 2);
-
-    let repo_names: Vec<&str> = repo_records.iter().map(|r| r.repo_name.as_str()).collect();
-    assert!(repo_names.contains(&"users_db"));
-    assert!(repo_names.contains(&"products_db"));
+    let repos = shamir.system_store().load_repositories().await.unwrap();
+    let prod_repos: Vec<_> = repos.iter().filter(|r| r["db_name"] == "production").collect();
+    assert_eq!(prod_repos.len(), 2);
 }
