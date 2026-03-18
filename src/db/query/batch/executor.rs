@@ -39,10 +39,13 @@ pub async fn execute_batch(
     // 1. Plan
     let plan = crate::db::query::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
 
-    // 2. Execute stages
+    // 2. Validate: all referenced tables exist
+    validate_tables(&request.queries, resolver).await?;
+
+    // 3. Execute stages
     let all_results = execute_plan(&plan, &request.queries, resolver).await?;
 
-    // 3. Filter results for response
+    // 4. Filter results for response
     let results = filter_results(&all_results, request, &plan);
 
     let elapsed = start.elapsed();
@@ -53,6 +56,34 @@ pub async fn execute_batch(
         execution_time_us: elapsed.as_micros() as u64,
         transaction: None,
     })
+}
+
+/// Validate that all referenced tables exist before execution.
+///
+/// Fails fast with a clear error if any table is not found, rather than
+/// discovering it mid-execution after some operations have already run.
+async fn validate_tables(
+    queries: &TMap<String, QueryEntry>,
+    resolver: &dyn TableResolver,
+) -> Result<(), BatchError> {
+    // Collect unique table refs
+    let mut seen = crate::types::common::new_set::<String>();
+    for (alias, entry) in queries {
+        let table_ref = entry.op.table_ref();
+        let key = format!("{}/{}", table_ref.repo, table_ref.table);
+        if seen.insert(key) {
+            resolver.resolve(table_ref).await.map_err(|e| {
+                BatchError::QueryError {
+                    alias: alias.clone(),
+                    message: format!(
+                        "Table '{}' in repo '{}' not found: {}",
+                        table_ref.table, table_ref.repo, e
+                    ),
+                }
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Execute a planned batch stage by stage.
@@ -167,12 +198,14 @@ async fn execute_single(
             Ok(write_result_to_query_result(wr))
         }
 
-        BatchOp::Set(_op) => {
-            // SetOp not yet implemented
-            Err(BatchError::QueryError {
-                alias: alias.to_string(),
-                message: "SetOp execution not yet implemented".to_string(),
-            })
+        BatchOp::Set(op) => {
+            let wr = table.execute_set(op).await.map_err(|e| {
+                BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: e.to_string(),
+                }
+            })?;
+            Ok(write_result_to_query_result(wr))
         }
     }
 }
