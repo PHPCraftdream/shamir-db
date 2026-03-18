@@ -24,13 +24,32 @@ Batch API предоставляет унифицированный интерф
 
 ### Простой запрос
 
+**Важно:** Поле `id` обязательно в каждом `BatchRequest`. Поля `field` в фильтрах — это массивы строк (не точечные пути).
+
 ```json
 {
+  "id": "req-001",
   "queries": {
     "users": {
       "from": "users",
-      "where": { "op": "eq", "field": "status", "value": "active" },
-      "limit": 10
+      "where": { "op": "eq", "field": ["status"], "value": "active" },
+      "pagination": { "mode": "LimitOffset", "limit": 10 }
+    }
+  }
+}
+```
+
+### Таблица из другого репо
+
+Поле `from` может быть строкой (repo по умолчанию `"main"`) или массивом `["repo", "table"]`:
+
+```json
+{
+  "id": 1,
+  "queries": {
+    "sessions": {
+      "from": ["hot", "sessions"],
+      "where": { "op": "eq", "field": ["user_id"], "value": 123 }
     }
   }
 }
@@ -40,16 +59,17 @@ Batch API предоставляет унифицированный интерф
 
 ```json
 {
+  "id": 2,
   "queries": {
     "user": {
       "from": "users",
-      "where": { "op": "eq", "field": "id", "value": 123 }
+      "where": { "op": "eq", "field": ["id"], "value": 123 }
     },
     "orders": {
       "from": "orders",
       "where": {
         "op": "eq",
-        "field": "user_id",
+        "field": ["user_id"],
         "value": { "$query": "user[0].id" }
       }
     },
@@ -57,7 +77,7 @@ Batch API предоставляет унифицированный интерф
       "from": "order_items",
       "where": {
         "op": "in",
-        "field": "order_id",
+        "field": ["order_id"],
         "values": [{ "$query": "orders[].id" }]
       }
     }
@@ -71,6 +91,7 @@ Batch API предоставляет унифицированный интерф
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
+| `id` | `any` | ✅ | ID запроса (эхо в ответе для корреляции) |
 | `queries` | `Map<String, QueryEntry>` | ✅ | Map алиас → запрос |
 | `name` | `string` | ❌ | Имя для логирования |
 | `transactional` | `boolean` | ❌ | MVCC транзакция (default: `false`) |
@@ -80,38 +101,56 @@ Batch API предоставляет унифицированный интерф
 
 ### QueryEntry
 
+Операция `BatchOp` встраивается напрямую (через `#[serde(flatten)]`). Тип операции определяется автоматически по уникальному ключу JSON.
+
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
-| `query` | `Query` | ✅ | Запрос к БД (или сам Query как значение) |
+| *(BatchOp fields)* | BatchOp | ✅ | Операция (flatten, определяется по ключу) |
 | `return_result` | `boolean` | ❌ | Включить в ответ (default: `true`) |
 
 **Примечание:** Ключ map — это алиас запроса, используемый в `$query` ссылках.
 
-### Два формата QueryEntry
+### Формат QueryEntry
 
 ```json
 {
+  "id": 1,
   "queries": {
     "users": { "from": "users" },
     "orders": {
-      "query": { "from": "orders" },
+      "from": "orders",
       "return_result": false
+    },
+    "new_user": {
+      "insert_into": "users",
+      "values": [{ "name": "Alice" }]
     }
   }
 }
 ```
 
-### Query
+### ReadQuery
 
 | Поле | Тип | Описание |
 |------|-----|----------|
-| `from` | `string` | Имя таблицы |
+| `from` | `string` или `["repo", "table"]` | Ссылка на таблицу (`TableRef`) |
 | `where` | `Filter` | Условие фильтрации |
-| `select` | `string[]` | Поля для выборки |
-| `order_by` | `string` | Поле сортировки |
-| `order_dir` | `"asc" \| "desc"` | Направление |
-| `limit` | `number` | Лимит записей |
-| `offset` | `number` | Смещение |
+| `select` | `Select` | Выборка полей (объект, не массив строк) |
+| `group_by` | `GroupBy` | Группировка |
+| `order_by` | `OrderBy` | Сортировка |
+| `pagination` | `Pagination` | Пагинация: `LimitOffset`, `Page`, или `None` |
+| `count_total` | `boolean` | Подсчитать общее кол-во записей (default: `false`) |
+
+**Важно:** Поля в фильтрах (`field`) — это массивы строк: `["user", "address", "city"]`, не точечные пути `"user.address.city"`.
+
+**Пагинация:**
+```json
+// Limit/Offset
+"pagination": { "mode": "LimitOffset", "limit": 10, "offset": 20 }
+
+// Page-based (1-based page number)
+"pagination": { "mode": "Page", "page": 3, "page_size": 10 }
+```
 
 ## Операции записи (Write Operations)
 
@@ -119,23 +158,44 @@ Batch API поддерживает операции записи: `insert`, `upd
 
 ### BatchOp — именование операций
 
-| BatchOp Variant | JSON поле | Тип | Описание |
-|-----------------|-----------|-----|----------|
-| `Read(Query)` | `from` | `ReadQuery` | SELECT запрос |
-| `Insert(InsertOp)` | `insert_into` | `InsertOp` | Вставка записей |
-| `Update(UpdateOp)` | `update` | `UpdateOp` | Обновление записей |
-| `Set(SetOp)` | `set` | `SetOp` | Upsert по ключу |
-| `Delete(DeleteOp)` | `delete_from` | `DeleteOp` | Удаление записей |
+`BatchOp` использует **явный key-based dispatch** (не `#[serde(untagged)]`). Десериализация проверяет наличие уникального ключа в JSON-объекте:
 
-**Примечание:** `ReadQuery` — это type alias для `Query`, используется для ясности API:
+| BatchOp Variant | JSON ключ | Описание |
+|-----------------|-----------|----------|
+| `Read(ReadQuery)` | `from` | SELECT запрос |
+| `Insert(InsertOp)` | `insert_into` | Вставка записей |
+| `Update(UpdateOp)` | `update` | Обновление записей |
+| `Set(SetOp)` | `set` | Upsert по ключу (полностью работает) |
+| `Delete(DeleteOp)` | `delete_from` | Удаление записей |
+| `CreateDb(CreateDbOp)` | `create_db` | Создание базы данных |
+| `DropDb(DropDbOp)` | `drop_db` | Удаление базы данных |
+| `CreateRepo(CreateRepoOp)` | `create_repo` | Создание репозитория |
+| `DropRepo(DropRepoOp)` | `drop_repo` | Удаление репозитория |
+| `CreateTable(CreateTableOp)` | `create_table` | Создание таблицы |
+| `DropTable(DropTableOp)` | `drop_table` | Удаление таблицы |
+| `CreateIndex(CreateIndexOp)` | `create_index` | Создание индекса |
+| `DropIndex(DropIndexOp)` | `drop_index` | Удаление индекса |
+| `List(ListOp)` | `list` | Список (databases/repos/tables/indexes) |
+
+**Порядок проверки:** `from` -> `insert_into` -> `update` -> `delete_from` -> admin ops -> `set` (последний, т.к. `UpdateOp` тоже имеет поле `set`).
+
+**Методы:**
+- `table_ref()` -> `Option<&TableRef>` — для data-операций (Read/Insert/Update/Set/Delete)
+- `is_admin()` -> `bool` — true для DDL-операций
+
+**Выполнение admin-операций** происходит через трейт `AdminExecutor`:
 ```rust
-pub type ReadQuery = Query;  // в read/mod.rs
+#[async_trait]
+pub trait AdminExecutor: Send + Sync {
+    async fn execute_admin(&self, op: &BatchOp) -> Result<QueryResult, BatchError>;
+}
 ```
 
 ### Insert — вставка записей
 
 ```json
 {
+  "id": 1,
   "queries": {
     "new_user": {
       "insert_into": "users",
@@ -150,7 +210,7 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
-| `insert_into` | `string` | ✅ | Имя таблицы |
+| `insert_into` | `TableRef` | ✅ | Ссылка на таблицу (`"table"` или `["repo", "table"]`) |
 | `values` | `Value[]` | ✅ | Массив записей для вставки |
 
 ### Update — обновление записей
@@ -159,10 +219,11 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 ```json
 {
+  "id": 1,
   "queries": {
     "activate_users": {
       "update": "users",
-      "where": { "op": "eq", "field": "status", "value": "pending" },
+      "where": { "op": "eq", "field": ["status"], "value": "pending" },
       "set": { "status": "active", "activated_at": "2024-01-15" }
     }
   }
@@ -172,11 +233,12 @@ pub type ReadQuery = Query;  // в read/mod.rs
 ```json
 // Обновление с использованием результата другого запроса
 {
+  "id": 2,
   "queries": {
-    "user": { "from": "users", "where": { "op": "eq", "field": "id", "value": 1 } },
+    "user": { "from": "users", "where": { "op": "eq", "field": ["id"], "value": 1 } },
     "update_orders": {
       "update": "orders",
-      "where": { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
+      "where": { "op": "eq", "field": ["user_id"], "value": { "$query": "user[0].id" } },
       "set": { "status": "processed" }
     }
   }
@@ -185,7 +247,7 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
-| `update` | `string` | ✅ | Имя таблицы |
+| `update` | `TableRef` | ✅ | Ссылка на таблицу (`"table"` или `["repo", "table"]`) |
 | `where` | `Filter` | ❌ | Условие фильтрации (все если опущено) |
 | `set` | `Value` | ✅ | Поля для обновления (частичное или полное) |
 | `select` | `UpdateSelect` | ❌ | Вернуть обновлённые записи |
@@ -196,10 +258,11 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 ```json
 {
+  "id": 1,
   "queries": {
     "update_vips": {
       "update": "users",
-      "where": { "op": "gte", "field": "login_count", "value": 100 },
+      "where": { "op": "gte", "field": ["login_count"], "value": 100 },
       "set": { "is_vip": true },
       "select": {
         "return_mode": "changed",
@@ -222,10 +285,11 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 ### Set — upsert по ключу
 
-Обновляет запись если существует, создаёт если нет. Работает только с первичным ключом (`id`) или уникальными полями.
+Обновляет запись если существует, создаёт если нет. Работает по ключу — полностью реализовано.
 
 ```json
 {
+  "id": 1,
   "queries": {
     "upsert_user": {
       "set": "users",
@@ -239,6 +303,7 @@ pub type ReadQuery = Query;  // в read/mod.rs
 ```json
 // Upsert по уникальному полю (email)
 {
+  "id": 2,
   "queries": {
     "upsert_by_email": {
       "set": "users",
@@ -251,7 +316,7 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
-| `set` | `string` | ✅ | Имя таблицы |
+| `set` | `TableRef` | ✅ | Ссылка на таблицу (`"table"` или `["repo", "table"]`) |
 | `key` | `Value` | ✅ | Ключ для поиска (id или уникальное поле) |
 | `value` | `Value` | ✅ | Значения для установки |
 
@@ -261,10 +326,11 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 ```json
 {
+  "id": 1,
   "queries": {
     "delete_inactive": {
       "delete_from": "users",
-      "where": { "op": "eq", "field": "status", "value": "inactive" }
+      "where": { "op": "eq", "field": ["status"], "value": "inactive" }
     }
   }
 }
@@ -273,16 +339,17 @@ pub type ReadQuery = Query;  // в read/mod.rs
 ```json
 // Удаление с использованием результата запроса
 {
+  "id": 2,
   "queries": {
     "expired": {
       "from": "sessions",
-      "where": { "op": "lt", "field": "expires_at", "value": "2024-01-01" }
+      "where": { "op": "lt", "field": ["expires_at"], "value": "2024-01-01" }
     },
     "cleanup": {
       "delete_from": "sessions",
       "where": {
         "op": "in",
-        "field": "id",
+        "field": ["id"],
         "values": [{ "$query": "expired[].id" }]
       }
     }
@@ -292,20 +359,65 @@ pub type ReadQuery = Query;  // в read/mod.rs
 
 | Поле | Тип | Обязательно | Описание |
 |------|-----|-------------|----------|
-| `delete_from` | `string` | ✅ | Имя таблицы |
+| `delete_from` | `TableRef` | ✅ | Ссылка на таблицу (`"table"` или `["repo", "table"]`) |
 | `where` | `Filter` | ✅ | Условие фильтрации (обязательно!) |
 
-### BatchOp — автоматическое определение
+### BatchOp — определение типа операции
 
-Serde автоматически определяет тип операции по уникальным полям:
+Тип операции определяется по уникальному ключу в JSON-объекте (ручная десериализация, не `#[serde(untagged)]`):
 
-| Поле | Операция |
-|------|----------|
-| `from` | Query (чтение) |
-| `insert_into` | Insert (вставка) |
-| `update` | Update (обновление) |
-| `set` | Set (upsert) |
-| `delete_from` | Delete (удаление) |
+| Ключ JSON | Операция |
+|-----------|----------|
+| `from` | Read (SELECT) |
+| `insert_into` | Insert |
+| `update` | Update |
+| `delete_from` | Delete |
+| `create_db` | CreateDb |
+| `drop_db` | DropDb |
+| `create_repo` | CreateRepo |
+| `drop_repo` | DropRepo |
+| `create_table` | CreateTable |
+| `drop_table` | DropTable |
+| `create_index` | CreateIndex |
+| `drop_index` | DropIndex |
+| `list` | List |
+| `set` | Set (upsert) — проверяется последним |
+
+### Admin (DDL) операции
+
+Пример создания таблицы и индекса:
+
+```json
+{
+  "id": "admin-001",
+  "queries": {
+    "new_table": {
+      "create_table": "products",
+      "repo": "main"
+    },
+    "new_index": {
+      "create_index": "email_idx",
+      "table": "users",
+      "fields": [["email"]],
+      "unique": true,
+      "repo": "main"
+    },
+    "list_tables": {
+      "list": "tables",
+      "repo": "main"
+    }
+  }
+}
+```
+
+Пример вывода `list`:
+
+```json
+{ "list": "databases" }
+{ "list": "repos" }
+{ "list": "tables", "repo": "main" }
+{ "list": "indexes", "table": "users", "repo": "main" }
+```
 
 ## Ссылки на результаты ($query)
 
@@ -369,7 +481,7 @@ Serde автоматически определяет тип операции п
     },
     "active_only": {
       "from": "@all_users",
-      "where": { "op": "eq", "field": "active", "value": true }
+      "where": { "op": "eq", "field": ["active"], "value": true }
     }
   }
 }
@@ -390,14 +502,16 @@ Serde автоматически определяет тип операции п
 ```rust
 // В planner.rs::extract_dependencies()
 BatchOp::Read(query) => {
-    // Если from начинается с '@' — это ссылка на алиас
-    if query.from.starts_with('@') {
-        let alias = &query.from[1..];  // убираем '@'
+    // Если table начинается с '@' — это ссылка на алиас
+    if query.from.table.starts_with('@') {
+        let alias = &query.from.table[1..];  // убираем '@'
         deps.insert(alias.to_string());
     }
     // ... плюс существующая логика для $query в filter
 }
 ```
+
+**Примечание:** `from` — это `TableRef { repo, table }`. Для ссылок на алиас проверяется `from.table`.
 
 ### Примеры
 
@@ -411,11 +525,11 @@ BatchOp::Read(query) => {
     },
     "active": {
       "from": "@users",
-      "where": { "op": "eq", "field": "status", "value": "active" }
+      "where": { "op": "eq", "field": ["status"], "value": "active" }
     },
     "vip": {
       "from": "@active",
-      "where": { "op": "gte", "field": "score", "value": 100 }
+      "where": { "op": "gte", "field": ["score"], "value": 100 }
     }
   }
 }
@@ -435,19 +549,19 @@ Stage 3: [vip]          // фильтруем active
   "queries": {
     "orders": {
       "from": "orders",
-      "where": { "op": "gte", "field": "total", "value": 1000 }
+      "where": { "op": "gte", "field": ["total"], "value": 1000 }
     },
     "order_items": {
       "from": "order_items",
       "where": {
         "op": "in",
-        "field": "order_id",
+        "field": ["order_id"],
         "values": [{ "$query": "orders[].id" }]
       }
     },
     "expensive_items": {
       "from": "@order_items",
-      "where": { "op": "gt", "field": "price", "value": 500 }
+      "where": { "op": "gt", "field": ["price"], "value": 500 }
     }
   }
 }
@@ -530,7 +644,7 @@ Stage 3: [vip]          // фильтруем active
   "from": "sessions",
   "where": {
     "op": "lt",
-    "field": "expires_at",
+    "field": ["expires_at"],
     "value": { "$fn": "NOW" }
   }
 }
@@ -552,7 +666,7 @@ Stage 3: [vip]          // фильтруем active
 ```json
 {
   "update": "users",
-  "where": { "op": "eq", "field": "id", "value": 1 },
+  "where": { "op": "eq", "field": ["id"], "value": 1 },
   "set": { "last_login": { "$fn": "NOW" } }
 }
 ```
@@ -562,7 +676,7 @@ Stage 3: [vip]          // фильтруем active
 ```json
 {
   "update": "products",
-  "where": { "op": "eq", "field": "id", "value": 1 },
+  "where": { "op": "eq", "field": ["id"], "value": 1 },
   "set": {
     "display_name": { "$fn": { "name": "COALESCE", "args": [{ "$ref": "name" }, "Unnamed"] } }
   }
@@ -576,11 +690,11 @@ Stage 3: [vip]          // фильтруем active
   "queries": {
     "user": {
       "from": "users",
-      "where": { "op": "eq", "field": "id", "value": 1 }
+      "where": { "op": "eq", "field": ["id"], "value": 1 }
     },
     "update_session": {
       "update": "sessions",
-      "where": { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
+      "where": { "op": "eq", "field": ["user_id"], "value": { "$query": "user[0].id" } },
       "set": {
         "last_active": { "$fn": "NOW" },
         "token": { "$fn": "UUID" }
@@ -601,38 +715,45 @@ Stage 3: [vip]          // фильтруем active
 
 ### Операторы сравнения
 
+**Важно:** `field` — это массив строк (FieldPath = `Vec<String>`), не строка.
+
 ```json
-{ "op": "eq", "field": "status", "value": "active" }
-{ "op": "ne", "field": "status", "value": "deleted" }
-{ "op": "gt", "field": "age", "value": 18 }
-{ "op": "gte", "field": "age", "value": 18 }
-{ "op": "lt", "field": "price", "value": 100 }
-{ "op": "lte", "field": "price", "value": 100 }
+{ "op": "eq", "field": ["status"], "value": "active" }
+{ "op": "ne", "field": ["status"], "value": "deleted" }
+{ "op": "gt", "field": ["age"], "value": 18 }
+{ "op": "gte", "field": ["age"], "value": 18 }
+{ "op": "lt", "field": ["price"], "value": 100 }
+{ "op": "lte", "field": ["price"], "value": 100 }
+```
+
+Вложенные пути:
+```json
+{ "op": "eq", "field": ["user", "address", "city"], "value": "Moscow" }
 ```
 
 ### Операторы массивов
 
 ```json
-{ "op": "in", "field": "status", "values": ["active", "pending"] }
-{ "op": "not_in", "field": "status", "values": ["deleted"] }
-{ "op": "contains", "field": "tags", "value": "rust" }
-{ "op": "contains_any", "field": "tags", "values": ["rust", "go"] }
-{ "op": "contains_all", "field": "tags", "values": ["rust", "async"] }
+{ "op": "in", "field": ["status"], "values": ["active", "pending"] }
+{ "op": "not_in", "field": ["status"], "values": ["deleted"] }
+{ "op": "contains", "field": ["tags"], "value": "rust" }
+{ "op": "contains_any", "field": ["tags"], "values": ["rust", "go"] }
+{ "op": "contains_all", "field": ["tags"], "values": ["rust", "async"] }
 ```
 
 ### Операторы соответствия
 
 ```json
-{ "op": "like", "field": "name", "pattern": "%john%" }
-{ "op": "i_like", "field": "email", "pattern": "%@gmail.com" }
-{ "op": "regex", "field": "phone", "pattern": "^\\+7" }
+{ "op": "like", "field": ["name"], "pattern": "%john%" }
+{ "op": "i_like", "field": ["email"], "pattern": "%@gmail.com" }
+{ "op": "regex", "field": ["phone"], "pattern": "^\\+7" }
 ```
 
 ### Null-проверки
 
 ```json
-{ "op": "is_null", "field": "deleted_at" }
-{ "op": "is_not_null", "field": "email" }
+{ "op": "is_null", "field": ["deleted_at"] }
+{ "op": "is_not_null", "field": ["email"] }
 ```
 
 ### Логические операторы
@@ -641,8 +762,8 @@ Stage 3: [vip]          // фильтруем active
 {
   "op": "and",
   "filters": [
-    { "op": "eq", "field": "status", "value": "active" },
-    { "op": "gt", "field": "age", "value": 18 }
+    { "op": "eq", "field": ["status"], "value": "active" },
+    { "op": "gt", "field": ["age"], "value": 18 }
   ]
 }
 ```
@@ -651,8 +772,8 @@ Stage 3: [vip]          // фильтруем active
 {
   "op": "or",
   "filters": [
-    { "op": "eq", "field": "role", "value": "admin" },
-    { "op": "eq", "field": "role", "value": "moderator" }
+    { "op": "eq", "field": ["role"], "value": "admin" },
+    { "op": "eq", "field": ["role"], "value": "moderator" }
   ]
 }
 ```
@@ -660,20 +781,27 @@ Stage 3: [vip]          // фильтруем active
 ```json
 {
   "op": "not",
-  "filter": { "op": "eq", "field": "banned", "value": true }
+  "filter": { "op": "eq", "field": ["banned"], "value": true }
 }
 ```
 
 ### Диапазон
 
 ```json
-{ "op": "between", "field": "price", "from": 10, "to": 100 }
+{ "op": "between", "field": ["price"], "from": 10, "to": 100 }
+```
+
+### Существование поля
+
+```json
+{ "op": "exists", "field": ["profile", "avatar"] }
+{ "op": "not_exists", "field": ["deleted_at"] }
 ```
 
 ### Сокращённая форма
 
 ```json
-{ "op": "field", "field": "user_id", "value": { "$query": "users[0].id" } }
+{ "op": "field", "field": ["user_id"], "value": { "$query": "users[0].id" } }
 ```
 
 ## Валидация ссылок $query
@@ -691,7 +819,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
     "users": { "from": "users" },
     "orders": {
       "from": "orders",
-      "where": { "op": "eq", "field": "user_id", "value": { "$query": "usres[0].id" } }
+      "where": { "op": "eq", "field": ["user_id"], "value": { "$query": "usres[0].id" } }
     }
   }
 }
@@ -730,7 +858,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ```json
 // Батч 1: Получить пользователя (может не существовать)
-{ "queries": { "user": { "from": "users", "where": { "op": "eq", "field": "id", "value": 999 } } } }
+{ "id": 1, "queries": { "user": { "from": "users", "where": { "op": "eq", "field": ["id"], "value": 999 } } } }
 
 // Приложение проверяет: если user пустой → не выполнять батч 2
 // Если user существует → выполнить батч 2 с реальным ID
@@ -801,14 +929,13 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ```json
 {
+  "id": "page-3",
   "queries": {
     "products": {
       "from": "products",
-      "where": { "op": "eq", "field": "category", "value": "electronics" },
-      "order_by": "created_at",
-      "order_dir": "desc",
-      "limit": 20,
-      "offset": 40
+      "where": { "op": "eq", "field": ["category"], "value": "electronics" },
+      "order_by": { "items": [{ "field": ["created_at"], "direction": "desc" }] },
+      "pagination": { "mode": "Page", "page": 3, "page_size": 20 }
     }
   }
 }
@@ -818,40 +945,38 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ```json
 {
+  "id": "dashboard-001",
   "name": "dashboard",
   "queries": {
     "user": {
       "from": "users",
-      "where": { "op": "eq", "field": "id", "value": 123 }
+      "where": { "op": "eq", "field": ["id"], "value": 123 }
     },
     "recent_orders": {
       "from": "orders",
       "where": {
         "op": "and",
         "filters": [
-          { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
-          { "op": "gte", "field": "created_at", "value": "2024-01-01" }
+          { "op": "eq", "field": ["user_id"], "value": { "$query": "user[0].id" } },
+          { "op": "gte", "field": ["created_at"], "value": "2024-01-01" }
         ]
       },
-      "order_by": "created_at",
-      "order_dir": "desc",
-      "limit": 10
+      "order_by": { "items": [{ "field": ["created_at"], "direction": "desc" }] },
+      "pagination": { "mode": "LimitOffset", "limit": 10 }
     },
     "order_count": {
       "from": "orders",
-      "where": { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
-      "select": ["count(*)"]
+      "where": { "op": "eq", "field": ["user_id"], "value": { "$query": "user[0].id" } },
+      "select": { "items": [{ "type": "count_all" }] }
     },
     "notifications": {
-      "query": {
-        "from": "notifications",
-        "where": {
-          "op": "and",
-          "filters": [
-            { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
-            { "op": "eq", "field": "read", "value": false }
-          ]
-        }
+      "from": "notifications",
+      "where": {
+        "op": "and",
+        "filters": [
+          { "op": "eq", "field": ["user_id"], "value": { "$query": "user[0].id" } },
+          { "op": "eq", "field": ["read"], "value": false }
+        ]
       },
       "return_result": false
     }
@@ -864,24 +989,25 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ```json
 {
+  "id": "transfer-001",
   "name": "transfer",
   "transactional": true,
   "queries": {
     "from_account": {
       "from": "accounts",
-      "where": { "op": "eq", "field": "id", "value": 1 }
+      "where": { "op": "eq", "field": ["id"], "value": 1 }
     },
     "to_account": {
       "from": "accounts",
-      "where": { "op": "eq", "field": "id", "value": 2 }
+      "where": { "op": "eq", "field": ["id"], "value": 2 }
     },
     "check_balance": {
       "from": "accounts",
       "where": {
         "op": "and",
         "filters": [
-          { "op": "eq", "field": "id", "value": 1 },
-          { "op": "gte", "field": "balance", "value": { "$query": "from_account[0].balance" } }
+          { "op": "eq", "field": ["id"], "value": 1 },
+          { "op": "gte", "field": ["balance"], "value": { "$query": "from_account[0].balance" } }
         ]
       }
     }
@@ -952,7 +1078,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
   "from": "products",
   "where": {
     "op": "gt",
-    "field": "price",
+    "field": ["price"],
     "value": { "$expr": { "op": "mul", "args": [{ "$ref": "base_price" }, 1.2] } }
   }
 }
@@ -963,7 +1089,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 ```json
 {
   "update": "products",
-  "where": { "op": "eq", "field": "id", "value": 1 },
+  "where": { "op": "eq", "field": ["id"], "value": 1 },
   "set": {
     "price": { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } },
     "full_name": { "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
@@ -1010,7 +1136,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 ```json
 {
   "$cond": {
-    "if": { "op": "eq", "field": "active", "value": true },
+    "if": { "op": "eq", "field": ["active"], "value": true },
     "then": "yes",
     "else": "no"
   }
@@ -1023,19 +1149,19 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 
 ```json
 // Простое сравнение
-"if": { "op": "eq", "field": "status", "value": "active" }
+"if": { "op": "eq", "field": ["status"], "value": "active" }
 
 // Сравнение с $ref
-"if": { "op": "gt", "field": "score", "value": { "$ref": "threshold" } }
+"if": { "op": "gt", "field": ["score"], "value": { "$ref": "threshold" } }
 
 // Логические операторы
 "if": { "op": "and", "filters": [
-  { "op": "eq", "field": "active", "value": true },
-  { "op": "gte", "field": "level", "value": 5 }
+  { "op": "eq", "field": ["active"], "value": true },
+  { "op": "gte", "field": ["level"], "value": 5 }
 ]}
 
 // С выражением $expr
-"if": { "op": "gt", "field": "total", "value": { "$expr": { "op": "mul", "args": [100, 2] } } }
+"if": { "op": "gt", "field": ["total"], "value": { "$expr": { "op": "mul", "args": [100, 2] } } }
 ```
 
 ### Примеры
@@ -1045,11 +1171,11 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 ```json
 {
   "update": "users",
-  "where": { "op": "eq", "field": "id", "value": 1 },
+  "where": { "op": "eq", "field": ["id"], "value": 1 },
   "set": {
     "label": {
       "$cond": {
-        "if": { "op": "gte", "field": "score", "value": 100 },
+        "if": { "op": "gte", "field": ["score"], "value": 100 },
         "then": "vip",
         "else": "regular"
       }
@@ -1065,7 +1191,7 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
   "set": {
     "price": {
       "$cond": {
-        "if": { "op": "eq", "field": "is_vip", "value": true },
+        "if": { "op": "eq", "field": ["is_vip"], "value": true },
         "then": { "$expr": { "op": "mul", "args": [{ "$ref": "base_price" }, 0.9] } },
         "else": { "$ref": "base_price" }
       }
@@ -1081,15 +1207,15 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
   "set": {
     "tier": {
       "$cond": {
-        "if": { "op": "gte", "field": "score", "value": 1000 },
+        "if": { "op": "gte", "field": ["score"], "value": 1000 },
         "then": "platinum",
         "else": {
           "$cond": {
-            "if": { "op": "gte", "field": "score", "value": 500 },
+            "if": { "op": "gte", "field": ["score"], "value": 500 },
             "then": "gold",
             "else": {
               "$cond": {
-                "if": { "op": "gte", "field": "score", "value": 100 },
+                "if": { "op": "gte", "field": ["score"], "value": 100 },
                 "then": "silver",
                 "else": "bronze"
               }
@@ -1109,10 +1235,10 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
   "from": "products",
   "where": {
     "op": "eq",
-    "field": "category",
+    "field": ["category"],
     "value": {
       "$cond": {
-        "if": { "op": "gt", "field": "price", "value": 1000 },
+        "if": { "op": "gt", "field": ["price"], "value": 1000 },
         "then": "premium",
         "else": "standard"
       }
@@ -1143,49 +1269,55 @@ S.H.A.M.I.R. использует **строгую валидацию** ссыл
 ## Архитектура
 
 ```
-BatchRequest
+BatchRequest { id, queries, limits, ... }
     │
     ▼
-┌─────────────────┐
-│  BatchPlanner   │
-│  ┌───────────┐  │
-│  │ Parse $query │──▶ Extract dependencies
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Validate  │──▶ Check aliases, cycles, depth
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Topo Sort │──▶ Create parallel stages
-│  └───────────┘  │
-└─────────────────┘
+┌──────────────────────────┐
+│  BatchPlanner            │
+│  ┌────────────────────┐  │
+│  │ Parse $query refs  │──▶ Extract dependencies
+│  └────────────────────┘  │
+│  ┌────────────────────┐  │
+│  │ Validate           │──▶ Check aliases, cycles, depth
+│  └────────────────────┘  │
+│  ┌────────────────────┐  │
+│  │ Topo Sort          │──▶ Create parallel stages
+│  └────────────────────┘  │
+└──────────────────────────┘
     │
     ▼
 BatchPlan { stages, aliases, dependencies }
     │
     ▼
-┌─────────────────┐
-│   Executor      │
-│  ┌───────────┐  │
-│  │ Stage 1   │──▶ Parallel execution
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Stage 2   │──▶ Wait for deps, then parallel
-│  └───────────┘  │
-│  ...            │
-└─────────────────┘
+┌──────────────────────────┐
+│  execute_batch()         │
+│  ├─ TableResolver trait  │──▶ Resolve TableRef → TableManager
+│  ├─ AdminExecutor trait  │──▶ Execute DDL (optional)
+│  ├─ FilterContext        │──▶ Resolved $query refs
+│  │                       │
+│  │  ┌─────────────────┐  │
+│  │  │ Stage 1         │──▶ Parallel (read/write/admin)
+│  │  └─────────────────┘  │
+│  │  ┌─────────────────┐  │
+│  │  │ Stage 2         │──▶ Wait for deps, then parallel
+│  │  └─────────────────┘  │
+│  │  ...                  │
+└──────────────────────────┘
     │
     ▼
-BatchResponse { results, execution_plan, execution_time_us }
+BatchResponse { id, results, execution_plan, execution_time_us }
 ```
 
 ## См. также
 
 - [Write Operations](../write/README.md) — операции записи (Insert, Update, Set, Delete)
+- [Admin Operations](../admin/types.rs) — DDL операции (Create/Drop/List)
 - [Write Examples](../examples/write.md) — примеры JSON для операций записи
 - [Filter Examples](../examples/filter.md) — примеры фильтров WHERE
 - [Query Reference](./reference.rs) — парсинг `$query` ссылок
-- [Batch Types](./types.rs) — типы данных
+- [Batch Types](./types.rs) — BatchRequest (id обязательно), BatchOp, QueryEntry
 - [Batch Planner](./planner.rs) — планировщик выполнения
+- [Batch Executor](./executor.rs) — execute_batch, TableResolver, AdminExecutor
 
 ## Performance Notes
 
@@ -1203,7 +1335,7 @@ O(n) где n = количество $query ссылок
 При реализации executor'а добавить кеширование извлечённых значений:
 
 ```rust
-// Кеш: "alias.path" → Value
+// Кеш: "alias.path" -> Value
 let cache: TMap<String, Value> = new_map();
 
 // Первый запрос к "users[0].id" — извлекаем и кешируем

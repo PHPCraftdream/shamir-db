@@ -1,12 +1,13 @@
 # Storage Backend Abstraction Layer
 
-This module provides a unified interface over 6 different embedded database engines, allowing S.H.A.M.I.R. to work with any supported backend seamlessly.
+This module provides a unified interface over 7 embedded database engines (plus a cached wrapper), allowing S.H.A.M.I.R. to work with any supported backend seamlessly.
 
 ## Architecture
 
 ```
 storage/
 ├── types.rs                  # Store and Repo traits
+├── error.rs                  # DbError, DbResult types
 ├── storage_in_memory.rs      # In-memory backend (testing/caching)
 ├── storage_cached.rs         # Cached wrapper (sync/async write modes)
 ├── storage_sled.rs           # Sled backend
