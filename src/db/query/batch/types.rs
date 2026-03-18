@@ -10,6 +10,9 @@ use crate::db::query::admin::{
     CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
     DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, ListOp,
 };
+use crate::db::query::auth::{
+    CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp,
+};
 use crate::db::query::read::{ReadQuery, QueryResult};
 use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::types::common::{TMap, TSet};
@@ -53,6 +56,14 @@ pub enum BatchOp {
     CreateIndex(CreateIndexOp),
     DropIndex(DropIndexOp),
     List(ListOp),
+
+    // Auth operations
+    CreateUser(CreateUserOp),
+    DropUser(DropUserOp),
+    CreateRole(CreateRoleOp),
+    DropRole(DropRoleOp),
+    GrantRole(GrantRoleOp),
+    RevokeRole(RevokeRoleOp),
 }
 
 impl Serialize for BatchOp {
@@ -72,6 +83,12 @@ impl Serialize for BatchOp {
             BatchOp::CreateIndex(op) => op.serialize(serializer),
             BatchOp::DropIndex(op) => op.serialize(serializer),
             BatchOp::List(op) => op.serialize(serializer),
+            BatchOp::CreateUser(op) => op.serialize(serializer),
+            BatchOp::DropUser(op) => op.serialize(serializer),
+            BatchOp::CreateRole(op) => op.serialize(serializer),
+            BatchOp::DropRole(op) => op.serialize(serializer),
+            BatchOp::GrantRole(op) => op.serialize(serializer),
+            BatchOp::RevokeRole(op) => op.serialize(serializer),
         }
     }
 }
@@ -108,6 +125,18 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value).map(BatchOp::CreateIndex).map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_index") {
             serde_json::from_value(value).map(BatchOp::DropIndex).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_user") {
+            serde_json::from_value(value).map(BatchOp::CreateUser).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_user") {
+            serde_json::from_value(value).map(BatchOp::DropUser).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_role") {
+            serde_json::from_value(value).map(BatchOp::CreateRole).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_role") {
+            serde_json::from_value(value).map(BatchOp::DropRole).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("grant_role") {
+            serde_json::from_value(value).map(BatchOp::GrantRole).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("revoke_role") {
+            serde_json::from_value(value).map(BatchOp::RevokeRole).map_err(serde::de::Error::custom)
         } else if obj.contains_key("list") {
             serde_json::from_value(value).map(BatchOp::List).map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
@@ -147,6 +176,12 @@ impl BatchOp {
                 | BatchOp::CreateIndex(_)
                 | BatchOp::DropIndex(_)
                 | BatchOp::List(_)
+                | BatchOp::CreateUser(_)
+                | BatchOp::DropUser(_)
+                | BatchOp::CreateRole(_)
+                | BatchOp::DropRole(_)
+                | BatchOp::GrantRole(_)
+                | BatchOp::RevokeRole(_)
         )
     }
 }

@@ -165,6 +165,37 @@ impl AdminExecutor for ShamirAdminExecutor {
                         let tables = db.list_tables(repo).map_err(|e| err(e.to_string()))?;
                         Ok(admin_result(json!({"tables": tables, "repo": repo})))
                     }
+                    ListOp::Users => {
+                        let table = self.shamir.system_store().users_table().await
+                            .map_err(|e| err(e.to_string()))?;
+                        let interner = table.interner().get().await
+                            .map_err(|e| err(e.to_string()))?;
+                        let refs = crate::types::common::new_map();
+                        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+                        let query = crate::db::query::read::ReadQuery::new("users");
+                        let result = table.read(&query, &ctx).await
+                            .map_err(|e| err(e.to_string()))?;
+                        // Strip password_hash from output
+                        let users: Vec<serde_json::Value> = result.records.into_iter().map(|mut r| {
+                            if let Some(obj) = r.as_object_mut() {
+                                obj.remove("password_hash");
+                            }
+                            r
+                        }).collect();
+                        Ok(admin_result(json!({"users": users})))
+                    }
+                    ListOp::Roles => {
+                        let table = self.shamir.system_store().roles_table().await
+                            .map_err(|e| err(e.to_string()))?;
+                        let interner = table.interner().get().await
+                            .map_err(|e| err(e.to_string()))?;
+                        let refs = crate::types::common::new_map();
+                        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+                        let query = crate::db::query::read::ReadQuery::new("roles");
+                        let result = table.read(&query, &ctx).await
+                            .map_err(|e| err(e.to_string()))?;
+                        Ok(admin_result(json!({"roles": result.records})))
+                    }
                     ListOp::Indexes { table, repo } => {
                         let db = self.shamir.get_db(&self.db_name)
                             .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
@@ -192,6 +223,147 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"indexes": indexes, "table": table, "repo": repo})))
                     }
                 }
+            }
+
+            BatchOp::CreateUser(op) => {
+                let user = crate::db::query::auth::User {
+                    name: op.create_user.clone(),
+                    password_hash: op.password.clone(), // TODO: hash properly
+                    roles: op.roles.clone(),
+                    profile: op.profile.clone(),
+                };
+                let user_json = serde_json::to_value(&user).map_err(|e| err(e.to_string()))?;
+                let table = self.shamir.system_store().users_table().await
+                    .map_err(|e| err(e.to_string()))?;
+                let set_op = crate::db::query::write::SetOp {
+                    set: crate::db::query::TableRef::new("users"),
+                    key: json!({"name": op.create_user}),
+                    value: user_json,
+                };
+                table.execute_set(&set_op).await.map_err(|e| err(e.to_string()))?;
+                table.interner().persist().await.map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"created_user": op.create_user})))
+            }
+
+            BatchOp::DropUser(op) => {
+                let table = self.shamir.system_store().users_table().await
+                    .map_err(|e| err(e.to_string()))?;
+                let interner = table.interner().get().await
+                    .map_err(|e| err(e.to_string()))?;
+                let refs = crate::types::common::new_map();
+                let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+                let del_op = crate::db::query::write::DeleteOp {
+                    delete_from: crate::db::query::TableRef::new("users"),
+                    where_clause: crate::db::query::filter::Filter::Eq {
+                        field: vec!["name".to_string()],
+                        value: crate::db::query::filter::FilterValue::String(op.drop_user.clone()),
+                    },
+                };
+                let result = table.execute_delete(&del_op, &ctx).await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"dropped_user": op.drop_user, "existed": result.affected > 0})))
+            }
+
+            BatchOp::CreateRole(op) => {
+                let role = crate::db::query::auth::Role {
+                    name: op.create_role.clone(),
+                    permissions: op.permissions.clone(),
+                };
+                let role_json = serde_json::to_value(&role).map_err(|e| err(e.to_string()))?;
+                let table = self.shamir.system_store().roles_table().await
+                    .map_err(|e| err(e.to_string()))?;
+                let set_op = crate::db::query::write::SetOp {
+                    set: crate::db::query::TableRef::new("roles"),
+                    key: json!({"name": op.create_role}),
+                    value: role_json,
+                };
+                table.execute_set(&set_op).await.map_err(|e| err(e.to_string()))?;
+                table.interner().persist().await.map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"created_role": op.create_role})))
+            }
+
+            BatchOp::DropRole(op) => {
+                let table = self.shamir.system_store().roles_table().await
+                    .map_err(|e| err(e.to_string()))?;
+                let interner = table.interner().get().await
+                    .map_err(|e| err(e.to_string()))?;
+                let refs = crate::types::common::new_map();
+                let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+                let del_op = crate::db::query::write::DeleteOp {
+                    delete_from: crate::db::query::TableRef::new("roles"),
+                    where_clause: crate::db::query::filter::Filter::Eq {
+                        field: vec!["name".to_string()],
+                        value: crate::db::query::filter::FilterValue::String(op.drop_role.clone()),
+                    },
+                };
+                let result = table.execute_delete(&del_op, &ctx).await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"dropped_role": op.drop_role, "existed": result.affected > 0})))
+            }
+
+            BatchOp::GrantRole(op) => {
+                // Read user, add role, write back
+                let table = self.shamir.system_store().users_table().await
+                    .map_err(|e| err(e.to_string()))?;
+                let interner = table.interner().get().await
+                    .map_err(|e| err(e.to_string()))?;
+                let refs = crate::types::common::new_map();
+                let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+                let query = crate::db::query::read::ReadQuery::new("users")
+                    .filter(crate::db::query::filter::Filter::Eq {
+                        field: vec!["name".to_string()],
+                        value: crate::db::query::filter::FilterValue::String(op.user.clone()),
+                    });
+                let result = table.read(&query, &ctx).await
+                    .map_err(|e| err(e.to_string()))?;
+                if result.records.is_empty() {
+                    return Err(err(format!("User '{}' not found", op.user)));
+                }
+                let mut user_json = result.records[0].clone();
+                if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
+                    if !roles.contains(&json!(op.grant_role)) {
+                        roles.push(json!(op.grant_role));
+                    }
+                }
+                let set_op = crate::db::query::write::SetOp {
+                    set: crate::db::query::TableRef::new("users"),
+                    key: json!({"name": op.user}),
+                    value: user_json,
+                };
+                table.execute_set(&set_op).await.map_err(|e| err(e.to_string()))?;
+                table.interner().persist().await.map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"granted_role": op.grant_role, "user": op.user})))
+            }
+
+            BatchOp::RevokeRole(op) => {
+                let table = self.shamir.system_store().users_table().await
+                    .map_err(|e| err(e.to_string()))?;
+                let interner = table.interner().get().await
+                    .map_err(|e| err(e.to_string()))?;
+                let refs = crate::types::common::new_map();
+                let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+                let query = crate::db::query::read::ReadQuery::new("users")
+                    .filter(crate::db::query::filter::Filter::Eq {
+                        field: vec!["name".to_string()],
+                        value: crate::db::query::filter::FilterValue::String(op.user.clone()),
+                    });
+                let result = table.read(&query, &ctx).await
+                    .map_err(|e| err(e.to_string()))?;
+                if result.records.is_empty() {
+                    return Err(err(format!("User '{}' not found", op.user)));
+                }
+                let mut user_json = result.records[0].clone();
+                if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
+                    roles.retain(|r| r != &json!(op.revoke_role));
+                }
+                let set_op = crate::db::query::write::SetOp {
+                    set: crate::db::query::TableRef::new("users"),
+                    key: json!({"name": op.user}),
+                    value: user_json,
+                };
+                table.execute_set(&set_op).await.map_err(|e| err(e.to_string()))?;
+                table.interner().persist().await.map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({"revoked_role": op.revoke_role, "user": op.user})))
             }
 
             _ => Err(err("Not an admin operation".to_string())),
