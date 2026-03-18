@@ -103,7 +103,14 @@ fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
                 "all" => Ok(SelectItem::All),
                 "field" => {
                     let path = match map.get(&"path".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
+                        Some(Value::Str(s)) => vec![s.clone()],
+                        Some(Value::List(list)) => list
+                            .iter()
+                            .filter_map(|v| match v {
+                                Value::Str(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
                         _ => return Err(QueryParseError::MissingField("field.path")),
                     };
 

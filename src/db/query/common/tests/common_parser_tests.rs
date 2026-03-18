@@ -28,7 +28,7 @@ fn test_order_by_single_asc() {
     let order = order_by_from_value(&value).unwrap();
 
     assert_eq!(order.items.len(), 1);
-    assert_eq!(order.items[0].field, "name");
+    assert_eq!(order.items[0].field, vec!["name".to_string()]);
     assert_eq!(order.items[0].direction, OrderDirection::Asc);
     assert!(order.items[0].nulls.is_none());
 }
@@ -45,7 +45,7 @@ fn test_order_by_single_desc() {
     let order = order_by_from_value(&value).unwrap();
 
     assert_eq!(order.items.len(), 1);
-    assert_eq!(order.items[0].field, "created_at");
+    assert_eq!(order.items[0].field, vec!["created_at".to_string()]);
     assert_eq!(order.items[0].direction, OrderDirection::Desc);
 }
 
@@ -72,7 +72,7 @@ fn test_order_by_item_asc() {
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let item = order_by_item_from_value(&value).unwrap();
     assert_eq!(item.direction, OrderDirection::Asc);
-    assert_eq!(item.field, "name");
+    assert_eq!(item.field, vec!["name".to_string()]);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn test_order_by_item_desc() {
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let item = order_by_item_from_value(&value).unwrap();
     assert_eq!(item.direction, OrderDirection::Desc);
-    assert_eq!(item.field, "date");
+    assert_eq!(item.field, vec!["date".to_string()]);
 }
 
 // ============================================================================
@@ -157,7 +157,7 @@ fn test_group_by_single_field() {
     let json = r#"{ "fields": ["department"] }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let group = group_by_from_value(&value).unwrap();
-    assert_eq!(group.fields, vec!["department"]);
+    assert_eq!(group.fields, vec![vec!["department".to_string()]]);
     assert!(group.having.is_none());
 }
 
@@ -166,7 +166,7 @@ fn test_group_by_multiple_fields() {
     let json = r#"{ "fields": ["department", "role"] }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let group = group_by_from_value(&value).unwrap();
-    assert_eq!(group.fields, vec!["department", "role"]);
+    assert_eq!(group.fields, vec![vec!["department".to_string()], vec!["role".to_string()]]);
 }
 
 #[test]
@@ -183,7 +183,7 @@ fn test_group_by_with_having() {
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let group = group_by_from_value(&value).unwrap();
 
-    assert_eq!(group.fields, vec!["customer_id"]);
+    assert_eq!(group.fields, vec![vec!["customer_id".to_string()]]);
     assert!(group.having.is_some());
 }
 
@@ -206,7 +206,7 @@ fn test_aggregate_field_field() {
     let json = r#"{ "type": "field", "name": "salary" }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let field = aggregate_field_from_value(&value).unwrap();
-    assert!(matches!(field, AggregateField::Field(name) if name == "salary"));
+    assert!(matches!(field, AggregateField::Field(name) if name == vec!["salary".to_string()]));
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn test_aggregate_field_string() {
     let json = r#""salary""#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let field = aggregate_field_from_value(&value).unwrap();
-    assert!(matches!(field, AggregateField::Field(name) if name == "salary"));
+    assert!(matches!(field, AggregateField::Field(name) if name == vec!["salary".to_string()]));
 }
 
 // ============================================================================
@@ -234,7 +234,7 @@ fn test_expr_field() {
     let json = r#"{ "type": "field", "name": "price" }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let expr = expr_from_value(&value).unwrap();
-    assert!(matches!(expr, SelectExpr::Field { path } if path == "price"));
+    assert!(matches!(expr, SelectExpr::Field { path } if path == vec!["price".to_string()]));
 }
 
 #[test]

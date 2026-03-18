@@ -30,7 +30,7 @@ impl Select {
             items: fields
                 .into_iter()
                 .map(|f| SelectItem::Field {
-                    path: f.into(),
+                    path: vec![f.into()],
                     alias: None,
                 })
                 .collect(),

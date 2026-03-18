@@ -71,7 +71,7 @@ fn test_plan_sequential_dependencies() {
                 "from": "orders",
                 "where": {
                     "op": "eq",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "value": { "$query": "users" }
                 }
             }
@@ -102,12 +102,12 @@ fn test_plan_complex_dependencies() {
                     "filters": [
                         {
                             "op": "eq",
-                            "field": "user_id",
+                            "field": ["user_id"],
                             "value": { "$query": "users" }
                         },
                         {
                             "op": "eq",
-                            "field": "product_id",
+                            "field": ["product_id"],
                             "value": { "$query": "products" }
                         }
                     ]
@@ -117,7 +117,7 @@ fn test_plan_complex_dependencies() {
                 "from": "stats",
                 "where": {
                     "op": "eq",
-                    "field": "order_count",
+                    "field": ["order_count"],
                     "value": { "$query": "orders" }
                 }
             }
@@ -145,7 +145,7 @@ fn test_plan_unknown_alias() {
                 "from": "orders",
                 "where": {
                     "op": "eq",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "value": { "$query": "nonexistent" }
                 }
             }
@@ -211,7 +211,7 @@ fn test_plan_circular_dependency() {
                 "from": "a",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": "c" }
                 }
             },
@@ -219,7 +219,7 @@ fn test_plan_circular_dependency() {
                 "from": "b",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": "a" }
                 }
             },
@@ -227,7 +227,7 @@ fn test_plan_circular_dependency() {
                 "from": "c",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": "b" }
                 }
             }
@@ -250,7 +250,7 @@ fn test_plan_self_dependency() {
                 "from": "t",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": "self_ref" }
                 }
             }
@@ -278,7 +278,7 @@ fn test_plan_dependency_depth() {
                 "from": "t",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": format!("q{}", i - 1) }
                 }
             }),
@@ -312,7 +312,7 @@ fn test_plan_mixed_in_filter() {
                 "from": "orders",
                 "where": {
                     "op": "in",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "values": [
                         { "$query": "users" },
                         42
@@ -343,12 +343,12 @@ fn test_plan_or_filter() {
                     "filters": [
                         {
                             "op": "eq",
-                            "field": "user_id",
+                            "field": ["user_id"],
                             "value": { "$query": "users" }
                         },
                         {
                             "op": "eq",
-                            "field": "admin_id",
+                            "field": ["admin_id"],
                             "value": { "$query": "admins" }
                         }
                     ]
@@ -374,7 +374,7 @@ fn test_plan_diamond_dependency() {
                 "from": "t",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": "a" }
                 }
             },
@@ -382,7 +382,7 @@ fn test_plan_diamond_dependency() {
                 "from": "t",
                 "where": {
                     "op": "eq",
-                    "field": "x",
+                    "field": ["x"],
                     "value": { "$query": "a" }
                 }
             },
@@ -393,12 +393,12 @@ fn test_plan_diamond_dependency() {
                     "filters": [
                         {
                             "op": "eq",
-                            "field": "x",
+                            "field": ["x"],
                             "value": { "$query": "b" }
                         },
                         {
                             "op": "eq",
-                            "field": "y",
+                            "field": ["y"],
                             "value": { "$query": "c" }
                         }
                     ]
@@ -425,7 +425,7 @@ fn test_plan_with_query_path() {
                 "from": "orders",
                 "where": {
                     "op": "eq",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "value": {
                         "$query": "users",
                         "path": "[0].id"
@@ -479,7 +479,7 @@ fn test_plan_transactional_batch() {
                 "from": "orders",
                 "where": {
                     "op": "eq",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "value": { "$query": "users[0].id" }
                 }
             }
@@ -502,7 +502,7 @@ fn test_plan_not_filter() {
                     "op": "not",
                     "filter": {
                         "op": "eq",
-                        "field": "id",
+                        "field": ["id"],
                         "value": { "$query": "active_users[0].id" }
                     }
                 }
@@ -552,7 +552,7 @@ fn test_plan_update_operation() {
                 "update": "orders",
                 "where": {
                     "op": "eq",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "value": { "$query": "users[0].id" }
                 },
                 "set": { "status": "processed" }
@@ -599,7 +599,7 @@ fn test_plan_delete_operation() {
                 "from": "users",
                 "where": {
                     "op": "eq",
-                    "field": "status",
+                    "field": ["status"],
                     "value": "inactive"
                 }
             },
@@ -607,7 +607,7 @@ fn test_plan_delete_operation() {
                 "delete_from": "orders",
                 "where": {
                     "op": "in",
-                    "field": "user_id",
+                    "field": ["user_id"],
                     "values": [{ "$query": "inactive_users[].id" }]
                 }
             }
@@ -652,7 +652,7 @@ fn test_plan_insert_with_value_reference() {
         "queries": {
             "user": {
                 "from": "users",
-                "where": { "op": "eq", "field": "id", "value": 1 }
+                "where": { "op": "eq", "field": ["id"], "value": 1 }
             },
             "insert_order": {
                 "insert_into": "orders",
@@ -686,7 +686,7 @@ fn test_plan_mixed_read_and_write() {
             },
             "update_inventory": {
                 "update": "inventory",
-                "where": { "op": "eq", "field": "product_id", "value": 1 },
+                "where": { "op": "eq", "field": ["product_id"], "value": 1 },
                 "set": { "quantity": 0 }
             }
         }
@@ -727,7 +727,7 @@ fn test_plan_write_operations_serialization() {
             },
             "update": {
                 "update": "users",
-                "where": { "op": "eq", "field": "name", "value": "Test" },
+                "where": { "op": "eq", "field": ["name"], "value": "Test" },
                 "set": { "name": "Updated" }
             },
             "set": {
@@ -737,7 +737,7 @@ fn test_plan_write_operations_serialization() {
             },
             "delete": {
                 "delete_from": "users",
-                "where": { "op": "eq", "field": "id", "value": 999 }
+                "where": { "op": "eq", "field": ["id"], "value": 999 }
             }
         }
     });

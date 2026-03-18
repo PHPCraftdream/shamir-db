@@ -17,7 +17,7 @@ pub struct GroupBy {
 impl GroupBy {
     pub fn new(fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
         GroupBy {
-            fields: fields.into_iter().map(|f| f.into()).collect(),
+            fields: fields.into_iter().map(|f| vec![f.into()]).collect(),
             having: None,
         }
     }

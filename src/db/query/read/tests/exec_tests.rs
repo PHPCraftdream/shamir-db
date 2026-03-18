@@ -73,7 +73,7 @@ fn select_with_alias() {
     let records = make_records(&interner);
     let select = Select {
         items: vec![SelectItem::Field {
-            path: "name".into(),
+            path: vec!["name".into()],
             alias: Some("user_name".into()),
         }],
         distinct: false,
@@ -110,7 +110,7 @@ fn group_by_count() {
     let select = Select {
         items: vec![
             SelectItem::Field {
-                path: "city".into(),
+                path: vec!["city".into()],
                 alias: None,
             },
             SelectItem::CountAll {
@@ -141,18 +141,18 @@ fn group_by_sum_avg() {
     let select = Select {
         items: vec![
             SelectItem::Field {
-                path: "city".into(),
+                path: vec!["city".into()],
                 alias: None,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Sum,
-                field: AggregateField::Field("age".into()),
+                field: AggregateField::Field(vec!["age".into()]),
                 alias: Some("total_age".into()),
                 distinct: false,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Avg,
-                field: AggregateField::Field("age".into()),
+                field: AggregateField::Field(vec!["age".into()]),
                 alias: Some("avg_age".into()),
                 distinct: false,
             },
@@ -183,18 +183,18 @@ fn group_by_min_max() {
     let select = Select {
         items: vec![
             SelectItem::Field {
-                path: "city".into(),
+                path: vec!["city".into()],
                 alias: None,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Min,
-                field: AggregateField::Field("age".into()),
+                field: AggregateField::Field(vec!["age".into()]),
                 alias: Some("min_age".into()),
                 distinct: false,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Max,
-                field: AggregateField::Field("age".into()),
+                field: AggregateField::Field(vec!["age".into()]),
                 alias: Some("max_age".into()),
                 distinct: false,
             },
@@ -220,19 +220,19 @@ fn group_by_having() {
 
     // HAVING total_age > 55
     let group_by = GroupBy::new(["city"]).having(Filter::Gt {
-        field: "total_age".into(),
+        field: vec!["total_age".into()],
         value: FilterValue::Int(55),
     });
 
     let select = Select {
         items: vec![
             SelectItem::Field {
-                path: "city".into(),
+                path: vec!["city".into()],
                 alias: None,
             },
             SelectItem::Aggregate {
                 func: AggFunc::Sum,
-                field: AggregateField::Field("age".into()),
+                field: AggregateField::Field(vec!["age".into()]),
                 alias: Some("total_age".into()),
                 distinct: false,
             },
@@ -261,11 +261,11 @@ fn group_by_multiple_fields() {
     let select = Select {
         items: vec![
             SelectItem::Field {
-                path: "city".into(),
+                path: vec!["city".into()],
                 alias: None,
             },
             SelectItem::Field {
-                path: "age".into(),
+                path: vec!["age".into()],
                 alias: None,
             },
             SelectItem::CountAll {
@@ -311,7 +311,7 @@ fn aggregate_all_count_sum() {
             },
             SelectItem::Aggregate {
                 func: AggFunc::Sum,
-                field: AggregateField::Field("age".into()),
+                field: AggregateField::Field(vec!["age".into()]),
                 alias: Some("sum_age".into()),
                 distinct: false,
             },
@@ -500,7 +500,7 @@ fn has_aggregates_true() {
     let select = Select {
         items: vec![
             SelectItem::Field {
-                path: "name".into(),
+                path: vec!["name".into()],
                 alias: None,
             },
             SelectItem::CountAll { alias: None },

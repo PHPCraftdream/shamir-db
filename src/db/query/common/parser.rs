@@ -3,11 +3,12 @@
 //! This module provides parsers for query components that are used by
 //! multiple query types (SELECT, UPDATE, DELETE, etc.).
 
-use crate::db::query::filter::{Cond, FilterExpr, FilterExprOp, Filter, FilterValue, FnCall};
+use crate::db::query::filter::{Cond, FieldPath, FilterExpr, FilterExprOp, Filter, FilterValue, FnCall};
 use crate::db::query::read::{
-    AggFunc, AggregateField, SelectExpr, SelectExprValue, GroupBy, Pagination, OrderBy,
-    OrderByItem,
+    AggFunc, AggregateField, SelectExpr, SelectExprValue, GroupBy, OrderDirection, Pagination,
+    OrderBy, OrderByItem,
 };
+use crate::types::common::TMap;
 use crate::types::value::{QueryValue, Value};
 
 /// Error during query parsing
@@ -51,6 +52,30 @@ impl std::fmt::Display for QueryParseError {
 
 impl std::error::Error for QueryParseError {}
 
+/// Parse a field path from a filter map's "field" key.
+///
+/// Accepts either a dot-separated string `"user.address.city"` → `["user", "address", "city"]`,
+/// or an array of strings `["user", "address", "city"]`.
+fn parse_field_path(map: &TMap<String, QueryValue>) -> Result<FieldPath, QueryParseError> {
+    match map.get(&"field".to_string()) {
+        Some(Value::Str(s)) => Ok(s.split('.').map(|seg| seg.to_string()).collect()),
+        Some(Value::List(list)) => {
+            let segments: Vec<String> = list
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            if segments.is_empty() {
+                return Err(QueryParseError::MissingField("filter.field"));
+            }
+            Ok(segments)
+        }
+        _ => Err(QueryParseError::MissingField("filter.field")),
+    }
+}
+
 /// Parse Expr from QueryValue (placeholder for future)
 pub fn expr_from_value(value: &QueryValue) -> Result<SelectExpr, QueryParseError> {
     match value {
@@ -62,11 +87,18 @@ pub fn expr_from_value(value: &QueryValue) -> Result<SelectExpr, QueryParseError
 
             match type_str {
                 "field" => {
-                    let name = match map.get(&"name".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
+                    let path = match map.get(&"name".to_string()) {
+                        Some(Value::Str(s)) => s.split('.').map(|seg| seg.to_string()).collect(),
+                        Some(Value::List(list)) => list
+                            .iter()
+                            .filter_map(|v| match v {
+                                Value::Str(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
                         _ => return Err(QueryParseError::MissingField("expr.name")),
                     };
-                    Ok(SelectExpr::Field { path: name })
+                    Ok(SelectExpr::Field { path })
                 }
                 "literal" => {
                     let value = map
@@ -106,10 +138,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
 
             match op {
                 "eq" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let value = match map.get(&"value".to_string()) {
                         Some(v) => filter_value_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("filter.value")),
@@ -117,10 +146,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::Eq { field, value })
                 }
                 "ne" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let value = match map.get(&"value".to_string()) {
                         Some(v) => filter_value_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("filter.value")),
@@ -128,10 +154,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::Ne { field, value })
                 }
                 "gt" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let value = match map.get(&"value".to_string()) {
                         Some(v) => filter_value_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("filter.value")),
@@ -139,10 +162,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::Gt { field, value })
                 }
                 "gte" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let value = match map.get(&"value".to_string()) {
                         Some(v) => filter_value_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("filter.value")),
@@ -150,10 +170,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::Gte { field, value })
                 }
                 "lt" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let value = match map.get(&"value".to_string()) {
                         Some(v) => filter_value_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("filter.value")),
@@ -161,10 +178,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::Lt { field, value })
                 }
                 "lte" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let value = match map.get(&"value".to_string()) {
                         Some(v) => filter_value_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("filter.value")),
@@ -206,10 +220,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     })
                 }
                 "in" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let values = match map.get(&"values".to_string()) {
                         Some(Value::List(list)) => list
                             .iter()
@@ -225,10 +236,7 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::In { field, values })
                 }
                 "not_in" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     let values = match map.get(&"values".to_string()) {
                         Some(Value::List(list)) => list
                             .iter()
@@ -243,17 +251,11 @@ pub fn filter_from_value(value: &QueryValue) -> Result<Filter, QueryParseError> 
                     Ok(Filter::NotIn { field, values })
                 }
                 "is_null" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     Ok(Filter::IsNull { field })
                 }
                 "is_not_null" => {
-                    let field = match map.get(&"field".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
-                        _ => return Err(QueryParseError::MissingField("filter.field")),
-                    };
+                    let field = parse_field_path(map)?;
                     Ok(Filter::IsNotNull { field })
                 }
                 _ => Err(QueryParseError::UnknownFilterOp(op.to_string())),
@@ -279,9 +281,20 @@ pub fn filter_value_from_value(value: &QueryValue) -> Result<FilterValue, QueryP
             Ok(FilterValue::Array(parsed))
         }
         Value::Map(map) => {
-            // Check for field reference: { "$ref": "path.to.field" }
-            if let Some(Value::Str(path)) = map.get(&"$ref".to_string()) {
-                return Ok(FilterValue::FieldRef { path: path.clone() });
+            // Check for field reference: { "$ref": "path.to.field" } or { "$ref": ["path", "to", "field"] }
+            if let Some(ref_val) = map.get(&"$ref".to_string()) {
+                let path = match ref_val {
+                    Value::Str(s) => s.split('.').map(|seg| seg.to_string()).collect(),
+                    Value::List(list) => list
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::Str(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => return Err(QueryParseError::InvalidType("$ref", "string or array")),
+                };
+                return Ok(FilterValue::FieldRef { path });
             }
 
             // Check for query reference: { "$query": "@alias.path" }
@@ -443,14 +456,14 @@ fn cond_from_value(value: &QueryValue) -> Result<Cond, QueryParseError> {
 pub fn group_by_from_value(value: &QueryValue) -> Result<GroupBy, QueryParseError> {
     match value {
         Value::Map(map) => {
-            let fields = match map.get(&"fields".to_string()) {
+            let fields: Vec<FieldPath> = match map.get(&"fields".to_string()) {
                 Some(Value::List(list)) => list
                     .iter()
                     .filter_map(|v| match v {
-                        Value::Str(s) => Some(s.clone()),
+                        Value::Str(s) => Some(s.split('.').map(|seg| seg.to_string()).collect()),
                         _ => None,
                     })
-                    .collect::<Vec<_>>(),
+                    .collect(),
                 None => return Err(QueryParseError::MissingField("group_by.fields")),
                 Some(_) => return Err(QueryParseError::InvalidType("fields", "array")),
             };
@@ -461,7 +474,7 @@ pub fn group_by_from_value(value: &QueryValue) -> Result<GroupBy, QueryParseErro
                 Some(_) => return Err(QueryParseError::InvalidType("having", "filter")),
             };
 
-            Ok(GroupBy::new(fields).having_opt(having))
+            Ok(GroupBy { fields, having: None }.having_opt(having))
         }
         _ => Err(QueryParseError::InvalidType("group_by", "object")),
     }
@@ -492,8 +505,15 @@ pub fn order_by_from_value(value: &QueryValue) -> Result<OrderBy, QueryParseErro
 pub fn order_by_item_from_value(value: &QueryValue) -> Result<OrderByItem, QueryParseError> {
     match value {
         Value::Map(map) => {
-            let field = match map.get(&"field".to_string()) {
-                Some(Value::Str(s)) => s.clone(),
+            let field_path: FieldPath = match map.get(&"field".to_string()) {
+                Some(Value::Str(s)) => s.split('.').map(|seg| seg.to_string()).collect(),
+                Some(Value::List(list)) => list
+                    .iter()
+                    .filter_map(|v| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
                 _ => return Err(QueryParseError::MissingField("order_by_item.field")),
             };
 
@@ -517,10 +537,15 @@ pub fn order_by_item_from_value(value: &QueryValue) -> Result<OrderByItem, Query
                 None => None,
             };
 
-            let mut item = if order {
-                OrderByItem::asc(&field)
+            let direction = if order {
+                OrderDirection::Asc
             } else {
-                OrderByItem::desc(&field)
+                OrderDirection::Desc
+            };
+            let mut item = OrderByItem {
+                field: field_path,
+                direction,
+                nulls: None,
             };
 
             if let Some(nulls_first) = nulls {
@@ -603,17 +628,24 @@ pub fn aggregate_field_from_value(value: &QueryValue) -> Result<AggregateField, 
 
             match type_str {
                 "field" => {
-                    let name = match map.get(&"name".to_string()) {
-                        Some(Value::Str(s)) => s.clone(),
+                    let path = match map.get(&"name".to_string()) {
+                        Some(Value::Str(s)) => s.split('.').map(|seg| seg.to_string()).collect(),
+                        Some(Value::List(list)) => list
+                            .iter()
+                            .filter_map(|v| match v {
+                                Value::Str(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
                         _ => return Err(QueryParseError::MissingField("field.name")),
                     };
-                    Ok(AggregateField::Field(name))
+                    Ok(AggregateField::Field(path))
                 }
                 "all" => Ok(AggregateField::All),
                 _ => Err(QueryParseError::UnknownType(type_str.to_string())),
             }
         }
-        Value::Str(s) => Ok(AggregateField::Field(s.clone())),
+        Value::Str(s) => Ok(AggregateField::Field(s.split('.').map(|seg| seg.to_string()).collect())),
         _ => Err(QueryParseError::InvalidType(
             "aggregate.field",
             "object or string",

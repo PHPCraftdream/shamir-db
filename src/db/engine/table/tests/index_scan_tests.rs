@@ -103,7 +103,7 @@ async fn test_read_uses_index_for_eq_filter() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::Eq {
-        field: "status".into(),
+        field: vec!["status".into()],
         value: FilterValue::String("active".into()),
     });
 
@@ -131,11 +131,11 @@ async fn test_read_uses_index_for_and_with_eq() {
     let query = ReadQuery::new("users").filter(Filter::And {
         filters: vec![
             Filter::Eq {
-                field: "status".into(),
+                field: vec!["status".into()],
                 value: FilterValue::String("active".into()),
             },
             Filter::Gt {
-                field: "age".into(),
+                field: vec!["age".into()],
                 value: FilterValue::Int(25),
             },
         ],
@@ -173,11 +173,11 @@ async fn test_read_composite_index() {
     let query = ReadQuery::new("users").filter(Filter::And {
         filters: vec![
             Filter::Eq {
-                field: "status".into(),
+                field: vec!["status".into()],
                 value: FilterValue::String("active".into()),
             },
             Filter::Eq {
-                field: "city".into(),
+                field: vec!["city".into()],
                 value: FilterValue::String("LA".into()),
             },
         ],
@@ -205,7 +205,7 @@ async fn test_read_no_index_for_gt() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::Gt {
-        field: "age".into(),
+        field: vec!["age".into()],
         value: FilterValue::Int(25),
     });
 
@@ -229,11 +229,11 @@ async fn test_read_no_index_for_or() {
     let query = ReadQuery::new("users").filter(Filter::Or {
         filters: vec![
             Filter::Eq {
-                field: "status".into(),
+                field: vec!["status".into()],
                 value: FilterValue::String("active".into()),
             },
             Filter::Eq {
-                field: "status".into(),
+                field: vec!["status".into()],
                 value: FilterValue::String("deleted".into()),
             },
         ],
@@ -255,7 +255,7 @@ async fn test_read_index_with_no_results() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::Eq {
-        field: "status".into(),
+        field: vec!["status".into()],
         value: FilterValue::String("banned".into()),
     });
 
@@ -281,7 +281,7 @@ async fn test_read_index_with_pagination() {
 
     let query = ReadQuery::new("users")
         .filter(Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("active".into()),
         })
         .limit(2)
@@ -313,7 +313,7 @@ async fn test_read_index_with_order_by() {
 
     let query = ReadQuery::new("users")
         .filter(Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("active".into()),
         })
         .order_by(OrderBy::desc("age"));
@@ -345,9 +345,9 @@ async fn test_read_index_with_field_ref_falls_through() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::Eq {
-        field: "status".into(),
+        field: vec!["status".into()],
         value: FilterValue::FieldRef {
-            path: "name".into(),
+            path: vec!["name".into()],
         },
     });
 
@@ -368,7 +368,7 @@ async fn test_read_uses_index_for_in() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::In {
-        field: "status".into(),
+        field: vec!["status".into()],
         values: vec![
             FilterValue::String("active".into()),
             FilterValue::String("deleted".into()),
@@ -396,7 +396,7 @@ async fn test_read_uses_index_for_in_single_value() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::In {
-        field: "status".into(),
+        field: vec!["status".into()],
         values: vec![FilterValue::String("inactive".into())],
     });
 
@@ -417,7 +417,7 @@ async fn test_read_uses_index_for_in_no_match() {
     let ctx = FilterContext::new(interner, &refs);
 
     let query = ReadQuery::new("users").filter(Filter::In {
-        field: "status".into(),
+        field: vec!["status".into()],
         values: vec![
             FilterValue::String("banned".into()),
             FilterValue::String("suspended".into()),
@@ -448,14 +448,14 @@ async fn test_read_uses_index_for_and_with_in() {
     let query = ReadQuery::new("users").filter(Filter::And {
         filters: vec![
             Filter::In {
-                field: "status".into(),
+                field: vec!["status".into()],
                 values: vec![
                     FilterValue::String("active".into()),
                     FilterValue::String("inactive".into()),
                 ],
             },
             Filter::Gt {
-                field: "age".into(),
+                field: vec!["age".into()],
                 value: FilterValue::Int(25),
             },
         ],

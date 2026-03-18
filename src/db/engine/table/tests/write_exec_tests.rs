@@ -140,7 +140,7 @@ async fn test_execute_update_with_filter() {
     let op = UpdateOp {
         update: "users".to_string(),
         where_clause: Some(Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("active".into()),
         }),
         set: json!({"status": "premium"}),
@@ -167,7 +167,7 @@ async fn test_execute_update_returns_changed() {
     let op = UpdateOp {
         update: "users".to_string(),
         where_clause: Some(Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("active".into()),
         }),
         set: json!({"status": "premium"}),
@@ -197,7 +197,7 @@ async fn test_execute_update_no_match() {
     let op = UpdateOp {
         update: "users".to_string(),
         where_clause: Some(Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("deleted".into()),
         }),
         set: json!({"status": "active"}),
@@ -245,7 +245,7 @@ async fn test_execute_update_unchanged_mode() {
     let op = UpdateOp {
         update: "users".to_string(),
         where_clause: Some(Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("active".into()),
         }),
         set: json!({"status": "active"}),
@@ -276,7 +276,7 @@ async fn test_execute_delete_with_filter() {
     let op = DeleteOp {
         delete_from: "users".to_string(),
         where_clause: Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("inactive".into()),
         },
     };
@@ -298,7 +298,7 @@ async fn test_execute_delete_no_match() {
     let op = DeleteOp {
         delete_from: "users".to_string(),
         where_clause: Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("deleted".into()),
         },
     };
@@ -319,7 +319,7 @@ async fn test_execute_delete_multiple() {
     let op = DeleteOp {
         delete_from: "users".to_string(),
         where_clause: Filter::Eq {
-            field: "status".into(),
+            field: vec!["status".into()],
             value: FilterValue::String("active".into()),
         },
     };
@@ -359,7 +359,7 @@ async fn test_insert_update_delete_pipeline() {
     let update_op = UpdateOp {
         update: "users".to_string(),
         where_clause: Some(Filter::Eq {
-            field: "name".into(),
+            field: vec!["name".into()],
             value: FilterValue::String("Bob".into()),
         }),
         set: json!({"score": 75}),
@@ -376,7 +376,7 @@ async fn test_insert_update_delete_pipeline() {
     let delete_op = DeleteOp {
         delete_from: "users".to_string(),
         where_clause: Filter::Lt {
-            field: "score".into(),
+            field: vec!["score".into()],
             value: FilterValue::Int(80),
         },
     };

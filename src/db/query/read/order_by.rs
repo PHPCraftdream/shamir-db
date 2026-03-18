@@ -45,7 +45,7 @@ pub struct OrderByItem {
 impl OrderByItem {
     pub fn asc(field: impl Into<String>) -> Self {
         OrderByItem {
-            field: field.into(),
+            field: vec![field.into()],
             direction: OrderDirection::Asc,
             nulls: None,
         }
@@ -53,7 +53,7 @@ impl OrderByItem {
 
     pub fn desc(field: impl Into<String>) -> Self {
         OrderByItem {
-            field: field.into(),
+            field: vec![field.into()],
             direction: OrderDirection::Desc,
             nulls: None,
         }

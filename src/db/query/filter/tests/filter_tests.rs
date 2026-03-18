@@ -30,7 +30,7 @@ fn test_filter_eq_string() {
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
-            if field == "status" && value == FilterValue::String("active".to_string())
+            if field == vec!["status".to_string()] && value == FilterValue::String("active".to_string())
     ));
 }
 
@@ -46,7 +46,7 @@ fn test_filter_eq_integer() {
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
-            if field == "count" && value == FilterValue::Int(42)
+            if field == vec!["count".to_string()] && value == FilterValue::Int(42)
     ));
 }
 
@@ -62,7 +62,7 @@ fn test_filter_eq_boolean() {
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
-            if field == "active" && value == FilterValue::Bool(true)
+            if field == vec!["active".to_string()] && value == FilterValue::Bool(true)
     ));
 }
 
@@ -78,7 +78,7 @@ fn test_filter_eq_null() {
     assert!(matches!(
         filter,
         Filter::Eq { field, value }
-            if field == "deleted_at" && value == FilterValue::Null
+            if field == vec!["deleted_at".to_string()] && value == FilterValue::Null
     ));
 }
 
@@ -94,7 +94,7 @@ fn test_filter_ne() {
     assert!(matches!(
         filter,
         Filter::Ne { field, value }
-            if field == "status" && value == FilterValue::String("deleted".to_string())
+            if field == vec!["status".to_string()] && value == FilterValue::String("deleted".to_string())
     ));
 }
 
@@ -110,7 +110,7 @@ fn test_filter_gt() {
     assert!(matches!(
         filter,
         Filter::Gt { field, value }
-            if field == "age" && value == FilterValue::Int(18)
+            if field == vec!["age".to_string()] && value == FilterValue::Int(18)
     ));
 }
 
@@ -126,7 +126,7 @@ fn test_filter_gte() {
     assert!(matches!(
         filter,
         Filter::Gte { field, value }
-            if field == "salary" && value == FilterValue::Int(50000)
+            if field == vec!["salary".to_string()] && value == FilterValue::Int(50000)
     ));
 }
 
@@ -142,7 +142,7 @@ fn test_filter_lt() {
     assert!(matches!(
         filter,
         Filter::Lt { field, value }
-            if field == "age" && value == FilterValue::Int(65)
+            if field == vec!["age".to_string()] && value == FilterValue::Int(65)
     ));
 }
 
@@ -158,7 +158,7 @@ fn test_filter_lte() {
     assert!(matches!(
         filter,
         Filter::Lte { field, value }
-            if field == "stock" && value == FilterValue::Int(100)
+            if field == vec!["stock".to_string()] && value == FilterValue::Int(100)
     ));
 }
 
@@ -218,7 +218,7 @@ fn test_filter_is_null() {
     }"#;
 
     let filter = parse_filter(json).unwrap();
-    assert!(matches!(filter, Filter::IsNull { field } if field == "deleted_at"));
+    assert!(matches!(filter, Filter::IsNull { field } if field == vec!["deleted_at".to_string()]));
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn test_filter_is_not_null() {
     }"#;
 
     let filter = parse_filter(json).unwrap();
-    assert!(matches!(filter, Filter::IsNotNull { field } if field == "email_verified_at"));
+    assert!(matches!(filter, Filter::IsNotNull { field } if field == vec!["email_verified_at".to_string()]));
 }
 
 #[test]
@@ -362,14 +362,14 @@ fn test_complex_permission_check() {
 fn test_filter_value_field_ref() {
     let json = r#"{ "$ref": "address.city" }"#;
     let v = parse_filter_value(json).unwrap();
-    assert!(matches!(v, FilterValue::FieldRef { path } if path == "address.city"));
+    assert!(matches!(v, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()]));
 }
 
 #[test]
 fn test_filter_value_field_ref_nested() {
     let json = r#"{ "$ref": "user.profile.bio" }"#;
     let v = parse_filter_value(json).unwrap();
-    assert!(matches!(v, FilterValue::FieldRef { path } if path == "user.profile.bio"));
+    assert!(matches!(v, FilterValue::FieldRef { path } if path == vec!["user".to_string(), "profile".to_string(), "bio".to_string()]));
 }
 
 #[test]
@@ -383,8 +383,8 @@ fn test_filter_eq_with_field_ref() {
     let filter = parse_filter(json).unwrap();
     match filter {
         Filter::Eq { field, value } => {
-            assert_eq!(field, "billing_city");
-            assert!(matches!(value, FilterValue::FieldRef { path } if path == "address.city"));
+            assert_eq!(field, vec!["billing_city".to_string()]);
+            assert!(matches!(value, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()]));
         }
         _ => panic!("Expected Eq filter"),
     }
@@ -401,8 +401,8 @@ fn test_filter_gt_with_field_ref() {
     let filter = parse_filter(json).unwrap();
     match filter {
         Filter::Gt { field, value } => {
-            assert_eq!(field, "end_date");
-            assert!(matches!(value, FilterValue::FieldRef { path } if path == "start_date"));
+            assert_eq!(field, vec!["end_date".to_string()]);
+            assert!(matches!(value, FilterValue::FieldRef { path } if path == vec!["start_date".to_string()]));
         }
         _ => panic!("Expected Gt filter"),
     }
@@ -435,7 +435,7 @@ fn test_filter_value_array_with_field_refs() {
     match v {
         FilterValue::Array(arr) => {
             assert_eq!(arr.len(), 3);
-            assert!(matches!(&arr[0], FilterValue::FieldRef { path } if path == "user.id"));
+            assert!(matches!(&arr[0], FilterValue::FieldRef { path } if *path == vec!["user".to_string(), "id".to_string()]));
             assert!(matches!(&arr[1], FilterValue::Int(42)));
             assert!(matches!(&arr[2], FilterValue::String(s) if s == "literal"));
         }
@@ -446,7 +446,7 @@ fn test_filter_value_array_with_field_refs() {
 #[test]
 fn test_field_ref_helper() {
     let v = FilterValue::field_ref("address.city");
-    assert!(matches!(v, FilterValue::FieldRef { path } if path == "address.city"));
+    assert!(matches!(v, FilterValue::FieldRef { path } if path == vec!["address.city".to_string()]));
 }
 
 // ============================================================================
@@ -494,7 +494,7 @@ fn test_fn_call_in_filter() {
     let filter = parse_filter(json).unwrap();
     match filter {
         Filter::Gte { field, value } => {
-            assert_eq!(field, "created_at");
+            assert_eq!(field, vec!["created_at".to_string()]);
             assert!(matches!(value, FilterValue::FnCall { .. }));
         }
         _ => panic!("Expected Gte filter"),
@@ -569,7 +569,7 @@ fn test_expr_in_filter() {
     let filter = parse_filter(json).unwrap();
     match filter {
         Filter::Gt { field, value } => {
-            assert_eq!(field, "total");
+            assert_eq!(field, vec!["total".to_string()]);
             assert!(matches!(value, FilterValue::Expr { .. }));
         }
         _ => panic!("Expected Gt filter"),
@@ -662,7 +662,7 @@ fn test_cond_in_filter() {
     let filter = parse_filter(json).unwrap();
     match filter {
         Filter::Eq { field, value } => {
-            assert_eq!(field, "tier");
+            assert_eq!(field, vec!["tier".to_string()]);
             assert!(matches!(value, FilterValue::Cond { .. }));
         }
         _ => panic!("Expected Eq filter"),
