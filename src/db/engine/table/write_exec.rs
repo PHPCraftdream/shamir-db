@@ -11,7 +11,8 @@ use crate::codecs::interned::{inner_to_json_value, json_value_to_inner};
 use crate::core::interner::InternerKey;
 use crate::db::query::filter::eval::compile_filter;
 use crate::db::query::filter::eval_context::FilterContext;
-use crate::db::query::write::{DeleteOp, InsertOp, UpdateOp, UpdateReturnMode, WriteResult};
+use crate::db::query::filter::eval::{intern_field_path, resolve_field};
+use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
 use crate::db::DbResult;
 use crate::types::value::InnerValue;
 
@@ -178,6 +179,107 @@ impl TableManager {
         Ok(WriteResult {
             affected,
             records: Vec::new(),
+            execution_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
+    /// Execute a SET (upsert) operation.
+    ///
+    /// Finds an existing record by matching all key fields, then either
+    /// updates it (merge) or inserts a new record if not found.
+    pub async fn execute_set(&self, op: &SetOp) -> DbResult<WriteResult> {
+        let start = Instant::now();
+        let batch_size = 1000;
+        let interner = self.interner().get().await?;
+
+        // Parse key as JSON object → list of (field_path, value) to match
+        // Use touch_ind (not get_ind) because key fields may not be interned yet
+        let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
+            json::Value::Object(map) => {
+                let mut fields = Vec::with_capacity(map.len());
+                for (k, v) in map {
+                    let key_id = match interner.touch_ind(k.as_str()) {
+                        Ok(t) => t.key().id(),
+                        Err(e) => return Err(crate::db::DbError::Codec(e.to_string())),
+                    };
+                    let inner_v = json_value_to_inner(v, interner)
+                        .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+                    fields.push((vec![key_id], inner_v));
+                }
+                fields
+            }
+            _ => {
+                return Err(crate::db::DbError::Validation(
+                    "SET key must be a JSON object".to_string(),
+                ))
+            }
+        };
+
+        // Scan for existing record matching all key fields
+        let mut found: Option<(crate::types::record_id::RecordId, InnerValue)> = None;
+        let stream = self.list_stream(batch_size);
+        futures::pin_mut!(stream);
+        'outer: while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (id, record) in batch {
+                let all_match = key_fields.iter().all(|(path, expected)| {
+                    resolve_field(&record, path)
+                        .map(|v| crate::db::query::filter::compare_values(&v, expected)
+                            == Some(std::cmp::Ordering::Equal))
+                        .unwrap_or(false)
+                });
+                if all_match {
+                    found = Some((id, record));
+                    break 'outer;
+                }
+            }
+        }
+
+        // Convert the new value
+        let new_inner = json_value_to_inner(&op.value, interner)
+            .map_err(|e| crate::db::DbError::Codec(e.to_string()))?;
+
+        let (created, result_record) = if let Some((id, existing)) = found {
+            // Update: merge new value into existing
+            let new_map = match &new_inner {
+                InnerValue::Map(m) => m,
+                _ => {
+                    return Err(crate::db::DbError::Validation(
+                        "SET value must be a JSON object".to_string(),
+                    ))
+                }
+            };
+            let merged = merge_inner_maps(&existing, new_map);
+            self.set(id, &merged).await?;
+            (false, inner_to_json_value(&merged, interner))
+        } else {
+            // Insert new record
+            let id = self.insert(&new_inner).await?;
+            let mut obj = match inner_to_json_value(&new_inner, interner) {
+                json::Value::Object(m) => m,
+                other => {
+                    let mut m = json::Map::new();
+                    m.insert("_value".to_string(), other);
+                    m
+                }
+            };
+            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+            (true, json::Value::Object(obj))
+        };
+
+        let mut result_obj = match result_record {
+            json::Value::Object(m) => m,
+            other => {
+                let mut m = json::Map::new();
+                m.insert("_value".to_string(), other);
+                m
+            }
+        };
+        result_obj.insert("_created".to_string(), json::Value::Bool(created));
+
+        Ok(WriteResult {
+            affected: 1,
+            records: vec![json::Value::Object(result_obj)],
             execution_time_us: start.elapsed().as_micros() as u64,
         })
     }

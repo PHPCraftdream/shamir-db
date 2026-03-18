@@ -386,3 +386,63 @@ async fn test_insert_update_delete_pipeline() {
 
     assert_eq!(table.count().await.unwrap(), 1); // Only Alice remains
 }
+
+// ============================================================================
+// SET (upsert)
+// ============================================================================
+
+#[tokio::test]
+async fn test_execute_set_insert_new() {
+    let table = setup_empty_table().await;
+
+    let op = crate::db::query::write::SetOp {
+        set: TableRef::new("users"),
+        key: json!({"email": "alice@example.com"}),
+        value: json!({"email": "alice@example.com", "name": "Alice"}),
+    };
+
+    let result = table.execute_set(&op).await.unwrap();
+
+    assert_eq!(result.affected, 1);
+    assert_eq!(result.records[0]["_created"], true);
+    assert_eq!(result.records[0]["name"], "Alice");
+    assert_eq!(table.count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_execute_set_update_existing() {
+    let table = setup_table_with_users().await;
+    let interner = table.interner().get().await.unwrap();
+
+    // Alice exists with status=active. Upsert by name.
+    let op = crate::db::query::write::SetOp {
+        set: TableRef::new("users"),
+        key: json!({"name": "Alice"}),
+        value: json!({"name": "Alice", "status": "vip", "score": 100}),
+    };
+
+    let result = table.execute_set(&op).await.unwrap();
+
+    assert_eq!(result.affected, 1);
+    assert_eq!(result.records[0]["_created"], false);
+    assert_eq!(result.records[0]["status"], "vip");
+    // Original field "age" should be preserved (merge)
+    assert_eq!(result.records[0]["age"], 30);
+    assert_eq!(table.count().await.unwrap(), 3); // no new record
+}
+
+#[tokio::test]
+async fn test_execute_set_no_match_inserts() {
+    let table = setup_table_with_users().await;
+
+    let op = crate::db::query::write::SetOp {
+        set: TableRef::new("users"),
+        key: json!({"name": "Zara"}),
+        value: json!({"name": "Zara", "age": 22}),
+    };
+
+    let result = table.execute_set(&op).await.unwrap();
+
+    assert_eq!(result.records[0]["_created"], true);
+    assert_eq!(table.count().await.unwrap(), 4); // new record added
+}

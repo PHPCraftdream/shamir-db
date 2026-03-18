@@ -5,6 +5,8 @@
 
 use std::cmp::Ordering;
 
+use regex::Regex;
+
 use crate::core::interner::{Interner, InternerKey};
 use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::read::QueryResult;
@@ -354,6 +356,211 @@ impl FilterCallback for FalseCallback {
     }
 }
 
+/// Like — SQL-like pattern matching (% = any chars, _ = single char)
+struct LikeCallback {
+    field_path: Vec<u64>,
+    regex: Regex,
+}
+
+impl FilterCallback for LikeCallback {
+    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
+        match resolve_field(record, &self.field_path) {
+            Some(InnerValue::Str(s)) => self.regex.is_match(&s),
+            _ => false,
+        }
+    }
+}
+
+/// Regex — regex pattern matching on string fields
+struct RegexCallback {
+    field_path: Vec<u64>,
+    regex: Regex,
+}
+
+impl FilterCallback for RegexCallback {
+    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
+        match resolve_field(record, &self.field_path) {
+            Some(InnerValue::Str(s)) => self.regex.is_match(&s),
+            _ => false,
+        }
+    }
+}
+
+/// Contains — for List/Set: check if collection contains the value.
+/// For Str: check if string contains substring.
+struct ContainsCallback {
+    field_path: Vec<u64>,
+    value: FilterValue,
+}
+
+impl FilterCallback for ContainsCallback {
+    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
+        let field_val = match resolve_field(record, &self.field_path) {
+            Some(v) => v,
+            None => return false,
+        };
+        let filter_val = match resolve_filter_value(&self.value, record, ctx) {
+            Some(v) => v,
+            None => return false,
+        };
+        match &field_val {
+            InnerValue::Str(s) => {
+                if let InnerValue::Str(sub) = &filter_val {
+                    s.contains(sub.as_str())
+                } else {
+                    false
+                }
+            }
+            InnerValue::List(list) => list
+                .iter()
+                .any(|item| compare_values(item, &filter_val) == Some(Ordering::Equal)),
+            InnerValue::Set(set) => set
+                .iter()
+                .any(|item| compare_values(item, &filter_val) == Some(Ordering::Equal)),
+            _ => false,
+        }
+    }
+}
+
+/// ContainsAny — collection contains at least one of the values
+struct ContainsAnyCallback {
+    field_path: Vec<u64>,
+    values: Vec<FilterValue>,
+}
+
+impl FilterCallback for ContainsAnyCallback {
+    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
+        let field_val = match resolve_field(record, &self.field_path) {
+            Some(v) => v,
+            None => return false,
+        };
+        self.values.iter().any(|fv| {
+            let resolved = match resolve_filter_value(fv, record, ctx) {
+                Some(v) => v,
+                None => return false,
+            };
+            match &field_val {
+                InnerValue::List(list) => list
+                    .iter()
+                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                InnerValue::Set(set) => set
+                    .iter()
+                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                _ => false,
+            }
+        })
+    }
+}
+
+/// ContainsAll — collection contains all of the values
+struct ContainsAllCallback {
+    field_path: Vec<u64>,
+    values: Vec<FilterValue>,
+}
+
+impl FilterCallback for ContainsAllCallback {
+    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
+        let field_val = match resolve_field(record, &self.field_path) {
+            Some(v) => v,
+            None => return false,
+        };
+        self.values.iter().all(|fv| {
+            let resolved = match resolve_filter_value(fv, record, ctx) {
+                Some(v) => v,
+                None => return false,
+            };
+            match &field_val {
+                InnerValue::List(list) => list
+                    .iter()
+                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                InnerValue::Set(set) => set
+                    .iter()
+                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                _ => false,
+            }
+        })
+    }
+}
+
+/// Between — field >= from AND field <= to
+struct BetweenCallback {
+    field_path: Vec<u64>,
+    from: FilterValue,
+    to: FilterValue,
+}
+
+impl FilterCallback for BetweenCallback {
+    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
+        let field_val = match resolve_field(record, &self.field_path) {
+            Some(v) => v,
+            None => return false,
+        };
+        let from_val = match resolve_filter_value(&self.from, record, ctx) {
+            Some(v) => v,
+            None => return false,
+        };
+        let to_val = match resolve_filter_value(&self.to, record, ctx) {
+            Some(v) => v,
+            None => return false,
+        };
+        matches!(
+            compare_values(&field_val, &from_val),
+            Some(Ordering::Greater | Ordering::Equal)
+        ) && matches!(
+            compare_values(&field_val, &to_val),
+            Some(Ordering::Less | Ordering::Equal)
+        )
+    }
+}
+
+/// Exists — field is present in the record (resolve_field returns Some)
+struct ExistsCallback {
+    field_path: Vec<u64>,
+}
+
+impl FilterCallback for ExistsCallback {
+    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
+        resolve_field(record, &self.field_path).is_some()
+    }
+}
+
+/// NotExists — field is not present in the record
+struct NotExistsCallback {
+    field_path: Vec<u64>,
+}
+
+impl FilterCallback for NotExistsCallback {
+    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
+        resolve_field(record, &self.field_path).is_none()
+    }
+}
+
+/// Convert a SQL LIKE pattern to a regex pattern.
+/// `%` matches any sequence of characters, `_` matches a single character.
+/// All other regex meta-characters are escaped.
+fn like_pattern_to_regex(pattern: &str, case_insensitive: bool) -> Option<Regex> {
+    let mut regex_str = String::with_capacity(pattern.len() + 4);
+    if case_insensitive {
+        regex_str.push_str("(?i)");
+    }
+    regex_str.push('^');
+    for ch in pattern.chars() {
+        match ch {
+            '%' => regex_str.push_str(".*"),
+            '_' => regex_str.push('.'),
+            // Escape regex meta-characters
+            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' | '^'
+            | '$' => {
+                regex_str.push('\\');
+                regex_str.push(ch);
+            }
+            _ => regex_str.push(ch),
+        }
+    }
+    regex_str.push('$');
+    Regex::new(&regex_str).ok()
+}
+
 // ============================================================================
 // Compiler
 // ============================================================================
@@ -421,16 +628,75 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCal
             None => Box::new(TrueCallback),
         },
 
-        // Not yet implemented — always false
-        Filter::Like { .. }
-        | Filter::ILike { .. }
-        | Filter::Regex { .. }
-        | Filter::Contains { .. }
-        | Filter::ContainsAny { .. }
-        | Filter::ContainsAll { .. }
-        | Filter::Between { .. }
-        | Filter::Exists { .. }
-        | Filter::NotExists { .. } => Box::new(FalseCallback),
+        Filter::Like { field, pattern } => match intern_field_path(field, interner) {
+            Some(path) => match like_pattern_to_regex(pattern, false) {
+                Some(regex) => Box::new(LikeCallback {
+                    field_path: path,
+                    regex,
+                }),
+                None => Box::new(FalseCallback),
+            },
+            None => Box::new(FalseCallback),
+        },
+        Filter::ILike { field, pattern } => match intern_field_path(field, interner) {
+            Some(path) => match like_pattern_to_regex(pattern, true) {
+                Some(regex) => Box::new(LikeCallback {
+                    field_path: path,
+                    regex,
+                }),
+                None => Box::new(FalseCallback),
+            },
+            None => Box::new(FalseCallback),
+        },
+        Filter::Regex { field, pattern } => match intern_field_path(field, interner) {
+            Some(path) => match Regex::new(pattern) {
+                Ok(regex) => Box::new(RegexCallback {
+                    field_path: path,
+                    regex,
+                }),
+                Err(_) => Box::new(FalseCallback),
+            },
+            None => Box::new(FalseCallback),
+        },
+        Filter::Contains { field, value } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(ContainsCallback {
+                field_path: path,
+                value: value.clone(),
+            }),
+            None => Box::new(FalseCallback),
+        },
+        Filter::ContainsAny { field, values } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(ContainsAnyCallback {
+                field_path: path,
+                values: values.clone(),
+            }),
+            None => Box::new(FalseCallback),
+        },
+        Filter::ContainsAll { field, values } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(ContainsAllCallback {
+                field_path: path,
+                values: values.clone(),
+            }),
+            None => Box::new(FalseCallback),
+        },
+        Filter::Between { field, from, to } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(BetweenCallback {
+                field_path: path,
+                from: from.clone(),
+                to: to.clone(),
+            }),
+            None => Box::new(FalseCallback),
+        },
+        Filter::Exists { field } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(ExistsCallback { field_path: path }),
+            // If the field path can't be interned, the field doesn't exist => always false
+            None => Box::new(FalseCallback),
+        },
+        Filter::NotExists { field } => match intern_field_path(field, interner) {
+            Some(path) => Box::new(NotExistsCallback { field_path: path }),
+            // If the field path can't be interned, the field doesn't exist => always true
+            None => Box::new(TrueCallback),
+        },
     }
 }
 

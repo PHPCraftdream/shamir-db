@@ -469,3 +469,40 @@ async fn test_circular_dependency_error() {
     let err = execute_batch(&req, &resolver).await.unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::CircularDependency { .. }));
 }
+
+// ============================================================================
+// Pre-validation: unknown table fails before execution
+// ============================================================================
+
+#[tokio::test]
+async fn test_unknown_table_fails_early() {
+    let resolver = setup_resolver().await;
+
+    let mut queries = new_map();
+    queries.insert(
+        "good".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("users"),
+                values: vec![serde_json::json!({"name": "Alice"})],
+            }),
+            return_result: true,
+        },
+    );
+    queries.insert(
+        "bad".to_string(),
+        ReadQuery::new("nonexistent_table").into(),
+    );
+    let req = BatchRequest {
+        name: None,
+        transactional: false,
+        queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    let err = execute_batch(&req, &resolver).await.unwrap_err();
+    // Should fail with table not found error BEFORE any execution
+    assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
+}

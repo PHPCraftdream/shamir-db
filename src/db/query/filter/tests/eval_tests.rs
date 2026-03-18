@@ -5,7 +5,7 @@ use crate::db::query::filter::eval::{compare_values, compile_filter, resolve_fie
 use crate::db::query::filter::eval_context::FilterContext;
 use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::read::QueryResult;
-use crate::types::common::{new_map, TMap};
+use crate::types::common::{new_map, new_set, TMap};
 use crate::types::value::InnerValue;
 
 // ============================================================================
@@ -856,4 +856,654 @@ fn test_not_in_query_ref_column() {
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&record, &ctx)); // 99 not in [1, 2]
+}
+
+// ============================================================================
+// Step 8: Like / ILike
+// ============================================================================
+
+#[test]
+fn test_like_prefix_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Like {
+        field: vec!["name".to_string()],
+        pattern: "Ali%".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" matches "Ali%"
+}
+
+#[test]
+fn test_like_suffix_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Like {
+        field: vec!["name".to_string()],
+        pattern: "%ice".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" matches "%ice"
+}
+
+#[test]
+fn test_like_no_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Like {
+        field: vec!["name".to_string()],
+        pattern: "Bob%".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_like_underscore_single_char() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Like {
+        field: vec!["name".to_string()],
+        pattern: "Alic_".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" matches "Alic_"
+}
+
+#[test]
+fn test_like_exact_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Like {
+        field: vec!["name".to_string()],
+        pattern: "Alice".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_like_case_sensitive() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Like {
+        field: vec!["name".to_string()],
+        pattern: "ali%".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // case-sensitive: "Alice" doesn't match "ali%"
+}
+
+#[test]
+fn test_ilike_case_insensitive() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ILike {
+        field: vec!["name".to_string()],
+        pattern: "ali%".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // case-insensitive: "Alice" matches "ali%"
+}
+
+#[test]
+fn test_ilike_no_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ILike {
+        field: vec!["name".to_string()],
+        pattern: "bob%".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+// ============================================================================
+// Step 9: Regex
+// ============================================================================
+
+#[test]
+fn test_regex_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Regex {
+        field: vec!["name".to_string()],
+        pattern: "^A[a-z]+e$".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" matches "^A[a-z]+e$"
+}
+
+#[test]
+fn test_regex_no_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Regex {
+        field: vec!["name".to_string()],
+        pattern: "^[0-9]+$".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_regex_partial_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // Without anchors, regex matches partially
+    let filter = Filter::Regex {
+        field: vec!["name".to_string()],
+        pattern: "lic".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" contains "lic"
+}
+
+#[test]
+fn test_regex_on_non_string_field() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Regex {
+        field: vec!["age".to_string()],
+        pattern: "\\d+".to_string(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // age is Int, not Str
+}
+
+// ============================================================================
+// Step 10: Contains
+// ============================================================================
+
+/// Build a record with a list field: {name: "Test", tags: ["rust", "db", "query"]}
+fn make_list_record(interner: &Interner) -> InnerValue {
+    let mut map = new_map();
+    let k_name = interner.touch_ind("name").unwrap().key().clone();
+    let k_tags = interner.touch_ind("tags").unwrap().key().clone();
+    map.insert(k_name, InnerValue::Str("Test".to_string()));
+    map.insert(
+        k_tags,
+        InnerValue::List(vec![
+            InnerValue::Str("rust".to_string()),
+            InnerValue::Str("db".to_string()),
+            InnerValue::Str("query".to_string()),
+        ]),
+    );
+    InnerValue::Map(map)
+}
+
+/// Build a record with a set field: {name: "Test", roles: {"admin", "user"}}
+fn make_set_record(interner: &Interner) -> InnerValue {
+    let mut map = new_map();
+    let k_name = interner.touch_ind("name").unwrap().key().clone();
+    let k_roles = interner.touch_ind("roles").unwrap().key().clone();
+    let mut roles = new_set();
+    roles.insert(InnerValue::Str("admin".to_string()));
+    roles.insert(InnerValue::Str("user".to_string()));
+    map.insert(k_name, InnerValue::Str("Test".to_string()));
+    map.insert(k_roles, InnerValue::Set(roles));
+    InnerValue::Map(map)
+}
+
+#[test]
+fn test_contains_string_substring() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Contains {
+        field: vec!["name".to_string()],
+        value: FilterValue::String("lic".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" contains "lic"
+}
+
+#[test]
+fn test_contains_string_no_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Contains {
+        field: vec!["name".to_string()],
+        value: FilterValue::String("xyz".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_list() {
+    let interner = Interner::new();
+    let record = make_list_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Contains {
+        field: vec!["tags".to_string()],
+        value: FilterValue::String("rust".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_list_no_match() {
+    let interner = Interner::new();
+    let record = make_list_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Contains {
+        field: vec!["tags".to_string()],
+        value: FilterValue::String("python".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_set() {
+    let interner = Interner::new();
+    let record = make_set_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Contains {
+        field: vec!["roles".to_string()],
+        value: FilterValue::String("admin".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_set_no_match() {
+    let interner = Interner::new();
+    let record = make_set_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Contains {
+        field: vec!["roles".to_string()],
+        value: FilterValue::String("superadmin".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+// ============================================================================
+// Step 11: ContainsAny / ContainsAll
+// ============================================================================
+
+#[test]
+fn test_contains_any_list_match() {
+    let interner = Interner::new();
+    let record = make_list_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ContainsAny {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("python".to_string()),
+            FilterValue::String("rust".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // tags contains "rust"
+}
+
+#[test]
+fn test_contains_any_list_no_match() {
+    let interner = Interner::new();
+    let record = make_list_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ContainsAny {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("python".to_string()),
+            FilterValue::String("java".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_all_list_match() {
+    let interner = Interner::new();
+    let record = make_list_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ContainsAll {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("rust".to_string()),
+            FilterValue::String("db".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // tags contains both "rust" and "db"
+}
+
+#[test]
+fn test_contains_all_list_partial_match() {
+    let interner = Interner::new();
+    let record = make_list_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ContainsAll {
+        field: vec!["tags".to_string()],
+        values: vec![
+            FilterValue::String("rust".to_string()),
+            FilterValue::String("python".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // tags has "rust" but not "python"
+}
+
+#[test]
+fn test_contains_any_set_match() {
+    let interner = Interner::new();
+    let record = make_set_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ContainsAny {
+        field: vec!["roles".to_string()],
+        values: vec![
+            FilterValue::String("admin".to_string()),
+            FilterValue::String("superadmin".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_contains_all_set_match() {
+    let interner = Interner::new();
+    let record = make_set_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::ContainsAll {
+        field: vec!["roles".to_string()],
+        values: vec![
+            FilterValue::String("admin".to_string()),
+            FilterValue::String("user".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+// ============================================================================
+// Step 12: Between
+// ============================================================================
+
+#[test]
+fn test_between_in_range() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Between {
+        field: vec!["age".to_string()],
+        from: FilterValue::Int(25),
+        to: FilterValue::Int(35),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // 30 is between 25 and 35
+}
+
+#[test]
+fn test_between_at_lower_bound() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Between {
+        field: vec!["age".to_string()],
+        from: FilterValue::Int(30),
+        to: FilterValue::Int(40),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // 30 >= 30
+}
+
+#[test]
+fn test_between_at_upper_bound() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Between {
+        field: vec!["age".to_string()],
+        from: FilterValue::Int(20),
+        to: FilterValue::Int(30),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // 30 <= 30
+}
+
+#[test]
+fn test_between_out_of_range() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Between {
+        field: vec!["age".to_string()],
+        from: FilterValue::Int(31),
+        to: FilterValue::Int(40),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // 30 < 31
+}
+
+#[test]
+fn test_between_with_field_ref() {
+    let interner = Interner::new();
+    let record = make_date_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // start_date (100) between 50 and end_date (200)
+    let filter = Filter::Between {
+        field: vec!["start_date".to_string()],
+        from: FilterValue::Int(50),
+        to: FilterValue::FieldRef {
+            path: vec!["end_date".to_string()],
+        },
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // 100 between 50 and 200
+}
+
+#[test]
+fn test_between_string() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Between {
+        field: vec!["name".to_string()],
+        from: FilterValue::String("A".to_string()),
+        to: FilterValue::String("B".to_string()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "Alice" between "A" and "B"
+}
+
+// ============================================================================
+// Step 13: Exists / NotExists
+// ============================================================================
+
+#[test]
+fn test_exists_present_field() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Exists {
+        field: vec!["name".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_exists_null_field() {
+    let interner = Interner::new();
+    let record = make_nullable_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // deleted_at exists in the record (value is Null but key is present)
+    let filter = Filter::Exists {
+        field: vec!["deleted_at".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // Exists checks presence, not value
+}
+
+#[test]
+fn test_exists_missing_field() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // "email" doesn't exist in alice record, but also not in interner
+    let filter = Filter::Exists {
+        field: vec!["email".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_exists_missing_field_in_record_but_in_interner() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    // Intern "email" so the path resolves, but it's not in the record
+    interner.touch_ind("email").unwrap();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::Exists {
+        field: vec!["email".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // field not in record
+}
+
+#[test]
+fn test_not_exists_missing_field() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::NotExists {
+        field: vec!["email".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // field not interned => TrueCallback
+}
+
+#[test]
+fn test_not_exists_present_field() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::NotExists {
+        field: vec!["name".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // "name" exists
+}
+
+#[test]
+fn test_not_exists_null_field() {
+    let interner = Interner::new();
+    let record = make_nullable_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // deleted_at has Null value but IS present in the record
+    let filter = Filter::NotExists {
+        field: vec!["deleted_at".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&record, &ctx)); // key exists (even though value is Null)
+}
+
+#[test]
+fn test_not_exists_field_in_interner_but_not_record() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    interner.touch_ind("email").unwrap();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::NotExists {
+        field: vec!["email".to_string()],
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&record, &ctx)); // "email" not in record
 }
