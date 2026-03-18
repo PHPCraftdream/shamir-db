@@ -12,6 +12,7 @@ use crate::db::query::batch::{
 use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::read::ReadQuery;
 use crate::db::query::write::{DeleteOp, InsertOp, UpdateOp};
+use crate::db::query::TableRef;
 use crate::db::DbResult;
 use crate::types::common::new_map;
 
@@ -23,8 +24,8 @@ struct TestResolver {
 
 #[async_trait::async_trait]
 impl TableResolver for TestResolver {
-    async fn resolve(&self, table_name: &str) -> DbResult<TableManager> {
-        self.db.get_table(&self.repo, table_name).await
+    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        self.db.get_table(&self.repo, &table_ref.table).await
     }
 }
 
@@ -58,7 +59,7 @@ async fn test_single_read_query() {
         "insert".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "age": 30}),
                     json!({"name": "Bob", "age": 25}),
@@ -111,7 +112,7 @@ async fn test_independent_queries_same_stage() {
         "s1".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![json!({"name": "Alice"})],
             }),
             return_result: false,
@@ -121,7 +122,7 @@ async fn test_independent_queries_same_stage() {
         "s2".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "orders".to_string(),
+                insert_into: TableRef::new("orders"),
                 values: vec![json!({"item": "Book"})],
             }),
             return_result: false,
@@ -172,7 +173,7 @@ async fn test_dependent_query_ref() {
         "seed".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "status": "active"}),
                     json!({"name": "Bob", "status": "inactive"}),
@@ -247,7 +248,7 @@ async fn test_insert_then_read() {
         "insert".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "score": 100}),
                     json!({"name": "Bob", "score": 50}),
@@ -293,7 +294,7 @@ async fn test_return_only() {
         "insert".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![json!({"name": "Alice"})],
             }),
             return_result: true,
@@ -330,7 +331,7 @@ async fn test_return_result_false() {
         "setup".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![json!({"name": "Alice"})],
             }),
             return_result: false,
@@ -368,7 +369,7 @@ async fn test_batch_with_delete() {
         "seed".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "status": "active"}),
                     json!({"name": "Bob", "status": "inactive"}),
@@ -397,7 +398,7 @@ async fn test_batch_with_delete() {
         "cleanup".to_string(),
         QueryEntry {
             op: BatchOp::Delete(DeleteOp {
-                delete_from: "users".to_string(),
+                delete_from: TableRef::new("users"),
                 where_clause: Filter::Eq {
                     field: vec!["status".into()],
                     value: FilterValue::String("inactive".into()),

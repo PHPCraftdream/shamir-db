@@ -5,6 +5,7 @@
 use crate::db::query::filter::Filter;
 use crate::db::query::read::query_from_value;
 use crate::db::query::read::{ReadQuery, SelectItem};
+use crate::db::query::TableRef;
 use crate::types::value::QueryValue;
 
 /// Parse JSON string to QueryValue, then to Query
@@ -36,7 +37,7 @@ fn test_parse_simple_query_from_json() {
 
     let query = parse_query(json);
 
-    assert_eq!(query.from, "users");
+    assert_eq!(query.from, TableRef::new("users"));
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(query.select.items[0], SelectItem::All));
     assert!(query.r#where.is_some());

@@ -9,19 +9,20 @@ use crate::db::engine::table::TableManager;
 use crate::db::query::batch::{
     BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
 };
+use crate::db::query::TableRef;
 use crate::db::query::filter::FilterContext;
 use crate::db::query::read::{QueryResult, QueryStats};
 use crate::db::query::write::WriteResult;
 use crate::db::DbResult;
 use crate::types::common::{new_map, TMap};
 
-/// Trait for resolving table names to TableManager instances.
+/// Trait for resolving table references to TableManager instances.
 ///
 /// Allows the executor to work with different table resolution strategies
-/// (DbInstance with repo, direct table map, etc.)
+/// (DbInstance, direct table map, etc.)
 #[async_trait::async_trait]
 pub trait TableResolver: Send + Sync {
-    async fn resolve(&self, table_name: &str) -> DbResult<TableManager>;
+    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager>;
 }
 
 /// Execute a batch request against a table resolver.
@@ -108,9 +109,9 @@ async fn execute_single(
     resolver: &dyn TableResolver,
     resolved_refs: &TMap<String, QueryResult>,
 ) -> Result<QueryResult, BatchError> {
-    let table_name = entry.op.table_name();
+    let table_ref = entry.op.table_ref();
     let table = resolver
-        .resolve(table_name)
+        .resolve(table_ref)
         .await
         .map_err(|e| BatchError::QueryError {
             alias: alias.to_string(),

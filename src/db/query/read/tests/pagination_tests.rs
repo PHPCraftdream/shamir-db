@@ -213,7 +213,7 @@ fn test_parse_page_based_query() {
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let query = query_from_value(&value).unwrap();
 
-    assert_eq!(query.from, "users");
+    assert_eq!(query.from, crate::db::query::TableRef::new("users"));
     assert!(matches!(
         query.pagination,
         Pagination::Page { page: 3, page_size: 20 }

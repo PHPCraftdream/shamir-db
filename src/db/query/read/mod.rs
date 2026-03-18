@@ -19,7 +19,7 @@ pub use limit::{Pagination, PaginationInfo};
 pub use order_by::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
 pub use parser::query_from_value;
 pub use query_result::{QueryResult, QueryStats};
-pub use read_query::{ReadQuery, TableName};
+pub use read_query::ReadQuery;
 pub use select::{Select, SelectItem};
 pub use select_expr::{SelectExpr, SelectExprValue};
 

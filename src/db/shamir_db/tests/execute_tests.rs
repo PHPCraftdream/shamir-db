@@ -9,6 +9,7 @@ use crate::db::query::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
 use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::read::ReadQuery;
 use crate::db::query::write::{DeleteOp, InsertOp, UpdateOp, UpdateSelect, UpdateReturnMode};
+use crate::db::query::TableRef;
 use crate::db::ShamirDb;
 use crate::types::common::new_map;
 
@@ -48,7 +49,7 @@ async fn test_execute_single_insert() {
         "ins".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "age": 30}),
                     json!({"name": "Bob", "age": 25}),
@@ -58,7 +59,7 @@ async fn test_execute_single_insert() {
         },
     );
 
-    let resp = shamir.execute("testdb", "main", &batch(q)).await.unwrap();
+    let resp = shamir.execute("testdb", &batch(q)).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
 }
 
@@ -72,18 +73,18 @@ async fn test_execute_single_read() {
         "s".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![json!({"name": "Alice"}), json!({"name": "Bob"})],
             }),
             return_result: false,
         },
     );
-    shamir.execute("testdb", "main", &batch(seed)).await.unwrap();
+    shamir.execute("testdb", &batch(seed)).await.unwrap();
 
     // Read
     let mut q = new_map();
     q.insert("users".to_string(), ReadQuery::new("users").into());
-    let resp = shamir.execute("testdb", "main", &batch(q)).await.unwrap();
+    let resp = shamir.execute("testdb", &batch(q)).await.unwrap();
 
     assert_eq!(resp.results["users"].records.len(), 2);
 }
@@ -102,7 +103,7 @@ async fn test_execute_crud_pipeline() {
         "ins".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "status": "active"}),
                     json!({"name": "Bob", "status": "inactive"}),
@@ -112,7 +113,7 @@ async fn test_execute_crud_pipeline() {
             return_result: false,
         },
     );
-    shamir.execute("testdb", "main", &batch(q1)).await.unwrap();
+    shamir.execute("testdb", &batch(q1)).await.unwrap();
 
     // 2. Update: activate Bob
     let mut q2 = new_map();
@@ -120,7 +121,7 @@ async fn test_execute_crud_pipeline() {
         "upd".to_string(),
         QueryEntry {
             op: BatchOp::Update(UpdateOp {
-                update: "users".to_string(),
+                update: TableRef::new("users"),
                 where_clause: Some(Filter::Eq {
                     field: vec!["name".into()],
                     value: FilterValue::String("Bob".into()),
@@ -134,7 +135,7 @@ async fn test_execute_crud_pipeline() {
             return_result: true,
         },
     );
-    let resp = shamir.execute("testdb", "main", &batch(q2)).await.unwrap();
+    let resp = shamir.execute("testdb", &batch(q2)).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
     assert_eq!(resp.results["upd"].records[0]["status"], "active");
 
@@ -144,7 +145,7 @@ async fn test_execute_crud_pipeline() {
         "del".to_string(),
         QueryEntry {
             op: BatchOp::Delete(DeleteOp {
-                delete_from: "users".to_string(),
+                delete_from: TableRef::new("users"),
                 where_clause: Filter::Eq {
                     field: vec!["name".into()],
                     value: FilterValue::String("Carol".into()),
@@ -154,7 +155,7 @@ async fn test_execute_crud_pipeline() {
         },
     );
     q3.insert("remaining".to_string(), ReadQuery::new("users").into());
-    let resp = shamir.execute("testdb", "main", &batch(q3)).await.unwrap();
+    let resp = shamir.execute("testdb", &batch(q3)).await.unwrap();
 
     assert_eq!(resp.results["remaining"].records.len(), 2);
 }
@@ -173,7 +174,7 @@ async fn test_execute_multi_table_with_dependency() {
         "s1".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "users".to_string(),
+                insert_into: TableRef::new("users"),
                 values: vec![
                     json!({"name": "Alice", "tier": "vip"}),
                     json!({"name": "Bob", "tier": "basic"}),
@@ -186,7 +187,7 @@ async fn test_execute_multi_table_with_dependency() {
         "s2".to_string(),
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
-                insert_into: "orders".to_string(),
+                insert_into: TableRef::new("orders"),
                 values: vec![
                     json!({"user": "Alice", "amount": 100}),
                     json!({"user": "Bob", "amount": 50}),
@@ -196,7 +197,7 @@ async fn test_execute_multi_table_with_dependency() {
             return_result: false,
         },
     );
-    shamir.execute("testdb", "main", &batch(seed)).await.unwrap();
+    shamir.execute("testdb", &batch(seed)).await.unwrap();
 
     // Query: find VIP users, then find their orders
     let mut q = new_map();
@@ -223,7 +224,7 @@ async fn test_execute_multi_table_with_dependency() {
         },
     );
 
-    let resp = shamir.execute("testdb", "main", &batch(q)).await.unwrap();
+    let resp = shamir.execute("testdb", &batch(q)).await.unwrap();
 
     // Stage 1: vips → Alice
     assert_eq!(resp.results["vips"].records.len(), 1);
@@ -244,7 +245,7 @@ async fn test_execute_unknown_db() {
     q.insert("r".to_string(), ReadQuery::new("users").into());
 
     let err = shamir
-        .execute("nonexistent", "main", &batch(q))
+        .execute("nonexistent", &batch(q))
         .await
         .unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
@@ -258,11 +259,14 @@ async fn test_execute_unknown_db() {
 async fn test_execute_unknown_repo() {
     let shamir = setup_shamir().await;
 
+    // Use a TableRef with a nonexistent repo
     let mut q = new_map();
-    q.insert("r".to_string(), ReadQuery::new("users").into());
+    let mut read = ReadQuery::new("users");
+    read.from = TableRef::with_repo("nonexistent", "users");
+    q.insert("r".to_string(), QueryEntry { op: BatchOp::Read(read), return_result: true });
 
     let err = shamir
-        .execute("testdb", "nonexistent", &batch(q))
+        .execute("testdb", &batch(q))
         .await
         .unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
