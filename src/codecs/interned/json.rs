@@ -38,7 +38,7 @@ pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>,
 }
 
 /// Converts serde_json::Value to InnerValue, interning all string keys
-fn json_value_to_inner(
+pub fn json_value_to_inner(
     json_value: &json::Value,
     interner: &Interner,
 ) -> Result<InnerValue, CodecError> {

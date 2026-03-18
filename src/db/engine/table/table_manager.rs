@@ -92,7 +92,6 @@ impl TableManager {
         &self.table
     }
 
-    #[cfg(test)]
     pub fn interner(&self) -> &InternerManager {
         &self.interner
     }

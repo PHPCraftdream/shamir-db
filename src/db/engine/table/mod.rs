@@ -4,6 +4,7 @@ pub mod record_counter;
 pub mod table;
 pub mod table_config;
 pub mod table_manager;
+mod write_exec;
 
 #[cfg(test)]
 pub mod tests;
