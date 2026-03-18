@@ -167,6 +167,32 @@ impl AdminExecutor for ShamirAdminExecutor {
                         let tables = db.list_tables(repo).map_err(|e| err(e.to_string()))?;
                         Ok(admin_result(json!({"tables": tables, "repo": repo})))
                     }
+                    ListOp::Indexes { table, repo } => {
+                        let db = self.shamir.get_db(&self.db_name)
+                            .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+                        let tm = db.get_table(repo, table).await
+                            .map_err(|e| err(e.to_string()))?;
+                        let interner = tm.interner().get().await
+                            .map_err(|e| err(e.to_string()))?;
+
+                        let mut indexes = Vec::new();
+                        for def in tm.index_manager_ref().iter_indexes() {
+                            let name = interner
+                                .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
+                                .map(|k| k.as_str().to_string())
+                                .unwrap_or_else(|| def.name_interned.to_string());
+                            indexes.push(json!({"name": name, "unique": false}));
+                        }
+                        for def in tm.index_manager_ref().iter_unique_indexes() {
+                            let name = interner
+                                .get_str(&crate::core::interner::InternerKey::new(def.name_interned))
+                                .map(|k| k.as_str().to_string())
+                                .unwrap_or_else(|| def.name_interned.to_string());
+                            indexes.push(json!({"name": name, "unique": true}));
+                        }
+
+                        Ok(admin_result(json!({"indexes": indexes, "table": table, "repo": repo})))
+                    }
                 }
             }
 

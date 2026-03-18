@@ -79,7 +79,7 @@ pub struct DropIndexOp {
     pub repo: String,
 }
 
-/// List databases / repos / tables.
+/// List databases / repos / tables / indexes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "list")]
 pub enum ListOp {
@@ -89,6 +89,12 @@ pub enum ListOp {
     Repos,
     #[serde(rename = "tables")]
     Tables {
+        #[serde(default = "default_repo")]
+        repo: String,
+    },
+    #[serde(rename = "indexes")]
+    Indexes {
+        table: String,
         #[serde(default = "default_repo")]
         repo: String,
     },

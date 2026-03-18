@@ -1022,6 +1022,11 @@ impl IndexManager {
         self.check_unique_constraint(name_interned, values).await
     }
 
+    /// Iterate over all unique index definitions.
+    pub fn iter_unique_indexes(&self) -> impl Iterator<Item = IndexDefinition> + '_ {
+        self.indexes_unique.iter()
+    }
+
     /// Проверяет существование уникального индекса по его имени.
     pub fn unique_index_exists(&self, name_interned: u64) -> bool {
         self.indexes_unique.contains(name_interned)
