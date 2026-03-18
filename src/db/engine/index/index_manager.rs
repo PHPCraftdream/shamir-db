@@ -851,11 +851,12 @@ impl IndexManager {
     ///   - количество записей с дублирующимися значениями
     ///   - пример дублирующегося значения
     pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use std::collections::HashMap;
+        use crate::types::common::TMap;
+        use crate::types::common::new_map;
 
         let name_interned = index_def.name_interned;
-        // HashMap для отслеживания количества каждого значения
-        let mut value_counts: HashMap<Vec<u8>, usize> = HashMap::new();
+        // TMap для отслеживания количества каждого значения
+        let mut value_counts: TMap<Vec<u8>, usize> = new_map();
         // Записи для добавления в индекс (RecordId, values_key)
         let mut entries: Vec<(RecordId, Vec<u8>, Vec<InnerValue>)> = Vec::new();
 

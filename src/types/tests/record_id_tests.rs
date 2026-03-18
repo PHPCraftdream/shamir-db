@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
     use crate::codecs::basic::bincode;
+    use crate::types::common::new_set;
     use crate::types::record_id::RecordId;
-    use std::collections::HashSet;
     use std::thread;
     use std::time::Duration;
 
     #[test]
     fn test_record_id_uniqueness() {
-        let mut ids = HashSet::new();
+        let mut ids = new_set();
         for _ in 0..100_000 {
             assert!(ids.insert(RecordId::new()));
         }
