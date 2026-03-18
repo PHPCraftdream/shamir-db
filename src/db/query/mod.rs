@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod batch;
 pub mod common;
 pub mod filter;

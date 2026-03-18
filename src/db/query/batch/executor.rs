@@ -17,12 +17,15 @@ use crate::db::DbResult;
 use crate::types::common::{new_map, TMap};
 
 /// Trait for resolving table references to TableManager instances.
-///
-/// Allows the executor to work with different table resolution strategies
-/// (DbInstance, direct table map, etc.)
 #[async_trait::async_trait]
 pub trait TableResolver: Send + Sync {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager>;
+}
+
+/// Trait for executing admin (DDL) operations.
+#[async_trait::async_trait]
+pub trait AdminExecutor: Send + Sync {
+    async fn execute_admin(&self, op: &BatchOp) -> Result<QueryResult, BatchError>;
 }
 
 /// Execute a batch request against a table resolver.
@@ -33,17 +36,18 @@ pub trait TableResolver: Send + Sync {
 pub async fn execute_batch(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
 ) -> Result<BatchResponse, BatchError> {
     let start = Instant::now();
 
     // 1. Plan
     let plan = crate::db::query::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
 
-    // 2. Validate: all referenced tables exist
+    // 2. Validate: all referenced tables exist (skip admin ops)
     validate_tables(&request.queries, resolver).await?;
 
     // 3. Execute stages
-    let all_results = execute_plan(&plan, &request.queries, resolver).await?;
+    let all_results = execute_plan(&plan, &request.queries, resolver, admin).await?;
 
     // 4. Filter results for response
     let results = filter_results(&all_results, request, &plan);
@@ -67,21 +71,22 @@ async fn validate_tables(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
 ) -> Result<(), BatchError> {
-    // Collect unique table refs
+    // Collect unique table refs (skip admin ops which don't reference tables)
     let mut seen = crate::types::common::new_set::<String>();
     for (alias, entry) in queries {
-        let table_ref = entry.op.table_ref();
-        let key = format!("{}/{}", table_ref.repo, table_ref.table);
-        if seen.insert(key) {
-            resolver.resolve(table_ref).await.map_err(|e| {
-                BatchError::QueryError {
-                    alias: alias.clone(),
-                    message: format!(
-                        "Table '{}' in repo '{}' not found: {}",
-                        table_ref.table, table_ref.repo, e
-                    ),
-                }
-            })?;
+        if let Some(table_ref) = entry.op.table_ref() {
+            let key = format!("{}/{}", table_ref.repo, table_ref.table);
+            if seen.insert(key) {
+                resolver.resolve(table_ref).await.map_err(|e| {
+                    BatchError::QueryError {
+                        alias: alias.clone(),
+                        message: format!(
+                            "Table '{}' in repo '{}' not found: {}",
+                            table_ref.table, table_ref.repo, e
+                        ),
+                    }
+                })?;
+            }
         }
     }
     Ok(())
@@ -96,6 +101,7 @@ async fn execute_plan(
     plan: &BatchPlan,
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map();
 
@@ -110,7 +116,7 @@ async fn execute_plan(
             let deps = plan.dependencies.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
 
-            let result = execute_single(alias, entry, resolver, &resolved_refs).await?;
+            let result = execute_single(alias, entry, resolver, admin, &resolved_refs).await?;
             all_results.insert(alias.clone(), result);
         }
     }
@@ -139,9 +145,21 @@ async fn execute_single(
     alias: &str,
     entry: &QueryEntry,
     resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
     resolved_refs: &TMap<String, QueryResult>,
 ) -> Result<QueryResult, BatchError> {
-    let table_ref = entry.op.table_ref();
+    // Admin ops — delegate to AdminExecutor
+    if entry.op.is_admin() {
+        return match admin {
+            Some(executor) => executor.execute_admin(&entry.op).await,
+            None => Err(BatchError::QueryError {
+                alias: alias.to_string(),
+                message: "Admin operations not supported in this context".to_string(),
+            }),
+        };
+    }
+
+    let table_ref = entry.op.table_ref().unwrap();
     let table = resolver
         .resolve(table_ref)
         .await
@@ -208,6 +226,9 @@ async fn execute_single(
             })?;
             Ok(write_result_to_query_result(wr))
         }
+
+        // Admin ops are handled before this match via is_admin() check
+        _ => unreachable!("Admin ops should have been handled earlier"),
     }
 }
 

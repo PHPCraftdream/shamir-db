@@ -6,6 +6,10 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
+use crate::db::query::admin::{
+    CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
+    DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, ListOp,
+};
 use crate::db::query::read::{ReadQuery, QueryResult};
 use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::types::common::{TMap, TSet};
@@ -38,6 +42,17 @@ pub enum BatchOp {
 
     /// Delete records.
     Delete(DeleteOp),
+
+    // Admin (DDL) operations
+    CreateDb(CreateDbOp),
+    DropDb(DropDbOp),
+    CreateRepo(CreateRepoOp),
+    DropRepo(DropRepoOp),
+    CreateTable(CreateTableOp),
+    DropTable(DropTableOp),
+    CreateIndex(CreateIndexOp),
+    DropIndex(DropIndexOp),
+    List(ListOp),
 }
 
 impl Serialize for BatchOp {
@@ -48,6 +63,15 @@ impl Serialize for BatchOp {
             BatchOp::Update(u) => u.serialize(serializer),
             BatchOp::Set(s) => s.serialize(serializer),
             BatchOp::Delete(d) => d.serialize(serializer),
+            BatchOp::CreateDb(op) => op.serialize(serializer),
+            BatchOp::DropDb(op) => op.serialize(serializer),
+            BatchOp::CreateRepo(op) => op.serialize(serializer),
+            BatchOp::DropRepo(op) => op.serialize(serializer),
+            BatchOp::CreateTable(op) => op.serialize(serializer),
+            BatchOp::DropTable(op) => op.serialize(serializer),
+            BatchOp::CreateIndex(op) => op.serialize(serializer),
+            BatchOp::DropIndex(op) => op.serialize(serializer),
+            BatchOp::List(op) => op.serialize(serializer),
         }
     }
 }
@@ -68,37 +92,62 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value).map(BatchOp::Update).map_err(serde::de::Error::custom)
         } else if obj.contains_key("delete_from") {
             serde_json::from_value(value).map(BatchOp::Delete).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_db") {
+            serde_json::from_value(value).map(BatchOp::CreateDb).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_db") {
+            serde_json::from_value(value).map(BatchOp::DropDb).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_repo") {
+            serde_json::from_value(value).map(BatchOp::CreateRepo).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_repo") {
+            serde_json::from_value(value).map(BatchOp::DropRepo).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_table") {
+            serde_json::from_value(value).map(BatchOp::CreateTable).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_table") {
+            serde_json::from_value(value).map(BatchOp::DropTable).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_index") {
+            serde_json::from_value(value).map(BatchOp::CreateIndex).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_index") {
+            serde_json::from_value(value).map(BatchOp::DropIndex).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("list") {
+            serde_json::from_value(value).map(BatchOp::List).map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value).map(BatchOp::Set).map_err(serde::de::Error::custom)
         } else {
             Err(serde::de::Error::custom(
-                "Unknown operation: expected 'from', 'insert_into', 'update', 'delete_from', or 'set' key"
+                "Unknown operation type"
             ))
         }
     }
 }
 
 impl BatchOp {
-    /// Returns the table reference for this operation.
-    pub fn table_ref(&self) -> &crate::db::query::TableRef {
+    /// Returns the table reference for data operations, None for admin ops.
+    pub fn table_ref(&self) -> Option<&crate::db::query::TableRef> {
         match self {
-            BatchOp::Read(q) => &q.from,
-            BatchOp::Insert(i) => &i.insert_into,
-            BatchOp::Update(u) => &u.update,
-            BatchOp::Set(s) => &s.set,
-            BatchOp::Delete(d) => &d.delete_from,
+            BatchOp::Read(q) => Some(&q.from),
+            BatchOp::Insert(i) => Some(&i.insert_into),
+            BatchOp::Update(u) => Some(&u.update),
+            BatchOp::Set(s) => Some(&s.set),
+            BatchOp::Delete(d) => Some(&d.delete_from),
+            _ => None,
         }
     }
 
-    /// Returns true if this is a read operation.
-    pub fn is_read(&self) -> bool {
-        matches!(self, BatchOp::Read(_))
-    }
-
-    /// Returns true if this is a write operation.
-    pub fn is_write(&self) -> bool {
-        !self.is_read()
+    /// Returns true if this is an admin (DDL) operation.
+    pub fn is_admin(&self) -> bool {
+        matches!(
+            self,
+            BatchOp::CreateDb(_)
+                | BatchOp::DropDb(_)
+                | BatchOp::CreateRepo(_)
+                | BatchOp::DropRepo(_)
+                | BatchOp::CreateTable(_)
+                | BatchOp::DropTable(_)
+                | BatchOp::CreateIndex(_)
+                | BatchOp::DropIndex(_)
+                | BatchOp::List(_)
+        )
     }
 }
 
