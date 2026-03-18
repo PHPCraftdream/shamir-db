@@ -1,202 +1,307 @@
-# Query System
+# ShamirDB Query Language
 
-Единая система запросов S.H.A.M.I.R. Database.
+Все запросы к ShamirDB идут через единый JSON формат — `BatchRequest`.
+Один запрос — это batch с одной операцией.
 
-## Модули
-
-| Модуль | Описание |
-|--------|----------|
-| [read](./read/) | SELECT запросы (ReadQuery) |
-| [write](./write/) | Операции записи (Insert, Update, Set, Delete) |
-| [batch](./batch/) | Batch API — выполнение нескольких запросов |
-| [filter](./filter/) | WHERE условия и фильтры |
-| [common](./common/) | Общие утилиты парсинга |
-
-## Основные типы
-
-### Read Operations
-
-```rust
-pub use read::{
-    ReadQuery,       // Полный SELECT запрос
-    Select,          // SELECT clause
-    GroupBy,         // GROUP BY
-    OrderBy,         // ORDER BY
-    Pagination,      // Пагинация (limit/offset или page-based)
-    PaginationInfo,  // Метаданные пагинации в ответе
-    QueryResult,     // Результат запроса
-    QueryStats,      // Статистика выполнения
-};
-```
-
-### Write Operations
-
-```rust
-pub use write::{
-    InsertOp,     // INSERT INTO
-    UpdateOp,     // UPDATE ... SET
-    SetOp,        // UPSERT по ключу
-    DeleteOp,     // DELETE FROM
-    UpdateSelect, // Возврат обновлённых записей
-};
-```
-
-### Batch API
-
-```rust
-pub use batch::{
-    BatchOp,       // Enum: Read, Insert, Update, Set, Delete
-    BatchRequest,  // Запрос с несколькими операциями
-    BatchResponse, // Результат выполнения
-    BatchPlan,     // План выполнения (стадии)
-    BatchPlanner,  // Планировщик
-    BatchError,    // Ошибки
-    QueryEntry,    // Запись в батче (операция + return_result)
-    QueryReference,// Ссылка $query
-};
-```
-
-### Filters
-
-```rust
-pub use filter::{
-    Filter,       // WHERE условие
-    FilterValue,  // Значение в фильтре
-    FieldPath,    // Путь к полю (nested)
-};
-```
-
-## BatchOp Enum
-
-`BatchOp` — универсальный тип для всех операций:
-
-```rust
-pub enum BatchOp {
-    Read(ReadQuery),  // SELECT (определяется по полю "from")
-    Insert(InsertOp), // INSERT (определяется по "insert_into")
-    Update(UpdateOp), // UPDATE (определяется по "update")
-    Set(SetOp),       // UPSERT (определяется по "set")
-    Delete(DeleteOp), // DELETE (определяется по "delete_from")
-}
-```
-
-### Автоматическое определение типа
-
-Serde автоматически определяет тип операции по уникальным полям:
-
-```json
-{ "from": "users" }                          // → Read
-{ "insert_into": "users", "values": [...] }  // → Insert
-{ "update": "users", "set": {...} }          // → Update
-{ "set": "users", "key": {...}, "value": {...} } // → Set
-{ "delete_from": "users", "where": {...} }   // → Delete
-```
-
-## Quick Examples
-
-### Single Read Query
+## BatchRequest
 
 ```json
 {
+  "id": "req-001",
   "queries": {
-    "users": {
-      "from": "users",
-      "where": { "op": "eq", "field": "status", "value": "active" },
-      "limit": { "limit": 10 }
-    }
+    "alias": { ... operation ... }
   }
 }
 ```
 
-### Read Query with Page-based Pagination
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `id` | any | да | ID запроса, возвращается в ответе для async correlation |
+| `queries` | object | да | Map alias → операция |
+| `name` | string | нет | Имя для логирования |
+| `transactional` | bool | нет | MVCC транзакция (default: false) |
+| `return_all` | bool | нет | Возвращать все результаты (default: true) |
+| `return_only` | [string] | нет | Вернуть только эти alias'ы |
+| `limits` | object | нет | Лимиты безопасности |
+
+## BatchResponse
 
 ```json
 {
-  "queries": {
-    "users": {
-      "from": "users",
-      "limit": { "page": 2, "page_size": 20 },
-      "count_total": true
-    }
-  }
+  "id": "req-001",
+  "results": {
+    "alias": { "records": [...], "stats": {...}, "pagination": {...} }
+  },
+  "execution_plan": [["users", "products"], ["orders"]],
+  "execution_time_us": 1234
 }
 ```
 
-### Mixed Batch (Read + Write)
+## Операции
+
+Тип операции определяется по ключевому полю в JSON:
+
+| Ключ | Операция |
+|------|----------|
+| `from` | Read (SELECT) |
+| `insert_into` | Insert |
+| `update` | Update |
+| `delete_from` | Delete |
+| `set` (без `update`) | Set (upsert) |
+
+---
+
+## Read (SELECT)
 
 ```json
 {
+  "from": "users",
+  "select": { ... },
+  "where": { ... },
+  "group_by": { ... },
+  "order_by": { ... },
+  "limit": { ... },
+  "count_total": true
+}
+```
+
+### from — таблица
+
+```json
+"from": "users"                    // repo "main" по умолчанию
+"from": ["archive", "logs"]       // явный repo
+```
+
+### select
+
+```json
+"select": {
+  "items": [
+    {"type": "all"},
+    {"type": "field", "path": ["name"]},
+    {"type": "field", "path": ["user", "address", "city"], "alias": "city"},
+    {"type": "count_all", "alias": "total"},
+    {"type": "aggregate", "func": "sum", "field": ["amount"], "alias": "total_amount"},
+    {"type": "aggregate", "func": "avg", "field": ["score"]}
+  ],
+  "distinct": true
+}
+```
+
+Агрегатные функции: `count`, `sum`, `avg`, `min`, `max`.
+
+### where — фильтры
+
+#### Сравнение
+
+```json
+{"op": "eq",  "field": ["status"], "value": "active"}
+{"op": "ne",  "field": ["role"],   "value": "guest"}
+{"op": "gt",  "field": ["age"],    "value": 18}
+{"op": "gte", "field": ["score"],  "value": 90}
+{"op": "lt",  "field": ["price"],  "value": 100}
+{"op": "lte", "field": ["count"],  "value": 10}
+```
+
+#### Логические
+
+```json
+{"op": "and", "filters": [ ... ]}
+{"op": "or",  "filters": [ ... ]}
+{"op": "not", "filter": { ... }}
+```
+
+#### Null / Exists
+
+```json
+{"op": "is_null",     "field": ["email"]}
+{"op": "is_not_null", "field": ["email"]}
+{"op": "exists",      "field": ["metadata"]}
+{"op": "not_exists",  "field": ["deleted_at"]}
+```
+
+#### In / Not In
+
+```json
+{"op": "in",     "field": ["status"], "values": ["active", "pending"]}
+{"op": "not_in", "field": ["role"],   "values": ["banned", "suspended"]}
+```
+
+#### Паттерны
+
+```json
+{"op": "like",  "field": ["name"], "pattern": "%alice%"}
+{"op": "ilike", "field": ["name"], "pattern": "%ALICE%"}
+{"op": "regex", "field": ["email"], "pattern": "^[a-z]+@"}
+```
+
+#### Содержание (строки, массивы, множества)
+
+```json
+{"op": "contains",     "field": ["tags"], "value": "urgent"}
+{"op": "contains_any", "field": ["tags"], "values": ["urgent", "critical"]}
+{"op": "contains_all", "field": ["tags"], "values": ["reviewed", "approved"]}
+```
+
+#### Диапазон
+
+```json
+{"op": "between", "field": ["age"], "from": 18, "to": 65}
+```
+
+#### Ссылка на другое поле
+
+```json
+{"op": "gt", "field": ["salary"], "value": {"$ref": ["min_salary"]}}
+```
+
+#### Ссылка на результат другого запроса ($query)
+
+```json
+{"op": "eq", "field": ["user_id"], "value": {"$query": "users", "path": "[0].id"}}
+{"op": "in", "field": ["status"],  "values": [{"$query": "allowed_statuses", "path": "[].code"}]}
+```
+
+### Field paths
+
+Пути к полям — массивы строк:
+
+```json
+["name"]                     // простое поле
+["user", "address", "city"]  // вложенное поле
+```
+
+### group_by
+
+```json
+"group_by": {
+  "fields": [["city"], ["status"]],
+  "having": {"op": "gt", "field": ["count"], "value": 5}
+}
+```
+
+### order_by
+
+```json
+"order_by": {
+  "items": [
+    {"field": ["age"], "direction": "desc"},
+    {"field": ["name"], "direction": "asc", "nulls": "last"}
+  ]
+}
+```
+
+Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
+
+### limit (pagination)
+
+```json
+"limit": {"mode": "LimitOffset", "limit": 10, "offset": 20}
+"limit": {"mode": "Page", "page": 3, "page_size": 25}
+```
+
+---
+
+## Insert
+
+```json
+{
+  "insert_into": "users",
+  "values": [
+    {"name": "Alice", "email": "alice@example.com"},
+    {"name": "Bob", "email": "bob@example.com"}
+  ]
+}
+```
+
+Возвращает вставленные записи с `_id`.
+
+## Update
+
+```json
+{
+  "update": "users",
+  "where": {"op": "eq", "field": ["status"], "value": "inactive"},
+  "set": {"status": "active", "updated_at": 1234567890},
+  "select": {"return_mode": "changed"}
+}
+```
+
+| return_mode | Возвращает |
+|-------------|-----------|
+| `changed` (default) | Только изменённые записи |
+| `unchanged` | Только совпавшие но не изменённые |
+| `all` | Все совпавшие |
+
+`where` — опционально. Без него — обновляет все записи.
+
+## Delete
+
+```json
+{
+  "delete_from": "users",
+  "where": {"op": "eq", "field": ["status"], "value": "deleted"}
+}
+```
+
+`where` — обязательно (защита от случайного удаления всего).
+
+## Set (upsert)
+
+```json
+{
+  "set": "users",
+  "key": {"email": "alice@example.com"},
+  "value": {"email": "alice@example.com", "name": "Alice", "status": "active"}
+}
+```
+
+Ищет запись по `key`. Если найдена — merge `value` в существующую. Если нет — insert. Возвращает `_created: true/false`.
+
+---
+
+## Зависимости ($query)
+
+Запросы в batch могут ссылаться на результаты друг друга:
+
+```json
+{
+  "id": 1,
   "queries": {
-    "user": {
+    "active_users": {
       "from": "users",
-      "where": { "op": "eq", "field": "id", "value": 1 }
+      "where": {"op": "eq", "field": ["status"], "value": "active"}
     },
-    "update_orders": {
-      "update": "orders",
-      "where": { "op": "eq", "field": "user_id", "value": { "$query": "user[0].id" } },
-      "set": { "status": "processed" }
+    "their_orders": {
+      "from": "orders",
+      "where": {
+        "op": "in",
+        "field": ["user_id"],
+        "values": [{"$query": "active_users", "path": "[].id"}]
+      }
     }
   }
 }
 ```
 
-### Insert with Reference
+Планировщик автоматически:
+1. Извлекает зависимости из `$query` ссылок
+2. Проверяет циклы
+3. Строит параллельные стейджи: `[["active_users"], ["their_orders"]]`
+
+Каждый запрос видит только результаты своих объявленных зависимостей.
+
+## Индексы
+
+Запросы с `where: eq` или `where: in` на индексированных полях автоматически используют index scan вместо full table scan. `stats.index_used` в ответе показывает какой индекс был использован.
+
+## Лимиты безопасности
 
 ```json
-{
-  "queries": {
-    "user": {
-      "from": "users",
-      "where": { "op": "eq", "field": "id", "value": 1 }
-    },
-    "new_order": {
-      "insert_into": "orders",
-      "values": [{
-        "user_id": { "$query": "user[0].id" },
-        "status": "pending",
-        "created_at": "2024-01-15"
-      }]
-    }
-  }
+"limits": {
+  "max_queries": 50,
+  "max_dependency_depth": 10,
+  "max_execution_time_secs": 30,
+  "max_result_size": 10485760
 }
 ```
-
-## Архитектура
-
-```
-BatchRequest
-    │
-    ▼
-┌─────────────────┐
-│  BatchPlanner   │
-│  ┌───────────┐  │
-│  │ Parse     │──▶ Extract dependencies from $query
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Validate  │──▶ Check aliases, cycles, depth
-│  └───────────┘  │
-│  ┌───────────┐  │
-│  │ Topo Sort │──▶ Create parallel stages
-│  └───────────┘  │
-└─────────────────┘
-    │
-    ▼
-BatchPlan { stages, aliases, dependencies }
-    │
-    ▼
-┌─────────────────┐
-│   Executor      │
-│  Stage 1: parallel execution
-│  Stage 2: wait for deps, then parallel
-│  ...
-└─────────────────┘
-    │
-    ▼
-BatchResponse { results, execution_plan, execution_time_us }
-```
-
-## См. также
-
-- [Read README](./read/README.md) — SELECT запросы и пагинация
-- [Batch README](./batch/README.md) — полная документация Batch API
-- [Write README](./write/README.md) — операции записи
