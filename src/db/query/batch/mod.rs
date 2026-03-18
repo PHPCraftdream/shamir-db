@@ -136,10 +136,12 @@
 //! }
 //! ```
 
+mod executor;
 mod planner;
 mod reference;
 mod types;
 
+pub use executor::{execute_batch, TableResolver};
 pub use planner::BatchPlanner;
 pub use reference::{QueryPath, QueryReference};
 pub use types::{
