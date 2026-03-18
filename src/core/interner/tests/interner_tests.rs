@@ -1,4 +1,5 @@
 use crate::core::interner::{Interner, InternerKey, TouchInd, UserKey};
+use crate::types::common::TMap;
 use std::sync::Arc;
 use std::thread;
 
@@ -104,12 +105,12 @@ fn test_concurrent_interning() {
     // across all threads (though not necessarily in insertion order)
     let first_result = &results[0];
     for result in results.iter().skip(1) {
-        let id_map_1: std::collections::HashMap<&str, u64> = first_result
+        let id_map_1: TMap<&str, u64> = first_result
             .iter()
             .zip(keys.iter())
             .map(|(result, key)| (*key, result.key().id()))
             .collect();
-        let id_map_2: std::collections::HashMap<&str, u64> = result
+        let id_map_2: TMap<&str, u64> = result
             .iter()
             .zip(keys.iter())
             .map(|(result, key)| (*key, result.key().id()))
@@ -249,7 +250,7 @@ fn test_concurrent_reverse_lookup() {
     }
 
     // Create a mapping for easy lookup
-    let id_lookup: std::collections::HashMap<InternerKey, String> = key_to_id
+    let id_lookup: TMap<InternerKey, String> = key_to_id
         .iter()
         .map(|(k, v)| (v.clone(), k.clone()))
         .collect();
