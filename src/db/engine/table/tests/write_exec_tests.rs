@@ -12,6 +12,7 @@ use crate::db::engine::table::TableConfig;
 use crate::db::query::filter::eval_context::FilterContext;
 use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::write::{DeleteOp, InsertOp, UpdateOp, UpdateReturnMode, UpdateSelect};
+use crate::db::query::TableRef;
 use crate::types::common::new_map;
 use crate::types::value::UserValue;
 
@@ -74,7 +75,7 @@ async fn test_execute_insert_single() {
     let table = setup_empty_table().await;
 
     let op = InsertOp {
-        insert_into: "users".to_string(),
+        insert_into: TableRef::new("users"),
         values: vec![json!({"name": "Alice", "age": 30})],
     };
 
@@ -95,7 +96,7 @@ async fn test_execute_insert_multiple() {
     let table = setup_empty_table().await;
 
     let op = InsertOp {
-        insert_into: "users".to_string(),
+        insert_into: TableRef::new("users"),
         values: vec![
             json!({"name": "Alice", "age": 30}),
             json!({"name": "Bob", "age": 25}),
@@ -115,7 +116,7 @@ async fn test_execute_insert_empty() {
     let table = setup_empty_table().await;
 
     let op = InsertOp {
-        insert_into: "users".to_string(),
+        insert_into: TableRef::new("users"),
         values: vec![],
     };
 
@@ -138,7 +139,7 @@ async fn test_execute_update_with_filter() {
 
     // Update active users: set status = "premium"
     let op = UpdateOp {
-        update: "users".to_string(),
+        update: TableRef::new("users"),
         where_clause: Some(Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("active".into()),
@@ -165,7 +166,7 @@ async fn test_execute_update_returns_changed() {
     let ctx = FilterContext::new(interner, &refs);
 
     let op = UpdateOp {
-        update: "users".to_string(),
+        update: TableRef::new("users"),
         where_clause: Some(Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("active".into()),
@@ -195,7 +196,7 @@ async fn test_execute_update_no_match() {
     let ctx = FilterContext::new(interner, &refs);
 
     let op = UpdateOp {
-        update: "users".to_string(),
+        update: TableRef::new("users"),
         where_clause: Some(Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("deleted".into()),
@@ -217,7 +218,7 @@ async fn test_execute_update_all_records() {
 
     // No where clause — update all
     let op = UpdateOp {
-        update: "users".to_string(),
+        update: TableRef::new("users"),
         where_clause: None,
         set: json!({"verified": true}),
         select: Some(UpdateSelect {
@@ -243,7 +244,7 @@ async fn test_execute_update_unchanged_mode() {
 
     // Set status = "active" on active users — no actual change
     let op = UpdateOp {
-        update: "users".to_string(),
+        update: TableRef::new("users"),
         where_clause: Some(Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("active".into()),
@@ -274,7 +275,7 @@ async fn test_execute_delete_with_filter() {
     let ctx = FilterContext::new(interner, &refs);
 
     let op = DeleteOp {
-        delete_from: "users".to_string(),
+        delete_from: TableRef::new("users"),
         where_clause: Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("inactive".into()),
@@ -296,7 +297,7 @@ async fn test_execute_delete_no_match() {
     let ctx = FilterContext::new(interner, &refs);
 
     let op = DeleteOp {
-        delete_from: "users".to_string(),
+        delete_from: TableRef::new("users"),
         where_clause: Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("deleted".into()),
@@ -317,7 +318,7 @@ async fn test_execute_delete_multiple() {
 
     // Delete all active users (Alice, Bob)
     let op = DeleteOp {
-        delete_from: "users".to_string(),
+        delete_from: TableRef::new("users"),
         where_clause: Filter::Eq {
             field: vec!["status".into()],
             value: FilterValue::String("active".into()),
@@ -342,7 +343,7 @@ async fn test_insert_update_delete_pipeline() {
 
     // 1. Insert
     let insert_op = InsertOp {
-        insert_into: "users".to_string(),
+        insert_into: TableRef::new("users"),
         values: vec![
             json!({"name": "Alice", "score": 100}),
             json!({"name": "Bob", "score": 50}),
@@ -357,7 +358,7 @@ async fn test_insert_update_delete_pipeline() {
 
     // 2. Update: boost Bob's score
     let update_op = UpdateOp {
-        update: "users".to_string(),
+        update: TableRef::new("users"),
         where_clause: Some(Filter::Eq {
             field: vec!["name".into()],
             value: FilterValue::String("Bob".into()),
@@ -374,7 +375,7 @@ async fn test_insert_update_delete_pipeline() {
 
     // 3. Delete: remove low scorers
     let delete_op = DeleteOp {
-        delete_from: "users".to_string(),
+        delete_from: TableRef::new("users"),
         where_clause: Filter::Lt {
             field: vec!["score".into()],
             value: FilterValue::Int(80),

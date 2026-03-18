@@ -6,15 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{GroupBy, OrderBy, Pagination, Select};
 use crate::db::query::filter::Filter;
-
-/// Table or store identifier
-pub type TableName = String;
+use crate::db::query::TableRef;
 
 /// Complete read query definition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadQuery {
-    /// Table to query
-    pub from: TableName,
+    /// Table to query (optionally qualified with repo)
+    pub from: TableRef,
     /// What to select (fields, aggregations)
     #[serde(default = "default_select")]
     pub select: Select,
@@ -44,10 +42,10 @@ fn is_false(v: &bool) -> bool {
 }
 
 impl ReadQuery {
-    /// Create a new query for the given table
+    /// Create a new query for the given table (default repo "main")
     pub fn new(table: impl Into<String>) -> Self {
         ReadQuery {
-            from: table.into(),
+            from: TableRef::new(table),
             select: Select::all(),
             r#where: None,
             group_by: None,
@@ -57,31 +55,39 @@ impl ReadQuery {
         }
     }
 
-    /// Set select clause
+    /// Create a new query with explicit repo
+    pub fn with_repo(repo: impl Into<String>, table: impl Into<String>) -> Self {
+        ReadQuery {
+            from: TableRef::with_repo(repo, table),
+            select: Select::all(),
+            r#where: None,
+            group_by: None,
+            order_by: None,
+            pagination: Pagination::None,
+            count_total: false,
+        }
+    }
+
     pub fn select(mut self, select: Select) -> Self {
         self.select = select;
         self
     }
 
-    /// Set WHERE filter
     pub fn filter(mut self, filter: Filter) -> Self {
         self.r#where = Some(filter);
         self
     }
 
-    /// Set GROUP BY
     pub fn group_by(mut self, group: GroupBy) -> Self {
         self.group_by = Some(group);
         self
     }
 
-    /// Set ORDER BY
     pub fn order_by(mut self, order: OrderBy) -> Self {
         self.order_by = Some(order);
         self
     }
 
-    /// Set LIMIT (creates LimitOffset pagination)
     pub fn limit(mut self, limit: u64) -> Self {
         match &mut self.pagination {
             Pagination::LimitOffset { limit: l, .. } => *l = Some(limit),
@@ -95,7 +101,6 @@ impl ReadQuery {
         self
     }
 
-    /// Set OFFSET (creates LimitOffset pagination)
     pub fn offset(mut self, offset: u64) -> Self {
         match &mut self.pagination {
             Pagination::LimitOffset { offset: o, .. } => *o = offset,
@@ -109,13 +114,11 @@ impl ReadQuery {
         self
     }
 
-    /// Set pagination
     pub fn pagination(mut self, pagination: Pagination) -> Self {
         self.pagination = pagination;
         self
     }
 
-    /// Request total count computation
     pub fn count_total(mut self, count: bool) -> Self {
         self.count_total = count;
         self

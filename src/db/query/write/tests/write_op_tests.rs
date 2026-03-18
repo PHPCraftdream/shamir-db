@@ -3,6 +3,7 @@
 use serde_json::json;
 
 use crate::db::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+use crate::db::query::TableRef;
 
 fn parse_insert(json: serde_json::Value) -> InsertOp {
     serde_json::from_value(json).expect("Failed to parse InsertOp")
@@ -38,7 +39,7 @@ fn test_insert_single_record() {
 
     let op = parse_insert(json);
 
-    assert_eq!(op.insert_into, "users");
+    assert_eq!(op.insert_into, TableRef::new("users"));
     assert_eq!(op.values.len(), 1);
     assert_eq!(op.values[0]["name"], "Alice");
     assert_eq!(op.values[0]["email"], "alice@example.com");
@@ -57,7 +58,7 @@ fn test_insert_multiple_records() {
 
     let op = parse_insert(json);
 
-    assert_eq!(op.insert_into, "users");
+    assert_eq!(op.insert_into, TableRef::new("users"));
     assert_eq!(op.values.len(), 3);
     assert_eq!(op.values[0]["name"], "Alice");
     assert_eq!(op.values[1]["name"], "Bob");
@@ -86,7 +87,7 @@ fn test_insert_nested_data() {
 
     let op = parse_insert(json);
 
-    assert_eq!(op.insert_into, "orders");
+    assert_eq!(op.insert_into, TableRef::new("orders"));
     assert_eq!(op.values[0]["id"], 1);
     assert_eq!(op.values[0]["items"].as_array().unwrap().len(), 2);
     assert_eq!(op.values[0]["metadata"]["source"], "web");
@@ -128,7 +129,7 @@ fn test_update_with_filter() {
 
     let op = parse_update(json);
 
-    assert_eq!(op.update, "users");
+    assert_eq!(op.update, TableRef::new("users"));
     assert!(op.where_clause.is_some());
     assert_eq!(op.set["name"], "New Name");
     assert_eq!(op.set["status"], "active");
@@ -145,7 +146,7 @@ fn test_update_without_filter() {
 
     let op = parse_update(json);
 
-    assert_eq!(op.update, "products");
+    assert_eq!(op.update, TableRef::new("products"));
     assert!(op.where_clause.is_none());
     assert_eq!(op.set["status"], "discontinued");
 }
@@ -168,7 +169,7 @@ fn test_update_with_complex_filter() {
 
     let op = parse_update(json);
 
-    assert_eq!(op.update, "orders");
+    assert_eq!(op.update, TableRef::new("orders"));
     assert!(op.where_clause.is_some());
     assert_eq!(op.set["status"], "expired");
 }
@@ -193,7 +194,7 @@ fn test_update_full_record() {
 
     let op = parse_update(json);
 
-    assert_eq!(op.update, "users");
+    assert_eq!(op.update, TableRef::new("users"));
     assert_eq!(op.set["id"], 1);
     assert_eq!(op.set["name"], "Full");
     assert_eq!(op.set["email"], "full@example.com");
@@ -259,7 +260,7 @@ fn test_update_select_changed_mode() {
 
     let op = parse_update(json);
 
-    assert_eq!(op.update, "users");
+    assert_eq!(op.update, TableRef::new("users"));
     assert!(op.select.is_some());
     let select = op.select.unwrap();
     assert_eq!(
@@ -458,7 +459,7 @@ fn test_set_by_primary_key() {
 
     let op = parse_set(json);
 
-    assert_eq!(op.set, "users");
+    assert_eq!(op.set, TableRef::new("users"));
     assert_eq!(op.key["id"], 1);
     assert_eq!(op.value["name"], "Alice");
     assert_eq!(op.value["email"], "alice@example.com");
@@ -478,7 +479,7 @@ fn test_set_by_unique_field() {
 
     let op = parse_set(json);
 
-    assert_eq!(op.set, "users");
+    assert_eq!(op.set, TableRef::new("users"));
     assert_eq!(op.key["email"], "alice@example.com");
     assert_eq!(op.value["name"], "Alice Updated");
 }
@@ -499,7 +500,7 @@ fn test_set_composite_key() {
 
     let op = parse_set(json);
 
-    assert_eq!(op.set, "order_items");
+    assert_eq!(op.set, TableRef::new("order_items"));
     assert_eq!(op.key["order_id"], 1);
     assert_eq!(op.key["product_id"], 5);
     assert_eq!(op.value["qty"], 3);
@@ -540,7 +541,7 @@ fn test_delete_with_filter() {
 
     let op = parse_delete(json);
 
-    assert_eq!(op.delete_from, "users");
+    assert_eq!(op.delete_from, TableRef::new("users"));
 }
 
 #[test]
@@ -558,7 +559,7 @@ fn test_delete_with_complex_filter() {
 
     let op = parse_delete(json);
 
-    assert_eq!(op.delete_from, "logs");
+    assert_eq!(op.delete_from, TableRef::new("logs"));
 }
 
 #[test]
@@ -574,7 +575,7 @@ fn test_delete_by_id() {
 
     let op = parse_delete(json);
 
-    assert_eq!(op.delete_from, "users");
+    assert_eq!(op.delete_from, TableRef::new("users"));
 }
 
 #[test]

@@ -5,6 +5,7 @@
 use crate::db::query::filter::{Filter, FilterValue};
 use crate::db::query::read::query_from_value;
 use crate::db::query::read::{AggFunc, ReadQuery, SelectItem};
+use crate::db::query::TableRef;
 use crate::types::value::QueryValue;
 
 /// Parse JSON string to QueryValue, then to Query
@@ -26,7 +27,7 @@ fn test_simple_select_all() {
 
     let query = parse_query(json);
 
-    assert_eq!(query.from, "users");
+    assert_eq!(query.from, TableRef::new("users"));
     assert_eq!(query.select.items.len(), 1);
     assert!(matches!(query.select.items[0], SelectItem::All));
     assert!(query.r#where.is_none());
@@ -426,7 +427,7 @@ fn test_complex_query() {
 
     let query = parse_query(json);
 
-    assert_eq!(query.from, "orders");
+    assert_eq!(query.from, TableRef::new("orders"));
     assert_eq!(query.select.items.len(), 4);
     assert!(query.r#where.is_some());
     assert!(query.group_by.is_some());
@@ -490,7 +491,7 @@ fn test_sales_report() {
 
     let query = parse_query(json);
 
-    assert_eq!(query.from, "orders");
+    assert_eq!(query.from, TableRef::new("orders"));
     assert_eq!(query.select.items.len(), 5);
     assert!(query.r#where.is_some());
     assert!(query.group_by.is_some());

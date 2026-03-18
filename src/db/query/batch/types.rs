@@ -40,14 +40,14 @@ pub enum BatchOp {
 }
 
 impl BatchOp {
-    /// Returns the table name for this operation.
-    pub fn table_name(&self) -> &str {
+    /// Returns the table reference for this operation.
+    pub fn table_ref(&self) -> &crate::db::query::TableRef {
         match self {
-            BatchOp::Read(q) => q.from.as_str(),
-            BatchOp::Insert(i) => i.insert_into.as_str(),
-            BatchOp::Update(u) => u.update.as_str(),
-            BatchOp::Set(s) => s.set.as_str(),
-            BatchOp::Delete(d) => d.delete_from.as_str(),
+            BatchOp::Read(q) => &q.from,
+            BatchOp::Insert(i) => &i.insert_into,
+            BatchOp::Update(u) => &u.update,
+            BatchOp::Set(s) => &s.set,
+            BatchOp::Delete(d) => &d.delete_from,
         }
     }
 
