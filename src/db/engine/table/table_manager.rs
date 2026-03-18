@@ -208,46 +208,72 @@ impl TableManager {
 
     /// Stream records filtered by a compiled filter callback.
     ///
-    /// Compiles the Filter AST into a callback network, then streams
-    /// records in batches, applying the filter to each record.
+    /// Compiles the Filter AST into a callback network, then yields
+    /// batches of matching records. The filter is compiled once; only
+    /// matching records are yielded — non-matching records are dropped
+    /// immediately without accumulation.
     ///
     /// # Arguments
     /// * `batch_size` - Number of records per batch from storage
     /// * `filter` - Filter AST to compile and apply
     /// * `ctx` - Filter context with interner and resolved query refs
-    pub async fn filter_stream(
+    pub async fn filter_stream<'a>(
         &self,
         batch_size: usize,
         filter: &Filter,
-        ctx: &FilterContext<'_>,
-    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
+        ctx: &'a FilterContext<'a>,
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
         let interner = self.interner.get().await?;
         let callback = compile_filter(filter, interner);
-        self.filter_stream_with_callback(batch_size, &*callback, ctx)
-            .await
+        let table_stream = self.table.list_stream(batch_size);
+
+        Ok(async_stream::stream! {
+            futures::pin_mut!(table_stream);
+            while let Some(batch_result) = table_stream.next().await {
+                match batch_result {
+                    Err(e) => { yield Err(e); return; }
+                    Ok(batch) => {
+                        let filtered: Vec<_> = batch
+                            .into_iter()
+                            .filter(|(_, record)| callback.matches(record, ctx))
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Stream records filtered by a pre-compiled callback.
     ///
     /// Use this when you want to compile the filter once and reuse it.
-    pub async fn filter_stream_with_callback(
+    pub fn filter_stream_with_callback<'a>(
         &self,
         batch_size: usize,
-        callback: &dyn FilterCallback,
-        ctx: &FilterContext<'_>,
-    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
-        let mut result = Vec::new();
-        let stream = self.table.list_stream(batch_size);
-        futures::pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            for (id, record) in batch {
-                if callback.matches(&record, ctx) {
-                    result.push((id, record));
+        callback: &'a dyn FilterCallback,
+        ctx: &'a FilterContext<'a>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        let table_stream = self.table.list_stream(batch_size);
+
+        async_stream::stream! {
+            futures::pin_mut!(table_stream);
+            while let Some(batch_result) = table_stream.next().await {
+                match batch_result {
+                    Err(e) => { yield Err(e); return; }
+                    Ok(batch) => {
+                        let filtered: Vec<_> = batch
+                            .into_iter()
+                            .filter(|(_, record)| callback.matches(record, ctx))
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
                 }
             }
         }
-        Ok(result)
     }
 
     /// Get a record by RecordId

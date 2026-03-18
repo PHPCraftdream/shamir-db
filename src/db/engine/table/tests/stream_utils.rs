@@ -28,3 +28,23 @@ pub async fn collect_list_stream(table: &Table) -> DbResult<Vec<(RecordId, Inner
     }
     Ok(result)
 }
+
+/// Collect all records from a filter_stream into a flat Vec.
+///
+/// # Warning
+/// FOR TESTS ONLY! This function loads ALL filtered records into memory.
+#[deprecated(
+    since = "0.1.0",
+    note = "FOR TESTS ONLY. Can consume all memory on large datasets."
+)]
+pub async fn collect_filter_stream(
+    stream: impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>>,
+) -> DbResult<Vec<(RecordId, InnerValue)>> {
+    let mut result = Vec::new();
+    futures::pin_mut!(stream);
+    while let Some(batch_result) = stream.next().await {
+        let batch = batch_result?;
+        result.extend(batch);
+    }
+    Ok(result)
+}

@@ -8,6 +8,7 @@ use crate::codecs::transform;
 use crate::db::engine::db_instance::db_instance::DbInstance;
 use crate::db::engine::repo::repo_types::BoxRepoFactory;
 use crate::db::engine::repo::RepoConfig;
+use crate::db::engine::table::tests::stream_utils::collect_filter_stream;
 use crate::db::engine::table::TableConfig;
 use crate::db::query::common::filter_from_value;
 use crate::db::query::filter::eval_context::FilterContext;
@@ -113,7 +114,7 @@ async fn test_filter_stream_eq_status_active() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = parse_filter(r#"{"op": "eq", "field": "status", "value": "active"}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 3);
     let names = extract_names(&table, &results).await;
@@ -128,7 +129,7 @@ async fn test_filter_stream_eq_no_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = parse_filter(r#"{"op": "eq", "field": "status", "value": "banned"}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 0);
 }
@@ -145,7 +146,7 @@ async fn test_filter_stream_gt_age() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = parse_filter(r#"{"op": "gt", "field": "age", "value": 28}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(30), Carol(35)
     assert_eq!(results.len(), 2);
@@ -161,7 +162,7 @@ async fn test_filter_stream_lte_age() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = parse_filter(r#"{"op": "lte", "field": "age", "value": 25}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Bob(25), Dave(22)
     assert_eq!(results.len(), 2);
@@ -188,7 +189,7 @@ async fn test_filter_stream_and() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(active, 95), Bob(active, 60) — Dave(active, 45) excluded by score
     assert_eq!(results.len(), 2);
@@ -215,7 +216,7 @@ async fn test_filter_stream_or() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Eve(deleted), Carol(35)
     assert_eq!(results.len(), 2);
@@ -239,7 +240,7 @@ async fn test_filter_stream_not() {
         "filter": {"op": "eq", "field": "status", "value": "active"}
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Carol(inactive), Eve(deleted)
     assert_eq!(results.len(), 2);
@@ -259,7 +260,7 @@ async fn test_filter_stream_ne() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = parse_filter(r#"{"op": "ne", "field": "status", "value": "active"}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Carol(inactive), Eve(deleted)
     assert_eq!(results.len(), 2);
@@ -293,7 +294,7 @@ async fn test_filter_stream_nested_and_or() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(active,95), Bob(active,60), Carol(inactive)
     assert_eq!(results.len(), 3);
@@ -332,7 +333,7 @@ async fn test_filter_stream_triple_nesting() {
         }
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 3);
     let names = extract_names(&table, &results).await;
@@ -352,7 +353,7 @@ async fn test_filter_stream_small_batches() {
 
     let filter = parse_filter(r#"{"op": "eq", "field": "status", "value": "active"}"#);
     // batch_size=2 forces multiple iterations over 5 records
-    let results = table.filter_stream(2, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(2, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 3);
     let names = extract_names(&table, &results).await;
@@ -388,7 +389,7 @@ async fn test_filter_stream_with_query_ref() {
         "value": {"$query": "@threshold[0].min_score"}
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(95), Carol(80), Eve(70)
     assert_eq!(results.len(), 3);
@@ -409,7 +410,7 @@ async fn test_filter_stream_all_excluded() {
 
     // age > 100 — nobody
     let filter = parse_filter(r#"{"op": "gt", "field": "age", "value": 100}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 0);
 }
@@ -427,7 +428,7 @@ async fn test_filter_stream_all_match() {
 
     // age > 0 — everyone
     let filter = parse_filter(r#"{"op": "gt", "field": "age", "value": 0}"#);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 5);
 }
@@ -473,7 +474,7 @@ async fn test_filter_stream_query_ref_in_and() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(30,95), Bob(25,60), Carol(35,80), Eve(28,70)
     // Dave excluded: age 22 < 25
@@ -509,7 +510,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(score 95 >= 90), Eve(deleted)
     assert_eq!(results.len(), 2);
@@ -542,7 +543,7 @@ async fn test_filter_stream_not_query_ref() {
         "filter": {"op": "gt", "field": "age", "value": {"$query": "@limits[0].max_age"}}
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 4);
     let names = extract_names(&table, &results).await;
@@ -610,7 +611,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Must be active: Alice(30), Bob(25), Dave(22)
     // Then OR branch:
@@ -638,7 +639,7 @@ async fn test_filter_stream_query_ref_missing_graceful() {
         "value": {"$query": "@nonexistent[0].value"}
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 0);
 }
@@ -675,7 +676,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // score>=50: Alice(95), Bob(60), Carol(80), Eve(70) — Dave(45) out
     // status!="deleted": Alice, Bob, Carol — Eve out
@@ -702,7 +703,7 @@ async fn test_filter_stream_in_literals() {
         "values": ["active", "inactive"]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(active), Bob(active), Carol(inactive), Dave(active) — Eve(deleted) excluded
     assert_eq!(results.len(), 4);
@@ -723,7 +724,7 @@ async fn test_filter_stream_not_in_literals() {
         "values": ["deleted", "inactive"]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Alice(active), Bob(active), Dave(active)
     assert_eq!(results.len(), 3);
@@ -763,7 +764,7 @@ async fn test_filter_stream_in_query_ref_column() {
         "values": {"$query": "@whitelist[].status"}
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // active: Alice, Bob, Dave; inactive: Carol; deleted Eve excluded
     assert_eq!(results.len(), 4);
@@ -799,7 +800,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
         "values": {"$query": "@exclude_scores[].val"}
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // Excluded: Dave(45), Eve(70). Remaining: Alice(95), Bob(60), Carol(80)
     assert_eq!(results.len(), 3);
@@ -853,7 +854,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     // status in [active, inactive]: Alice(95), Bob(60), Carol(80), Dave(45)
     // score >= 60: Alice(95), Bob(60), Carol(80)
@@ -898,7 +899,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
         ]
     }"#;
     let filter = parse_filter(json);
-    let results = table.filter_stream(100, &filter, &ctx).await.unwrap();
+    let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap()).await.unwrap();
 
     assert_eq!(results.len(), 3);
     let names = extract_names(&table, &results).await;
