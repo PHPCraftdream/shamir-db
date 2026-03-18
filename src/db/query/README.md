@@ -41,13 +41,28 @@
 
 Тип операции определяется по ключевому полю в JSON:
 
-| Ключ | Операция |
-|------|----------|
-| `from` | Read (SELECT) |
-| `insert_into` | Insert |
-| `update` | Update |
-| `delete_from` | Delete |
-| `set` (без `update`) | Set (upsert) |
+| Ключ | Операция | Категория |
+|------|----------|-----------|
+| `from` | Read (SELECT) | DML |
+| `insert_into` | Insert | DML |
+| `update` | Update | DML |
+| `delete_from` | Delete | DML |
+| `set` (без `update`) | Set (upsert) | DML |
+| `create_db` | Create database | DDL |
+| `drop_db` | Drop database | DDL |
+| `create_repo` | Create repository | DDL |
+| `drop_repo` | Drop repository | DDL |
+| `create_table` | Create table | DDL |
+| `drop_table` | Drop table | DDL |
+| `create_index` | Create index | DDL |
+| `drop_index` | Drop index | DDL |
+| `list` | List entities | DDL |
+| `create_user` | Create user | Auth |
+| `drop_user` | Drop user | Auth |
+| `create_role` | Create role | Auth |
+| `drop_role` | Drop role | Auth |
+| `grant_role` | Grant role to user | Auth |
+| `revoke_role` | Revoke role from user | Auth |
 
 ---
 
@@ -294,6 +309,113 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 ## Индексы
 
 Запросы с `where: eq` или `where: in` на индексированных полях автоматически используют index scan вместо full table scan. `stats.index_used` в ответе показывает какой индекс был использован.
+
+---
+
+## DDL (Admin Operations)
+
+### Create/Drop Database
+
+```json
+{"create_db": "mydb"}
+{"drop_db": "mydb"}
+```
+
+### Create/Drop Repository
+
+```json
+{"create_repo": "hot_cache", "engine": "in_memory", "tables": ["sessions", "tokens"]}
+{"drop_repo": "hot_cache"}
+```
+
+Engines: `in_memory`. Disk engines (sled, redb, fjall) требуют конфигурации path.
+
+### Create/Drop Table
+
+```json
+{"create_table": "products", "repo": "main"}
+{"drop_table": "products", "repo": "main"}
+```
+
+`repo` — default `"main"`.
+
+### Create/Drop Index
+
+```json
+{"create_index": "email_idx", "table": "users", "fields": [["email"]], "unique": true}
+{"drop_index": "email_idx", "table": "users"}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|------|-----|-------------|----------|
+| `create_index` / `drop_index` | string | да | Имя индекса |
+| `table` | string | да | Таблица |
+| `fields` | [[string]] | да (create) | Пути полей |
+| `unique` | bool | нет | Уникальный индекс (default: false) |
+| `repo` | string | нет | Репозиторий (default: "main") |
+
+### List
+
+```json
+{"list": "databases"}
+{"list": "repos"}
+{"list": "tables", "repo": "main"}
+{"list": "indexes", "table": "users", "repo": "main"}
+```
+
+---
+
+## Auth (Roles & Permissions) — *planned*
+
+Подробная документация: [auth/README.md](./auth/README.md)
+
+### Users
+
+```json
+{"create_user": "alice", "password": "...", "roles": ["readonly"]}
+{"drop_user": "alice"}
+{"grant_role": "analyst", "user": "alice"}
+{"revoke_role": "analyst", "user": "alice"}
+{"list": "users"}
+```
+
+### Roles
+
+```json
+{
+  "create_role": "analyst",
+  "permissions": [
+    {
+      "effect": "allow",
+      "actions": ["read"],
+      "resource": {"scope": "global"}
+    },
+    {
+      "effect": "allow",
+      "actions": ["insert", "update"],
+      "resource": {"scope": "table", "database": "mydb", "repo": "main", "table": "reports"},
+      "where": {"op": "eq", "field": ["department"], "value": "analytics"}
+    }
+  ]
+}
+{"drop_role": "analyst"}
+{"list": "roles"}
+```
+
+### Permission structure
+
+```json
+{
+  "effect": "allow",
+  "actions": ["read", "insert"],
+  "resource": {"scope": "table", "database": "mydb", "repo": "main", "table": "orders"},
+  "where": { ... filter ... }
+}
+```
+
+`where` — row-level security. Тот же синтаксис фильтров. Автоматически добавляется ко всем запросам пользователя.
+
+---
 
 ## Лимиты безопасности
 
