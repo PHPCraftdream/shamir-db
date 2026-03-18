@@ -50,9 +50,9 @@ impl FilterValue {
         matches!(self, FilterValue::Null)
     }
 
-    /// Create a field reference
+    /// Create a field reference from a single-segment field name
     pub fn field_ref(path: impl Into<String>) -> Self {
-        FilterValue::FieldRef { path: path.into() }
+        FilterValue::FieldRef { path: vec![path.into()] }
     }
 
     /// Create a query reference (references another query's result in a batch)

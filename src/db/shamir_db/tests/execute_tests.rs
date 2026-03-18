@@ -122,7 +122,7 @@ async fn test_execute_crud_pipeline() {
             op: BatchOp::Update(UpdateOp {
                 update: "users".to_string(),
                 where_clause: Some(Filter::Eq {
-                    field: "name".into(),
+                    field: vec!["name".into()],
                     value: FilterValue::String("Bob".into()),
                 }),
                 set: json!({"status": "active"}),
@@ -146,7 +146,7 @@ async fn test_execute_crud_pipeline() {
             op: BatchOp::Delete(DeleteOp {
                 delete_from: "users".to_string(),
                 where_clause: Filter::Eq {
-                    field: "name".into(),
+                    field: vec!["name".into()],
                     value: FilterValue::String("Carol".into()),
                 },
             }),
@@ -204,7 +204,7 @@ async fn test_execute_multi_table_with_dependency() {
         "vips".to_string(),
         ReadQuery::new("users")
             .filter(Filter::Eq {
-                field: "tier".into(),
+                field: vec!["tier".into()],
                 value: FilterValue::String("vip".into()),
             })
             .into(),
@@ -213,7 +213,7 @@ async fn test_execute_multi_table_with_dependency() {
         "vip_orders".to_string(),
         QueryEntry {
             op: BatchOp::Read(ReadQuery::new("orders").filter(Filter::Eq {
-                field: "user".into(),
+                field: vec!["user".into()],
                 value: FilterValue::QueryRef {
                     alias: "vips".into(),
                     path: Some("[0].name".into()),

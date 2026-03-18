@@ -52,15 +52,15 @@ fn test_select_fields() {
     assert_eq!(query.select.items.len(), 3);
     assert!(matches!(
         &query.select.items[0],
-        SelectItem::Field { path, alias } if path == "name" && alias.is_none()
+        SelectItem::Field { path, alias } if *path == vec!["name".to_string()] && alias.is_none()
     ));
     assert!(matches!(
         &query.select.items[1],
-        SelectItem::Field { path, alias } if path == "email" && alias.is_none()
+        SelectItem::Field { path, alias } if *path == vec!["email".to_string()] && alias.is_none()
     ));
     assert!(matches!(
         &query.select.items[2],
-        SelectItem::Field { path, alias } if path == "age" && alias.is_none()
+        SelectItem::Field { path, alias } if *path == vec!["age".to_string()] && alias.is_none()
     ));
 }
 
@@ -81,11 +81,11 @@ fn test_select_fields_with_aliases() {
     assert_eq!(query.select.items.len(), 2);
     assert!(matches!(
         &query.select.items[0],
-        SelectItem::Field { path, alias } if path == "name" && alias == &Some("user_name".to_string())
+        SelectItem::Field { path, alias } if *path == vec!["name".to_string()] && alias == &Some("user_name".to_string())
     ));
     assert!(matches!(
         &query.select.items[1],
-        SelectItem::Field { path, alias } if path == "email" && alias == &Some("user_email".to_string())
+        SelectItem::Field { path, alias } if *path == vec!["email".to_string()] && alias == &Some("user_email".to_string())
     ));
 }
 
@@ -111,7 +111,7 @@ fn test_select_with_where() {
     let filter = query.r#where.unwrap();
     assert!(matches!(
         filter,
-        Filter::Eq { field, value } if field == "status" && value == FilterValue::String("active".to_string())
+        Filter::Eq { field, value } if field == vec!["status".to_string()] && value == FilterValue::String("active".to_string())
     ));
 }
 
@@ -186,7 +186,7 @@ fn test_select_with_group_by() {
 
     assert!(query.group_by.is_some());
     let group = query.group_by.unwrap();
-    assert_eq!(group.fields, vec!["customer_id"]);
+    assert_eq!(group.fields, vec![vec!["customer_id".to_string()]]);
 }
 
 #[test]

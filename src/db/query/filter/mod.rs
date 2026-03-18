@@ -8,8 +8,11 @@ mod filter_expr;
 mod filter_value;
 mod fn_call;
 
-/// Field path (e.g., "user.email" or "tags")
-pub type FieldPath = String;
+/// Field path as a sequence of key segments.
+///
+/// Example: `["user", "address", "city"]` instead of `"user.address.city"`.
+/// Simple field: `["name"]`.
+pub type FieldPath = Vec<String>;
 
 pub use cond::Cond;
 pub use filter_enum::Filter;

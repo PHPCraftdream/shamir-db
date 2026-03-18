@@ -188,7 +188,7 @@ fn test_eq_string_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Eq {
-        field: "status".to_string(),
+        field: vec!["status".to_string()],
         value: FilterValue::String("active".to_string()),
     };
     let cb = compile_filter(&filter, &interner);
@@ -203,7 +203,7 @@ fn test_eq_string_no_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Eq {
-        field: "status".to_string(),
+        field: vec!["status".to_string()],
         value: FilterValue::String("deleted".to_string()),
     };
     let cb = compile_filter(&filter, &interner);
@@ -218,7 +218,7 @@ fn test_gt_int() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Gt {
-        field: "age".to_string(),
+        field: vec!["age".to_string()],
         value: FilterValue::Int(25),
     };
     let cb = compile_filter(&filter, &interner);
@@ -233,7 +233,7 @@ fn test_lt_int_no_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Lt {
-        field: "age".to_string(),
+        field: vec!["age".to_string()],
         value: FilterValue::Int(25),
     };
     let cb = compile_filter(&filter, &interner);
@@ -248,7 +248,7 @@ fn test_gte_int_equal() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Gte {
-        field: "age".to_string(),
+        field: vec!["age".to_string()],
         value: FilterValue::Int(30),
     };
     let cb = compile_filter(&filter, &interner);
@@ -263,7 +263,7 @@ fn test_lte_int() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Lte {
-        field: "age".to_string(),
+        field: vec!["age".to_string()],
         value: FilterValue::Int(30),
     };
     let cb = compile_filter(&filter, &interner);
@@ -278,7 +278,7 @@ fn test_ne_string() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Ne {
-        field: "status".to_string(),
+        field: vec!["status".to_string()],
         value: FilterValue::String("deleted".to_string()),
     };
     let cb = compile_filter(&filter, &interner);
@@ -299,11 +299,11 @@ fn test_and_both_true() {
     let filter = Filter::And {
         filters: vec![
             Filter::Eq {
-                field: "status".to_string(),
+                field: vec!["status".to_string()],
                 value: FilterValue::String("active".to_string()),
             },
             Filter::Gt {
-                field: "age".to_string(),
+                field: vec!["age".to_string()],
                 value: FilterValue::Int(25),
             },
         ],
@@ -322,11 +322,11 @@ fn test_and_one_false() {
     let filter = Filter::And {
         filters: vec![
             Filter::Eq {
-                field: "status".to_string(),
+                field: vec!["status".to_string()],
                 value: FilterValue::String("deleted".to_string()),
             },
             Filter::Gt {
-                field: "age".to_string(),
+                field: vec!["age".to_string()],
                 value: FilterValue::Int(25),
             },
         ],
@@ -345,11 +345,11 @@ fn test_or_one_true() {
     let filter = Filter::Or {
         filters: vec![
             Filter::Eq {
-                field: "status".to_string(),
+                field: vec!["status".to_string()],
                 value: FilterValue::String("deleted".to_string()),
             },
             Filter::Gt {
-                field: "age".to_string(),
+                field: vec!["age".to_string()],
                 value: FilterValue::Int(25),
             },
         ],
@@ -368,11 +368,11 @@ fn test_or_both_false() {
     let filter = Filter::Or {
         filters: vec![
             Filter::Eq {
-                field: "status".to_string(),
+                field: vec!["status".to_string()],
                 value: FilterValue::String("deleted".to_string()),
             },
             Filter::Lt {
-                field: "age".to_string(),
+                field: vec!["age".to_string()],
                 value: FilterValue::Int(25),
             },
         ],
@@ -390,7 +390,7 @@ fn test_not_inverts() {
 
     let filter = Filter::Not {
         filter: Box::new(Filter::Eq {
-            field: "status".to_string(),
+            field: vec!["status".to_string()],
             value: FilterValue::String("deleted".to_string()),
         }),
     };
@@ -410,7 +410,7 @@ fn test_is_null_on_null_field() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::IsNull {
-        field: "deleted_at".to_string(),
+        field: vec!["deleted_at".to_string()],
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&record, &ctx));
@@ -424,7 +424,7 @@ fn test_is_null_on_existing_field() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::IsNull {
-        field: "name".to_string(),
+        field: vec!["name".to_string()],
     };
     let cb = compile_filter(&filter, &interner);
     assert!(!cb.matches(&record, &ctx)); // name = "Carol", not null
@@ -438,7 +438,7 @@ fn test_is_null_on_missing_field() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::IsNull {
-        field: "nonexistent".to_string(),
+        field: vec!["nonexistent".to_string()],
     };
     // "nonexistent" not in interner yet, so compile treats as always-null
     let cb = compile_filter(&filter, &interner);
@@ -453,7 +453,7 @@ fn test_is_not_null_on_existing_field() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::IsNotNull {
-        field: "name".to_string(),
+        field: vec!["name".to_string()],
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&record, &ctx));
@@ -467,7 +467,7 @@ fn test_is_not_null_on_null_field() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::IsNotNull {
-        field: "deleted_at".to_string(),
+        field: vec!["deleted_at".to_string()],
     };
     let cb = compile_filter(&filter, &interner);
     assert!(!cb.matches(&record, &ctx));
@@ -486,9 +486,9 @@ fn test_field_ref_gt() {
 
     // end_date (200) > start_date (100) => true
     let filter = Filter::Gt {
-        field: "end_date".to_string(),
+        field: vec!["end_date".to_string()],
         value: FilterValue::FieldRef {
-            path: "start_date".to_string(),
+            path: vec!["start_date".to_string()],
         },
     };
     let cb = compile_filter(&filter, &interner);
@@ -504,9 +504,9 @@ fn test_field_ref_lt() {
 
     // start_date (100) < end_date (200) => true
     let filter = Filter::Lt {
-        field: "start_date".to_string(),
+        field: vec!["start_date".to_string()],
         value: FilterValue::FieldRef {
-            path: "end_date".to_string(),
+            path: vec!["end_date".to_string()],
         },
     };
     let cb = compile_filter(&filter, &interner);
@@ -522,9 +522,9 @@ fn test_field_ref_eq_same() {
 
     // start_date == start_date => true
     let filter = Filter::Eq {
-        field: "start_date".to_string(),
+        field: vec!["start_date".to_string()],
         value: FilterValue::FieldRef {
-            path: "start_date".to_string(),
+            path: vec!["start_date".to_string()],
         },
     };
     let cb = compile_filter(&filter, &interner);
@@ -559,7 +559,7 @@ fn test_query_ref_eq() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Eq {
-        field: "user_id".to_string(),
+        field: vec!["user_id".to_string()],
         value: FilterValue::QueryRef {
             alias: "users".to_string(),
             path: Some("[0].id".to_string()),
@@ -591,7 +591,7 @@ fn test_query_ref_no_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Eq {
-        field: "user_id".to_string(),
+        field: vec!["user_id".to_string()],
         value: FilterValue::QueryRef {
             alias: "users".to_string(),
             path: Some("[0].id".to_string()),
@@ -614,7 +614,7 @@ fn test_query_ref_missing_alias() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Eq {
-        field: "user_id".to_string(),
+        field: vec!["user_id".to_string()],
         value: FilterValue::QueryRef {
             alias: "nonexistent".to_string(),
             path: Some("[0].id".to_string()),
@@ -642,17 +642,17 @@ fn test_complex_nested_filter() {
             Filter::And {
                 filters: vec![
                     Filter::Eq {
-                        field: "status".to_string(),
+                        field: vec!["status".to_string()],
                         value: FilterValue::String("active".to_string()),
                     },
                     Filter::Gt {
-                        field: "age".to_string(),
+                        field: vec!["age".to_string()],
                         value: FilterValue::Int(25),
                     },
                 ],
             },
             Filter::Eq {
-                field: "status".to_string(),
+                field: vec!["status".to_string()],
                 value: FilterValue::String("vip".to_string()),
             },
         ],
@@ -669,7 +669,7 @@ fn test_nested_field_path_in_filter() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Eq {
-        field: "user.name".to_string(),
+        field: vec!["user".to_string(), "name".to_string()],
         value: FilterValue::String("Bob".to_string()),
     };
     let cb = compile_filter(&filter, &interner);
@@ -684,7 +684,7 @@ fn test_nested_field_path_gt() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::Gt {
-        field: "user.score".to_string(),
+        field: vec!["user".to_string(), "score".to_string()],
         value: FilterValue::Int(80),
     };
     let cb = compile_filter(&filter, &interner);
@@ -703,7 +703,7 @@ fn test_in_literal_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::In {
-        field: "status".to_string(),
+        field: vec!["status".to_string()],
         values: vec![
             FilterValue::String("active".to_string()),
             FilterValue::String("pending".to_string()),
@@ -721,7 +721,7 @@ fn test_in_literal_no_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::In {
-        field: "status".to_string(),
+        field: vec!["status".to_string()],
         values: vec![
             FilterValue::String("deleted".to_string()),
             FilterValue::String("banned".to_string()),
@@ -739,7 +739,7 @@ fn test_not_in_literal() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::NotIn {
-        field: "status".to_string(),
+        field: vec!["status".to_string()],
         values: vec![
             FilterValue::String("deleted".to_string()),
             FilterValue::String("banned".to_string()),
@@ -778,7 +778,7 @@ fn test_in_query_ref_column() {
 
     // user_id IN @allowed_users[].id
     let filter = Filter::In {
-        field: "user_id".to_string(),
+        field: vec!["user_id".to_string()],
         values: vec![FilterValue::QueryRef {
             alias: "allowed_users".to_string(),
             path: Some("[].id".to_string()),
@@ -813,7 +813,7 @@ fn test_in_query_ref_column_no_match() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::In {
-        field: "user_id".to_string(),
+        field: vec!["user_id".to_string()],
         values: vec![FilterValue::QueryRef {
             alias: "allowed_users".to_string(),
             path: Some("[].id".to_string()),
@@ -848,7 +848,7 @@ fn test_not_in_query_ref_column() {
     let ctx = FilterContext::new(&interner, &refs);
 
     let filter = Filter::NotIn {
-        field: "user_id".to_string(),
+        field: vec!["user_id".to_string()],
         values: vec![FilterValue::QueryRef {
             alias: "blocked".to_string(),
             path: Some("[].id".to_string()),

@@ -117,7 +117,7 @@ fn test_update_with_filter() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -157,8 +157,8 @@ fn test_update_with_complex_filter() {
         "where": {
             "op": "and",
             "filters": [
-                { "op": "eq", "field": "status", "value": "pending" },
-                { "op": "lt", "field": "created_at", "value": "2024-01-01" }
+                { "op": "eq", "field": ["status"], "value": "pending" },
+                { "op": "lt", "field": ["created_at"], "value": "2024-01-01" }
             ]
         },
         "set": {
@@ -179,7 +179,7 @@ fn test_update_full_record() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -205,7 +205,7 @@ fn test_update_roundtrip() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -246,7 +246,7 @@ fn test_update_select_changed_mode() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "status",
+            "field": ["status"],
             "value": "inactive"
         },
         "set": {
@@ -275,7 +275,7 @@ fn test_update_select_all_mode() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -301,7 +301,7 @@ fn test_update_select_unchanged_mode() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -327,7 +327,7 @@ fn test_update_select_with_fields() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -363,7 +363,7 @@ fn test_update_select_roundtrip() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -387,7 +387,7 @@ fn test_update_without_select() {
         "update": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         },
         "set": {
@@ -533,7 +533,7 @@ fn test_delete_with_filter() {
         "delete_from": "users",
         "where": {
             "op": "eq",
-            "field": "status",
+            "field": ["status"],
             "value": "inactive"
         }
     });
@@ -550,8 +550,8 @@ fn test_delete_with_complex_filter() {
         "where": {
             "op": "and",
             "filters": [
-                { "op": "lt", "field": "created_at", "value": "2023-01-01" },
-                { "op": "eq", "field": "archived", "value": true }
+                { "op": "lt", "field": ["created_at"], "value": "2023-01-01" },
+                { "op": "eq", "field": ["archived"], "value": true }
             ]
         }
     });
@@ -567,7 +567,7 @@ fn test_delete_by_id() {
         "delete_from": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 42
         }
     });
@@ -583,7 +583,7 @@ fn test_delete_roundtrip() {
         "delete_from": "users",
         "where": {
             "op": "eq",
-            "field": "id",
+            "field": ["id"],
             "value": 1
         }
     });

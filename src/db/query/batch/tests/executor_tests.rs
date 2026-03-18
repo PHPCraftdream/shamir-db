@@ -199,7 +199,7 @@ async fn test_dependent_query_ref() {
         "active".to_string(),
         ReadQuery::new("users")
             .filter(Filter::Eq {
-                field: "status".into(),
+                field: vec!["status".into()],
                 value: FilterValue::String("active".into()),
             })
             .into(),
@@ -208,7 +208,7 @@ async fn test_dependent_query_ref() {
         "first_active".to_string(),
         QueryEntry {
             op: BatchOp::Read(ReadQuery::new("users").filter(Filter::Eq {
-                field: "name".into(),
+                field: vec!["name".into()],
                 value: FilterValue::QueryRef {
                     alias: "active".into(),
                     path: Some("[0].name".into()),
@@ -399,7 +399,7 @@ async fn test_batch_with_delete() {
             op: BatchOp::Delete(DeleteOp {
                 delete_from: "users".to_string(),
                 where_clause: Filter::Eq {
-                    field: "status".into(),
+                    field: vec!["status".into()],
                     value: FilterValue::String("inactive".into()),
                 },
             }),
@@ -434,7 +434,7 @@ async fn test_circular_dependency_error() {
         "a".to_string(),
         QueryEntry {
             op: BatchOp::Read(ReadQuery::new("users").filter(Filter::Eq {
-                field: "id".into(),
+                field: vec!["id".into()],
                 value: FilterValue::QueryRef {
                     alias: "b".into(),
                     path: Some("[0].id".into()),
@@ -447,7 +447,7 @@ async fn test_circular_dependency_error() {
         "b".to_string(),
         QueryEntry {
             op: BatchOp::Read(ReadQuery::new("users").filter(Filter::Eq {
-                field: "id".into(),
+                field: vec!["id".into()],
                 value: FilterValue::QueryRef {
                     alias: "a".into(),
                     path: Some("[0].id".into()),

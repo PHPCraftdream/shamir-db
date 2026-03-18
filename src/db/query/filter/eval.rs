@@ -47,10 +47,10 @@ pub fn resolve_field(record: &InnerValue, path: &[u64]) -> Option<InnerValue> {
     }
 }
 
-/// Resolve a field path string (e.g. "user.email") into interned u64 keys.
-pub fn intern_field_path(field: &str, interner: &Interner) -> Option<Vec<u64>> {
-    let mut keys = Vec::new();
-    for part in field.split('.') {
+/// Resolve a field path (segments) into interned u64 keys.
+pub fn intern_field_path(field: &[String], interner: &Interner) -> Option<Vec<u64>> {
+    let mut keys = Vec::with_capacity(field.len());
+    for part in field {
         let interned = interner.get_ind(part)?;
         keys.push(interned.id());
     }
@@ -435,7 +435,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCal
 }
 
 fn compile_compare(
-    field: &str,
+    field: &[String],
     value: &FilterValue,
     op: CompareOp,
     interner: &Interner,

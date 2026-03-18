@@ -29,8 +29,8 @@ use crate::types::value::InnerValue;
 pub struct SelectProjection {
     /// true → just convert whole record to JSON
     is_all: bool,
-    /// (interned_path, raw_path, alias)
-    fields: Vec<(Option<Vec<u64>>, String, Option<String>)>,
+    /// (interned_path, raw_path_segments, alias)
+    fields: Vec<(Option<Vec<u64>>, Vec<String>, Option<String>)>,
 }
 
 impl SelectProjection {
@@ -73,7 +73,7 @@ impl SelectProjection {
                 .and_then(|p| resolve_field(record, p))
                 .map(|v| inner_to_json_value(&v, interner))
                 .unwrap_or(json::Value::Null);
-            let key = alias.as_deref().unwrap_or(raw_path);
+            let key = alias.as_deref().unwrap_or_else(|| raw_path.last().map(|s| s.as_str()).unwrap_or(""));
             obj.insert(key.to_string(), val);
         }
         json::Value::Object(obj)
@@ -114,7 +114,15 @@ pub fn has_aggregates(select: &Select) -> bool {
 fn pre_intern_select_keys(select: &Select, interner: &Interner) {
     for item in &select.items {
         let key = match item {
-            SelectItem::Field { path, alias } => alias.as_deref().unwrap_or(path),
+            SelectItem::Field { path, alias } => {
+                if let Some(a) = alias {
+                    a.as_str()
+                } else if let Some(last) = path.last() {
+                    last.as_str()
+                } else {
+                    continue;
+                }
+            }
             SelectItem::CountAll { alias } => alias.as_deref().unwrap_or("count"),
             SelectItem::Aggregate {
                 alias, ..
@@ -247,7 +255,7 @@ fn compute_aggregate(
 fn build_aggregate_object(
     group_records: &[&InnerValue],
     select: &Select,
-    group_key_values: Option<&[(&str, json::Value)]>,
+    group_key_values: Option<&[(String, json::Value)]>,
     interner: &Interner,
 ) -> json::Value {
     let mut obj = json::Map::new();
@@ -255,7 +263,7 @@ fn build_aggregate_object(
     // Add group key values if provided
     if let Some(keys) = group_key_values {
         for (key, val) in keys {
-            obj.insert(key.to_string(), val.clone());
+            obj.insert(key.clone(), val.clone());
         }
     }
 
@@ -272,7 +280,7 @@ fn build_aggregate_object(
                 ..
             } => {
                 let default_name = match (func, field) {
-                    (_, AggregateField::Field(f)) => format!("{:?}_{}", func, f).to_lowercase(),
+                    (_, AggregateField::Field(f)) => format!("{:?}_{}", func, f.join(".")).to_lowercase(),
                     (_, AggregateField::All) => format!("{:?}", func).to_lowercase(),
                 };
                 let key = alias.as_deref().unwrap_or(&default_name);
@@ -283,7 +291,8 @@ fn build_aggregate_object(
                 // In group context, field must be a group-by field.
                 // Already added from group_key_values, but handle case
                 // where it wasn't in group_key_values
-                let key = alias.as_deref().unwrap_or(path);
+                let default_key = path.last().map(|s| s.as_str()).unwrap_or("");
+                let key = alias.as_deref().unwrap_or(default_key);
                 if !obj.contains_key(key) {
                     // Take value from first record
                     if let Some(first) = group_records.first() {
@@ -322,16 +331,19 @@ pub fn apply_group_by(
     }
 
     // Pre-intern group-by field paths
-    let group_paths: Vec<(&str, Option<Vec<u64>>)> = group_by
+    let group_paths: Vec<(String, Option<Vec<u64>>)> = group_by
         .fields
         .iter()
-        .map(|f| (f.as_str(), intern_field_path(f, interner)))
+        .map(|f| {
+            let display_name = f.last().cloned().unwrap_or_default();
+            (display_name, intern_field_path(f, interner))
+        })
         .collect();
 
     // Build groups: key = serialized group values, value = vec of record refs
     let mut groups: BTreeMap<String, Vec<&InnerValue>> = BTreeMap::new();
     // Also store the JSON key values per group for output
-    let mut group_keys_map: BTreeMap<String, Vec<(&str, json::Value)>> = BTreeMap::new();
+    let mut group_keys_map: BTreeMap<String, Vec<(String, json::Value)>> = BTreeMap::new();
 
     for (_, record) in records {
         let mut key_parts = Vec::with_capacity(group_paths.len());
@@ -347,7 +359,7 @@ pub fn apply_group_by(
                 .unwrap_or(json::Value::Null);
             // Use canonical JSON for grouping key
             key_parts.push(json_val.to_string());
-            key_json_values.push((*field_name, json_val));
+            key_json_values.push((field_name.clone(), json_val));
         }
 
         let group_key = key_parts.join("|");
@@ -423,11 +435,11 @@ pub fn apply_order_by(records: &mut [json::Value], order_by: &OrderBy) {
     });
 }
 
-/// Get a field from a JSON value by dot-separated path.
-fn get_json_field<'a>(value: &'a json::Value, path: &str) -> Option<&'a json::Value> {
+/// Get a field from a JSON value by path segments.
+fn get_json_field<'a>(value: &'a json::Value, path: &[String]) -> Option<&'a json::Value> {
     let mut current = value;
-    for part in path.split('.') {
-        current = current.get(part)?;
+    for part in path {
+        current = current.get(part.as_str())?;
     }
     Some(current)
 }
