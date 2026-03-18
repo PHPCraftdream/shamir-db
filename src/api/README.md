@@ -1,78 +1,126 @@
 # API Layer
 
-**Status:** 🚧 Under Construction
+**Status:** Under Construction
 
 This module will provide external APIs for S.H.A.M.I.R. database.
+
+## Current Architecture
+
+All database operations are accessed through the **Batch API** — a unified JSON-based interface.
+
+### Entry Point
+
+```rust
+use shamir_db::db::ShamirDb;
+use shamir_db::db::SystemStoreConfig;
+use shamir_db::db::query::BatchRequest;
+
+// Initialize database
+let db = ShamirDb::init(SystemStoreConfig::InMemory).await?;
+
+// Create a database
+db.create_db("myapp").await;
+
+// Execute batch request
+let request: BatchRequest = serde_json::from_str(json_str)?;
+let response = db.execute("myapp", &request).await?;
+```
+
+### Batch Request Format
+
+Every request goes through `BatchRequest` with a mandatory `id` field:
+
+```json
+{
+  "id": "req-001",
+  "queries": {
+    "users": {
+      "from": "users",
+      "where": { "op": "eq", "field": ["status"], "value": "active" }
+    }
+  }
+}
+```
+
+**Important:** Field paths are arrays (`["user", "address", "city"]`), not dot-separated strings.
+
+### Table References
+
+Tables are referenced via `TableRef { repo, table }`:
+
+```json
+// Simple: default repo "main"
+"from": "users"
+
+// With repo qualifier
+"from": ["hot", "sessions"]
+```
+
+### Operations via Batch API
+
+| Operation | JSON Key | Description |
+|-----------|----------|-------------|
+| Read (SELECT) | `from` | Query records |
+| Insert | `insert_into` | Insert records |
+| Update | `update` | Update records |
+| Set (Upsert) | `set` | Update or create |
+| Delete | `delete_from` | Delete records |
+| Create DB | `create_db` | Create database |
+| Drop DB | `drop_db` | Drop database |
+| Create Repo | `create_repo` | Create repository |
+| Drop Repo | `drop_repo` | Drop repository |
+| Create Table | `create_table` | Create table |
+| Drop Table | `drop_table` | Drop table |
+| Create Index | `create_index` | Create index |
+| Drop Index | `drop_index` | Drop index |
+| List | `list` | List databases/repos/tables/indexes |
+
+### Response Format
+
+```json
+{
+  "id": "req-001",
+  "results": {
+    "users": {
+      "records": [...],
+      "stats": { "records_scanned": 100, "records_returned": 5, "execution_time_us": 1234 }
+    }
+  },
+  "execution_plan": [["users"]],
+  "execution_time_us": 1500
+}
+```
 
 ## Planned Components
 
 ### Network Protocols
-- **REST API** (HTTP/JSON)
-- **gRPC** (high-performance RPC)
+- **REST API** (Axum)
+- **gRPC** (Tonic)
 - **WebSocket** (real-time subscriptions)
 
-### Operations
-```rust
-// Planned API structure
+### REST API Design
 
-// Tables
-POST   /tables                 → Create table
-GET    /tables                 → List tables
-GET    /tables/{name}          → Get table info
-DELETE /tables/{name}          → Drop table
-
-// Records
-POST   /tables/{name}/records  → Insert record
-GET    /tables/{name}/records/{id} → Get record
-PUT    /tables/{name}/records/{id} → Update record
-DELETE /tables/{name}/records/{id} → Delete record
-GET    /tables/{name}/records  → List/stream records
-
-// Queries (future)
-POST   /tables/{name}/query    → Execute query
+```
+POST   /batch                 -> Execute batch request
+POST   /query                 -> Execute single query (convenience)
 ```
 
-### Request/Response Examples
-
-**Insert Record:**
-```http
-POST /tables/users/records
-Content-Type: application/json
-
-{
-  "name": "Alice",
-  "age": 30,
-  "email": "alice@example.com"
-}
-
-Response: 201 Created
-{
-  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "created_at": "2026-02-03T18:00:00Z"
-}
-```
-
-**Stream Records:**
-```http
-GET /tables/users/records?batch_size=100
-Accept: application/json-stream
-
-Response: 200 OK
-Content-Type: application/json-stream
-
-{"id": "...", "data": {...}}
-{"id": "...", "data": {...}}
-...
-```
+All operations go through the Batch API, so REST endpoints are thin wrappers.
 
 ## Implementation Status
 
-- [ ] REST API (Actix-web/Axum)
+- [x] Batch API (core engine)
+- [x] Read queries (SELECT with filters, ordering, pagination)
+- [x] Write operations (Insert, Update, Set, Delete)
+- [x] Admin/DDL operations (create/drop db/repo/table/index, list)
+- [x] SystemStore for persistent metadata
+- [x] ShamirDb::init(SystemStoreConfig) entry point
+- [ ] REST API (Axum)
 - [ ] gRPC (Tonic)
 - [ ] WebSocket (Tokio-tungstenite)
-- [ ] Authentication/Authorization
+- [ ] Authentication/Authorization (designed, see auth/README.md)
 - [ ] Rate limiting
-- [ ] Request validation
+- [ ] Request validation middleware
 
 ## Design Considerations
 
@@ -86,75 +134,49 @@ Will utilize the underlying `iter_stream()` for memory-efficient responses:
 HTTP status mapping:
 - `200` - Success
 - `201` - Created
-- `400` - Bad request
+- `400` - Bad request (BatchError)
 - `404` - Not found
 - `500` - Internal error
 - `503` - Service unavailable
 
 ### Concurrency
-- Per-request table clones
-- Shared connection pool
+- Per-request table resolution via `TableResolver` trait
+- `AdminExecutor` trait for DDL operations
 - Request timeout configuration
 
-## Integration with Table Engine
+## Integration with Engine
 
 ```rust
-// Pseudo-code for REST handler
+// ShamirDb manages the full hierarchy:
+// ShamirDb
+//   -> SystemStore (persistent metadata)
+//   -> DbInstance (per database)
+//     -> RepoInstance (per repository)
+//       -> TableManager (per table)
 
-async fn insert_record(Path(table_name): Path<String>,
-                        Json(value): Json<UserValue>,
-                        repo: State<Arc<SledRepo>>)
-    -> Result<Json<InsertResponse>, StatusCode>
-{
-    let table = repo.table_get(&table_name)?;
+let shamir = ShamirDb::init(SystemStoreConfig::Redb("./data".into())).await?;
+let db = shamir.create_db("production").await;
 
-    let id = table.insert(value).await?;
-
-    Ok(Json(InsertResponse { id }))
-}
-
-async fn stream_records(Path(table_name): Path<String>,
-                        Query(params): Query<StreamParams>,
-                        repo: State<Arc<SledRepo>>)
-    -> Response<Body>
-{
-    let table = repo.table_get(&table_name)?;
-    let stream = table.list_stream(params.batch_size);
-
-    // Convert to SSE stream
-    let sse_stream = stream.map(|batch| {
-        match batch {
-            Ok(records) => {
-                for (id, value) in records {
-                    yield sse_event(id, value);
-                }
-            }
-            Err(e) => yield sse_error(e),
-        }
-    });
-
-    Response::new(Body::wrap_stream(sse_stream))
-}
+// Execute batch
+let response = shamir.execute("production", &request).await?;
 ```
 
 ## Timeline
 
-**Phase 1** (Current):
-- ✅ Core database engine
-- ✅ Storage abstraction
-- ✅ Table API
+**Phase 1** (Complete):
+- [x] Core database engine
+- [x] Storage abstraction (7 engines + cached wrapper)
+- [x] Table API with interning
+- [x] Batch query system with read/write/admin ops
+- [x] SystemStore for metadata persistence
+- [x] Filter evaluation (all operators implemented)
 
 **Phase 2** (Next):
 - [ ] REST API
-- [ ] Basic CRUD operations
+- [ ] Basic HTTP endpoints
 - [ ] Streaming support
 
 **Phase 3** (Future):
 - [ ] gRPC
 - [ ] WebSocket subscriptions
-- [ ] Query language
-- [ ] Authentication
-
-## Contributing
-
-API layer implementation is open for contribution once core features stabilize.
+- [ ] Authentication middleware

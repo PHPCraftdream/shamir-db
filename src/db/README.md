@@ -1,193 +1,189 @@
 # Database Layer
 
-S.H.A.M.I.R. database abstraction layer, providing table management, indexing system, and storage abstraction.
+S.H.A.M.I.R. database abstraction layer, providing table management, indexing system, query execution, and storage abstraction.
 
 ## Architecture
 
 ```
 db/
-├── engine/           # Table engine (high-level API)
-│   ├── dispatcher/   # ✅ NEW (2025-02-08) - Multi-repo dispatcher
-│   │   ├── config.rs          # YAML configuration loader
-│   │   ├── dispatcher.rs      # Dispatcher (manages multiple repos)
-│   │   ├── types.rs           # Config types (DbConfig, RepoConfig, etc.)
-│   │   └── tests/             # Dispatcher tests
-│   │       ├── config_loader_tests.rs
-│   │       ├── config_validation_tests.rs
-│   │       └── dispatcher_tests.rs
-│   ├── index/        # Index management system
-│   │   ├── index_definition.rs   # Index definition (simple/composite)
-│   │   ├── index_info.rs         # Index metadata & status
-│   │   ├── index_info_item.rs    # Single index path item
-│   │   ├── index_record.rs       # Index record representation
-│   │   ├── index_manager.rs      # Index manager for tables (renamed from table_index_manager)
-│   │   └── tests/              # ✅ REORGANIZED (2025-02-08)
-│   │       ├── mod.rs
-│   │       ├── index_definition_tests.rs
-│   │       ├── index_info_item_tests.rs
-│   │       ├── index_info_tests.rs
-│   │       ├── index_record_tests.rs
-│   │       └── index_manager_tests.rs
-│   ├── table/        # ✅ MODULARIZED (2025-02-08)
+├── shamir_db/           # Top-level database manager
+│   ├── mod.rs
+│   ├── shamir_db.rs     # ShamirDb — multi-database manager
+│   ├── system_store.rs  # SystemStore — persistent metadata (databases, repos, settings, users, roles)
+│   ├── execute.rs       # Batch execution entry point (TableResolver, AdminExecutor)
+│   └── tests/
+│       ├── shamir_db_tests.rs
+│       ├── system_metadata_tests.rs
+│       └── execute_tests.rs
+├── engine/              # Table engine (high-level API)
+│   ├── db_instance/     # Database instance management
+│   │   ├── db_instance.rs  # DbInstance (manages repos within a database)
+│   │   └── tests/
+│   ├── repo/            # Repository management
+│   │   ├── repo_config.rs       # RepoConfig, BoxRepoFactory
+│   │   ├── repo_manager.rs      # RepoManager (manages repos)
+│   │   ├── repo_manager_instance.rs
+│   │   ├── repo_types.rs
+│   │   └── tests/
+│   ├── table/           # Table implementation
+│   │   ├── table_manager.rs     # TableManager — main table facade
+│   │   ├── table_config.rs      # TableConfig
+│   │   ├── table_context.rs     # TableContext (with index integration)
 │   │   ├── counter.rs           # RecordCounter service
-│   │   ├── interner.rs          # InternerManager service
-│   │   ├── table.rs             # Main Table facade
-│   │   ├── mod.rs               # Public API exports
-│   │   └── tests/              # Organized test suites
-│   │       ├── mod.rs
-│   │       ├── crud_tests.rs
-│   │       ├── concurrent_tests.rs
-│   │       └── persistence_tests.rs
-│   ├── repo/         # ✅ NEW (2025-02-08) - Repo management
-│   │   ├── repo_config.rs       # Repo configuration types
-│   │   ├── repo_manager.rs     # RepoManager (manages repos)
-│   │   ├── repo_manager_instance.rs # RepoManagerInstance
-│   │   ├── repo_types.rs       # Repo types
-│   │   └── tests/              # Repo tests
-│   │       ├── mod.rs
-│   │       ├── repo_config_tests.rs
-│   │       └── repo_manager_tests.rs
-│   ├── README.md     # Engine documentation
-│   └── table.md     # Table refactoring documentation
-├── storage/          # Storage abstraction (low-level)
-│   ├── types.rs      # Store and Repo traits
-│   ├── storage_in_memory.rs  # In-memory store (for testing)
-│   ├── storage_cached.rs     # Cached store wrapper (sync/async modes)
+│   │   ├── interner_manager.rs  # InternerManager service
+│   │   └── tests/
+│   ├── index/           # Index management system
+│   │   ├── index_definition.rs
+│   │   ├── index_info.rs
+│   │   ├── index_info_item.rs
+│   │   ├── index_record_key.rs
+│   │   ├── index_status.rs
+│   │   ├── index_manager.rs
+│   │   └── tests/
+│   └── README.md
+├── storage/             # Storage abstraction (low-level)
+│   ├── types.rs         # Store and Repo traits
+│   ├── error.rs         # DbError, DbResult types
+│   ├── storage_in_memory.rs
+│   ├── storage_cached.rs
 │   ├── storage_sled.rs
 │   ├── storage_redb.rs
 │   ├── storage_fjall.rs
 │   ├── storage_nebari.rs
 │   ├── storage_persy.rs
 │   ├── storage_canopy.rs
-│   └── README.md     # Storage documentation
-├── query/            # ✅ NEW (2026-02-24) - Query system
-│   ├── batch/        # Batch query API
-│   │   ├── mod.rs
-│   │   ├── types.rs  # BatchRequest, BatchResponse, BatchOp
-│   │   ├── planner.rs
+│   └── README.md
+├── query/               # Query system
+│   ├── table_ref.rs     # TableRef { repo, table }
+│   ├── batch/           # Batch query API
+│   │   ├── types.rs     # BatchRequest (id mandatory), BatchResponse, BatchOp, QueryEntry
+│   │   ├── planner.rs   # BatchPlanner (topological sort, dependency resolution)
+│   │   ├── executor.rs  # execute_batch, TableResolver, AdminExecutor traits
+│   │   ├── reference.rs # QueryReference, QueryPath ($query parsing)
 │   │   └── README.md
-│   ├── read/         # Read operations (SELECT)
-│   │   ├── mod.rs
-│   │   ├── types.rs  # Query, Select, Filter, etc.
+│   ├── read/            # Read operations (SELECT)
+│   │   ├── read_query.rs # ReadQuery (from: TableRef, select, where, group_by, order_by, pagination)
+│   │   ├── select.rs    # Select, SelectItem
+│   │   ├── limit.rs     # Pagination enum (LimitOffset / Page / None), PaginationInfo
+│   │   ├── order_by.rs  # OrderBy, OrderByItem, OrderDirection, NullsOrder
+│   │   ├── group_by.rs  # GroupBy
+│   │   ├── agg.rs       # AggFunc, AggregateField
+│   │   ├── query_result.rs # QueryResult, QueryStats
+│   │   ├── exec.rs      # Query execution engine
 │   │   └── README.md
-│   ├── write/        # ✅ NEW (2026-02-24) - Write operations
-│   │   ├── mod.rs
-│   │   ├── types.rs  # InsertOp, UpdateOp, SetOp, DeleteOp
+│   ├── write/           # Write operations
+│   │   ├── types.rs     # InsertOp, UpdateOp, SetOp, DeleteOp, UpdateSelect, UpdateReturnMode
+│   │   ├── write_result.rs # WriteResult
 │   │   └── README.md
-│   ├── filter/       # Filter (WHERE clause)
-│   │   ├── mod.rs
-│   │   └── types.rs
-│   ├── common/       # Common types
+│   ├── filter/          # Filter (WHERE clause)
+│   │   ├── filter_enum.rs  # Filter enum (all operators)
+│   │   ├── filter_value.rs # FilterValue
+│   │   ├── filter_expr.rs  # FilterExpr, FilterExprOp
+│   │   ├── fn_call.rs      # FnCall ($fn)
+│   │   ├── cond.rs         # Cond ($cond)
+│   │   ├── eval.rs         # compile_filter, compare_values, resolve_field
+│   │   ├── eval_context.rs # FilterContext
+│   │   └── mod.rs       # FieldPath = Vec<String>
+│   ├── admin/           # Admin (DDL) operations
+│   │   ├── types.rs     # Create/Drop Db/Repo/Table/Index ops, ListOp
 │   │   └── mod.rs
-│   └── examples/     # JSON examples
+│   ├── common/
+│   │   └── mod.rs
+│   └── examples/
 │       ├── filter.md
 │       ├── select.md
 │       ├── aggregate.md
-│       └── write.md  # ✅ NEW (2026-02-24)
-├── mod.rs
-└── error.rs          # DbError, DbResult types
+│       └── write.md
+├── mod.rs               # Re-exports: ShamirDb, SystemStoreConfig, DbError, DbResult
+└── error.rs             # (legacy location, actual error in storage/error.rs)
+```
+
+## Top-Level Entry Point
+
+### ShamirDb
+
+The primary entry point for the entire database system.
+
+```rust
+use shamir_db::db::{ShamirDb, SystemStoreConfig};
+
+// Initialize with persistent storage
+let db = ShamirDb::init(SystemStoreConfig::Redb("./data".into())).await?;
+
+// Or in-memory for tests
+let db = ShamirDb::init_memory().await?;
+
+// Create and use databases
+db.create_db("myapp").await;
+let response = db.execute("myapp", &batch_request).await?;
+```
+
+**Hierarchy:**
+```
+ShamirDb
+  +-- SystemStore (persistent metadata: databases, repos, settings, users, roles)
+  +-- production (DbInstance)
+  |     +-- main (RepoInstance)
+  |           +-- users (TableManager)
+  +-- analytics (DbInstance)
+        +-- archive (RepoInstance)
+              +-- logs (TableManager)
+```
+
+### SystemStore
+
+Persistent metadata store using a dedicated DbInstance with system tables:
+- `databases` - registered databases
+- `repositories` - registered repositories (with engine type and path)
+- `settings` - key-value settings
+- `users` - user accounts (for auth/RBAC)
+- `roles` - role definitions (for auth/RBAC)
+
+```rust
+// SystemStoreConfig determines persistence
+pub enum SystemStoreConfig {
+    InMemory,                    // For tests
+    Redb(std::path::PathBuf),    // For production
+}
 ```
 
 ## Components
 
 ### Engine (`db/engine/`)
 **High-level table API** with automatic interning and index management:
-- `Dispatcher` - ✅ NEW: Multi-repo management with YAML configuration (2025-02-08)
-- `RepoManager` - ✅ NEW: Repository and table management (2025-02-08)
-- `Table<R>` - Main table abstraction (modularized 2025-02-08)
-- `IndexManager` (formerly TableIndexManager) - Index management system
-- `RecordCounter` - Counter service (separate module)
-- `InternerManager` - Interning service (separate module)
-- Manages key interning transparently
-- Transforms UserValue ↔ InnerValue
-- Provides memory-efficient async streaming
-- **56 index tests**, UniqueIndexCreationFailed error
-
-**New Modular Structure (2025-02-08):**
-```
-engine/
-├── dispatcher/           # Multi-repo dispatcher
-│   ├── config.rs         # YAML configuration loader
-│   ├── dispatcher.rs     # Dispatcher implementation
-│   ├── types.rs          # Config types
-│   └── tests/            # 8 config tests + dispatcher tests
-├── repo/                 # Repo management
-│   ├── repo_config.rs    # Repo config types
-│   ├── repo_manager.rs  # RepoManager
-│   └── tests/            # 14 repo tests
-├── table/                # Table implementation
-│   ├── counter.rs        # RecordCounter (5 tests)
-│   ├── interner.rs       # InternerManager (5 tests)
-│   ├── table.rs          # Table facade
-│   └── tests/            # 25 table tests (CRUD, concurrent, persistence)
-└── index/                # Index system
-    ├── index_definition.rs
-    ├── index_info.rs
-    ├── index_record.rs
-    ├── table_index_manager.rs
-    └── tests/            # 56 index tests
-```
-
-See `engine/README.md` for details.
-
-### Index System (`db/engine/index/`)
-**Index management** for tables:
-- `IndexManager` (renamed from TableIndexManager) - Index operations and validation
-- `IndexDefinition` - Simple and composite index definitions (name_interned: u64)
-- `IndexInfo` - Index metadata with sync status tracking
-- Atomic flags for fast path optimization (O(1) existence check)
-- Unique indexes: validation BEFORE write, update AFTER write
-- UniqueIndexCreationFailed(name, count, sample) error for duplicates
-- Three indexing modes: Disabled, All, Selective
-- **56 tests** organized by entity in `tests/` folder
-
-### Dispatcher (`db/engine/dispatcher/`)
-**Multi-repo management** with YAML configuration:
-- `Dispatcher` - Manages multiple RepoManagers
-- `ConfigLoader` (from `core::config`) - Load/save YAML configuration files
-- `DbConfig`, `RepoConfig`, `TableConfig`, `IndexConfig` - Configuration types
-- Atomic file writes (temp + rename) for safe updates
-- Validation on load (ensures config correctness)
-- **Hot-reload ready** - web interface can update config atomically
-
-### Repo Manager (`db/engine/repo/`)
-**Repository and table management**:
-- `RepoManager` - Manages repositories (collections of tables)
-- `RepoManagerInstance` - Holds Arc<Repo> with lazy table initialization
-- `RepoConfig` - Repository configuration
-- Default repo support
-- CRUD operations for repos
-- **14 tests** for repo management
+- `DbInstance` - Database instance managing multiple repos
+- `RepoManager` - Repository and table management
+- `TableManager` - Main table abstraction with index integration
+- `IndexManager` - Index management system
+- `RecordCounter` - Counter service
+- `InternerManager` - Interning service
 
 ### Storage (`db/storage/`)
-**Low-level storage abstraction** over 8 embedded databases:
-- Pluggable backends (InMemory, Cached, Sled, Redb, Fjall, Nebari, Persy, Canopy)
+**Low-level storage abstraction** over 7 embedded databases + cached wrapper:
+- Pluggable backends: InMemory, Sled, Redb, Fjall, Nebari, Persy, Canopy
+- CachedStore wrapper with sync/async write modes
 - Unified `Store` trait for key-value operations
 - Unified `Repo` trait for multi-store management
 - Async streaming with batch generators
 - Prefix scan operations for composite keys
 
-**New Storage Options:**
-- **InMemoryStore** - Pure in-memory storage for testing/caching
-- **CachedStore** - Wrapper with write-through or write-behind modes
-
 See `storage/README.md` for details.
 
 ### Query System (`db/query/`)
-**Unified query interface** for read and write operations:
-- `BatchRequest/BatchResponse` - Batch API for multiple queries
-- `BatchPlanner` - Automatic parallelization and dependency resolution
-- `Query` - SELECT queries with filters, ordering, pagination
-- `Filter` - WHERE clause with AND/OR/NOT/comparison operators
-- **Write Operations** (NEW 2026-02-24):
-  - `InsertOp` - Insert records into table
-  - `UpdateOp` - Update records with optional `select` for returning
-  - `SetOp` - Upsert by key (create or update)
-  - `DeleteOp` - Delete records by filter
-- `UpdateSelect` - Return updated records with modes: `all`, `changed`, `unchanged`
-- **465+ tests** covering all query operations
+**Unified query interface** for read, write, and admin operations:
 
-See `query/batch/README.md` and `query/write/README.md` for details.
+- **TableRef** `{ repo, table }` - Table reference with optional repo qualifier
+- **FieldPath** `Vec<String>` - Array-based field paths (`["user", "address", "city"]`)
+- **BatchRequest** - Batch API with mandatory `id` field
+- **BatchOp** - Key-based dispatch (explicit, not serde untagged)
+- **ReadQuery** - SELECT with filters, ordering, pagination (Pagination enum: LimitOffset / Page / None)
+- **Filter** - Full set of operators including Like, ILike, Regex, Contains, ContainsAny, ContainsAll, Between, Exists, NotExists
+- **Write Operations**: InsertOp, UpdateOp, SetOp (upsert, fully working), DeleteOp
+- **Admin Operations**: Create/Drop Db/Repo/Table/Index, List
+- **AdminExecutor** trait for DDL execution
+- **TableResolver** trait for resolving TableRef to TableManager
+
+See `query/batch/README.md` for details.
 
 ## Error Handling
 
@@ -197,313 +193,93 @@ All database operations return `DbResult<T>`:
 pub type DbResult<T> = Result<T, DbError>;
 
 pub enum DbError {
-    Storage(String),           // Backend-specific error
-    NotFound(String),          // Key/table doesn't exist
-    Codec(String),             // Serialization error
-    Internal(String),          // Internal logic error
-    KeyExists(String),         // Primary key collision
-    DuplicateKey(String),      // Unique index violation
+    NotFound(String),                              // Key/table doesn't exist
+    KeyExists(String),                             // Primary key collision
+    DuplicateKey(String),                          // Unique index violation
     UniqueIndexCreationFailed(String, usize, String), // (name, count, sample)
+    Storage(String),                               // Backend-specific error
+    Config(String),                                // Configuration error
+    Codec(String),                                 // Serialization error
+    Io(std::io::Error),                            // I/O error
+    Internal(String),                              // Internal logic error
+    Validation(String),                            // Validation error
 }
 ```
 
 ## Usage Flow
 
-### 1. Open Repository
+### 1. Initialize ShamirDb
 
 ```rust
-use shamir_db::db::storage::storage_sled::SledRepo;
-use shamir_db::db::storage::types::Repo;
+use shamir_db::db::{ShamirDb, SystemStoreConfig};
 
-let repo = SledRepo::new("./my_db")?;
+let db = ShamirDb::init(SystemStoreConfig::InMemory).await?;
 ```
 
-### 2. Get Table
+### 2. Create Database and Repository
 
 ```rust
-use shamir_db::db::engine::Table;
+db.create_db("myapp").await;
 
-let table = repo.table_get("users")?;
+use shamir_db::db::engine::repo::{RepoConfig, BoxRepoFactory};
+let config = RepoConfig::new("main", BoxRepoFactory::in_memory());
+db.add_repo("myapp", config).await?;
 ```
 
-**What happens:**
-1. Opens `__data__users` store for records
-2. Opens `__info__users` store for metadata
-3. Creates or loads interner from system records
-4. Returns `Table` handle
-
-### 3. Use Table
+### 3. Execute Batch Queries
 
 ```rust
-use shamir_db::types::value::Value;
+use shamir_db::db::query::BatchRequest;
 
-// Insert (interns strings automatically)
-let user = Value::Object(map![
-    ("name".into(), Value::Str("Alice".into())),
-    ("email".into(), Value::Str("alice@example.com".into()))
-]);
-let id = table.insert(user).await?;
-
-// Read (reverse interning)
-let retrieved = table.get(id).await?;
-
-// Stream (memory-efficient!)
-let mut stream = table.list_stream(100);
-while let Some(batch) = stream.next().await {
-    for (id, record) in batch? {
-        println!("{}: {:?}", id, record);
+let request: BatchRequest = serde_json::from_value(serde_json::json!({
+    "id": 1,
+    "queries": {
+        "users": {
+            "from": "users",
+            "where": { "op": "eq", "field": ["status"], "value": "active" }
+        }
     }
-}
+}))?;
 
-// Index operations
-table.add_index(&["email"]).await?;
-table.add_unique_index(&["username"]).await?;
-
-// Query with prefix scan stream (for index lookups)
-let mut stream = store.scan_prefix_stream(b"idx:email:".to_vec().into(), 100);
-while let Some(batch_result) = stream.next().await {
-    let batch = batch_result?;
-    for (key, value) in batch {
-        // Process matching records
-    }
-}
+let response = db.execute("myapp", &request).await?;
 ```
-
-## Storage Layout
-
-Each table creates 2 underlying stores:
-
-```
-my_db/
-├── __data__users          # User records (InnerValue<u64>)
-├── __info__users          # Metadata (interning state)
-├── __data__posts
-├── __info__posts
-└── ...
-```
-
-### Data Store (`__data__{table}`)
-Contains actual user records:
-- Key: `RecordId` (16 bytes)
-- Value: `InnerValue<u64>` (interned)
-- Example: `a1b2... → Object{1: 2, 3: 4}`
-
-### Info Store (`__info__{table}`)
-Contains metadata:
-- `RecordId::system("internals")` → `Map<String, u64>`
-- `RecordId::system("inter_max")` → `u64`
-- `RecordId::system("indexes")` → `IndexInfo` (index definitions)
-- `RecordId::system("indexes_unique")` → `IndexInfo` (unique constraints)
-- Future: statistics, etc.
-
-## Async Flow
-
-### Insert Operation
-
-```rust
-table.insert(user_value).await?;
-```
-
-**Flow:**
-1. Acquire interner (lazy load if needed)
-2. Transform `UserValue<String>` → `InnerValue<u64>`
-   - Extract all strings
-   - Intern them (assign IDs or reuse)
-3. Serialize `InnerValue` to bytes
-4. Call `store.insert(bytes)`
-5. Update interner in `__info__` store
-6. Return `RecordId`
-
-### Read Operation
-
-```rust
-table.get(id).await?;
-```
-
-**Flow:**
-1. Acquire interner (lazy load if needed)
-2. Call `store.get(id)` → bytes
-3. Deserialize bytes → `InnerValue<u64>`
-4. Transform `InnerValue<u64>` → `UserValue<String>`
-   - Reverse lookup all u64 IDs
-   - Convert back to strings
-5. Return `UserValue`
-
-### Stream Operation
-
-```rust
-table.list_stream(batch_size)
-```
-
-**Flow:**
-1. Acquire interner once
-2. Get stream from storage: `store.iter_stream(batch_size)`
-3. For each batch:
-   - Deserialize bytes → `InnerValue<u64>`
-   - Transform → `UserValue<String>`
-   - Yield batch to consumer
-4. Consumer processes batches lazily
 
 ## Concurrency Model
 
 ### Thread Safety
 
 All components are thread-safe:
+- `ShamirDb` is `Clone` (Arc-based)
+- `DbInstance` is `Clone` (Arc-based)
+- `TableManager` is `Clone` (Arc-based)
+- DashMap for concurrent interning
+- OnceCell for lazy initialization
 
-```rust
-// Clone table (cheap - Arc-based)
-let t1 = table.clone();
-let t2 = table.clone();
+## Key Type Changes
 
-// Concurrent operations
-tokio::join!(
-    async {
-        t1.insert(value1).await
-    },
-    async {
-        t2.insert(value2).await
-    }
-);
-```
-
-**Guarantees:**
-- ✅ Multiple concurrent reads
-- ✅ Multiple concurrent writes
-- ✅ Safe interned ID assignment (DashMap)
-- ✅ Lazy loading with OnceCell (single init)
-
-### Interning Synchronization
-
-- **DashMap**: Lock-free reads, fine-grained write locks
-- **OnceCell**: Ensures single initialization
-- **Atomic**: Next ID assignment
-
-## Performance Considerations
-
-### When to Use Tables vs Raw Stores
-
-**Use Tables (`Table<R>`) when:**
-- Working with structured data
-- Need string interning
-- Want automatic transformations
-- Building application features
-
-**Use Raw Stores (`Store`) when:**
-- Building custom indexes
-- Maximum performance needed
-- Don't need interning overhead
-- Building internal components
-
-**Storage Backend Options:**
-- **InMemoryStore** - For testing/caching (zero latency)
-- **CachedStore** - Wrapper with sync/async write modes
-- **Persistent stores** - Sled, Redb, Fjall, Nebari, Persy, Canopy
-
-### Memory Usage
-
-| Operation | Memory |
-|-----------|--------|
-| Open table | Minimal (Arc pointers) |
-| First access | + interner size |
-| Streaming | Constant (batch_size) |
-| Full scan (iter()) | O(dataset) - beware! |
-
-### Interning Overhead
-
-**Cost:**
-- Lookup in DashMap for each string
-- System record updates
-- Extra deserialization pass
-
-**Benefit:**
-- ~70% memory reduction
-- Faster comparisons (u64 vs String)
-- Smaller storage footprint
-
-**Verdict:** Worth it for string-heavy data!
-
-## Error Recovery
-
-### Storage Errors
-
-```rust
-match table.insert(value).await {
-    Ok(id) => println!("Inserted: {}", id),
-    Err(DbError::Storage(msg)) => {
-        eprintln!("Backend error: {}", msg);
-        // Retry? Fail gracefully?
-    }
-    Err(e) => eprintln!("Other error: {:?}", e),
-}
-```
-
-### NotFound Errors
-
-```rust
-match table.get(id).await {
-    Ok(record) => println!("Found: {:?}", record),
-    Err(DbError::NotFound(_)) => {
-        println!("Record doesn't exist");
-        // Handle missing record
-    }
-}
-```
-
-
-Data transform:
-// Write: [api: MessagePack] → [DB: InnerValue  → Bytes → Store]
-let inner_bytes = transform.inner_value.to_bytes();  // rmp_serde
-
-// Read: [DB: Store → Bytes → InnerValue] → [api: MessagePack]
-let inner_value = InnerValue::from_bytes(bytes)?;
-
-## Best Practices
-
-### ✅ DO
-- Use streaming for large datasets
-- Set appropriate batch sizes (100-1000)
-- Clone tables for concurrent use
-- Handle errors gracefully
-
-### ❌ DON'T
-- Call `iter()` on large tables (OOM!)
-- Ignore errors
-- Forget to await async operations
-- Assume RecordId is sequential
+| Concept | Old | Current |
+|---------|-----|---------|
+| Field paths | `String` (dot-separated) | `Vec<String>` (array segments) |
+| Table reference | `String` | `TableRef { repo, table }` |
+| Batch request ID | not present | mandatory `id: serde_json::Value` |
+| BatchOp dispatch | `#[serde(untagged)]` | explicit key-based dispatch |
+| Pagination | `LimitOffset` struct | `Pagination` enum (LimitOffset / Page / None) |
+| Initialization | `ShamirDb::new().init()` | `ShamirDb::init(SystemStoreConfig)` |
+| InnerValue key | `Value<u64>` | `Value<InternerKey>` |
 
 ## Future Enhancements
 
-- [x] ✅ **Multi-repo dispatcher** (2025-02-08)
-  - Dispatcher manages multiple RepoManagers
-  - YAML configuration support
-  - ConfigLoader for atomic file operations
-- [x] ✅ **Modular table architecture** (2025-02-08)
-  - Extracted RecordCounter to separate module
-  - Extracted InternerManager to separate module
-  - Organized tests by type (CRUD, concurrent, persistence)
-  - **280 tests passing**
-- [x] ✅ **Test reorganization** (2025-02-08)
-  - Tests moved to separate `tests/` folders
-  - One entity per test file
-  - Names match content
-- [x] ✅ **Repo management** (2025-02-08)
-  - RepoManager for repository operations
-  - Lazy table initialization
-  - Default repo support
-- [x] ✅ **Index system** (2026-02-22)
-  - Simple and composite indexes
-  - Unique constraint validation
-  - Atomic flags for O(1) existence check
-  - **56 index tests**
-  - UniqueIndexCreationFailed error with duplicate count
-- [x] ✅ **Query system with write operations** (2026-02-24)
-  - Batch API for multiple queries with dependencies
-  - Insert, Update, Set, Delete operations
-  - `UpdateSelect` for returning updated records
-  - Modes: `all`, `changed`, `unchanged`
-  - **465+ tests**
+- [x] Multi-repo dispatcher
+- [x] Modular table architecture
+- [x] Index system (simple, composite, unique)
+- [x] Query system with read/write/admin ops
+- [x] SystemStore for persistent metadata
+- [x] ShamirDb::init(SystemStoreConfig)
+- [x] Filter evaluation (all operators implemented)
+- [x] SetOp (upsert) fully working
+- [ ] Auth/RBAC (designed, see auth/README.md)
+- [ ] $user reference for role-based row filtering
 - [ ] Query planner integration
 - [ ] Transaction support across tables
 - [ ] Migration system
 - [ ] Backup/restore utilities
-- [ ] Garbage collection for unused interned strings

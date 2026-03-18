@@ -6,7 +6,9 @@ Serialization/deserialization support for various data formats in S.H.A.M.I.R. d
 
 ```
 src/codecs/
-├── mod.rs              # Codec<T> trait, CodecError, re-exports
+├── mod.rs              # Re-exports: Codec, CodecError, basic/interned codecs
+├── codec.rs            # Codec<T> trait definition
+├── error.rs            # CodecError enum (Encode/Decode)
 ├── basic/              # Generic codecs (no dependencies)
 │   ├── mod.rs        # JsonCodec, MessagePackCodec, bincode functions
 │   ├── json.rs       # JSON serialization via serde_json
@@ -15,7 +17,7 @@ src/codecs/
 ├── interned/           # Interning-aware codecs
 │   ├── mod.rs        # InternedCodec trait, CodecFormat enum
 │   ├── codec.rs      # InternedCodec trait definition
-│   ├── json.rs       # json_to_inner, inner_to_json
+│   ├── json.rs       # json_to_inner, inner_to_json, json_value_to_inner, inner_to_json_value
 │   ├── messagepack.rs # msgpack_to_inner, inner_to_msgpack
 │   └── common.rs     # intern_string_key, deintern_key
 ├── legacy/            # Deprecated API
@@ -45,7 +47,7 @@ src/codecs/
 
 ## Core Traits
 
-### Codec Trait (`mod.rs`)
+### Codec Trait (`codec.rs`)
 ```rust
 pub trait Codec<T: Serialize + DeserializeOwned> {
     fn encode(&self, value: &T) -> Result<Vec<u8>, CodecError>;
@@ -56,9 +58,12 @@ pub trait Codec<T: Serialize + DeserializeOwned> {
 **Design:**
 - Generic over `T` - works with any serializable type
 - `DeserializeOwned` - type owns deserialized data
-- Error handling via `CodecError` (Encode/Decode variants)
+- Error handling via `CodecError` from `error.rs` (Encode/Decode variants)
 
 ### InternedCodec Trait (`interned/codec.rs`)
+
+The interned codec also provides `json_value_to_inner` / `inner_to_json_value` functions for converting `serde_json::Value` to/from `InnerValue` with interning (used by SystemStore).
+
 ```rust
 pub trait InternedCodec: Send + Sync {
     fn decode_with_interner(
@@ -277,13 +282,13 @@ pub fn inner_to_msgpack(interner: &Interner, value: &InnerValue) -> Result<Vec<u
 ### Common Interning Functions (`interned/common.rs`)
 
 ```rust
-pub fn intern_string_key(interner: &Interner, key_str: &str) -> Result<InternedKey, CodecError>
-pub fn deintern_key(interner: &Interner, interned_key: &InternedKey) -> String
+pub fn intern_string_key(interner: &Interner, key_str: &str) -> Result<InternerKey, CodecError>
+pub fn deintern_key(interner: &Interner, interned_key: &InternerKey) -> String
 ```
 
 **intern_string_key:**
 - Calls `interner.touch_ind(key_str)`
-- Returns `InternedKey`
+- Returns `InternerKey`
 - Used during decode (external format → InnerValue)
 
 **deintern_key:**
@@ -300,7 +305,7 @@ pub fn deintern_key(interner: &Interner, interned_key: &InternedKey) -> String
 #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
 pub struct TransformResult {
     pub inner_value: InnerValue,
-    pub new_keys: Option<Vec<(InternedKey, UserKey)>>,
+    pub new_keys: Option<Vec<(InternerKey, UserKey)>>,
 }
 
 #[deprecated(since = "0.1.0", note = "Use newer codec-based approach instead")]
