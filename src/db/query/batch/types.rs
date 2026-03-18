@@ -216,6 +216,10 @@ impl From<ReadQuery> for QueryEntry {
 /// - `limits`: Security limits
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchRequest {
+    /// Client-provided request ID, echoed back in the response.
+    /// Used for correlating async requests with responses.
+    pub id: serde_json::Value,
+
     /// Optional name for logging/debugging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -266,6 +270,9 @@ fn default_return_all() -> bool {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchResponse {
+    /// Echoed request ID from BatchRequest.
+    pub id: serde_json::Value,
+
     /// Results by alias.
     #[serde(default)]
     pub results: TMap<String, QueryResult>,

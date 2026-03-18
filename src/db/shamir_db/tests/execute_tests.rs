@@ -29,6 +29,7 @@ async fn test_execute_single_insert() {
     let shamir = setup_shamir().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "ins": {
                 "insert_into": "users",
@@ -50,6 +51,7 @@ async fn test_execute_single_read() {
 
     // Seed
     let seed: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "s": {
                 "insert_into": "users",
@@ -62,6 +64,7 @@ async fn test_execute_single_read() {
 
     // Read
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "users": {"from": "users"}
         }
@@ -81,6 +84,7 @@ async fn test_execute_crud_pipeline() {
 
     // 1. Insert users
     let q1: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "ins": {
                 "insert_into": "users",
@@ -97,6 +101,7 @@ async fn test_execute_crud_pipeline() {
 
     // 2. Update: activate Bob
     let q2: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "upd": {
                 "update": "users",
@@ -114,6 +119,7 @@ async fn test_execute_crud_pipeline() {
 
     // 3. Delete Carol + read remaining
     let q3: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "del": {
                 "delete_from": "users",
@@ -137,6 +143,7 @@ async fn test_execute_multi_table_with_dependency() {
 
     // Seed users and orders
     let seed: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "s1": {
                 "insert_into": "users",
@@ -161,6 +168,7 @@ async fn test_execute_multi_table_with_dependency() {
 
     // Query: find VIP users, then find their orders
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "vips": {
                 "from": "users",
@@ -195,6 +203,7 @@ async fn test_execute_unknown_db() {
     let shamir = setup_shamir().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "r": {"from": "users"}
         }
@@ -217,6 +226,7 @@ async fn test_execute_unknown_repo() {
 
     // Use a TableRef with a nonexistent repo (array format: ["repo", "table"])
     let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
         "queries": {
             "r": {
                 "from": ["nonexistent", "users"]

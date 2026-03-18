@@ -51,6 +51,7 @@ pub async fn execute_batch(
     let elapsed = start.elapsed();
 
     Ok(BatchResponse {
+        id: request.id.clone(),
         results,
         execution_plan: plan.stages.clone(),
         execution_time_us: elapsed.as_micros() as u64,
