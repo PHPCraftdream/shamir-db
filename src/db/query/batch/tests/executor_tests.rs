@@ -62,7 +62,7 @@ async fn test_single_read_query() {
             }
         }
     })).unwrap();
-    let resp = execute_batch(&insert_req, &resolver).await.unwrap();
+    let resp = execute_batch(&insert_req, &resolver, None).await.unwrap();
     assert_eq!(resp.results["insert"].records.len(), 2);
 
     // Now read
@@ -73,7 +73,7 @@ async fn test_single_read_query() {
         }
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
     assert_eq!(resp.results.len(), 1);
     assert_eq!(resp.results["users"].records.len(), 2);
@@ -104,7 +104,7 @@ async fn test_independent_queries_same_stage() {
             }
         }
     })).unwrap();
-    execute_batch(&seed_req, &resolver).await.unwrap();
+    execute_batch(&seed_req, &resolver, None).await.unwrap();
 
     // Two independent reads
     let req: BatchRequest = serde_json::from_value(json!({
@@ -115,7 +115,7 @@ async fn test_independent_queries_same_stage() {
         }
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
     // Both in same stage (no dependencies)
     assert_eq!(resp.execution_plan.len(), 1);
@@ -146,7 +146,7 @@ async fn test_dependent_query_ref() {
             }
         }
     })).unwrap();
-    execute_batch(&seed_req, &resolver).await.unwrap();
+    execute_batch(&seed_req, &resolver, None).await.unwrap();
 
     // Query 1: get active users
     // Query 2: get users where name == first active user's name (via $query ref)
@@ -168,7 +168,7 @@ async fn test_dependent_query_ref() {
         }
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
     // Two stages: [active], [first_active]
     assert_eq!(resp.execution_plan.len(), 2);
@@ -198,7 +198,7 @@ async fn test_insert_then_read() {
         }
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
     // Both in same stage (no explicit dependency)
     assert_eq!(resp.results["insert"].records.len(), 2);
@@ -227,7 +227,7 @@ async fn test_return_only() {
         "return_only": ["read"]
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
     // Only "read" returned
     assert_eq!(resp.results.len(), 1);
@@ -255,7 +255,7 @@ async fn test_return_result_false() {
         "return_all": false
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
     // "setup" has return_result=false, "read" has return_result=true (default)
     assert_eq!(resp.results.len(), 1);
@@ -284,7 +284,7 @@ async fn test_batch_with_delete() {
             }
         }
     })).unwrap();
-    execute_batch(&seed_req, &resolver).await.unwrap();
+    execute_batch(&seed_req, &resolver, None).await.unwrap();
 
     // Delete inactive, then read
     let req: BatchRequest = serde_json::from_value(json!({
@@ -297,7 +297,7 @@ async fn test_batch_with_delete() {
         }
     })).unwrap();
 
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
     // 1 record deleted (Bob)
     assert_eq!(resp.results["cleanup"].stats.as_ref().unwrap().records_scanned, 1);
 }
@@ -333,7 +333,7 @@ async fn test_circular_dependency_error() {
         }
     })).unwrap();
 
-    let err = execute_batch(&req, &resolver).await.unwrap_err();
+    let err = execute_batch(&req, &resolver, None).await.unwrap_err();
     assert!(matches!(err, crate::db::query::batch::BatchError::CircularDependency { .. }));
 }
 
@@ -356,7 +356,7 @@ async fn test_unknown_table_fails_early() {
         }
     })).unwrap();
 
-    let err = execute_batch(&req, &resolver).await.unwrap_err();
+    let err = execute_batch(&req, &resolver, None).await.unwrap_err();
     // Should fail with table not found error BEFORE any execution
     assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
 }
@@ -376,7 +376,7 @@ async fn test_request_id_echoed() {
             "q": {"from": "users"}
         }
     })).unwrap();
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
     assert_eq!(resp.id, json!("req-42"));
 
     // Numeric ID
@@ -386,6 +386,6 @@ async fn test_request_id_echoed() {
             "q": {"from": "users"}
         }
     })).unwrap();
-    let resp = execute_batch(&req, &resolver).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None).await.unwrap();
     assert_eq!(resp.id, json!(123));
 }

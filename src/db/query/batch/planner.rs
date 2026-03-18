@@ -168,6 +168,8 @@ impl BatchPlanner {
                     Self::extract_deps_from_value(value, &mut deps);
                 }
             }
+            // Admin ops have no query dependencies
+            _ => {}
         }
 
         deps
