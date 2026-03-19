@@ -2188,3 +2188,5 @@
 /chroma_data/f6388493-4ed8-47e5-ace4-3823ab7cae02/length.bin
 /chroma_data/f6388493-4ed8-47e5-ace4-3823ab7cae02/link_lists.bin
 /chroma_data/chroma.sqlite3
+server-cert.pem
+tests/e2e/node_modules/

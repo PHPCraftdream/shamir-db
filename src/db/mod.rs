@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod net;
 pub mod query;
 pub mod shamir_db;
 pub mod storage;

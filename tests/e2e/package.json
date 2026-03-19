@@ -1,0 +1,10 @@
+{
+  "name": "shamir-e2e",
+  "private": true,
+  "scripts": {
+    "test": "node auth.test.js"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0-beta.3"
+  }
+}
