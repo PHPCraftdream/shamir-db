@@ -12,7 +12,7 @@ Future hardening — **../ROADMAP.md**.
 | ID | Adversary | В scope v1? |
 |---|---|---|
 | A1 | Passive network observer | Yes |
-| A2 | Active network MITM | Yes |
+| A2 | Active network MITM (включая corporate proxy с rogue CA) | Yes |
 | A3 | Offline DB snapshot (`__system__/*`) | Yes |
 | A4 | Live host RAM read | Partial — defence-in-depth |
 | A5 | Malicious admin | Out of scope |
@@ -21,6 +21,8 @@ Future hardening — **../ROADMAP.md**.
 | A8 | Cache-timing / Spectre | Out of scope (acknowledged) |
 | A9 | Hardware tampering / cold boot | Out of scope |
 | A10 | DoS — botnets, amplification | In scope |
+| A11 | Single-process RCE → all secrets | **Acknowledged limitation** (см. §4.13) |
+| A12 | Compromised admin UI origin (CDN hijack, malicious deploy) | Partial — для browser path documented limitation |
 
 ---
 
@@ -58,6 +60,8 @@ Future hardening — **../ROADMAP.md**.
 | DoS — admin lockout | A10 | Lockout per (subnet, user). Emergency `--regen-bootstrap` |
 | Restart-replay window | A2 | Warmup rate limit `/4` первые 60s |
 | Audit log truncation | A3 | Periodic `last_audit_hmac` checkpoint в server_meta + startup verify |
+| **Browser TLS MITM → session hijack** | A2, A12 | TLS exporter недоступен в browser → relay attack возможен. SCRAM защищает password, но `session_id` может быть hijacked. См. §4.9 + recommend native client для admin operations. |
+| Backup restore counter rollback → ticket replay | A6, A2 | Mandatory `revokeAllTickets` при любом restore (см. IMPLEMENTATION_GUIDE §5.7) |
 
 ---
 
@@ -102,13 +106,36 @@ ShamirDB Auth Protocol v1 НЕ гарантирует:
 
 4.8. **PQ resistance** для server identity. Ed25519 — Shor's. См. ROADMAP.
 
-4.9. **Browser-mode security parity с native.** Browser лишён TLS exporter API → channel_binding ослаблен (`binding_mode=0x02`). Mitigations: strict TOFU + out-of-band pinning + HSTS + CSP. Resumption tickets из browser **не могут upgrade** в native session.
+4.9. **Browser-mode security parity с native.** Browser лишён TLS exporter API → channel_binding ослаблен (`binding_mode=0x02`). Mitigations: strict TOFU + out-of-band pinning + HSTS + CSP.
+
+**Practical attack vectors при TLS MITM в browser path** (corporate proxy с installed CA, DNS hijack + rogue Let's Encrypt cert):
+- Атакующий перехватывает `GET /admin/static/main.<hash>.js`
+- Подменяет embedded Ed25519 server pin на свой
+- Браузер юзера загружает modified bundle, доверяет attacker pin
+- Атакующий проксирует SCRAM messages — relay attack
+- **Password не утекает** (SCRAM делает свою работу — proof не reusable)
+- НО **session_id может быть hijacked**: атакующий получает auth_ok с валидным session_id для своей connection
+
+**Mitigation для admin operations: использовать native client с out-of-band Ed25519 pin.** Browser admin UI приемлем для read-only / low-stakes operations.
+
+Resumption tickets из browser path **не могут upgrade** в native session при `allow_browser_ticket_upgrade=false` (server config).
 
 4.10. **Password length confidentiality.** В v1 password length не передаётся серверу и не хранится.
 
 4.11. **Resumption replay через graceful crash window — устранено** (synchronous fsync). Но: если SystemStore сам corrupt (disk failure), counter может откатиться → ticket replay в окне до восстановления. Mitigation: `revokeAllTickets` после disaster recovery.
 
 4.12. **Lockout state warmup window.** Первые 60 секунд после restart применяется reduced rate limit (`/4`) пока in-memory state warmup'ится. Без этого distributed attacker мог бы получить burst attempts.
+
+4.13. **Single-process trusted server.** ShamirDB v1 = monolithic process с всеми secrets (`server_secret`, `lockout_secret`, `server_ed25519_priv`, `ticket_key`, `audit_chain_key`) в одной address space. **RCE в любой части = compromise всех secrets simultaneously**. Mitigations:
+- mlock на priv keys (best-effort)
+- disable_core_dumps (best-effort per OS)
+- Минимизация attack surface (no FFI с untrusted libraries, no eval)
+- Run в отдельном UID/container с restricted privileges
+- v1.1+ ROADMAP: privilege separation (отдельный signer process для Ed25519 ops)
+
+**Это не уязвимость**, это design choice для simplicity v1. Документируется явно чтобы deployment expectations были realistic.
+
+4.14. **Clock dependency.** Auth flow зависит от server clock (timestamps в tickets, expires_at, tickets_invalid_before_ns). Server MUST использовать synchronized clock (NTP/PTP). При clock jumps > 5s — recommended manual `revokeAllTickets`. Audit event `clock_anomaly_detected` если abs(now - last_observed) > 5s.
 
 ---
 

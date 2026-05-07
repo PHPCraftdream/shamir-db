@@ -10,6 +10,9 @@ Future features beyond v1 spec. Не нормативные, не binding обе
 - **Argon2id parameter auto-tuning** на старте сервера (benchmark под текущее железо)
 - **Channel binding RFC 9266 формальное соответствие** — формальная attestation если interop требует
 - **WebAuthn second factor** для admin operations (browser-native)
+- **`expire_password_now` flag** в updateUser (требует field `password_must_change` в user record)
+- **DPoP-like request signing** для session tokens — channel-bound MAC per request, защищает session_id от bearer-token theft
+- **Privilege separation** — отдельный signer process для Ed25519 ops (RCE compartmentalization)
 
 (Audit log HMAC chaining и Bootstrap token TTL configurable — перенесены в v1, см. IMPLEMENTATION_GUIDE.md §3.3 и AUTH_PROTOCOL.md §11.2.2.)
 

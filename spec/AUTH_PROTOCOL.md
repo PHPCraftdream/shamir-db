@@ -69,15 +69,24 @@
 {
   "auth_ok": {
     "server_signature": bytes(32),       // SCRAM HMAC proof
-    "server_pub_key": bytes(32),         // Ed25519 public
-    "identity_sig": bytes(64),           // см. §6
+    "server_pub_key": bytes(32),         // Ed25519 public — current
+    "identity_sig": bytes(64),           // см. §6 — signed by current Ed25519 priv
     "session_id": bytes(32),             // CSPRNG
-    "expires_at": u64,                   // unix seconds
-    "resumption_ticket": Optional<bytes>,// см. SESSION_RESUMPTION.md
-    "kdf_upgrade_required": Optional<bool>  // см. §13
+    "expires_at_ns": u64,                // unix nanos (унифицировано с tickets_invalid_before_ns)
+    "resumption_ticket": Optional<bytes>,    // см. SESSION_RESUMPTION.md
+    "resumption_expires_at_ns": Optional<u64>,
+    "kdf_upgrade_required": Optional<bool>,  // см. §13
+    "rotation_in_progress": Optional<{       // Только когда server identity в overlap window
+       "previous_pub": bytes(32),            // старый Ed25519 pub
+       "identity_sig_previous": bytes(64),   // identity_input подписан previous_priv
+       "transition_until_ns": u64,           // когда previous_priv будет zeroized
+       "rotation_proof": bytes(64)           // sign(previous_priv, ROTATION_PROOF_PAYLOAD), см. §6.5
+    }>
   }
 }
 ```
+
+`rotation_in_progress` — **присутствует** в auth_ok только когда `server_ed25519_priv_previous` ещё активен (в течение 7-day overlap после `rotateServerIdentity`). См. §6.5 для процедуры обработки клиентом.
 
 ### 2.5. `error` (Server → Client)
 
@@ -114,7 +123,7 @@ zeroize: password, salted_password, client_key
 3.5. Сервер сохраняет в `__system__/users/{user_id}`:
 ```
 {
-  name: String,                         // PRECIS UsernameCaseMapped + NFC
+  name: String,                         // PRECIS UsernameCaseMapped + NFC, ≤ 255 байт
   salt: bytes(16),
   stored_key: bytes(32),
   server_key: bytes(32),
@@ -123,11 +132,13 @@ zeroize: password, salted_password, client_key
   parallelism: u32,
   argon2_version: u8,                   // 0x13
   roles: Vec<String>,
-  tickets_invalid_before: u64,          // см. SESSION_RESUMPTION.md
-  created_at: u64,
-  updated_at: u64
+  tickets_invalid_before_ns: u64,       // unix nanos, см. SESSION_RESUMPTION.md
+  created_at_ns: u64,
+  updated_at_ns: u64
 }
 ```
+
+**Username length validation:** длина в **байтах** (после NFC + UsernameCaseMapped) ≤ 255 проверяется **до** сериализации. Reject с `bootstrap_failed` / `createUser_failed` иначе. Soft recommendation: ≤ 64 байт для UX и audit log compactness.
 
 3.6. Сервер **никогда** не хранит: `password`, `salted_password`, `client_key`.
 
@@ -264,6 +275,8 @@ fake_server_key  = fake_blob[48..80]
 ```
 `server_secret = random(32)` хранится в SystemStore (`__system__/server_meta`), **ротируется каждые 30 дней** с overlap-окном (см. IMPLEMENTATION_GUIDE.md).
 
+**Rotation behavior для fake path** [NORMATIVE]: во время overlap window для fake_blob используется **только current** `server_secret` (не previous). Иначе атакующий, наблюдающий timing changes между sessions, мог бы detect факт ротации через subtle differences в HKDF cache patterns. `server_secret_previous` используется **только** для backward-compat decrypt существующих state (если требуется), но не для генерации новых fake values.
+
 5.2.2. Server использует либо real (`stored_key, server_key, salt`) либо fake — **constant-time** branch. Те же библиотечные вызовы.
 
 5.2.3. Verify:
@@ -278,7 +291,7 @@ ok = ConstantTimeEq(SHA256(recovered_client_key), stored_key)
 ```
 server_signature = HMAC-SHA256(server_key, auth_message)
 session_id       = random(32)               // discarded if auth fails — no timing oracle
-expires_at       = now + SESSION_MAX_AGE
+expires_at_ns    = now_ns + SESSION_MAX_AGE_NS    // 24h в nanos
 
 identity_input = "SHAMIR-IDENTITY-v1"
               || SHA256(server_pub_key)     // включён в подпись (защита от key-substitution)
@@ -287,11 +300,13 @@ identity_input = "SHAMIR-IDENTITY-v1"
               || tls_exporter_or_zeros(32)
               || auth_message
               || session_id(32)
-              || u64_be(expires_at)
+              || u64_be(expires_at_ns)
 identity_sig = Ed25519::sign(server_ed25519_priv, identity_input)
 ```
 
-5.2.5. На fail → `{"error": "authentication_failed"}`. Backoff per `(client_ip_subnet, username_hash)` где subnet = `/24 IPv4` или `/64 IPv6`. Backoff: `100ms × 2^N`, cap 30s, reset 5 мин.
+5.2.5. На fail → `{"error": "authentication_failed"}`. Backoff per `(client_ip_subnet, username_hash)` где subnet = `/24 IPv4` или `/64 IPv6`. Backoff: `100ms × 2^N`, cap 30s, reset 5 мин неактивности.
+
+**Reset on success** [NORMATIVE]: при **успешной** аутентификации server **немедленно удаляет** запись `FailureState` для `(subnet, username_hash)`. Иначе legitimate user после нескольких typo получит persistent backoff даже после успешного login. Aналогично `lockout_state` для пары (если pre-threshold) — clear at success.
 
 `username_hash = HMAC-SHA256(lockout_secret, username_nfc)[..16]`. См. IMPLEMENTATION_GUIDE §1.3 — `lockout_secret` отдельный от `server_secret`, **не ротируется** (защита lockout state от orphan на ротации anti-enumeration secret).
 
@@ -326,7 +341,9 @@ Ed25519::verify_strict(server_pub_key, identity_input, identity_sig)
 
 6.2. **Хранение priv:** `__system__/server_meta` с `chmod 600` + `mlock` (best-effort) + `disable_core_dumps` (best-effort per-OS). Backup — encrypted-at-rest **отдельно** от users data.
 
-6.3. **Pinning model.** Pin = `SHA256(server_pub_key)` 32 байта. Источник:
+6.3. **Pinning model.** Pin = `SHA256(server_pub_key)` 32 байта, где `server_pub_key` — **raw 32-byte Ed25519 public key encoding** (RFC 8032 §5.1.5 compressed Y coordinate). НЕ SPKI/DER wrapping. Эта же raw form используется во всех `SHA256(server_pub_key)` operations (§5.2.4 identity_sig, §11.3.3 bootstrap, §12.2 rotation).
+
+Источник:
 - (a) URI param: `shamir+tcp://alice@host?pin=base64url(SHA256(pub))` (recommended for prod)
 - (b) `~/.shamir/known_hosts` запись от предыдущего подключения (TOFU)
 
@@ -335,6 +352,36 @@ Ed25519::verify_strict(server_pub_key, identity_input, identity_sig)
 `known_hosts` сопровождается integrity tag — см. IMPLEMENTATION_GUIDE §7.
 
 6.4. **Server identity rotation:** admin command `rotateServerIdentity` (§12.2). Поддерживает overlap-окно 7 дней (фиксировано) с подписью старым ключом перехода к новому.
+
+### 6.5. Rotation orphan protection
+
+**Проблема:** клиент offline во время rotation broadcast (§12.2 — broadcast только для активных сессий) → имеет old pin → следующее full SCRAM получает identity_sig от **new** priv → verify fail → "server compromised" → user thinks server hijacked, но это legitimate rotation.
+
+**Решение:** во время overlap window сервер **дополнительно** включает `rotation_in_progress` payload в `auth_ok` (см. §2.4):
+- `previous_pub` — старый Ed25519 pub
+- `identity_sig_previous` — те же `identity_input` (§5.2.4) подписанные `previous_priv`
+- `transition_until_ns`
+- `rotation_proof` = `Ed25519::sign(previous_priv, ROTATION_PROOF_PAYLOAD)` где
+  ```
+  ROTATION_PROOF_PAYLOAD =
+      "SHAMIR-ROTATE-PROOF-v1"              // 22 bytes ASCII
+   || SHA256(previous_pub)                  // anti key-substitution
+   || current_pub(32)                       // new key endorsed by old
+   || u64_be(transition_until_ns)
+  ```
+  Подписан `previous_priv` — доказывает что rotation legitimate (от обладателя старого ключа).
+
+**Client handling:**
+1. Verify `identity_sig` против `current_pub` через `verify_strict`
+2. Если pinned_hash matches `SHA256(current_pub)` → проверка passed, save (already pinned)
+3. Если pinned_hash matches `SHA256(previous_pub)` AND `rotation_in_progress` present:
+   - Verify `identity_sig_previous` против `previous_pub` (через verify_strict) — должен совпасть
+   - Verify `rotation_proof` против `previous_pub` — доказывает legitimate rotation
+   - Verify `transition_until_ns > now_ns` — overlap не истёк
+   - **С user confirmation если interactive** ИЛИ fail-closed для non-interactive scripts → update pin to `SHA256(current_pub)`
+4. Иначе (pinned ≠ current AND pinned ≠ previous) → `server_identity_changed`, disconnect
+
+Это закрывает orphan client случай без compromise security: legitimate rotation сопровождается криптографическим доказательством от обладателя предыдущего ключа.
 
 ---
 
@@ -347,16 +394,39 @@ Ed25519::verify_strict(server_pub_key, identity_input, identity_sig)
 struct Session {
     user_id: bytes(16),
     username: String,
-    permissions: SessionPermissions,        // см. §7.3
-    created_at: Instant,
+    permissions: SessionPermissions,        // см. §7.3 — snapshot at auth
+    created_at_ns: u64,                     // unix nanos — для validity check (§7.4.1)
     last_activity: AtomicU64,
     transport_kind: u8,                     // tcp=0x01, ws=0x02
     binding_mode: u8,                       // см. §4.2
     channel_binding_at_auth: bytes(32),     // снят с auth — для resumption check
+    pending_changepw_challenge: Option<{    // см. §12.5
+        server_nonce_cp: bytes(32),
+        client_nonce_cp: bytes(32),
+        issued_at_ns: u64,
+    }>
 }
 ```
 
 (Nonces `client_nonce`/`server_nonce` НЕ хранятся в Session после handshake. См. §12.5 — `changePassword` использует свой challenge cycle.)
+
+### 7.4.1. Per-request session validity check (NORMATIVE)
+
+**На каждом** request в активной сессии (после auth_ok) сервер проверяет **до** обработки запроса:
+
+```
+if session.created_at_ns <= user.tickets_invalid_before_ns:
+    close session with error "session_invalidated"
+    audit event session_evicted{reason="invalidated"}
+    return
+```
+
+Это закрывает race между `updateUser`/`kickSession` и in-flight requests/resumes:
+- Resume create новую Session с `created_at_ns = now_ns`
+- Если updateUser обновил `tickets_invalid_before_ns = now_ns_later` после создания этой сессии — следующий request от неё detected как invalid → kicked
+- Без этой проверки сессия escape'нула updateUser snapshot и жила до idle TTL
+
+Cost: один `u64 <=` compare per request — тривиально.
 
 7.3. **SessionPermissions** — snapshot ролей в момент auth:
 ```
@@ -416,24 +486,42 @@ struct SessionPermissions {
 
 8.4. **Lockout silent**: response identical с `authentication_failed`. Внутреннее состояние не раскрывается.
 
-8.5. **Latency padding для negative paths**: rate_limited / lockout / server_busy ответы задерживаются до `target_constant_time = max(jitter_ms, kdf_time_seconds * 1000)`.
+8.5. **Latency padding** применяется к **всем** ответам сервера в auth flow (challenge response И negative-path responses). Цель — устранить timing oracle между real-vs-fake user paths (fake уходит в HKDF, real — в DashMap lookup; на microsecond уровне это различимо). Реализация: задержка до `target_constant_time_ms = max(jitter_ms, fixed_floor_ms)` где `fixed_floor_ms = 50` (защищает от LAN/loopback нанo-timing) + `jitter_ms = uniform[0, 25]` (статистический шум).
+
+Trade-off: добавляет ~50ms latency per handshake. Acceptable — Argon2id уже занимает ~2с.
 
 8.6. **Restart warmup window**: первые 60 секунд после старта сервер applies глобальный rate limit `RATE_LIMIT_AUTH_INIT_PER_SUBNET / 4 = 2.5/sec` пока in-memory state warmup'ится из persisted snapshots. Закрывает restart-replay window для distributed attackers.
+
+8.7. **Server clock requirements**: server MUST использовать synchronized clock (NTP с smoothed time источниками или PTP). Большие clock jumps (>5 секунд назад) могут invalidate live tickets; jumps вперёд могут expire active sessions. При detection clock anomaly (`abs(now - last_observed) > 5s`) — log warning event + рекомендуется manual `revokeAllTickets`.
 
 ---
 
 ## 9. Constant-time Discipline
 
-"Constant-time" = **branch-equivalent**: одинаковые библиотечные вызовы и memory access patterns на real-vs-fake путях. **Не** wall-clock padding.
+Защита состоит из **двух независимых слоёв**:
 
-Применяется к:
-- 5.2.1—5.2.4 SCRAM verify (real / fake path)
+### 9.1. Branch-equivalent code paths
+
+Одинаковые библиотечные вызовы на real-vs-fake путях. Применяется к:
+- §5.2.1—5.2.4 SCRAM verify (real / fake path)
 - §11 Bootstrap token check — `ConstantTimeEq(SHA256(token), stored_hash)`
-- 5.3 Client mutual auth — все compare через `subtle::ConstantTimeEq` / `@noble/equalBytes`
+- §5.3 Client mutual auth — все compare через `subtle::ConstantTimeEq` / `@noble/equalBytes`
 
-**Ed25519 verify** — variable-time on public inputs (RFC 8032 §6). Это OK криптографически — нет remote oracle. Boolean result branching на клиенте — безопасен.
+**Ed25519 verify** — variable-time на public inputs (RFC 8032 §6). OK криптографически — нет remote oracle.
 
-**Cache side-channel** (Argon2id internals, HMAC variability) — **не покрывается**. Защита: generic errors, generic latency.
+### 9.2. Wall-clock padding (см. §8.5)
+
+Branch-equivalent **недостаточно** для anti-enumeration на microsecond уровне. Конкретно: real path делает DashMap lookup, fake path — HKDF derivation. Эти операции занимают разное время даже при идентичной структуре кода.
+
+Защита: **latency padding** перед отправкой challenge response и negative-path responses (§8.5). Это устраняет timing oracle на сетевом уровне.
+
+### 9.3. Что НЕ покрывается
+
+- **Cache side-channels** (Argon2id internals, HMAC implementations vary by CPU)
+- **Cross-VM timing** на shared host
+- **Spectre/Meltdown classes** — out of scope (A8 в SECURITY_MODEL §1)
+
+Mitigation для этих случаев = generic errors + generic latency + не запускать на shared host без isolation.
 
 ---
 
@@ -463,7 +551,7 @@ struct SessionPermissions {
 ### 11.2. Token issuance
 
 11.2.1. `bootstrap_token = random(32)`, prefix `shbst1_` для git-secret-scanners.
-11.2.2. Сервер сохраняет атомарно: `bootstrap_token_hash = SHA256(token)`, `bootstrap_token_expires_at = now + bootstrap_token_ttl`.
+11.2.2. Сервер сохраняет атомарно: `bootstrap_token_hash = SHA256(token)`, `bootstrap_token_expires_at_ns = now_ns + bootstrap_token_ttl_ns`.
 
 `bootstrap_token_ttl` configurable (server config):
 - Default: **1 час**
@@ -474,7 +562,7 @@ Air-gapped deployments (где token нужно физически достав�
 
 11.2.3. **Token output** (server config):
 - `--bootstrap-token-tty` (default): печать в stdout **только** если `isatty(stdout)`. Иначе server fails с инструкцией.
-- `--bootstrap-token-file <path>`: атомарно создать `chmod 600` файл, записать токен. Server **MUST** удалять файл (a) при `bootstrap_used` event AND (b) фоновым GC при `now > expires_at`. На startup server проверяет file existence vs `bootstrap_token_hash IS NULL` и удаляет orphan файл (audit event `bootstrap_token_file_orphan_cleaned`).
+- `--bootstrap-token-file <path>`: атомарно создать `chmod 600` файл, записать токен. Server **MUST** удалять файл (a) при `bootstrap_used` event AND (b) фоновым GC при `now_ns > bootstrap_token_expires_at_ns`. На startup server проверяет file existence vs `bootstrap_token_hash IS NULL` и удаляет orphan файл (audit event `bootstrap_token_file_orphan_cleaned`).
 - **Запрещено** логирование через `tracing!` / `log!`.
 
 11.2.4. Рядом печатается `SERVER_PUB_FINGERPRINT: base64url(SHA256(server_ed25519_pub))` для out-of-band pinning.
@@ -491,6 +579,7 @@ Bootstrap **обязан** работать только на **native client** 
 ```
 { "bootstrap_challenge": {
     "server_pub_key": bytes(32),
+    "server_time": u64,                    // unix nanos, передаётся на проводе для verify
     "identity_sig_bootstrap": bytes(64)
 }}
 ```
@@ -498,7 +587,7 @@ Bootstrap **обязан** работать только на **native client** 
 ```
 identity_sig_bootstrap = Ed25519::sign(priv,
     "SHAMIR-BOOTSTRAP-v1"
-    || SHA256(server_pub_key)              // защита от key-substitution
+    || SHA256(server_pub_key)              // защита от key-substitution; SHA-256 от raw 32-byte Ed25519 encoding (RFC 8032 §5.1.5)
     || u8(transport_kind)
     || tls_exporter(32)
     || client_nonce(32)                    // anti-replay binding к этому клиенту
@@ -506,7 +595,13 @@ identity_sig_bootstrap = Ed25519::sign(priv,
 )
 ```
 
-11.3.4. Клиент валидирует pin = `SHA256(server_pub_key)` (constant-time) и Ed25519 подпись. Mismatch → disconnect, **plain password не уходит**.
+**Все** поля подписываемого payload передаются клиенту явно (`server_pub_key`, `server_time` на wire; `transport_kind`, `tls_exporter`, `client_nonce` известны клиенту локально). Без этого клиент не может воссоздать payload для verify.
+
+11.3.4. Клиент **MUST** валидировать **в указанном порядке** (любой fail → disconnect, plain password не уходит):
+- (a) `ConstantTimeEq(SHA256(server_pub_key), pinned_hash)` — pin check
+- (b) Ed25519 verify_strict(server_pub_key, identity_input, identity_sig_bootstrap) — подпись valid
+- (c) **`ConstantTimeEq(client_nonce_in_signed_payload, client_nonce_отправленный_в_bootstrap_hello)`** — anti-replay challenge другому клиенту
+- (d) `abs(now - server_time) ≤ 60 секунд` — clock anomaly detection
 
 11.3.5. Клиент локально вычисляет derived материал (как §3.3) с **серверными default params**, шлёт:
 ```
@@ -526,13 +621,13 @@ identity_sig_bootstrap = Ed25519::sign(priv,
 ```
 
 11.3.6. Server атомарно (mutex + CAS):
-- Validate `expires_at > now` AND `ConstantTimeEq(SHA256(token), bootstrap_token_hash)`
+- Validate `bootstrap_token_expires_at_ns > now_ns` AND `ConstantTimeEq(SHA256(token), bootstrap_token_hash)`
 - Validate `kdf_params == server_defaults` (защита от malicious client'а)
 - Validate username:
   - PRECIS UsernameCaseMapped + NFC
   - **Если username уже существует** → `bootstrap_failed` (no overwrite). Operator должен сначала удалить collision через `--list-users` / `--delete-user` CLI.
 - Создаёт user с ролью `superuser`
-- Set `bootstrap_token_hash = NULL`, `bootstrap_token_expires_at = NULL`, `superuser_ever_existed = true`
+- Set `bootstrap_token_hash = NULL`, `bootstrap_token_expires_at_ns = NULL`, `superuser_ever_existed = true`
 - Invariant: после успеха `bootstrap_token_hash IS NULL AND superuser EXISTS`
 
 11.3.7. На fail → `{"error": "bootstrap_failed"}` (generic).
@@ -577,7 +672,7 @@ Server validates:
 
 ```
 Request:  { "rotateServerIdentity": {} }                  // нет параметров; window фиксировано 7 дней
-Response: { "ok": { "new_pub": bytes(32), "transition_until": u64 } }
+Response: { "ok": { "new_pub": bytes(32), "transition_until_ns": u64 } }
 ```
 
 Процедура:
@@ -588,7 +683,7 @@ Response: { "ok": { "new_pub": bytes(32), "transition_until": u64 } }
 { "identity_rotation": {
     "old_pub": bytes(32),
     "new_pub": bytes(32),
-    "transition_until": u64,
+    "transition_until_ns": u64,
     "recipient_session_id": bytes(32),         // полный sid (не prefix), уникален per recipient
     "signed_by_old": bytes(64)
 }}
@@ -596,12 +691,18 @@ where signed_by_old = Ed25519::sign(old_priv,
     "SHAMIR-ROTATE-v1"
     || SHA256(old_pub)                         // domain binding to current key (anti-stale-pin attack)
     || new_pub
-    || u64_be(transition_until)
+    || u64_be(transition_until_ns)
     || recipient_session_id(32)                // anti-replay between recipients
 )
 ```
-4. Клиент: проверяет `signed_by_old` против currently pinned `old_pub` (`ConstantTimeEq(SHA256(old_pub), pinned_hash)`), проверяет `recipient_session_id == my_session_id` (constant-time), валидирует Ed25519 подпись. Обновляет pin (с user confirmation если interactive).
-5. Через `transition_until` server zeroize old priv.
+4. Клиент: проверяет **в указанном порядке** (любой fail → close connection без обновления pin, audit event `identity_rotation_invalid`):
+   - (a) `ConstantTimeEq(SHA256(old_pub), pinned_hash)` — old_pub matches currently pinned
+   - (b) `ConstantTimeEq(recipient_session_id, my_session_id)` — message не для другого recipient
+   - (c) Ed25519 verify_strict(old_pub, signed_by_old payload, signed_by_old signature) — подпись valid
+   - (d) `transition_until_ns > now_ns + 60_000_000_000` (60s в nanos) — overlap window реалистичен
+   
+   На success: обновляет pin (с user confirmation если interactive, иначе fail-closed для non-interactive scripts).
+5. Через `transition_until_ns` server zeroize old priv.
 
 **Emergency rotation (без grace окна):** server config `--identity-revoked` flag (см. IMPLEMENTATION_GUIDE §5.2). Active sessions terminate, new sessions reject пока operator не выполнит rotation properly.
 
@@ -625,7 +726,7 @@ Request:  { "kickSession": {
 Response: { "ok": { "killed_count": u32 } }
 ```
 
-**Атомарно (single transaction):** kill matching sessions + update `user.tickets_invalid_before = now` для затронутых юзеров (защита от resumption через украденный ticket с устаревшими ролями).
+**Атомарно (single transaction):** kill matching sessions + update `user.tickets_invalid_before_ns = now_ns` для затронутых юзеров (защита от resumption через украденный ticket с устаревшими ролями).
 
 ### 12.5. `changePassword` (self-service)
 
@@ -644,6 +745,12 @@ Server → Client: { "challenge_cp": {
     "memory_kb": u32, "time": u32,              // current user kdf params
     "parallelism": u32, "argon2_version": u8
 }}
+
+# [NORMATIVE] Single in-flight challenge per session_id:
+# Server stores pending_changepw_challenge в Session struct (§7.2).
+# Повторный changePasswordChallenge от той же session → **invalidates** previous
+# (overwrites pending_changepw_challenge). Multi-tab user должен это понимать —
+# первый submit fails если другой tab инициировал свой challenge ранее.
 
 Step 3 — Both compute auth_message_cp:
 auth_message_cp =
@@ -683,9 +790,15 @@ Step 4 — Client → Server:
 # kdf_params от клиента игнорируются — server применяет current defaults
 
 Step 5 — Server verifies:
+# Lookup session.pending_changepw_challenge — должен быть present
+# (иначе client пытается submit без prior changePasswordChallenge → reject)
+# Использует server_nonce_cp + client_nonce_cp ИЗ session.pending state, не из network message.
+
 client_signature = HMAC(user.stored_key, auth_message_cp)
 recovered = client_proof_old XOR client_signature
 ok = ConstantTimeEq(SHA256(recovered), user.stored_key)
+
+# Atomic on success: clear session.pending_changepw_challenge (single-use), persist new keys.
 
 Step 6 — Server → Client: { "ok": {} } или { "error": "authentication_failed" }
 ```
@@ -694,7 +807,7 @@ Step 6 — Server → Client: { "ok": {} } или { "error": "authentication_fai
 
 12.5.2. Server **игнорирует** client-supplied kdf_params — всегда server defaults.
 
-12.5.3. **Все сессии юзера убиваются** (включая текущую) И `tickets_invalid_before = now`. Клиент должен переаутентифицироваться.
+12.5.3. **Все сессии юзера убиваются** (включая текущую) И `tickets_invalid_before_ns = now_ns`. Клиент должен переаутентифицироваться.
 
 12.5.4. Serialized per user (mutex). Atomic update.
 
@@ -705,23 +818,28 @@ Request:  { "updateUser": {
               "user": String,
               "roles": Option<Vec<String>>
            }}
-Response: { "ok": {} }
+Response: { "ok": { "changes_applied": bool } }
 ```
 
-**Атомарно (single transaction). Строгий порядок шагов** (защита от race с in-flight resumption):
+**No-op semantic:** если `roles == None` AND ничего не меняется реально → server возвращает `{ok: {changes_applied: false}}` **без** обновления `tickets_invalid_before_ns` и **без** kill sessions. Защита от silent DoS через repeated `updateUser(alice)` без аргументов (иначе атакующий-admin или buggy script могли бы forced full SCRAM каждую минуту).
+
+**Если есть реальные изменения** — атомарная процедура (single transaction, persist barrier):
 
 ```
-1. Update user record (roles если задан) → persist
-2. Set user.tickets_invalid_before = now → persist
-3. (Persist barrier — дальнейшие resume будут видеть новое tickets_invalid_before)
-4. Snapshot active sessions matching user_id
-5. Kill snapshotted sessions (close connections)
-6. Audit event roles_changed
+1. Update user record (roles → new value) → persist (durable)
+2. Set user.tickets_invalid_before_ns = now_ns → persist (durable)
+3. (Persist barrier — все subsequent reads видят новое значение)
+4. Optional: snapshot active sessions matching user_id, close connections (best-effort eviction)
+5. Audit event roles_changed
+6. Response { changes_applied: true }
 ```
 
-Между шагом 2 и снапшотом любое in-flight resume увидит обновлённый `tickets_invalid_before` и отвергнется. Без шага 3 (persist barrier) гонка возможна.
+**Race protection — двухуровневая:**
+- (a) **In-flight resumption:** новый resume after step 2 fails check `original_auth_at_ns > tickets_invalid_before_ns` (SESSION_RESUMPTION §5.4 step 9, strict `>`)
+- (b) **Sessions созданные между step 2 и step 4** (resume concurrent): покрываются **per-request session validity check** (§7.4.1) — на следующем request session detected as invalidated и kicked
+- Step 4 = best-effort eager eviction для immediate kill TCP connection. Без §7.4.1 step 4 был бы insufficient race window.
 
-(Принудительная смена пароля — будет в v1.1; для v1: admin удаляет user через CLI и создаёт заново через `createUser`, или просит юзера сменить через §12.5 self-service.)
+(Принудительная смена пароля — v1.1; для v1: admin удаляет user через CLI и создаёт заново через `createUser`, или просит юзера сменить через §12.5 self-service.)
 
 ### 12.7. Информационные команды
 
@@ -777,10 +895,25 @@ Response: { "ok": {} }
 - NFC normalization
 - Case-folded (lowercase) — защита от homograph атак
 - Запрещены: control chars (Cc), bidi-format chars (Cf вне allow-list), private-use plane
+- Pinned **Unicode version 15.1** для v1 (test vectors зависят от этой версии — см. §16)
 
-Lookup и хранение — **после** нормализации. Длина измеряется в **байтах** UTF-8.
+Lookup и хранение — **после** нормализации. Длина измеряется в **байтах** UTF-8 (после NFC), max 255.
+
+**Forbidden character handling** [NORMATIVE]: при detection запрещённого символа в `auth_init.user` сервер **MUST**:
+1. НЕ запускать Argon2id (constant-time discipline)
+2. Возвращать generic `{"error": "authentication_failed"}` (без раскрытия причины)
+3. Закрыть connection
+4. Audit event `auth_failed{reason="invalid_username_chars"}` (только во внутренний log)
+
+**Cross-language consistency** требование: Rust impl (через `unicode-normalization` + `precis-profiles`) и JS impl (через `String.prototype.normalize("NFC").toLowerCase()` + custom blacklist) должны pass одинаковые test vectors. Mismatch → release blocker.
 
 15.4. **Password не нормализуется** (NIST SP 800-63B §5.1.1.2). UTF-8 bytes как есть.
+
+15.5. **Timestamp convention** [NORMATIVE]: **все** wire-level и persisted timestamps используют **unix nanoseconds** (`u64`) с суффиксом `_ns` в именах полей. Никаких `_secs` / `_at` без суффикса в protocol-level fields.
+
+Применяется к: `expires_at_ns`, `tickets_invalid_before_ns`, `created_at_ns`, `updated_at_ns`, `original_auth_at_ns`, `bootstrap_token_expires_at_ns`, `transition_until_ns`, `last_audit_checkpoint_at_ns`, `audit log ts_ns`, и т.д.
+
+Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **MUST** use monotonic-corrected unix nanos (NTP-disciplined) — наивный `gettimeofday` уязвим к user-space clock manipulation на host.
 
 ---
 
@@ -794,8 +927,8 @@ Lookup и хранение — **после** нормализации. Длин
 Inputs:
   username = "alice"          (5 bytes UTF-8 NFC casemapped)
   client_nonce = 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
-  server_nonce = 2030...4f    (32 bytes 0x20..0x3f)
-  salt         = 5051..5f     (16 bytes 0x50..0x5f)
+  server_nonce = 20212223...3e3f   (32 bytes 0x20..0x3f)
+  salt         = 5051...5e5f       (16 bytes 0x50..0x5f)
   memory_kb=131072 (0x00020000), time=4, parallelism=1, argon2_version=0x13
   transport_kind=0x01 (tcp), binding_mode=0x01 (tls_exporter)
   tls_exporter = aabbccdd...  (32 bytes 0xaa..0xc9)
@@ -818,6 +951,8 @@ auth_message bytes:
   01                                    # binding_mode=tls_exporter
   aabbccdd ... (32 bytes)               # tls_exporter
   01                                    # supported_version
+
+Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 149 bytes
 ```
 
 Полный test-vectors JSON содержит:
@@ -843,7 +978,8 @@ auth_message bytes:
 | `"SHAMIR-CHGPW-v1"` | Header auth_message_cp в changePassword |
 | `"SHAMIR-IDENTITY-v1"` | Префикс identity_sig |
 | `"SHAMIR-BOOTSTRAP-v1"` | Bootstrap challenge sig |
-| `"SHAMIR-ROTATE-v1"` | Identity rotation sig |
+| `"SHAMIR-ROTATE-v1"` | Identity rotation event sig (active session broadcast) |
+| `"SHAMIR-ROTATE-PROOF-v1"` | Rotation proof в auth_ok (orphan client recovery, §6.5) |
 | `"EXPORTER-ShamirDB-AUTH-v1"` | TLS exporter label |
 | `"SHAMIR-TICKET-v1"` | См. SESSION_RESUMPTION.md |
 
