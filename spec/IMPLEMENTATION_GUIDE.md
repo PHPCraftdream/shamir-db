@@ -17,7 +17,7 @@ Operational details для имплементаторов сервера и кл
   // Anti-enumeration
   server_secret: bytes(32),                       // ротируется (§5.1)
   server_secret_previous: Option<bytes(32)>,
-  server_secret_rotated_at: u64,
+  server_secret_rotated_at_ns: u64,
   
   // Lockout state derivation key — отдельный от server_secret
   lockout_secret: bytes(32),                      // НЕ ротируется (lockout state survives)
@@ -27,31 +27,33 @@ Operational details для имплементаторов сервера и кл
   server_ed25519_pub: bytes(32),
   server_ed25519_priv_previous: Option<bytes(32)>,
   server_ed25519_pub_previous: Option<bytes(32)>,
-  server_ed25519_rotation_until: Option<u64>,
+  server_ed25519_rotation_until_ns: Option<u64>,  // overlap window end
   
   // Resumption
   ticket_key: bytes(32),
   ticket_key_previous: Option<bytes(32)>,
-  ticket_key_rotated_at: u64,
+  ticket_key_rotated_at_ns: u64,
   
   // Audit log integrity
   audit_chain_key: bytes(32),                     // HMAC key для chained log (см. §3.3)
   audit_chain_key_previous: Option<bytes(32)>,    // overlap при ротации
-  audit_chain_key_rotated_at: u64,
+  audit_chain_key_rotated_at_ns: u64,
   
   // Audit truncation defence (см. §3.3)
   last_audit_hmac: bytes(32),                     // checkpoint предыдущей записи
   last_audit_seq: u64,                            // монотонная sequence
-  last_audit_checkpoint_at: u64,
+  last_audit_checkpoint_at_ns: u64,
   
   // Bootstrap state
   bootstrap_token_hash: Option<bytes(32)>,
-  bootstrap_token_expires_at: Option<u64>,
+  bootstrap_token_expires_at_ns: Option<u64>,
   superuser_ever_existed: bool,
   
-  created_at: u64
+  created_at_ns: u64
 }
 ```
+
+**Все timestamps unix nanoseconds** (см. AUTH §15.5). NTP-disciplined источник обязателен.
 
 POSIX: `chmod 600`, owned by server user. Windows: ACL только owner SID. Backup encrypted-at-rest **отдельно** от users data (например, `age` с recipient key оператора).
 
@@ -69,6 +71,7 @@ struct FailureState {
 - `username_hash = HMAC-SHA256(lockout_secret, username_nfc)[..16]` — anti-enumeration через **отдельный** `lockout_secret` (НЕ ротируется, см. §1.2)
 - Background GC каждые 60s: удалить entries с `now - last_fail > BACKOFF_RESET`
 - Hard cap `MAX_AUTH_FAILURES_ENTRIES = 1M`, LRU eviction
+- **[NORMATIVE] Reset on success**: при успешной auth соответствующая `(subnet, username_hash)` entry **немедленно удаляется** из `auth_failures` И `lockout_state` (если pre-threshold). Иначе legitimate user видит persistent backoff после typo. См. AUTH §5.2.5.
 
 #### `lockout_state: DashMap<(subnet, username_hash), LockoutState>` [NORMATIVE]
 ```
@@ -102,10 +105,21 @@ struct HandshakeState {
 ```
 GC каждые 5s: drop без proof в течение 10s.
 
-#### `consumed_counters: DashMap<user_id, u64>` [NORMATIVE]
-last_consumed `monotonic_counter` для resumption (см. SESSION_RESUMPTION §6.2).
+#### `consumed_counters: DashMap<(user_id, ticket_family_id), u64>` [NORMATIVE]
+last_consumed `family_counter` per ticket lineage (см. SESSION_RESUMPTION §6.2).
 
-**SYNCHRONOUS persist** (fsync) перед `resume_ok` reply — **не** batched. См. SESSION_RESUMPTION §10.2.
+**SYNCHRONOUS DURABLE persist** перед `resume_ok` reply — **не** batched. "Durable" =:
+- POSIX `fsync` после write
+- SQLite backend: `PRAGMA synchronous=FULL` + WAL + checkpoint OR `PRAGMA synchronous=EXTRA`
+- sled/redb/fjall: equivalent flush-and-sync
+- ext4: mount option `barrier=1` (default modern, проверять)
+- xfs/btrfs: equivalent write barriers
+- **Power-fail testing required** для valid implementation (release blocker per IMPLEMENTATION_GUIDE §11)
+
+См. SESSION_RESUMPTION §10.2 для motivation. **Not batched** потому что batched flush откатывает counter при crash → ticket replay window.
+
+#### `bootstrap_token_files: DashMap<path, expires_at_ns>`
+Tracking outstanding bootstrap token files для GC (см. §1.4).
 
 #### `sessions: DashMap<session_id, Arc<Session>>`
 Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каждую минуту.
@@ -113,6 +127,22 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 ### 1.4. Restart warmup [NORMATIVE]
 
 В первые 60 секунд после старта server applies глобальный rate limit `RATE_LIMIT_AUTH_INIT_PER_SUBNET / 4 = 2.5/sec` пока in-memory state warmup'ится из persisted snapshots. Закрывает restart-replay window для distributed attackers.
+
+### 1.5. Memory quotas [NORMATIVE]
+
+Помимо `PER_SESSION_MEM = 64 MB` (AUTH §7.4):
+
+- `MAX_TOTAL_SESSION_MEM_PER_SUBNET = 256 MB` — глобальный cap на (input + output буферы + parsed query state) для всех sessions от одного subnet (/24 IPv4, /64 IPv6). Превышение → новые sessions из subnet rejected с `server_busy`.
+- Backpressure policy: при достижении 75% от cap — server отклоняет non-critical operations (admin commands proceed) и шлёт `Retry-After` header.
+- `MAX_CONCURRENT_ARGON2` рекомендуется derive from RAM: `floor(available_ram_mb / (kdf.memory_kb / 1024 × 2.5))`. Hard cap 64. Защищает от OOM при memory_kb=128, server с 4GB RAM.
+
+### 1.6. known_hosts.bin fallback encryption (NORMATIVE для headless deploy)
+
+Когда OS keychain недоступен (headless server, embedded), `local_key.bin` fallback (см. §7) хранится в `~/.shamir/local_key.bin` chmod 600. **Encryption обязательна:**
+
+- Default: encrypted с пользовательской passphrase через `scrypt` (N=2^17, r=8, p=1) → AES-256-GCM. Passphrase запрашивается интерактивно при первом запуске; хранится в memory keyring/agent для последующих.
+- Alternative: `--local-key-file <path>` injected via env var or external secrets manager (Vault, Doppler).
+- Plain `local_key.bin` (без encryption) — **только** с `--insecure-local-key` flag и audit warning при каждом запуске.
 
 ---
 
@@ -123,14 +153,38 @@ Session state — AUTH_PROTOCOL §7.2. Не персистентны. GC каж�
 ```toml
 [server]
 data_dir = "./data"
-bootstrap_token_output = "tty"          # tty | file:<path>
-bootstrap_token_ttl_secs = 3600         # default 1 час, min 300, max 86400
+
+# Bootstrap token output — варианты, выбрать один
+bootstrap_token_output = "tty"          # tty | file:<path> | command:<cmd>
+bootstrap_token_ttl_ns = 3_600_000_000_000     # default 1 час (60·60·1e9 nanos), min 300s=3e11, max 24h=8.64e13
 
 # Argon2id defaults (must satisfy floor §3.7.2 AUTH)
 [kdf]
 memory_kb = 131072
 time = 4
 parallelism = 1
+# MAX_CONCURRENT_ARGON2 — RECOMMENDED derive from RAM:
+#   floor(available_ram_mb / (memory_kb / 1024 * 2.5))
+# Hard cap 64 (защита от runaway).
+# Без autodetect — fixed:
+max_concurrent_argon2 = 32              # для server с 8 GB RAM
+
+# Strict mode hardening (defaults для backward compat, для prod рекомендуется true)
+[strict]
+allow_browser_ticket_upgrade = true     # false = browser ticket НЕ может быть resumed в native
+disable_tofu_in_production = false      # true = клиенты MUST использовать out-of-band pin
+
+# Memory budgets [NORMATIVE]
+[limits]
+per_session_mem_mb = 64
+max_total_session_mem_per_subnet_mb = 256
+max_connections_per_ip = 100
+
+# Resumption behavior
+[resumption]
+disable_plain_ticket_upgrade = false    # true = plain ticket НЕ может resume в TLS transport
+                                         # (мнемоника: plain → stronger transport blocked)
+                                         # false (default) = embedded handoff OK
 
 # Listeners — каждый со своим binding_mode policy
 [[listener]]
@@ -160,6 +214,14 @@ addr = "0.0.0.0:7335"
 allowed_origins = ["https://admin.example.com"]
 ```
 
+#### Bootstrap token output options
+
+- `tty` (default): печать в stdout **только** если `isatty(stdout)` AND процесс не systemd-managed (проверка `INVOCATION_ID` env var). Иначе server fails с инструкцией.
+- `file:<path>`: атомарно создать `chmod 600` файл. **Strongly recommend tmpfs/ramdisk path** (`/run/shamir/bootstrap.token` или `/dev/shm/...`) — обычные filesystem пути попадают в backup/AV/EDR/cloud sync ecosystem. Server **MUST** удалить после use или TTL.
+- `command:<cmd>`: pipe token в external command (e.g., `pass insert shamir/bootstrap`, `age -r recipient -e -o /vault/token.age`, `gpg -e -r ops@example.com`). Token не касается обычного диска.
+
+**WARNING:** systemd / journald / docker logs / k8s log shippers **захватывают stdout** даже при `isatty` check (через TTY emulation). Пред-deployment проверять `journalctl -u shamirdb` после bootstrap — токен не должен присутствовать.
+
 **MUST:** profile→binding_mode mapping enforced server-side. Server rejects auth_init с `binding_mode` не в listener policy **до** Argon2id (DoS-amp защита; см. AUTH §4.3).
 
 ### 2.2. Plain TCP listener constraints [NORMATIVE]
@@ -172,6 +234,13 @@ Server при старте **проверяет** и fails если:
   - Unix domain socket (path-based)
 - `profile = "plain"` AND `0.0.0.0` или `::` (любой "any-bind") → **NEVER allowed**
 - `addr` resolves to multiple addresses вне whitelist
+
+**Bootstrap on plain loopback не поддерживается в v1.** Bootstrap (§11 AUTH) требует `binding_mode == 0x01` (TLS exporter). Embedded deployment с plain TCP loopback должен:
+- (a) Поднять TLS listener временно для первого bootstrap, потом switch к plain, ИЛИ
+- (b) Использовать `--regen-bootstrap` flag через CLI с предзаготовленными credentials, ИЛИ
+- (c) Pre-provision admin user через CLI tool (не через wire protocol)
+
+Operational note: pure-plain embedded deployments — это explicit limitation v1. v1.1+ может добавить unix-socket-based bootstrap с file-permission-based authority.
 
 ### 2.3. Browser-only deployment warning
 
@@ -374,6 +443,21 @@ Trade-off: атакующий получает clean slate (50 attempts зано
 4. Restart → operator делает re-bootstrap для нового admin
 5. Operator manually удаляет старого locked-out admin (если есть)
 
+### 5.7. Backup restore (counter rollback prevention) — MANDATORY
+
+При restore SystemStore из backup `consumed_counters` могут откатываться → ticket replay window. **Mandatory recovery step:**
+
+1. Restore SystemStore из backup
+2. **Перед** start сервера: `shamir-server --revoke-all-tickets-on-start` flag
+3. Server при старте инвалидирует `ticket_key` (rotates без overlap, `ticket_key_previous = NULL`)
+4. Audit event `revoke_all_tickets{reason="backup_restore"}` записан
+5. Все клиенты делают full re-auth (~2с Argon2id, acceptable для recovery scenario)
+6. После — нормальная работа
+
+Документировать в operations runbook: **"Любой backup restore SystemStore = mandatory revokeAllTickets"**.
+
+Аналогично — при disk corruption suspected, replication failover, OS reinstall с restored data dir.
+
 ---
 
 ## 6. Observability — Metrics
@@ -400,6 +484,8 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 - `shamir_auth_duration_seconds{transport}`
 - `shamir_argon2id_duration_seconds`
 - `shamir_handshake_state_lifetime_seconds`
+- `shamir_resumption_fsync_latency_seconds` — alert если p99 > 100ms (recommend NVMe или WAL group-commit)
+- `shamir_audit_log_append_latency_seconds`
 
 ### 6.3. Gauges
 
@@ -416,6 +502,9 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 - Bootstrap usage anomaly: `shamir_bootstrap_attempts_total > 1`
 - Resumption downgrade: `rate(shamir_resumption_used_total{result="downgrade_blocked"}[5m]) > 0`
 - Audit chain corruption: `shamir_audit_chain_verify_failures_total > 0`
+- Resumption fsync slow: `histogram_quantile(0.99, shamir_resumption_fsync_latency_seconds) > 0.1` — рекомендация мигрировать на NVMe или включить WAL group-commit
+- TOFU consent usage in production: `rate(shamir_admin_command_total{command="accept_new_host"}[1h]) > 0` — если `disable_tofu_in_production = true`, должно быть 0
+- Clock skew: `abs(time() - shamir_last_observed_time) > 5` — manual `revokeAllTickets` recommended
 
 ---
 
@@ -425,16 +514,16 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 
 Format `known_hosts`:
 ```
-host:port  base64url(SHA256(server_pub_key))  added_at_unix
+host:port  base64url(SHA256(server_pub_key))  added_at_ns
 ```
 
 `known_hosts.mac` = HMAC-SHA256(`local_key`, file_content).
 
-`local_key` хранится в:
+`local_key` хранится в (priority order):
 - macOS: Keychain (Service: "ShamirDB", Account: "known-hosts-mac")
 - Linux: freedesktop secret-service (D-Bus)
 - Windows: Credential Manager
-- Headless / no-keychain: `~/.shamir/local_key.bin` chmod 600 (best-effort fallback)
+- Headless: `~/.shamir/local_key.bin` encrypted (см. §1.6)
 
 При чтении:
 1. Если `local_key` недоступен → **fail-closed**, требовать out-of-band pin
@@ -443,6 +532,30 @@ host:port  base64url(SHA256(server_pub_key))  added_at_unix
 4. При file replace (rotation): atomic rename + новый MAC
 
 При несовпадении owner / permissions → **fail-closed**.
+
+### 7.1. Server Identity Rotation — известные клиенты
+
+Когда сервер выполняет `rotateServerIdentity` (AUTH §12.2), клиенты получают `identity_rotation` event в активной сессии. Procedure:
+
+1. Клиент проверяет `signed_by_old` против currently pinned `old_pub`
+2. Если valid: client SHOULD prompt user (interactive CLI) с информацией:
+   - Old pin: `base64url(SHA256(old_pub))`
+   - New pin: `base64url(SHA256(new_pub))`
+   - Transition until: `<timestamp>`
+3. На user confirmation: atomic update known_hosts entry для host:port
+4. Recompute MAC, persist
+5. Если non-interactive (CLI script): **fail-closed**, требовать manual `--pin <new>` для следующего подключения
+
+Audit event `client_known_hosts_updated` (если client logging включён).
+
+### 7.2. TOFU production hardening
+
+Server config `[strict] disable_tofu_in_production = true`:
+- Server возвращает `tofu_disabled` warning в auth_ok если клиент использовал `--accept-new-host` (по протоколу: client SHOULD signal но это honor-system)
+- Audit event `tofu_consent_used` записан с user, ip, timestamp
+- Operators могут alert на любое появление этого event
+
+Client side: `--accept-new-host` flag всегда печатает loud stderr warning + audit-grade log entry даже без server hint.
 
 ---
 
@@ -498,21 +611,43 @@ host:port  base64url(SHA256(server_pub_key))  added_at_unix
 - Browser path (binding_mode=0x02) auth + resume в same tier
 - Cross-transport same-tier resumption (TCP↔WS)
 - Anti-downgrade resumption rejection
-- Bootstrap (token TTL, CAS race в parallel attempt, file orphan cleanup)
+- Bootstrap (token TTL, CAS race в parallel attempt, file orphan cleanup, command pipe mode)
 - Identity rotation (broadcast, signed_by_old, transition_until, per-recipient signing)
 - Lockout (threshold, silent error, backoff)
 - Channel binding mismatch detection
 - Argon2id semaphore exhaustion
 - Pre-Argon2id binding_mode rejection (DoS-amp)
 - changePassword fresh challenge flow
-- updateUser → ticket invalidation
+- updateUser → ticket invalidation (всех families)
 - Restart warmup window
+- **Multi-device family isolation:** device A refresh не invalidates device B
+- **Race attack:** strict `>` comparison при tickets_invalid_before_ns
 
 11.3. **Log redaction tests** (§4.3) — mandatory CI gate.
 
-11.4. **Audit chain integrity tests** — verify chain HMAC across N entries.
+11.4. **Audit chain integrity tests** — verify chain HMAC across N entries + truncation detection.
 
 11.5. **Constant-time tests** (best-effort): synthetic timing для real-vs-fake user paths.
+
+11.6. **Property-based tests (proptest)** — release blocker:
+- Anti-downgrade invariants: random ticket params + random session params, assert downgrade always rejected
+- Family isolation: random multi-device scenarios, assert no cross-family interference
+- AAD tampering: random byte mutations always rejected by GCM
+
+11.7. **Pre-auth fuzzing (cargo-fuzz / AFL)** — release blocker:
+- Frame parsing на pre-auth path (≤ 4 KB)
+- msgpack deserialization для auth_init, bootstrap_hello
+- Должен быть memory-safe + reject all malformed inputs without panic
+
+11.8. **Power-fail testing** для durability — release blocker:
+- Resume → kill -9 server во время fsync → restart → assert ticket cannot replay
+- Test на target storage backend (SQLite/sled/redb/fjall)
+
+11.9. **Unicode normalization test vectors** — release blocker:
+- Pin Unicode version (15.1 для v1)
+- Test vectors для edge cases: combining marks, zero-width chars, casefold ambiguities, NFC vs NFD
+- Cross-language consistency: Rust output == JS output (`String.normalize("NFC").toLowerCase()`)
+- Reject non-stable normalization implementations
 
 ---
 
@@ -551,7 +686,7 @@ Response: {
     "username": String,
     "roles": Vec<String>,
     "is_superuser": bool,
-    "session_expires_at": u64
+    "session_expires_at_ns": u64
   }
 }
 ```
@@ -568,7 +703,7 @@ Response: {
         "transport": "tcp" | "ws",
         "binding_mode": u8,
         "ip_subnet": String,
-        "created_at": u64,
+        "created_at_ns": u64,
         "last_activity": u64
       }
     ]

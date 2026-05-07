@@ -156,17 +156,36 @@ tls_exporter_or_zeros = bytes(32) zeros
 
 Это **явный** policy signal — не UA-detection. MITM не может switch'нуть browser клиента в стronger режим (нет API) или ослабить native клиента (server policy на endpoint).
 
-### 4.2. Trade-off
+### 4.2. Trade-off — honest assessment
 
 Browser теряет UKS защиту через TLS exporter. **Mitigations:**
 
 - **Strict Origin matching** на сервере (TRANSPORT_WS §9)
 - **HSTS** (`Strict-Transport-Security: max-age=31536000; includeSubDomains`)
-- **TOFU + out-of-band Ed25519 pinning** обязательны для admin connections. Pin embedded в JS bundle (server отдаёт `/admin/static/main.<hash>.js` где hash содержит `SHA256(server_pub)` константы)
+- **Out-of-band Ed25519 pinning embedded в production bundle.** TOFU — **strictly dev-only**.
 - **CSP `connect-src 'self'`** — JS не может connect никуда кроме origin сервера
 - **Subresource Integrity** на bundle (`<script integrity="sha384-...">`)
 
-Эти меры дают защиту того же уровня что channel binding для practical attack scenarios. Документировано как known limitation в SECURITY_MODEL §4.9.
+**Что embedded pin реально защищает (узкий случай):**
+
+Embedded pin защищает **только** от: server identity (Ed25519 priv) compromised **БЕЗ** соответствующего bundle redeploy И клиент имеет cached bundle от предыдущей версии. После rotation атакующий с stolen priv пытается impersonate server — cached bundle с старым pin отвергает соединение.
+
+**Embedded pin НЕ защищает** от любого attacker, способного контролировать bundle delivery:
+
+- **Compromised origin / CDN / malicious deploy** — атакующий просто меняет embedded pin в новом bundle
+- **TLS MITM** (corporate proxy с installed root CA, DNS hijack + rogue cert) — атакующий перехватывает `GET /admin/static/main.<hash>.js`, отдаёт свой bundle с своим pin (включая правильный SRI hash для своего bundle)
+- **Browser cache poisoning** через MITM — same vector
+
+**Реальная модель безопасности browser path:**
+- TLS поверх browser встроенной CA chain — security floor
+- + HSTS preload — против downgrade на http
+- + CSP — против XSS escalation
+- + memory-only secrets — против persistent compromise
+- = **примерно как любая web admin panel.** SCRAM защищает credential exchange (пароль не уходит в plaintext даже при MITM), но **session_id может быть hijacked** через relay attack.
+
+**Recommendation:** для high-stakes admin operations (database management, user CRUD, identity rotation, key rotation) — **native CLI с out-of-band pin** обязателен. Browser admin UI приемлем для read-only monitoring / low-stakes config.
+
+Документировано как known limitation в SECURITY_MODEL §4.9 + §2 threat coverage table.
 
 ### 4.3. Anti-downgrade в resumption
 
