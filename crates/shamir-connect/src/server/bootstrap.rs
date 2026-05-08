@@ -29,8 +29,30 @@ use zeroize::Zeroizing;
 ///
 /// Only the bootstrap-related fields are modeled here; the larger
 /// `server_meta` schema lives elsewhere in the application.
+///
+/// Custom [`Debug`] impl redacts `bootstrap_token_hash` (spec IMPL §4 —
+/// the hash itself is sensitive: equality lets an attacker confirm a
+/// guessed token).
 pub struct BootstrapState {
     inner: Mutex<BootstrapInner>,
+}
+
+impl core::fmt::Debug for BootstrapState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let g = self.inner.lock();
+        f.debug_struct("BootstrapState")
+            .field(
+                "bootstrap_token_hash",
+                &if g.bootstrap_token_hash.is_some() {
+                    "<REDACTED:32 (active)>"
+                } else {
+                    "<None>"
+                },
+            )
+            .field("bootstrap_token_expires_at_ns", &g.bootstrap_token_expires_at_ns)
+            .field("superuser_ever_existed", &g.superuser_ever_existed)
+            .finish()
+    }
 }
 
 struct BootstrapInner {

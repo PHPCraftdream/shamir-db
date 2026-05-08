@@ -40,7 +40,7 @@ impl SessionPermissions {
 ///
 /// Single in-flight per session: the second `changePasswordChallenge`
 /// invalidates this. Expires after `CHANGEPW_CHALLENGE_TTL_NS` (5 min).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PendingChangePwChallenge {
     /// Server-side fresh nonce.
     pub server_nonce_cp: [u8; 32],
@@ -50,8 +50,35 @@ pub struct PendingChangePwChallenge {
     pub issued_at_ns: u64,
 }
 
+impl core::fmt::Debug for PendingChangePwChallenge {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingChangePwChallenge")
+            .field("server_nonce_cp", &"<REDACTED:32>")
+            .field("client_nonce_cp", &"<REDACTED:32>")
+            .field("issued_at_ns", &self.issued_at_ns)
+            .finish()
+    }
+}
+
+impl core::fmt::Debug for Session {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Session")
+            .field("user_id", &"<REDACTED:16>")
+            .field("username", &"<REDACTED>")
+            .field("permissions", &"<RwLock>")
+            .field("created_at_ns", &self.created_at_ns)
+            .field("transport_kind", &self.transport_kind)
+            .field("binding_mode", &self.binding_mode)
+            .field("channel_binding_at_auth", &"<REDACTED:32>")
+            .field("pending_changepw_challenge", &"<Mutex>")
+            .finish()
+    }
+}
+
 /// Per-session state held by the server in memory (spec §7.2).
-#[derive(Debug)]
+///
+/// Custom [`Debug`] impl redacts `channel_binding_at_auth` (TLS exporter
+/// derivative — would link logs to a TLS session secret per IMPL §4).
 pub struct Session {
     /// Stable user identifier.
     pub user_id: [u8; 16],

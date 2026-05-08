@@ -40,8 +40,17 @@ pub type ServerKey = Zeroizing<[u8; 32]>;
 
 /// `stored_key` = SHA256(client_key) — 32 bytes. Stored on the server,
 /// **not** zeroized: it is what server holds in `__system__/users`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Custom [`Debug`] impl prints `<REDACTED:32>` instead of the bytes
+/// (spec IMPL §4 NORMATIVE log redaction).
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StoredKey(pub [u8; 32]);
+
+impl core::fmt::Debug for StoredKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("StoredKey(<REDACTED:32>)")
+    }
+}
 
 /// HMAC tag — 32 bytes (SHA-256 output).
 pub type HmacTag = [u8; 32];
@@ -150,9 +159,32 @@ pub fn argon2id(password: &[u8], salt: &[u8], params: &KdfParams) -> Result<Salt
 ///
 /// Wraps [`SigningKey`] which already enables zeroization via the `zeroize`
 /// feature in `Cargo.toml`.
-#[derive(Debug)]
+///
+/// Custom [`Debug`] impl prints only the public key fingerprint and
+/// `<REDACTED>` for the private half (spec IMPL §4 NORMATIVE).
 pub struct Ed25519Keypair {
     signing: SigningKey,
+}
+
+impl core::fmt::Debug for Ed25519Keypair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let pub_bytes = self.signing.verifying_key().to_bytes();
+        f.debug_struct("Ed25519Keypair")
+            .field("public_pkfp_b64", &base64_first8(&pub_bytes))
+            .field("private", &"<REDACTED:32>")
+            .finish()
+    }
+}
+
+fn base64_first8(bytes: &[u8]) -> String {
+    // Short identifier — 8 hex chars of the first 4 bytes; enough to tell
+    // two keys apart in logs without revealing the public key.
+    let n = bytes.len().min(4);
+    let mut s = String::with_capacity(2 * n);
+    for &b in &bytes[..n] {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 impl Ed25519Keypair {

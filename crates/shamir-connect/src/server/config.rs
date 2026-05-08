@@ -21,10 +21,21 @@ impl ListenerPolicy {
 
 /// Global server secrets — held in memory, persisted to `__system__/server_meta`
 /// on real deployments.
-#[derive(Debug, Clone)]
+///
+/// Custom [`Debug`] impl redacts both secrets (spec IMPL §4 NORMATIVE).
+#[derive(Clone)]
 pub struct ServerSecrets {
     /// Anti-enumeration HKDF IKM (rotated on schedule).
     pub server_secret: [u8; 32],
     /// Per-spec §5.2.5: SEPARATE secret for `username_hash`. NOT rotated.
     pub lockout_secret: [u8; 32],
+}
+
+impl core::fmt::Debug for ServerSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ServerSecrets")
+            .field("server_secret", &"<REDACTED:32>")
+            .field("lockout_secret", &"<REDACTED:32>")
+            .finish()
+    }
 }
