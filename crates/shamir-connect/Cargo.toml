@@ -34,6 +34,7 @@ serde_bytes = "0.11"
 
 # Username normalization (RFC 8265 PRECIS UsernameCaseMapped)
 unicode-normalization = "0.1"
+precis-profiles = "0.1"
 
 # Errors
 thiserror = "2.0"
