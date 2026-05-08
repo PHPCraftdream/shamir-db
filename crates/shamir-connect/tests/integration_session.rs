@@ -265,6 +265,55 @@ fn dispatch_request_view_kills_session_when_invalidated() {
     assert_eq!(store.len(), 0, "session must be removed");
 }
 
+/// Optim #9: `RequestEnvelopeRef<'a>` produces byte-identical msgpack to
+/// the owning `RequestEnvelope` AND to a payload that round-trips through
+/// `RequestEnvelopeView`. Confirms wire-compat for the zero-copy client
+/// encode path.
+#[test]
+fn request_envelope_ref_wire_compat_with_owning_and_view() {
+    use shamir_connect::common::envelope::{RequestEnvelopeRef, RequestEnvelopeView};
+
+    let sid = [0xa1u8; 32];
+    let req: &[u8] = b"hello world";
+
+    let owning = RequestEnvelope::new(sid, Some(7), req.to_vec());
+    let owning_bytes = owning.to_msgpack().unwrap();
+
+    let borrowed = RequestEnvelopeRef {
+        session_id: &sid,
+        request_id: Some(7),
+        req,
+    };
+    let borrowed_bytes = borrowed.to_msgpack().unwrap();
+
+    assert_eq!(
+        owning_bytes, borrowed_bytes,
+        "RequestEnvelopeRef must produce identical bytes to RequestEnvelope"
+    );
+
+    // And the view-side decode of either must succeed and observe the
+    // expected content.
+    let view = RequestEnvelopeView::from_msgpack(&borrowed_bytes).unwrap();
+    assert_eq!(view.session_id_array().unwrap(), &sid);
+    assert_eq!(view.request_id, Some(7));
+    assert_eq!(view.req, req);
+}
+
+/// Optim #9: rid omitted on the wire when `None`.
+#[test]
+fn request_envelope_ref_skips_rid_when_none() {
+    use shamir_connect::common::envelope::RequestEnvelopeRef;
+
+    let sid = [0u8; 32];
+    let r1 = RequestEnvelopeRef {
+        session_id: &sid,
+        request_id: None,
+        req: b"x",
+    };
+    let r2 = RequestEnvelope::new(sid, None, b"x".to_vec());
+    assert_eq!(r1.to_msgpack().unwrap(), r2.to_msgpack().unwrap());
+}
+
 /// Optim #4: invalid session_id length is rejected.
 #[test]
 fn request_envelope_view_rejects_wrong_session_id_length() {
