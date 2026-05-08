@@ -43,8 +43,8 @@ sequenceDiagram
     end
 
     alt ok == true
-        S->>DB: persist session, reset auth_failures[(subnet, user_hash)]
-        S->>C: auth_ok { server_signature, server_pub_key, identity_sig,<br/>session_id, expires_at_ns,<br/>resumption_ticket?, rotation_in_progress? }
+        Note over S: Insert Session into in-memory SessionStore<br/>(DashMap, NOT persisted — §7.7)<br/>Reset auth_failures[(subnet, user_hash)] (durable, IMPL §1.3)
+        S->>C: auth_ok { server_signature, server_pub_key, identity_sig,<br/>session_id, expires_at_ns,<br/>resumption_ticket?, rotation_in_progress?,<br/>kdf_upgrade_required? }
     else ok == false
         S->>DB: increment auth_failures[(subnet, user_hash)]<br/>backoff: 100ms × 2^N
         Note over S: Latency padding до target_constant_time<br/>(50ms floor + uniform[0,25] jitter)
