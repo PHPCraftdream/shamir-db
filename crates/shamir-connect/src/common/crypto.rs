@@ -81,6 +81,19 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 // ----------------------------------------------------------------------------
 
 /// HMAC-SHA256(key, data) → 32-byte tag.
+///
+/// **Design note: per-user Hmac caching is intentionally NOT done.** A
+/// natural-looking optimization is to pre-compute `Hmac<Sha256>` instances
+/// for `stored_key` / `server_key` in `UserRecord` and clone-then-update on
+/// every SCRAM verify (saves ~200-400 ns of ipad/opad init per HMAC).
+/// However this would introduce a real-vs-fake user timing channel:
+/// real-user path (cached) ~150 ns/HMAC, fake-user path (fresh init)
+/// ~300 ns/HMAC. The §8.5 latency padding (50-75 ms) would mask the
+/// difference on the wire, but spec §5.2.4 + §9.2 mandate constant-time
+/// discipline AS WELL AS padding (defense-in-depth). The ~300 ns
+/// savings is dwarfed by Argon2id (~2 s) and by the padding floor (50 ms),
+/// so we accept the small CPU cost in exchange for branch-equivalence
+/// between real and fake paths.
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> HmacTag {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);

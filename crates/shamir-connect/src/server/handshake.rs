@@ -24,7 +24,8 @@ use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::server::config::{ListenerPolicy, ServerSecrets};
-use crate::server::rotation::RotationInProgressPayload;
+use crate::server::resume::ResumeConfig;
+use crate::server::rotation::{RotationInProgressPayload, ServerIdentityState};
 use crate::server::user_record::UserRecord;
 
 /// Server's `auth_init` view — what arrived from the wire.
@@ -275,3 +276,89 @@ impl<'a> ServerHandshake<'a> {
 
 /// Default `SESSION_MAX_AGE` per spec §7.4: 24 hours.
 pub const SESSION_MAX_AGE_NS: u64 = 24 * ns::HOUR;
+
+/// Returns true iff `user_params` is weaker than `current_defaults` along any
+/// axis (memory_kb, time, parallelism). Used to drive the
+/// `kdf_upgrade_required` flag on `auth_ok` per spec §13.
+pub fn needs_kdf_upgrade(
+    user_params: crate::common::kdf_params::KdfParams,
+    current_defaults: crate::common::kdf_params::KdfParams,
+) -> bool {
+    user_params.memory_kb < current_defaults.memory_kb
+        || user_params.time < current_defaults.time
+        || user_params.parallelism < current_defaults.parallelism
+}
+
+impl AuthOkView {
+    /// Attach a server-issued resumption ticket bytes + its expiry.
+    ///
+    /// Typical integration: after `verify_proof` returns
+    /// `ProofOutcome::Accepted`, call
+    /// [`crate::server::resume::issue_initial_ticket`] (or
+    /// [`crate::server::ticket::encrypt_ticket_with_cipher`] for finer
+    /// control), then chain `.with_resumption_ticket(bytes, expires)`
+    /// before serializing.
+    pub fn with_resumption_ticket(mut self, bytes: Vec<u8>, expires_at_ns: u64) -> Self {
+        self.resumption_ticket = Some(bytes);
+        self.resumption_expires_at_ns = Some(expires_at_ns);
+        self
+    }
+
+    /// Attach an orphan-recovery `rotation_in_progress` payload (spec §6.5
+    /// / diagram 05 Part B).
+    ///
+    /// The caller MUST build the payload via
+    /// [`crate::server::rotation::build_rotation_in_progress_payload`]
+    /// using the **same byte-exact** `identity_input` that the current
+    /// `identity_sig` in this `AuthOkView` was signed over. The library
+    /// does not auto-rebuild that input here because doing so would
+    /// require threading additional state through every `verify_proof`
+    /// call site.
+    pub fn with_rotation_in_progress(mut self, payload: RotationInProgressPayload) -> Self {
+        self.rotation_in_progress = Some(payload);
+        self
+    }
+
+    /// Set `kdf_upgrade_required = Some(true)` (spec §13). Use
+    /// [`needs_kdf_upgrade`] to decide.
+    pub fn with_kdf_upgrade_required(mut self) -> Self {
+        self.kdf_upgrade_required = Some(true);
+        self
+    }
+}
+
+/// **Helper sketch for integrators** — combine the three attachers above into
+/// a single call given precomputed pieces.
+///
+/// This deliberately does NOT compute `rotation_in_progress` for the caller:
+/// the orphan-recovery payload requires the byte-exact `identity_input` that
+/// the current `identity_sig` covers, and that input is not stored on
+/// `AuthOkView`. Callers wanting orphan-recovery emission MUST build the
+/// payload themselves via [`build_rotation_in_progress_payload`] right after
+/// `verify_proof` (where they still have the auth_message in scope) and pass
+/// the result here as `rotation`.
+///
+/// `ticket: Option<(bytes, expires_at_ns)>` and `kdf_upgrade: bool` round
+/// out the three optional fields. Returns the populated `AuthOkView`.
+pub fn complete_auth_ok(
+    base: AuthOkView,
+    ticket: Option<(Vec<u8>, u64)>,
+    rotation: Option<RotationInProgressPayload>,
+    kdf_upgrade: bool,
+) -> AuthOkView {
+    let mut view = base;
+    if let Some((bytes, exp)) = ticket {
+        view = view.with_resumption_ticket(bytes, exp);
+    }
+    if let Some(p) = rotation {
+        view = view.with_rotation_in_progress(p);
+    }
+    if kdf_upgrade {
+        view = view.with_kdf_upgrade_required();
+    }
+    view
+}
+
+// Suppress unused warnings for re-exports kept for caller convenience.
+#[allow(dead_code)]
+fn _doc_link_targets(_: &ServerIdentityState, _: &ResumeConfig) {}
