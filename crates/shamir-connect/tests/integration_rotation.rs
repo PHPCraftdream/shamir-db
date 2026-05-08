@@ -165,18 +165,34 @@ fn rotation_event_rejects_far_future_transition_window_high_2() {
     assert!(result.is_err());
 }
 
+/// Stable test-only stand-in for the per-handshake `identity_input` bytes
+/// (the canonical 18-byte tag + SHA256(server_pub) + ... layout from
+/// `common::identity::build_identity_input`). Diagram 05 Part B step 67
+/// requires `identity_sig_previous` and current `identity_sig` to be over the
+/// **same byte-exact** input.
+const IDENTITY_INPUT_FIXTURE: &[u8] = b"SHAMIR-IDENTITY-v1-test-fixture-bytes-for-rotation-tests";
+
 #[test]
 fn orphan_recovery_round_trip() {
+    // Diagram 05 Part B steps 64-75 — full happy path.
     let s = ServerIdentityState::fresh();
     let old_pub = s.current_pub();
     let pinned = sha256(&old_pub);
     let now = UnixNanos::now().as_u64();
     let _ = s.rotate(now).unwrap();
 
-    let payload = build_rotation_in_progress_payload(&s).unwrap();
+    let payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
     let new_pub = s.current_pub();
 
-    let new_pin = verify_rotation_in_progress(&payload, &new_pub, &pinned, now, true).unwrap();
+    let new_pin = verify_rotation_in_progress(
+        &payload,
+        &new_pub,
+        IDENTITY_INPUT_FIXTURE,
+        &pinned,
+        now,
+        true,
+    )
+    .unwrap();
     assert_eq!(new_pin, sha256(&new_pub));
 }
 
@@ -184,12 +200,13 @@ fn orphan_recovery_round_trip() {
 fn orphan_recovery_rejects_wrong_pin() {
     let s = ServerIdentityState::fresh();
     let _ = s.rotate(UnixNanos::now().as_u64()).unwrap();
-    let payload = build_rotation_in_progress_payload(&s).unwrap();
+    let payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
     let new_pub = s.current_pub();
 
     let result = verify_rotation_in_progress(
         &payload,
         &new_pub,
+        IDENTITY_INPUT_FIXTURE,
         &[0xffu8; 32], // wrong pinned hash
         UnixNanos::now().as_u64(),
         true,
@@ -204,18 +221,92 @@ fn orphan_recovery_default_fail_closed() {
     let pinned = sha256(&old_pub);
     let _ = s.rotate(UnixNanos::now().as_u64()).unwrap();
 
-    let payload = build_rotation_in_progress_payload(&s).unwrap();
+    let payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
     let new_pub = s.current_pub();
 
     // accept_rotation = false → fail closed.
     let result = verify_rotation_in_progress(
         &payload,
         &new_pub,
+        IDENTITY_INPUT_FIXTURE,
         &pinned,
         UnixNanos::now().as_u64(),
         false,
     );
     assert!(result.is_err());
+}
+
+/// Diagram 05 Part B step 75: the orphan client MUST verify
+/// `identity_sig_previous` against `previous_pub` over the SAME byte-exact
+/// `identity_input` it used for the current `identity_sig`. Tampering with
+/// the signature MUST cause verification to fail.
+#[test]
+fn orphan_recovery_rejects_tampered_identity_sig_previous_per_diagram_05() {
+    let s = ServerIdentityState::fresh();
+    let old_pub = s.current_pub();
+    let pinned = sha256(&old_pub);
+    let now = UnixNanos::now().as_u64();
+    let _ = s.rotate(now).unwrap();
+
+    let mut payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
+    // Flip a bit anywhere in identity_sig_previous.
+    payload.identity_sig_previous[0] ^= 0x01;
+    let new_pub = s.current_pub();
+
+    let result = verify_rotation_in_progress(
+        &payload,
+        &new_pub,
+        IDENTITY_INPUT_FIXTURE,
+        &pinned,
+        now,
+        true,
+    );
+    assert!(matches!(
+        result,
+        Err(shamir_connect::common::error::Error::ServerSignatureInvalid)
+    ));
+}
+
+/// Diagram 05 Part B step 67: server signs identity_sig_previous over the
+/// SAME identity_input. If client uses a different identity_input bytes than
+/// the server signed, verification MUST fail (catches mismatched binding).
+#[test]
+fn orphan_recovery_rejects_identity_input_mismatch_per_diagram_05() {
+    let s = ServerIdentityState::fresh();
+    let old_pub = s.current_pub();
+    let pinned = sha256(&old_pub);
+    let now = UnixNanos::now().as_u64();
+    let _ = s.rotate(now).unwrap();
+
+    let payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
+    let new_pub = s.current_pub();
+
+    // Client recomputes a DIFFERENT identity_input (e.g. wrong session_id) —
+    // verify must reject because identity_sig_previous won't match.
+    let other_input: &[u8] = b"SHAMIR-IDENTITY-v1-different-bytes-mismatched-handshake";
+    let result = verify_rotation_in_progress(&payload, &new_pub, other_input, &pinned, now, true);
+    assert!(matches!(
+        result,
+        Err(shamir_connect::common::error::Error::ServerSignatureInvalid)
+    ));
+}
+
+/// Diagram 05 Part B step 70: the payload returned by
+/// `build_rotation_in_progress_payload` MUST contain ALL FOUR fields per spec
+/// §6.5 (previous_pub, identity_sig_previous, transition_until_ns,
+/// rotation_proof). Sanity-check the schema.
+#[test]
+fn rotation_in_progress_payload_carries_four_fields_per_spec_6_5() {
+    let s = ServerIdentityState::fresh();
+    let _ = s.rotate(UnixNanos::now().as_u64()).unwrap();
+    let payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
+
+    assert_ne!(payload.previous_pub, [0u8; 32]);
+    assert_ne!(payload.identity_sig_previous, [0u8; 64]);
+    assert!(payload.transition_until_ns > 0);
+    assert_ne!(payload.rotation_proof, [0u8; 64]);
+    // Two sigs MUST differ (different payloads — identity_input vs rotation chain).
+    assert_ne!(payload.identity_sig_previous, payload.rotation_proof);
 }
 
 #[test]
@@ -225,12 +316,19 @@ fn orphan_recovery_rejects_expired_overlap() {
     let pinned = sha256(&old_pub);
     let _ = s.rotate(0).unwrap(); // rotation at unix epoch start
 
-    let payload = build_rotation_in_progress_payload(&s).unwrap();
+    let payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
     let new_pub = s.current_pub();
 
     // Now is 100 years later — overlap long expired.
     let far_future = UnixNanos::now().as_u64() + 100 * 365 * ns::DAY;
-    let result = verify_rotation_in_progress(&payload, &new_pub, &pinned, far_future, true);
+    let result = verify_rotation_in_progress(
+        &payload,
+        &new_pub,
+        IDENTITY_INPUT_FIXTURE,
+        &pinned,
+        far_future,
+        true,
+    );
     assert!(result.is_err());
 }
 
@@ -246,11 +344,18 @@ fn orphan_recovery_rejects_far_future_window_high_2() {
     let now = UnixNanos::now().as_u64();
     let _ = s.rotate(now).unwrap();
 
-    let mut payload = build_rotation_in_progress_payload(&s).unwrap();
+    let mut payload = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE).unwrap();
     payload.transition_until_ns = now + 2 * ROTATION_MAX_TRANSITION_NS;
 
     let new_pub = s.current_pub();
-    let result = verify_rotation_in_progress(&payload, &new_pub, &pinned, now, true);
+    let result = verify_rotation_in_progress(
+        &payload,
+        &new_pub,
+        IDENTITY_INPUT_FIXTURE,
+        &pinned,
+        now,
+        true,
+    );
     assert!(result.is_err());
 }
 
@@ -265,6 +370,6 @@ fn build_rotation_event_fails_when_no_overlap() {
 #[test]
 fn build_rotation_in_progress_fails_when_no_overlap() {
     let s = ServerIdentityState::fresh();
-    let result = build_rotation_in_progress_payload(&s);
+    let result = build_rotation_in_progress_payload(&s, IDENTITY_INPUT_FIXTURE);
     assert!(result.is_err());
 }

@@ -18,33 +18,65 @@ struct ServerIdentityInner {
     current: Ed25519Keypair,
     previous: Option<Ed25519Keypair>,
     rotation_until_ns: Option<u64>,
+    /// Monotonically increasing version of the current Ed25519 keypair.
+    /// Starts at 0 for `fresh()`; `rotate()` increments by 1. Allows tickets
+    /// to record which keypair they were issued under so that during a
+    /// rotation overlap window the server can reject pre-rotation tickets
+    /// (spec §5.7 NORMATIVE / diagram 12).
+    current_version: u64,
 }
 
 impl ServerIdentityState {
-    /// Construct from a freshly-generated keypair.
+    /// Construct from a freshly-generated keypair (`current_version = 0`).
     pub fn fresh() -> Self {
         Self {
             inner: parking_lot::RwLock::new(ServerIdentityInner {
                 current: Ed25519Keypair::generate(),
                 previous: None,
                 rotation_until_ns: None,
+                current_version: 0,
             }),
         }
     }
 
     /// Construct from explicit material (for rehydration from `__system__/server_meta`).
+    ///
+    /// `current_version` MUST match the persisted version counter so that
+    /// post-restart resumes correctly accept/reject in-flight tickets.
     pub fn from_material(
         current_seed: &[u8; 32],
         previous_seed: Option<&[u8; 32]>,
         rotation_until_ns: Option<u64>,
+        current_version: u64,
     ) -> Self {
         Self {
             inner: parking_lot::RwLock::new(ServerIdentityInner {
                 current: Ed25519Keypair::from_seed(current_seed),
                 previous: previous_seed.map(Ed25519Keypair::from_seed),
                 rotation_until_ns,
+                current_version,
             }),
         }
+    }
+
+    /// Current identity-key version.
+    pub fn current_version(&self) -> u64 {
+        self.inner.read().current_version
+    }
+
+    /// Whether a ticket carrying `ticket_identity_key_version` is acceptable
+    /// for resumption right now (spec §5.7 NORMATIVE / diagram 12).
+    ///
+    /// Rules:
+    /// - Outside overlap (no `previous`): accept ONLY tickets at `current_version`.
+    ///   (Older tickets predate at least one rotation that already finalized;
+    ///   their issuing keypair is gone — force re-auth.)
+    /// - Inside overlap: ticket version MUST equal `current_version`. Tickets
+    ///   issued under `previous` (i.e., `current_version - 1`) are rejected
+    ///   so orphan clients are forced into full re-auth and thus pick up the
+    ///   `rotation_in_progress` payload (spec §6.5 / diagram 05 Part B).
+    pub fn is_ticket_version_acceptable(&self, ticket_version: u64) -> bool {
+        ticket_version == self.inner.read().current_version
     }
 
     /// Current public key.
@@ -100,10 +132,12 @@ impl ServerIdentityState {
         let transition_until_ns = now_ns.saturating_add(ROTATION_OVERLAP_NS);
         g.previous = Some(old);
         g.rotation_until_ns = Some(transition_until_ns);
+        g.current_version = g.current_version.saturating_add(1);
         Ok(RotationOutcome {
             old_pub,
             new_pub,
             transition_until_ns,
+            new_version: g.current_version,
         })
     }
 
@@ -131,6 +165,10 @@ pub struct RotationOutcome {
     pub new_pub: [u8; 32],
     /// Wall-clock end of overlap window.
     pub transition_until_ns: u64,
+    /// New `current_version` after rotation. Used by callers issuing fresh
+    /// tickets immediately so they tag the ticket with the just-incremented
+    /// version (spec §5.7 / diagram 12).
+    pub new_version: u64,
 }
 
 /// Build the per-recipient `identity_rotation` event signed by the previous
@@ -165,10 +203,27 @@ pub fn build_identity_rotation_event(
     })
 }
 
-/// Build the orphan-recovery `rotation_proof` for embedding into `auth_ok`
-/// (spec §6.5).
+/// Build the orphan-recovery payload for embedding into `auth_ok`
+/// (spec §6.5 + diagram 05 Part B step 67).
+///
+/// Two signatures by previous_priv are produced:
+///
+/// 1. `identity_sig_previous` — over the **same byte-exact** `identity_input`
+///    that the current keypair signed for the standard `identity_sig` field.
+///    Diagram 05 Part B step 75 ("Verify identity_sig_previous против
+///    previous_pub ✓") relies on this.
+/// 2. `rotation_proof` — over the `(previous_pub, current_pub,
+///    transition_until_ns)` chain so the client can attest that current_pub
+///    was authorized by the previously-pinned key.
+///
+/// `identity_input` MUST be the bytes returned by
+/// [`crate::common::identity::build_identity_input`] for the current handshake
+/// — i.e. computed against `current_pub`, the same `auth_message`, the same
+/// `session_id`, and the same `expires_at_ns` that the corresponding
+/// `identity_sig` is signed over.
 pub fn build_rotation_in_progress_payload(
     state: &ServerIdentityState,
+    identity_input: &[u8],
 ) -> Result<RotationInProgressPayload> {
     let inner = state.inner.read();
     let previous = inner
@@ -181,12 +236,15 @@ pub fn build_rotation_in_progress_payload(
     let previous_pub = previous.public_bytes();
     let current_pub = inner.current.public_bytes();
 
+    let identity_sig_previous = previous.sign(identity_input);
+
     let proof_payload =
         build_rotation_proof_input(&previous_pub, &current_pub, transition_until_ns);
     let rotation_proof = previous.sign(&proof_payload);
 
     Ok(RotationInProgressPayload {
         previous_pub,
+        identity_sig_previous,
         transition_until_ns,
         rotation_proof,
     })
@@ -208,13 +266,29 @@ pub struct IdentityRotationEvent {
 }
 
 /// Wire view: `rotation_in_progress` payload embedded in `auth_ok` for
-/// offline-client orphan recovery (spec §6.5).
+/// offline-client orphan recovery (spec §6.5 + diagram 05 Part B step 70).
+///
+/// Spec §6.5 NORMATIVE 4-field schema:
+/// ```text
+/// rotation_in_progress: {
+///     previous_pub,
+///     identity_sig_previous,  // Ed25519 sig by previous_priv over SAME identity_input
+///     transition_until_ns,
+///     rotation_proof          // Ed25519 sig by previous_priv over rotation chain
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct RotationInProgressPayload {
     /// Old Ed25519 pub.
     pub previous_pub: [u8; 32],
+    /// Ed25519 signature by previous_priv over the **same byte-exact**
+    /// `identity_input` that current_priv signed for `identity_sig`. Allows
+    /// orphan client to verify mutual auth against its old pin (spec §6.5
+    /// step 3 / diagram 05 Part B step 75).
+    pub identity_sig_previous: [u8; 64],
     /// End of overlap.
     pub transition_until_ns: u64,
-    /// Ed25519 signature by previous priv over the canonical input.
+    /// Ed25519 signature by previous priv over the
+    /// `(previous_pub, current_pub, transition_until_ns)` rotation chain.
     pub rotation_proof: [u8; 64],
 }
