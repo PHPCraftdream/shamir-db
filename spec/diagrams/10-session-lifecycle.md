@@ -28,7 +28,7 @@ stateDiagram-v2
         Processing --> Idle: response sent
         
         Idle --> ChangePwPending: changePasswordChallenge<br/>(stores pending_changepw_challenge)
-        ChangePwPending --> Idle: changePassword OK<br/>OR challenge expired (5min)<br/>OR fail
+        ChangePwPending --> Idle: challenge expired (5min)<br/>OR proof verification fail<br/>(success path terminates session — see outer)
         
         note right of Processing
             §7.5 Per-request validity check:

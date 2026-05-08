@@ -267,7 +267,7 @@ zeroize: client_key
 ```
 fake_blob = HKDF-SHA256(
     ikm  = server_secret,
-    salt = "SHAMIR-FAKE-SALT-v1",                // 18 bytes ASCII (domain separation)
+    salt = "SHAMIR-FAKE-SALT-v1",                // 19 bytes ASCII (domain separation)
     info = username_nfc,
     L    = 80
 )
