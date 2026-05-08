@@ -84,6 +84,9 @@ pub fn build_request(
     password: &mut [u8],
     kdf_params: KdfParams,
 ) -> Result<BootstrapRequest> {
+    // Spec §3.2: enforce password policy BEFORE running Argon2id (server
+    // cannot validate; this is the client's only chance).
+    crate::common::password::validate_password(password)?;
     kdf_params.validate_client_limits()?;
     let salt = crate::common::crypto::random_array::<{ limits::SALT_BYTES }>();
     let derived = DerivedKeys::derive(password, &salt, &kdf_params)?;

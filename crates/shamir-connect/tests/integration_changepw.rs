@@ -210,7 +210,7 @@ fn rejects_after_ttl_expiration() {
         start_change_password_challenge(&session_arc, salt, kdf, client_nonce_cp, issued_at);
 
     let mut old_buf = b"correct".to_vec();
-    let mut new_buf = b"new".to_vec();
+    let mut new_buf = b"new strong password 99".to_vec();
     let request = client_cp::build_request(
         &NormalizedUsername::from_raw("alice").unwrap(),
         &sid,
@@ -276,7 +276,7 @@ fn second_challenge_invalidates_first_multi_tab() {
 
     // Tab A computes proof using A's nonces.
     let mut old_buf = b"correct".to_vec();
-    let mut new_buf = b"new".to_vec();
+    let mut new_buf = b"new strong password 99".to_vec();
     let request_a = client_cp::build_request(
         &NormalizedUsername::from_raw("alice").unwrap(),
         &sid,
@@ -327,7 +327,7 @@ fn proof_is_single_use_after_consume() {
         start_change_password_challenge(&session_arc, salt, kdf, nonce, UnixNanos::now().as_u64());
 
     let mut old_buf = b"correct".to_vec();
-    let mut new_buf = b"new".to_vec();
+    let mut new_buf = b"new strong password 99".to_vec();
     let request = client_cp::build_request(
         &NormalizedUsername::from_raw("alice").unwrap(),
         &sid,
@@ -382,4 +382,69 @@ fn finalize_kills_only_target_user_sessions() {
     let _ = finalize_change_password(&store, &alice_uid, UnixNanos::now().as_u64());
     assert_eq!(store.len(), 1); // only bob remains
     assert!(store.lookup(&[0xb1u8; 32]).is_some());
+}
+
+/// Spec §3.2 NORMATIVE / diagram 04: client-side password policy must reject
+/// `new_password` shorter than `PASSWORD_MIN_LENGTH = 12 chars` BEFORE
+/// running Argon2id. The server has no way to verify this.
+#[test]
+fn build_request_rejects_weak_new_password_per_spec_3_2() {
+    let salt = [0x55u8; 16];
+    let kdf = fast_kdf();
+    let username = NormalizedUsername::from_raw("alice").unwrap();
+    let sid = [0xa1u8; 32];
+    let client_nonce_cp = [0xc1u8; 32];
+    let server_nonce_cp = [0x91u8; 32];
+
+    // OLD password is fine — verification is on `new_password`.
+    let mut old_buf = b"old correct password".to_vec();
+    let mut new_buf = b"short".to_vec(); // 5 chars < 12
+    let result = client_cp::build_request(
+        &username,
+        &sid,
+        &client_nonce_cp,
+        &server_nonce_cp,
+        &salt,
+        kdf,
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &[0u8; 32],
+        &mut old_buf,
+        &mut new_buf,
+        kdf,
+    );
+    assert!(matches!(
+        result,
+        Err(shamir_connect::common::error::Error::InvalidPassword(_))
+    ));
+}
+
+/// Spec §3.2: single-repeated-char passwords MUST be rejected client-side.
+#[test]
+fn build_request_rejects_single_repeated_char_new_password() {
+    let salt = [0x55u8; 16];
+    let kdf = fast_kdf();
+    let username = NormalizedUsername::from_raw("alice").unwrap();
+    let sid = [0xa1u8; 32];
+
+    let mut old_buf = b"old correct password".to_vec();
+    let mut new_buf = b"aaaaaaaaaaaaaaaa".to_vec(); // 16 'a's
+    let result = client_cp::build_request(
+        &username,
+        &sid,
+        &[0u8; 32],
+        &[0u8; 32],
+        &salt,
+        kdf,
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &[0u8; 32],
+        &mut old_buf,
+        &mut new_buf,
+        kdf,
+    );
+    assert!(matches!(
+        result,
+        Err(shamir_connect::common::error::Error::InvalidPassword(_))
+    ));
 }

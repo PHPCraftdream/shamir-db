@@ -34,6 +34,12 @@ pub fn build_request(
     new_password: &mut [u8],
     new_kdf_params_recommendation: KdfParams,
 ) -> Result<ChangePwRequest> {
+    // Spec §3.2: only the NEW password must satisfy the policy. The OLD
+    // password may have been issued under a previous (looser) policy and is
+    // about to be discarded — validating it here would lock legitimate users
+    // out of their own changePassword flow. Per spec the policy check
+    // applies to the password being SET.
+    crate::common::password::validate_password(new_password)?;
     new_kdf_params_recommendation.validate_client_limits()?;
 
     // Build canonical auth_message_cp.
