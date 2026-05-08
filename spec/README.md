@@ -48,6 +48,9 @@
 ### Future (вне `spec/`)
 - **[../ROADMAP.md](../ROADMAP.md)** — v1.1+ planned features.
 
+### Diagrams
+- **[diagrams/](diagrams/)** — Mermaid sequence + state diagrams для всех flows. Renders на GitHub inline.
+
 ### Test vectors
 - `test-vectors/auth_v1.json` — **release blocker** для v1 (см. AUTH_PROTOCOL §16).
 
