@@ -1,7 +1,7 @@
 //! Tests for length-prefix msgpack framing.
 
 use shamir_transport_tcp::framing::{
-    read_frame, write_close, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT,
+    read_frame, read_frame_into, write_close, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT,
 };
 use tokio::io::duplex;
 
@@ -76,4 +76,84 @@ async fn frame_exactly_at_size_limit_is_accepted() {
     let frame = read_frame(&mut b, cap).await.unwrap();
     assert_eq!(frame.len(), cap);
     writer.await.unwrap();
+}
+
+/// Optim #1 (pooled buffer API): `read_frame_into` reads correctly into a
+/// caller-supplied buffer.
+#[tokio::test]
+async fn read_frame_into_round_trip_small() {
+    let (mut a, mut b) = duplex(64 * 1024);
+    let payload = b"hello world".to_vec();
+    write_frame(&mut a, &payload).await.unwrap();
+    let mut buf = Vec::new();
+    read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+        .await
+        .unwrap();
+    assert_eq!(buf, payload);
+}
+
+/// Optim #1: capacity is reused across calls — no growth after first read
+/// when subsequent frames fit in existing capacity.
+#[tokio::test]
+async fn read_frame_into_reuses_capacity() {
+    let (mut a, mut b) = duplex(64 * 1024);
+    let mut buf = Vec::with_capacity(2048);
+    let initial_cap = buf.capacity();
+
+    // 5 frames of decreasing size — buf capacity must NOT change.
+    for sz in [1024usize, 512, 256, 128, 64] {
+        let payload = vec![0xefu8; sz];
+        write_frame(&mut a, &payload).await.unwrap();
+        read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(buf.len(), sz);
+        assert_eq!(buf.capacity(), initial_cap, "capacity must not shrink");
+    }
+}
+
+/// Optim #1: handles partial reads via `read_exact` correctly even into
+/// pre-set-len buffer (no UB observable).
+#[tokio::test]
+async fn read_frame_into_handles_partial_reads() {
+    let (mut a, mut b) = duplex(8); // tiny buffer forces fragmentation
+    let writer = tokio::spawn(async move {
+        let payload = vec![0xa5u8; 1024];
+        write_frame(&mut a, &payload).await.unwrap();
+    });
+    let mut buf = Vec::with_capacity(64);
+    read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+        .await
+        .unwrap();
+    assert_eq!(buf.len(), 1024);
+    assert!(buf.iter().all(|&b| b == 0xa5));
+    writer.await.unwrap();
+}
+
+/// Optim #1: peer-close on length=0 leaves buffer untouched.
+#[tokio::test]
+async fn read_frame_into_close_returns_peer_close() {
+    let (mut a, mut b) = duplex(16);
+    write_close(&mut a).await.unwrap();
+    let mut buf = vec![0xffu8; 100];
+    let err = read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FrameError::PeerClose));
+}
+
+/// Optim #1: oversized declaration is rejected before any unsafe set_len.
+#[tokio::test]
+async fn read_frame_into_rejects_oversized() {
+    let (mut a, mut b) = duplex(16);
+    let too_big = (MAX_FRAME_SIZE_DEFAULT as u32 + 1).to_be_bytes();
+    use tokio::io::AsyncWriteExt;
+    a.write_all(&too_big).await.unwrap();
+    a.flush().await.unwrap();
+    let mut buf = Vec::new();
+    let err = read_frame_into(&mut b, MAX_FRAME_SIZE_DEFAULT, &mut buf)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FrameError::TooLarge { .. }));
+    assert_eq!(buf.len(), 0);
 }
