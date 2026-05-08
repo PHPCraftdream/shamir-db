@@ -75,23 +75,49 @@ pub fn verify_identity_rotation_event(
     Ok(sha256(&event.new_pub))
 }
 
-/// Verify the orphan-recovery `rotation_proof` from `auth_ok.rotation_in_progress`
-/// (spec §6.5).
+/// Verify the orphan-recovery `rotation_in_progress` payload from
+/// `auth_ok.rotation_in_progress` (spec §6.5 + diagram 05 Part B steps 73-75).
 ///
-/// Returns the new pin if valid AND `accept_rotation = true`.
+/// Performs FOUR cryptographic checks (in order):
+///
+/// 1. `SHA256(previous_pub) == pinned_hash` — confirms we actually pin the old key.
+/// 2. `Ed25519::verify_strict(previous_pub, identity_input, identity_sig_previous)` —
+///    diagram 05 Part B step 75 mutual-auth anchor over the **same byte-exact**
+///    `identity_input` that the current `identity_sig` covers.
+/// 3. `Ed25519::verify_strict(previous_pub, rotation_proof_payload, rotation_proof)` —
+///    chain attestation that current_pub was authorized by previous_priv.
+/// 4. `transition_until_ns` window: `> now_ns` AND `≤ now_ns + 7d + 1h` (HIGH-2).
+///
+/// `identity_input` MUST be the bytes the caller already used to verify the
+/// standard `identity_sig` (computed against `current_pub`).
+///
+/// Returns the new pin (= `SHA256(current_pub)`) only if every check passes
+/// AND `accept_rotation = true`. Default fail-closed.
 pub fn verify_rotation_in_progress(
     payload: &RotationInProgressPayload,
     current_pub: &[u8; 32],
+    identity_input: &[u8],
     pinned_hash: &[u8; 32],
     now_ns: u64,
     accept_rotation: bool,
 ) -> Result<[u8; 32]> {
-    // We currently pin the OLD pub.
+    // 1. We currently pin the OLD pub.
     let old_hash = sha256(&payload.previous_pub);
     if !constant_time_eq(pinned_hash, &old_hash) {
         return Err(Error::ServerIdentityChanged);
     }
 
+    // 2. identity_sig_previous over the SAME identity_input — diagram 05
+    //    Part B step 75. Anchors mutual auth to the previously-pinned key.
+    if !ed25519_verify_strict(
+        &payload.previous_pub,
+        identity_input,
+        &payload.identity_sig_previous,
+    ) {
+        return Err(Error::ServerSignatureInvalid);
+    }
+
+    // 3. rotation_proof over the rotation chain.
     let proof_payload = build_rotation_proof_input(
         &payload.previous_pub,
         current_pub,
@@ -101,6 +127,7 @@ pub fn verify_rotation_in_progress(
         return Err(Error::ServerSignatureInvalid);
     }
 
+    // 4. Window sanity.
     if payload.transition_until_ns <= now_ns {
         return Err(Error::ServerSignatureInvalid);
     }
