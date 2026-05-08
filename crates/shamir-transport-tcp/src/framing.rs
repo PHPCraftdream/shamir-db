@@ -137,15 +137,57 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
 }
 
 /// Write one frame: prepends `u32_be length` then payload.
+///
+/// **Optim #7:** length and payload are concatenated into ONE buffer and
+/// written via a single `write_all`. With `tokio_rustls::TlsStream` two
+/// separate `write_all` calls produce two TLS records (each ~22 bytes of
+/// header + tag overhead) — combining them halves the wire overhead for
+/// small responses. Allocates one temporary `Vec<u8>` of size `4 + N`; for
+/// callers wanting zero allocation see [`write_frame_into`] which writes
+/// into a caller-supplied scratch buffer.
 pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     payload: &[u8],
 ) -> Result<(), FrameError> {
     let len = payload.len() as u32;
-    writer.write_all(&len.to_be_bytes()).await?;
-    if !payload.is_empty() {
-        writer.write_all(payload).await?;
-    }
+    let mut buf = Vec::with_capacity(4 + payload.len());
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(payload);
+    writer.write_all(&buf).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Same as [`write_frame`] but writes into a caller-supplied scratch
+/// buffer that's reused across calls (zero-allocation in steady state).
+///
+/// `scratch` is `clear()`-ed first; on return it contains the framed
+/// bytes that were sent (caller may keep capacity for the next call).
+/// The buffer's capacity grows monotonically to the high-water mark.
+///
+/// Pair with [`read_frame_into`] for a fully-pooled per-connection
+/// request loop:
+///
+/// ```rust,ignore
+/// let mut read_buf = Vec::with_capacity(4096);
+/// let mut write_buf = Vec::with_capacity(4096);
+/// loop {
+///     read_frame_into(&mut r, MAX_FRAME_SIZE_DEFAULT, &mut read_buf).await?;
+///     let response = handle(&read_buf);
+///     write_frame_into(&mut w, &response, &mut write_buf).await?;
+/// }
+/// ```
+pub async fn write_frame_into<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+    scratch: &mut Vec<u8>,
+) -> Result<(), FrameError> {
+    let len = payload.len() as u32;
+    scratch.clear();
+    scratch.reserve(4 + payload.len());
+    scratch.extend_from_slice(&len.to_be_bytes());
+    scratch.extend_from_slice(payload);
+    writer.write_all(scratch).await?;
     writer.flush().await?;
     Ok(())
 }
