@@ -1,0 +1,566 @@
+//! Integration tests: full client+server SCRAM handshake in one process.
+//!
+//! Validates the complete protocol surface from `auth_init` through
+//! `auth_ok` verification, plus orthogonal scenarios (wrong password,
+//! unknown user, binding_mode policy mismatch, anti-downgrade).
+
+use shamir_connect::client::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
+use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
+use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::common::username::NormalizedUsername;
+use shamir_connect::server::{
+    AuthInitView, ListenerPolicy, ProofOutcome, ServerHandshake, ServerSecrets, UserRecord,
+    SESSION_MAX_AGE_NS,
+};
+
+/// Fast Argon2id params (real defaults take ~2s; tests use minimum).
+fn fast_kdf() -> KdfParams {
+    KdfParams {
+        memory_kb: 19_456, // OWASP minimum
+        time: 2,
+        parallelism: 1,
+        argon2_version: 0x13,
+    }
+}
+
+fn fixed_secrets() -> ServerSecrets {
+    ServerSecrets {
+        server_secret: [0x42u8; 32],
+        lockout_secret: [0xa5u8; 32],
+    }
+}
+
+/// Create a UserRecord by deriving from a known password.
+/// Mirrors what the server stores at createUser/bootstrap (spec §3.5).
+fn make_user_record(password: &[u8], salt: [u8; 16], params: KdfParams) -> UserRecord {
+    let derived = DerivedKeys::derive(password, &salt, &params).unwrap();
+    UserRecord {
+        salt,
+        stored_key: derived.stored_key,
+        server_key: derived.server_key,
+        kdf_params: params,
+        tickets_invalid_before_ns: 0,
+    }
+}
+
+#[test]
+fn happy_path_full_round_trip() {
+    let username = "alice";
+    let password = b"correct horse battery staple";
+
+    // Server side state
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let identity_kp = Ed25519Keypair::generate();
+    let salt = [0x55u8; 16];
+    let params = fast_kdf();
+
+    // Server "stores" the user record (i.e., what's in __system__/users)
+    let server_user_db = make_user_record(password, salt, params);
+    let stored_pin = sha256(&identity_kp.public_bytes());
+
+    // Client side
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    let exporter = [0x77u8; 32];
+    let client = HandshakeBuilder::new(
+        user_norm.clone(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+    )
+    .tls_exporter(exporter)
+    .pinned_hash(stored_pin)
+    .build()
+    .unwrap();
+
+    // Step 1: client → server: auth_init
+    let auth_init = client.auth_init();
+
+    // Server: parse + look up user
+    let server_view = AuthInitView {
+        user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+        client_nonce: auth_init.client_nonce,
+        binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+        version: auth_init.version,
+    };
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        server_view,
+        exporter,
+        params, // kdf_params_current
+        |_user| Some(server_user_db.clone()),
+    )
+    .unwrap();
+
+    // Step 2: server → client: challenge
+    let server_challenge = server.challenge();
+    let client_challenge = ServerChallenge {
+        salt: server_challenge.salt,
+        kdf_params: server_challenge.kdf_params,
+        server_nonce: server_challenge.server_nonce,
+    };
+
+    // Step 3: client computes proof
+    let mut password_buf = password.to_vec();
+    let (proof, derived, am_client) = client
+        .process_challenge(&client_challenge, &mut password_buf)
+        .unwrap();
+
+    // Step 4: server verifies proof
+    let outcome = server
+        .verify_proof(&proof, &identity_kp, SESSION_MAX_AGE_NS)
+        .unwrap();
+    let auth_ok_server = match outcome {
+        ProofOutcome::Accepted(ok) => ok,
+        ProofOutcome::Rejected => panic!("server rejected legitimate proof"),
+    };
+
+    // Step 5: client receives auth_ok and verifies all three
+    let auth_ok_client = ServerAuthOk {
+        server_signature: auth_ok_server.server_signature,
+        server_pub_key: auth_ok_server.server_pub_key,
+        identity_sig: auth_ok_server.identity_sig,
+        session_id: auth_ok_server.session_id,
+        expires_at_ns: auth_ok_server.expires_at_ns,
+    };
+    let success = client
+        .process_auth_ok(&auth_ok_client, &derived, &am_client, |_pin| {
+            panic!("pin already known — TOFU callback should not fire");
+        })
+        .unwrap();
+
+    assert_eq!(success.session_id, auth_ok_server.session_id);
+    assert_eq!(success.expires_at_ns, auth_ok_server.expires_at_ns);
+    assert!(success.expires_at_ns > 0);
+}
+
+#[test]
+fn rejects_wrong_password() {
+    let username = "alice";
+    let real_password = b"correct password";
+    let wrong_password = b"wrong password";
+
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let identity_kp = Ed25519Keypair::generate();
+    let salt = [0x55u8; 16];
+    let params = fast_kdf();
+
+    let server_user_db = make_user_record(real_password, salt, params);
+
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    let exporter = [0x77u8; 32];
+    let client = HandshakeBuilder::new(user_norm, TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .pinned_hash(sha256(&identity_kp.public_bytes()))
+        .build()
+        .unwrap();
+
+    let auth_init = client.auth_init();
+    let server_view = AuthInitView {
+        user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+        client_nonce: auth_init.client_nonce,
+        binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+        version: auth_init.version,
+    };
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        server_view,
+        exporter,
+        params,
+        |_| Some(server_user_db.clone()),
+    )
+    .unwrap();
+
+    let cc = server.challenge();
+    let client_challenge = ServerChallenge {
+        salt: cc.salt,
+        kdf_params: cc.kdf_params,
+        server_nonce: cc.server_nonce,
+    };
+
+    let mut buf = wrong_password.to_vec();
+    let (proof, _derived, _am) = client
+        .process_challenge(&client_challenge, &mut buf)
+        .unwrap();
+
+    let outcome = server
+        .verify_proof(&proof, &identity_kp, SESSION_MAX_AGE_NS)
+        .unwrap();
+    assert!(matches!(outcome, ProofOutcome::Rejected));
+}
+
+#[test]
+fn unknown_user_path_constant_time_returns_rejected() {
+    // Client tries to log in for "ghost" — server has no record.
+    let username = "ghost";
+    let password = b"any password";
+
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let identity_kp = Ed25519Keypair::generate();
+    let params = fast_kdf();
+    let exporter = [0x77u8; 32];
+
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    let client = HandshakeBuilder::new(user_norm, TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .pinned_hash(sha256(&identity_kp.public_bytes()))
+        .build()
+        .unwrap();
+
+    let auth_init = client.auth_init();
+    let server_view = AuthInitView {
+        user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+        client_nonce: auth_init.client_nonce,
+        binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+        version: auth_init.version,
+    };
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        server_view,
+        exporter,
+        params,
+        |_| None, // user not found
+    )
+    .unwrap();
+
+    // Client gets a (fake) challenge that looks structurally identical.
+    let cc = server.challenge();
+    assert_eq!(cc.salt.len(), 16);
+    assert_eq!(cc.kdf_params, params);
+
+    let client_challenge = ServerChallenge {
+        salt: cc.salt,
+        kdf_params: cc.kdf_params,
+        server_nonce: cc.server_nonce,
+    };
+
+    let mut buf = password.to_vec();
+    let (proof, _derived, _am) = client
+        .process_challenge(&client_challenge, &mut buf)
+        .unwrap();
+
+    let outcome = server
+        .verify_proof(&proof, &identity_kp, SESSION_MAX_AGE_NS)
+        .unwrap();
+    // Server STILL goes through full crypto pipeline for unknown users
+    // (HKDF fake_blob → HMAC → SHA256) and emits Rejected — same outcome
+    // as wrong-password case.
+    assert!(matches!(outcome, ProofOutcome::Rejected));
+}
+
+#[test]
+fn rejects_binding_mode_policy_mismatch_pre_argon2id() {
+    // Listener accepts only TlsExporter; client claims None (plain).
+    let username = "alice";
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let exporter = [0x77u8; 32];
+
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    let auth_init_view = AuthInitView {
+        user: user_norm,
+        client_nonce: [0xabu8; 32],
+        binding_mode: BindingMode::None, // mismatch with policy
+        version: 1,
+    };
+
+    let result = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        auth_init_view,
+        exporter,
+        fast_kdf(),
+        |_| panic!("user lookup must NOT happen — pre-Argon policy check should fire first"),
+    );
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn rejects_unsupported_protocol_version() {
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let auth_init_view = AuthInitView {
+        user: NormalizedUsername::from_raw("alice").unwrap(),
+        client_nonce: [1u8; 32],
+        binding_mode: BindingMode::TlsExporter,
+        version: 99, // future protocol
+    };
+
+    let result = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        auth_init_view,
+        [0u8; 32],
+        fast_kdf(),
+        |_| panic!("user lookup must NOT happen"),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn rejects_all_zero_client_nonce() {
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let auth_init_view = AuthInitView {
+        user: NormalizedUsername::from_raw("alice").unwrap(),
+        client_nonce: [0u8; 32], // all-zero
+        binding_mode: BindingMode::TlsExporter,
+        version: 1,
+    };
+
+    let result = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        auth_init_view,
+        [0u8; 32],
+        fast_kdf(),
+        |_| None,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn client_pin_mismatch_after_auth_ok_aborts() {
+    // Server signs with one Ed25519 key; client has a different pin.
+    let username = "alice";
+    let password = b"secret password";
+
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let real_kp = Ed25519Keypair::generate();
+    let salt = [0x55u8; 16];
+    let params = fast_kdf();
+    let exporter = [0x77u8; 32];
+
+    let server_user_db = make_user_record(password, salt, params);
+
+    // CLIENT PINS A DIFFERENT KEY than what server uses
+    let attacker_kp = Ed25519Keypair::generate();
+    let wrong_pin = sha256(&attacker_kp.public_bytes());
+
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    let client = HandshakeBuilder::new(user_norm, TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .pinned_hash(wrong_pin)
+        .build()
+        .unwrap();
+
+    let auth_init = client.auth_init();
+    let server_view = AuthInitView {
+        user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+        client_nonce: auth_init.client_nonce,
+        binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+        version: auth_init.version,
+    };
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        server_view,
+        exporter,
+        params,
+        |_| Some(server_user_db.clone()),
+    )
+    .unwrap();
+
+    let cc = server.challenge();
+    let client_challenge = ServerChallenge {
+        salt: cc.salt,
+        kdf_params: cc.kdf_params,
+        server_nonce: cc.server_nonce,
+    };
+
+    let mut buf = password.to_vec();
+    let (proof, derived, am_client) = client
+        .process_challenge(&client_challenge, &mut buf)
+        .unwrap();
+
+    let outcome = server
+        .verify_proof(&proof, &real_kp, SESSION_MAX_AGE_NS)
+        .unwrap();
+    let ok = match outcome {
+        ProofOutcome::Accepted(ok) => ok,
+        ProofOutcome::Rejected => panic!("expected accept (pw is right; pin is just different)"),
+    };
+
+    let server_auth_ok = ServerAuthOk {
+        server_signature: ok.server_signature,
+        server_pub_key: ok.server_pub_key,
+        identity_sig: ok.identity_sig,
+        session_id: ok.session_id,
+        expires_at_ns: ok.expires_at_ns,
+    };
+
+    // Client should reject with ServerIdentityChanged (pin mismatch).
+    let result = client.process_auth_ok(&server_auth_ok, &derived, &am_client, |_| {
+        panic!("TOFU should not fire when pin is set");
+    });
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::ServerIdentityChanged)
+    ));
+}
+
+#[test]
+fn tofu_first_connect_invokes_pin_callback() {
+    let username = "alice";
+    let password = b"secret password";
+
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let real_kp = Ed25519Keypair::generate();
+    let salt = [0x55u8; 16];
+    let params = fast_kdf();
+    let exporter = [0x77u8; 32];
+
+    let server_user_db = make_user_record(password, salt, params);
+
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    // No pinned_hash — accept_new_host enabled (TOFU).
+    let client = HandshakeBuilder::new(user_norm, TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .accept_new_host(true)
+        .build()
+        .unwrap();
+
+    let auth_init = client.auth_init();
+    let server_view = AuthInitView {
+        user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+        client_nonce: auth_init.client_nonce,
+        binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+        version: auth_init.version,
+    };
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        server_view,
+        exporter,
+        params,
+        |_| Some(server_user_db.clone()),
+    )
+    .unwrap();
+
+    let cc = server.challenge();
+    let cc_view = ServerChallenge {
+        salt: cc.salt,
+        kdf_params: cc.kdf_params,
+        server_nonce: cc.server_nonce,
+    };
+
+    let mut buf = password.to_vec();
+    let (proof, derived, am_client) = client.process_challenge(&cc_view, &mut buf).unwrap();
+    let outcome = server
+        .verify_proof(&proof, &real_kp, SESSION_MAX_AGE_NS)
+        .unwrap();
+    let ok = match outcome {
+        ProofOutcome::Accepted(ok) => ok,
+        _ => panic!(),
+    };
+
+    let server_auth_ok = ServerAuthOk {
+        server_signature: ok.server_signature,
+        server_pub_key: ok.server_pub_key,
+        identity_sig: ok.identity_sig,
+        session_id: ok.session_id,
+        expires_at_ns: ok.expires_at_ns,
+    };
+
+    let mut tofu_fired = false;
+    let _ = client
+        .process_auth_ok(&server_auth_ok, &derived, &am_client, |hash| {
+            assert_eq!(*hash, sha256(&real_kp.public_bytes()));
+            tofu_fired = true;
+        })
+        .unwrap();
+
+    assert!(tofu_fired, "TOFU pin callback must fire on first connect");
+}
+
+#[test]
+fn tampered_identity_sig_aborts_client() {
+    let username = "alice";
+    let password = b"secret password";
+
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let real_kp = Ed25519Keypair::generate();
+    let salt = [0x55u8; 16];
+    let params = fast_kdf();
+    let exporter = [0x77u8; 32];
+
+    let server_user_db = make_user_record(password, salt, params);
+
+    let user_norm = NormalizedUsername::from_raw(username).unwrap();
+    let client = HandshakeBuilder::new(user_norm, TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .pinned_hash(sha256(&real_kp.public_bytes()))
+        .build()
+        .unwrap();
+
+    let auth_init = client.auth_init();
+    let server_view = AuthInitView {
+        user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+        client_nonce: auth_init.client_nonce,
+        binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+        version: auth_init.version,
+    };
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        server_view,
+        exporter,
+        params,
+        |_| Some(server_user_db.clone()),
+    )
+    .unwrap();
+
+    let cc = server.challenge();
+    let cc_view = ServerChallenge {
+        salt: cc.salt,
+        kdf_params: cc.kdf_params,
+        server_nonce: cc.server_nonce,
+    };
+
+    let mut buf = password.to_vec();
+    let (proof, derived, am_client) = client.process_challenge(&cc_view, &mut buf).unwrap();
+    let outcome = server
+        .verify_proof(&proof, &real_kp, SESSION_MAX_AGE_NS)
+        .unwrap();
+    let ok = match outcome {
+        ProofOutcome::Accepted(ok) => ok,
+        _ => panic!(),
+    };
+
+    // TAMPER WITH THE SIG
+    let mut bad_sig = ok.identity_sig;
+    bad_sig[0] ^= 0xff;
+
+    let server_auth_ok = ServerAuthOk {
+        server_signature: ok.server_signature,
+        server_pub_key: ok.server_pub_key,
+        identity_sig: bad_sig,
+        session_id: ok.session_id,
+        expires_at_ns: ok.expires_at_ns,
+    };
+
+    let result = client.process_auth_ok(&server_auth_ok, &derived, &am_client, |_| {});
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::ServerSignatureInvalid)
+    ));
+}
