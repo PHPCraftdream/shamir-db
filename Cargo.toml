@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/shamir-connect"]
+
 [package]
 name = "shamir-db"
 version = "0.1.0"
