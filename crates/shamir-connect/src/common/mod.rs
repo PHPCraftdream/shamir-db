@@ -10,6 +10,8 @@ pub mod error;
 pub mod fake_blob;
 pub mod identity;
 pub mod kdf_params;
+pub mod latency;
+pub mod password;
 pub mod rotation;
 pub mod scram;
 pub mod time;
