@@ -1,0 +1,349 @@
+//! Server-side resumption flow (SESSION_RESUMPTION §5).
+//!
+//! End-to-end ticket consumption: parse envelope → decrypt with current/previous
+//! ticket_key → validate version/expires_at_ns/user/tickets_invalid_before_ns
+//! (strict `>`) → anti-downgrade → atomic per-(user, family) counter CAS →
+//! create new [`Session`] → emit new ticket.
+//!
+//! The per-(user, family) counter store is in-memory; production deployments
+//! MUST persist via `SystemStore` with synchronous fsync (spec §1.3
+//! IMPLEMENTATION_GUIDE NORMATIVE) — wired here as a trait so callers can
+//! plug in their durable backend.
+
+use crate::common::error::{Error, Result};
+use crate::common::types::{limits, BindingMode};
+use crate::server::session::{Session, SessionPermissions, SessionStore};
+use crate::server::ticket::{
+    check_anti_downgrade, decrypt_ticket, encrypt_ticket, ticket_limits, validate_ticket_enums,
+    TicketPlain, TicketWire,
+};
+use dashmap::DashMap;
+use std::sync::Arc;
+
+/// Pluggable per-(user_id, family_id) counter store.
+///
+/// Production: persistent K-V with synchronous fsync (spec §6.2). Tests +
+/// development: in-memory [`InMemoryConsumedCounters`] (below).
+pub trait ConsumedCounterStore: Send + Sync {
+    /// Atomic compare-and-swap: if `new_counter > stored`, set stored = new and return true.
+    /// Else return false (replay or stale).
+    ///
+    /// Implementation **MUST** persist durably (fsync) before returning `true`.
+    fn try_advance(
+        &self,
+        user_id: &[u8; 16],
+        family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
+        new_counter: u64,
+    ) -> bool;
+
+    /// Background GC: remove entries with `last_observed_at + max_chain_age < now_ns`.
+    /// Default impl is no-op (caller may override).
+    fn gc(&self, _now_ns: u64) {}
+}
+
+/// In-memory counter store — DashMap of `(user_id, family_id) → (last_counter, last_observed_at_ns)`.
+#[derive(Debug, Default)]
+pub struct InMemoryConsumedCounters {
+    map: DashMap<([u8; 16], [u8; limits::TICKET_FAMILY_ID_BYTES]), (u64, u64)>,
+}
+
+impl InMemoryConsumedCounters {
+    /// Empty store.
+    pub fn new() -> Self {
+        Self {
+            map: DashMap::new(),
+        }
+    }
+
+    /// Number of distinct (user, family) lineages tracked.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// Whether empty.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// Test helper: peek the current counter for a (user, family).
+    pub fn peek(
+        &self,
+        user_id: &[u8; 16],
+        family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
+    ) -> Option<u64> {
+        self.map.get(&(*user_id, *family_id)).map(|v| v.0)
+    }
+}
+
+impl ConsumedCounterStore for InMemoryConsumedCounters {
+    fn try_advance(
+        &self,
+        user_id: &[u8; 16],
+        family_id: &[u8; limits::TICKET_FAMILY_ID_BYTES],
+        new_counter: u64,
+    ) -> bool {
+        let key = (*user_id, *family_id);
+        let now_ns = crate::common::time::UnixNanos::now().as_u64();
+        let mut accepted = false;
+        self.map
+            .entry(key)
+            .and_modify(|(c, ts)| {
+                if new_counter > *c {
+                    *c = new_counter;
+                    *ts = now_ns;
+                    accepted = true;
+                }
+            })
+            .or_insert_with(|| {
+                accepted = true;
+                (new_counter, now_ns)
+            });
+        accepted
+    }
+
+    fn gc(&self, now_ns: u64) {
+        let cutoff = now_ns.saturating_sub(ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS);
+        self.map.retain(|_, (_, ts)| *ts >= cutoff);
+    }
+}
+
+/// Server resumption configuration.
+pub struct ResumeConfig {
+    /// Current `ticket_key` for AES-GCM.
+    pub ticket_key: [u8; 32],
+    /// Optional previous `ticket_key` for 24h overlap.
+    pub ticket_key_previous: Option<[u8; 32]>,
+    /// Strict mode: refuse browser → native upgrade (spec §6.1).
+    pub allow_browser_ticket_upgrade: bool,
+    /// Refuse plain → TLS upgrade (spec §6.4).
+    pub disable_plain_ticket_upgrade: bool,
+}
+
+/// Per-spec §5.4 inputs from the client.
+#[derive(Debug, Clone)]
+pub struct ResumeRequest<'a> {
+    /// Wire-encoded ticket from `auth_ok.resumption_ticket`.
+    pub ticket_wire_bytes: &'a [u8],
+    /// Fresh client nonce.
+    pub client_nonce: [u8; 32],
+    /// Binding mode of the NEW connection.
+    pub binding_mode_now: BindingMode,
+    /// `tls_exporter_or_zeros` of the NEW connection.
+    pub channel_binding_now: [u8; 32],
+}
+
+/// Server response.
+#[derive(Debug)]
+pub struct ResumeOk {
+    /// New session id.
+    pub session_id: [u8; limits::SESSION_ID_BYTES],
+    /// Absolute session expiry.
+    pub expires_at_ns: u64,
+    /// New resumption ticket (same family_id, counter+1) — optional.
+    pub resumption_ticket: Option<Vec<u8>>,
+    /// New ticket expiry.
+    pub resumption_expires_at_ns: Option<u64>,
+}
+
+/// Lookup hook: returns user's `tickets_invalid_before_ns` for the spec §5.4
+/// step 9 check. Caller wires this to its `__system__/users` lookup.
+pub trait UserStateLookup: Send + Sync {
+    /// Returns `tickets_invalid_before_ns` if the user exists, `None` if not.
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64>;
+}
+
+/// Process a resume request end-to-end. Returns `Ok(ResumeOk)` on success or
+/// [`Error::AuthFailed`] (generic) on any failure (spec §5.5).
+#[allow(clippy::too_many_arguments)]
+pub fn process_resume(
+    request: &ResumeRequest,
+    config: &ResumeConfig,
+    counters: &dyn ConsumedCounterStore,
+    user_lookup: &dyn UserStateLookup,
+    session_store: &SessionStore,
+    session_max_age_ns: u64,
+    new_ticket_ttl_ns: u64,
+    now_ns: u64,
+) -> Result<ResumeOk> {
+    // Step 1: parse envelope.
+    let wire = TicketWire::from_bytes(request.ticket_wire_bytes).map_err(|_| Error::AuthFailed)?;
+
+    // Step 2: validate envelope.version (we only accept v1).
+    if wire.version != 1 {
+        return Err(Error::AuthFailed);
+    }
+
+    // Steps 3-4: decrypt with current key, fall back to previous.
+    let plain = decrypt_ticket(&config.ticket_key, config.ticket_key_previous.as_ref(), &wire)
+        .map_err(|_| Error::AuthFailed)?;
+
+    // Step 5: parse plaintext + Step 6 already enforced inside decrypt_ticket
+    // via the `plain.version != wire.version` check.
+    let (_transport_at_auth, binding_at_auth) =
+        validate_ticket_enums(&plain).map_err(|_| Error::AuthFailed)?;
+
+    // Step 7: expiry.
+    if plain.expires_at_ns <= now_ns {
+        return Err(Error::AuthFailed);
+    }
+    if plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS <= now_ns {
+        return Err(Error::AuthFailed);
+    }
+
+    // Step 8: lookup user → get tickets_invalid_before_ns.
+    let user_id = parse_user_id(&plain.user_id)?;
+    let invalid_before = user_lookup.lookup(&user_id).ok_or(Error::AuthFailed)?;
+
+    // Step 9: STRICT > comparison (spec §5.4 step 9).
+    if !(plain.original_auth_at_ns > invalid_before) {
+        return Err(Error::AuthFailed);
+    }
+
+    // Step 10: anti-downgrade.
+    check_anti_downgrade(
+        binding_at_auth,
+        request.binding_mode_now,
+        config.allow_browser_ticket_upgrade,
+    )
+    .map_err(|_| Error::AuthFailed)?;
+    if config.disable_plain_ticket_upgrade
+        && binding_at_auth == BindingMode::None
+        && request.binding_mode_now != BindingMode::None
+    {
+        return Err(Error::AuthFailed);
+    }
+
+    // Step 11: atomic per-(user, family) counter CAS.
+    let family_id = parse_family_id(&plain.ticket_family_id)?;
+    if !counters.try_advance(&user_id, &family_id, plain.family_counter) {
+        return Err(Error::AuthFailed);
+    }
+
+    // Step 12: create new Session.
+    let session_id = crate::common::crypto::random_array::<{ limits::SESSION_ID_BYTES }>();
+    let expires_at_ns = now_ns.saturating_add(session_max_age_ns);
+
+    // The username comes from ticket plaintext (already normalized when persisted).
+    let session = Session::new(
+        user_id,
+        plain.username_nfc.clone(),
+        SessionPermissions::from_roles(extract_roles_from_perms(&plain)),
+        crate::common::types::TransportKind::from_u8(plain.transport_kind_at_auth)
+            .unwrap_or(crate::common::types::TransportKind::Tcp),
+        request.binding_mode_now,
+        request.channel_binding_now,
+        now_ns,
+    );
+    session_store.insert(session_id, session);
+
+    // Step 13: optionally issue a new ticket (same family, counter+1).
+    let mut resumption_ticket = None;
+    let mut resumption_expires_at_ns = None;
+    if plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS > now_ns + new_ticket_ttl_ns {
+        let new_plain = TicketPlain {
+            version: 1,
+            user_id: plain.user_id.clone(),
+            username_nfc: plain.username_nfc.clone(),
+            transport_kind_at_auth: plain.transport_kind_at_auth,
+            binding_mode_at_auth: plain.binding_mode_at_auth,
+            channel_binding_at_auth: plain.channel_binding_at_auth.clone(),
+            ticket_family_id: plain.ticket_family_id.clone(),
+            original_auth_at_ns: plain.original_auth_at_ns,
+            expires_at_ns: now_ns.saturating_add(new_ticket_ttl_ns),
+            family_counter: plain.family_counter.saturating_add(1),
+        };
+        let wire = encrypt_ticket(&config.ticket_key, &new_plain).map_err(|_| Error::AuthFailed)?;
+        resumption_ticket = Some(wire.to_bytes());
+        resumption_expires_at_ns = Some(new_plain.expires_at_ns);
+    }
+
+    Ok(ResumeOk {
+        session_id,
+        expires_at_ns,
+        resumption_ticket,
+        resumption_expires_at_ns,
+    })
+}
+
+/// Build a fresh ticket for a brand-new SCRAM auth.
+///
+/// Used right after `auth_ok` when the server wants to issue a resumption
+/// token. `family_id = random(16)`, `family_counter = 1`, `original_auth_at_ns = now`.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_initial_ticket(
+    ticket_key: &[u8; 32],
+    user_id: [u8; 16],
+    username_nfc: String,
+    transport_kind_at_auth: u8,
+    binding_mode_at_auth: u8,
+    channel_binding_at_auth: [u8; 32],
+    now_ns: u64,
+    ttl_ns: u64,
+) -> Result<(Vec<u8>, u64)> {
+    let mut family = [0u8; limits::TICKET_FAMILY_ID_BYTES];
+    crate::common::crypto::random_bytes(&mut family);
+
+    let plain = TicketPlain {
+        version: 1,
+        user_id: user_id.to_vec(),
+        username_nfc,
+        transport_kind_at_auth,
+        binding_mode_at_auth,
+        channel_binding_at_auth: channel_binding_at_auth.to_vec(),
+        ticket_family_id: family.to_vec(),
+        original_auth_at_ns: now_ns,
+        expires_at_ns: now_ns.saturating_add(ttl_ns),
+        family_counter: 1,
+    };
+    let wire = encrypt_ticket(ticket_key, &plain).map_err(|_| Error::AuthFailed)?;
+    Ok((wire.to_bytes(), plain.expires_at_ns))
+}
+
+/// Lookup adapter: implement [`UserStateLookup`] for any closure.
+impl<F> UserStateLookup for F
+where
+    F: Fn(&[u8; 16]) -> Option<u64> + Send + Sync,
+{
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
+        self(user_id)
+    }
+}
+
+/// In-memory user store: simple hashmap-based [`UserStateLookup`].
+pub type InMemoryUserStateMap = Arc<DashMap<[u8; 16], u64>>;
+
+/// Construct an empty in-memory user state map.
+pub fn new_user_state_map() -> InMemoryUserStateMap {
+    Arc::new(DashMap::new())
+}
+
+impl UserStateLookup for InMemoryUserStateMap {
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
+        self.get(user_id).map(|v| *v)
+    }
+}
+
+fn parse_user_id(bytes: &[u8]) -> Result<[u8; 16]> {
+    if bytes.len() != 16 {
+        return Err(Error::InvalidInput("ticket: user_id wrong length"));
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+fn parse_family_id(bytes: &[u8]) -> Result<[u8; limits::TICKET_FAMILY_ID_BYTES]> {
+    if bytes.len() != limits::TICKET_FAMILY_ID_BYTES {
+        return Err(Error::InvalidInput("ticket: family_id wrong length"));
+    }
+    let mut out = [0u8; limits::TICKET_FAMILY_ID_BYTES];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+fn extract_roles_from_perms(_plain: &TicketPlain) -> Vec<String> {
+    // The protocol field is `permissions: SessionPermissions` but our
+    // ticket struct currently doesn't carry it as a typed field — extract
+    // when permissions snapshot moves into the ticket schema (v0.2).
+    Vec::new()
+}

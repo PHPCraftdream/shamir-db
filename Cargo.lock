@@ -2142,10 +2142,12 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
+ "dashmap 6.1.0",
  "ed25519-dalek",
  "hex",
  "hkdf",
  "hmac",
+ "parking_lot 0.12.5",
  "rand 0.8.5",
  "rmp-serde",
  "serde",
@@ -2204,6 +2206,25 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "unicode-normalization",
+]
+
+[[package]]
+name = "shamir-transport-tcp"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "hex",
+ "rcgen",
+ "rmp-serde",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_bytes",
+ "shamir-connect",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "zeroize",
 ]
 
 [[package]]

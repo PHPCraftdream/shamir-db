@@ -9,7 +9,7 @@ use crate::common::types::limits;
 use zeroize::Zeroizing;
 
 /// Persisted user record (SCRAM-relevant fields only).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UserRecord {
     /// Per-user 16-byte Argon2id salt.
     pub salt: [u8; limits::SALT_BYTES],
