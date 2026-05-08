@@ -33,7 +33,9 @@ use shamir_connect::common::crypto::{
 use shamir_connect::server::ticket::{
     decrypt_ticket_with_ciphers, encrypt_ticket_with_cipher,
 };
-use shamir_connect::common::envelope::{RequestEnvelope, RequestEnvelopeView, ResponseEnvelope};
+use shamir_connect::common::envelope::{
+    RequestEnvelope, RequestEnvelopeRef, RequestEnvelopeView, ResponseEnvelope,
+};
 use shamir_connect::common::fake_blob::FakeBlob;
 use shamir_connect::common::identity::build_identity_input;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -134,6 +136,25 @@ fn bench_envelope(c: &mut Criterion) {
                 black_box(bytes);
             });
         });
+
+        // Optim #9: borrowed encode path — saves the per-call sid Vec<u8>
+        // allocation that `RequestEnvelope::new` does.
+        g.bench_with_input(
+            BenchmarkId::new("request_encode_ref", body_size),
+            &(sid, body_size),
+            |b, (sid, sz)| {
+                let body_buf = vec![0u8; *sz];
+                b.iter(|| {
+                    let r = RequestEnvelopeRef {
+                        session_id: sid,
+                        request_id: Some(42),
+                        req: &body_buf,
+                    };
+                    let bytes = r.to_msgpack().unwrap();
+                    black_box(bytes);
+                });
+            },
+        );
         g.bench_with_input(
             BenchmarkId::new("request_decode", body_size),
             &encoded,

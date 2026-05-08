@@ -63,6 +63,49 @@ impl RequestEnvelope {
     }
 }
 
+/// **Optim #9:** zero-copy borrowed envelope for the **client encode** path.
+///
+/// Symmetric to [`RequestEnvelopeView`] (which is for server decode):
+/// `RequestEnvelopeRef<'a>` lets a client serialize a request without
+/// allocating a `Vec<u8>` for `session_id`. Useful in tight client-side
+/// request loops where the same `[u8; 32]` session id is sent on every
+/// request.
+///
+/// ```rust,ignore
+/// let sid: [u8; 32] = /* from auth_ok */;
+/// let body = b"...";
+/// let envelope = RequestEnvelopeRef {
+///     session_id: &sid,
+///     request_id: Some(42),
+///     req: body,
+/// };
+/// let bytes = envelope.to_msgpack()?;
+/// ```
+///
+/// Wire format identical to [`RequestEnvelope`] — verified by
+/// `request_envelope_ref_wire_compat_with_owning` integration test.
+#[derive(Debug, Serialize)]
+pub struct RequestEnvelopeRef<'a> {
+    /// Bearer session id (always 32 bytes).
+    #[serde(with = "serde_bytes", rename = "sid")]
+    pub session_id: &'a [u8; 32],
+    /// Optional client-side correlation id.
+    #[serde(rename = "rid", default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<u32>,
+    /// Application-level request body — borrowed.
+    #[serde(with = "serde_bytes")]
+    pub req: &'a [u8],
+}
+
+impl<'a> RequestEnvelopeRef<'a> {
+    /// Encode to msgpack — single allocation for the output Vec; no per-call
+    /// copy of `session_id` or `req`.
+    pub fn to_msgpack(&self) -> Result<Vec<u8>> {
+        rmp_serde::to_vec_named(self)
+            .map_err(|e| Error::Encoding(format!("envelope ref encode: {e}")))
+    }
+}
+
 /// **Optim #4:** zero-copy borrowed view over a request envelope.
 ///
 /// Use this on the server-side hot path instead of the owning
