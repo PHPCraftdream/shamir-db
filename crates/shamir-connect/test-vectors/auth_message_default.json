@@ -1,0 +1,24 @@
+{
+  "name": "auth_message — inline example from spec §16",
+  "spec_section": "AUTH_PROTOCOL.md §16",
+  "inputs": {
+    "username": "alice",
+    "client_nonce_hex": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    "server_nonce_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "salt_hex": "505152535455565758595a5b5c5d5e5f",
+    "kdf_params": {
+      "memory_kb": 131072,
+      "time": 4,
+      "parallelism": 1,
+      "argon2_version": 19
+    },
+    "transport_kind": 1,
+    "binding_mode": 1,
+    "tls_exporter_hex": "aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9",
+    "supported_version": 1
+  },
+  "expected": {
+    "auth_message_total_bytes": 149,
+    "auth_message_hex": "5348414d49522d415554482d76310005616c69636500112233445566778899aabbccddeeff00112233445566778899aabbccddeeff202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f505152535455565758595a5b5c5d5e5f000200000000000400000001130101aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c901"
+  }
+}
