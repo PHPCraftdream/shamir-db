@@ -211,3 +211,81 @@ fn permissions_snapshot_admin_detection() {
     let p2 = SessionPermissions::from_roles(vec!["read_only".into()]);
     assert!(!p2.is_superuser);
 }
+
+/// Optim #4: dispatch_request_view operates on a borrowed RequestEnvelopeView
+/// without copying session_id or req. Functionally identical to dispatch_request.
+#[test]
+fn dispatch_request_view_round_trip() {
+    use shamir_connect::common::envelope::RequestEnvelopeView;
+    use shamir_connect::server::dispatch::dispatch_request_view;
+
+    let store = SessionStore::new();
+    let sid = [0xa1u8; 32];
+    store.insert(sid, make_session([0x01u8; 16], UnixNanos::now().as_u64()));
+
+    let env = RequestEnvelope::new(sid, Some(7), b"ping".to_vec());
+    let bytes = env.to_msgpack().unwrap();
+
+    let view = RequestEnvelopeView::from_msgpack(&bytes).unwrap();
+    assert_eq!(view.session_id_array().unwrap(), &sid);
+    assert_eq!(view.request_id, Some(7));
+    assert_eq!(view.req, b"ping");
+
+    let outcome = dispatch_request_view(&view, &store, |_| 0u64, &Echo).unwrap();
+    let DispatchOutcome::Response(r) = outcome else {
+        panic!("expected response")
+    };
+    assert_eq!(r.res, b"ping");
+    assert_eq!(r.request_id, Some(7));
+}
+
+/// Optim #4: dispatch_request_view applies the §7.5 validity check
+/// identically to dispatch_request.
+#[test]
+fn dispatch_request_view_kills_session_when_invalidated() {
+    use shamir_connect::common::envelope::RequestEnvelopeView;
+    use shamir_connect::server::dispatch::dispatch_request_view;
+
+    let store = SessionStore::new();
+    let sid = [0xb2u8; 32];
+    let uid = [0x02u8; 16];
+    let created_at = 1000u64;
+    store.insert(sid, make_session(uid, created_at));
+
+    let env = RequestEnvelope::new(sid, Some(99), b"bye".to_vec());
+    let bytes = env.to_msgpack().unwrap();
+    let view = RequestEnvelopeView::from_msgpack(&bytes).unwrap();
+
+    // tickets_invalid_before_ns >= created_at_ns → §7.5 kicks.
+    let outcome = dispatch_request_view(&view, &store, |_| created_at, &Echo).unwrap();
+    let DispatchOutcome::Error(e) = outcome else {
+        panic!("expected error")
+    };
+    assert_eq!(e.error, "session_invalidated");
+    assert_eq!(store.len(), 0, "session must be removed");
+}
+
+/// Optim #4: invalid session_id length is rejected.
+#[test]
+fn request_envelope_view_rejects_wrong_session_id_length() {
+    use serde::Serialize;
+    use shamir_connect::common::envelope::RequestEnvelopeView;
+
+    #[derive(Serialize)]
+    struct Bad {
+        #[serde(with = "serde_bytes", rename = "sid")]
+        session_id: Vec<u8>,
+        #[serde(rename = "rid", skip_serializing_if = "Option::is_none")]
+        request_id: Option<u32>,
+        #[serde(with = "serde_bytes")]
+        req: Vec<u8>,
+    }
+    let bad = Bad {
+        session_id: vec![0u8; 16], // too short
+        request_id: None,
+        req: vec![],
+    };
+    let bytes = rmp_serde::to_vec_named(&bad).unwrap();
+    let view = RequestEnvelopeView::from_msgpack(&bytes).unwrap();
+    assert!(view.session_id_array().is_err());
+}

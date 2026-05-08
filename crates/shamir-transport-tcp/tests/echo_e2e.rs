@@ -15,14 +15,16 @@ use std::sync::Arc;
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::envelope::{
-    ErrorEnvelope, RequestEnvelope, ResponseEnvelope,
+    ErrorEnvelope, RequestEnvelope, RequestEnvelopeView, ResponseEnvelope,
 };
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
-use shamir_connect::server::dispatch::{dispatch_request, DispatchOutcome, RequestHandler};
+use shamir_connect::server::dispatch::{
+    dispatch_request, dispatch_request_view, DispatchOutcome, RequestHandler,
+};
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
@@ -268,20 +270,22 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         write_frame(&mut w, &bytes).await.unwrap();
 
         // ----- 2. Echo loop -----
-        // Per-connection scratch buffer: reused across iterations via
-        // `read_frame_into`, eliminating heap allocations in the hot path
-        // (see `crates/shamir-transport-tcp/benches/framing.rs`
-        // `round_trip_pooled` group — ~3× faster at 256 KB frames vs the
-        // owning `read_frame` API).
+        // Per-connection scratch buffer + zero-copy envelope view = the
+        // production hot-path pattern:
+        //   - `read_frame_into` reuses buffer capacity (Optim #1).
+        //   - `RequestEnvelopeView::from_msgpack` borrows session_id + req
+        //     directly from `frame` (Optim #4).
+        //   - `dispatch_request_view` skips the owning Vec<u8> allocations.
+        // Combined: ~½ the allocator pressure per request vs the owning APIs.
         let mut frame: Vec<u8> = Vec::with_capacity(4096);
         loop {
             match read_frame_into(&mut r, MAX_FRAME_SIZE_DEFAULT, &mut frame).await {
                 Ok(()) => {}
                 Err(_) => break, // client closed
             }
-            let env = RequestEnvelope::from_msgpack(&frame).unwrap();
-            let outcome = dispatch_request(
-                &env,
+            let view = RequestEnvelopeView::from_msgpack(&frame).unwrap();
+            let outcome = dispatch_request_view(
+                &view,
                 &server_session_store,
                 |_uid| server_tib.load(Ordering::Relaxed),
                 &*server_echo,

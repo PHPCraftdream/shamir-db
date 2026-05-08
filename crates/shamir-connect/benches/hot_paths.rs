@@ -33,7 +33,7 @@ use shamir_connect::common::crypto::{
 use shamir_connect::server::ticket::{
     decrypt_ticket_with_ciphers, encrypt_ticket_with_cipher,
 };
-use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
+use shamir_connect::common::envelope::{RequestEnvelope, RequestEnvelopeView, ResponseEnvelope};
 use shamir_connect::common::fake_blob::FakeBlob;
 use shamir_connect::common::identity::build_identity_input;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -42,7 +42,9 @@ use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, ProtocolVersion, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
-use shamir_connect::server::dispatch::{dispatch_request, DispatchOutcome, RequestHandler};
+use shamir_connect::server::dispatch::{
+    dispatch_request, dispatch_request_view, DispatchOutcome, RequestHandler,
+};
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
@@ -177,6 +179,9 @@ fn bench_dispatch(c: &mut Criterion) {
     let mut g = c.benchmark_group("dispatch");
     for body_size in [16usize, 256, 4096].iter().copied() {
         let env = RequestEnvelope::new(sid, Some(7), vec![0xcdu8; body_size]);
+        // Pre-encoded msgpack bytes for the view path (simulates a wire
+        // buffer freshly read by the framing layer).
+        let env_bytes = env.to_msgpack().unwrap();
 
         g.throughput(Throughput::Elements(1));
         g.bench_with_input(BenchmarkId::new("happy_path", body_size), &env, |b, e| {
@@ -187,6 +192,24 @@ fn bench_dispatch(c: &mut Criterion) {
                 };
             });
         });
+
+        // Optim #4 — borrowed view path. Includes the msgpack PARSE step
+        // (which the owning path also does inside `from_msgpack`); the saved
+        // work is the per-field Vec<u8> allocations for sid + req.
+        g.bench_with_input(
+            BenchmarkId::new("happy_path_view", body_size),
+            &env_bytes,
+            |b, bytes| {
+                b.iter(|| {
+                    let view = RequestEnvelopeView::from_msgpack(black_box(bytes)).unwrap();
+                    let outcome =
+                        dispatch_request_view(&view, &store, |_| 0u64, &handler).unwrap();
+                    let DispatchOutcome::Response(_) = outcome else {
+                        panic!("expected response")
+                    };
+                });
+            },
+        );
     }
     g.finish();
 }

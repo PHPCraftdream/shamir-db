@@ -16,6 +16,7 @@
 use crate::common::error::{Error, Result};
 use crate::common::types::limits;
 use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
 
 /// Client → server request envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +60,47 @@ impl RequestEnvelope {
         let mut out = [0u8; limits::SESSION_ID_BYTES];
         out.copy_from_slice(&self.session_id);
         Ok(out)
+    }
+}
+
+/// **Optim #4:** zero-copy borrowed view over a request envelope.
+///
+/// Use this on the server-side hot path instead of the owning
+/// [`RequestEnvelope`]: `session_id` and `req` are `&[u8]` borrows that
+/// alias directly into the input buffer — no allocation, no copy.
+///
+/// Build via [`RequestEnvelopeView::from_msgpack`] which is the borrowed
+/// counterpart of [`RequestEnvelope::from_msgpack`].
+#[derive(Debug, Deserialize)]
+pub struct RequestEnvelopeView<'a> {
+    /// Bearer session id (must be exactly 32 bytes — validated at access time).
+    #[serde(borrow, with = "serde_bytes", rename = "sid")]
+    pub session_id: &'a [u8],
+    /// Optional client-side correlation id.
+    #[serde(rename = "rid", default)]
+    pub request_id: Option<u32>,
+    /// Application-level request body — opaque borrowed slice.
+    #[serde(borrow, with = "serde_bytes")]
+    pub req: &'a [u8],
+}
+
+impl<'a> RequestEnvelopeView<'a> {
+    /// Decode from msgpack bytes WITHOUT copying.
+    ///
+    /// The returned view borrows from `buf`; `buf` must outlive the view.
+    pub fn from_msgpack(buf: &'a [u8]) -> Result<Self> {
+        rmp_serde::from_slice(buf)
+            .map_err(|e| Error::Encoding(format!("envelope view decode: {e}")))
+    }
+
+    /// Validate `session_id.len() == 32` and return a borrowed array reference.
+    ///
+    /// Zero-copy: returns a `&[u8; 32]` that points to the same memory as
+    /// the underlying buffer.
+    pub fn session_id_array(&self) -> Result<&[u8; limits::SESSION_ID_BYTES]> {
+        self.session_id
+            .try_into()
+            .map_err(|_| Error::InvalidInput("envelope: session_id wrong length"))
     }
 }
 
