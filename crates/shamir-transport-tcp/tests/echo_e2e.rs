@@ -29,7 +29,9 @@ use shamir_connect::server::handshake::{
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 use shamir_connect::server::user_record::UserRecord;
 
-use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
+use shamir_transport_tcp::framing::{
+    read_frame, read_frame_into, write_frame, MAX_FRAME_SIZE_DEFAULT,
+};
 use shamir_transport_tcp::tls::{
     extract_tls_exporter, generate_self_signed_server_cert, make_client_config_no_ca,
     make_server_config_from_pem,
@@ -266,11 +268,17 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         write_frame(&mut w, &bytes).await.unwrap();
 
         // ----- 2. Echo loop -----
+        // Per-connection scratch buffer: reused across iterations via
+        // `read_frame_into`, eliminating heap allocations in the hot path
+        // (see `crates/shamir-transport-tcp/benches/framing.rs`
+        // `round_trip_pooled` group — ~3× faster at 256 KB frames vs the
+        // owning `read_frame` API).
+        let mut frame: Vec<u8> = Vec::with_capacity(4096);
         loop {
-            let frame = match read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await {
-                Ok(b) => b,
+            match read_frame_into(&mut r, MAX_FRAME_SIZE_DEFAULT, &mut frame).await {
+                Ok(()) => {}
                 Err(_) => break, // client closed
-            };
+            }
             let env = RequestEnvelope::from_msgpack(&frame).unwrap();
             let outcome = dispatch_request(
                 &env,
