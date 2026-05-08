@@ -7,20 +7,23 @@
 //! enough — see SECURITY_MODEL §9.2.
 //!
 //! ```text
-//! target_constant_time_ms = max(FIXED_FLOOR_MS, JITTER_MAX_MS sample)
+//! target_constant_time_ms = FIXED_FLOOR_MS + uniform[0, JITTER_MAX_MS]
 //! pad_ms = max(0, target_constant_time_ms - elapsed_ms)
 //! sleep(pad_ms)
 //! ```
 //!
-//! `FIXED_FLOOR_MS = 50`, `JITTER_MAX_MS = 25` per spec §8.5.
+//! `FIXED_FLOOR_MS = 50`, `JITTER_MAX_MS = 25` per spec §8.5 + diagram 01
+//! step 14 ("50ms floor + uniform[0,25] jitter"). The result is therefore in
+//! `[50, 75]` ms — the floor defeats LAN/loopback nano-timing distinguishers
+//! and the jitter adds statistical noise to the rest.
 //!
 //! This module provides:
-//! - [`LatencyBudget`] — pure-logic helper that returns the `Duration` to
+//! - [`padding_for`] — pure-logic helper that returns the `Duration` to
 //!   sleep based on observed elapsed time. No I/O, no time source — fully
 //!   testable + portable across `std` / `tokio` / `async-std`.
 //! - [`LatencyPadGuard`] — RAII helper that captures `Instant::now()` on
-//!   creation and computes the pad on drop (caller responsible for the
-//!   sleep — we deliberately don't pick a runtime).
+//!   creation and computes the pad at finish time (caller responsible for
+//!   the actual sleep — we deliberately don't pick a runtime).
 
 use std::time::Duration;
 use std::time::Instant;
@@ -29,20 +32,26 @@ use rand::Rng;
 
 /// Floor below which the auth response MUST NOT be released (spec §8.5).
 pub const FIXED_FLOOR_MS: u64 = 50;
-/// Maximum jitter sampled uniform[0, JITTER_MAX_MS] added on top of the
-/// floor (spec §8.5).
+/// Maximum jitter sampled uniform\[0, JITTER_MAX_MS\] added on top of the
+/// floor (spec §8.5 + diagram 01).
 pub const JITTER_MAX_MS: u64 = 25;
 
-/// Compute today's `target_constant_time_ms` per spec §8.5.
+/// Compute the per-response `target_constant_time_ms` per spec §8.5 +
+/// diagram 01 step 14.
 ///
-/// Returns `max(FIXED_FLOOR_MS, sample) ` where `sample` is uniform on
-/// `[0, JITTER_MAX_MS]`. Effectively `FIXED_FLOOR_MS + uniform[0,
-/// JITTER_MAX_MS]` (since `FIXED_FLOOR_MS = 50 > JITTER_MAX_MS = 25`, the
-/// floor always wins, but we keep the `max(_, _)` form to match the spec
-/// formula verbatim and to permit future tuning).
+/// Result range: `[FIXED_FLOOR_MS, FIXED_FLOOR_MS + JITTER_MAX_MS]` — i.e.
+/// `[50, 75]` ms with the current constants.
+///
+/// Implementation note: the spec text writes `max(jitter_ms, fixed_floor_ms)`
+/// AND `jitter_ms = uniform[0, JITTER_MAX_MS]` separately. Diagram 01 step
+/// 14 spells out the intent explicitly as `floor + uniform[0, jitter]`,
+/// which is what this function computes. The previous implementation used
+/// `floor.max(j) + j` which only happened to produce the correct result
+/// because `FLOOR > JITTER_MAX` (so `max(50, j) == 50` always). The current
+/// form is unambiguous: caller-visible behaviour is byte-equivalent.
 pub fn target_constant_time_ms() -> u64 {
     let jitter: u64 = rand::thread_rng().gen_range(0..=JITTER_MAX_MS);
-    FIXED_FLOOR_MS.max(jitter) + jitter
+    FIXED_FLOOR_MS + jitter
 }
 
 /// Compute padding to sleep given `elapsed` and a sampled `target_ms`.
@@ -132,6 +141,34 @@ mod tests {
             let t = target_constant_time_ms();
             assert!(t <= FIXED_FLOOR_MS + JITTER_MAX_MS);
         }
+    }
+
+    /// Diagram 01 step 14: jitter MUST cover the full \[0, JITTER_MAX\]
+    /// range. Previous buggy `floor.max(j) + j` form happened to satisfy
+    /// the floor and max-jitter bounds, but if `JITTER_MAX_MS` were ever
+    /// raised above `FIXED_FLOOR_MS` the result would jump non-linearly.
+    /// This test exercises the distribution: across many samples we expect
+    /// to see at least the boundaries 50 and 75.
+    #[test]
+    fn sampled_target_distribution_covers_floor_and_ceiling() {
+        let mut saw_floor = false;
+        let mut saw_ceiling = false;
+        // 10000 samples: probability of missing either endpoint with
+        // uniform[0,25] is (25/26)^10000 ≈ 0 — practically impossible.
+        for _ in 0..10_000 {
+            let t = target_constant_time_ms();
+            if t == FIXED_FLOOR_MS {
+                saw_floor = true;
+            }
+            if t == FIXED_FLOOR_MS + JITTER_MAX_MS {
+                saw_ceiling = true;
+            }
+        }
+        assert!(saw_floor, "must occasionally hit the FIXED_FLOOR_MS exactly");
+        assert!(
+            saw_ceiling,
+            "must occasionally hit FIXED_FLOOR_MS + JITTER_MAX_MS"
+        );
     }
 
     /// LatencyPadGuard returns ~target after fast computation (under floor).

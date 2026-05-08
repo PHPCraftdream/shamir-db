@@ -518,7 +518,7 @@ Cost: один `u64 <=` compare per request — тривиально.
 
 8.4. **Lockout silent**: response identical с `authentication_failed`. Внутреннее состояние не раскрывается.
 
-8.5. **Latency padding** применяется к **всем** ответам сервера в auth flow (challenge response И negative-path responses). Цель — устранить timing oracle между real-vs-fake user paths (fake уходит в HKDF, real — в DashMap lookup; на microsecond уровне это различимо). Реализация: задержка до `target_constant_time_ms = max(jitter_ms, fixed_floor_ms)` где `fixed_floor_ms = 50` (защищает от LAN/loopback нанo-timing) + `jitter_ms = uniform[0, 25]` (статистический шум).
+8.5. **Latency padding** применяется к **всем** ответам сервера в auth flow (challenge response И negative-path responses). Цель — устранить timing oracle между real-vs-fake user paths (fake уходит в HKDF, real — в DashMap lookup; на microsecond уровне это различимо). Реализация: задержка до `target_constant_time_ms = fixed_floor_ms + uniform[0, jitter_max_ms]` где `fixed_floor_ms = 50` (защищает от LAN/loopback нанo-timing) и `jitter_max_ms = 25` (статистический шум). Эффективный диапазон: `[50, 75]` ms — соответствует диаграмме 01 шаг 14 ("50ms floor + uniform[0,25] jitter").
 
 Trade-off: добавляет ~50ms latency per handshake. Acceptable — Argon2id уже занимает ~2с.
 
