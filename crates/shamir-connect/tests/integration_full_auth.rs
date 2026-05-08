@@ -125,6 +125,10 @@ fn happy_path_full_round_trip() {
         identity_sig: auth_ok_server.identity_sig,
         session_id: auth_ok_server.session_id,
         expires_at_ns: auth_ok_server.expires_at_ns,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
     };
     let success = client
         .process_auth_ok(&auth_ok_client, &derived, &am_client, |_pin| {
@@ -402,6 +406,10 @@ fn client_pin_mismatch_after_auth_ok_aborts() {
         identity_sig: ok.identity_sig,
         session_id: ok.session_id,
         expires_at_ns: ok.expires_at_ns,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
     };
 
     // Client should reject with ServerIdentityChanged (pin mismatch).
@@ -477,6 +485,10 @@ fn tofu_first_connect_invokes_pin_callback() {
         identity_sig: ok.identity_sig,
         session_id: ok.session_id,
         expires_at_ns: ok.expires_at_ns,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
     };
 
     let mut tofu_fired = false;
@@ -556,6 +568,10 @@ fn tampered_identity_sig_aborts_client() {
         identity_sig: bad_sig,
         session_id: ok.session_id,
         expires_at_ns: ok.expires_at_ns,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
     };
 
     let result = client.process_auth_ok(&server_auth_ok, &derived, &am_client, |_| {});

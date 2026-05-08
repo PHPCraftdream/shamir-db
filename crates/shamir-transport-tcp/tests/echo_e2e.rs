@@ -359,6 +359,10 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         identity_sig: id_sig,
         session_id: sid,
         expires_at_ns: ok_wire.expires_at_ns,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
     };
     let success = hs
         .process_auth_ok(&auth_ok, &derived, &am, |_| {})

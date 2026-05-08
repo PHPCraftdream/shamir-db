@@ -24,6 +24,7 @@ use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::server::config::{ListenerPolicy, ServerSecrets};
+use crate::server::rotation::RotationInProgressPayload;
 use crate::server::user_record::UserRecord;
 
 /// Server's `auth_init` view — what arrived from the wire.
@@ -69,6 +70,15 @@ pub struct ChallengeView {
 }
 
 /// Server's `auth_ok` view — bundles everything the client needs to verify.
+///
+/// Optional extension fields per spec §2.4 / diagram 01 step 16:
+/// - `resumption_ticket` / `resumption_expires_at_ns`: when the server wants
+///   to issue an initial resumption token (typical happy path).
+/// - `rotation_in_progress`: when the server is in identity rotation overlap
+///   AND this connection is from an orphan client still pinning the previous
+///   key (spec §6.5 / diagram 05 Part B).
+/// - `kdf_upgrade_required`: when the user's stored Argon2id parameters are
+///   below the current server defaults (spec §13).
 #[derive(Debug, Clone)]
 pub struct AuthOkView {
     /// SCRAM mutual auth proof.
@@ -81,6 +91,15 @@ pub struct AuthOkView {
     pub session_id: [u8; limits::SESSION_ID_BYTES],
     /// Absolute session expiry (unix nanos).
     pub expires_at_ns: u64,
+    /// Optional resumption ticket bytes (encrypted blob from `issue_initial_ticket`).
+    pub resumption_ticket: Option<Vec<u8>>,
+    /// Optional ticket expiry (only meaningful with `resumption_ticket`).
+    pub resumption_expires_at_ns: Option<u64>,
+    /// Optional orphan-recovery payload (spec §6.5).
+    pub rotation_in_progress: Option<RotationInProgressPayload>,
+    /// Optional flag: set to `true` to ask the client to run `changePassword`
+    /// soon to upgrade their stored Argon2id parameters (spec §13).
+    pub kdf_upgrade_required: Option<bool>,
 }
 
 /// Outcome of [`ServerHandshake::verify_proof`].
@@ -214,6 +233,10 @@ impl<'a> ServerHandshake<'a> {
                 identity_sig,
                 session_id,
                 expires_at_ns,
+                resumption_ticket: None,
+                resumption_expires_at_ns: None,
+                rotation_in_progress: None,
+                kdf_upgrade_required: None,
             }))
         } else {
             Ok(ProofOutcome::Rejected)
