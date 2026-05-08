@@ -1,7 +1,8 @@
 //! Tests for length-prefix msgpack framing.
 
 use shamir_transport_tcp::framing::{
-    read_frame, read_frame_into, write_close, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT,
+    read_frame, read_frame_into, write_close, write_frame, write_frame_into, FrameError,
+    MAX_FRAME_SIZE_DEFAULT,
 };
 use tokio::io::duplex;
 
@@ -156,4 +157,45 @@ async fn read_frame_into_rejects_oversized() {
         .unwrap_err();
     assert!(matches!(err, FrameError::TooLarge { .. }));
     assert_eq!(buf.len(), 0);
+}
+
+/// Optim #7: write_frame_into reuses caller buffer + emits len+payload
+/// in a single write_all (bench-confirmed halves TLS record overhead).
+#[tokio::test]
+async fn write_frame_into_round_trip_reuses_buffer() {
+    let (mut a, mut b) = duplex(64 * 1024);
+    let mut scratch = Vec::with_capacity(2048);
+    let initial_cap = scratch.capacity();
+
+    for sz in [16usize, 256, 1024, 256, 16] {
+        let payload = vec![0xa5u8; sz];
+        write_frame_into(&mut a, &payload, &mut scratch).await.unwrap();
+        let got = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+        assert_eq!(got, payload);
+    }
+    assert_eq!(
+        scratch.capacity(),
+        initial_cap,
+        "scratch capacity must not grow when frames stay below initial size"
+    );
+}
+
+/// Optim #7: write_frame produces byte-identical wire output to
+/// write_frame_into (single concatenated write vs two separate writes
+/// from the original implementation).
+#[tokio::test]
+async fn write_frame_and_write_frame_into_produce_identical_bytes() {
+    let payload = vec![0xefu8; 1234];
+
+    let (mut a1, mut b1) = duplex(8 * 1024);
+    write_frame(&mut a1, &payload).await.unwrap();
+    let frame1 = read_frame(&mut b1, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+
+    let (mut a2, mut b2) = duplex(8 * 1024);
+    let mut scratch = Vec::new();
+    write_frame_into(&mut a2, &payload, &mut scratch).await.unwrap();
+    let frame2 = read_frame(&mut b2, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+
+    assert_eq!(frame1, frame2);
+    assert_eq!(frame1, payload);
 }
