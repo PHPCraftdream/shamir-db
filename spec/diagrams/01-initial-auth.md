@@ -33,7 +33,7 @@ sequenceDiagram
     S->>C: challenge { salt, kdf_params, server_nonce(32) }
 
     rect rgb(230, 240, 255)
-    Note over C: Argon2id (~2s, 128 MB):<br/>salted_pw = Argon2id(password, salt, kdf_params)<br/>client_key = HMAC(salted_pw, "Client Key")<br/>server_key = HMAC(salted_pw, "Server Key")<br/>stored_key = SHA256(client_key)<br/>auth_message = §4.1 (149 bytes для default params)<br/>client_signature = HMAC(stored_key, auth_message)<br/>client_proof = client_key XOR client_signature<br/>zeroize: password, salted_pw, client_key
+    Note over C: Argon2id (~2s, 128 MB):<br/>salted_pw = Argon2id(password, salt, kdf_params)<br/>client_key = HMAC(salted_pw, "Client Key")<br/>server_key = HMAC(salted_pw, "Server Key")<br/>stored_key = SHA256(client_key)<br/>auth_message = §4.1 (144 + byte_len(username_nfc) bytes)<br/>client_signature = HMAC(stored_key, auth_message)<br/>client_proof = client_key XOR client_signature<br/>zeroize: password, salted_pw, client_key
     end
 
     C->>S: client_proof { bytes(32) }
@@ -44,7 +44,7 @@ sequenceDiagram
 
     alt ok == true
         Note over S: Insert Session into in-memory SessionStore<br/>(DashMap, NOT persisted — §7.7)<br/>Reset auth_failures[(subnet, user_hash)] (durable, IMPL §1.3)
-        S->>C: auth_ok { server_signature, server_pub_key, identity_sig,<br/>session_id, expires_at_ns,<br/>resumption_ticket?, rotation_in_progress?,<br/>kdf_upgrade_required? }
+        S->>C: auth_ok { server_signature, server_pub_key, identity_sig,<br/>session_id, expires_at_ns,<br/>resumption_ticket?, resumption_expires_at_ns?,<br/>rotation_in_progress?, kdf_upgrade_required? }
     else ok == false
         S->>DB: increment auth_failures[(subnet, user_hash)]<br/>backoff: 100ms × 2^N
         Note over S: Latency padding до target_constant_time<br/>(50ms floor + uniform[0,25] jitter)
