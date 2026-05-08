@@ -12,12 +12,12 @@ use shamir_connect::server::session::SessionStore;
 const TICKET_TTL: u64 = ns::HOUR;
 
 fn fixed_config() -> ResumeConfig {
-    ResumeConfig {
-        ticket_key: [0xa1u8; 32],
-        ticket_key_previous: None,
-        allow_browser_ticket_upgrade: true,
-        disable_plain_ticket_upgrade: false,
-    }
+    ResumeConfig::new(
+        [0xa1u8; 32], // ticket_key
+        None,         // ticket_key_previous
+        true,         // allow_browser_ticket_upgrade
+        false,        // disable_plain_ticket_upgrade
+    )
 }
 
 #[test]
