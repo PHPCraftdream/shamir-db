@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/shamir-connect", "crates/shamir-transport-tcp", "crates/shamir-transport-ws"]
+members = ["crates/shamir-connect", "crates/shamir-transport-tcp", "crates/shamir-transport-ws", "crates/shamir-server"]
 
 [package]
 name = "shamir-db"
