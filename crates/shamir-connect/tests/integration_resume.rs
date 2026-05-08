@@ -6,6 +6,7 @@ use shamir_connect::server::resume::{
     issue_initial_ticket, new_user_state_map, process_resume, ConsumedCounterStore,
     InMemoryConsumedCounters, ResumeConfig, ResumeRequest,
 };
+use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
 
 const TICKET_TTL: u64 = ns::HOUR;
@@ -33,9 +34,11 @@ fn full_resume_round_trip() {
         &cfg.ticket_key,
         user_id,
         "alice".into(),
-        BindingMode::TlsExporter.as_u8().into(),
+        BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -49,7 +52,7 @@ fn full_resume_round_trip() {
         channel_binding_now: [0x77u8; 32],
     };
 
-    let ok = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let ok = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
     assert_eq!(store.len(), 1);
     assert_eq!(counters.len(), 1);
     let ticket_v2 = ok.resumption_ticket.expect("expected new ticket issued");
@@ -61,7 +64,7 @@ fn full_resume_round_trip() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req2, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req2, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 
     // Step 3: NEW ticket from step 1 (counter+1) does work.
@@ -71,7 +74,7 @@ fn full_resume_round_trip() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let _ok2 = process_resume(&req3, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let _ok2 = process_resume(&req3, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
     assert_eq!(store.len(), 2);
 }
 
@@ -92,6 +95,8 @@ fn rejects_expired_ticket() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![],
+        0,
         now,
         ns::SECOND, // 1s TTL
     )
@@ -106,7 +111,7 @@ fn rejects_expired_ticket() {
 
     // 2 seconds later — expired.
     let later = now + 2 * ns::SECOND;
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, later);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, later);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -126,6 +131,8 @@ fn rejects_when_user_kicked_via_tickets_invalid_before() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![],
+        0,
         now, // original_auth_at_ns = now
         TICKET_TTL,
     )
@@ -141,7 +148,7 @@ fn rejects_when_user_kicked_via_tickets_invalid_before() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -161,6 +168,8 @@ fn ticket_one_ns_after_kick_succeeds() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![],
+        0,
         now + 1, // ticket strictly after kick boundary
         TICKET_TTL,
     )
@@ -173,7 +182,7 @@ fn ticket_one_ns_after_kick_succeeds() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now + 2);
+    let ok = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now + 2);
     assert!(ok.is_ok());
 }
 
@@ -194,6 +203,8 @@ fn rejects_anti_downgrade_tls_to_browser() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(), // ticket issued in TLS exporter context
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -206,7 +217,7 @@ fn rejects_anti_downgrade_tls_to_browser() {
         binding_mode_now: BindingMode::TlsNoExport,
         channel_binding_now: [0u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -227,6 +238,8 @@ fn allows_browser_to_native_upgrade_by_default() {
         BindingMode::TlsNoExport.as_u8(),
         BindingMode::TlsNoExport.as_u8(), // browser-issued ticket
         [0u8; 32],
+        vec![],
+        0,
         now,
         TICKET_TTL,
     )
@@ -238,7 +251,7 @@ fn allows_browser_to_native_upgrade_by_default() {
         binding_mode_now: BindingMode::TlsExporter, // upgrade to native
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(result.is_ok());
 }
 
@@ -261,6 +274,8 @@ fn strict_mode_rejects_browser_to_native() {
         BindingMode::TlsNoExport.as_u8(),
         BindingMode::TlsNoExport.as_u8(),
         [0u8; 32],
+        vec![],
+        0,
         now,
         TICKET_TTL,
     )
@@ -272,7 +287,7 @@ fn strict_mode_rejects_browser_to_native() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -292,6 +307,8 @@ fn rejects_when_user_unknown() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -303,7 +320,7 @@ fn rejects_when_user_unknown() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -324,6 +341,8 @@ fn rejects_when_ticket_key_changed_no_overlap() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -339,7 +358,7 @@ fn rejects_when_ticket_key_changed_no_overlap() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -361,6 +380,8 @@ fn ticket_works_under_previous_key_during_overlap() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -376,7 +397,7 @@ fn ticket_works_under_previous_key_during_overlap() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let ok = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(ok.is_ok());
 }
 
@@ -397,6 +418,8 @@ fn rejects_aad_tampered_ticket() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -411,7 +434,7 @@ fn rejects_aad_tampered_ticket() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -435,6 +458,8 @@ fn multi_device_family_isolation() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -447,6 +472,8 @@ fn multi_device_family_isolation() {
         BindingMode::TlsExporter.as_u8(),
         BindingMode::TlsExporter.as_u8(),
         [0x77u8; 32],
+        vec![], // roles snapshot (empty for these tests; see admin-resume test for non-empty)
+        0,      // identity_key_version
         now,
         TICKET_TTL,
     )
@@ -459,7 +486,7 @@ fn multi_device_family_isolation() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok_a = process_resume(&req_a, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let ok_a = process_resume(&req_a, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
 
     // Laptop refreshes via the new ticket — family_a counter advances.
     let new_a_bytes = ok_a.resumption_ticket.unwrap();
@@ -469,7 +496,7 @@ fn multi_device_family_isolation() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let _ok_a2 = process_resume(&req_a2, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let _ok_a2 = process_resume(&req_a2, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
 
     // Phone uses ticket_b — must STILL succeed (different family_id).
     let req_b = ResumeRequest {
@@ -478,7 +505,7 @@ fn multi_device_family_isolation() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok_b = process_resume(&req_b, &cfg, &counters, &users, &store, 24 * ns::HOUR, TICKET_TTL, now);
+    let ok_b = process_resume(&req_b, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
     assert!(ok_b.is_ok(), "phone ticket must survive laptop refresh");
 }
 
@@ -493,4 +520,262 @@ fn counter_store_gc_evicts_stale_entries() {
     let now_far_future = UnixNanos::now().as_u64() + 48 * ns::HOUR;
     counters.gc(now_far_future);
     assert_eq!(counters.len(), 0);
+}
+
+/// Diagram 02 step 12 + SESSION_RESUMPTION §2.1: the resumed [`Session`] MUST
+/// be constructed with `permissions = ticket_plain.roles`. A `superuser`
+/// session resumed via ticket MUST retain `is_superuser == true` so admin
+/// commands continue to work.
+#[test]
+fn resumed_admin_session_retains_roles_per_diagram_02() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xa0u8; 16];
+    let users = new_user_state_map();
+    users.insert(user_id, 0);
+    let store = SessionStore::new();
+
+    let now = UnixNanos::now().as_u64();
+    let admin_roles = vec!["superuser".to_string(), "read_write".to_string()];
+    let (ticket_bytes, _) = issue_initial_ticket(
+        &cfg.ticket_key,
+        user_id,
+        "admin".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        admin_roles.clone(),
+        0,
+        now,
+        TICKET_TTL,
+    )
+    .unwrap();
+
+    let req = ResumeRequest {
+        ticket_wire_bytes: &ticket_bytes,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let ok = process_resume(
+        &req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now,
+    )
+    .unwrap();
+
+    // Pull the freshly-created session and assert role/superuser preserved.
+    let session = store.lookup(&ok.session_id).expect("session created");
+    let perms = session.permissions.read();
+    assert!(
+        perms.is_superuser,
+        "admin resumed via ticket must keep superuser flag (diagram 02 step 12)"
+    );
+    assert_eq!(perms.roles, admin_roles, "roles vector must round-trip");
+}
+
+/// Diagram 02 step 13 + SESSION_RESUMPTION §2.1: a refresh-ticket issued
+/// during resume MUST carry the same roles forward so subsequent resumes
+/// continue to authorize the user as admin.
+#[test]
+fn refresh_ticket_carries_roles_forward_per_diagram_02() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xa1u8; 16];
+    let users = new_user_state_map();
+    users.insert(user_id, 0);
+    let store = SessionStore::new();
+
+    let now = UnixNanos::now().as_u64();
+    let admin_roles = vec!["superuser".to_string()];
+    let (ticket_v1, _) = issue_initial_ticket(
+        &cfg.ticket_key,
+        user_id,
+        "admin".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        admin_roles.clone(),
+        0,
+        now,
+        TICKET_TTL,
+    )
+    .unwrap();
+
+    let req = ResumeRequest {
+        ticket_wire_bytes: &ticket_v1,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let ok = process_resume(
+        &req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now,
+    )
+    .unwrap();
+    let ticket_v2 = ok.resumption_ticket.expect("refresh ticket issued");
+
+    // Resume with the refreshed ticket — admin still admin.
+    let req2 = ResumeRequest {
+        ticket_wire_bytes: &ticket_v2,
+        client_nonce: [0xacu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let ok2 = process_resume(
+        &req2, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now,
+    )
+    .unwrap();
+    let session2 = store.lookup(&ok2.session_id).expect("session created");
+    assert!(session2.permissions.read().is_superuser);
+}
+
+/// Spec §5.7 NORMATIVE / diagram 12 footer: a ticket issued under the
+/// previous keypair MUST be rejected during the rotation overlap window. The
+/// orphan client is forced through full SCRAM and picks up the
+/// `rotation_in_progress` payload (diagram 05 Part B).
+#[test]
+fn pre_rotation_ticket_rejected_during_overlap_per_diagram_12() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xb0u8; 16];
+    let users = new_user_state_map();
+    users.insert(user_id, 0);
+    let store = SessionStore::new();
+
+    // Identity v0 — issue a ticket under it.
+    let identity = ServerIdentityState::fresh();
+    assert_eq!(identity.current_version(), 0);
+    let now = UnixNanos::now().as_u64();
+    let (ticket_v0, _) = issue_initial_ticket(
+        &cfg.ticket_key,
+        user_id,
+        "alice".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        vec![],
+        identity.current_version(), // 0
+        now,
+        TICKET_TTL,
+    )
+    .unwrap();
+
+    // Rotate → now we're in overlap, current_version becomes 1.
+    let outcome = identity.rotate(now).unwrap();
+    assert_eq!(outcome.new_version, 1);
+    assert_eq!(identity.current_version(), 1);
+    assert!(identity.rotation_in_progress(now));
+
+    // Resume with the v0 ticket — MUST be rejected (force re-auth).
+    let req = ResumeRequest {
+        ticket_wire_bytes: &ticket_v0,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let result = process_resume(
+        &req, &cfg, &counters, &users, &store, &identity, 24 * ns::HOUR, TICKET_TTL, now,
+    );
+    assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
+    assert_eq!(store.len(), 0, "no session should be created");
+}
+
+/// Diagram 12 + spec §5.7: tickets issued AFTER rotation (under
+/// `current_version`) MUST be accepted normally even while overlap is still
+/// active.
+#[test]
+fn post_rotation_ticket_accepted_during_overlap() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xb1u8; 16];
+    let users = new_user_state_map();
+    users.insert(user_id, 0);
+    let store = SessionStore::new();
+
+    let identity = ServerIdentityState::fresh();
+    let now = UnixNanos::now().as_u64();
+    identity.rotate(now).unwrap();
+    assert!(identity.rotation_in_progress(now));
+
+    // Brand-new ticket issued under post-rotation version (1).
+    let (ticket_v1, _) = issue_initial_ticket(
+        &cfg.ticket_key,
+        user_id,
+        "alice".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        vec![],
+        identity.current_version(), // 1
+        now,
+        TICKET_TTL,
+    )
+    .unwrap();
+
+    let req = ResumeRequest {
+        ticket_wire_bytes: &ticket_v1,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let ok = process_resume(
+        &req, &cfg, &counters, &users, &store, &identity, 24 * ns::HOUR, TICKET_TTL, now,
+    );
+    assert!(ok.is_ok(), "post-rotation ticket must work during overlap");
+}
+
+/// Diagram 12: after the overlap window finalizes (current_version stays at
+/// the post-rotation value), pre-rotation tickets remain rejected (their
+/// version is now strictly less than current).
+#[test]
+fn pre_rotation_ticket_rejected_after_overlap_finalize() {
+    let cfg = fixed_config();
+    let counters = InMemoryConsumedCounters::new();
+    let user_id = [0xb2u8; 16];
+    let users = new_user_state_map();
+    users.insert(user_id, 0);
+    let store = SessionStore::new();
+
+    let identity = ServerIdentityState::fresh();
+    let now = UnixNanos::now().as_u64();
+    let (ticket_v0, _) = issue_initial_ticket(
+        &cfg.ticket_key,
+        user_id,
+        "alice".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77u8; 32],
+        vec![],
+        0,
+        now,
+        TICKET_TTL,
+    )
+    .unwrap();
+
+    identity.rotate(now).unwrap();
+    // Force overlap to finalize.
+    let after_overlap = now + 8 * ns::DAY;
+    assert!(identity.try_finalize(after_overlap));
+    assert!(!identity.rotation_in_progress(after_overlap));
+    assert_eq!(identity.current_version(), 1);
+
+    let req = ResumeRequest {
+        ticket_wire_bytes: &ticket_v0,
+        client_nonce: [0xabu8; 32],
+        binding_mode_now: BindingMode::TlsExporter,
+        channel_binding_now: [0x77u8; 32],
+    };
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &identity,
+        24 * ns::HOUR,
+        TICKET_TTL,
+        // Use after_overlap as "now" but back-date the chain-age check via
+        // a now within original TTL — supply now, ticket still in TTL because
+        // we used a 1h TTL and "now" param is fresh.
+        now,
+    );
+    assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }

@@ -29,6 +29,10 @@ use serde::{Deserialize, Serialize};
 /// Plaintext fields of the ticket. Encoded as msgpack (canonical form
 /// by msgpack-rs default — sufficient for v1 since AAD does not depend on
 /// any inner field).
+///
+/// Per SESSION_RESUMPTION §2.1 / diagram 02 step 12, `roles` is the
+/// permissions snapshot taken at full SCRAM time; resumed sessions MUST be
+/// constructed with these roles so admin sessions retain admin powers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TicketPlain {
     /// Plaintext version byte (must equal envelope.version).
@@ -54,6 +58,15 @@ pub struct TicketPlain {
     pub expires_at_ns: u64,
     /// Monotonic counter within the family.
     pub family_counter: u64,
+    /// Permissions snapshot at full SCRAM time (SESSION_RESUMPTION §2.1).
+    /// Resume rebuilds [`SessionPermissions`] from these so e.g. a `superuser`
+    /// session resumed via ticket retains admin authorization.
+    pub roles: Vec<String>,
+    /// Identity-key version: which Ed25519 keypair was current when this
+    /// ticket was issued. Allows server to reject tickets issued before a
+    /// rotation overlap window (spec §5.7 NORMATIVE / diagram 12).
+    /// Increments on every `rotateServerIdentity`. `0` for first-ever key.
+    pub identity_key_version: u64,
 }
 
 /// Wire envelope.
