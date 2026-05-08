@@ -8,6 +8,9 @@ pub mod dispatch;
 pub mod handshake;
 pub mod lockout;
 pub mod rate_limit;
+
+#[cfg(feature = "durable-redb")]
+pub mod durable_counters;
 pub mod resume;
 pub mod rotation;
 pub mod session;
