@@ -38,17 +38,15 @@ pub fn make_server_config_from_pem(
     key_pem: &str,
 ) -> Result<Arc<ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
     let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(CertificateDer::from)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let key_pem_bytes = key_pem.as_bytes().to_vec();
     let mut slice = key_pem_bytes.as_slice();
     let mut key_iter = rustls_pemfile::pkcs8_private_keys(&mut slice);
     let key = key_iter.next().ok_or("no PKCS8 key in PEM")??;
     let key = PrivateKeyDer::Pkcs8(key);
 
-    let cfg = ServerConfig::builder()
+    // TLS 1.3 ONLY (TRANSPORT_TCP §3.1 NORMATIVE).
+    let cfg = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     Ok(Arc::new(cfg))
@@ -56,9 +54,9 @@ pub fn make_server_config_from_pem(
 
 /// Build a TLS 1.3 client config that **accepts any cert** — identity is
 /// instead pinned by the application via Ed25519 (spec §6.3 +
-/// TRANSPORT_TCP §3.3).
+/// TRANSPORT_TCP §3.3). TLS 1.3 only — no fallback to TLS 1.2 (§3.1).
 pub fn make_client_config_no_ca() -> Arc<ClientConfig> {
-    let cfg = ClientConfig::builder()
+    let cfg = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoCaVerify))
         .with_no_client_auth();
