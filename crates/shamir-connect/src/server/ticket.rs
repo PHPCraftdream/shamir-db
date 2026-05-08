@@ -33,25 +33,28 @@ use serde::{Deserialize, Serialize};
 /// Per SESSION_RESUMPTION §2.1 / diagram 02 step 12, `roles` is the
 /// permissions snapshot taken at full SCRAM time; resumed sessions MUST be
 /// constructed with these roles so admin sessions retain admin powers.
+///
+/// **Optim #2:** fixed-size byte fields (`user_id`, `channel_binding_at_auth`,
+/// `ticket_family_id`) use [`serde_bytes::ByteArray<N>`] instead of
+/// `Vec<u8>` — eliminates per-resume heap allocation for these fields and
+/// removes the `parse_user_id`/`parse_family_id` length-check helpers.
+/// Wire format identical (msgpack `bin` of length N).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TicketPlain {
     /// Plaintext version byte (must equal envelope.version).
     pub version: u8,
     /// User identifier (16 bytes, e.g. UUID).
-    #[serde(with = "serde_bytes")]
-    pub user_id: Vec<u8>,
+    pub user_id: serde_bytes::ByteArray<16>,
     /// Username post-NFC (UTF-8).
     pub username_nfc: String,
     /// `transport_kind` at time of full SCRAM auth.
     pub transport_kind_at_auth: u8,
     /// `binding_mode` at time of full SCRAM auth.
     pub binding_mode_at_auth: u8,
-    /// `tls_exporter_or_zeros` at time of full SCRAM auth.
-    #[serde(with = "serde_bytes")]
-    pub channel_binding_at_auth: Vec<u8>,
+    /// `tls_exporter_or_zeros` at time of full SCRAM auth (32 bytes).
+    pub channel_binding_at_auth: serde_bytes::ByteArray<32>,
     /// 16-byte ticket family id (per-device lineage). Counter is per-(user, family).
-    #[serde(with = "serde_bytes")]
-    pub ticket_family_id: Vec<u8>,
+    pub ticket_family_id: serde_bytes::ByteArray<16>,
     /// Original full-SCRAM time — does NOT update on refreshTicket.
     pub original_auth_at_ns: u64,
     /// Absolute ticket expiry.

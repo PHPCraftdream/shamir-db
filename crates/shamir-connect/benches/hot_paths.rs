@@ -367,12 +367,12 @@ fn bench_protocol_construction(c: &mut Criterion) {
     let ticket_key = [0xddu8; 32];
     let plain = TicketPlain {
         version: 1,
-        user_id: vec![0x01u8; 16],
+        user_id: serde_bytes::ByteArray::new([0x01u8; 16]),
         username_nfc: "alice".into(),
         transport_kind_at_auth: 0x01,
         binding_mode_at_auth: 0x01,
-        channel_binding_at_auth: vec![0x77u8; 32],
-        ticket_family_id: vec![0x11u8; 16],
+        channel_binding_at_auth: serde_bytes::ByteArray::new([0x77u8; 32]),
+        ticket_family_id: serde_bytes::ByteArray::new([0x11u8; 16]),
         original_auth_at_ns: 1_000_000,
         expires_at_ns: 2_000_000,
         family_counter: 1,

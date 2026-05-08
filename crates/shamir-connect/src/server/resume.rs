@@ -205,7 +205,8 @@ pub fn process_resume(
     }
 
     // Step 8: lookup user → get tickets_invalid_before_ns.
-    let user_id = parse_user_id(&plain.user_id)?;
+    // Optim #2: `plain.user_id` is `ByteArray<16>` — direct array deref.
+    let user_id: [u8; 16] = *plain.user_id.as_ref();
     let invalid_before = user_lookup.lookup(&user_id).ok_or(Error::AuthFailed)?;
 
     // Step 9: STRICT > comparison (spec §5.4 step 9).
@@ -228,7 +229,8 @@ pub fn process_resume(
     }
 
     // Step 11: atomic per-(user, family) counter CAS.
-    let family_id = parse_family_id(&plain.ticket_family_id)?;
+    // Optim #2: `plain.ticket_family_id` is `ByteArray<16>` — no copy/parse.
+    let family_id: [u8; 16] = *plain.ticket_family_id.as_ref();
     if !counters.try_advance(&user_id, &family_id, plain.family_counter) {
         return Err(Error::AuthFailed);
     }
@@ -310,12 +312,12 @@ pub fn issue_initial_ticket(
 
     let plain = TicketPlain {
         version: 1,
-        user_id: user_id.to_vec(),
+        user_id: serde_bytes::ByteArray::new(user_id),
         username_nfc,
         transport_kind_at_auth,
         binding_mode_at_auth,
-        channel_binding_at_auth: channel_binding_at_auth.to_vec(),
-        ticket_family_id: family.to_vec(),
+        channel_binding_at_auth: serde_bytes::ByteArray::new(channel_binding_at_auth),
+        ticket_family_id: serde_bytes::ByteArray::new(family),
         original_auth_at_ns: now_ns,
         expires_at_ns: now_ns.saturating_add(ttl_ns),
         family_counter: 1,
@@ -350,21 +352,6 @@ impl UserStateLookup for InMemoryUserStateMap {
     }
 }
 
-fn parse_user_id(bytes: &[u8]) -> Result<[u8; 16]> {
-    if bytes.len() != 16 {
-        return Err(Error::InvalidInput("ticket: user_id wrong length"));
-    }
-    let mut out = [0u8; 16];
-    out.copy_from_slice(bytes);
-    Ok(out)
-}
-
-fn parse_family_id(bytes: &[u8]) -> Result<[u8; limits::TICKET_FAMILY_ID_BYTES]> {
-    if bytes.len() != limits::TICKET_FAMILY_ID_BYTES {
-        return Err(Error::InvalidInput("ticket: family_id wrong length"));
-    }
-    let mut out = [0u8; limits::TICKET_FAMILY_ID_BYTES];
-    out.copy_from_slice(bytes);
-    Ok(out)
-}
+// `parse_user_id` and `parse_family_id` removed in Optim #2 — fields are
+// now `serde_bytes::ByteArray<N>` and accessed directly as `[u8; N]`.
 
