@@ -16,12 +16,22 @@ parent-крейта `shamir-db` на Windows и не завершён в рам�
 | Server meta store (secrets + identity + bootstrap) | `server_meta.rs` | 485 | 9/9 | ✅ |
 | ktav config schema | `config.rs` | 361 | 9/9 | ✅ |
 | Background scheduler | `scheduler.rs` | 303 | written | 🟡 not validated this session |
-| DB handler bridge | `db_handler.rs` | 355 | 7/7 | ✅ |
+| DB handler bridge (full Batch API) | `db_handler.rs` | 215 | 8/8 | ✅ |
 | Connection orchestration | `connection.rs` | ~600 | none | 🟡 compiles, needs e2e |
 | Main binary | `main.rs` | ~150 | none | 🟡 compiles, listeners not yet bound |
 
 Плюс: **WS profile enforcement** (`shamir-transport-ws::listener`) — 9
 тестов, release-blocker закрыт.
+
+**DB-bridge выставляет полный Batch API** (а не toy Get/Set/Delete):
+`Execute { db, batch: BatchRequest }` → `Batch(BatchResponse)`. На
+проводе доступно всё, что умеет ShamirDb: WHERE/ORDER BY/GROUP BY/
+LIMIT/projection/aggregation, multi-record reads с QueryStats и
+PaginationInfo, `$query` references между запросами, MVCC
+transactions, admin DDL (CreateDb/CreateRepo/CreateTable/CreateIndex/
+Drop*/List*) и auth ops (CreateUser/GrantRole/...). Admin/auth ops
+gated на `session.is_superuser`. Никаких потерь данных или метаданных
+по сравнению с прямым вызовом `ShamirDb::execute`.
 
 ## Что НЕ готово (gaps)
 
