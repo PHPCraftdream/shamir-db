@@ -100,9 +100,23 @@ impl Session {
     }
 
     /// Update `last_activity_ns` to current wall-clock.
+    ///
+    /// Calls `UnixNanos::now()` internally — on Windows this is a syscall
+    /// (~100 ns). Hot-path callers processing many requests per batch should
+    /// use [`Session::touch_at`] instead and reuse a single timestamp
+    /// captured by the transport layer.
     pub fn touch(&self) {
-        self.last_activity_ns
-            .store(UnixNanos::now().as_u64(), Ordering::Relaxed);
+        self.touch_at(UnixNanos::now().as_u64());
+    }
+
+    /// **Optim #5:** update `last_activity_ns` with a caller-supplied timestamp.
+    ///
+    /// Allows the transport layer to capture `UnixNanos::now()` once per
+    /// request (or per batch) and reuse it across multiple session touches,
+    /// amortizing the syscall cost. On Windows this saves ~100 ns/dispatch.
+    #[inline]
+    pub fn touch_at(&self, now_ns: u64) {
+        self.last_activity_ns.store(now_ns, Ordering::Relaxed);
     }
 
     /// Whether this session has expired by wall-clock.
@@ -116,6 +130,7 @@ impl Session {
     ///
     /// Returns `false` if `created_at_ns <= tickets_invalid_before_ns` —
     /// caller MUST kick the session immediately and emit `session_invalidated`.
+    #[inline]
     pub fn is_valid_for_user(&self, tickets_invalid_before_ns: u64) -> bool {
         self.created_at_ns > tickets_invalid_before_ns
     }
@@ -151,9 +166,26 @@ impl SessionStore {
     }
 
     /// Look up a session by id, touching `last_activity_ns` if found.
+    ///
+    /// Calls `UnixNanos::now()` internally LAZILY (only on hit). On miss
+    /// returns immediately without consulting the clock. Hot-path callers
+    /// should still prefer [`SessionStore::lookup_at`] to share one
+    /// timestamp across multiple session touches.
     pub fn lookup(&self, sid: &[u8; limits::SESSION_ID_BYTES]) -> Option<Arc<Session>> {
         let session = self.by_sid.get(sid).map(|r| r.clone())?;
         session.touch();
+        Some(session)
+    }
+
+    /// **Optim #5:** lookup with a caller-supplied `now_ns`, avoiding a
+    /// `UnixNanos::now()` call inside the hot path.
+    pub fn lookup_at(
+        &self,
+        sid: &[u8; limits::SESSION_ID_BYTES],
+        now_ns: u64,
+    ) -> Option<Arc<Session>> {
+        let session = self.by_sid.get(sid).map(|r| r.clone())?;
+        session.touch_at(now_ns);
         Some(session)
     }
 
