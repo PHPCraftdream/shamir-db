@@ -231,6 +231,15 @@ fn bench_session_store(c: &mut Criterion) {
             black_box(s);
         });
     });
+    // Optim #5 — lookup_at with caller-supplied timestamp (skips
+    // UnixNanos::now() syscall inside the hot path).
+    let captured_now = UnixNanos::now().as_u64();
+    g.bench_function("lookup_at_hit", |b| {
+        b.iter(|| {
+            let s = store.lookup_at(black_box(&sid), captured_now);
+            black_box(s);
+        });
+    });
     let miss_sid = [0xffu8; 32];
     g.bench_function("lookup_miss", |b| {
         b.iter(|| {
