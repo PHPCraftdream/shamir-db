@@ -432,7 +432,8 @@ struct Session {
     pending_changepw_challenge: Option<{    // см. §12.5
         server_nonce_cp: bytes(32),
         client_nonce_cp: bytes(32),
-        issued_at_ns: u64,
+        issued_at_ns: u64,                  // SHOULD expire после CHANGEPW_CHALLENGE_TTL = 5 минут
+                                            // (защита от stale state confusion в multi-tab scenarios)
     }>
 }
 ```
@@ -509,7 +510,9 @@ Cost: один `u64 <=` compare per request — тривиально.
 
 8.1. **Argon2id semaphore** (`MAX_CONCURRENT_ARGON2`) берётся **только** на время фактического Argon2id. Pre-state до proof занимает 1KB слот, не permit.
 
-8.2. **Pre-handshake state GC** каждые 5 секунд: state без proof в течение 10с → drop.
+8.2. **Pre-handshake state GC** каждые 5 секунд: state без proof в течение `HANDSHAKE_TIMEOUT` (= `max(15s, kdf_time × 5)`) → drop.
+
+**Важно**: GC timeout **MUST** быть ≥ `HANDSHAKE_TIMEOUT`. Иначе legitimate mobile/slow-network клиенты с медленным Argon2id (~3-5s) + network latency теряют state до прихода `client_proof` → cryptic auth_failed без real cause. Раньше spec указывал hardcoded 10s — fixed на ≥ HANDSHAKE_TIMEOUT (выровнено с §8 table).
 
 8.3. **Один TCP/WS connection** = один активный handshake state. Повторный `auth_init` в том же connection → close.
 
@@ -829,6 +832,8 @@ Step 4 — Client → Server:
 Step 5 — Server verifies:
 # Lookup session.pending_changepw_challenge — должен быть present
 # (иначе client пытается submit без prior changePasswordChallenge → reject)
+# Verify: now_ns - pending.issued_at_ns ≤ CHANGEPW_CHALLENGE_TTL (5 min)
+# (если истёк → reject, client должен повторно changePasswordChallenge)
 # Использует server_nonce_cp + client_nonce_cp ИЗ session.pending state, не из network message.
 
 client_signature = HMAC(user.stored_key, auth_message_cp)
@@ -895,7 +900,13 @@ Response: { "ok": { "changes_applied": bool } }
 13.4. Если `user.kdf_params != kdf_params_current` AND все params strictly_weaker (memory_kb/time/parallelism все ≤ current):
 - В `auth_ok` сервер шлёт `"kdf_upgrade_required": true`.
 - Клиент использует **тот же** two-step flow что в §12.5 (`changePasswordChallenge` → `changePassword`) с тем же паролем для re-derive под новыми params.
-- Transparent UX. Audit event `kdf_params_upgraded`.
+- Audit event `kdf_params_upgraded`.
+
+**UX caveat:** §12.5 changePassword kills все сессии включая текущую (§12.5.3) → user внезапно logged out после kdf upgrade. Двойной 2-секундный Argon2id freeze (initial auth + upgrade re-derive). Clients SHOULD:
+- Show explicit progress UI: "Updating security parameters... (~4 seconds)"
+- Auto-resume через resumption ticket после upgrade (если выдан)
+- Avoid showing "session expired" alarm
+- v1.1 ROADMAP: dedicated kdf_upgrade endpoint без kill sessions (re-derive только stored_key/server_key, session_id остаётся)
 
 13.5. Anti-enumeration: для unknown user сервер возвращает **current** kdf_params. Старые юзеры с устаревшими params видны атакующему — known trade-off.
 
