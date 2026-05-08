@@ -1,9 +1,13 @@
 //! Shared types and primitives used by both client and server.
 
 pub mod auth_message;
+pub mod crypto;
 pub mod domain_tags;
 pub mod error;
+pub mod fake_blob;
+pub mod identity;
 pub mod kdf_params;
+pub mod scram;
 pub mod time;
 pub mod types;
 pub mod username;

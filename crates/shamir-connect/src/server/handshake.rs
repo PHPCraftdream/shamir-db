@@ -1,0 +1,254 @@
+//! Server-side full SCRAM handshake state machine.
+//!
+//! Implements the verifier path of spec §5.2 with **constant-time discipline**:
+//!
+//! - `binding_mode` policy check happens **before** any Argon2id (spec §4.3).
+//! - Real-vs-fake user paths run identical operations: HMAC-SHA256 with either
+//!   the real `stored_key` or HKDF-derived `fake_stored_key`.
+//! - `server_signature`, `session_id`, and `identity_sig` are computed
+//!   ALWAYS, even when verification will fail — preventing branch-timing leaks
+//!   on the wire (spec §5.2.4).
+//!
+//! Wall-clock latency padding (spec §8.5) is **not** applied here — this is a
+//! library and the runtime/transport layer is responsible for sleeping the
+//! response by `target_constant_time_ms` (=`max(50ms, kdf_time*1000)`).
+
+use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
+use crate::common::crypto::{constant_time_eq, random_array, Ed25519Keypair, HmacTag};
+use crate::common::error::{Error, Result};
+use crate::common::fake_blob::FakeBlob;
+use crate::common::identity::{build_identity_input, sign_identity};
+use crate::common::kdf_params::KdfParams;
+use crate::common::scram::{build_server_signature, verify_client_proof, ClientProof};
+use crate::common::time::{ns, UnixNanos};
+use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
+use crate::common::username::NormalizedUsername;
+use crate::server::config::{ListenerPolicy, ServerSecrets};
+use crate::server::user_record::UserRecord;
+
+/// Server's `auth_init` view — what arrived from the wire.
+#[derive(Debug, Clone)]
+pub struct AuthInitView {
+    /// Username (post NFC + UsernameCaseMapped).
+    pub user: NormalizedUsername,
+    /// Client's CSPRNG nonce.
+    pub client_nonce: [u8; limits::CLIENT_NONCE_BYTES],
+    /// Wire-byte binding mode (parsed before this struct is built).
+    pub binding_mode: BindingMode,
+    /// Protocol version asserted by the client.
+    pub version: u8,
+}
+
+/// Server-side per-handshake state, built from `auth_init` + listener policy.
+///
+/// Holds derived material across `auth_init → challenge → client_proof →
+/// auth_ok` round trips. GC after `HANDSHAKE_TIMEOUT` (spec §8.2).
+pub struct ServerHandshake<'a> {
+    listener_policy: ListenerPolicy,
+    transport_kind: TransportKind,
+    secrets: &'a ServerSecrets,
+    /// Either real persisted record or `None` (synthesized via fake_blob).
+    user_record: Option<UserRecord>,
+    fake_blob: FakeBlob,
+    auth_init: AuthInitView,
+    server_nonce: [u8; limits::SERVER_NONCE_BYTES],
+    tls_exporter_or_zeros: [u8; 32],
+    /// Effective KDF params surfaced to client — real user's OR server defaults.
+    effective_kdf: KdfParams,
+}
+
+/// Server's `challenge` view — what gets sent on the wire.
+#[derive(Debug, Clone)]
+pub struct ChallengeView {
+    /// Either user's real salt OR fake_salt for unknown user (constant-time).
+    pub salt: [u8; limits::SALT_BYTES],
+    /// KDF parameters.
+    pub kdf_params: KdfParams,
+    /// Per-handshake CSPRNG.
+    pub server_nonce: [u8; limits::SERVER_NONCE_BYTES],
+}
+
+/// Server's `auth_ok` view — bundles everything the client needs to verify.
+#[derive(Debug, Clone)]
+pub struct AuthOkView {
+    /// SCRAM mutual auth proof.
+    pub server_signature: HmacTag,
+    /// Server's current Ed25519 public key.
+    pub server_pub_key: [u8; 32],
+    /// Ed25519 over `identity_input`.
+    pub identity_sig: [u8; 64],
+    /// Session id — fresh CSPRNG.
+    pub session_id: [u8; limits::SESSION_ID_BYTES],
+    /// Absolute session expiry (unix nanos).
+    pub expires_at_ns: u64,
+}
+
+/// Outcome of [`ServerHandshake::verify_proof`].
+#[derive(Debug)]
+pub enum ProofOutcome {
+    /// Proof was valid → emit `auth_ok`.
+    Accepted(AuthOkView),
+    /// Proof invalid OR user unknown → emit generic `authentication_failed`.
+    /// Caller must apply latency padding before responding.
+    Rejected,
+}
+
+impl<'a> ServerHandshake<'a> {
+    /// Construct a handshake state, enforcing pre-Argon2id `binding_mode` policy.
+    ///
+    /// `lookup_user` returns `Some(record)` for known users, `None` for unknown.
+    /// We synthesize fake material via [`FakeBlob`] to keep the rest of the
+    /// path identical (constant-time discipline, spec §5.2.1–5.2.4).
+    pub fn new<F>(
+        listener_policy: ListenerPolicy,
+        transport_kind: TransportKind,
+        secrets: &'a ServerSecrets,
+        auth_init: AuthInitView,
+        tls_exporter_or_zeros: [u8; 32],
+        kdf_params_current: KdfParams,
+        lookup_user: F,
+    ) -> Result<Self>
+    where
+        F: FnOnce(&NormalizedUsername) -> Option<UserRecord>,
+    {
+        // PRE-ARGON2ID POLICY CHECK (spec §4.3 NORMATIVE).
+        if auth_init.binding_mode != listener_policy.binding_mode {
+            return Err(Error::InvalidInput("binding_mode not in listener policy"));
+        }
+        if auth_init.version != ProtocolVersion::V1.as_u8() {
+            return Err(Error::UnsupportedVersion);
+        }
+        if auth_init.client_nonce.iter().all(|&b| b == 0) {
+            return Err(Error::InvalidInput("client_nonce all-zero"));
+        }
+
+        let user_record = lookup_user(&auth_init.user);
+        let fake_blob = FakeBlob::derive(&secrets.server_secret, &auth_init.user)?;
+
+        let server_nonce = random_array::<{ limits::SERVER_NONCE_BYTES }>();
+
+        // Effective params: real user's stored params (so SCRAM math works for them);
+        // for unknown user → current defaults (spec §13.5 anti-enumeration trade-off).
+        let effective_kdf = match &user_record {
+            Some(r) => r.kdf_params,
+            None => kdf_params_current,
+        };
+
+        Ok(Self {
+            listener_policy,
+            transport_kind,
+            secrets,
+            user_record,
+            fake_blob,
+            auth_init,
+            server_nonce,
+            tls_exporter_or_zeros,
+            effective_kdf,
+        })
+    }
+
+    /// Wire view of the `challenge` sent to the client.
+    pub fn challenge(&self) -> ChallengeView {
+        let salt = match &self.user_record {
+            Some(r) => r.salt,
+            None => self.fake_blob.salt,
+        };
+        ChallengeView {
+            salt,
+            kdf_params: self.effective_kdf,
+            server_nonce: self.server_nonce,
+        }
+    }
+
+    /// Verify the client's SCRAM proof and (if valid) build `auth_ok`.
+    ///
+    /// **Constant-time discipline:** all three crypto outputs (server_signature,
+    /// session_id, identity_sig) are computed regardless of verification
+    /// result. Only the final `Accepted` vs `Rejected` branch differs — caller
+    /// is responsible for padding the negative path latency (spec §8.5).
+    pub fn verify_proof(
+        &self,
+        client_proof: &ClientProof,
+        identity_keypair: &Ed25519Keypair,
+        session_max_age: u64,
+    ) -> Result<ProofOutcome> {
+        // Reconstruct `auth_message` from server-side components.
+        let am = self.build_auth_message()?;
+
+        // Pick stored_key + server_key (real OR fake), constant-time access pattern.
+        let (stored_key_ref, server_key_ref) = match &self.user_record {
+            Some(r) => (&r.stored_key, &r.server_key[..]),
+            None => (&self.fake_blob.stored_key, &self.fake_blob.server_key[..]),
+        };
+
+        // ALWAYS compute everything — no branch on success/failure (§5.2.4).
+        let mut server_key_arr = [0u8; 32];
+        server_key_arr.copy_from_slice(server_key_ref);
+        let server_signature = build_server_signature(&server_key_arr, &am);
+        let session_id = random_array::<{ limits::SESSION_ID_BYTES }>();
+        let now_ns = UnixNanos::now().as_u64();
+        let expires_at_ns = now_ns.saturating_add(session_max_age);
+
+        let identity_input = build_identity_input(
+            &identity_keypair.public_bytes(),
+            self.transport_kind,
+            self.auth_init.binding_mode,
+            &self.tls_exporter_or_zeros,
+            &am,
+            &session_id,
+            expires_at_ns,
+        );
+        let identity_sig = sign_identity(identity_keypair, &identity_input);
+
+        // Verify proof.
+        let verified = verify_client_proof(client_proof, stored_key_ref, &am);
+
+        // Branch ONLY on the accept/reject decision. Both paths have already
+        // computed the same three operations.
+        let _ = constant_time_eq;
+
+        if verified && self.user_record.is_some() {
+            Ok(ProofOutcome::Accepted(AuthOkView {
+                server_signature,
+                server_pub_key: identity_keypair.public_bytes(),
+                identity_sig,
+                session_id,
+                expires_at_ns,
+            }))
+        } else {
+            Ok(ProofOutcome::Rejected)
+        }
+    }
+
+    /// Build the canonical `auth_message` from accumulated handshake state.
+    fn build_auth_message(&self) -> Result<AuthMessage> {
+        let salt_ref = match &self.user_record {
+            Some(r) => &r.salt,
+            None => &self.fake_blob.salt,
+        };
+        AuthMessage::build(AuthMessageInputs {
+            username: &self.auth_init.user,
+            client_nonce: &self.auth_init.client_nonce,
+            server_nonce: &self.server_nonce,
+            salt: salt_ref,
+            kdf_params: self.effective_kdf,
+            transport_kind: self.transport_kind,
+            binding_mode: self.auth_init.binding_mode,
+            tls_exporter_or_zeros: &self.tls_exporter_or_zeros,
+            supported_version: ProtocolVersion::V1,
+        })
+    }
+
+    /// Borrow listener policy.
+    pub fn listener_policy(&self) -> ListenerPolicy {
+        self.listener_policy
+    }
+
+    /// Borrow per-handshake secrets reference.
+    pub fn secrets(&self) -> &ServerSecrets {
+        self.secrets
+    }
+}
+
+/// Default `SESSION_MAX_AGE` per spec §7.4: 24 hours.
+pub const SESSION_MAX_AGE_NS: u64 = 24 * ns::HOUR;
