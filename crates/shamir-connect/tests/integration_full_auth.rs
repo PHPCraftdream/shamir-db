@@ -580,3 +580,146 @@ fn tampered_identity_sig_aborts_client() {
         Err(shamir_connect::Error::ServerSignatureInvalid)
     ));
 }
+
+// ----------------------------------------------------------------------------
+// complete_auth_ok helper tests (integration-helper task)
+// ----------------------------------------------------------------------------
+
+/// Helper test: complete_auth_ok preserves base fields and applies all
+/// three optional extensions when supplied.
+#[test]
+fn complete_auth_ok_attaches_all_three_optional_fields() {
+    use shamir_connect::server::handshake::{complete_auth_ok, AuthOkView};
+    use shamir_connect::server::rotation::{
+        build_rotation_in_progress_payload, ServerIdentityState,
+    };
+
+    // Build a base AuthOkView with deterministic content.
+    let base = AuthOkView {
+        server_signature: [0xa1u8; 32],
+        server_pub_key: [0xb2u8; 32],
+        identity_sig: [0xc3u8; 64],
+        session_id: [0xd4u8; 32],
+        expires_at_ns: 1_234_567_890,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
+    };
+
+    // Build a real rotation_in_progress payload via the canonical builder.
+    let identity = ServerIdentityState::fresh();
+    identity.rotate(1_000_000).unwrap();
+    let identity_input: &[u8] = b"test-identity-input-bytes-for-helper";
+    let rotation = build_rotation_in_progress_payload(&identity, identity_input).unwrap();
+
+    let ticket_bytes = vec![0x77u8; 80];
+    let ticket_expires = 9_999_999_999u64;
+
+    let view = complete_auth_ok(
+        base.clone(),
+        Some((ticket_bytes.clone(), ticket_expires)),
+        Some(rotation.clone()),
+        true,
+    );
+
+    // Base fields preserved.
+    assert_eq!(view.server_signature, base.server_signature);
+    assert_eq!(view.server_pub_key, base.server_pub_key);
+    assert_eq!(view.identity_sig, base.identity_sig);
+    assert_eq!(view.session_id, base.session_id);
+    assert_eq!(view.expires_at_ns, base.expires_at_ns);
+
+    // Extensions populated.
+    assert_eq!(view.resumption_ticket.as_deref(), Some(ticket_bytes.as_slice()));
+    assert_eq!(view.resumption_expires_at_ns, Some(ticket_expires));
+    assert!(view.rotation_in_progress.is_some());
+    let r = view.rotation_in_progress.unwrap();
+    assert_eq!(r.previous_pub, rotation.previous_pub);
+    assert_eq!(r.identity_sig_previous, rotation.identity_sig_previous);
+    assert_eq!(view.kdf_upgrade_required, Some(true));
+}
+
+/// Helper test: complete_auth_ok leaves all extensions None when no inputs
+/// supplied.
+#[test]
+fn complete_auth_ok_no_extensions_when_none_supplied() {
+    use shamir_connect::server::handshake::{complete_auth_ok, AuthOkView};
+
+    let base = AuthOkView {
+        server_signature: [0u8; 32],
+        server_pub_key: [0u8; 32],
+        identity_sig: [0u8; 64],
+        session_id: [0u8; 32],
+        expires_at_ns: 0,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
+    };
+    let view = complete_auth_ok(base, None, None, false);
+    assert!(view.resumption_ticket.is_none());
+    assert!(view.resumption_expires_at_ns.is_none());
+    assert!(view.rotation_in_progress.is_none());
+    assert!(view.kdf_upgrade_required.is_none());
+}
+
+/// needs_kdf_upgrade returns true iff user_params is weaker on ANY axis.
+#[test]
+fn needs_kdf_upgrade_detects_weaker_axes() {
+    use shamir_connect::server::handshake::needs_kdf_upgrade;
+
+    let current = KdfParams {
+        memory_kb: 131_072,
+        time: 4,
+        parallelism: 1,
+        argon2_version: 0x13,
+    };
+
+    // Same → no upgrade.
+    assert!(!needs_kdf_upgrade(current, current));
+
+    // Weaker memory.
+    let weaker_mem = KdfParams {
+        memory_kb: 65_536,
+        ..current
+    };
+    assert!(needs_kdf_upgrade(weaker_mem, current));
+
+    // Weaker time.
+    let weaker_time = KdfParams { time: 2, ..current };
+    assert!(needs_kdf_upgrade(weaker_time, current));
+
+    // Stronger user is fine.
+    let stronger = KdfParams {
+        memory_kb: 262_144,
+        time: 8,
+        parallelism: 2,
+        argon2_version: 0x13,
+    };
+    assert!(!needs_kdf_upgrade(stronger, current));
+}
+
+/// AuthOkView builder methods chain correctly.
+#[test]
+fn auth_ok_view_with_methods_chain() {
+    use shamir_connect::server::handshake::AuthOkView;
+
+    let view = AuthOkView {
+        server_signature: [0u8; 32],
+        server_pub_key: [0u8; 32],
+        identity_sig: [0u8; 64],
+        session_id: [0u8; 32],
+        expires_at_ns: 100,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: None,
+        kdf_upgrade_required: None,
+    }
+    .with_resumption_ticket(vec![1, 2, 3], 200)
+    .with_kdf_upgrade_required();
+
+    assert_eq!(view.resumption_ticket.as_deref(), Some([1u8, 2, 3].as_slice()));
+    assert_eq!(view.resumption_expires_at_ns, Some(200));
+    assert_eq!(view.kdf_upgrade_required, Some(true));
+}
