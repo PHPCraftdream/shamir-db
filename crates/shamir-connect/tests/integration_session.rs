@@ -1,0 +1,213 @@
+//! Integration tests for Session + dispatch + per-request validity check (§7.5).
+
+use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseEnvelope};
+use shamir_connect::common::time::{ns, UnixNanos};
+use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
+use shamir_connect::server::{dispatch_request, DispatchOutcome, RequestHandler};
+
+struct Echo;
+impl RequestHandler for Echo {
+    fn handle(
+        &self,
+        _session: &shamir_connect::server::Session,
+        req: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        Ok(req.to_vec())
+    }
+}
+
+fn make_session(user_id: [u8; 16], created_at_ns: u64) -> Session {
+    Session::new(
+        user_id,
+        "alice".into(),
+        SessionPermissions::from_roles(vec!["read_write".into()]),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0u8; 32],
+        created_at_ns,
+    )
+}
+
+#[test]
+fn store_insert_lookup_remove() {
+    let store = SessionStore::new();
+    let sid = [0xaau8; 32];
+    let s = make_session([1u8; 16], 100);
+    let _arc = store.insert(sid, s);
+
+    assert_eq!(store.len(), 1);
+
+    let found = store.lookup(&sid).unwrap();
+    assert_eq!(found.username, "alice");
+
+    let removed = store.remove(&sid).unwrap();
+    assert_eq!(removed.username, "alice");
+    assert!(store.is_empty());
+}
+
+#[test]
+fn dispatch_returns_session_expired_for_unknown_sid() {
+    let store = SessionStore::new();
+    let env = RequestEnvelope::new([0u8; 32], Some(7), b"hello".to_vec());
+
+    let out = dispatch_request(&env, &store, |_| 0, &Echo).unwrap();
+    match out {
+        DispatchOutcome::Error(e) => {
+            assert_eq!(e.error, "session_expired");
+            assert_eq!(e.request_id, Some(7));
+        }
+        DispatchOutcome::Response(_) => panic!("expected error"),
+    }
+}
+
+#[test]
+fn dispatch_routes_to_handler_for_valid_session() {
+    let store = SessionStore::new();
+    let sid = [0x55u8; 32];
+    let s = make_session([1u8; 16], 100);
+    store.insert(sid, s);
+
+    // tickets_invalid_before_ns = 0 → 100 > 0 → valid
+    let env = RequestEnvelope::new(sid, Some(42), b"hello world".to_vec());
+    let out = dispatch_request(&env, &store, |_| 0, &Echo).unwrap();
+    match out {
+        DispatchOutcome::Response(r) => {
+            assert_eq!(r.request_id, Some(42));
+            assert_eq!(r.res, b"hello world");
+        }
+        DispatchOutcome::Error(e) => panic!("unexpected error: {}", e.error),
+    }
+}
+
+#[test]
+fn dispatch_kills_session_when_invalidated_per_section_7_5() {
+    let store = SessionStore::new();
+    let sid = [0x55u8; 32];
+    let s = make_session([1u8; 16], 100); // created at T=100
+    store.insert(sid, s);
+
+    // Admin sets tickets_invalid_before_ns = 200 (future relative to creation).
+    // Per §7.5: created_at_ns(100) <= invalid_before(200) → kick.
+    let env = RequestEnvelope::new(sid, None, b"x".to_vec());
+    let out = dispatch_request(&env, &store, |_| 200, &Echo).unwrap();
+
+    match out {
+        DispatchOutcome::Error(e) => assert_eq!(e.error, "session_invalidated"),
+        _ => panic!("expected session_invalidated"),
+    }
+    // Store cleaned eagerly so concurrent requests can't reuse.
+    assert!(store.lookup(&sid).is_none());
+}
+
+#[test]
+fn dispatch_strict_inequality_at_exact_boundary() {
+    let store = SessionStore::new();
+    let sid = [0x55u8; 32];
+    let s = make_session([1u8; 16], 100);
+    store.insert(sid, s);
+
+    // created_at_ns(100) == tickets_invalid_before_ns(100) → strict > → invalid
+    let env = RequestEnvelope::new(sid, None, b"x".to_vec());
+    let out = dispatch_request(&env, &store, |_| 100, &Echo).unwrap();
+    match out {
+        DispatchOutcome::Error(e) => assert_eq!(e.error, "session_invalidated"),
+        _ => panic!("strict > must reject equal timestamps"),
+    }
+}
+
+#[test]
+fn dispatch_one_nanosecond_after_invalidation_passes() {
+    let store = SessionStore::new();
+    let sid = [0x55u8; 32];
+    let s = make_session([1u8; 16], 101);
+    store.insert(sid, s);
+
+    let env = RequestEnvelope::new(sid, None, b"x".to_vec());
+    let out = dispatch_request(&env, &store, |_| 100, &Echo).unwrap();
+    assert!(matches!(out, DispatchOutcome::Response(_)));
+}
+
+#[test]
+fn snapshot_by_user_returns_only_matching() {
+    let store = SessionStore::new();
+    let alice_uid = [1u8; 16];
+    let bob_uid = [2u8; 16];
+
+    store.insert([0xa1u8; 32], make_session(alice_uid, 100));
+    store.insert([0xa2u8; 32], make_session(alice_uid, 100));
+    store.insert([0xb1u8; 32], make_session(bob_uid, 100));
+
+    let alice_sids = store.snapshot_by_user(&alice_uid);
+    assert_eq!(alice_sids.len(), 2);
+
+    let bob_sids = store.snapshot_by_user(&bob_uid);
+    assert_eq!(bob_sids.len(), 1);
+}
+
+#[test]
+fn gc_evicts_idle_sessions() {
+    let store = SessionStore::new();
+    let now = UnixNanos::now().as_u64();
+    let one_hour_ago = now - ns::HOUR;
+    store.insert([0x11u8; 32], make_session([1u8; 16], one_hour_ago));
+
+    // idle_ttl = 30 min, max_age = 24h
+    let evicted = store.gc_expired(now, 24 * ns::HOUR, 30 * ns::MINUTE);
+    assert_eq!(evicted, 1);
+    assert_eq!(store.len(), 0);
+}
+
+#[test]
+fn gc_keeps_active_sessions() {
+    let store = SessionStore::new();
+    let now = UnixNanos::now().as_u64();
+    store.insert([0x11u8; 32], make_session([1u8; 16], now));
+
+    let evicted = store.gc_expired(now + ns::SECOND, 24 * ns::HOUR, 30 * ns::MINUTE);
+    assert_eq!(evicted, 0);
+    assert_eq!(store.len(), 1);
+}
+
+#[test]
+fn envelope_round_trip_msgpack() {
+    let env = RequestEnvelope::new([0xabu8; 32], Some(123), b"test request".to_vec());
+    let bytes = env.to_msgpack().unwrap();
+    let decoded = RequestEnvelope::from_msgpack(&bytes).unwrap();
+    assert_eq!(env, decoded);
+}
+
+#[test]
+fn envelope_rejects_wrong_session_id_length() {
+    let env = RequestEnvelope {
+        session_id: vec![0x01, 0x02, 0x03], // wrong length
+        request_id: None,
+        req: vec![],
+    };
+    assert!(env.session_id_array().is_err());
+}
+
+#[test]
+fn response_envelope_round_trip() {
+    let r = ResponseEnvelope::ok(Some(99), b"response body".to_vec());
+    let b = r.to_msgpack().unwrap();
+    let r2 = ResponseEnvelope::from_msgpack(&b).unwrap();
+    assert_eq!(r, r2);
+}
+
+#[test]
+fn error_envelope_round_trip() {
+    let e = ErrorEnvelope::new(Some(99), "session_expired");
+    let b = e.to_msgpack().unwrap();
+    let e2 = ErrorEnvelope::from_msgpack(&b).unwrap();
+    assert_eq!(e, e2);
+}
+
+#[test]
+fn permissions_snapshot_admin_detection() {
+    let p = SessionPermissions::from_roles(vec!["read_write".into(), "superuser".into()]);
+    assert!(p.is_superuser);
+
+    let p2 = SessionPermissions::from_roles(vec!["read_only".into()]);
+    assert!(!p2.is_superuser);
+}

@@ -1,0 +1,318 @@
+//! End-to-end test: TCP + TLS 1.3 + length-prefix framing + SCRAM-Argon2id.
+//!
+//! Validates that:
+//!   1. TLS 1.3 succeeds with self-signed cert + custom verifier (Ed25519 pin
+//!      done at protocol layer).
+//!   2. TLS exporter is identical on both ends.
+//!   3. SCRAM proof verifies and `auth_ok` is bit-exactly accepted by the
+//!      client (mutual auth, pin check, identity Ed25519 verify).
+
+use std::sync::Arc;
+
+use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
+use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
+use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::common::username::NormalizedUsername;
+use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
+use shamir_connect::server::handshake::{AuthInitView, ProofOutcome, ServerHandshake};
+use shamir_connect::server::user_record::UserRecord;
+use shamir_connect::server::handshake::SESSION_MAX_AGE_NS;
+
+use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
+use shamir_transport_tcp::tls::{
+    extract_tls_exporter, generate_self_signed_server_cert, make_client_config_no_ca,
+    make_server_config_from_pem,
+};
+
+use serde::{Deserialize, Serialize};
+use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+use zeroize::Zeroizing;
+
+// ----------------------------------------------------------------------------
+// Wire frames (test-local subset of the spec — protocol layer is transport-
+// agnostic so this transport binding chooses its own envelope encoding).
+// ----------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct WireAuthInit {
+    user: String,
+    #[serde(with = "serde_bytes")]
+    client_nonce: Vec<u8>, // 32 bytes
+    binding_mode: u8,
+    version: u8,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireChallenge {
+    #[serde(with = "serde_bytes")]
+    salt: Vec<u8>, // 16 bytes
+    memory_kb: u32,
+    time: u32,
+    parallelism: u32,
+    argon2_version: u8,
+    #[serde(with = "serde_bytes")]
+    server_nonce: Vec<u8>, // 32 bytes
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireClientProof {
+    #[serde(with = "serde_bytes")]
+    client_proof: Vec<u8>, // 32 bytes
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireAuthOk {
+    #[serde(with = "serde_bytes")]
+    server_signature: Vec<u8>, // 32
+    #[serde(with = "serde_bytes")]
+    server_pub_key: Vec<u8>, // 32
+    #[serde(with = "serde_bytes")]
+    identity_sig: Vec<u8>, // 64
+    #[serde(with = "serde_bytes")]
+    session_id: Vec<u8>, // 32
+    expires_at_ns: u64,
+}
+
+// ----------------------------------------------------------------------------
+// Test
+// ----------------------------------------------------------------------------
+
+fn fast_kdf() -> KdfParams {
+    // Faster than the spec floor — deliberate for test runtime. Tests must
+    // pass `validate_client_limits` on the client side.
+    KdfParams {
+        memory_kb: 19_456,
+        time: 2,
+        parallelism: 1,
+        argon2_version: 0x13,
+    }
+}
+
+fn make_user(password: &[u8]) -> (UserRecord, NormalizedUsername) {
+    let username = NormalizedUsername::from_raw("alice").unwrap();
+    let salt = [0x42u8; 16];
+    let kdf = fast_kdf();
+    let derived = DerivedKeys::derive(password, &salt, &kdf).unwrap();
+    let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    server_key_z.copy_from_slice(&derived.server_key[..]);
+    let record = UserRecord {
+        salt,
+        stored_key: derived.stored_key,
+        server_key: server_key_z,
+        kdf_params: kdf,
+        tickets_invalid_before_ns: 0,
+    };
+    (record, username)
+}
+
+#[tokio::test]
+async fn full_handshake_over_tcp_tls() {
+    // Install rustls crypto provider once.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // ---- Test fixture: identity, user record, password ----
+    let identity = Arc::new(Ed25519Keypair::generate());
+    let secrets = Arc::new(ServerSecrets {
+        server_secret: [0xaa; 32],
+        lockout_secret: [0xbb; 32],
+    });
+    let listener_policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let password: &[u8] = b"correct horse battery staple";
+    let (user_record, username) = make_user(password);
+    let server_pub = identity.public_bytes();
+    let pinned_hash = sha256(&server_pub);
+
+    // ---- TLS configs ----
+    let (cert_pem, key_pem) =
+        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
+    let client_cfg = make_client_config_no_ca();
+
+    // ---- Listener ----
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = TlsAcceptor::from(server_cfg);
+
+    let server_identity = identity.clone();
+    let server_secrets = secrets.clone();
+    let server_user = user_record.clone();
+    let server_username = username.clone();
+    let server_task = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = acceptor.accept(tcp).await.unwrap();
+        let exporter = extract_tls_exporter(&tls).expect("exporter");
+
+        let (mut r, mut w) = split(tls);
+
+        // 1) Receive auth_init
+        let init_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+        let init: WireAuthInit = rmp_serde::from_slice(&init_bytes).unwrap();
+        let mut client_nonce = [0u8; 32];
+        client_nonce.copy_from_slice(&init.client_nonce);
+        let init_view = AuthInitView {
+            user: NormalizedUsername::from_raw(&init.user).unwrap(),
+            client_nonce,
+            binding_mode: BindingMode::from_u8(init.binding_mode).unwrap(),
+            version: init.version,
+        };
+
+        // 2) Build server handshake state
+        let kdf_default = fast_kdf();
+        let lookup = |u: &NormalizedUsername| -> Option<UserRecord> {
+            if u.as_str() == server_username.as_str() {
+                Some(server_user.clone())
+            } else {
+                None
+            }
+        };
+        let hs = ServerHandshake::new(
+            listener_policy,
+            TransportKind::Tcp,
+            &server_secrets,
+            init_view,
+            exporter,
+            kdf_default,
+            lookup,
+        )
+        .unwrap();
+
+        // 3) Send challenge
+        let ch = hs.challenge();
+        let wire_ch = WireChallenge {
+            salt: ch.salt.to_vec(),
+            memory_kb: ch.kdf_params.memory_kb,
+            time: ch.kdf_params.time,
+            parallelism: ch.kdf_params.parallelism,
+            argon2_version: ch.kdf_params.argon2_version,
+            server_nonce: ch.server_nonce.to_vec(),
+        };
+        let bytes = rmp_serde::to_vec(&wire_ch).unwrap();
+        write_frame(&mut w, &bytes).await.unwrap();
+
+        // 4) Receive client_proof
+        let proof_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+        let proof_msg: WireClientProof = rmp_serde::from_slice(&proof_bytes).unwrap();
+        let mut proof_arr = [0u8; 32];
+        proof_arr.copy_from_slice(&proof_msg.client_proof);
+
+        // 5) Verify and respond auth_ok / fail
+        match hs
+            .verify_proof(&proof_arr, &server_identity, SESSION_MAX_AGE_NS)
+            .unwrap()
+        {
+            ProofOutcome::Accepted(ok) => {
+                let wire = WireAuthOk {
+                    server_signature: ok.server_signature.to_vec(),
+                    server_pub_key: ok.server_pub_key.to_vec(),
+                    identity_sig: ok.identity_sig.to_vec(),
+                    session_id: ok.session_id.to_vec(),
+                    expires_at_ns: ok.expires_at_ns,
+                };
+                let bytes = rmp_serde::to_vec(&wire).unwrap();
+                write_frame(&mut w, &bytes).await.unwrap();
+            }
+            ProofOutcome::Rejected => panic!("server rejected proof unexpectedly"),
+        }
+        // Drain a short read so client side gets EOF graciously.
+        let _ = w.shutdown().await;
+        let mut tmp = [0u8; 1];
+        let _ = r.read(&mut tmp).await;
+    });
+
+    // ---- Client side ----
+    let connector = TlsConnector::from(client_cfg);
+    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let tcp = TcpStream::connect(addr).await.unwrap();
+    let tls = connector.connect(server_name, tcp).await.unwrap();
+    let exporter = extract_tls_exporter(&tls).expect("client exporter");
+
+    let (mut r, mut w) = split(tls);
+
+    let mut hs = HandshakeBuilder::new(username.clone(), TransportKind::Tcp, BindingMode::TlsExporter)
+        .tls_exporter(exporter)
+        .pinned_hash(pinned_hash)
+        .build()
+        .unwrap();
+    // suppress unused-mut: hs is read-only beyond build; keep `let mut` cosmetic-free
+    let _ = &mut hs;
+
+    // Send auth_init
+    let init = hs.auth_init();
+    let init_wire = WireAuthInit {
+        user: init.user,
+        client_nonce: init.client_nonce.to_vec(),
+        binding_mode: init.binding_mode,
+        version: init.version,
+    };
+    let bytes = rmp_serde::to_vec(&init_wire).unwrap();
+    write_frame(&mut w, &bytes).await.unwrap();
+
+    // Read challenge
+    let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+    let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes).unwrap();
+    let mut salt = [0u8; 16];
+    salt.copy_from_slice(&ch_wire.salt);
+    let mut server_nonce = [0u8; 32];
+    server_nonce.copy_from_slice(&ch_wire.server_nonce);
+    let challenge = ServerChallenge {
+        salt,
+        kdf_params: KdfParams {
+            memory_kb: ch_wire.memory_kb,
+            time: ch_wire.time,
+            parallelism: ch_wire.parallelism,
+            argon2_version: ch_wire.argon2_version,
+        },
+        server_nonce,
+    };
+
+    // Compute proof
+    let mut password_buf = password.to_vec();
+    let (proof, derived, am) = hs
+        .process_challenge(&challenge, &mut password_buf)
+        .unwrap();
+
+    // Send proof
+    let proof_wire = WireClientProof {
+        client_proof: proof.to_vec(),
+    };
+    let bytes = rmp_serde::to_vec(&proof_wire).unwrap();
+    write_frame(&mut w, &bytes).await.unwrap();
+
+    // Read auth_ok
+    let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+    let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes).unwrap();
+    let mut sig32 = [0u8; 32];
+    sig32.copy_from_slice(&ok_wire.server_signature);
+    let mut pub32 = [0u8; 32];
+    pub32.copy_from_slice(&ok_wire.server_pub_key);
+    let mut id_sig = [0u8; 64];
+    id_sig.copy_from_slice(&ok_wire.identity_sig);
+    let mut sid = [0u8; 32];
+    sid.copy_from_slice(&ok_wire.session_id);
+    let auth_ok = ServerAuthOk {
+        server_signature: sig32,
+        server_pub_key: pub32,
+        identity_sig: id_sig,
+        session_id: sid,
+        expires_at_ns: ok_wire.expires_at_ns,
+    };
+
+    // Verify (mutual auth + pin + identity)
+    let success = hs
+        .process_auth_ok(&auth_ok, &derived, &am, |_pin| {
+            panic!("pin already known — TOFU should not fire");
+        })
+        .unwrap();
+
+    assert_eq!(success.session_id, auth_ok.session_id);
+    assert_eq!(success.expires_at_ns, auth_ok.expires_at_ns);
+    assert_eq!(auth_ok.server_pub_key, server_pub);
+
+    // Cleanly close.
+    let _ = w.shutdown().await;
+    server_task.await.unwrap();
+}
