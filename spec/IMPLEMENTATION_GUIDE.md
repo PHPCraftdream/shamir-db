@@ -25,9 +25,9 @@ Operational details для имплементаторов сервера и кл
   // Server identity
   server_ed25519_priv: bytes(32),
   server_ed25519_pub: bytes(32),
-  server_ed25519_priv_previous: Option<bytes(32)>,
+  server_ed25519_priv_previous: Option<bytes(32)>,    // zeroized после rotation_until_ns
   server_ed25519_pub_previous: Option<bytes(32)>,
-  server_ed25519_rotation_until_ns: Option<u64>,  // overlap window end
+  server_ed25519_rotation_until_ns: Option<u64>,      // overlap window end (HIGH-5: блокирует повторный rotateServerIdentity)
   
   // Resumption
   ticket_key: bytes(32),

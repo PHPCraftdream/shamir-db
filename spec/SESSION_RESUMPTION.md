@@ -181,11 +181,13 @@ ciphertext, tag = AES-256-GCM(
 
 Если ticket был issued под `previous` Ed25519 keypair и `transition_until_ns > now_ns`:
 
-**v1 поведение:** server отвергает resume → клиент выполняет full re-auth и сразу получает identity_sig от **current** ключа. Это простейшая семантика без двойных подписей и inline rotation events.
+**v1 поведение:** server отвергает resume → клиент выполняет full re-auth.
 
-Цена: клиенты со stale tickets во время окна rotation теряют ~2 секунды (Argon2id full re-auth) на первое подключение. Acceptable trade-off против complexity multi-key signing.
+После full re-auth client получает `auth_ok` с **`rotation_in_progress`** payload (см. AUTH §6.5) → handles pin update согласно §6.5 (interactive prompt mandatory или `--accept-rotation` flag для non-interactive). Только после успешного pin update сессия используется.
 
-После окна rotation (`now_ns > transition_until_ns`) resumption работает нормально с current keypair.
+Цена: клиенты со stale tickets во время окна rotation теряют ~2 секунды (Argon2id full re-auth) на первое подключение + interactive prompt time. Acceptable trade-off против complexity multi-key signing в resume_ok.
+
+После окна rotation (`now_ns > transition_until_ns`) resumption работает нормально с current keypair. `rotation_in_progress` отсутствует в `resume_ok` schema (§5.6) — только в `auth_ok`.
 
 ---
 
