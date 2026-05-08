@@ -38,6 +38,17 @@ pub struct ServerChallenge {
 }
 
 /// Server-supplied auth_ok fields the client needs to verify.
+///
+/// Spec §2.4 / diagram 01 step 16 lists three optional extensions that
+/// transport bindings populate as needed:
+///
+/// - `resumption_ticket` (+ `resumption_expires_at_ns`): server-issued
+///   resumption token; client persists for later resume.
+/// - `rotation_in_progress`: orphan-recovery payload (spec §6.5 / diagram 05
+///   Part B). Client invokes
+///   [`crate::client::rotation::verify_rotation_in_progress`] when present.
+/// - `kdf_upgrade_required`: server requests changePassword to upgrade KDF
+///   params (spec §13).
 #[derive(Debug, Clone)]
 pub struct ServerAuthOk {
     /// SCRAM proof of the server (mutual auth).
@@ -50,6 +61,15 @@ pub struct ServerAuthOk {
     pub session_id: [u8; limits::SESSION_ID_BYTES],
     /// Absolute session expiry (unix nanos).
     pub expires_at_ns: u64,
+    /// Optional encrypted resumption ticket bytes.
+    pub resumption_ticket: Option<Vec<u8>>,
+    /// Optional resumption expiry (paired with `resumption_ticket`).
+    pub resumption_expires_at_ns: Option<u64>,
+    /// Optional orphan-recovery payload — see
+    /// [`crate::server::rotation::RotationInProgressPayload`].
+    pub rotation_in_progress: Option<crate::server::rotation::RotationInProgressPayload>,
+    /// Optional flag asking client to run changePassword to upgrade KDF.
+    pub kdf_upgrade_required: Option<bool>,
 }
 
 /// Successful handshake outcome — ready for session use.
