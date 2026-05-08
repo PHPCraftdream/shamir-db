@@ -779,3 +779,79 @@ fn pre_rotation_ticket_rejected_after_overlap_finalize() {
     );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
+
+/// Optim #2: confirm wire-compatibility — `serde_bytes::ByteArray<N>` must
+/// produce IDENTICAL msgpack bytes as `#[serde(with = "serde_bytes")] Vec<u8>`
+/// for the same content. Otherwise tickets issued by old servers (or by
+/// other-language clients) would fail to decrypt.
+///
+/// Strategy: define a Vec-typed mirror struct, encode both, compare bytes.
+#[test]
+fn ticket_plain_bytearray_wire_compat_with_vec_u8() {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct VecMirror {
+        version: u8,
+        #[serde(with = "serde_bytes")]
+        user_id: Vec<u8>,
+        username_nfc: String,
+        transport_kind_at_auth: u8,
+        binding_mode_at_auth: u8,
+        #[serde(with = "serde_bytes")]
+        channel_binding_at_auth: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        ticket_family_id: Vec<u8>,
+        original_auth_at_ns: u64,
+        expires_at_ns: u64,
+        family_counter: u64,
+        roles: Vec<String>,
+        identity_key_version: u64,
+    }
+
+    let mirror = VecMirror {
+        version: 1,
+        user_id: vec![0x01u8; 16],
+        username_nfc: "alice".into(),
+        transport_kind_at_auth: 0x01,
+        binding_mode_at_auth: 0x01,
+        channel_binding_at_auth: vec![0x77u8; 32],
+        ticket_family_id: vec![0x11u8; 16],
+        original_auth_at_ns: 1_000_000,
+        expires_at_ns: 2_000_000,
+        family_counter: 1,
+        roles: vec!["read_write".into()],
+        identity_key_version: 0,
+    };
+
+    use shamir_connect::server::ticket::TicketPlain;
+    let real = TicketPlain {
+        version: 1,
+        user_id: serde_bytes::ByteArray::new([0x01u8; 16]),
+        username_nfc: "alice".into(),
+        transport_kind_at_auth: 0x01,
+        binding_mode_at_auth: 0x01,
+        channel_binding_at_auth: serde_bytes::ByteArray::new([0x77u8; 32]),
+        ticket_family_id: serde_bytes::ByteArray::new([0x11u8; 16]),
+        original_auth_at_ns: 1_000_000,
+        expires_at_ns: 2_000_000,
+        family_counter: 1,
+        roles: vec!["read_write".into()],
+        identity_key_version: 0,
+    };
+
+    let mirror_bytes = rmp_serde::to_vec_named(&mirror).unwrap();
+    let real_bytes = rmp_serde::to_vec_named(&real).unwrap();
+
+    assert_eq!(
+        mirror_bytes, real_bytes,
+        "ByteArray<N> wire format must match #[serde(with = \"serde_bytes\")] Vec<u8>"
+    );
+
+    // Cross-deserialize: ByteArray bytes must decode into Vec mirror and vice versa.
+    let decoded_mirror: VecMirror = rmp_serde::from_slice(&real_bytes).unwrap();
+    assert_eq!(decoded_mirror, mirror);
+
+    let decoded_real: TicketPlain = rmp_serde::from_slice(&mirror_bytes).unwrap();
+    assert_eq!(decoded_real, real);
+}
