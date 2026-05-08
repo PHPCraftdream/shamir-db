@@ -21,8 +21,8 @@
 //! field flips tag verification.
 
 use crate::common::crypto::{
-    aes256gcm_cipher, aes256gcm_decrypt_with_cipher, aes256gcm_encrypt_with_cipher, random_array,
-    Aes256GcmCipher,
+    aes256gcm_cipher, aes256gcm_decrypt_in_place_with_cipher, aes256gcm_encrypt_with_cipher,
+    random_array, Aes256GcmCipher,
 };
 use crate::common::domain_tags::TICKET_V1;
 use crate::common::error::{Error, Result};
@@ -189,6 +189,13 @@ pub fn decrypt_ticket(
 }
 
 /// Decrypt with pre-scheduled [`Aes256GcmCipher`]s (Optim #3).
+///
+/// **Optim #8:** decrypts in-place via `decrypt_in_place_detached` instead
+/// of concatenating ciphertext+tag into a fresh `Vec`. The mutable buffer
+/// holds wire ciphertext on entry, plaintext on exit (same length). On
+/// current-cipher tag-mismatch the buffer may be partially mutated — we
+/// re-clone wire.ciphertext for the previous-cipher fallback so that path
+/// gets a clean copy.
 pub fn decrypt_ticket_with_ciphers(
     current_cipher: &Aes256GcmCipher,
     previous_cipher: Option<&Aes256GcmCipher>,
@@ -199,21 +206,32 @@ pub fn decrypt_ticket_with_ciphers(
     }
     let aad = build_aad(wire.version);
 
-    // Reassemble ciphertext || tag for the aes-gcm crate.
-    let mut ct_with_tag = Vec::with_capacity(wire.ciphertext.len() + 16);
-    ct_with_tag.extend_from_slice(&wire.ciphertext);
-    ct_with_tag.extend_from_slice(&wire.tag);
+    // One allocation: a working buffer to decrypt into. On success holds
+    // plaintext bytes; on failure may be partially overwritten — caller
+    // must not observe the buffer after Err return.
+    let mut buf = wire.ciphertext.clone();
 
-    let plaintext = match aes256gcm_decrypt_with_cipher(
+    let plaintext: Vec<u8> = match aes256gcm_decrypt_in_place_with_cipher(
         current_cipher,
         &wire.nonce,
-        &ct_with_tag,
         &aad,
+        &mut buf,
+        &wire.tag,
     ) {
-        Ok(pt) => pt,
+        Ok(()) => buf,
         Err(_) => match previous_cipher {
             Some(prev) => {
-                aes256gcm_decrypt_with_cipher(prev, &wire.nonce, &ct_with_tag, &aad)?
+                // Buffer may be corrupted by the failed decrypt — re-clone
+                // wire.ciphertext to retry cleanly.
+                let mut buf2 = wire.ciphertext.clone();
+                aes256gcm_decrypt_in_place_with_cipher(
+                    prev,
+                    &wire.nonce,
+                    &aad,
+                    &mut buf2,
+                    &wire.tag,
+                )?;
+                buf2
             }
             None => return Err(Error::Crypto("AES-GCM: decrypt failed")),
         },

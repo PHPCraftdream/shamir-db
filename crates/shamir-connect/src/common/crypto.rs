@@ -12,8 +12,8 @@
 use crate::common::error::{Error, Result};
 use crate::common::kdf_params::KdfParams;
 use ::hkdf::Hkdf;
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use argon2::{Algorithm, Argon2, Params, Version};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac};
@@ -274,6 +274,33 @@ pub fn aes256gcm_decrypt_with_cipher(
                 aad,
             },
         )
+        .map_err(|_| Error::Crypto("AES-GCM: decrypt failed (tag mismatch?)"))
+}
+
+/// **Optim #8**: in-place AES-256-GCM decrypt with separate tag.
+///
+/// `buffer` arrives holding ciphertext and is overwritten with plaintext on
+/// success (length unchanged: AES-GCM is a stream cipher under the hood).
+/// `tag` is the 16-byte authentication tag carried alongside ciphertext on
+/// the wire (e.g. from `TicketWire.tag`).
+///
+/// Saves the per-call allocation that the owning [`aes256gcm_decrypt_with_cipher`]
+/// API forces (it concatenates ciphertext + tag into a fresh `Vec`).
+///
+/// On tag-mismatch, `buffer` may have been partially overwritten — caller
+/// MUST treat its contents as garbage and retry with another cipher key
+/// (or fail).
+pub fn aes256gcm_decrypt_in_place_with_cipher(
+    cipher: &Aes256Gcm,
+    nonce: &[u8; 12],
+    aad: &[u8],
+    buffer: &mut [u8],
+    tag: &[u8; 16],
+) -> Result<()> {
+    let nonce = Nonce::from_slice(nonce);
+    let tag = Tag::from_slice(tag);
+    cipher
+        .decrypt_in_place_detached(nonce, aad, buffer, tag)
         .map_err(|_| Error::Crypto("AES-GCM: decrypt failed (tag mismatch?)"))
 }
 
