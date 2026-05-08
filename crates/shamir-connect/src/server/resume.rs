@@ -288,45 +288,71 @@ pub fn process_resume(
     let session_id = crate::common::crypto::random_array::<{ limits::SESSION_ID_BYTES }>();
     let expires_at_ns = now_ns.saturating_add(session_max_age_ns);
 
-    // The username comes from ticket plaintext (already normalized when persisted).
-    // Roles are restored from ticket → resumed admin sessions retain admin
-    // powers (SESSION_RESUMPTION §2.1 / diagram 02 step 12).
-    let session = Session::new(
-        user_id,
-        plain.username_nfc.clone(),
-        SessionPermissions::from_roles(plain.roles.clone()),
-        crate::common::types::TransportKind::from_u8(plain.transport_kind_at_auth)
-            .unwrap_or(crate::common::types::TransportKind::Tcp),
-        request.binding_mode_now,
-        request.channel_binding_now,
-        now_ns,
-    );
-    session_store.insert(session_id, session);
+    // Step 12 + 13 fused. Optim #6: avoid deep-cloning `plain.username_nfc`
+    // / `plain.roles` twice (once for Session, once for new ticket) by
+    // moving them between `plain` → `new_plain` → `Session` instead. We
+    // pay at most ONE String + ONE Vec<String> clone per resume regardless
+    // of whether a refresh ticket is issued (down from 2 + 2 = 4 in the
+    // previous version).
 
-    // Step 13: optionally issue a new ticket (same family, counter+1).
-    let mut resumption_ticket = None;
-    let mut resumption_expires_at_ns = None;
-    if plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS > now_ns + new_ticket_ttl_ns {
+    let issue_refresh =
+        plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS
+            > now_ns + new_ticket_ttl_ns;
+
+    let transport_at_auth = plain.transport_kind_at_auth;
+    let session_transport = crate::common::types::TransportKind::from_u8(transport_at_auth)
+        .unwrap_or(crate::common::types::TransportKind::Tcp);
+
+    let (resumption_ticket, resumption_expires_at_ns) = if issue_refresh {
+        // Refresh path: clone what Session also needs, MOVE everything else
+        // into new_plain (no clone for the heavy fields).
+        let session_username = plain.username_nfc.clone();
+        let session_roles = plain.roles.clone();
+
         let new_plain = TicketPlain {
             version: 1,
-            user_id: plain.user_id.clone(),
-            username_nfc: plain.username_nfc.clone(),
-            transport_kind_at_auth: plain.transport_kind_at_auth,
+            user_id: plain.user_id, // ByteArray<16>: Copy, free
+            username_nfc: plain.username_nfc, // moved
+            transport_kind_at_auth: transport_at_auth,
             binding_mode_at_auth: plain.binding_mode_at_auth,
-            channel_binding_at_auth: plain.channel_binding_at_auth.clone(),
-            ticket_family_id: plain.ticket_family_id.clone(),
+            channel_binding_at_auth: plain.channel_binding_at_auth, // ByteArray<32>: Copy
+            ticket_family_id: plain.ticket_family_id, // ByteArray<16>: Copy
             original_auth_at_ns: plain.original_auth_at_ns,
             expires_at_ns: now_ns.saturating_add(new_ticket_ttl_ns),
             family_counter: plain.family_counter.saturating_add(1),
-            roles: plain.roles.clone(),
+            roles: plain.roles, // moved
             identity_key_version: plain.identity_key_version,
         };
         // Optim #3: reuse cached current cipher for re-encrypt.
         let wire = encrypt_ticket_with_cipher(current_cipher, &new_plain)
             .map_err(|_| Error::AuthFailed)?;
-        resumption_ticket = Some(wire.to_bytes());
-        resumption_expires_at_ns = Some(new_plain.expires_at_ns);
-    }
+
+        let session = Session::new(
+            user_id,
+            session_username,
+            SessionPermissions::from_roles(session_roles),
+            session_transport,
+            request.binding_mode_now,
+            request.channel_binding_now,
+            now_ns,
+        );
+        session_store.insert(session_id, session);
+
+        (Some(wire.to_bytes()), Some(new_plain.expires_at_ns))
+    } else {
+        // No refresh: move plain directly into Session — zero clones.
+        let session = Session::new(
+            user_id,
+            plain.username_nfc, // moved
+            SessionPermissions::from_roles(plain.roles), // moved
+            session_transport,
+            request.binding_mode_now,
+            request.channel_binding_now,
+            now_ns,
+        );
+        session_store.insert(session_id, session);
+        (None, None)
+    };
 
     Ok(ResumeOk {
         session_id,
