@@ -20,7 +20,10 @@
 //! `ticket_plain` — GCM tag covers all of plaintext, so tampering with any
 //! field flips tag verification.
 
-use crate::common::crypto::{aes256gcm_decrypt, aes256gcm_encrypt, random_array};
+use crate::common::crypto::{
+    aes256gcm_cipher, aes256gcm_decrypt_with_cipher, aes256gcm_encrypt_with_cipher, random_array,
+    Aes256GcmCipher,
+};
 use crate::common::domain_tags::TICKET_V1;
 use crate::common::error::{Error, Result};
 use crate::common::types::{BindingMode, TransportKind};
@@ -132,14 +135,27 @@ fn build_aad(version: u8) -> Vec<u8> {
 }
 
 /// Encrypt a [`TicketPlain`] with `ticket_key` → wire envelope.
+///
+/// Convenience wrapper that schedules a fresh AES key per call. Hot-path
+/// callers should pre-cache the cipher (see `ResumeConfig`) and use
+/// [`encrypt_ticket_with_cipher`] instead.
 pub fn encrypt_ticket(ticket_key: &[u8; 32], plain: &TicketPlain) -> Result<TicketWire> {
+    let cipher = aes256gcm_cipher(ticket_key)?;
+    encrypt_ticket_with_cipher(&cipher, plain)
+}
+
+/// Encrypt with a pre-scheduled [`Aes256GcmCipher`] (Optim #3).
+pub fn encrypt_ticket_with_cipher(
+    cipher: &Aes256GcmCipher,
+    plain: &TicketPlain,
+) -> Result<TicketWire> {
     let plaintext = rmp_serde::to_vec_named(plain)
         .map_err(|e| Error::Encoding(format!("ticket msgpack: {e}")))?;
 
     let nonce = random_array::<12>();
     let aad = build_aad(plain.version);
 
-    let ct_with_tag = aes256gcm_encrypt(ticket_key, &nonce, &plaintext, &aad)?;
+    let ct_with_tag = aes256gcm_encrypt_with_cipher(cipher, &nonce, &plaintext, &aad)?;
     if ct_with_tag.len() < 16 {
         return Err(Error::Crypto("AES-GCM: short output"));
     }
@@ -159,12 +175,23 @@ pub fn encrypt_ticket(ticket_key: &[u8; 32], plain: &TicketPlain) -> Result<Tick
 /// Decrypt a [`TicketWire`] using `current_key` first, falling back to
 /// `previous_key` (during 24h rotation overlap, SESSION_RESUMPTION §3.2).
 ///
-/// Returns the parsed `TicketPlain` after AAD validation. The caller is then
-/// responsible for the remaining checks (expiry, downgrade, family counter
-/// CAS) in spec §5.4.
+/// Convenience wrapper that schedules fresh AES keys per call. Hot-path
+/// callers should pre-cache ciphers (see `ResumeConfig`) and use
+/// [`decrypt_ticket_with_ciphers`] instead.
 pub fn decrypt_ticket(
     current_key: &[u8; 32],
     previous_key: Option<&[u8; 32]>,
+    wire: &TicketWire,
+) -> Result<TicketPlain> {
+    let current = aes256gcm_cipher(current_key)?;
+    let previous = previous_key.map(aes256gcm_cipher).transpose()?;
+    decrypt_ticket_with_ciphers(&current, previous.as_ref(), wire)
+}
+
+/// Decrypt with pre-scheduled [`Aes256GcmCipher`]s (Optim #3).
+pub fn decrypt_ticket_with_ciphers(
+    current_cipher: &Aes256GcmCipher,
+    previous_cipher: Option<&Aes256GcmCipher>,
     wire: &TicketWire,
 ) -> Result<TicketPlain> {
     if wire.version != 1 {
@@ -177,10 +204,17 @@ pub fn decrypt_ticket(
     ct_with_tag.extend_from_slice(&wire.ciphertext);
     ct_with_tag.extend_from_slice(&wire.tag);
 
-    let plaintext = match aes256gcm_decrypt(current_key, &wire.nonce, &ct_with_tag, &aad) {
+    let plaintext = match aes256gcm_decrypt_with_cipher(
+        current_cipher,
+        &wire.nonce,
+        &ct_with_tag,
+        &aad,
+    ) {
         Ok(pt) => pt,
-        Err(_) => match previous_key {
-            Some(prev) => aes256gcm_decrypt(prev, &wire.nonce, &ct_with_tag, &aad)?,
+        Err(_) => match previous_cipher {
+            Some(prev) => {
+                aes256gcm_decrypt_with_cipher(prev, &wire.nonce, &ct_with_tag, &aad)?
+            }
             None => return Err(Error::Crypto("AES-GCM: decrypt failed")),
         },
     };

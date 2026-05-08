@@ -26,8 +26,12 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 
 use shamir_connect::common::auth_message::{AuthMessage, AuthMessageInputs};
 use shamir_connect::common::crypto::{
-    aes256gcm_decrypt, aes256gcm_encrypt, ed25519_verify_strict, hkdf_sha256, hmac_sha256,
-    random_array, sha256, Ed25519Keypair, StoredKey,
+    aes256gcm_cipher, aes256gcm_decrypt, aes256gcm_decrypt_with_cipher, aes256gcm_encrypt,
+    aes256gcm_encrypt_with_cipher, ed25519_verify_strict, hkdf_sha256, hmac_sha256, random_array,
+    sha256, Ed25519Keypair, StoredKey,
+};
+use shamir_connect::server::ticket::{
+    decrypt_ticket_with_ciphers, encrypt_ticket_with_cipher,
 };
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::fake_blob::FakeBlob;
@@ -44,6 +48,7 @@ use shamir_connect::server::handshake::{
 };
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 use shamir_connect::server::ticket::{decrypt_ticket, encrypt_ticket, TicketPlain, TicketWire};
+// (decrypt_ticket_with_ciphers / encrypt_ticket_with_cipher imported above)
 use shamir_connect::server::user_record::UserRecord;
 
 use zeroize::Zeroizing;
@@ -287,6 +292,33 @@ fn bench_crypto_primitives(c: &mut Criterion) {
         });
     });
 
+    // Optim #3 — cached cipher avoids per-call key schedule.
+    let cached_cipher = aes256gcm_cipher(&aes_key).unwrap();
+    g.bench_function("aes256gcm_encrypt_256b_cached_cipher", |b| {
+        b.iter(|| {
+            let out = aes256gcm_encrypt_with_cipher(
+                black_box(&cached_cipher),
+                &nonce,
+                &pt,
+                aad,
+            )
+            .unwrap();
+            black_box(out);
+        });
+    });
+    g.bench_function("aes256gcm_decrypt_256b_cached_cipher", |b| {
+        b.iter(|| {
+            let out = aes256gcm_decrypt_with_cipher(
+                black_box(&cached_cipher),
+                &nonce,
+                &ct,
+                aad,
+            )
+            .unwrap();
+            black_box(out);
+        });
+    });
+
     // Ed25519 sign + verify.
     let kp = Ed25519Keypair::generate();
     let pk = kp.public_bytes();
@@ -389,6 +421,22 @@ fn bench_protocol_construction(c: &mut Criterion) {
     g.bench_function("ticket_decrypt", |b| {
         b.iter(|| {
             let p = decrypt_ticket(&ticket_key, None, black_box(&wire)).unwrap();
+            black_box(p);
+        });
+    });
+
+    // Optim #3 — pre-cached cipher (matches the production hot path
+    // pattern: ResumeConfig holds the scheduled cipher across requests).
+    let ticket_cipher = aes256gcm_cipher(&ticket_key).unwrap();
+    g.bench_function("ticket_encrypt_cached_cipher", |b| {
+        b.iter(|| {
+            let w = encrypt_ticket_with_cipher(&ticket_cipher, black_box(&plain)).unwrap();
+            black_box(w);
+        });
+    });
+    g.bench_function("ticket_decrypt_cached_cipher", |b| {
+        b.iter(|| {
+            let p = decrypt_ticket_with_ciphers(&ticket_cipher, None, black_box(&wire)).unwrap();
             black_box(p);
         });
     });

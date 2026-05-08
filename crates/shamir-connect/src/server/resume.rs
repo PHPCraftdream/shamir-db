@@ -10,13 +10,14 @@
 //! IMPLEMENTATION_GUIDE NORMATIVE) — wired here as a trait so callers can
 //! plug in their durable backend.
 
+use crate::common::crypto::{aes256gcm_cipher, Aes256GcmCipher};
 use crate::common::error::{Error, Result};
 use crate::common::types::{limits, BindingMode};
 use crate::server::rotation::ServerIdentityState;
 use crate::server::session::{Session, SessionPermissions, SessionStore};
 use crate::server::ticket::{
-    check_anti_downgrade, decrypt_ticket, encrypt_ticket, ticket_limits, validate_ticket_enums,
-    TicketPlain, TicketWire,
+    check_anti_downgrade, decrypt_ticket_with_ciphers, encrypt_ticket, encrypt_ticket_with_cipher,
+    ticket_limits, validate_ticket_enums, TicketPlain, TicketWire,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -109,6 +110,10 @@ impl ConsumedCounterStore for InMemoryConsumedCounters {
 }
 
 /// Server resumption configuration.
+///
+/// **Optim #3:** AES-256-GCM ciphers are pre-scheduled once at construction
+/// time and reused across every resume. Rebuilding the key schedule per
+/// call (~10% of AES-GCM total time) is eliminated.
 pub struct ResumeConfig {
     /// Current `ticket_key` for AES-GCM.
     pub ticket_key: [u8; 32],
@@ -118,6 +123,47 @@ pub struct ResumeConfig {
     pub allow_browser_ticket_upgrade: bool,
     /// Refuse plain → TLS upgrade (spec §6.4).
     pub disable_plain_ticket_upgrade: bool,
+    /// Pre-scheduled cipher for `ticket_key`. Lazily built on first use via
+    /// [`ResumeConfig::ciphers`]; never rebuilt afterward.
+    cached_current: std::sync::OnceLock<Aes256GcmCipher>,
+    /// Pre-scheduled cipher for `ticket_key_previous` if set.
+    cached_previous: std::sync::OnceLock<Option<Aes256GcmCipher>>,
+}
+
+impl ResumeConfig {
+    /// Construct with default flags (anti-downgrade rules per spec §6.1/§6.4).
+    pub fn new(
+        ticket_key: [u8; 32],
+        ticket_key_previous: Option<[u8; 32]>,
+        allow_browser_ticket_upgrade: bool,
+        disable_plain_ticket_upgrade: bool,
+    ) -> Self {
+        Self {
+            ticket_key,
+            ticket_key_previous,
+            allow_browser_ticket_upgrade,
+            disable_plain_ticket_upgrade,
+            cached_current: std::sync::OnceLock::new(),
+            cached_previous: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Get (lazily-constructed, then cached) AES-GCM ciphers for the current
+    /// and optional previous keys. Subsequent calls reuse the same instances.
+    pub fn ciphers(&self) -> (&Aes256GcmCipher, Option<&Aes256GcmCipher>) {
+        let current = self.cached_current.get_or_init(|| {
+            aes256gcm_cipher(&self.ticket_key).expect("AES-256 key length validated")
+        });
+        let previous = self
+            .cached_previous
+            .get_or_init(|| {
+                self.ticket_key_previous.as_ref().map(|k| {
+                    aes256gcm_cipher(k).expect("AES-256 key length validated")
+                })
+            })
+            .as_ref();
+        (current, previous)
+    }
 }
 
 /// Per-spec §5.4 inputs from the client.
@@ -181,7 +227,10 @@ pub fn process_resume(
     }
 
     // Steps 3-4: decrypt with current key, fall back to previous.
-    let plain = decrypt_ticket(&config.ticket_key, config.ticket_key_previous.as_ref(), &wire)
+    // Optim #3: ciphers are pre-scheduled inside ResumeConfig — no AES key
+    // schedule rebuild per call.
+    let (current_cipher, previous_cipher) = config.ciphers();
+    let plain = decrypt_ticket_with_ciphers(current_cipher, previous_cipher, &wire)
         .map_err(|_| Error::AuthFailed)?;
 
     // Step 5: parse plaintext + Step 6 already enforced inside decrypt_ticket
@@ -272,7 +321,9 @@ pub fn process_resume(
             roles: plain.roles.clone(),
             identity_key_version: plain.identity_key_version,
         };
-        let wire = encrypt_ticket(&config.ticket_key, &new_plain).map_err(|_| Error::AuthFailed)?;
+        // Optim #3: reuse cached current cipher for re-encrypt.
+        let wire = encrypt_ticket_with_cipher(current_cipher, &new_plain)
+            .map_err(|_| Error::AuthFailed)?;
         resumption_ticket = Some(wire.to_bytes());
         resumption_expires_at_ns = Some(new_plain.expires_at_ns);
     }

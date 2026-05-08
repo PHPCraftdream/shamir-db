@@ -233,3 +233,49 @@ pub fn aes256gcm_decrypt(
         )
         .map_err(|_| Error::Crypto("AES-GCM: decrypt failed (tag mismatch?)"))
 }
+
+/// Build a pre-scheduled AES-256-GCM cipher from a raw 32-byte key.
+///
+/// **Optim #3:** the AES key schedule (~14 round-keys × 16 bytes) is
+/// computed once here. Hot-path callers (e.g. resumption-ticket encrypt /
+/// decrypt) MUST cache the resulting cipher and feed it to the `_with_cipher`
+/// variants below instead of calling `aes256gcm_encrypt`/`decrypt` which
+/// would re-schedule on every call.
+pub fn aes256gcm_cipher(key: &[u8; 32]) -> Result<Aes256Gcm> {
+    Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("AES-GCM: bad key"))
+}
+
+/// Encrypt with a pre-scheduled cipher (Optim #3).
+pub fn aes256gcm_encrypt_with_cipher(
+    cipher: &Aes256Gcm,
+    nonce: &[u8; 12],
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let nonce = Nonce::from_slice(nonce);
+    cipher
+        .encrypt(nonce, Payload { msg: plaintext, aad })
+        .map_err(|_| Error::Crypto("AES-GCM: encrypt failed"))
+}
+
+/// Decrypt with a pre-scheduled cipher (Optim #3).
+pub fn aes256gcm_decrypt_with_cipher(
+    cipher: &Aes256Gcm,
+    nonce: &[u8; 12],
+    ciphertext_and_tag: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>> {
+    let nonce = Nonce::from_slice(nonce);
+    cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext_and_tag,
+                aad,
+            },
+        )
+        .map_err(|_| Error::Crypto("AES-GCM: decrypt failed (tag mismatch?)"))
+}
+
+// Re-export Aes256Gcm so callers don't need to add aes-gcm to their deps.
+pub use aes_gcm::Aes256Gcm as Aes256GcmCipher;
