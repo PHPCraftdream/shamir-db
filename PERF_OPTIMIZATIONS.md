@@ -1,9 +1,12 @@
 # Hot-Path Performance Optimizations
 
-Five optimizations applied to `shamir-connect` + `shamir-transport-tcp`
-following the post-stabilization perf review. Each is an atomic git commit,
+**TEN** optimizations applied to `shamir-connect` + `shamir-transport-tcp`
+following two rounds of perf review. Each is an atomic git commit,
 covered by criterion benchmarks against a saved `before-optim` baseline,
 and additive to the public API (no breakage).
+
+**Plus:** spec/diagram fixes for the §8.5 latency-padding wiring and one
+diagram-only mismatch.
 
 ## Reproducibility
 
@@ -21,11 +24,11 @@ Criterion stores per-benchmark results under `target/criterion/<group>/<name>/<b
 
 ## Test counts
 
-| Crate | Tests | New TDD tests |
-|-------|-------|---------------|
-| `shamir-connect`        | 192 | +5 (framing pooled API in transport-tcp) + 3 dispatch view + 2 wire-compat + 0 lookup_at |
-| `shamir-transport-tcp`  | 15  | +5 read_frame_into TDD |
-| **Total**               | **207** | **15** |
+| Crate | Tests | TDD tests added across both rounds |
+|-------|-------|-----------------------------------|
+| `shamir-connect`        | 199 | +5 (round 1) + +9 (round 2: 1 latency, 2 envelope ref, 4 helper, 2 framing-into wire-compat) |
+| `shamir-transport-tcp`  | 17  | +5 (round 1) + +2 (round 2: write_frame_into) |
+| **Total**               | **216** | **21** |
 
 All green. `cargo clippy --workspace --all-targets` clean.
 
@@ -194,6 +197,195 @@ existing call sites broken.
 
 ---
 
+---
+
+## Round 2 (added after second perf review + spec/diagram audit)
+
+### Fix #1 — Latency padding bug + wiring
+
+**Commit:** `a16dd3c` — `fix(latency): canonicalize formula + wire LatencyPadGuard into echo demo`
+
+**Files:** `crates/shamir-connect/src/common/latency.rs`,
+`crates/shamir-transport-tcp/tests/echo_e2e.rs`,
+`spec/AUTH_PROTOCOL.md`
+
+**Problem (caught by Round-2 impl-vs-spec review):**
+- `target_constant_time_ms` used `jitter` twice: `FLOOR.max(j) + j`. Worked
+  by accident because `FLOOR > JITTER_MAX` (so `max == FLOOR` always),
+  but fragile.
+- `LatencyPadGuard` existed but was nowhere wired — spec §8.5 NORMATIVE
+  not satisfied at runtime.
+- Spec §8.5 wording was ambiguous (`max(jitter_ms, fixed_floor_ms)`),
+  contradicted by diagram 01 step 14 (`floor + uniform[0,25] jitter`).
+
+**Fix:**
+- Code: `FIXED_FLOOR_MS + uniform[0, JITTER_MAX_MS]` (canonical form,
+  result `[50, 75]` ms). Same observed behaviour as before.
+- Echo demo wires `LatencyPadGuard` into the auth path; sleeps to target
+  before writing `auth_ok`.
+- Spec §8.5 text rewritten to match diagram: `floor + uniform[0, jitter]`.
+
+**+1 TDD test:** `sampled_target_distribution_covers_floor_and_ceiling`
+(verifies both endpoints are reachable; catches future regressions like
+the previous double-jitter bug).
+
+---
+
+### Optim #6 — `resume.rs` move-out instead of 5 clones
+
+**Commit:** `9963acd` — `perf(resume): move plain fields instead of cloning`
+
+**File:** `crates/shamir-connect/src/server/resume.rs:289-355`
+
+**Mechanism:**
+Previously `Step 12+13` deep-cloned `plain.username_nfc` and
+`plain.roles` TWICE: once for `Session::new`, once for `new_plain`.
+Reordered so:
+- Refresh path: clone username + roles ONCE for Session, MOVE everything
+  else into `new_plain`.
+- No-refresh path: MOVE plain directly into Session — zero clones.
+
+Saves ~250–500 ns per resume + 2–4 heap allocations (depending on
+`roles.len()`).
+
+---
+
+### Optim #7 — Single-syscall `write_frame`
+
+**Commit:** `a4f7f4e` — `perf(framing): single write_all + write_frame_into pooled variant`
+
+**File:** `crates/shamir-transport-tcp/src/framing.rs`
+
+**Mechanism:**
+- `write_frame`: concatenate length + payload into one buffer, single
+  `write_all` (was: two `write_all` + flush → two TLS records).
+- New `write_frame_into(writer, payload, &mut scratch)`: zero-allocation
+  steady state, symmetric to `read_frame_into` (Optim #1).
+
+**Bench impact** (`framing/write_only/write_frame`):
+
+| Frame size | OLD (2× write_all) | NEW (single concat) | Δ |
+|-----------|--------------------|--------------------|---|
+| 64 B      | 1.43 µs            | 815 ns             | **-49%** |
+| 1 KB      | 1.52 µs            | 985 ns             | **-44%** |
+| 16 KB     | 2.09 µs            | 2.13 µs            | -8% (I/O dominates) |
+
+Halves CPU on small frames. With TLS this also halves wire overhead
+(~22 bytes of TLS header+tag per record).
+
+---
+
+### Optim #8 — In-place AES-GCM decrypt
+
+**Commit:** `3dead97` — `perf(ticket): in-place AES-GCM decrypt`
+
+**Files:** `crates/shamir-connect/src/common/crypto.rs`,
+`crates/shamir-connect/src/server/ticket.rs`
+
+**Mechanism:**
+- New `aes256gcm_decrypt_in_place_with_cipher(cipher, nonce, aad,
+  &mut buffer, &tag)` thin wrapper around `aes_gcm::AeadInPlace`.
+- `decrypt_ticket_with_ciphers` now clones `wire.ciphertext` ONCE into
+  a working buffer + calls in-place decrypt with separate tag (was:
+  concat ciphertext+tag into a fresh `Vec` to feed owning `Aead::decrypt`).
+- On current-cipher tag-mismatch the buffer is corrupted — re-clones for
+  the previous-cipher fallback to ensure clean retry.
+
+**Bench impact** (`protocol_construction/ticket_decrypt`):
+6.93 µs (vs `before-optim` baseline; change -9.18% median, p=0.03).
+
+Modest because msgpack parse (~5 µs) dominates the path. Real win is
+the eliminated allocation, not the AES timing.
+
+---
+
+### Optim #9 — `RequestEnvelopeRef<'a>` for client encode
+
+**Commit:** `e0683d0` — `perf(envelope): RequestEnvelopeRef<'a> for zero-copy client encode`
+
+**Files:** `crates/shamir-connect/src/common/envelope.rs`,
+`crates/shamir-connect/tests/integration_session.rs`
+
+**Mechanism:**
+Symmetric to `RequestEnvelopeView<'a>` (Optim #4, server decode).
+`RequestEnvelopeRef<'a>` lets a client serialize a request without the
+per-call `sid.to_vec()` allocation.
+
+**Bench impact** (`envelope/request_encode_ref` vs `request_encode`):
+- 256 B body: 924 ns vs 960 ns (-4%)
+- 4 KB body: 910 ns vs 929 ns (-2%)
+
+Modest absolute win; the real value is API symmetry — read side has
+zero-copy view, write side now has zero-copy ref. Together they
+support fully-pooled transports.
+
+**Wire-compat verified** by `request_envelope_ref_wire_compat_with_owning_and_view`.
+
+---
+
+### Optim #10 — *intentionally skipped*: per-user Hmac caching
+
+**Commit:** included in `f33f56b` — design-note added to `crypto::hmac_sha256`.
+
+**Why not done:**
+Pre-computing `Hmac<Sha256>` instances in `UserRecord` for `stored_key`
+and `server_key` would save ~200–400 ns per SCRAM verify (~10–20% of
+the non-Argon2 work). However it would introduce a real-vs-fake user
+timing channel: cached-user path ~150 ns/HMAC, fresh-init fake path
+~300 ns/HMAC.
+
+While §8.5 latency padding (50–75 ms) masks this on the wire, spec
+§5.2.4 + §9.2 mandate constant-time discipline AS WELL AS padding
+(defense-in-depth). The ~300 ns savings is dwarfed by Argon2id (~2 s)
+and by the padding floor — not worth the discipline erosion. Decision
+documented in `crypto.rs::hmac_sha256` doc-comment.
+
+---
+
+### Helper — `complete_auth_ok` + `AuthOkView::with_*` builder methods
+
+**Commit:** `f33f56b` — `feat(handshake): complete_auth_ok helper + AuthOkView builder methods`
+
+**File:** `crates/shamir-connect/src/server/handshake.rs`
+
+**Problem (caught by Round-2 impl-vs-diagrams review):**
+`verify_proof` returns `AuthOkView` with all three optional extension
+fields hardcoded to `None`. The fields exist (API correct), but the
+library never auto-populates them. A deployment using `verify_proof`
+output verbatim would silently never issue resumption tickets and never
+serve `rotation_in_progress` to orphan clients (spec §6.5).
+
+**Fix:** three additive APIs:
+- `AuthOkView::with_resumption_ticket(bytes, expires) -> Self`
+- `AuthOkView::with_rotation_in_progress(payload) -> Self`
+- `AuthOkView::with_kdf_upgrade_required() -> Self`
+- `complete_auth_ok(base, ticket, rotation, kdf_upgrade) -> AuthOkView`
+- `needs_kdf_upgrade(user_params, current_defaults) -> bool` (decision helper)
+
+The helper deliberately does NOT auto-rebuild `identity_input` for the
+`rotation_in_progress` path — spec §6.5 requires byte-exact
+`identity_input` and that's only known at the call site that has the
+`auth_message` in scope. Caller pattern documented in rustdoc.
+
+**+4 TDD tests** in `integration_full_auth.rs`.
+
+---
+
+### Diagram minor fixes
+
+**Commit:** `4cdcf7b` — `docs(diagrams): fix two minor mismatches in 01-initial-auth.md`
+
+- Step 9 client-side note: "auth_message = §4.1 (149 bytes для default
+  params)" → "144 + byte_len(username_nfc) bytes" (149 was specific to
+  `username = "alice"`).
+- Step 14 `auth_ok` payload: added missing `resumption_expires_at_ns?`
+  for schema completeness (already present in `02-resumption.md` for
+  `resume_ok` and in spec §2.4).
+
+Documentation-only; implementation already correct.
+
+---
+
 ## Cumulative impact
 
 The combination of Optim #1 + #4 + #5 removes virtually every
@@ -226,7 +418,9 @@ breakdown is:
 ~1 µs is the response-encode allocation that a future `dispatch_into`
 API could also eliminate.
 
-## What remains (lower-priority items from the perf review)
+## What remains (lower-priority items)
+
+After two rounds of optimization, these are the still-deferred items:
 
 | Item | File | Estimated win |
 |------|------|---------------|
@@ -235,7 +429,20 @@ API could also eliminate.
 | `gc_expired` → `DashMap::retain` (one-pass) | `session.rs:177-189` | minor; cleanup |
 | `permissions: SessionPermissions` drop the `RwLock` (immutable per-session) | `session.rs:61` | -5 ns admin auth check |
 | `FakeBlob::derive` use `zeroize::Zeroize::zeroize()` for volatile_write | `fake_blob.rs:67` | security hardening (LLVM was DCE-ing the `fill(0)`) |
-| Single-syscall `write_frame` (currently 3 writes + flush) | `framing.rs:65-75` | halves TLS record overhead per response |
+| `build_aad(version)` heap-allocates 17 byte Vec → `static AAD_V1: [u8; 17]` | `ticket.rs:130-135` | -1 alloc per encrypt+decrypt |
+| `auth_message`/`identity_input`/etc builders use thread_local scratch | various `common/*.rs` | -2 allocs per SCRAM accept |
+| `ErrorEnvelope::error: Cow<'static, str>` (avoid String alloc for static codes) | `envelope.rs` | -1 alloc per error response |
+| `SessionStore::lookup_at` extract Ref + drop before `Arc::clone` (reduce shard lock hold) | `session.rs:182-190` | minor under contention |
+| `extract_tls_exporter_into(&mut [u8; 32])` zero-copy variant | `tls.rs:72-78` | -1 32-byte memcpy per handshake |
+| `current_pub`/`previous_pub` AtomicU64 mirror (lock-free reads) | `rotation.rs` | -5–10 ns per handshake |
 
-These are documented but deferred — the diminishing-returns curve makes
-them lower-priority than the five committed optimizations.
+Plus the **STILL-MISSING NORMATIVE** items that aren't perf-related:
+
+- Lockout / backoff / rate-limit subsystem (§5.2.5, §8 table, IMPL §1.3).
+- WebSocket transport (entire `shamir-transport-ws` crate).
+- Synchronous durable persist of `consumed_counters` (§6.2).
+- HMAC-chained audit log (IMPL §3.3).
+- `MAX_SESSIONS_PER_USER` / 5s grace / `MAX_CONCURRENT_ARGON2`.
+- Plain TCP loopback whitelist enforcement.
+- Username PRECIS UsernameCaseMapped (currently `to_lowercase`).
+- Log redaction (`Debug` derived everywhere on key types).
