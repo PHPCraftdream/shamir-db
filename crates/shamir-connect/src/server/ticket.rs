@@ -42,7 +42,11 @@ use serde::{Deserialize, Serialize};
 /// `Vec<u8>` — eliminates per-resume heap allocation for these fields and
 /// removes the `parse_user_id`/`parse_family_id` length-check helpers.
 /// Wire format identical (msgpack `bin` of length N).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Custom [`Debug`] impl redacts identifying fields (spec IMPL §4): logging
+/// `TicketPlain` would expose user_id, channel_binding (links to TLS
+/// session), and ticket_family_id (links a device's resumption lineage).
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TicketPlain {
     /// Plaintext version byte (must equal envelope.version).
     pub version: u8,
@@ -73,6 +77,25 @@ pub struct TicketPlain {
     /// rotation overlap window (spec §5.7 NORMATIVE / diagram 12).
     /// Increments on every `rotateServerIdentity`. `0` for first-ever key.
     pub identity_key_version: u64,
+}
+
+impl core::fmt::Debug for TicketPlain {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TicketPlain")
+            .field("version", &self.version)
+            .field("user_id", &"<REDACTED:16>")
+            .field("username_nfc", &"<REDACTED>")
+            .field("transport_kind_at_auth", &self.transport_kind_at_auth)
+            .field("binding_mode_at_auth", &self.binding_mode_at_auth)
+            .field("channel_binding_at_auth", &"<REDACTED:32>")
+            .field("ticket_family_id", &"<REDACTED:16>")
+            .field("original_auth_at_ns", &self.original_auth_at_ns)
+            .field("expires_at_ns", &self.expires_at_ns)
+            .field("family_counter", &self.family_counter)
+            .field("roles", &"<REDACTED>")
+            .field("identity_key_version", &self.identity_key_version)
+            .finish()
+    }
 }
 
 /// Wire envelope.
