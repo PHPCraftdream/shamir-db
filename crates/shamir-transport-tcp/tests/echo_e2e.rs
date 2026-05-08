@@ -192,6 +192,14 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         let (mut r, mut w) = split(tls);
 
         // ----- 1. Handshake -----
+        // Spec §8.5 NORMATIVE latency padding: capture wall-clock at the
+        // start of the auth flow; before emitting `auth_ok` (or any
+        // negative response) we sleep until target_constant_time_ms is
+        // reached. Defeats the real-vs-fake user timing oracle that
+        // branch-equivalent code alone cannot close (SECURITY_MODEL §9.2).
+        use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
+        let pad_guard = LatencyPadGuard::start();
+
         let init_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
         let init: WireAuthInit = rmp_serde::from_slice(&init_bytes).unwrap();
         let mut client_nonce = [0u8; 32];
@@ -267,6 +275,11 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
             expires_at_ns: ok.expires_at_ns,
         })
         .unwrap();
+        // Spec §8.5: pad to target_constant_time_ms BEFORE writing auth_ok.
+        let pad = pad_guard.finish_with_target(target_constant_time_ms());
+        if pad > std::time::Duration::ZERO {
+            tokio::time::sleep(pad).await;
+        }
         write_frame(&mut w, &bytes).await.unwrap();
 
         // ----- 2. Echo loop -----
