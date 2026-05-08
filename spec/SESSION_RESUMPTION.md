@@ -179,6 +179,12 @@ ciphertext, tag = AES-256-GCM(
 
 ### 5.7. Resumption во время identity rotation
 
+**Determination rule** [NORMATIVE]: ticket считается "issued под previous keypair" если:
+```
+ticket_plain.original_auth_at_ns < (server_meta.server_ed25519_rotation_until_ns - 7 days_in_ns)
+```
+То есть ticket_plain.original_auth_at_ns раньше начала текущего overlap window (current rotation начался в `rotation_until_ns - 7 days`). `ticket_plain` сам не содержит epoch field — server derive из timestamp.
+
 Если ticket был issued под `previous` Ed25519 keypair и `transition_until_ns > now_ns`:
 
 **v1 поведение:** server отвергает resume → клиент выполняет full re-auth.

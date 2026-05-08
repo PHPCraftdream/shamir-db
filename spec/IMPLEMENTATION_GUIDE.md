@@ -103,7 +103,7 @@ struct HandshakeState {
     started_at: Instant,
 }
 ```
-GC каждые 5s: drop без proof в течение 10s.
+GC каждые 5s: drop без proof в течение `HANDSHAKE_TIMEOUT` (typically 15-20s, см. AUTH §8 table). **NOT** hardcoded 10s — раньше было misaligned с handshake timeout, что dropping legitimate slow mobile клиентов до прихода proof.
 
 #### `consumed_counters: DashMap<(user_id, ticket_family_id), u64>` [NORMATIVE]
 last_consumed `family_counter` per ticket lineage (см. SESSION_RESUMPTION §6.2).
