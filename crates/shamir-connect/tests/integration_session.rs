@@ -314,6 +314,87 @@ fn request_envelope_ref_skips_rid_when_none() {
     assert_eq!(r1.to_msgpack().unwrap(), r2.to_msgpack().unwrap());
 }
 
+/// v1 #7: `MAX_SESSIONS_PER_USER` LRU eviction — when the user reaches
+/// the per-user cap, the LEAST-RECENTLY-USED existing session is evicted
+/// (audit reason `max_sessions_lru` per spec §7.4 NORMATIVE).
+#[test]
+fn insert_with_per_user_cap_evicts_lru_at_threshold() {
+    use shamir_connect::server::session::SessionStore;
+
+    let store = SessionStore::new();
+    let uid = [0xa1u8; 16];
+
+    // Cap = 3, insert 3 sessions with monotonically-increasing
+    // last_activity (so we know which is "oldest").
+    let mut sids = Vec::new();
+    for i in 0..3 {
+        let s = make_session(uid, 1000 + i);
+        let sid = [i as u8; 32];
+        store.insert(sid, s);
+        sids.push(sid);
+    }
+    assert_eq!(store.len(), 3);
+
+    // 4th insert with cap=3 → must evict the LRU (sids[0], oldest activity).
+    let new_sid = [99u8; 32];
+    let (_arc, evicted) = store.insert_with_per_user_cap(
+        new_sid,
+        make_session(uid, 5000),
+        3, // cap
+    );
+    assert_eq!(evicted, Some(sids[0]), "must evict LRU (oldest activity)");
+    assert!(store.lookup(&sids[0]).is_none());
+    assert!(store.lookup(&sids[1]).is_some());
+    assert!(store.lookup(&sids[2]).is_some());
+    assert!(store.lookup(&new_sid).is_some());
+    assert_eq!(store.len(), 3);
+}
+
+/// v1 #7: per-user cap is per-USER, not global. Other users' sessions
+/// are not touched.
+#[test]
+fn insert_with_per_user_cap_does_not_affect_other_users() {
+    use shamir_connect::server::session::SessionStore;
+
+    let store = SessionStore::new();
+    let alice = [0x11u8; 16];
+    let bob = [0x22u8; 16];
+
+    for i in 0..3 {
+        store.insert([i as u8; 32], make_session(alice, 1000 + i));
+    }
+    let bob_sid = [50u8; 32];
+    store.insert(bob_sid, make_session(bob, 1000));
+
+    // Alice insert with cap=3 → evicts an alice session, NOT bob's.
+    let (_arc, evicted) = store.insert_with_per_user_cap(
+        [99u8; 32],
+        make_session(alice, 5000),
+        3,
+    );
+    assert!(evicted.is_some());
+    assert!(store.lookup(&bob_sid).is_some(), "bob's session must be untouched");
+}
+
+/// v1 #7: cap of 0 disables the LRU policy (insert always succeeds, no
+/// eviction).
+#[test]
+fn insert_with_per_user_cap_zero_disables_eviction() {
+    use shamir_connect::server::session::SessionStore;
+
+    let store = SessionStore::new();
+    let uid = [0xa1u8; 16];
+    for i in 0..50 {
+        let (_, evicted) = store.insert_with_per_user_cap(
+            [i as u8; 32],
+            make_session(uid, 1000 + i),
+            0,
+        );
+        assert!(evicted.is_none());
+    }
+    assert_eq!(store.len(), 50);
+}
+
 /// Optim #4: invalid session_id length is rejected.
 #[test]
 fn request_envelope_view_rejects_wrong_session_id_length() {
