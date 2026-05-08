@@ -12,6 +12,7 @@
 
 use crate::common::error::{Error, Result};
 use crate::common::types::{limits, BindingMode};
+use crate::server::rotation::ServerIdentityState;
 use crate::server::session::{Session, SessionPermissions, SessionStore};
 use crate::server::ticket::{
     check_anti_downgrade, decrypt_ticket, encrypt_ticket, ticket_limits, validate_ticket_enums,
@@ -154,6 +155,11 @@ pub trait UserStateLookup: Send + Sync {
 
 /// Process a resume request end-to-end. Returns `Ok(ResumeOk)` on success or
 /// [`Error::AuthFailed`] (generic) on any failure (spec §5.5).
+///
+/// `identity_state` is consulted to enforce spec §5.7 NORMATIVE / diagram 12:
+/// tickets carrying a stale `identity_key_version` (i.e., issued before the
+/// current keypair) are rejected so orphan clients are forced through full
+/// SCRAM and pick up the `rotation_in_progress` payload (§6.5).
 #[allow(clippy::too_many_arguments)]
 pub fn process_resume(
     request: &ResumeRequest,
@@ -161,6 +167,7 @@ pub fn process_resume(
     counters: &dyn ConsumedCounterStore,
     user_lookup: &dyn UserStateLookup,
     session_store: &SessionStore,
+    identity_state: &ServerIdentityState,
     session_max_age_ns: u64,
     new_ticket_ttl_ns: u64,
     now_ns: u64,
@@ -187,6 +194,13 @@ pub fn process_resume(
         return Err(Error::AuthFailed);
     }
     if plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS <= now_ns {
+        return Err(Error::AuthFailed);
+    }
+
+    // Step 7.5: identity-key version check (spec §5.7 / diagram 12).
+    // Pre-rotation tickets are rejected so orphan clients re-auth and receive
+    // the `rotation_in_progress` payload they need to update their pin.
+    if !identity_state.is_ticket_version_acceptable(plain.identity_key_version) {
         return Err(Error::AuthFailed);
     }
 
@@ -224,10 +238,12 @@ pub fn process_resume(
     let expires_at_ns = now_ns.saturating_add(session_max_age_ns);
 
     // The username comes from ticket plaintext (already normalized when persisted).
+    // Roles are restored from ticket → resumed admin sessions retain admin
+    // powers (SESSION_RESUMPTION §2.1 / diagram 02 step 12).
     let session = Session::new(
         user_id,
         plain.username_nfc.clone(),
-        SessionPermissions::from_roles(extract_roles_from_perms(&plain)),
+        SessionPermissions::from_roles(plain.roles.clone()),
         crate::common::types::TransportKind::from_u8(plain.transport_kind_at_auth)
             .unwrap_or(crate::common::types::TransportKind::Tcp),
         request.binding_mode_now,
@@ -251,6 +267,8 @@ pub fn process_resume(
             original_auth_at_ns: plain.original_auth_at_ns,
             expires_at_ns: now_ns.saturating_add(new_ticket_ttl_ns),
             family_counter: plain.family_counter.saturating_add(1),
+            roles: plain.roles.clone(),
+            identity_key_version: plain.identity_key_version,
         };
         let wire = encrypt_ticket(&config.ticket_key, &new_plain).map_err(|_| Error::AuthFailed)?;
         resumption_ticket = Some(wire.to_bytes());
@@ -269,6 +287,11 @@ pub fn process_resume(
 ///
 /// Used right after `auth_ok` when the server wants to issue a resumption
 /// token. `family_id = random(16)`, `family_counter = 1`, `original_auth_at_ns = now`.
+///
+/// `roles` is the permissions snapshot from the just-completed handshake —
+/// SESSION_RESUMPTION §2.1 mandates that resume rebuild [`SessionPermissions`]
+/// from this list. `identity_key_version` lets later rotations reject
+/// pre-rotation tickets (spec §5.7 / diagram 12).
 #[allow(clippy::too_many_arguments)]
 pub fn issue_initial_ticket(
     ticket_key: &[u8; 32],
@@ -277,6 +300,8 @@ pub fn issue_initial_ticket(
     transport_kind_at_auth: u8,
     binding_mode_at_auth: u8,
     channel_binding_at_auth: [u8; 32],
+    roles: Vec<String>,
+    identity_key_version: u64,
     now_ns: u64,
     ttl_ns: u64,
 ) -> Result<(Vec<u8>, u64)> {
@@ -294,6 +319,8 @@ pub fn issue_initial_ticket(
         original_auth_at_ns: now_ns,
         expires_at_ns: now_ns.saturating_add(ttl_ns),
         family_counter: 1,
+        roles,
+        identity_key_version,
     };
     let wire = encrypt_ticket(ticket_key, &plain).map_err(|_| Error::AuthFailed)?;
     Ok((wire.to_bytes(), plain.expires_at_ns))
@@ -341,9 +368,3 @@ fn parse_family_id(bytes: &[u8]) -> Result<[u8; limits::TICKET_FAMILY_ID_BYTES]>
     Ok(out)
 }
 
-fn extract_roles_from_perms(_plain: &TicketPlain) -> Vec<String> {
-    // The protocol field is `permissions: SessionPermissions` but our
-    // ticket struct currently doesn't carry it as a typed field — extract
-    // when permissions snapshot moves into the ticket schema (v0.2).
-    Vec::new()
-}
