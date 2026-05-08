@@ -1,6 +1,7 @@
 //! Server-side of the connection protocol.
 
 pub mod admin;
+pub mod audit_chain;
 pub mod bootstrap;
 pub mod changepw;
 pub mod config;
