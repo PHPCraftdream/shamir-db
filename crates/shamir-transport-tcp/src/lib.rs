@@ -6,6 +6,7 @@
 //! only deals with bytes-on-the-wire concerns.
 
 pub mod framing;
+pub mod listener;
 pub mod tls;
 
 pub use framing::{read_frame, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT};
