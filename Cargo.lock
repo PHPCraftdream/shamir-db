@@ -2615,6 +2615,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "shamir-connect",
+ "shamir-db",
  "shamir-transport-tcp",
  "shamir-transport-ws",
  "tempfile",
