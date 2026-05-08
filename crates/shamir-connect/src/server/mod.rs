@@ -7,6 +7,7 @@ pub mod config;
 pub mod dispatch;
 pub mod handshake;
 pub mod lockout;
+pub mod rate_limit;
 pub mod resume;
 pub mod rotation;
 pub mod session;
