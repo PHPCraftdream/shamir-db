@@ -163,6 +163,15 @@ impl Session {
     }
 }
 
+/// Spec §7.4 NORMATIVE: hard cap on concurrent sessions per user.
+/// Excess sessions are evicted LRU (oldest `last_activity_ns` first).
+pub const MAX_SESSIONS_PER_USER: usize = 16;
+
+/// Spec §7.8 NORMATIVE: 5-second grace window after disconnect during
+/// which the session is held in `Disconnected` state and may be resumed
+/// without ticket refresh. Past the window, eviction is permanent.
+pub const DISCONNECT_GRACE_NS: u64 = 5 * crate::common::time::ns::SECOND;
+
 /// Concurrent session store — keyed by `session_id` (bearer token).
 ///
 /// `Arc<Session>` so handlers can hold a session reference while admin
@@ -190,6 +199,53 @@ impl SessionStore {
         let arc = Arc::new(session);
         self.by_sid.insert(session_id, arc.clone());
         arc
+    }
+
+    /// **v1 #7:** insert with `MAX_SESSIONS_PER_USER` enforcement.
+    ///
+    /// If the user already has `max_sessions_per_user` live sessions, the
+    /// oldest one (by `last_activity_ns`) is evicted before the new
+    /// session is added — spec §7.4 NORMATIVE LRU policy. Returns
+    /// `(new_arc, evicted_sid)` where `evicted_sid` is `Some(_)` iff an
+    /// LRU eviction happened (caller can emit
+    /// `session_evicted{reason="max_sessions_lru"}` per IMPL §3.2).
+    pub fn insert_with_per_user_cap(
+        &self,
+        session_id: [u8; limits::SESSION_ID_BYTES],
+        session: Session,
+        max_sessions_per_user: usize,
+    ) -> (
+        Arc<Session>,
+        Option<[u8; limits::SESSION_ID_BYTES]>,
+    ) {
+        let user_id = session.user_id;
+
+        // Atomically: collect snapshot of all current sids for this user
+        // (cheap — typically ≤16) and evict LRU if cap reached.
+        let evicted = if max_sessions_per_user > 0 {
+            let mut user_sids: Vec<([u8; limits::SESSION_ID_BYTES], u64)> = Vec::new();
+            for entry in self.by_sid.iter() {
+                if entry.value().user_id == user_id {
+                    let last = entry.value().last_activity_ns.load(Ordering::Relaxed);
+                    user_sids.push((*entry.key(), last));
+                }
+            }
+            if user_sids.len() >= max_sessions_per_user {
+                // Evict the LRU (smallest last_activity_ns).
+                user_sids.sort_by_key(|(_, last)| *last);
+                let victim = user_sids[0].0;
+                self.by_sid.remove(&victim);
+                Some(victim)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let arc = Arc::new(session);
+        self.by_sid.insert(session_id, arc.clone());
+        (arc, evicted)
     }
 
     /// Look up a session by id, touching `last_activity_ns` if found.
