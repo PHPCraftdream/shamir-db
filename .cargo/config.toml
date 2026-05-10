@@ -9,3 +9,26 @@ opt-level = 2
 [profile.dev.package.shamir_db]
 opt-level = 0
 debug = false
+
+# ---------------------------------------------------------------------------
+# Test-only speedups — only the `[profile.test]` block. `[profile.dev]` (above)
+# is left untouched: those values are an intentional choice for the dev
+# runtime of the server binary, not for tests.
+#
+# A faster linker (rust-lld) was tried first; it ships with rustup but on
+# the windows-gnu host it cannot link proc-macro DLLs (`_DllMainCRTStartup`
+# undefined — known limitation). On windows-msvc rust-lld works as drop-in
+# for link.exe; if you ever switch the toolchain, add:
+#   [target.x86_64-pc-windows-msvc]
+#   linker = "rust-lld"
+# back into this file.
+# ---------------------------------------------------------------------------
+
+# Test-binary compilation: spread codegen across CPUs and reuse incremental
+# artefacts so the second `cargo test` finishes in seconds, not minutes.
+# `debug = 1` keeps line-number info for backtraces but skips full type info,
+# shrinking the linked exe by megabytes.
+[profile.test]
+codegen-units = 256
+incremental = true
+debug = 1
