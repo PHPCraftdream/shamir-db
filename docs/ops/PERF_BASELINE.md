@@ -564,13 +564,47 @@ If a caller needs the old "every write is fsync'd before return"
 semantics, the pattern is now explicit: `store.set(...).await?;
 store.flush().await?;`.
 
+## After sorted-index range path → `iter_range_stream` (2026-05-11)
+
+`SortedIndexManager::lookup_range / lookup_min / lookup_first_k` used
+`Store::scan_prefix_stream` and then filtered each returned batch
+in-process against the lower/upper byte-bounds. sled's
+`scan_prefix` starts at the prefix-min and walks forward, so any
+records before the lower bound got materialised + filtered, wasted.
+
+Fix is again at the unified-interface level: same call sites now
+build (lower, upper) absolute keys in the physical-key space and
+delegate to `Store::iter_range_stream`. Disk backends use their
+native B-tree `range()` (already implemented in `storage_sled.rs` /
+`storage_redb.rs`), seeking straight to `lower` and stopping at
+`upper`. In-memory falls back to the default filter wrapper —
+correct, same as before.
+
+Logic preserved: the same lower/upper construction (prefix +
+encoded_value + record_id-tiebreaker padding); `None` ends become
+`prefix` / `prefix || [0xFF; 64]` (greater than any real entry
+inside this prefix, less than the start of the next prefix).
+
+### Sled range queries — after #2
+
+| Bench                                 | Pre   | Post  | Speedup |
+|---------------------------------------|-------|-------|---------|
+| range_query_with_index_sled/10000     | 66.2 ms | 47.9 ms | **1.38×** |
+| range_query_with_index_sled/1000      | 4.84 ms | 4.80 ms | noise   |
+| range_query_with_index_sled/100       | 583 µs  | 579 µs  | noise   |
+| range_query_narrow_with_index_sled/10000 | 20.2 ms | 7.95 ms | **2.54×** |
+| range_query_narrow_with_index_sled/1000  | 1.21 ms | 895 µs  | **1.36×** |
+| range_query_narrow_with_index_sled/100   | 335 µs  | 207 µs  | **1.62×** |
+
+Win scales with how much of the index prefix sits before the lower
+bound. Wide ranges at low `start` (age=30 out of 18..78 → ~20%
+waste) get ~1.4×. Narrow ranges (age=30 exactly, single value)
+where we used to walk from age=18 → ~2.5×. As expected.
+
 ## Next
 
-Sprint γ candidates from `PERF_OPPORTUNITIES.md`:
-- **#2** — `lookup_range` / `lookup_min` / `lookup_first_k` to use
-  `iter_range_stream` instead of `scan_prefix_stream` (sorted-index
-  range queries on disk).
+Sprint γ remaining:
 - **#6** — hash-index posting layout from blob → key-per-record
-  (high-cardinality index writes).
+  (high-cardinality index writes; O(K)→O(1)).
 - **#3 / Opt O** — covering indexes (range-by-index without per-record
-  data fetch).
+  data fetch — break the 6%-selectivity ceiling on sled).
