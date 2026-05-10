@@ -54,19 +54,20 @@
 
 | # | Задача | Время | Что и зачем |
 |---|--------|-------|-------------|
-| 1 | Health checks `/healthz`, `/readyz` | ~1 ч | LB / K8s probe знает живой ли сервер. Без этого rolling deploy слепой |
+| 1 | Observability HTTP-сервер: `/healthz`, `/readyz`, `/metrics`, `/info` | ~4 ч | **P0 #1 и #6 объединены** — один маленький HTTP-сервер (axum/hyper, обычно `127.0.0.1:9090`). `/healthz` boolean alive (для K8s liveness, держим простым), `/readyz` boolean готовности (для traffic gating), `/metrics` стандартный Prometheus формат с **process metrics** (`process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_threads`, `process_io_read_bytes_total`, `process_io_write_bytes_total`) + application metrics (sessions, connections, auth attempts). `/info` опциональный pretty-JSON для curl-debug'инга. Используем crate `metrics-process` — кроссплатформенно, эмитит стандартные имена которые node_exporter / Grafana уже понимают. Background poller раз в 5 сек обновляет кэш (~30-50 μs работы), probes читают атомики (~ns). Overhead: 0.001% CPU |
 | 2 | Backups | ~3 ч | `Database::backup()` + CLI `shamir-server backup --to /path`. Кэш regenerate'ит, но user data → терять нельзя |
 | 3 | Global max-connections cap | ~2 ч | Atomic counter, отказ accept'а при лимите. Без этого DDoS = OOM |
 | 4 | Pre-handshake read/write timeout | ~1 ч | Slow-loris защита. Одна `tokio::time::timeout` на auth_init read |
 | 5 | Audit log rotation | ~2 ч | Файл растёт бесконечно → диск переполнится. Простой rotation by size/age |
-| 6 | Prometheus `/metrics` | ~3 ч | Без него production слепой. `auth_attempts`, `active_sessions`, `argon2_busy`, `connections_active`, p99 latency |
+| ~~6~~ | ~~Prometheus `/metrics`~~ | — | **Слит с #1** (один HTTP-сервер обслуживает все 4 endpoint'а: healthz/readyz/metrics/info) |
 | 7 | Slow query logging | ~1 ч | `if execution_time_us > N { tracing::warn!(..) }`. Тривиально, спасает от безумия в продакшене |
 | 8 | systemd unit + Dockerfile | ~2 ч | Без них ops-команда не задеплоит |
 | 9 | `changePassword` SCRAM | ~3 ч | Базовый user flow. Уже реализован в `shamir-connect::changepw`, нужно подключить через wire. Без него юзер не может сменить пароль = security incident response невозможен |
 | 10 | Server-side query limits cap | ~1 ч | `[security.query_limits] max_result_size_bytes`, `max_execution_time_ms`, `max_queries_per_batch`. Клиент может **уменьшить**, не **увеличить**. Сейчас 10MB-default — произвольный, нужен явный operator-knob |
 | 11 | Capacity planning docs | ~1 ч | Не код. README: "1 session = ~2 KB RAM, audit entry = ~200 bytes, redb growth ~X/день при Y запросов/сек" |
 
-**Итого P0 ≈ 20 часов.**
+**Итого P0 ≈ 18 часов** (после слияния #1 + #6: суммарно 4 ч вместо 1+3=4 ч,
+но один HTTP-сервер вместо двух отдельных задач — меньше boilerplate).
 
 ### P1 — нужно если multi-user / долгосрочная эксплуатация
 
