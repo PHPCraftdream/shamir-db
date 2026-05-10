@@ -261,17 +261,26 @@ impl IndexManager {
 
     /// Добавляет запись в индекс.
     ///
-    /// Ключ индекса: `[index_key]` (25 байт)
-    /// Значение: сериализованный `BTreeSet<RecordId>` (множество идентификаторов записей)
+    /// # Layout — key-per-posting (since 2026-05-11)
     ///
-    /// Если запись с таким index_key уже существует, добавляет record_id в множество.
-    /// Иначе создаёт новое множество с одним record_id.
+    /// One physical KV per `(index_value, record_id)` pair:
     ///
-    /// # Аргументы
+    /// ```text
+    /// key   = index_key (25 bytes) || record_id (16 bytes)   →   41 bytes
+    /// value = empty
+    /// ```
     ///
-    /// * `name_interned` — интернированный идентификатор имени индекса
-    /// * `values` — значения проиндексированных полей
-    /// * `record_id` — идентификатор записи в таблице
+    /// This replaces the previous "one blob holds the whole posting
+    /// list" layout. Reasons:
+    ///
+    /// - Write is O(1) regardless of posting-list cardinality. The
+    ///   old layout did read → deserialise → mutate → serialise →
+    ///   write, paying O(K) per add for a posting list of size K.
+    /// - Concurrent writes for distinct record_ids on the same value
+    ///   no longer race for the same blob.
+    ///
+    /// Reads scan the 25-byte prefix and reconstruct the
+    /// `BTreeSet<RecordId>` from key suffixes (see `lookup_by_index`).
     async fn add_index_entry(
         &self,
         name_interned: u64,
@@ -279,21 +288,8 @@ impl IndexManager {
         record_id: &RecordId,
     ) -> DbResult<()> {
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
-
-        // Читаем существующее множество RecordId или создаём пустое
-        let mut record_ids = match self.info_store.get(index_key.clone()).await {
-            Ok(bytes) => bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default(),
-            Err(shamir_storage::error::DbError::NotFound(_)) => BTreeSet::new(),
-            Err(e) => return Err(e),
-        };
-
-        // Добавляем новый RecordId (BTreeSet автоматически гарантирует уникальность)
-        record_ids.insert(*record_id);
-
-        // Сериализуем и сохраняем
-        let bytes = bincode::serialize(&record_ids)
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-        self.info_store.set(index_key, Bytes::from(bytes)).await?;
+        let posting_key = Self::build_posting_key(&index_key, record_id);
+        self.info_store.set(posting_key, Bytes::new()).await?;
         // Opt G: drop the cached posting list for this (name, values)
         // — the next reader pulls the fresh version.
         self.invalidate_posting_cache(name_interned, values);
@@ -302,41 +298,29 @@ impl IndexManager {
 
     /// Удаляет запись из индекса.
     ///
-    /// Читает множество RecordId из значения индекса, удаляет указанный record_id
-    /// и сохраняет обратно. Если множество становится пустым — удаляет ключ целиком.
+    /// Drops the single `(index_key || record_id)` posting entry
+    /// (O(1), no read-modify-write).
     async fn remove_index_entry(
         &self,
         name_interned: u64,
         values: &[InnerValue],
         record_id: &RecordId,
     ) -> DbResult<()> {
-        use std::collections::BTreeSet;
-
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
-
-        // Читаем существующее множество RecordId
-        let mut record_ids = match self.info_store.get(index_key.clone()).await {
-            Ok(bytes) => bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default(),
-            Err(shamir_storage::error::DbError::NotFound(_)) => return Ok(()), // Нечего удалять
-            Err(e) => return Err(e),
-        };
-
-        // Удаляем RecordId из множества
-        record_ids.remove(record_id);
-
-        if record_ids.is_empty() {
-            // Если множество пусто — удаляем ключ целиком
-            self.info_store.remove(index_key).await?;
-        } else {
-            // Иначе сохраняем обновлённое множество
-            let bytes = bincode::serialize(&record_ids)
-                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-            self.info_store.set(index_key, Bytes::from(bytes)).await?;
-        }
-
+        let posting_key = Self::build_posting_key(&index_key, record_id);
+        let _ = self.info_store.remove(posting_key).await?;
         // Opt G: drop the cached posting list for this (name, values).
         self.invalidate_posting_cache(name_interned, values);
         Ok(())
+    }
+
+    /// Compose the physical posting key:
+    /// `index_key (25b) || record_id (16b)` = 41 bytes.
+    fn build_posting_key(index_key: &Bytes, record_id: &RecordId) -> Bytes {
+        let mut k = Vec::with_capacity(index_key.len() + 16);
+        k.extend_from_slice(index_key);
+        k.extend_from_slice(record_id.as_bytes());
+        Bytes::from(k)
     }
 
     /// Создаёт новый индекс для таблицы.
@@ -590,6 +574,8 @@ impl IndexManager {
         name_interned: u64,
         values: &[InnerValue],
     ) -> DbResult<BTreeSet<RecordId>> {
+        use futures::StreamExt;
+
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
 
         // Opt G: try the in-memory posting cache first.
@@ -602,38 +588,35 @@ impl IndexManager {
             return Ok((*cached).clone());
         }
 
-        match self.info_store.get(index_key.clone()).await {
-            Ok(bytes) => {
-                let record_ids =
-                    bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default();
-                // Populate cache (bounded — evict arbitrary entry on
-                // overflow; exact LRU isn't worth the dep, index
-                // hotsets are small).
-                if let Ok(mut cache) = self.posting_cache.lock() {
-                    if cache.len() >= POSTING_CACHE_CAP {
-                        if let Some(k) = cache.keys().next().cloned() {
-                            cache.remove(&k);
-                        }
-                    }
-                    cache.insert(index_key, Arc::new(record_ids.clone()));
+        // Scan the 25-byte index prefix; every match is a posting
+        // entry whose final 16 bytes are the record_id.
+        let mut record_ids: BTreeSet<RecordId> = BTreeSet::new();
+        let mut stream = self.info_store.scan_prefix_stream(index_key.clone(), 512);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch? {
+                let kb: &[u8] = k.as_ref();
+                if kb.len() >= index_key.len() + 16 {
+                    let mut id_bytes = [0u8; 16];
+                    id_bytes.copy_from_slice(&kb[index_key.len()..index_key.len() + 16]);
+                    record_ids.insert(RecordId(id_bytes));
                 }
-                Ok(record_ids)
             }
-            Err(shamir_storage::error::DbError::NotFound(_)) => {
-                // Cache the empty result too — same lookup repeating
-                // should not hit the store again.
-                if let Ok(mut cache) = self.posting_cache.lock() {
-                    if cache.len() >= POSTING_CACHE_CAP {
-                        if let Some(k) = cache.keys().next().cloned() {
-                            cache.remove(&k);
-                        }
-                    }
-                    cache.insert(index_key, Arc::new(BTreeSet::new()));
-                }
-                Ok(BTreeSet::new())
-            }
-            Err(e) => Err(e),
         }
+
+        // Populate cache (bounded — evict arbitrary entry on
+        // overflow; exact LRU isn't worth the dep, index hotsets are
+        // small). Empty results are cached too — the next identical
+        // lookup short-circuits without re-scanning.
+        if let Ok(mut cache) = self.posting_cache.lock() {
+            if cache.len() >= POSTING_CACHE_CAP {
+                if let Some(k) = cache.keys().next().cloned() {
+                    cache.remove(&k);
+                }
+            }
+            cache.insert(index_key, Arc::new(record_ids.clone()));
+        }
+
+        Ok(record_ids)
     }
 
     /// Invalidate any cached posting list for `(name_interned,
