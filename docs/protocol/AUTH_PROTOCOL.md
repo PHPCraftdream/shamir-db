@@ -967,7 +967,7 @@ Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **M
 
 ## 16. Test Vectors
 
-**Release blocker для v1.** Файл `spec/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
+**Release blocker для v1.** Файл `docs/protocol/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
 
 ### Example: auth_message hex dump
 

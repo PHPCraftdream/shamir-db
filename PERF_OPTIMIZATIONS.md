@@ -5,7 +5,7 @@ following two rounds of perf review. Each is an atomic git commit,
 covered by criterion benchmarks against a saved `before-optim` baseline,
 and additive to the public API (no breakage).
 
-**Plus:** spec/diagram fixes for the §8.5 latency-padding wiring and one
+**Plus:** docs/protocol/diagram fixes for the §8.5 latency-padding wiring and one
 diagram-only mismatch.
 
 ## Reproducibility
@@ -199,7 +199,7 @@ existing call sites broken.
 
 ---
 
-## Round 2 (added after second perf review + spec/diagram audit)
+## Round 2 (added after second perf review + docs/protocol/diagram audit)
 
 ### Fix #1 — Latency padding bug + wiring
 
@@ -207,7 +207,7 @@ existing call sites broken.
 
 **Files:** `crates/shamir-connect/src/common/latency.rs`,
 `crates/shamir-transport-tcp/tests/echo_e2e.rs`,
-`spec/AUTH_PROTOCOL.md`
+`docs/protocol/AUTH_PROTOCOL.md`
 
 **Problem (caught by Round-2 impl-vs-spec review):**
 - `target_constant_time_ms` used `jitter` twice: `FLOOR.max(j) + j`. Worked

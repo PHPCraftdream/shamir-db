@@ -603,7 +603,7 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 
 ## 11. Test Plan (release blockers)
 
-11.1. **Test vectors** — `spec/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
+11.1. **Test vectors** — `docs/protocol/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
 
 11.2. **Integration tests:**
 - Full TCP+TLS auth round-trip

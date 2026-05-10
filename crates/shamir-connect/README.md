@@ -2,7 +2,7 @@
 
 ShamirDB connection protocol library — auth handshake + session management.
 
-Implements the spec at `../../spec/AUTH_PROTOCOL.md`.
+Implements the spec at `../../docs/protocol/AUTH_PROTOCOL.md`.
 
 ## Modules
 
