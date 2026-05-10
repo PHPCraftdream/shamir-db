@@ -149,6 +149,14 @@ boundaries stay clean.
   per-token posting lists, and BM25 scoring. Phase 0 is boolean
   match; Phase 1 adds relevance ranking. Full design in
   `docs/roadmap/FULL_TEXT_SEARCH.md`.
+- *Constant-factor performance* (orthogonal to the above feature
+  work) — A/B/C/D landed asymptotic wins on hot write paths
+  (800-1100×). The next class of gains is structural: removing
+  async ceremony where work is sync, allocation pressure, repeated
+  reverse-interner lookups, monolithic index-blob deserialisation,
+  vtable jumps in inner loops, persist amplification recurrences.
+  ~3 weeks of cleanup for cumulative 3-10× across the whole profile;
+  catalogue + sprint plan in `docs/roadmap/PERF_OPPORTUNITIES.md`.
 - All three layers — DTOs (`shamir-query-types`), pure planning, and
   runtime execution — are now properly separated. The batch planner
   and `$query` reference parser live in `shamir-query-types::batch`
