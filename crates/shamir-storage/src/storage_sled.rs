@@ -98,10 +98,6 @@ impl Store for SledStore {
             tree.insert(&key[..], &*value)
                 .map_err(|e| DbError::Storage(format!("SledDB insert: {}", e)))?;
 
-            // sled is transactional by default, but we might want to flush explicitly for durability
-            tree.flush()
-                .map_err(|e| DbError::Storage(format!("SledDB flush: {}", e)))?;
-
             Ok(key)
         })
         .await
@@ -119,9 +115,6 @@ impl Store for SledStore {
 
             tree.insert(&key[..], &*value)
                 .map_err(|e| DbError::Storage(format!("SledDB insert: {}", e)))?;
-
-            tree.flush()
-                .map_err(|e| DbError::Storage(format!("SledDB flush: {}", e)))?;
 
             Ok(!existed)
         })
@@ -152,9 +145,6 @@ impl Store for SledStore {
                 .remove(&key[..])
                 .map_err(|e| DbError::Storage(format!("SledDB remove: {}", e)))?
                 .is_some();
-
-            tree.flush()
-                .map_err(|e| DbError::Storage(format!("SledDB flush: {}", e)))?;
 
             Ok(existed)
         })
@@ -335,6 +325,21 @@ impl Store for SledStore {
                 yield Ok(batch);
             }
         })
+    }
+
+    /// Explicit fsync. Individual writes are buffered and made durable
+    /// by sled's background flusher (default: every 500 ms). Call this
+    /// when an external durability boundary is needed (end of batch
+    /// request, explicit user FLUSH, graceful shutdown).
+    async fn flush(&self) -> DbResult<()> {
+        let tree = self.tree.clone();
+        spawn_blocking(move || -> DbResult<()> {
+            tree.flush()
+                .map_err(|e| DbError::Storage(format!("SledDB flush: {}", e)))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 }
 

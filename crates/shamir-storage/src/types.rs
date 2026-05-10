@@ -49,6 +49,24 @@ pub trait Store: Send + Sync {
     /// Removes a record by its `RecordKey`.
     async fn remove(&self, key: RecordKey) -> DbResult<bool>;
 
+    /// Force the backend to make all writes-so-far durable.
+    ///
+    /// **Durability contract.** The basic `insert` / `set` / `remove`
+    /// operations are *eventually* durable — backends are free to
+    /// buffer writes in a WAL / page cache / background flusher and
+    /// only fsync periodically. Callers that need a strict
+    /// commit-boundary (an RPC reply, a transaction end, an explicit
+    /// `FLUSH` request from a user) call `flush()` and await it.
+    ///
+    /// Default impl is a no-op for backends that have no buffered
+    /// state (in-memory) or that already fsync per write at a lower
+    /// layer.
+    ///
+    /// Backends that buffer (sled, fjall, cached) MUST override.
+    async fn flush(&self) -> DbResult<()> {
+        Ok(())
+    }
+
     /// Returns an async stream that yields batches of records.
     /// Like PHP generators but with batching - yields Vec of size batch_size.
     /// Uses concurrent prefetching: while yielding current batch, fetches next batch in background.
