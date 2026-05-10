@@ -108,18 +108,17 @@ index scan / full scan → WHERE → GROUP BY → AGG per group → HAVING → S
 
 ## Файлы
 
+DTO-типы (`ReadQuery`, `Select`, `SelectItem`, `AggFunc`, `AggregateField`,
+`GroupBy`, `OrderBy`, `OrderByItem`, `OrderDirection`, `NullsOrder`,
+`Pagination`, `PaginationInfo`, `QueryResult`, `QueryStats`, `SelectExpr`,
+`SelectExprValue`) живут в крейте **`shamir-query-types::read`**.
+`shamir-engine::query::read` re-export-ит их и добавляет runtime-логику:
+
 | Файл | Описание |
 |------|----------|
-| `read_query.rs` | `ReadQuery` — определение запроса |
-| `select.rs` | `Select`, `SelectItem` |
-| `agg.rs` | `AggFunc`, `AggregateField` |
-| `group_by.rs` | `GroupBy` (fields + having) |
-| `order_by.rs` | `OrderBy`, `OrderByItem`, `OrderDirection`, `NullsOrder` |
-| `limit.rs` | `Pagination` (LimitOffset/Page/None), `PaginationInfo` |
-| `query_result.rs` | `QueryResult`, `QueryStats` |
-| `select_expr.rs` | `SelectExpr`, `SelectExprValue` |
+| `mod.rs` | Re-exports DTO + `query_from_value` + `exec::*` |
 | `parser.rs` | `query_from_value()` — парсинг JSON → ReadQuery |
-| `exec.rs` | Пайплайн выполнения: apply_select, apply_group_by и т.д. |
+| `exec.rs` | Пайплайн выполнения: `apply_select`, `apply_group_by`, `apply_order_by`, `apply_pagination`, `apply_distinct`, `SelectProjection` |
 
 ## Индексы
 

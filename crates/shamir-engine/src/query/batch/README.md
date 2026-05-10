@@ -1311,13 +1311,19 @@ BatchResponse { id, results, execution_plan, execution_time_us }
 ## См. также
 
 - [Write Operations](../write/README.md) — операции записи (Insert, Update, Set, Delete)
-- [Admin Operations](../admin/types.rs) — DDL операции (Create/Drop/List)
-- [Write Examples](../examples/write.md) — примеры JSON для операций записи
-- [Filter Examples](../examples/filter.md) — примеры фильтров WHERE
-- [Query Reference](./reference.rs) — парсинг `$query` ссылок
-- [Batch Types](./types.rs) — BatchRequest (id обязательно), BatchOp, QueryEntry
-- [Batch Planner](./planner.rs) — планировщик выполнения
-- [Batch Executor](./executor.rs) — execute_batch, TableResolver, AdminExecutor
+- [Admin Operations](../admin/README.md) — DDL операции (Create/Drop/List)
+- [Filter](../filter/README.md) — синтаксис WHERE/HAVING фильтров
+- [Read Query](../read/README.md) — формат SELECT-запроса (ReadQuery)
+- [Auth](../auth/README.md) — модель ролей и permissions
+
+DTO-типы (`BatchRequest`, `BatchResponse`, `BatchOp`, `BatchLimits`,
+`BatchError`, `BatchPlan`, `QueryEntry`, `TransactionInfo`) живут в
+`shamir-query-types::batch`. Этот модуль содержит исполнительную часть:
+
+- `reference.rs` — `QueryReference` / `QueryPath`, парсинг `$query` ссылок
+- `planner.rs` — `BatchPlanner`, валидация и топологическая сортировка
+- `executor.rs` — `execute_batch`, `execute_batch_with_permissions`,
+  трейты `TableResolver` и `AdminExecutor`
 
 ## Performance Notes
 

@@ -1,235 +1,131 @@
-# Table Engine
+# `shamir-engine` crate
 
-High-level table abstraction with automatic key interning, value transformations, and index management.
+The runtime engine for ShamirDB: database/repo/table managers, the index
+subsystem, and the SDBQL query layer (filter / read / write / batch / admin /
+auth). DTOs live in `shamir-query-types`; this crate owns the executable
+behaviour (parsing, planning, execution, interner-aware filter compilation,
+index maintenance).
 
-## Architecture
+## Crate layout
 
 ```
-engine/
-├── db_instance/                 # Database instance
-│   ├── db_instance.rs           # DbInstance (manages repos within a database)
-│   ├── mod.rs
-│   └── tests/
-├── repo/                        # Repository management
-│   ├── repo_config.rs           # RepoConfig, BoxRepoFactory
-│   ├── repo_manager.rs          # RepoManager
-│   ├── repo_manager_instance.rs # RepoManagerInstance
-│   ├── repo_types.rs            # BoxRepoFactory enum (7 engine types)
-│   ├── mod.rs
-│   └── tests/
-├── table/                       # Table implementation
-│   ├── table_manager.rs         # TableManager — main table facade
-│   ├── table_config.rs          # TableConfig
-│   ├── table_context.rs         # TableContext (with index integration)
-│   ├── counter.rs               # RecordCounter service
-│   ├── interner_manager.rs      # InternerManager service
-│   ├── mod.rs
-│   └── tests/
-│       ├── crud_tests.rs
-│       ├── concurrent_tests.rs
-│       └── persistence_tests.rs
-├── index/                       # Index management system
-│   ├── index_definition.rs      # Index definition (simple/composite)
-│   ├── index_info.rs            # Index metadata with sync status
-│   ├── index_info_item.rs       # Single index path item
-│   ├── index_record_key.rs      # Index record key for B-Tree storage
-│   ├── index_status.rs          # Index sync status enum
-│   ├── index_manager.rs         # IndexManager
-│   ├── mod.rs
-│   └── tests/
+shamir-engine/src/
+├── lib.rs
 ├── README.md
-└── table.md
+├── LAYERS.md                 # short note: где живёт интернер и почему
+├── db_instance/              # DbInstance — repos within one DB
+├── repo/                     # RepoInstance + BoxRepo + BoxRepoFactory (7 backends)
+├── table/                    # TableManager + Table (low-level CRUD) + interner / counter / read+write executors
+├── index/                    # IndexManager + IndexInfo + IndexDefinition + IndexRecordKey
+└── query/                    # SDBQL query layer
+    ├── batch/                # BatchPlanner + execute_batch + $query reference resolver
+    ├── read/                 # parser + exec pipeline (DTOs re-exported from shamir-query-types)
+    ├── write/                # re-exports + execution glue (DTOs in shamir-query-types)
+    ├── admin/                # DDL re-exports
+    ├── auth/                 # SessionPermissions + auth DTOs
+    ├── filter/               # compile_filter + eval_context + FilterCallback
+    └── common/               # shared parsers (filter / order / agg / pagination)
 ```
 
-## Purpose
+Hierarchy of managers (bottom of `shamir-db` ↓):
 
-Bridges the gap between raw storage (`Store`) and user-friendly API:
-- **ShamirDb** -> **DbInstance** -> **RepoManager** -> **TableManager**
-- Manages key interning transparently
-- Provides async streaming for large datasets
-- Handles table metadata via system records
-- Index management with atomic flags for O(1) existence check
-
-## DbInstance
-
-A database instance manages multiple repositories:
-
-```rust
-let db = DbInstance::new();
-db.add_repo(repo_config).await?;
-let table = db.get_table("main", "users").await?;
+```
+ShamirDb (in shamir-db crate)
+  └── DbInstance               manages repos within one database
+       └── RepoInstance        wraps one BoxRepo (storage backend) + table configs
+            └── TableManager   one table: data + interner + indexes + query exec
+                 └── IndexManager   regular + unique indexes (atomic flags for O(1) probe)
 ```
 
-## RepoManager and BoxRepoFactory
+## Storage model per table
 
-Repository management with factory-based backend selection:
+Each `TableManager` owns two underlying `Store`s in its repo:
+
+```
+__data__{table_name}   user records (InnerValue payload, RecordId keys)
+__info__{table_name}   interner state + index metadata (system records)
+```
+
+`RecordId::system("internals")` / `RecordId::system("inter_max")` /
+`RecordId::system("indexes")` / `RecordId::system("indexes_unique")` are the
+well-known keys in the info store.
+
+## Storage backends
+
+Repos plug into one of seven embedded engines via `BoxRepoFactory`:
 
 ```rust
-// Supported storage backends
 pub enum BoxRepoFactory {
     InMemory(_),
-    Sled(_),
-    Redb(_),
-    Fjall(_),
-    Nebari(_),
-    Persy(_),
-    Canopy(_),
+    #[cfg(feature = "sled")]   Sled(_),
+    #[cfg(feature = "redb")]   Redb(_),
+    #[cfg(feature = "fjall")]  Fjall(_),
+    #[cfg(feature = "nebari")] Nebari(_),
+    #[cfg(feature = "persy")]  Persy(_),
+    #[cfg(feature = "canopy")] Canopy(_),
 }
-
-let config = RepoConfig::new("main", BoxRepoFactory::in_memory())
-    .add_table(TableConfig::new("users"))
-    .add_table(TableConfig::new("orders"));
 ```
 
-## TableManager
+Each non-memory backend is gated by its cargo feature.
 
-The main table abstraction (formerly `Table<R>`). Each table consists of two underlying stores:
+## TableManager surface
 
-```
-__data__{table_name}  -> actual data with InnerValue (InternerKey keys)
-__info__{table_name}  -> interning state + indexes
-```
-
-### System Records
-
-The interner is stored as system records in `__info__` store:
+CRUD (all routed through interning + index maintenance):
 
 ```rust
-RecordId::system("internals")  -> bincoded map<String, u64>
-RecordId::system("inter_max")  -> bincoded u64
-RecordId::system("indexes")    -> Index metadata
-```
-
-### Query Execution
-
-TableManager executes queries via the Batch API:
-
-```rust
-// Read
-table.read(&read_query, &filter_context).await?;
-
-// Write operations
+table.read(&read_query, &filter_ctx).await?;
 table.execute_insert(&insert_op).await?;
-table.execute_update(&update_op, &filter_context).await?;
-table.execute_set(&set_op).await?;        // Upsert (fully working)
-table.execute_delete(&delete_op, &filter_context).await?;
+table.execute_update(&update_op, &filter_ctx).await?;
+table.execute_set(&set_op).await?;       // upsert
+table.execute_delete(&delete_op, &filter_ctx).await?;
 ```
 
-### InternerManager
-
-Manages the interner lifecycle:
+Index management:
 
 ```rust
-// Get interner (lazy load from __info__ store)
-let interner = table.interner().get().await?;
-
-// Persist interner state to storage
-table.interner().persist().await?;
-```
-
-## Index System
-
-The index system provides efficient data lookup with three indexing modes:
-
-### Index Modes
-
-```rust
-pub enum IndexMode {
-    Disabled,                      // No indexing
-    All,                           // Index all Map fields (simple indexes)
-    Selective(Vec<IndexDefinition>), // Custom indexes
-}
-```
-
-### Index Definition
-
-Indexes can be **simple** (single path) or **composite** (multiple paths):
-
-```rust
-// Simple index
-let email_idx = IndexDefinition::new(email_name_interned, vec![
-    IndexInfoItem::new(vec![2])  // Path to email field
-]);
-
-// Composite index
-let name_age_idx = IndexDefinition::new(name_age_name_interned, vec![
-    IndexInfoItem::new(vec![1]),  // Path to name field
-    IndexInfoItem::new(vec![3])   // Path to age field
-]);
-```
-
-### IndexManager
-
-- **Atomic flags** for O(1) existence check (no locks!)
-- **Two index types**: regular and unique
-- **Unique indexes**: validation BEFORE write, update AFTER write
-- **Status tracking**: Actual, Pending, Saving
-
-### Index Operations
-
-```rust
-// Create indexes
 table.create_index("email_idx", &["email"]).await?;
 table.create_unique_index("username_idx", &["username"]).await?;
-
-// Drop indexes
 table.drop_index("email_idx").await?;
 table.drop_unique_index("username_idx").await?;
-
-// Check if has indexes (O(1) - no locks!)
-if table.has_indexes() {
-    // Use indexes for query
-}
+table.has_indexes(); // O(1), atomic flag
 ```
+
+The interner is loaded lazily from `__info__` via `OnceCell` and persisted
+after every write that introduced a new key.
+
+## Query layer
+
+All requests funnel through `BatchRequest`:
+
+```rust
+let response: BatchResponse = execute_batch(
+    &batch_request,
+    &table_resolver,
+    Some(&admin_executor),
+).await?;
+```
+
+The planner extracts `$query` references, validates them against declared
+aliases, sorts dependencies into parallel stages, and runs each stage
+concurrently. Reads use index scans automatically when `where` is `Eq` / `In`
+on an indexed field; otherwise full scan.
+
+For the JSON wire format see
+[`query/batch/README.md`](query/batch/README.md) and
+[`query/README.md`](query/README.md).
 
 ## Concurrency
 
-TableManager is fully thread-safe:
+Every manager is cheaply cloneable (`Arc` internals). Concurrent reads and
+writes on the same table are supported; the interner is `DashMap`-backed and
+`OnceCell` guarantees single initialization.
 
-```rust
-// Clone table (cheap - Arc-based)
-let table1 = table.clone();
-let table2 = table.clone();
+## Errors
 
-// Concurrent operations
-let t1 = tokio::spawn(async move {
-    table1.execute_insert(&insert_op).await
-});
-let t2 = tokio::spawn(async move {
-    table2.read(&query, &ctx).await
-});
-tokio::join!(t1, t2);
-```
+Surfaces `DbError` from `shamir-storage`:
 
-**Thread Safety Guarantees:**
-- Multiple concurrent reads
-- Multiple concurrent writes
-- Interner synchronized via DashMap
-- OnceCell ensures single init
-
-## Error Handling
-
-```rust
-use shamir_db::DbError;
-
-match table.read(&query, &ctx).await {
-    Ok(result) => println!("Found {} records", result.records.len()),
-    Err(DbError::NotFound(msg)) => eprintln!("Not found: {}", msg),
-    Err(DbError::DuplicateKey(msg)) => eprintln!("Duplicate: {}", msg),
-    Err(DbError::Storage(msg)) => eprintln!("Storage error: {}", msg),
-    Err(e) => eprintln!("Error: {:?}", e),
-}
-```
-
-## Future Enhancements
-
-- [x] Multi-repo dispatcher (DbInstance)
-- [x] Repo management with BoxRepoFactory
-- [x] Modular table architecture (TableManager)
-- [x] Index system (simple, composite, unique)
-- [x] Query execution (read, insert, update, set, delete)
-- [x] Admin operations via Batch API
-- [ ] Garbage collection for unused interned strings
-- [ ] Automatic batch size tuning
-- [ ] Statistics (record count, interned strings count)
-- [ ] Transaction support across tables
+- `DbError::NotFound` — missing key/table/repo/db
+- `DbError::DuplicateKey` — unique-index conflict on insert/update
+- `DbError::Storage` — backend I/O error
+- `DbError::UniqueIndexCreationFailed(name, dup_count, sample)` — building a
+  unique index over an existing table that already contains duplicates

@@ -9,7 +9,7 @@
 || Уровень | Компонент | Поля | Описание |
 ||---------|-----------|------|----------|
 || 1 | **IndexManager** | `indexes`, `indexes_unique` | Менеджер индексов таблицы |
-|| 2 | **IndexInfo** | `indexes: Vec<IndexDefinition>`, `status: AtomicU8` | Конфигурация индексов |
+|| 2 | **IndexInfo** | `indexes: TDashMap<u64, IndexDefinition>`, `status: AtomicU8` | Конфигурация индексов |
 || 3 | **IndexDefinition** | `name_interned: u64`, `paths: Vec<IndexInfoItem>` | Определение индекса |
 || 4 | **IndexInfoItem** | `path: Vec<u64>` | Путь к полю через ID |
 
@@ -120,29 +120,35 @@ pub struct IndexDefinition {
 
 ```rust
 pub struct IndexInfo {
-    indexes: Vec<IndexDefinition>,     // Определения индексов
-    #[serde(skip)]
-    status: StatusAtom,                // Runtime-статус (не сериализуется)
+    indexes: TDashMap<u64, IndexDefinition>,  // name_interned → определение
+    status: StatusAtom,                       // runtime-статус (не сериализуется)
 }
 ```
+
+Сериализуется как `BTreeMap<u64, IndexDefinition>` (для детерминированного
+порядка байт на диске); десериализуется обратно в DashMap. `status` всегда
+восстанавливается как `Actual` и затем переводится в `Pending` при первой
+правке.
 
 **Методы:**
 
 || Метод | Описание |
 ||-------|----------|
 || `new() -> Self` | Создание пустой конфигурации |
-|| `from_definitions(indexes) -> Self` | Создание с определениями |
+|| `from_definitions(iter) -> Self` | Создание из итератора `IndexDefinition` |
 || `is_enabled(&self) -> bool` | Проверка наличия индексов |
 || `status(&self) -> IndexStatus` | Получение текущего статуса |
 || `set_status(&self, status)` | Установка статуса |
 || `mark_pending(&self)` | Пометить как требующий синхронизации |
-|| `add_index(&mut self, index_def)` | Добавить/обновить индекс |
-|| `remove_index(&mut self, name) -> bool` | Удалить индекс по имени |
-|| `definitions(&self) -> &[IndexDefinition]` | Получить все определения |
-|| `definitions_mut(&mut self) -> &mut Vec<IndexDefinition>` | Мутабельный доступ |
+|| `add_index(&self, index_def)` | Добавить/обновить индекс (`&self`, не `&mut`) |
+|| `remove_index(&self, name_interned) -> bool` | Удалить по interned-имени |
+|| `get_index(&self, name_interned) -> Option<IndexDefinition>` | Получить по имени |
+|| `iter(&self) -> impl Iterator<…>` | Итерация по копиям определений |
+|| `contains(&self, name_interned) -> bool` | Проверить наличие |
+|| `len(&self) -> usize` / `is_empty(&self) -> bool` | Размер карты |
 
 **Особенности:**
-- `PartialEq` сравнивает только `indexes`, игнорируя `status`
+- Внутри — `TDashMap` (DashMap с FxHasher), все мутации через `&self`
 - Статус хранится в `Arc<AtomicU8>` для потокобезопасности
 - При изменении индексов автоматически устанавливается статус `Pending`
 
@@ -157,7 +163,7 @@ pub struct IndexInfo {
 ```rust
 pub struct IndexRecordKey {
     pub is_unique: u8,           // Флаг уникальности (1 или 0)
-    pub index_id: u64,           // ID индекса (интернированное имя)
+    pub name_interned: u64,      // ID индекса (интернированное имя)
     pub hash1: u64,              // Хеш индексируемых значений
     pub hash2: u64,              // Второй хеш (защита от коллизий)
 }
@@ -168,7 +174,7 @@ pub struct IndexRecordKey {
 || Поле | Размер | Описание |
 ||------|--------|----------|
 || `is_unique` | 1 byte | Флаг уникальности (0=обычный, 1=уникальный) |
-|| `index_id` | 8 bytes | ID индекса |
+|| `name_interned` | 8 bytes | ID индекса (интернированное имя) |
 || `hash1` | 8 bytes | Хеш значений |
 || `hash2` | 8 bytes | Хеш для коллизий |
 
@@ -180,16 +186,16 @@ pub struct IndexRecordKey {
 
 || Метод | Описание |
 ||-------|----------|
-|| `new(is_unique: bool, index_id: u64) -> Self` | Создание префикса ключа |
+|| `new(is_unique: bool, name_interned: u64) -> Self` | Создание префикса ключа |
 || `with_values<T: Hash>(self, values: &[&T]) -> Self` | Вычисление хешей |
 || `to_bytes(&self) -> Bytes` | Сериализация в байты |
 || `from_bytes(bytes: Bytes) -> Result<Self, String>` | Десериализация |
 || `to_prefix_bytes(&self) -> Bytes` | Префикс для сканирования |
-|| `index_id(&self) -> u64` | Получить ID индекса |
+|| `name_interned(&self) -> u64` | Получить ID индекса |
 
 **Вычисление хешей:**
 - `hash1` — FxHasher с seed 0
-- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `index_id`
+- `hash2` — FxHasher с seed `0x9E3779B97F4A7C15` (golden ratio) XOR `name_interned`
 
 **⚠️ ВАЖНО: Проверка данных при коллизиях хешей**
 
@@ -198,13 +204,13 @@ pub struct IndexRecordKey {
 
 ```rust
 // ❌ НЕПРАВИЛЬНО: доверяем хешу без проверки
-let key = IndexRecordKey::new(false, index_id).with_values(&[&value]);
+let key = IndexRecordKey::new(false, name_interned).with_values(&[&value]);
 if let Some(record_ids) = store.get(key.to_bytes())? {
     return Ok(record_ids);  // Может вернуть чужие записи!
 }
 
 // ✅ ПРАВИЛЬНО: проверяем фактическое значение
-let key = IndexRecordKey::new(false, index_id).with_values(&[&value]);
+let key = IndexRecordKey::new(false, name_interned).with_values(&[&value]);
 if let Some(record_ids) = store.get(key.to_bytes())? {
     let mut result = BTreeSet::new();
     for record_id in record_ids {
@@ -319,12 +325,12 @@ pub enum DbError {
 
 ### IndexManager
 
-|| Зависимость | Модуль |
-||-------------|--------|
-|| `Store` | `db::storage::types` |
-|| `RecordId` | `types::record_id` |
-|| `InnerValue` | `types::value` |
-|| `IndexInfo` | `db::engine::index` |
+|| Зависимость | Crate / модуль |
+||-------------|----------------|
+|| `Store` | `shamir-storage::types` |
+|| `RecordId` | `shamir-types::types::record_id` |
+|| `InnerValue` | `shamir-types::types::value` |
+|| `IndexInfo` | `shamir-engine::index` (этот модуль) |
 
 ### Цепочка IndexInfo
 
@@ -347,7 +353,7 @@ pub enum DbError {
 
 ```rust
 // Создание определения индекса
-let email_path = IndexInfoItem::new(vec![42]); // ID для "email"
+let email_path = IndexInfoItem::new(vec![42]); // ID для "email" (interned)
 let index_def = IndexDefinition::new(1001, vec![email_path]);
 
 // Создание обычного индекса

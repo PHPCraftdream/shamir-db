@@ -22,7 +22,6 @@ pub use shamir_storage as storage;
 pub use shamir_storage::error::{DbError, DbResult};
 
 pub mod api;
-pub mod net;
 pub mod shamir_db;
 
 // Top-level convenience re-exports — `shamir_db::ShamirDb` etc. resolve

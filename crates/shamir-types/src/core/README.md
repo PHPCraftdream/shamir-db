@@ -87,7 +87,7 @@ core/
 
 ### Example
 ```rust
-use shamir_db::core::interner::{Interner, TouchInd};
+use shamir_types::core::interner::{Interner, TouchInd};
 
 let interner = Interner::new();
 
