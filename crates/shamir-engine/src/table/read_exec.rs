@@ -259,6 +259,45 @@ impl TableManager {
             if let Some((idx_name, lookup_sets, residual)) =
                 self.try_plan_index_scan(filter, interner)
             {
+                // Opt #2.5 (1000×-class): `count(*) WHERE indexed_eq`
+                // collapses to `BTreeSet::len()` of the index lookup —
+                // no record materialisation. Eligible when:
+                //   - the WHERE is fully covered by the index (no residual)
+                //   - select is exactly one CountAll item
+                //   - no group_by, order_by, distinct, count_total, pagination
+                if residual.is_none()
+                    && query.group_by.is_none()
+                    && query.order_by.is_none()
+                    && !query.select.distinct
+                    && !query.count_total
+                    && query.pagination.is_none()
+                    && query.select.items.len() == 1
+                {
+                    if let SelectItem::CountAll { alias } = &query.select.items[0] {
+                        let mut total: u64 = 0;
+                        for values in &lookup_sets {
+                            let ids = self
+                                .index_manager_ref()
+                                .lookup_by_index(idx_name, values)
+                                .await?;
+                            total += ids.len() as u64;
+                        }
+                        let key = alias.as_deref().unwrap_or("count").to_string();
+                        let mut obj = serde_json::Map::new();
+                        obj.insert(key, serde_json::Value::Number(total.into()));
+                        return Ok(QueryResult {
+                            records: vec![serde_json::Value::Object(obj)],
+                            stats: Some(QueryStats {
+                                index_used: Some(format!("idx_{idx_name}")),
+                                records_scanned: total,
+                                records_returned: 1,
+                                execution_time_us: start.elapsed().as_micros() as u64,
+                            }),
+                            pagination: None,
+                        });
+                    }
+                }
+
                 return self
                     .read_index_scan(query, ctx, interner, idx_name, &lookup_sets, residual.as_ref(), start)
                     .await;
