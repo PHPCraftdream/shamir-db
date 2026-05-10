@@ -53,7 +53,7 @@
 
 ### Правила для модулей с тестами:
 1. **Структура директорий:** Каждый модуль (тип, компонент) имеет отдельную папку `tests/`
-   - Пример: `src/types/tests/`, `src/core/tests/`, `src/db/engine/table/tests/`
+   - Пример: `crates/shamir-db/src/types/tests/`, `crates/shamir-db/src/core/tests/`, `crates/shamir-db/src/db/engine/table/tests/`
 
 2. **Разделение тестов по типам:**
    - Создавай отдельные файлы для логически связанных тестов
@@ -64,7 +64,7 @@
    - Не содержит сам тестовый код
 
 4. **Подключение тестов в родительском модуле:**
-   - В файле модуля (например, `src/types/mod.rs`) добавь:
+   - В файле модуля (например, `crates/shamir-db/src/types/mod.rs`) добавь:
    ```rust
    #[cfg(test)]
    mod tests;
@@ -80,7 +80,7 @@
 
 ### Пример структуры:
 ```
-src/types/
+crates/shamir-db/src/types/
 ├── mod.rs            # содержит #[cfg(test)] mod tests;
 ├── value.rs         # только реализация типов
 ├── record_id.rs     # только реализация типов
