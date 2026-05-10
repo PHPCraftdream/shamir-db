@@ -99,7 +99,7 @@ your `/metrics` data after a week of production traffic.
 Scale by replicating + fronting with a load balancer that pins a
 session_id to a single server (sessions are in-memory, not shared
 between replicas). Replication of the durable redb files is a separate
-P2 feature — see `PRODUCTION_HARDENING_ROADMAP.md`.
+P2 feature — see `../roadmap/PRODUCTION_HARDENING_ROADMAP.md`.
 
 ## Things that will hurt you if you ignore them
 

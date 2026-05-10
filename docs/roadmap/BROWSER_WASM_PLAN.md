@@ -285,9 +285,9 @@ zero-trust network, embedded scenarios без TLS termination):
 
 ## References
 
-- docs/protocol/AUTH_PROTOCOL.md §3.7 — KDF parameters
-- docs/protocol/TRANSPORT_WS.md — WebSocket binding (browser endpoint)
-- docs/protocol/CLIENT_BROWSER.md — browser-specific guidance (memory-only ticket
+- docs/client-server-protocol-spec/AUTH_PROTOCOL.md §3.7 — KDF parameters
+- docs/client-server-protocol-spec/TRANSPORT_WS.md — WebSocket binding (browser endpoint)
+- docs/client-server-protocol-spec/CLIENT_BROWSER.md — browser-specific guidance (memory-only ticket
   storage, etc.)
 - [Noise Protocol Framework](https://noiseprotocol.org/)
 - [`snow` crate](https://docs.rs/snow/) — production Noise impl

@@ -134,7 +134,7 @@ pub struct ConnectionContext {
     /// Listener-pinned transport kind — encoded into auth_message.
     pub transport_kind: TransportKind,
     /// Listener-pinned KDF override, if any (browser endpoints lower the
-    /// floor per `BROWSER_WASM_PLAN.md`).
+    /// floor per `docs/roadmap/BROWSER_WASM_PLAN.md`).
     pub kdf_override: Option<KdfParams>,
     /// Maximum wall-clock time to wait for the client's `auth_init` after
     /// the TLS handshake completes. Defends against slow-loris attacks —

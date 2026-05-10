@@ -603,7 +603,7 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 
 ## 11. Test Plan (release blockers)
 
-11.1. **Test vectors** — `docs/protocol/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
+11.1. **Test vectors** — `docs/client-server-protocol-spec/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
 
 11.2. **Integration tests:**
 - Full TCP+TLS auth round-trip
@@ -738,4 +738,4 @@ Schemas очевидны из имени; semantic см. в AUTH_PROTOCOL §12, 
 - **TRANSPORT_TCP.md / TRANSPORT_WS.md** — transport bindings
 - **ADMIN_UI_HOSTING.md** — admin UI delivery
 - **CLIENT_BROWSER.md** — browser SDK
-- **../ROADMAP.md** — future hardening
+- **../roadmap/ROADMAP.md** — future hardening
