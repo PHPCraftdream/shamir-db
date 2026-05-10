@@ -227,6 +227,13 @@ impl SortedIndexManager {
     /// `[start, end]` (both inclusive). `start` / `end` are the
     /// already-encoded value bytes (call sites use
     /// `sort_codec::encode_*` to produce them).
+    ///
+    /// Builds the lower / upper bounds in the physical-key space and
+    /// delegates to `Store::iter_range_stream` — on B-tree-backed
+    /// stores (sled, redb, fjall, persy, canopy) this seeks straight
+    /// to `lower` and stops at `upper`, doing zero wasted work
+    /// outside the range. In-memory / cached fall back to
+    /// `iter_range_stream`'s default filter wrapper, still correct.
     pub async fn lookup_range(
         &self,
         name_interned: u64,
@@ -234,41 +241,17 @@ impl SortedIndexManager {
         end_encoded: Option<&[u8]>,
     ) -> DbResult<BTreeSet<RecordId>> {
         let prefix = self.entry_prefix(name_interned);
-        let stream = self.info_store.scan_prefix_stream(prefix.clone(), 256);
-        futures::pin_mut!(stream);
+        let (lower, upper) = self.range_bounds(&prefix, start_encoded, end_encoded);
 
-        // Bounds in the same physical-key space.
-        let lower_bound = start_encoded.map(|enc| {
-            let mut k = prefix.to_vec();
-            k.extend_from_slice(enc);
-            k
-        });
-        let upper_bound = end_encoded.map(|enc| {
-            let mut k = prefix.to_vec();
-            k.extend_from_slice(enc);
-            // Append max-suffix so all record_id tiebreakers for the
-            // upper-bound value are included.
-            k.extend_from_slice(&[0xFFu8; 16]);
-            k
-        });
+        let stream = self
+            .info_store
+            .iter_range_stream(Some(lower), Some(upper), 256);
+        futures::pin_mut!(stream);
 
         let mut out: BTreeSet<RecordId> = BTreeSet::new();
         while let Some(batch) = stream.next().await {
             for (k, _) in batch? {
-                let kb: &[u8] = k.as_ref();
-                if let Some(ref lo) = lower_bound {
-                    if kb.as_ref() < lo.as_slice() {
-                        continue;
-                    }
-                }
-                if let Some(ref hi) = upper_bound {
-                    if kb.as_ref() > hi.as_slice() {
-                        // Sorted scan — once we cross the upper bound
-                        // we're done.
-                        return Ok(out);
-                    }
-                }
-                if let Some(id) = decode_record_id_suffix(kb) {
+                if let Some(id) = decode_record_id_suffix(k.as_ref()) {
                     out.insert(id);
                 }
             }
@@ -277,9 +260,14 @@ impl SortedIndexManager {
     }
 
     /// Min lookup — the first record under the sorted prefix.
+    /// `iter_range_stream` with batch_size=1 reads exactly the first
+    /// entry on B-tree backends; in-memory falls back to its default.
     pub async fn lookup_min(&self, name_interned: u64) -> DbResult<Option<RecordId>> {
         let prefix = self.entry_prefix(name_interned);
-        let stream = self.info_store.scan_prefix_stream(prefix, 1);
+        let (lower, upper) = self.range_bounds(&prefix, None, None);
+        let stream = self
+            .info_store
+            .iter_range_stream(Some(lower), Some(upper), 1);
         futures::pin_mut!(stream);
         if let Some(batch) = stream.next().await {
             for (k, _) in batch? {
@@ -299,7 +287,10 @@ impl SortedIndexManager {
             return Ok(Vec::new());
         }
         let prefix = self.entry_prefix(name_interned);
-        let stream = self.info_store.scan_prefix_stream(prefix, k.min(256));
+        let (lower, upper) = self.range_bounds(&prefix, None, None);
+        let stream = self
+            .info_store
+            .iter_range_stream(Some(lower), Some(upper), k.min(256));
         futures::pin_mut!(stream);
         let mut out = Vec::with_capacity(k);
         while let Some(batch) = stream.next().await {
@@ -313,6 +304,51 @@ impl SortedIndexManager {
             }
         }
         Ok(out)
+    }
+
+    /// Build inclusive (lower, upper) physical-key bounds for one
+    /// sorted-index range query.
+    ///
+    /// - `start_encoded = None` → lower = `prefix` itself (start of
+    ///   the index's keyspace).
+    /// - `end_encoded = None` → upper = `prefix || [0xFF; 64]`,
+    ///   strictly greater than any real entry in this prefix and
+    ///   strictly less than the start of the next prefix
+    ///   (`name_interned + 1`), so it correctly bounds "everything in
+    ///   this index" without leaking into neighbours.
+    /// - Otherwise the bounds are `prefix || encoded[ || 0xFF×16]`.
+    fn range_bounds(
+        &self,
+        prefix: &Bytes,
+        start_encoded: Option<&[u8]>,
+        end_encoded: Option<&[u8]>,
+    ) -> (Bytes, Bytes) {
+        let lower = match start_encoded {
+            Some(enc) => {
+                let mut k = Vec::with_capacity(prefix.len() + enc.len());
+                k.extend_from_slice(prefix);
+                k.extend_from_slice(enc);
+                Bytes::from(k)
+            }
+            None => prefix.clone(),
+        };
+        let upper = match end_encoded {
+            Some(enc) => {
+                let mut k = Vec::with_capacity(prefix.len() + enc.len() + 16);
+                k.extend_from_slice(prefix);
+                k.extend_from_slice(enc);
+                // Cover all record_id tiebreakers at the upper value.
+                k.extend_from_slice(&[0xFFu8; 16]);
+                Bytes::from(k)
+            }
+            None => {
+                let mut k = Vec::with_capacity(prefix.len() + 64);
+                k.extend_from_slice(prefix);
+                k.extend_from_slice(&[0xFFu8; 64]);
+                Bytes::from(k)
+            }
+        };
+        (lower, upper)
     }
 
     // ----- internals --------------------------------------------------------
