@@ -137,6 +137,12 @@ boundaries stay clean.
   through (MVCC via the storage backends that support it; one-repo
   rule; serial execution inside a tx) is in
   `docs/roadmap/TRANSACTIONS.md`.
+- *Embeddings & vector search* — not implemented yet; the design
+  decision is "DB stores + indexes vectors, embedders plug in via
+  the OpenAI-compatible HTTP standard." Pure-storage path always
+  available (client computes vector); optional auto-embed-on-change
+  through configured embedders for convenience. Full design in
+  `docs/roadmap/EMBEDDINGS_AND_VECTORS.md`.
 - All three layers — DTOs (`shamir-query-types`), pure planning, and
   runtime execution — are now properly separated. The batch planner
   and `$query` reference parser live in `shamir-query-types::batch`
