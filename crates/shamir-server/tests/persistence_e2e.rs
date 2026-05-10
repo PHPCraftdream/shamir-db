@@ -128,6 +128,7 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
             key_path: data_dir.join("key.pem"),
         },
         security: Default::default(),
+        audit: Default::default(),
     }
 }
 

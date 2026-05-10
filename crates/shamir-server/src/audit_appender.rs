@@ -204,6 +204,20 @@ enum Durab {
     },
 }
 
+/// Optional log-rotation policy for the JSON-line audit file.
+///
+/// When set, every successful append checks the running file size; once it
+/// crosses `max_size_bytes` the current file is renamed to
+/// `audit_log.jsonl.<unix_nanos>` and a fresh `audit_log.jsonl` is opened
+/// for subsequent writes. The HMAC chain is **not** affected — each
+/// rotated entry already carries its `prev_hmac`, so verification stitches
+/// the rotated files back together by reading them in lexicographic order.
+#[derive(Debug)]
+pub struct RotationPolicy {
+    pub max_size_bytes: u64,
+    pub current_size: std::sync::atomic::AtomicU64,
+}
+
 /// Durable [`AuditAppender`] backed by JSON-line log + redb checkpoint.
 pub struct RedbAuditAppender {
     /// Open append-handle to `audit.log`.
@@ -214,6 +228,8 @@ pub struct RedbAuditAppender {
     checkpoint_db: Arc<Database>,
     /// Durability mode (strict or batched).
     mode: Durab,
+    /// Optional rotation policy. `None` = unlimited file size (legacy).
+    rotation: Option<RotationPolicy>,
 }
 
 impl core::fmt::Debug for RedbAuditAppender {
@@ -257,16 +273,29 @@ impl RedbAuditAppender {
 
     /// Open in **strict** mode — every entry is fsync'd synchronously.
     pub fn open_strict(data_dir: impl AsRef<Path>) -> Result<Arc<Self>, AppenderError> {
+        Self::open_strict_with_rotation(data_dir, None)
+    }
+
+    /// Same as [`Self::open_strict`] with optional rotation cap (in bytes).
+    pub fn open_strict_with_rotation(
+        data_dir: impl AsRef<Path>,
+        max_size_bytes: Option<u64>,
+    ) -> Result<Arc<Self>, AppenderError> {
         let dir = data_dir.as_ref();
         std::fs::create_dir_all(dir)?;
         let (log_path, db_path) = Self::paths(dir);
         let log_file = Self::open_log(&log_path)?;
+        let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
         let checkpoint_db = Self::open_db(&db_path)?;
         Ok(Arc::new(Self {
             log_file: Mutex::new(log_file),
             log_path,
             checkpoint_db,
             mode: Durab::Strict,
+            rotation: max_size_bytes.map(|m| RotationPolicy {
+                max_size_bytes: m,
+                current_size: std::sync::atomic::AtomicU64::new(initial_size),
+            }),
         }))
     }
 
@@ -276,10 +305,20 @@ impl RedbAuditAppender {
         data_dir: impl AsRef<Path>,
         flush_every: Duration,
     ) -> Result<Arc<Self>, AppenderError> {
+        Self::open_batched_with_rotation(data_dir, flush_every, None)
+    }
+
+    /// Same as [`Self::open_batched`] with optional rotation cap (in bytes).
+    pub fn open_batched_with_rotation(
+        data_dir: impl AsRef<Path>,
+        flush_every: Duration,
+        max_size_bytes: Option<u64>,
+    ) -> Result<Arc<Self>, AppenderError> {
         let dir = data_dir.as_ref();
         std::fs::create_dir_all(dir)?;
         let (log_path, db_path) = Self::paths(dir);
         let log_file = Self::open_log(&log_path)?;
+        let initial_size = log_file.metadata().map(|m| m.len()).unwrap_or(0);
         let checkpoint_db = Self::open_db(&db_path)?;
 
         let notify = Arc::new(Notify::new());
@@ -294,6 +333,10 @@ impl RedbAuditAppender {
                 shutdown: shutdown.clone(),
                 task: Mutex::new(None),
             },
+            rotation: max_size_bytes.map(|m| RotationPolicy {
+                max_size_bytes: m,
+                current_size: std::sync::atomic::AtomicU64::new(initial_size),
+            }),
         });
 
         // Spawn the background flusher.
@@ -418,14 +461,29 @@ impl RedbAuditAppender {
             return Ok(());
         }
         let mut f = self.log_file.lock();
+        let mut bytes_written: u64 = 0;
         for e in &entries {
             let je = JsonEntry::from_audit(e);
             let mut bytes = serde_json::to_vec(&je)?;
             bytes.push(b'\n');
             f.write_all(&bytes)?;
+            bytes_written += bytes.len() as u64;
         }
         f.flush()?;
         f.sync_all()?;
+        // Rotation check — done while holding the file lock so two flushes
+        // can't race past the threshold simultaneously.
+        if let Some(rot) = &self.rotation {
+            let new_size = rot
+                .current_size
+                .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed)
+                + bytes_written;
+            if new_size >= rot.max_size_bytes {
+                if let Err(e) = self.rotate_locked(&mut f) {
+                    tracing::warn!(error = %e, "audit log rotation failed");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -434,10 +492,52 @@ impl RedbAuditAppender {
         let je = JsonEntry::from_audit(entry);
         let mut bytes = serde_json::to_vec(&je)?;
         bytes.push(b'\n');
+        let bytes_written = bytes.len() as u64;
         let mut f = self.log_file.lock();
         f.write_all(&bytes)?;
         f.flush()?;
         f.sync_all()?;
+        if let Some(rot) = &self.rotation {
+            let new_size = rot
+                .current_size
+                .fetch_add(bytes_written, std::sync::atomic::Ordering::Relaxed)
+                + bytes_written;
+            if new_size >= rot.max_size_bytes {
+                if let Err(e) = self.rotate_locked(&mut f) {
+                    tracing::warn!(error = %e, "audit log rotation failed");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rotate the current log file: fsync close, rename to
+    /// `audit_log.jsonl.<unix_nanos>`, open a fresh file. Caller MUST
+    /// hold the `log_file` mutex (the `&mut File` parameter is the lock
+    /// guard's deref).
+    fn rotate_locked(&self, current: &mut File) -> Result<(), AppenderError> {
+        // Final sync before renaming so no buffered bytes are lost.
+        current.flush()?;
+        current.sync_all()?;
+        // Build rotated name with a wall-clock timestamp so files sort
+        // chronologically when listed.
+        let ts_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let mut rotated = self.log_path.clone();
+        let stem = rotated
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "audit_log.jsonl".to_string());
+        rotated.set_file_name(format!("{stem}.{ts_ns:020}"));
+        std::fs::rename(&self.log_path, &rotated)?;
+        // Open a new empty file in place.
+        *current = Self::open_log(&self.log_path)?;
+        if let Some(rot) = &self.rotation {
+            rot.current_size.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        tracing::info!(rotated = %rotated.display(), "audit log rotated");
         Ok(())
     }
 
