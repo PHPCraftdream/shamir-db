@@ -2,6 +2,13 @@
 .idea
 /test_data/
 /crates/shamir-db/test_data/
+# Match test_data anywhere in the workspace (each crate's tests
+# materialise their own fixture dirs).
+**/test_data/
+
+# Claude Code session-local state (scheduled wakeups, etc.) — local
+# to each developer's machine, never to be committed.
+/.claude/
 /web/node_modules/.bin/autoprefixer
 /web/node_modules/.bin/autoprefixer.cmd
 /web/node_modules/.bin/autoprefixer.ps1
