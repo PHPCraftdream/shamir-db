@@ -92,7 +92,8 @@ impl TableManager {
         &self.interner
     }
 
-    #[cfg(test)]
+    /// Public accessor for the record counter — used by the read
+    /// fast-path for `COUNT(*)` without filter (Opt #2).
     pub fn counter(&self) -> &Arc<RecordCounter> {
         &self.counter
     }

@@ -232,6 +232,64 @@ fn req_read_with_order_limit() -> BatchRequest {
     .unwrap()
 }
 
+fn req_count_all() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "c",
+        "queries": {
+            "c": {
+                "from": "users",
+                "select": { "items": [{ "type": "count_all", "alias": "n" }] }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+fn req_count_with_filter(city: &str) -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "c",
+        "queries": {
+            "c": {
+                "from": "users",
+                "where": { "op": "eq", "field": ["city"], "value": city },
+                "select": { "items": [{ "type": "count_all", "alias": "n" }] }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+fn req_min_max_score() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "mm",
+        "queries": {
+            "mm": {
+                "from": "users",
+                "select": {
+                    "items": [
+                        { "type": "aggregate", "func": "min", "field": ["score"], "alias": "lo" },
+                        { "type": "aggregate", "func": "max", "field": ["score"], "alias": "hi" }
+                    ]
+                }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+fn req_range_age() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "r",
+        "queries": {
+            "r": {
+                "from": "users",
+                "where": { "op": "between", "field": ["age"], "from": 30, "to": 35 }
+            }
+        }
+    }))
+    .unwrap()
+}
+
 fn req_bulk_insert(start: usize, count: usize) -> BatchRequest {
     let values: Vec<JsonValue> = (start..start + count).map(gen_user).collect();
     serde_json::from_value(json!({
@@ -549,6 +607,168 @@ fn bench_order_limit(c: &mut Criterion) {
     group.finish();
 }
 
+/// COUNT(*) without filter — Opt #2: should fast-path through
+/// RecordCounter (O(1)) instead of a full scan.
+fn bench_count_all_no_filter(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("count_all_no_filter");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(seeded(n, false));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_count_all();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+/// COUNT(*) with eq filter — eligible for index-lookup fast path
+/// (count = matched_set.len() without materialising records).
+fn bench_count_with_filter_no_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("count_with_filter_no_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(seeded(n, false));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_count_with_filter("NYC");
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_count_with_filter_with_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("count_with_filter_with_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_index(&s, "users", "by_city", "city", false).await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_count_with_filter("NYC");
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+/// MIN(score) + MAX(score) over the whole table — Opt #4 should walk
+/// the score index (first / last key) instead of scanning everything.
+fn bench_min_max_no_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("min_max_no_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(seeded(n, false));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_min_max_score();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_min_max_with_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("min_max_with_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_index(&s, "users", "by_score", "score", false).await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_min_max_score();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+/// `order_by score desc + LIMIT 10` on indexed score field — Opt #1
+/// can read the index in order and stop after K matches.
+fn bench_order_limit_with_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("order_limit_top10_with_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_index(&s, "users", "by_score", "score", false).await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_read_with_order_limit();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+/// `where age between 30 AND 35` — narrow range, ~5 % selectivity.
+/// Opt #5 should make this O(log N + K) via sorted-index range scan.
+fn bench_range_query_no_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_no_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(seeded(n, false));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_range_query_with_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_with_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_index(&s, "users", "by_age", "age", false).await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
 /// 8 independent reads in a single batch — exercises the parallel
 /// stage planner.
 fn bench_batch_multi_read(c: &mut Criterion) {
@@ -589,6 +809,14 @@ criterion_group!(
     bench_delete_by_id_with_index,
     bench_complex_filter,
     bench_order_limit,
+    bench_count_all_no_filter,
+    bench_count_with_filter_no_index,
+    bench_count_with_filter_with_index,
+    bench_min_max_no_index,
+    bench_min_max_with_index,
+    bench_order_limit_with_index,
+    bench_range_query_no_index,
+    bench_range_query_with_index,
     bench_batch_multi_read,
 );
 criterion_main!(benches);
