@@ -1,0 +1,35 @@
+[package]
+name = "shamir-client"
+version = "0.1.0"
+edition = "2021"
+description = "Async Rust client SDK for ShamirDB — TLS 1.3 + SCRAM-Argon2id + msgpack envelopes."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+shamir-connect      = { path = "../shamir-connect" }
+shamir-transport-tcp = { path = "../shamir-transport-tcp" }
+shamir-query-types  = { path = "../shamir-query-types" }
+shamir-types        = { path = "../shamir-types" }
+
+# Async runtime + I/O
+tokio   = { version = "1", features = ["net", "io-util", "macros", "sync", "rt", "time"] }
+tokio-rustls = "0.26"
+rustls  = { version = "0.23", default-features = false, features = ["std"] }
+
+# Wire serialization
+serde       = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+rmp-serde   = "1"
+
+# Misc
+zeroize   = "1.8"
+thiserror = "2"
+tracing   = "0.1"
+
+[dev-dependencies]
+shamir-server  = { path = "../shamir-server" }
+shamir-db      = { path = "../shamir-db" }
+shamir-engine  = { path = "../shamir-engine" }
+tempfile  = "3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }
