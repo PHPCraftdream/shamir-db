@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
-use crate::engine::table::{TableConfig, TableManager};
+use crate::engine::table::TableManager;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use std::sync::Arc;

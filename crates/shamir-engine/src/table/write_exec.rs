@@ -11,7 +11,7 @@ use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
 use shamir_types::core::interner::InternerKey;
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::eval::{intern_field_path, resolve_field};
+use crate::query::filter::eval::resolve_field;
 use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
 use shamir_storage::error::DbResult;
 use shamir_types::types::value::InnerValue;

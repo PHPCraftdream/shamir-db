@@ -304,7 +304,7 @@ async fn test_insert_update_delete_pipeline() {
     let table = setup_empty_table().await;
     let interner = table.interner().get().await.unwrap();
     let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
+    let _ctx = FilterContext::new(interner, &refs);
 
     // 1. Insert
     let insert_op: InsertOp = serde_json::from_value(json!({
@@ -368,7 +368,7 @@ async fn test_execute_set_insert_new() {
 #[tokio::test]
 async fn test_execute_set_update_existing() {
     let table = setup_table_with_users().await;
-    let interner = table.interner().get().await.unwrap();
+    let _interner = table.interner().get().await.unwrap();
 
     // Alice exists with status=active. Upsert by name.
     let op: SetOp = serde_json::from_value(json!({

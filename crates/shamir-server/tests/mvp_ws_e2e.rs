@@ -354,7 +354,6 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     }
 
     // Graceful close.
-    use futures_util::SinkExt;
     let _ = ws.close(None).await;
     // Drain server's close frame (best effort; timeout to avoid hang).
     let _ = tokio::time::timeout(

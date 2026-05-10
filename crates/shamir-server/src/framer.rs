@@ -193,7 +193,6 @@ where
         ws_send(&mut self.ws, payload).await.map_err(map_ws_err)
     }
     async fn shutdown(&mut self) {
-        use futures_util::SinkExt;
         let _ = self.ws.close(None).await;
     }
 }

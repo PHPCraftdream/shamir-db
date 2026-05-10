@@ -1,5 +1,5 @@
 use super::super::table::{TableConfig, TableManager};
-use crate::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
+use crate::repo::{RepoConfig, RepoInstance};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::value::InnerValue;
 use dashmap::DashMap;

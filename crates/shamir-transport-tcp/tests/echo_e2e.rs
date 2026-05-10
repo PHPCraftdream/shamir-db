@@ -23,7 +23,7 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
 use shamir_connect::server::dispatch::{
-    dispatch_request, dispatch_request_view, DispatchOutcome, RequestHandler,
+    dispatch_request_view, DispatchOutcome, RequestHandler,
 };
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
