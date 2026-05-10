@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::filter::{FieldPath, Filter};
+use crate::filter::{FieldPath, Filter};
 
 /// GROUP BY clause
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

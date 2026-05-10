@@ -1,0 +1,17 @@
+[package]
+name = "shamir-query-types"
+version = "0.1.0"
+edition = "2021"
+description = "Pure DTOs for ShamirDB's SDBQL query language (Filter, ReadQuery, BatchRequest, ...)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+shamir-types = { path = "../shamir-types" }
+
+# Pure data dependencies — DTOs serialize to JSON / msgpack and use
+# ordered maps for deterministic iteration.
+serde      = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.149"
+serde_bytes = "0.11"
+indexmap   = { version = "2.7", features = ["serde"] }
+fxhash     = "0.2.1"

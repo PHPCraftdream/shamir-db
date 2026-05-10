@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{GroupBy, OrderBy, Pagination, Select};
-use crate::query::filter::Filter;
-use crate::query::TableRef;
+use crate::filter::Filter;
+use crate::TableRef;
 
 /// Complete read query definition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

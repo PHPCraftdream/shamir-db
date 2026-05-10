@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::filter::FieldPath;
+use crate::filter::FieldPath;
 
 /// ORDER BY clause
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

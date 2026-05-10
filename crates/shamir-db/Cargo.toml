@@ -4,13 +4,31 @@ version = "0.1.0"
 edition = "2021"
 description = "ShamirDB facade — re-exports types/storage/engine/query and provides ShamirDb + SystemStore."
 
+[features]
+# Cascade backend feature flags from shamir-storage / shamir-engine all
+# the way through the facade. Default = all backends, so consumers
+# that didn't pick features explicitly see no change. Embedded
+# minimal builds: `default-features = false, features = ["redb"]`.
+#
+# `all-backends` lists per-backend features explicitly, mirroring
+# shamir-engine — needed because the facade's own re-exports go through
+# engine's BoxRepoFactory which is gated by engine's own features.
+default = ["all-backends"]
+all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
+redb   = ["shamir-storage/redb",   "shamir-engine/redb"]
+sled   = ["shamir-storage/sled",   "shamir-engine/sled"]
+fjall  = ["shamir-storage/fjall",  "shamir-engine/fjall"]
+nebari = ["shamir-storage/nebari", "shamir-engine/nebari"]
+persy  = ["shamir-storage/persy",  "shamir-engine/persy"]
+canopy = ["shamir-storage/canopy", "shamir-engine/canopy"]
+
 [dependencies]
 # Foundation crates re-exported under `shamir_db::*` so callers stay
 # stable. The split is purely organisational; nothing about the public
 # surface changed when these moved out.
 shamir-types   = { path = "../shamir-types" }
-shamir-storage = { path = "../shamir-storage" }
-shamir-engine  = { path = "../shamir-engine" }
+shamir-storage = { path = "../shamir-storage", default-features = false }
+shamir-engine  = { path = "../shamir-engine",  default-features = false }
 
 # Direct deps for what's still here: the `db::shamir_db` facade
 # (ShamirDb + SystemStore + execute) and the small `api/` shim.

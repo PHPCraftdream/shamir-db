@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::filter::FieldPath;
+use crate::filter::FieldPath;
 
 /// Aggregation functions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

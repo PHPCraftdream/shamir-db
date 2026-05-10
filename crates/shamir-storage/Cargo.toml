@@ -5,19 +5,39 @@ edition = "2021"
 description = "Storage backends for ShamirDB — Store trait + per-engine impls."
 license = "MIT OR Apache-2.0"
 
+[features]
+# Default: all backends bundled in. Matches every consumer that didn't
+# pick features explicitly — no behaviour change vs the pre-feature
+# layout.
+default = ["all-backends"]
+
+# Convenience meta-feature: enables every concrete backend.
+all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
+
+# Per-backend features. Each one toggles its `dep:<crate>` so the
+# corresponding storage engine + the `storage_*` module + the matching
+# `BoxRepo` / `BoxRepoFactory` variant only compile when asked for.
+# The in-memory backend is always available — it has no extra deps and
+# is required by tests across the workspace.
+redb   = ["dep:redb"]
+sled   = ["dep:sled"]
+fjall  = ["dep:fjall"]
+nebari = ["dep:nebari"]
+persy  = ["dep:persy"]
+canopy = ["dep:canopydb"]
+
 [dependencies]
 # Foundation
 shamir-types = { path = "../shamir-types" }
 
-# Backends — all bundled today; feature-gating per-backend is a small
-# follow-up once a concrete operator goal lands ("embedded build wants
-# only redb").
-redb = "3.1.0"
-fjall = "3.0.1"
-canopydb = "0.2.5"
-sled = "0.34.7"
-nebari = "0.5.5"
-persy = "1.7.1"
+# Backends — `optional = true` makes each one pulled in only when the
+# matching feature is enabled.
+redb     = { version = "3.1.0",  optional = true }
+fjall    = { version = "3.0.1",  optional = true }
+canopydb = { version = "0.2.5",  optional = true }
+sled     = { version = "0.34.7", optional = true }
+nebari   = { version = "0.5.5",  optional = true }
+persy    = { version = "1.7.1",  optional = true }
 
 # Async / runtime helpers used by the trait surface and a few backends
 tokio = { version = "1.49.0", features = ["full"] }

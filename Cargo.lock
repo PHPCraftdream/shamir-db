@@ -2921,10 +2921,23 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "shamir-query-types",
  "shamir-storage",
  "shamir-types",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "shamir-query-types"
+version = "0.1.0"
+dependencies = [
+ "fxhash",
+ "indexmap",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "shamir-types",
 ]
 
 [[package]]

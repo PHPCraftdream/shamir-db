@@ -87,14 +87,25 @@ impl ShamirDb {
     }
 
     fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {
+        // Each backend is gated by its cargo feature; an unknown engine
+        // string OR a backend that wasn't built into this binary returns
+        // `None`. The system_store's recorded engine name doesn't
+        // disappear when the feature is off — we just refuse to
+        // re-attach the repo.
         match engine {
             "in_memory" => Some(BoxRepoFactory::in_memory()),
-            "redb" => path.map(|p| BoxRepoFactory::redb(p)),
-            "sled" => path.map(|p| BoxRepoFactory::sled(p)),
-            "fjall" => path.map(|p| BoxRepoFactory::fjall(p)),
-            "nebari" => path.map(|p| BoxRepoFactory::nebari(p)),
-            "persy" => path.map(|p| BoxRepoFactory::persy(p)),
-            "canopy" => path.map(|p| BoxRepoFactory::canopy(p)),
+            #[cfg(feature = "redb")]
+            "redb" => path.map(BoxRepoFactory::redb),
+            #[cfg(feature = "sled")]
+            "sled" => path.map(BoxRepoFactory::sled),
+            #[cfg(feature = "fjall")]
+            "fjall" => path.map(BoxRepoFactory::fjall),
+            #[cfg(feature = "nebari")]
+            "nebari" => path.map(BoxRepoFactory::nebari),
+            #[cfg(feature = "persy")]
+            "persy" => path.map(BoxRepoFactory::persy),
+            #[cfg(feature = "canopy")]
+            "canopy" => path.map(BoxRepoFactory::canopy),
             _ => None,
         }
     }
@@ -173,11 +184,17 @@ impl ShamirDb {
     fn extract_storage_type(factory: &BoxRepoFactory) -> String {
         match factory {
             BoxRepoFactory::InMemory(_) => "in_memory",
+            #[cfg(feature = "sled")]
             BoxRepoFactory::Sled(_) => "sled",
+            #[cfg(feature = "redb")]
             BoxRepoFactory::Redb(_) => "redb",
+            #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(_) => "fjall",
+            #[cfg(feature = "nebari")]
             BoxRepoFactory::Nebari(_) => "nebari",
+            #[cfg(feature = "persy")]
             BoxRepoFactory::Persy(_) => "persy",
+            #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(_) => "canopy",
         }
         .to_string()
@@ -186,11 +203,17 @@ impl ShamirDb {
     fn extract_path(factory: &BoxRepoFactory) -> Option<String> {
         match factory {
             BoxRepoFactory::InMemory(_) => None,
+            #[cfg(feature = "sled")]
             BoxRepoFactory::Sled(f) => Some(f.path.to_string_lossy().to_string()),
+            #[cfg(feature = "redb")]
             BoxRepoFactory::Redb(f) => Some(f.path.to_string_lossy().to_string()),
+            #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => Some(f.path.to_string_lossy().to_string()),
+            #[cfg(feature = "nebari")]
             BoxRepoFactory::Nebari(f) => Some(f.path.to_string_lossy().to_string()),
+            #[cfg(feature = "persy")]
             BoxRepoFactory::Persy(f) => Some(f.path.to_string_lossy().to_string()),
+            #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => Some(f.path.to_string_lossy().to_string()),
         }
     }

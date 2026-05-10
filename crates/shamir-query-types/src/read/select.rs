@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{AggFunc, AggregateField, SelectExpr};
-use crate::query::filter::FieldPath;
+use crate::filter::FieldPath;
 
 /// What to select/return from a query
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
