@@ -1,14 +1,29 @@
 # Performance Opportunities — Beyond Asymptotic Wins
 
-Status: **review pass after the A → D + sorted-index + sprint α
-+ sprint β.** Companion to `docs/ops/PERF_BASELINE.md` (measured
+Status: **review pass after sprints α (Q1, Q2, F), β (G), and γ
+(sled-flush rework, iter_range_stream, key-per-record posting
+layout).** Companion to `docs/ops/PERF_BASELINE.md` (measured
 numbers).
 
-> **2026-05-11 update.** Sprint α (Q1, Q2, F) and Sprint β (G) shipped.
-> One item from α (Opt L — batch RecordId allocator) was tried,
-> measured, and reverted: see «Opt L — tried and reverted» below.
-> The DONE markers, measured numbers, and Sprint headers below
-> reflect the post-sprint state.
+> **2026-05-11 (later) update — Sprint γ partial.** Three items
+> from the "real wins on real workloads" tier shipped:
+>
+> - **sled-flush rework** — per-write `tree.flush()` removed;
+>   `Store::flush()` added to the trait. Default semantics changed
+>   to "eventually durable; explicit fsync via `Store::flush()`".
+>   bulk_insert_sled/1000: 2.59 s → 71 ms (**36×**).
+> - **lookup_range / lookup_min / lookup_first_k → iter_range_stream**
+>   instead of scan_prefix + in-process filter. Disk backends
+>   now seek straight to the lower bound.
+>   range_query_narrow_with_index_sled/10000: 20.2 ms → 7.95 ms
+>   (**2.54×**).
+> - **#6 — hash-index posting layout** swapped from one blob per
+>   posting list to one KV per (value, record_id). Writes
+>   O(K) → O(1). bulk_insert_with_index_sled/1000: 180 ms → 121 ms
+>   (1.49×); read-side wins 1.1–1.3× on cached-miss paths.
+>
+> Remaining sprint γ: covering index (Opt O), `Store::get_many`
+> (Opt P).
 
 Where A/B/C/D cut O(n) → O(log n) on the write path (set/update/delete
 via index → 800–1100× wins; count(*) → 3000× via RecordCounter), this
@@ -39,6 +54,7 @@ Ranked by cost / value after the verification pass:
 |------|-------|-----|
 | ✅ **DONE in sprint α** | **Q1** (MIN fast-path), **Q2** (Filter::Gt/Lt), **F** (interner Vec reverse) | Measured below. |
 | ✅ **DONE in sprint β** | **G** (LRU posting cache) | Measured below. |
+| ✅ **DONE in sprint γ (partial)** | **sled-flush rework** (`Store::flush()` + remove per-write `tree.flush()` — **36× bulk_insert_sled**), **lookup_range → iter_range_stream** (**2.5× narrow range**), **#6 hash-posting layout** (O(K)→O(1) writes, **1.5× indexed bulk insert**) | Three at once. See `PERF_BASELINE.md` for tables. |
 | ❌ **TRIED and reverted** | **L** (batch RecordId pool) | TLS+RefCell overhead worse than getrandom on this stack; see «tried and reverted» |
 | 🥈 **Real wins on real workloads — next** | **O** (covering index, ~1 week), **P** (vectored multi-get, 2–3 days) | These move the dial on disk-backend production. |
 | 🥈 **Architectural cleanup** | **H₂** (Persistable trait), 1 day | Not a perf spike — prevents the next recurrence of write-amplification. |
