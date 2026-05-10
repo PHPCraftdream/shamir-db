@@ -63,26 +63,27 @@
 | 7 | Slow query logging | ~1 ч | `if execution_time_us > N { tracing::warn!(..) }`. Тривиально, спасает от безумия в продакшене |
 | 8 | systemd unit + Dockerfile | ~2 ч | Без них ops-команда не задеплоит |
 | 9 | `changePassword` SCRAM | ~3 ч | Базовый user flow. Уже реализован в `shamir-connect::changepw`, нужно подключить через wire. Без него юзер не может сменить пароль = security incident response невозможен |
-| 10 | Capacity planning docs | ~1 ч | Не код. README: "1 session = ~2 KB RAM, audit entry = ~200 bytes, redb growth ~X/день при Y запросов/сек" |
+| 10 | Server-side query limits cap | ~1 ч | `[security.query_limits] max_result_size_bytes`, `max_execution_time_ms`, `max_queries_per_batch`. Клиент может **уменьшить**, не **увеличить**. Сейчас 10MB-default — произвольный, нужен явный operator-knob |
+| 11 | Capacity planning docs | ~1 ч | Не код. README: "1 session = ~2 KB RAM, audit entry = ~200 bytes, redb growth ~X/день при Y запросов/сек" |
 
-**Итого P0 ≈ 19 часов.**
+**Итого P0 ≈ 20 часов.**
 
 ### P1 — нужно если multi-user / долгосрочная эксплуатация
 
 | # | Задача | Время | Что и зачем | Когда нужно |
 |---|--------|-------|-------------|-------------|
-| 11 | Real RBAC | ~4 ч | Per-table permissions. Сейчас бинарный superuser-or-not | Когда >1 типа пользователей с разными правами |
-| 12 | Resume PATH (server-side) | ~3 ч | Issue'им ticket но не принимаем — мёртвый функционал | Когда долгие mobile-сессии (re-auth дорогой Argon2id) |
-| 13 | Per-session resource limits на сервере | ~3 ч | Сейчас `BatchLimits` в payload — клиент сам себе верит. Server-side override | Когда >1 organization sharing tenant |
+| 12 | Real RBAC | ~4 ч | Per-table permissions. Сейчас бинарный superuser-or-not | Когда >1 типа пользователей с разными правами |
+| 13 | Resume PATH (server-side) | ~3 ч | Issue'им ticket но не принимаем — мёртвый функционал | Когда долгие mobile-сессии (re-auth дорогой Argon2id) |
 | 14 | CLI admin tool | ~5 ч | `shamir-server-admin user/audit/backup`. Иначе ops пишет custom client | Когда есть отдельная ops-команда |
 | 15 | Connection drain mode (SIGUSR1) | ~2 ч | Blue/green deploy без потерянных соединений | Только если blue/green — иначе SIGTERM с timeout достаточен |
 
-**Итого P1 ≈ 17 часов** (если все нужны).
+**Итого P1 ≈ 14 часов** (если все нужны).
 
 ### P2 — отдельные крупные проекты, не roadmap item
 
 | Задача | Когда делать |
 |---|---|
+| **True streaming responses** (multi-frame `ResponseChunk` + cursor + cancellation) | Когда конкретный use-case с измеренными требованиями (например "ETL пайплайн отправляет 1 GB datasets раз в час через сеть"). Это **breaking change wire-протокола** + изменения в shamir-db (Vec<Value> → Stream<Value>) + новая query_version. Реалистично ~15-20 ч. Промежуточный workaround — поднять `max_result_size_bytes` в config (P0 #10) и LIMIT/pagination на уровне query |
 | Replication / HA (Raft / master-replica) | Когда uptime требование >99.9%. Это **месяц работы**, не 10 часов из исходного плана. Не roadmap, а отдельный design doc |
 | HSM/KMS для identity seed | Когда compliance требует (SOC2, FedRAMP). Иначе chmod 600 + encrypted disk достаточно |
 | Schema migrations | Когда **впервые** придётся бампать `BatchRequest` version. Сейчас version=1 hardcoded — преждевременно |
@@ -99,7 +100,7 @@
 | **HSM/KMS** для большинства | Если seed файл с `chmod 600` + диск зашифрован — этого достаточно для всего кроме FedRAMP-grade compliance. Откладываем до compliance-driver |
 | **Schema migrations infrastructure** | Сейчас одна версия. Преждевременная оптимизация. Сделаем когда впервые понадобится |
 | **Audit query API** | `jq` + `tail -f` + `grep` работают на JSON-line файле. Admin API — сахар. Если есть Splunk/ELK — туда отправлять важнее чем API |
-| **Query result streaming (cursor)** | `BatchRequest::limits.max_result_size = 10MB` уже limits. Если ответ 100MB — это проектная проблема, не недостаток сервера. LIMIT/pagination существуют |
+| ~~**Query result streaming (cursor)**~~ ← **изменено** | Изначальный аргумент "10 MB достаточно" был патерналистским — за пользователя нельзя решать. Промежуточное решение: configurable `max_result_size_bytes` (P0 #10). Полный streaming с cursor/cancellation/multi-frame — отдельный major feature в P2, делать когда появится конкретный use-case (ETL с GB-датасетами и backpressure-требованиями) |
 | **Connection draining metrics** | Часть P0 #6 (Prometheus metrics) |
 | **Replication / HA** | Не "10 часов задача" — это **месяц** работы (Raft consensus или conflict resolution). Отдельный major feature, не пункт в roadmap |
 | **Connection drain SIGUSR1** для всех | SIGTERM с graceful timeout (уже есть) покрывает 95%. SIGUSR1 — только для blue/green. Перенесено в P1 как опциональное |
@@ -107,7 +108,7 @@
 ## Рекомендуемый порядок до production-готовности
 
 ```
-== Sprint 1 (~15 часов): ship-able state ==
+== Sprint 1 (~16 часов): ship-able state ==
 1. Health checks (/healthz, /readyz)              ~1 ч
 2. Pre-handshake timeout                          ~1 ч
 3. Global max-connections cap                     ~2 ч
@@ -115,22 +116,25 @@
 5. Slow query logging                             ~1 ч
 6. Backup task + CLI                              ~3 ч
 7. Prometheus /metrics                            ~3 ч
-8. systemd unit + Dockerfile                      ~2 ч
+8. Server-side query limits cap (configurable)   ~1 ч
+9. systemd unit + Dockerfile                      ~2 ч
 
 == Sprint 2 (~4 часов): user lifecycle ==
-9. changePassword wire-side                       ~3 ч
-10. Capacity planning docs                        ~1 ч
+10. changePassword wire-side                      ~3 ч
+11. Capacity planning docs                        ~1 ч
 
-== Optional sprint 3 (~17 часов): multi-user maturity ==
-11. Real RBAC                                     ~4 ч
-12. Resume PATH (server-side)                     ~3 ч
-13. Per-session server-side limits                ~3 ч
+== Optional sprint 3 (~14 часов): multi-user maturity ==
+12. Real RBAC                                     ~4 ч
+13. Resume PATH (server-side)                     ~3 ч
 14. CLI admin tool                                ~5 ч
 15. Connection drain SIGUSR1                      ~2 ч
 ```
 
-**Минимально достаточно: Sprint 1 + 2 = ~19 часов.**
-Полная зрелость для multi-tenant: + Sprint 3 = ~36 часов.
+**Минимально достаточно: Sprint 1 + 2 = ~20 часов.**
+Полная зрелость для multi-tenant: + Sprint 3 = ~34 часа.
+
+True streaming (multi-frame ResponseChunk) — отдельный feature на ~15-20 ч,
+делать когда конкретный use-case с GB-датасетами появится.
 
 После Sprint 1+2 получится:
 
@@ -181,14 +185,14 @@ services:
 ## Сводная оценка после ревью
 
 ```
-было P0    ~11 ч    →   стало P0     ~19 ч  (включил часть P1+P2 что реально важно)
-было P1    ~22 ч    →   стало P1     ~17 ч  (выкинул IP-allowlist, cert-rotation, drain mode)
-было P2    ~49 ч    →   стало P2      0 ч   (всё в "проекты" или "не делать")
+было P0    ~11 ч    →   стало P0     ~20 ч  (+ changePassword, slow-query log, query-limits cap, capacity docs)
+было P1    ~22 ч    →   стало P1     ~14 ч  (выкинул IP-allowlist, cert-rotation, отдельный drain mode)
+было P2    ~49 ч    →   стало P2 на потребность  (HA, streaming, HSM — feature-driven, не roadmap)
 ─────────────────────────────────────────
-было total ~82 ч    →   стало total  ~36 ч  (-56%)
+было total ~82 ч    →   стало total  ~34 ч  (-58%)
 ```
 
-**Production-ready минимум: ~19 часов** (Sprint 1+2).
-**Multi-user maturity: +17 часов** = ~36 часов всего.
-**HA/replication, encryption-at-rest, HSM**: отдельные проекты,
-не roadmap items.
+**Production-ready минимум: ~20 часов** (Sprint 1+2).
+**Multi-user maturity: +14 часов** = ~34 часа всего.
+**HA/replication, true streaming, HSM, encryption-at-rest**: отдельные
+feature-driven проекты, делать когда конкретный use-case появится.
