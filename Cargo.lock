@@ -160,15 +160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-swap"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ded5f9a03ac8f24d1b8a25101ee812cd32cdc8c50a4c50237de2c4915850e73"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2802,19 +2793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serial_test"
 version = "3.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2905,16 +2883,11 @@ dependencies = [
 name = "shamir-db"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "arc-swap",
  "async-stream",
  "async-trait",
- "base-x",
  "bincode",
  "bytes",
  "canopydb",
- "chrono",
- "crc32fast",
  "dashmap 6.1.0",
  "fjall",
  "futures",
@@ -2922,30 +2895,23 @@ dependencies = [
  "indexmap",
  "log",
  "nebari",
- "num-bigint",
- "once_cell",
  "persy",
  "rand 0.8.5",
- "rayon",
  "rcgen",
  "redb",
  "regex",
  "rmp-serde",
  "rmpv",
- "rust_decimal",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
- "serde_yaml",
  "serial_test",
+ "shamir-types",
  "sled",
- "smallvec 1.15.1",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -3023,6 +2989,35 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "tungstenite",
+]
+
+[[package]]
+name = "shamir-types"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base-x",
+ "bincode",
+ "bytes",
+ "chrono",
+ "dashmap 6.1.0",
+ "fxhash",
+ "indexmap",
+ "log",
+ "num-bigint",
+ "once_cell",
+ "rand 0.8.5",
+ "regex",
+ "rmp-serde",
+ "rmpv",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "smallvec 1.15.1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -3547,12 +3542,6 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "unsigned-varint"
