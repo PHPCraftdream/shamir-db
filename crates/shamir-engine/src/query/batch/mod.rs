@@ -137,19 +137,15 @@
 //! ```
 
 mod executor;
-mod planner;
-mod reference;
 
-// DTOs (BatchRequest / BatchResponse / BatchOp / BatchLimits /
-// BatchError / BatchPlan / QueryEntry / TransactionInfo) live in
-// `shamir-query-types::batch`. Logic (executor / planner /
-// `$query` reference resolver) stays here.
+// Only the executor (which actually drives a TableManager) lives here.
+// DTOs, the topological planner, and the `$query` reference parser are
+// all pure-data and live in `shamir-query-types::batch` — re-exported
+// here so callers keep using `shamir_db::query::batch::*` paths.
 pub use executor::{execute_batch, execute_batch_with_permissions, AdminExecutor, TableResolver};
-pub use planner::BatchPlanner;
-pub use reference::{QueryPath, QueryReference};
 pub use shamir_query_types::batch::{
-    BatchError, BatchLimits, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
-    TransactionInfo,
+    BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,
+    QueryEntry, QueryPath, QueryReference, ReferenceParseError, TransactionInfo,
 };
 
 #[cfg(test)]

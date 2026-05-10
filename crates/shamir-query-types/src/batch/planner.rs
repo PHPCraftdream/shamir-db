@@ -42,8 +42,8 @@
 //! Stage 2 runs `orders` after Stage 1 completes.
 //! Stage 3 runs `stats` after Stage 2 completes.
 
-use crate::query::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
-use crate::query::filter::Filter;
+use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
+use crate::filter::Filter;
 use shamir_types::types::common::{new_map, new_set, TMap, TSet};
 use serde_json::Value;
 
@@ -250,10 +250,10 @@ impl BatchPlanner {
 
     /// Extract dependencies from a filter value.
     fn extract_deps_from_filter_value(
-        value: &crate::query::filter::FilterValue,
+        value: &crate::filter::FilterValue,
         deps: &mut TSet<String>,
     ) {
-        use crate::query::filter::FilterValue;
+        use crate::filter::FilterValue;
 
         match value {
             FilterValue::Array(arr) => {
