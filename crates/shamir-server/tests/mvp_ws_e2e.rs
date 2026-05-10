@@ -282,7 +282,7 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     // create_table and insert can NOT live in the same batch because the
     // planner runs independent ops in a single parallel stage and the
     // insert can race ahead of the create — same constraint as mvp_e2e.
-    let mk: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let mk: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "ws-mk",
         "queries": { "tb": { "create_table": "ws_items", "repo": "main" } }
     }))
@@ -306,7 +306,7 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     // the read sees the insert from the same stage when we have only one
     // table involved — but to be deterministic we issue them in two
     // separate batches as well). -----
-    let ins: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let ins: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "ws-ins",
         "queries": { "ins": { "set": "ws_items", "key": {"id":"a"}, "value": {"id":"a","n":7} } }
     }))
@@ -326,7 +326,7 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         other => panic!("insert failed: {:?}", other),
     }
 
-    let rd: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let rd: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "ws-rd",
         "queries": { "rd": { "from": "ws_items" } }
     }))

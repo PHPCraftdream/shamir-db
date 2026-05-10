@@ -2,11 +2,11 @@
 
 use serde_json::json;
 
-use crate::db::engine::repo::repo_types::BoxRepoFactory;
-use crate::db::engine::repo::RepoConfig;
-use crate::db::engine::table::TableConfig;
-use crate::db::query::batch::BatchRequest;
-use crate::db::ShamirDb;
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
+use crate::engine::table::TableConfig;
+use crate::query::batch::BatchRequest;
+use crate::ShamirDb;
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -213,7 +213,7 @@ async fn test_execute_unknown_db() {
         .execute("nonexistent", &req)
         .await
         .unwrap_err();
-    assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
 }
 
 // ============================================================================
@@ -238,5 +238,5 @@ async fn test_execute_unknown_repo() {
         .execute("testdb", &req)
         .await
         .unwrap_err();
-    assert!(matches!(err, crate::db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
 }

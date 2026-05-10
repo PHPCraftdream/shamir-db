@@ -11,7 +11,7 @@
 //!   Argon2id work.
 //!
 //! - **Query language version** (`u32`) — carried as `query_version` in
-//!   `DbRequest::Execute`. Bumped when the [`shamir_db::db::query::batch`]
+//!   `DbRequest::Execute`. Bumped when the [`shamir_db::query::batch`]
 //!   schema gains incompatible fields or removes existing ones. The handler
 //!   rejects unknown versions before invoking `ShamirDb::execute` so a
 //!   future-version client gets a typed error rather than a confusing
@@ -43,7 +43,7 @@ pub const CURRENT_HANDSHAKE_PROTO_VERSION: u8 = 1;
 /// likely to evolve than the wire-level handshake — easier to bump for a
 /// long time without overflowing.
 pub const SUPPORTED_QUERY_LANG_VERSIONS: &[u32] = &[
-    // v1: corresponds to today's `shamir_db::db::query::batch::BatchRequest`
+    // v1: corresponds to today's `shamir_db::query::batch::BatchRequest`
     // shape. Bumped when fields are added/removed in a non-backwards
     // -compatible way.
     1,

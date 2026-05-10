@@ -9,11 +9,11 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::codecs::interned::{json_to_inner, json_value_to_inner, inner_to_json_value};
-use crate::db::engine::repo::repo_types::BoxRepoFactory;
-use crate::db::engine::repo::RepoConfig;
-use crate::db::engine::table::{TableConfig, TableManager};
-use crate::db::engine::db_instance::db_instance::DbInstance;
-use crate::db::{DbError, DbResult};
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
+use crate::engine::table::{TableConfig, TableManager};
+use crate::engine::db_instance::db_instance::DbInstance;
+use crate::{DbError, DbResult};
 
 const SYSTEM_REPO: &str = "system";
 
@@ -77,8 +77,8 @@ impl SystemStore {
         let inner = json_value_to_inner(record, interner)
             .map_err(|e| DbError::Codec(e.to_string()))?;
         // Use set with name-based key lookup
-        let op = crate::db::query::write::SetOp {
-            set: crate::db::query::TableRef::new(TABLE_DATABASES),
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_DATABASES),
             key: json!({"name": name}),
             value: record.clone(),
         };
@@ -92,12 +92,12 @@ impl SystemStore {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
-        let op = crate::db::query::write::DeleteOp {
-            delete_from: crate::db::query::TableRef::new(TABLE_DATABASES),
-            where_clause: crate::db::query::filter::Filter::Eq {
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_DATABASES),
+            where_clause: crate::query::filter::Filter::Eq {
                 field: vec!["name".to_string()],
-                value: crate::db::query::filter::FilterValue::String(name.to_string()),
+                value: crate::query::filter::FilterValue::String(name.to_string()),
             },
         };
         table.execute_delete(&op, &ctx).await?;
@@ -109,8 +109,8 @@ impl SystemStore {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
-        let query = crate::db::query::read::ReadQuery::new(TABLE_DATABASES);
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_DATABASES);
         let result = table.read(&query, &ctx).await?;
         Ok(result.records)
     }
@@ -128,8 +128,8 @@ impl SystemStore {
             "path": path,
         });
         let table = self.table(TABLE_REPOSITORIES).await?;
-        let op = crate::db::query::write::SetOp {
-            set: crate::db::query::TableRef::new(TABLE_REPOSITORIES),
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_REPOSITORIES),
             key: json!({"db_name": db_name, "repo_name": repo_name}),
             value: record,
         };
@@ -143,18 +143,18 @@ impl SystemStore {
         let table = self.table(TABLE_REPOSITORIES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
-        let op = crate::db::query::write::DeleteOp {
-            delete_from: crate::db::query::TableRef::new(TABLE_REPOSITORIES),
-            where_clause: crate::db::query::filter::Filter::And {
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_REPOSITORIES),
+            where_clause: crate::query::filter::Filter::And {
                 filters: vec![
-                    crate::db::query::filter::Filter::Eq {
+                    crate::query::filter::Filter::Eq {
                         field: vec!["db_name".to_string()],
-                        value: crate::db::query::filter::FilterValue::String(db_name.to_string()),
+                        value: crate::query::filter::FilterValue::String(db_name.to_string()),
                     },
-                    crate::db::query::filter::Filter::Eq {
+                    crate::query::filter::Filter::Eq {
                         field: vec!["repo_name".to_string()],
-                        value: crate::db::query::filter::FilterValue::String(repo_name.to_string()),
+                        value: crate::query::filter::FilterValue::String(repo_name.to_string()),
                     },
                 ],
             },
@@ -168,8 +168,8 @@ impl SystemStore {
         let table = self.table(TABLE_REPOSITORIES).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
-        let query = crate::db::query::read::ReadQuery::new(TABLE_REPOSITORIES);
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_REPOSITORIES);
         let result = table.read(&query, &ctx).await?;
         Ok(result.records)
     }
@@ -181,8 +181,8 @@ impl SystemStore {
     /// Save a setting.
     pub async fn save_setting(&self, key: &str, value: &serde_json::Value) -> DbResult<()> {
         let table = self.table(TABLE_SETTINGS).await?;
-        let op = crate::db::query::write::SetOp {
-            set: crate::db::query::TableRef::new(TABLE_SETTINGS),
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_SETTINGS),
             key: json!({"key": key}),
             value: json!({"key": key, "value": value}),
         };
@@ -196,11 +196,11 @@ impl SystemStore {
         let table = self.table(TABLE_SETTINGS).await?;
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
-        let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
-        let query = crate::db::query::read::ReadQuery::new(TABLE_SETTINGS)
-            .filter(crate::db::query::filter::Filter::Eq {
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_SETTINGS)
+            .filter(crate::query::filter::Filter::Eq {
                 field: vec!["key".to_string()],
-                value: crate::db::query::filter::FilterValue::String(key.to_string()),
+                value: crate::query::filter::FilterValue::String(key.to_string()),
             });
         let result = table.read(&query, &ctx).await?;
         Ok(result.records.into_iter().next().map(|r| r["value"].clone()))

@@ -14,7 +14,7 @@
 //!
 //! - [`DbRequest::Ping`] — health check (zero DB cost; useful for keepalive).
 //! - [`DbRequest::Execute { db, batch }`] — wraps a complete
-//!   [`BatchRequest`] (see `shamir_db::db::query::batch`). The batch is the
+//!   [`BatchRequest`] (see `shamir_db::query::batch`). The batch is the
 //!   single point of entry for every database operation:
 //!     - reads (with WHERE / SELECT projections+aggregations / GROUP BY /
 //!       ORDER BY / pagination / `count_total`),
@@ -27,9 +27,9 @@
 //!     - optional MVCC transactional semantics.
 //!
 //! [`DbResponse::Batch`] returns the **full** [`BatchResponse`] —
-//! per-alias [`QueryResult`](shamir_db::db::query::read::QueryResult) with
-//! `records: Vec<Value>`, [`QueryStats`](shamir_db::db::query::read::QueryStats),
-//! [`PaginationInfo`](shamir_db::db::query::read::PaginationInfo), the
+//! per-alias [`QueryResult`](shamir_db::query::read::QueryResult) with
+//! `records: Vec<Value>`, [`QueryStats`](shamir_db::query::read::QueryStats),
+//! [`PaginationInfo`](shamir_db::query::read::PaginationInfo), the
 //! execution plan stages, total execution time, and transaction info. No
 //! information is dropped or summarised by the bridge.
 //!
@@ -43,7 +43,7 @@
 //! ops on data tables are accepted from any authenticated session.
 //!
 //! Fine-grained per-table RBAC (mapping role names → DB-side
-//! [`SessionPermissions`](shamir_db::db::query::auth::SessionPermissions) +
+//! [`SessionPermissions`](shamir_db::query::auth::SessionPermissions) +
 //! [`execute_batch_with_permissions`]) is a follow-up item — the wire
 //! schema does not need to change for it.
 //!
@@ -70,8 +70,8 @@ use serde::{Deserialize, Serialize};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 
-use shamir_db::db::query::batch::{BatchError, BatchOp, BatchRequest, BatchResponse};
-use shamir_db::db::ShamirDb;
+use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest, BatchResponse};
+use shamir_db::ShamirDb;
 
 use shamir_connect::common::crypto::random_array;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -119,7 +119,7 @@ pub enum DbRequest {
         /// Target database name (must already exist, or be created within
         /// the same batch via a `create_db` op).
         db: String,
-        /// Batch payload — see `shamir_db::db::query::batch::BatchRequest`.
+        /// Batch payload — see `shamir_db::query::batch::BatchRequest`.
         batch: BatchRequest,
     },
     /// Create a SCRAM-authenticatable user — the kind of user that can
@@ -255,7 +255,7 @@ impl QueryLimitsCap {
 /// `session.permissions.is_superuser`. All other ops are accepted from any
 /// authenticated session. A future patch will plumb per-role table-level
 /// RBAC by mapping into
-/// `shamir_db::db::query::auth::SessionPermissions` and using
+/// `shamir_db::query::auth::SessionPermissions` and using
 /// `execute_batch_with_permissions`.
 #[derive(Clone)]
 pub struct ShamirDbHandler {

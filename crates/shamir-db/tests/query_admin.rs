@@ -2,10 +2,10 @@
 
 use serde_json::json;
 
-use shamir_db::db::engine::repo::repo_types::BoxRepoFactory;
-use shamir_db::db::engine::repo::RepoConfig;
-use shamir_db::db::engine::table::TableConfig;
-use shamir_db::db::query::batch::BatchRequest;
+use shamir_db::engine::repo::repo_types::BoxRepoFactory;
+use shamir_db::engine::repo::RepoConfig;
+use shamir_db::engine::table::TableConfig;
+use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
 async fn setup_shamir() -> ShamirDb {
@@ -399,7 +399,7 @@ async fn test_drop_table() {
         }
     })).unwrap();
     let err = shamir.execute("testdb", &insert).await.unwrap_err();
-    assert!(matches!(err, shamir_db::db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(err, shamir_db::query::batch::BatchError::QueryError { .. }));
 }
 
 #[tokio::test]
@@ -432,5 +432,5 @@ async fn test_admin_unknown_repo_error() {
     })).unwrap();
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
-    assert!(matches!(err, shamir_db::db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(err, shamir_db::query::batch::BatchError::QueryError { .. }));
 }

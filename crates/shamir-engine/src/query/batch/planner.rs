@@ -55,7 +55,7 @@ use serde_json::Value;
 /// # Example
 ///
 /// ```rust,ignore
-/// use shamir_db::db::query::batch::{BatchPlanner, BatchLimits, QueryEntry};
+/// use shamir_db::query::batch::{BatchPlanner, BatchLimits, QueryEntry};
 /// use shamir_db::types::common::new_map;
 ///
 /// let mut queries = new_map();

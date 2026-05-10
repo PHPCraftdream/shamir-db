@@ -365,7 +365,7 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     let mut next_rid: u32 = 1;
 
     // --- Step A: create `prod` db ---
-    let mk_db: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let mk_db: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "mk-db",
         "queries": { "mk": { "create_db": "prod" } }
     })).expect("parse mk batch");
@@ -383,7 +383,7 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     }
 
     // --- Step B: create repo+table, set, then read ---
-    let work: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let work: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "work",
         "queries": {
             "mr": { "create_repo": "main" },
@@ -405,7 +405,7 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     }
 
     // --- Step C: write a record, read it back ---
-    let rw: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let rw: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "rw",
         "queries": {
             "ins": { "set": "items", "key": {"sku":"X1"}, "value": {"sku":"X1","qty":42} },
