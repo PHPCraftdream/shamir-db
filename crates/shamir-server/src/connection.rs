@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView, ResponseEnvelope};
+use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
 use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -26,7 +26,7 @@ use shamir_connect::server::handshake::{
     AuthInitView, AuthOkView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
 use shamir_connect::server::lockout::{
-    subnet_of, username_hash, FailureOutcome, LockoutStore, PairKey,
+    subnet_of, username_hash, LockoutStore, PairKey,
 };
 use shamir_connect::server::rate_limit::{RateDecision, RateLimiter};
 use shamir_connect::server::resume::ResumeConfig;

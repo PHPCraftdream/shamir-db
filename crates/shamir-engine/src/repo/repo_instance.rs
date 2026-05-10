@@ -2,7 +2,7 @@ use super::super::table::{TableConfig, TableManager};
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use shamir_storage::types::{Repo, Store};
 use shamir_storage::error::{DbError, DbResult};
-use shamir_types::types::common::{new_dash_map_wc, TDashMap, TMap};
+use shamir_types::types::common::{new_dash_map_wc, TDashMap};
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::Arc;

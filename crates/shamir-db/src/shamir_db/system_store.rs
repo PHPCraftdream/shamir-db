@@ -4,11 +4,9 @@
 //! Uses a TableManager backed by any storage engine (redb for production,
 //! in_memory for tests).
 
-use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
 
-use crate::codecs::interned::{json_to_inner, json_value_to_inner, inner_to_json_value};
+use crate::codecs::interned::json_value_to_inner;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::{TableConfig, TableManager};
@@ -74,7 +72,7 @@ impl SystemStore {
     pub async fn save_database(&self, name: &str, record: &serde_json::Value) -> DbResult<()> {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
-        let inner = json_value_to_inner(record, interner)
+        let _inner = json_value_to_inner(record, interner)
             .map_err(|e| DbError::Codec(e.to_string()))?;
         // Use set with name-based key lookup
         let op = crate::query::write::SetOp {

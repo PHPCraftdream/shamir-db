@@ -141,7 +141,10 @@ pub enum FailureOutcome {
     LockedOut,
     /// Pair has a backoff requirement (caller should sleep at least this long
     /// before responding).
-    Backoff { delay_ms: u64 },
+    Backoff {
+        /// Minimum delay in milliseconds before the next response is sent.
+        delay_ms: u64,
+    },
 }
 
 /// Pluggable backend for failure / lockout state. Production should back
