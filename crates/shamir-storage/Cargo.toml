@@ -1,0 +1,36 @@
+[package]
+name = "shamir-storage"
+version = "0.1.0"
+edition = "2021"
+description = "Storage backends for ShamirDB — Store trait + per-engine impls."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Foundation
+shamir-types = { path = "../shamir-types" }
+
+# Backends — all bundled today; feature-gating per-backend is a small
+# follow-up once a concrete operator goal lands ("embedded build wants
+# only redb").
+redb = "3.1.0"
+fjall = "3.0.1"
+canopydb = "0.2.5"
+sled = "0.34.7"
+nebari = "0.5.5"
+persy = "1.7.1"
+
+# Async / runtime helpers used by the trait surface and a few backends
+tokio = { version = "1.49.0", features = ["full"] }
+async-trait = "0.1.81"
+async-stream = "0.3"
+futures = "0.3"
+bytes = "1.11.0"
+dashmap = "6.1.0"
+
+# Errors / logging
+thiserror = "2.0.18"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3.10.1"
+serial_test = "3.3.1"
