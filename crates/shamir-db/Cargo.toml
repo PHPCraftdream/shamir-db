@@ -2,49 +2,33 @@
 name = "shamir-db"
 version = "0.1.0"
 edition = "2021"
+description = "ShamirDB facade — re-exports types/storage/engine/query and provides ShamirDb + SystemStore."
 
 [dependencies]
-# Foundation crate — re-exports its `types`, `codecs`, `core::interner`
-# under `shamir_db::*` so callers don't see the split.
-shamir-types = { path = "../shamir-types" }
-# Storage backends — re-exported under `shamir_db::db::storage` so
-# `crate::db::storage::storage_redb::*` paths keep resolving.
+# Foundation crates re-exported under `shamir_db::*` so callers stay
+# stable. The split is purely organisational; nothing about the public
+# surface changed when these moved out.
+shamir-types   = { path = "../shamir-types" }
 shamir-storage = { path = "../shamir-storage" }
+shamir-engine  = { path = "../shamir-engine" }
 
-# Direct deps still needed by `shamir-db/src/{db,api}/*` after the
-# foundation moved out. Anything that's only used by `types/` /
-# `codecs/` / `core/interner/` lives in `shamir-types` now.
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.149"
-fxhash = "0.2.1"
-regex = "1.11.1"
-log = "0.4"               # macros log::info! / warn! used across db/storage
-rmp-serde = "1.3.0"       # storage layer encodes records to msgpack
-rmpv = { version = "1.3.1", features = ["serde"] }  # storage / engine codec helpers
-bincode = "1.3.3"         # storage_redb / others use bincode for index/header
-indexmap = { version = "2.7", features = ["serde"] }  # engine ordered maps
+# Direct deps for what's still here: the `db::shamir_db` facade
+# (ShamirDb + SystemStore + execute) and the small `api/` shim.
+serde       = { version = "1.0.217", features = ["derive"] }
+serde_json  = "1.0.149"
+tokio       = { version = "1.49.0", features = ["full"] }
+dashmap     = "6.1.0"
+log         = "0.4"            # log!/info!/warn! macros across the facade
+async-trait = "0.1.81"         # AdminExecutor / TableResolver trait impls
+rmp-serde   = "1.3.0"          # facade encodes audit / system-store records
+rand        = "0.8.5"          # facade rng for record-id allocation
 
-# --- Storage engines moved to `shamir-storage` crate; the engine layer
-#     here only needs the trait surface, which comes via `shamir-storage`.
-
-# --- Async / runtime ---
-tokio = { version = "1.49.0", features = ["full"] }
-dashmap = "6.1.0"
-thiserror = "2.0.18"
-async-trait = "0.1.81"
-bytes = "1.11.0"
-async-stream = "0.3"
-futures = "0.3"
-rand = "0.8.5"  # engine layer uses rng for record-id allocation
-
-# --- Legacy network / TLS module (db/net/*) — slated for removal once
-# unused; kept here so the obsolete bin doesn't bit-rot before deletion.
-rustls = "0.23"
+# Legacy network / TLS module (`db/net/*`) — kept compiling so the
+# obsolete code doesn't bit-rot before its planned deletion.
+rustls       = "0.23"
 tokio-rustls = "0.26"
-rcgen = "0.13"
-
-
+rcgen        = "0.13"
 
 [dev-dependencies]
-tempfile = "3.10.1"
+tempfile    = "3.10.1"
 serial_test = "3.3.1"

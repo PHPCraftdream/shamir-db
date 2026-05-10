@@ -12,3 +12,7 @@ pub use shamir_types::types;
 
 pub mod api;
 pub mod db;
+
+// Top-level convenience re-exports — `shamir_db::ShamirDb` etc. resolve
+// without forcing callers to type the full `db::shamir_db::` path.
+pub use crate::db::shamir_db::{ShamirDb, SystemStoreConfig};

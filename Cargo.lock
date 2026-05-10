@@ -2883,6 +2883,28 @@ dependencies = [
 name = "shamir-db"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "dashmap 6.1.0",
+ "log",
+ "rand 0.8.5",
+ "rcgen",
+ "rmp-serde",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "shamir-engine",
+ "shamir-storage",
+ "shamir-types",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+]
+
+[[package]]
+name = "shamir-engine"
+version = "0.1.0"
+dependencies = [
  "async-stream",
  "async-trait",
  "bincode",
@@ -2893,20 +2915,16 @@ dependencies = [
  "indexmap",
  "log",
  "rand 0.8.5",
- "rcgen",
  "regex",
  "rmp-serde",
  "rmpv",
- "rustls",
  "serde",
  "serde_json",
  "serial_test",
  "shamir-storage",
  "shamir-types",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
