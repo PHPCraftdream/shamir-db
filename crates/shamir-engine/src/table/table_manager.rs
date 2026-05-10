@@ -142,6 +142,57 @@ impl TableManager {
         &self.sorted_indexes
     }
 
+    /// Register a new sorted (B-tree-by-value) index over a single
+    /// scalar field, then backfill it from existing records.
+    pub async fn create_sorted_index(
+        &self,
+        index_name: &str,
+        field_path: &[&str],
+    ) -> DbResult<()> {
+        use crate::index::sorted_index_manager::SortedIndexDefinition;
+        let interner = self.interner.get().await?;
+        let name_interned = interner
+            .touch_ind(index_name)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
+            .key()
+            .id();
+        let mut path_ids: Vec<u64> = Vec::new();
+        for seg in field_path {
+            for part in seg.split('.') {
+                let id = interner
+                    .touch_ind(part)
+                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
+                    .key()
+                    .id();
+                path_ids.push(id);
+            }
+        }
+        let def = SortedIndexDefinition::new(name_interned, path_ids);
+        self.sorted_indexes.register(def).await?;
+        self.interner.persist().await?;
+
+        // Backfill: stream existing records and add each to the new
+        // sorted index. Avoids materialising the whole table.
+        use futures::StreamExt;
+        let stream = self.table.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (id, record) in batch? {
+                self.sorted_indexes.on_record_created(&id, &record).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop a sorted index by name.
+    pub async fn drop_sorted_index(&self, index_name: &str) -> DbResult<bool> {
+        let interner = self.interner.get().await?;
+        let Some(name_interned) = interner.get_ind(index_name) else {
+            return Ok(false);
+        };
+        self.sorted_indexes.drop_index(name_interned.id()).await
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
