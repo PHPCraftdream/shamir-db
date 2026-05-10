@@ -11,7 +11,7 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use crate::query::filter::eval::{compile_filter, filter_value_to_inner, intern_field_path, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
-use crate::query::read::{exec, PaginationInfo, QueryResult, QueryStats, ReadQuery};
+use crate::query::read::{exec, PaginationInfo, QueryResult, QueryStats, ReadQuery, SelectItem};
 use shamir_storage::error::DbResult;
 use shamir_types::types::common::new_set;
 use shamir_types::types::record_id::RecordId;
@@ -221,6 +221,38 @@ impl TableManager {
         let start = Instant::now();
         let batch_size = 1000;
         let interner = self.interner().get().await?;
+
+        // Opt #2 (1000×-class): `SELECT count(*) FROM table` (no WHERE,
+        // no GROUP BY, no DISTINCT, no ORDER BY, no pagination, no
+        // count_total flag) is answered directly from the persistent
+        // record counter — O(1), no scan, no allocation. Previously
+        // it materialised every record just to call `.len()` on the
+        // result vector.
+        if query.r#where.is_none()
+            && query.group_by.is_none()
+            && query.order_by.is_none()
+            && !query.select.distinct
+            && !query.count_total
+            && query.pagination.is_none()
+            && query.select.items.len() == 1
+        {
+            if let SelectItem::CountAll { alias } = &query.select.items[0] {
+                let count: u64 = self.counter().get().await?;
+                let key = alias.as_deref().unwrap_or("count").to_string();
+                let mut obj = serde_json::Map::new();
+                obj.insert(key, serde_json::Value::Number(count.into()));
+                return Ok(QueryResult {
+                    records: vec![serde_json::Value::Object(obj)],
+                    stats: Some(QueryStats {
+                        index_used: Some("__record_counter__".to_string()),
+                        records_scanned: 0,
+                        records_returned: 1,
+                        execution_time_us: start.elapsed().as_micros() as u64,
+                    }),
+                    pagination: None,
+                });
+            }
+        }
 
         // Try index scan first
         if let Some(ref filter) = query.r#where {
