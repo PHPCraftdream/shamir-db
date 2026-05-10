@@ -1,0 +1,36 @@
+[package]
+name = "shamir-client-node"
+version = "0.1.0"
+edition = "2021"
+description = "Node.js native binding for ShamirDB client SDK (TLS 1.3 + SCRAM-Argon2id)."
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+shamir-client       = { path = "../shamir-client" }
+shamir-query-types  = { path = "../shamir-query-types" }
+
+# napi-rs 2.x stable. Features:
+#   napi6  — Node-API v6 baseline (Node ≥ 10.20 / Electron ≥ 8); supports
+#            BigInt, async functions, Buffer, etc.
+#   async  — generates Node Promise wrappers from `async fn` automatically.
+#   serde-json — lets us pass `serde_json::Value` across the boundary so
+#            JS sends/receives plain objects without manual conversion.
+napi        = { version = "2", default-features = false, features = ["napi6", "async", "serde-json"] }
+napi-derive = "2"
+
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize    = "1.8"
+tokio      = { version = "1", features = ["sync"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = "fat"
+opt-level = "z"
+codegen-units = 1
+strip = true

@@ -1,0 +1,7 @@
+# napi-rs on Windows requires MSVC linkage — Node.exe exports the
+# Node-API symbols via delay-load against `node.exe`, which the napi-rs
+# build script wires up only when targeting `x86_64-pc-windows-msvc`.
+# The rest of the workspace stays on the default toolchain.
+[toolchain]
+channel = "stable"
+targets = ["x86_64-pc-windows-msvc"]
