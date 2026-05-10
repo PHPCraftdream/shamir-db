@@ -60,6 +60,15 @@ dashmap = "6.1"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 
+# Observability HTTP server (/healthz /readyz /metrics /info).
+# Versions chosen to share a single `metrics` recorder with `metrics-process` —
+# version skew between the metrics 0.23 / 0.24 lines silently produces empty
+# /metrics output (the process metrics register against a different global).
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+metrics-process = "2"
+
 [dev-dependencies]
 hex = "0.4"
 # E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM —

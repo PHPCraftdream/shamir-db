@@ -92,6 +92,32 @@ pub struct Config {
     /// Audit log knobs (rotation, retention).
     #[serde(default)]
     pub audit: AuditConfig,
+    /// Observability HTTP server (`/healthz` etc.). Empty block = bind
+    /// to default loopback `127.0.0.1:9090`. Set `addr = ""` to disable.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
+}
+
+/// Observability HTTP server (`/healthz`, `/readyz`, `/metrics`, `/info`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ObservabilityConfig {
+    /// Bind address. Default `127.0.0.1:9090`. Empty string disables
+    /// the server entirely (no port bound, no metrics endpoint, no
+    /// liveness probe — typically you don't want this in production).
+    #[serde(default = "default_observability_addr")]
+    pub addr: String,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            addr: default_observability_addr(),
+        }
+    }
+}
+
+fn default_observability_addr() -> String {
+    "127.0.0.1:9090".to_string()
 }
 
 /// Audit log file management.

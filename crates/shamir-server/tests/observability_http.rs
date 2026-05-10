@@ -1,0 +1,129 @@
+//! Observability HTTP server end-to-end test.
+//!
+//! Spawns the server with `observability.addr = 127.0.0.1:0`, then HTTP-GETs
+//! every endpoint and verifies status codes + headline content.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use tempfile::TempDir;
+use zeroize::Zeroizing;
+
+use shamir_server::config::{
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig,
+    ObservabilityConfig, ProfileKind, TlsConfig,
+};
+use shamir_server::server::{BootstrapMode, ServerLauncher};
+
+fn fast_kdf() -> KdfConfig {
+    KdfConfig {
+        memory_kb: 19_456,
+        time: 2,
+        parallelism: 1,
+        argon2_version: 0x13,
+    }
+}
+
+fn make_config(temp: &TempDir, obs_addr: &str) -> Config {
+    let data_dir: PathBuf = temp.path().to_path_buf();
+    Config {
+        data_dir: data_dir.clone(),
+        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        kdf_defaults: fast_kdf(),
+        argon2_concurrent_max: 4,
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Tcp,
+            addr: "127.0.0.1:0".into(),
+            profile: ProfileKind::TlsExporter,
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: vec![],
+        }],
+        tls: TlsConfig {
+            cert_path: data_dir.join("cert.pem"),
+            key_path: data_dir.join("key.pem"),
+        },
+        security: Default::default(),
+        audit: Default::default(),
+        observability: ObservabilityConfig {
+            addr: obs_addr.into(),
+        },
+    }
+}
+
+/// Pick an OS-assigned free port by binding-then-closing — race-free
+/// enough for tests on a quiet CI host.
+async fn pick_free_port() -> SocketAddr {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    drop(l);
+    addr
+}
+
+async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    s.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    // Crude HTTP parse: status line is "HTTP/1.1 NNN ..."
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body_start = text.find("\r\n\r\n").map(|i| i + 4).unwrap_or(text.len());
+    (status, text[body_start..].to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn endpoints_return_expected_codes_and_content() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let temp = TempDir::new().unwrap();
+    let obs_addr = pick_free_port().await;
+
+    let cfg = make_config(&temp, &obs_addr.to_string());
+    let launcher = ServerLauncher {
+        config: cfg,
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(b"hunter2".to_vec()),
+        },
+    };
+    let handle = launcher.launch().await.expect("launcher");
+
+    // Give the HTTP server a moment to actually start serving.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // /healthz — always 200.
+    let (status, body) = http_get(obs_addr, "/healthz").await;
+    assert_eq!(status, 200, "healthz status");
+    assert!(body.contains("ok"), "healthz body should say ok, got {:?}", body);
+
+    // /readyz — should be 200 because the launcher marked ready before
+    // returning.
+    let (status, _body) = http_get(obs_addr, "/readyz").await;
+    assert_eq!(status, 200, "readyz status after boot");
+
+    // /metrics — Prometheus text. Should include at least the standard
+    // process_* metrics from metrics-process.
+    let (status, body) = http_get(obs_addr, "/metrics").await;
+    assert_eq!(status, 200, "metrics status");
+    assert!(
+        body.contains("process_"),
+        "metrics body must include process_* series, got first 200 bytes: {:?}",
+        &body.chars().take(200).collect::<String>()
+    );
+
+    // /info — pretty JSON.
+    let (status, body) = http_get(obs_addr, "/info").await;
+    assert_eq!(status, 200, "info status");
+    assert!(body.contains("uptime_seconds"), "info body fields, got {:?}", body);
+    assert!(body.contains("\"ready\":true"), "info should say ready=true, got {:?}", body);
+
+    handle.shutdown().await;
+}

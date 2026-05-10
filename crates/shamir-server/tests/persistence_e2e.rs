@@ -129,6 +129,7 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
+        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
     }
 }
 
