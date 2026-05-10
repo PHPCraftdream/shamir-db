@@ -229,6 +229,51 @@ fn user_id_lookup_consistent_with_lookup_by_name() {
 }
 
 #[test]
+fn tickets_invalid_before_ns_lookup_by_user_id_reflects_updates() {
+    // Spec §7.5: changing roles must bump tickets_invalid_before_ns so the
+    // connection layer can invalidate live sessions on the next request.
+    let (_tmp, store) = fresh_dir();
+    let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+
+    // Fresh user — no invalidation yet.
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid), 0);
+
+    // Bumping via update_roles writes the new timestamp; lookup MUST see it.
+    store
+        .update_roles("alice", vec!["read_write".to_string()], 12_345)
+        .unwrap();
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid), 12_345);
+
+    // Direct bump_tickets_invalid also visible.
+    store.bump_tickets_invalid("alice", 99_999).unwrap();
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&uid), 99_999);
+
+    // Unknown user_id → 0 (fail-open default; spec §7.5 treats 0 as no invalidation).
+    let unknown_uid = [0xFFu8; 16];
+    assert_eq!(store.tickets_invalid_before_ns_by_user_id(&unknown_uid), 0);
+}
+
+#[test]
+fn user_id_index_survives_restart() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("users.redb");
+    let uid = {
+        let store = RedbUserDirectory::open(&path).unwrap();
+        let uid = store.insert("alice".to_string(), fixture_record()).unwrap();
+        store.bump_tickets_invalid("alice", 7_777).unwrap();
+        uid
+    };
+    {
+        let store = RedbUserDirectory::open(&path).unwrap();
+        assert_eq!(
+            store.tickets_invalid_before_ns_by_user_id(&uid),
+            7_777,
+            "secondary index must survive restart"
+        );
+    }
+}
+
+#[test]
 fn concurrent_inserts_assign_distinct_user_ids() {
     let (_tmp, store) = fresh_dir();
     let store = Arc::new(store);

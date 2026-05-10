@@ -22,7 +22,7 @@ use shamir_connect::server::session::SessionStore;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 /// Periods for each scheduler task. Defaults from spec.
@@ -94,9 +94,18 @@ pub struct SchedulerInputs {
 /// Drop-tolerant: dropping without calling [`Self::shutdown`] will terminate
 /// the tokio runtime which aborts the tasks. For graceful drain (last-flush
 /// audit checkpoint, etc.) prefer `shutdown().await`.
+///
+/// Shutdown is signalled via a `tokio::sync::broadcast::Sender<()>` rather
+/// than `tokio::sync::Notify`. The latter has no "pending permit" semantics:
+/// `notify_waiters()` only wakes tasks that are *already* parked on
+/// `.notified()`. If `Scheduler::shutdown()` is called before every spawned
+/// task has had a chance to enter its `select!`, the notify is silently
+/// dropped and the task waits for the next `interval.tick()` — which can be
+/// up to an hour for `identity_finalize`. broadcast retains the message for
+/// any future `recv()`, so the race is closed.
 pub struct Scheduler {
     handles: Vec<JoinHandle<()>>,
-    shutdown: Arc<Notify>,
+    shutdown_tx: broadcast::Sender<()>,
 }
 
 impl core::fmt::Debug for Scheduler {
@@ -110,16 +119,22 @@ impl core::fmt::Debug for Scheduler {
 impl Scheduler {
     /// Spawn all six periodic tasks. Returns immediately; tasks are now live.
     pub fn spawn(inputs: SchedulerInputs, config: SchedulerConfig) -> Self {
-        let shutdown = Arc::new(Notify::new());
+        // Capacity 1 is enough — we only ever send a single shutdown message.
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let mut handles = Vec::with_capacity(6);
+
+        // Each subscriber MUST be created synchronously (in `spawn`, not
+        // inside the async block) so the receiver exists before `Scheduler::
+        // spawn` returns. Otherwise an immediate `shutdown()` could race
+        // with the task starting up.
 
         // 1. Counter GC.
         {
             let store = inputs.counters.clone();
-            let shutdown = shutdown.clone();
+            let rx = shutdown_tx.subscribe();
             let period = config.counter_gc_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("counter_gc", period, shutdown, move || {
+                run_periodic("counter_gc", period, rx, move || {
                     let now_ns = UnixNanos::now().as_u64();
                     let store = store.clone();
                     safe_run("counter_gc", move || {
@@ -133,10 +148,10 @@ impl Scheduler {
         // 2. Lockout GC.
         {
             let store = inputs.lockout.clone();
-            let shutdown = shutdown.clone();
+            let rx = shutdown_tx.subscribe();
             let period = config.lockout_gc_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("lockout_gc", period, shutdown, move || {
+                run_periodic("lockout_gc", period, rx, move || {
                     let now_ns = UnixNanos::now().as_u64();
                     let store = store.clone();
                     safe_run("lockout_gc", move || {
@@ -150,10 +165,10 @@ impl Scheduler {
         // 3. Rate-limit GC.
         {
             let store = inputs.rate_limit.clone();
-            let shutdown = shutdown.clone();
+            let rx = shutdown_tx.subscribe();
             let period = config.rate_limit_gc_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("rate_limit_gc", period, shutdown, move || {
+                run_periodic("rate_limit_gc", period, rx, move || {
                     let now_ns = UnixNanos::now().as_u64();
                     let store = store.clone();
                     safe_run("rate_limit_gc", move || {
@@ -167,12 +182,12 @@ impl Scheduler {
         // 4. Session GC.
         {
             let store = inputs.session_store.clone();
-            let shutdown = shutdown.clone();
+            let rx = shutdown_tx.subscribe();
             let period = config.session_gc_period;
             let max_age_ns = inputs.session_max_age_ns;
             let idle_ttl_ns = inputs.session_idle_ttl_ns;
             handles.push(tokio::spawn(async move {
-                run_periodic("session_gc", period, shutdown, move || {
+                run_periodic("session_gc", period, rx, move || {
                     let now_ns = UnixNanos::now().as_u64();
                     let store = store.clone();
                     safe_run("session_gc", move || {
@@ -190,10 +205,10 @@ impl Scheduler {
         {
             let chain = inputs.audit_chain.clone();
             let appender = inputs.audit_appender.clone();
-            let shutdown = shutdown.clone();
+            let rx = shutdown_tx.subscribe();
             let period = config.audit_checkpoint_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("audit_checkpoint", period, shutdown, move || {
+                run_periodic("audit_checkpoint", period, rx, move || {
                     let chain = chain.clone();
                     let appender = appender.clone();
                     safe_run("audit_checkpoint", move || {
@@ -208,10 +223,10 @@ impl Scheduler {
         // 6. Identity rotation finalize.
         {
             let identity = inputs.identity.clone();
-            let shutdown = shutdown.clone();
+            let rx = shutdown_tx.subscribe();
             let period = config.identity_finalize_period;
             handles.push(tokio::spawn(async move {
-                run_periodic("identity_finalize", period, shutdown, move || {
+                run_periodic("identity_finalize", period, rx, move || {
                     let now_ns = UnixNanos::now().as_u64();
                     let identity = identity.clone();
                     safe_run("identity_finalize", move || {
@@ -225,23 +240,21 @@ impl Scheduler {
         }
 
         tracing::info!(tasks = handles.len(), "scheduler spawned");
-        Self { handles, shutdown }
+        Self { handles, shutdown_tx }
     }
 
-    /// Signal shutdown and await all tasks. Idempotent shutdown — multiple
-    /// calls are not undefined but only one consumes the handles.
+    /// Signal shutdown and await all tasks.
+    ///
+    /// Calling `shutdown_tx.send(())` deposits the message in every
+    /// subscriber's queue — even subscribers that haven't yet reached their
+    /// `.recv()` will pick it up on the next poll. Once the sender is
+    /// dropped (which happens when `self` is consumed at the bottom of this
+    /// function via the implicit move-into-the-Vec drain), any remaining
+    /// `recv()` calls also return `Err(Closed)` which the loop treats as
+    /// shutdown.
     pub async fn shutdown(self) {
-        // `notify_waiters` wakes every task currently parked on `notified()`.
-        self.shutdown.notify_waiters();
-        // Some tasks may not have reached `.notified()` yet (e.g. spawned but
-        // not yet polled). Issue a broadcast a few times to be safe — every
-        // notified() call after this point will return immediately for tasks
-        // that subsequently subscribe, because Notify retains a "pending"
-        // permit per call until consumed.
+        let _ = self.shutdown_tx.send(());
         for h in self.handles {
-            // Each task also checks the notify periodically inside select!,
-            // so even if it missed the broadcast it'll exit on the next tick.
-            // Timeout-bounded join: don't block forever on a stuck task.
             let _ = h.await;
         }
         tracing::info!("scheduler shutdown complete");
@@ -251,10 +264,15 @@ impl Scheduler {
 /// Drive an interval + shutdown select loop. Each tick calls `tick_fn`.
 ///
 /// Discards the first immediate tick (`interval.tick()` returns immediately on
-/// the first call) so cold-start doesn't double-trigger. The shutdown signal
-/// breaks out promptly even between ticks.
-async fn run_periodic<F>(name: &'static str, period: Duration, shutdown: Arc<Notify>, tick_fn: F)
-where
+/// the first call) so cold-start doesn't double-trigger. Shutdown breaks out
+/// either via an explicit `()` broadcast OR via `Closed` (sender dropped) —
+/// both treated identically.
+async fn run_periodic<F>(
+    name: &'static str,
+    period: Duration,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    tick_fn: F,
+) where
     F: Fn() + Send + 'static,
 {
     let mut interval = tokio::time::interval(period);
@@ -264,12 +282,18 @@ where
     interval.tick().await;
     loop {
         tokio::select! {
+            biased;
+            // Bias the shutdown branch so a notified shutdown wins over a
+            // simultaneously-ready tick. `recv()` returns Ok(()) on send,
+            // Err(Lagged) if we missed messages (impossible with capacity=1
+            // and a single send), or Err(Closed) when sender is dropped.
+            // All three are "exit now".
+            res = shutdown_rx.recv() => {
+                tracing::debug!(task = name, ?res, "scheduler task shutting down");
+                break;
+            }
             _ = interval.tick() => {
                 tick_fn();
-            }
-            _ = shutdown.notified() => {
-                tracing::debug!(task = name, "scheduler task shutting down");
-                break;
             }
         }
     }

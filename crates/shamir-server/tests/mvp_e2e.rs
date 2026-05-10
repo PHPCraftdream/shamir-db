@@ -91,6 +91,13 @@ struct WireAuthOk {
     #[serde(with = "serde_bytes")]
     session_id: Vec<u8>,
     expires_at_ns: u64,
+    /// Resumption ticket — present iff the server issued one. v1 server
+    /// always issues; an empty `Vec` here means the issuance failed
+    /// (warned in server logs) and the client must re-auth from scratch.
+    #[serde(default, with = "serde_bytes")]
+    resumption_ticket: Vec<u8>,
+    #[serde(default)]
+    resumption_expires_at_ns: u64,
 }
 
 // --------------------------------------------------------------------------
@@ -304,14 +311,28 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     // the placeholder pin doesn't match (which it won't, since it's all-
     // zero). The callback receives the real pin as `[u8; 32]` — we record
     // it and treat it as the trust-decision step.
+    // Server is expected to issue a resumption ticket — assert it does so
+    // we don't silently regress §5.4 / SESSION_RESUMPTION wiring.
+    assert!(
+        !ok_wire.resumption_ticket.is_empty(),
+        "server must issue a resumption ticket in auth_ok",
+    );
+    // Ticket expiry is computed by `issue_initial_ticket` from the same
+    // wall-clock as the session expiry; both use a 24h TTL, so they are
+    // ~equal. Just assert the ticket carries a non-zero TTL.
+    assert!(
+        ok_wire.resumption_expires_at_ns >= ok_wire.expires_at_ns
+            || ok_wire.resumption_expires_at_ns > 0,
+        "ticket must carry an expiry timestamp",
+    );
     let auth_ok = ServerAuthOk {
         server_signature: sig32,
         server_pub_key: pub32,
         identity_sig: id_sig,
         session_id,
         expires_at_ns: ok_wire.expires_at_ns,
-        resumption_ticket: None,
-        resumption_expires_at_ns: None,
+        resumption_ticket: Some(ok_wire.resumption_ticket.clone()),
+        resumption_expires_at_ns: Some(ok_wire.resumption_expires_at_ns),
         rotation_in_progress: None,
         kdf_upgrade_required: None,
     };
