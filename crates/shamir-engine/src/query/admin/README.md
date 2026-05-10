@@ -83,10 +83,16 @@ pub trait AdminExecutor {
 
 ## Файлы
 
+DTO-структуры (`CreateDbOp`, `DropDbOp`, `CreateRepoOp`, `DropRepoOp`,
+`CreateTableOp`, `DropTableOp`, `CreateIndexOp`, `DropIndexOp`, `ListOp`)
+живут в крейте **`shamir-query-types::admin`**. Этот модуль — только re-export:
+
 | Файл | Описание |
 |------|----------|
-| `types.rs` | Все DDL структуры и `ListOp` enum |
-| `mod.rs` | Публичные re-exports |
+| `mod.rs` | Re-export DTO из `shamir-query-types::admin` |
+
+Реализация `ShamirAdminExecutor` (роутинг DDL → методы `ShamirDb`/`DbInstance`)
+лежит в [`shamir-db::shamir_db::execute`](../../../../shamir-db/src/shamir_db/execute.rs).
 
 ## Архитектура
 

@@ -27,9 +27,14 @@
 4.  **Reliability:** Checksums, Crash safety (storage backends handle durability).
 
 ### 🧹 Code Quality (ОБЯЗАТЕЛЬНО)
-1.  **cargo clippy --all-targets** - Проверить все предупреждения перед завершением работы
-2.  **cargo fmt** - Отформатировать код после завершения работы
-3.  **cargo test --lib** - Все тесты должны проходить
+1.  **cargo clippy --all-targets --workspace** - Проверить все предупреждения перед завершением работы
+2.  **cargo fmt --all** - Отформатировать код после завершения работы
+3.  **cargo test --workspace --lib** (или `scripts/test-all`) - Все тесты должны проходить
+
+Проект — Cargo workspace из 9 крейтов: `shamir-types`, `shamir-storage`,
+`shamir-query-types`, `shamir-engine`, `shamir-db`, `shamir-connect`,
+`shamir-server`, `shamir-transport-tcp`, `shamir-transport-ws`. Используй
+`--workspace` флаги вместо одиночных `cargo test --lib`.
 
 ---
 
@@ -53,7 +58,7 @@
 
 ### Правила для модулей с тестами:
 1. **Структура директорий:** Каждый модуль (тип, компонент) имеет отдельную папку `tests/`
-   - Пример: `crates/shamir-db/src/types/tests/`, `crates/shamir-db/src/core/tests/`, `crates/shamir-engine/src/table/tests/`
+   - Пример: `crates/shamir-types/src/types/tests/`, `crates/shamir-types/src/core/interner/tests/`, `crates/shamir-engine/src/table/tests/`
 
 2. **Разделение тестов по типам:**
    - Создавай отдельные файлы для логически связанных тестов
@@ -64,7 +69,7 @@
    - Не содержит сам тестовый код
 
 4. **Подключение тестов в родительском модуле:**
-   - В файле модуля (например, `crates/shamir-db/src/types/mod.rs`) добавь:
+   - В файле модуля (например, `crates/shamir-types/src/types/mod.rs`) добавь:
    ```rust
    #[cfg(test)]
    mod tests;
@@ -80,7 +85,7 @@
 
 ### Пример структуры:
 ```
-crates/shamir-db/src/types/
+crates/shamir-types/src/types/
 ├── mod.rs            # содержит #[cfg(test)] mod tests;
 ├── value.rs         # только реализация типов
 ├── record_id.rs     # только реализация типов

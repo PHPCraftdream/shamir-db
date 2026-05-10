@@ -89,15 +89,16 @@ let matches = callback.matches(&record, &ctx);
 
 ## Файлы
 
+DTO-типы (`Filter`, `FilterValue`, `Cond`, `FilterExpr`, `FilterExprOp`,
+`FnCall`, `FieldPath`) живут в крейте **`shamir-query-types::filter`**.
+В `shamir-engine::query::filter` остаётся только runtime-логика, которой
+нужен интернер:
+
 | Файл | Описание |
 |------|----------|
-| `filter_enum.rs` | `Filter` enum — AST фильтров |
-| `filter_value.rs` | `FilterValue` — типы значений |
-| `eval.rs` | `compile_filter()`, `FilterCallback`, `compare_values()`, `resolve_field()` |
-| `eval_context.rs` | `FilterContext` — контекст выполнения |
-| `cond.rs` | `Cond` — условный оператор ($cond) |
-| `filter_expr.rs` | `FilterExpr`, `FilterExprOp` — арифметические выражения ($expr) |
-| `fn_call.rs` | `FnCall` — системные функции ($fn) |
+| `mod.rs` | Re-export DTO + публикация runtime-функций |
+| `eval.rs` | `compile_filter()`, `FilterCallback`, `compare_values()`, `resolve_field()`, `intern_field_path`, `filter_value_to_inner` |
+| `eval_context.rs` | `FilterContext` — контекст выполнения (Interner + результаты других запросов) |
 
 ## Архитектура
 

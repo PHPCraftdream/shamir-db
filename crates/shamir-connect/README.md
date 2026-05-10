@@ -26,13 +26,20 @@ shamir-connect = { version = "0.1", default-features = false, features = ["clien
 
 ## Status
 
-**v0.1 alpha** — under active TDD development. Tracks spec v1 (frozen).
+**v0.1 alpha** — TDD-developed against spec v1 (frozen). The full handshake,
+session lifecycle, password rotation, and resumption tickets are all
+implemented end-to-end with integration coverage in `tests/`.
 
-Implementation order (per AGENTS.md):
-1. Foundation: types, canonical auth_message, crypto wrappers
-2. Test vectors loading + verification
-3. Common: HKDF anti-enumeration, password normalization
-4. Client: SCRAM derivation, mutual auth verify, pin check
-5. Server: SCRAM verify, identity signing, session lifecycle
-6. Resumption ticket: AEAD encrypt/decrypt, family counter
-7. Integration tests: full handshake round-trip
+Implemented surface (see source layout under `src/`):
+
+- **common/** — canonical `auth_message` builder, crypto wrappers,
+  fake-blob anti-enumeration, password / username (PRECIS) normalization,
+  envelope, KDF params, identity, rotation primitives, latency helpers
+- **client/** — bootstrap, SCRAM handshake, password change, key rotation
+- **server/** — bootstrap, handshake, SCRAM verify, session manager, resume
+  tickets, password change, key rotation, audit chain, lockout / rate limit /
+  Argon2 semaphore, durable counters, admin ops, dispatch
+
+Integration tests under `tests/` exercise full round-trips for bootstrap,
+handshake, resume, rotation, password change, session lifecycle, admin ops,
+log redaction, and PRECIS username handling.

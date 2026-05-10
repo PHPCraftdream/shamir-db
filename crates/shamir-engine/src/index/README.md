@@ -36,7 +36,7 @@ pub struct IndexManager {
 ```rust
 pub struct IndexDefinition {
     pub name_interned: u64,
-    pub items: Vec<IndexInfoItem>,
+    pub paths: Vec<IndexInfoItem>,
 }
 ```
 
@@ -52,11 +52,16 @@ pub struct IndexInfoItem {
 
 ### IndexRecordKey
 
-Ключ записи в B-Tree индекса. Хранит значения полей для hash-based lookup.
+Ключ записи в B-Tree индекса (25 байт: `is_unique` + `name_interned` +
+двойной FxHash значений). Двойной хеш — защита от коллизий; при попадании
+на коллизию данные обязательно перепроверяются по фактическому значению.
 
 ```rust
 pub struct IndexRecordKey {
-    pub values: Vec<InnerValue>,
+    pub is_unique: u8,        // 1 = unique, 0 = regular
+    pub name_interned: u64,   // interned ID имени индекса
+    pub hash1: u64,           // FxHash значений
+    pub hash2: u64,           // FxHash с другим seed (XOR name_interned)
 }
 ```
 

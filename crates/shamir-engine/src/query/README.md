@@ -328,7 +328,9 @@ Direction: `asc` (default), `desc`. Nulls: `first`, `last`.
 {"drop_repo": "hot_cache"}
 ```
 
-Engines: `in_memory`. Disk engines (sled, redb, fjall) требуют конфигурации path.
+Engines: `in_memory` (всегда), `sled` / `redb` / `fjall` / `nebari` / `persy` /
+`canopy` (если соответствующая cargo-feature включена при сборке).
+Disk-движкам требуется поле `path`.
 
 ### Create/Drop Table
 
@@ -365,9 +367,10 @@ Engines: `in_memory`. Disk engines (sled, redb, fjall) требуют конфи
 
 ---
 
-## Auth (Roles & Permissions) — *planned*
+## Auth (Roles & Permissions)
 
-Подробная документация: [auth/README.md](./auth/README.md)
+Реализовано: пользователи, роли, permissions с row-level security через
+`SessionPermissions`. Подробная документация: [auth/README.md](./auth/README.md).
 
 ### Users
 

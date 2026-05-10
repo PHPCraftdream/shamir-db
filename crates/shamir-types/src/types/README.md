@@ -79,7 +79,7 @@ pub type InnerValue = Value<InternerKey>;
 ### Examples
 
 ```rust
-use shamir_db::types::value::Value;
+use shamir_types::types::value::Value;
 
 // Simple values
 let null = Value::<String>::Null;
@@ -104,7 +104,7 @@ let bigint = Value::Big(BigInt::from(1000i64));
 Values serialize to/from MessagePack:
 
 ```rust
-use shamir_db::types::value::InnerValue;
+use shamir_types::types::value::InnerValue;
 
 let value = InnerValue::Int(42);
 let bytes = value.to_bytes();  // Bytes (MessagePack format)
@@ -155,7 +155,7 @@ pub struct RecordId([u8; 16]);
 ### Creation
 
 ```rust
-use shamir_db::types::record_id::RecordId;
+use shamir_types::types::record_id::RecordId;
 
 // Generate new random ID
 let id = RecordId::new();

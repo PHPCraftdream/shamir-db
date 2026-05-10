@@ -4,40 +4,52 @@ This module provides a unified interface over 7 embedded database engines (plus 
 
 ## Architecture
 
+`error`, `types` (Store / Repo trait surface), `storage_in_memory`, and
+`storage_cached` are always compiled. Each on-disk backend is gated by its
+own cargo feature (default feature `all-backends` turns them all on; embedded
+builds can opt out).
+
 ```
-storage/
-├── types.rs                  # Store and Repo traits
-├── error.rs                  # DbError, DbResult types
-├── storage_in_memory.rs      # In-memory backend (testing/caching)
-├── storage_cached.rs         # Cached wrapper (sync/async write modes)
-├── storage_sled.rs           # Sled backend
-├── storage_redb.rs           # Redb backend
-├── storage_fjall.rs          # Fjall backend
-├── storage_nebari.rs         # Nebari backend
-├── storage_persy.rs          # Persy backend
-└── storage_canopy.rs         # Canopy backend
+shamir-storage/src/
+├── lib.rs
+├── README.md
+├── types.rs                  # Store and Repo traits  (always compiled)
+├── error.rs                  # DbError, DbResult types (always compiled)
+├── storage_in_memory.rs      # In-memory backend       (always compiled)
+├── storage_cached.rs         # Cached wrapper          (always compiled)
+├── storage_sled.rs           # Sled backend       (feature = "sled")
+├── storage_redb.rs           # Redb backend       (feature = "redb")
+├── storage_fjall.rs          # Fjall backend      (feature = "fjall")
+├── storage_nebari.rs         # Nebari backend     (feature = "nebari")
+├── storage_persy.rs          # Persy backend      (feature = "persy")
+└── storage_canopy.rs         # Canopy backend     (feature = "canopy")
 ```
 
 ## Core Traits
 
 ### `Store` Trait
-Low-level key-value store operating on raw bytes:
+Low-level key-value store operating on raw bytes. Keys are `RecordKey =
+Bytes` (opaque to storage; higher layers use `RecordId` 16-byte
+identifiers serialized via `RecordId::to_bytes`).
 
 ```rust
+pub type RecordKey = Bytes;
+type RecordStream =
+    Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+
 #[async_trait]
 pub trait Store: Send + Sync {
     // Basic operations
-    async fn insert(&self, value: Bytes) -> DbResult<RecordId>;
-    async fn set(&self, key: RecordId, value: Bytes) -> DbResult<bool>;
-    async fn get(&self, key: RecordId) -> DbResult<Bytes>;
-    async fn remove(&self, key: RecordId) -> DbResult<bool>;
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey>;
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool>;
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes>;
+    async fn remove(&self, key: RecordKey) -> DbResult<bool>;
 
-    // Iteration
-    async fn iter(&self) -> DbResult<Vec<(RecordId, Bytes)>>;
+    // Async streaming (PHP-style generators with batching + prefetch)
+    fn iter_stream(&self, batch_size: usize) -> RecordStream;
 
-    // Async streaming (PHP-style generators!)
-    fn iter_stream(&self, batch_size: usize)
-        -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordId, Bytes)>, DbError>> + Send>>;
+    // Prefix-filtered streaming (used by index scans)
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream;
 }
 ```
 
@@ -69,8 +81,8 @@ pub trait Repo: Send + Sync {
 ## Usage Example
 
 ```rust
-use shamir_db::storage::storage_sled::SledRepo;
-use shamir_db::storage::types::Repo;
+use shamir_storage::storage_sled::SledRepo;
+use shamir_storage::types::Repo;
 
 // Open repository
 let repo = SledRepo::new("./my_db")?;
@@ -79,8 +91,8 @@ let repo = SledRepo::new("./my_db")?;
 let store = repo.store_get("users").await?;
 
 // Use store
-let id = store.insert(b"Alice").await?;
-let data = store.get(id).await?;
+let key = store.insert(Bytes::from_static(b"Alice")).await?;
+let data = store.get(key).await?;
 
 // Stream records (memory-efficient!)
 let mut stream = store.iter_stream(100);

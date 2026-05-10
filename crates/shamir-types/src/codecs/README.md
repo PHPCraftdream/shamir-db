@@ -354,9 +354,9 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue
 ### Basic Codec (JSON)
 
 ```rust
-use shamir_db::codecs::Codec;
-use shamir_db::codecs::basic::JsonCodec;
-use shamir_db::types::value::UserValue;
+use shamir_types::codecs::Codec;
+use shamir_types::codecs::basic::JsonCodec;
+use shamir_types::types::value::UserValue;
 
 let codec = JsonCodec;
 let value = UserValue::Str("Hello".to_string());
@@ -371,10 +371,10 @@ let decoded: UserValue = codec.decode(&bytes)?;
 ### Interned Codec
 
 ```rust
-use shamir_db::codecs::interned::InternedCodec;
-use shamir_db::codecs::interned::JsonInternedCodec;
-use shamir_db::core::interner::Interner;
-use shamir_db::types::value::InnerValue;
+use shamir_types::codecs::interned::InternedCodec;
+use shamir_types::codecs::interned::JsonInternedCodec;
+use shamir_types::core::interner::Interner;
+use shamir_types::types::value::InnerValue;
 
 let interner = Interner::new();
 let codec: Box<dyn InternedCodec> = JsonInternedCodec.into();
@@ -390,7 +390,7 @@ let output = codec.encode_with_interner(&inner_value, &interner)?;
 ### Bincode Functions
 
 ```rust
-use shamir_db::codecs::basic::{to_bytes, from_bytes};
+use shamir_types::codecs::basic::{to_bytes, from_bytes};
 
 let value = 42i32;
 
@@ -529,7 +529,7 @@ use shamir_db::codecs::interned::{json_to_inner, inner_to_json, msgpack_to_inner
 use shamir_db::codecs::interned::{intern_string_key, deintern_key};
 
 // For bincode
-use shamir_db::codecs::basic::{to_bytes, from_bytes};
+use shamir_types::codecs::basic::{to_bytes, from_bytes};
 
 // For legacy (DO NOT USE - deprecated)
 use shamir_db::codecs::transform; // Will emit deprecation warning

@@ -118,8 +118,14 @@ pub struct WriteResult {
 
 ## Файлы
 
+DTO-типы (`InsertOp`, `UpdateOp`, `SetOp`, `DeleteOp`, `UpdateSelect`,
+`UpdateReturnMode`, `WriteResult`) живут в крейте
+**`shamir-query-types::write`**. Этот модуль содержит только re-export:
+
 | Файл | Описание |
 |------|----------|
-| `types.rs` | `InsertOp`, `UpdateOp`, `SetOp`, `DeleteOp`, `UpdateSelect`, `UpdateReturnMode` |
-| `write_result.rs` | `WriteResult` |
-| `mod.rs` | Re-exports |
+| `mod.rs` | Re-export DTO из `shamir-query-types::write` |
+
+Сама логика выполнения write-операций находится в
+[`shamir-engine::table`](../../table/README.md) (`write_exec.rs`,
+`TableManager::execute_insert/update/delete/set`).
