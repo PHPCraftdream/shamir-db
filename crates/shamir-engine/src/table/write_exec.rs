@@ -223,25 +223,12 @@ impl TableManager {
             }
         };
 
-        // Scan for existing record matching all key fields
-        let mut found: Option<(shamir_types::types::record_id::RecordId, InnerValue)> = None;
-        let stream = self.list_stream(batch_size);
-        futures::pin_mut!(stream);
-        'outer: while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            for (id, record) in batch {
-                let all_match = key_fields.iter().all(|(path, expected)| {
-                    resolve_field(&record, path)
-                        .map(|v| crate::query::filter::compare_values(&v, expected)
-                            == Some(std::cmp::Ordering::Equal))
-                        .unwrap_or(false)
-                });
-                if all_match {
-                    found = Some((id, record));
-                    break 'outer;
-                }
-            }
-        }
+        // Locate the existing record (if any) — Opt B uses a regular
+        // single-field index when one exists for the key path; falls
+        // back to a full scan otherwise.
+        let found = self
+            .lookup_existing_for_set(&key_fields, batch_size)
+            .await?;
 
         // Convert the new value
         let new_inner = json_value_to_inner(&op.value, interner)
@@ -293,6 +280,64 @@ impl TableManager {
             records: vec![json::Value::Object(result_obj)],
             execution_time_us: start.elapsed().as_micros() as u64,
         })
+    }
+}
+
+impl TableManager {
+    /// Locate the record matching `key_fields` for `execute_set`.
+    ///
+    /// **Opt B (write-path index lookup).** If the key has exactly one
+    /// field AND there is a regular single-field index covering it,
+    /// the lookup goes through `IndexManager::lookup_by_index` —
+    /// O(log n) instead of the O(n) full-table scan that the original
+    /// implementation always did.
+    ///
+    /// Falls back to the original full scan when:
+    ///   - the key has more than one field (composite index lookup is
+    ///     a future extension), or
+    ///   - no matching index exists.
+    async fn lookup_existing_for_set(
+        &self,
+        key_fields: &[(Vec<u64>, InnerValue)],
+        batch_size: usize,
+    ) -> DbResult<Option<(shamir_types::types::record_id::RecordId, InnerValue)>> {
+        // Index fast-path — single-field key with a covering regular index.
+        if key_fields.len() == 1 {
+            let (path, value) = &key_fields[0];
+            if let Some(idx_name) = self.find_single_field_index(path) {
+                let ids = self
+                    .index_manager_ref()
+                    .lookup_by_index(idx_name, std::slice::from_ref(value))
+                    .await?;
+                if let Some(&id) = ids.iter().next() {
+                    let inner = self.get(id).await?;
+                    return Ok(Some((id, inner)));
+                }
+                // Index says: no record with this key → don't scan,
+                // INSERT path.
+                return Ok(None);
+            }
+        }
+
+        // Fallback: full scan. Worst-case O(n); short-circuits on the
+        // first match.
+        let stream = self.list_stream(batch_size);
+        futures::pin_mut!(stream);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (id, record) in batch {
+                let all_match = key_fields.iter().all(|(path, expected)| {
+                    resolve_field(&record, path)
+                        .map(|v| crate::query::filter::compare_values(&v, expected)
+                            == Some(std::cmp::Ordering::Equal))
+                        .unwrap_or(false)
+                });
+                if all_match {
+                    return Ok(Some((id, record)));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
