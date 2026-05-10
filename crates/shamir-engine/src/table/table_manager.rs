@@ -10,6 +10,7 @@ use shamir_types::core::interner::TouchInd;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_manager::IndexManager;
+use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::query::filter::eval::{compile_filter, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
@@ -24,6 +25,7 @@ pub struct TableManager {
     interner: InternerManager,
     counter: Arc<RecordCounter>,
     index_manager: IndexManager,
+    sorted_indexes: SortedIndexManager,
 }
 
 impl Clone for TableManager {
@@ -34,6 +36,7 @@ impl Clone for TableManager {
             interner: self.interner.clone(),
             counter: Arc::clone(&self.counter),
             index_manager: self.index_manager.clone(),
+            sorted_indexes: self.sorted_indexes.clone(),
         }
     }
 }
@@ -52,6 +55,7 @@ impl TableManager {
         let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
         let index_manager =
             IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
+        let sorted_indexes = SortedIndexManager::new(Arc::clone(&info_store)).await?;
         let table = Table::new(data_store);
 
         Ok(Self {
@@ -60,6 +64,7 @@ impl TableManager {
             interner,
             counter,
             index_manager,
+            sorted_indexes,
         })
     }
 
@@ -74,12 +79,29 @@ impl TableManager {
         counter: Arc<RecordCounter>,
         index_manager: IndexManager,
     ) -> Self {
+        // Tests that construct TableManager directly don't exercise
+        // sorted indexes — give them an empty manager that shares
+        // info_store... but we don't have it here. The simplest
+        // thing: construct an "orphan" sorted manager backed by an
+        // in-memory store. Its persisted defs blob then lives in a
+        // throwaway store, which is fine because these tests never
+        // call sorted-index methods.
+        let info_store: Arc<dyn Store> = Arc::new(
+            shamir_storage::storage_in_memory::InMemoryStore::new(),
+        );
+        // Construct synchronously: SortedIndexManager::new() is async
+        // but the empty-state path doesn't await any real work.
+        let sorted_indexes = futures::executor::block_on(
+            SortedIndexManager::new(info_store),
+        )
+        .expect("sorted index manager init for test");
         Self {
             name,
             table: Arc::new(table),
             interner,
             counter,
             index_manager,
+            sorted_indexes,
         }
     }
 
@@ -113,6 +135,13 @@ impl TableManager {
         &self.index_manager
     }
 
+    /// Borrow the table's sorted-index manager — used by the planner
+    /// for range / order / min queries, and by DDL when a
+    /// `create_index { sorted: true }` op lands.
+    pub fn sorted_indexes(&self) -> &SortedIndexManager {
+        &self.sorted_indexes
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -133,6 +162,7 @@ impl TableManager {
         self.index_manager
             .on_record_created_unique(&id, value)
             .await?;
+        self.sorted_indexes.on_record_created(&id, value).await?;
 
         Ok(id)
     }
@@ -149,6 +179,7 @@ impl TableManager {
                 self.index_manager
                     .on_record_deleted_unique(&id, old)
                     .await?;
+                self.sorted_indexes.on_record_deleted(&id, old).await?;
             }
         }
         Ok(removed)
@@ -180,12 +211,16 @@ impl TableManager {
             self.index_manager
                 .on_record_created_unique(&id, value)
                 .await?;
+            self.sorted_indexes.on_record_created(&id, value).await?;
         } else if let Some(old) = old_value {
             self.index_manager
                 .on_record_updated(&id, &old, value)
                 .await?;
             self.index_manager
                 .on_record_updated_unique(&id, &old, value)
+                .await?;
+            self.sorted_indexes
+                .on_record_updated(&id, &old, value)
                 .await?;
         }
         Ok(created)
