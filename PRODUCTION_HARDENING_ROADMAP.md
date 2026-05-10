@@ -62,12 +62,11 @@
 | ~~6~~ | ~~Prometheus `/metrics`~~ | — | **Слит с #1** (один HTTP-сервер обслуживает все 4 endpoint'а: healthz/readyz/metrics/info) |
 | 7 | Slow query logging | ~1 ч | `if execution_time_us > N { tracing::warn!(..) }`. Тривиально, спасает от безумия в продакшене |
 | 8 | systemd unit + Dockerfile | ~2 ч | Без них ops-команда не задеплоит |
-| 9 | `changePassword` SCRAM | ~3 ч | Базовый user flow. Уже реализован в `shamir-connect::changepw`, нужно подключить через wire. Без него юзер не может сменить пароль = security incident response невозможен |
+| ~~9~~ | ~~`changePassword` SCRAM~~ | — | **Выкинуто из roadmap.** Изначально стояло как production-must "без него юзер не может сменить пароль". На практике admin может пересоздать SCRAM-юзера через уже-работающий wire-op `CreateScramUser` (delete старого через прямой доступ к `RedbUserDirectory` + create нового). Self-service changePassword — nice-to-have, не critical. Возвращаемся когда (а) compliance-driver требует self-service rotation, или (б) appears regular-user-flow с тысячами пользователей которым нужна smena без admin-вмешательства |
 | 10 | Server-side query limits cap | ~1 ч | `[security.query_limits] max_result_size_bytes`, `max_execution_time_ms`, `max_queries_per_batch`. Клиент может **уменьшить**, не **увеличить**. Сейчас 10MB-default — произвольный, нужен явный operator-knob |
 | 11 | Capacity planning docs | ~1 ч | Не код. README: "1 session = ~2 KB RAM, audit entry = ~200 bytes, redb growth ~X/день при Y запросов/сек" |
 
-**Итого P0 ≈ 18 часов** (после слияния #1 + #6: суммарно 4 ч вместо 1+3=4 ч,
-но один HTTP-сервер вместо двух отдельных задач — меньше boilerplate).
+**Итого P0 ≈ 15 часов** (после удаления changePassword, было 18).
 
 ### P1 — нужно если multi-user / долгосрочная эксплуатация
 
@@ -120,8 +119,8 @@
 8. Server-side query limits cap (configurable)   ~1 ч
 9. systemd unit + Dockerfile                      ~2 ч
 
-== Sprint 2 (~4 часов): user lifecycle ==
-10. changePassword wire-side                      ~3 ч
+== Sprint 2 (~1 час): docs ==
+# changePassword removed — see P0 #9 above for rationale.
 11. Capacity planning docs                        ~1 ч
 
 == Optional sprint 3 (~14 часов): multi-user maturity ==
@@ -186,7 +185,8 @@ services:
 ## Сводная оценка после ревью
 
 ```
-было P0    ~11 ч    →   стало P0     ~20 ч  (+ changePassword, slow-query log, query-limits cap, capacity docs)
+было P0    ~11 ч    →   стало P0     ~15 ч  (+ slow-query log, query-limits cap, capacity docs;
+                                                     – changePassword)
 было P1    ~22 ч    →   стало P1     ~14 ч  (выкинул IP-allowlist, cert-rotation, отдельный drain mode)
 было P2    ~49 ч    →   стало P2 на потребность  (HA, streaming, HSM — feature-driven, не roadmap)
 ─────────────────────────────────────────
