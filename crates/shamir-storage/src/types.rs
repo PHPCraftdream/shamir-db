@@ -72,6 +72,70 @@ pub trait Store: Send + Sync {
     /// # Returns
     /// Stream that yields batches of matching records
     fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream;
+
+    /// Returns an async stream of records whose keys fall in
+    /// `[start_inclusive ..= end_inclusive]` (lexicographic byte
+    /// order). `None` on either side = unbounded.
+    ///
+    /// Used by sorted-index range / order / min queries. Disk-backed
+    /// backends (redb, sled, fjall, persy, nebari, canopy) override
+    /// this with their native `range()` API → genuine
+    /// `O(log N + K)`. The default impl below leans on
+    /// `iter_stream` + filter — correct everywhere but
+    /// `O(N)` (used as fallback for `in_memory` / `cached` whose
+    /// hash-keyed storage can't seek).
+    ///
+    /// # Arguments
+    /// * `start_inclusive` — lower bound. `None` = scan from the start.
+    /// * `end_inclusive` — upper bound. `None` = scan to the end.
+    /// * `batch_size` — number of records per yielded batch.
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> RecordStream {
+        // Default impl: full scan + in-stream filter. Correct for
+        // any backend that has `iter_stream`. Native impls below
+        // make it O(log N + K) by seeking into the B-tree.
+        let inner = self.iter_stream(batch_size);
+        Box::pin(default_range_filter(inner, start_inclusive, end_inclusive))
+    }
+}
+
+/// Default range-filter wrapper around an existing iter stream.
+///
+/// Filters each yielded batch element-by-element against the
+/// `[start..=end]` window and yields filtered batches as soon as we
+/// have any (preserving the stream's batching semantics).
+fn default_range_filter(
+    mut inner: RecordStream,
+    start: Option<Bytes>,
+    end: Option<Bytes>,
+) -> impl Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send {
+    use futures::StreamExt;
+    async_stream::stream! {
+        while let Some(batch) = inner.next().await {
+            let batch = batch?;
+            let filtered: Vec<(RecordKey, Bytes)> = batch
+                .into_iter()
+                .filter(|(k, _)| {
+                    let after_start = match &start {
+                        Some(s) => k.as_ref() >= s.as_ref(),
+                        None => true,
+                    };
+                    let before_end = match &end {
+                        Some(e) => k.as_ref() <= e.as_ref(),
+                        None => true,
+                    };
+                    after_start && before_end
+                })
+                .collect();
+            if !filtered.is_empty() {
+                yield Ok(filtered);
+            }
+        }
+    }
 }
 
 /// A trait for a repository that can manage multiple `Store` instances.

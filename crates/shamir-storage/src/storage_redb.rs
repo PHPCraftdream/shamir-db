@@ -315,6 +315,71 @@ impl Store for RedbStore {
             }
         })
     }
+
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let start_bytes = start_inclusive.map(|b| b.to_vec());
+        let end_bytes = end_inclusive.map(|b| b.to_vec());
+
+        Box::pin(stream! {
+            // Cursor advances past the last key we yielded.
+            let mut cursor: Option<Vec<u8>> = None;
+
+            loop {
+                let db_clone = db.clone();
+                let table_name_clone = table_name.clone();
+                let cur = cursor.clone();
+                let initial_start = start_bytes.clone();
+                let upper = end_bytes.clone();
+
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = task::spawn_blocking(move || {
+                    let read_txn = db_clone.begin_read()?;
+                    let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name_clone);
+                    let table = read_txn.open_table(table_def)?;
+
+                    // After the first batch we resume past the
+                    // previously-yielded key (Excluded). Otherwise we
+                    // start at the user-supplied lower bound (Included)
+                    // or Unbounded.
+                    let lower = match (&cur, &initial_start) {
+                        (Some(c), _) => Bound::Excluded(c.as_slice()),
+                        (None, Some(s)) => Bound::Included(s.as_slice()),
+                        (None, None) => Bound::Unbounded,
+                    };
+                    let upper = match &upper {
+                        Some(e) => Bound::Included(e.as_slice()),
+                        None => Bound::Unbounded,
+                    };
+
+                    let range: (Bound<&[u8]>, Bound<&[u8]>) = (lower, upper);
+                    let mut items = Vec::new();
+                    for item in table.range::<&[u8]>(range)?.take(batch_size) {
+                        let (key, val) = item?;
+                        items.push((
+                            Bytes::copy_from_slice(key.value()),
+                            Bytes::copy_from_slice(val.value()),
+                        ));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+                let batch = batch?;
+                if batch.is_empty() {
+                    break;
+                }
+                cursor = batch.last().map(|(k, _)| k.to_vec());
+                yield Ok(batch);
+            }
+        })
+    }
 }
 
 // ============================================================================
@@ -432,5 +497,87 @@ mod tests {
         for key in &expected_keys {
             assert!(all_records.iter().any(|(rec_key, _)| rec_key == key));
         }
+    }
+
+    /// Native `iter_range_stream` on redb — exercises the
+    /// `table.range((Included, Included))` path.
+    #[tokio::test]
+    async fn test_redb_iter_range_stream_native() {
+        let path = "./test_data/redb_iter_range/db.redb";
+        if let Some(parent) = Path::new(path).parent() {
+            if parent.exists() {
+                fs::remove_dir_all(parent).unwrap();
+            }
+        }
+        let repo = RedbRepo::new(path).unwrap();
+        let store = repo.store_get("range_test").await.unwrap();
+
+        // Seed keys "k00".."k19" (sortable ASCII) — set() takes explicit keys.
+        for i in 0..20 {
+            let key = Bytes::from(format!("k{i:02}"));
+            let val = Bytes::from(format!("v{i}"));
+            store.set(key, val).await.unwrap();
+        }
+
+        // Closed range [k05 ..= k10]
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("k05")),
+            Some(Bytes::from("k10")),
+            100,
+        );
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k05", "k06", "k07", "k08", "k09", "k10"]);
+
+        // Unbounded upper.
+        let stream = store.iter_range_stream(Some(Bytes::from("k17")), None, 100);
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k17", "k18", "k19"]);
+
+        // Empty range — no overlap.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("z0")),
+            Some(Bytes::from("z9")),
+            100,
+        );
+        let mut count = 0;
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            count += batch.unwrap().len();
+        }
+        assert_eq!(count, 0);
+
+        // Cursor advance across multiple batches.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("k00")),
+            Some(Bytes::from("k19")),
+            6, // 20 / 6 → 4 batches (6+6+6+2)
+        );
+        let mut total = 0;
+        let mut batches = 0;
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            let b = batch.unwrap();
+            assert!(b.len() <= 6);
+            total += b.len();
+            batches += 1;
+        }
+        assert_eq!(total, 20);
+        assert!(batches >= 4, "expected ≥4 batches, got {batches}");
+
+        fs::remove_dir_all(Path::new(path).parent().unwrap()).ok();
     }
 }
