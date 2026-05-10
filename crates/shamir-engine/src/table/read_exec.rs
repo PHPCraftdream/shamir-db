@@ -74,7 +74,7 @@ impl TableManager {
     }
 
     /// Find a single-field index whose path matches `field_path`.
-    fn find_single_field_index(&self, field_path: &[u64]) -> Option<u64> {
+    pub fn find_single_field_index(&self, field_path: &[u64]) -> Option<u64> {
         for def in self.index_manager_ref().iter_indexes() {
             if def.paths.len() == 1 && def.paths[0].path == field_path {
                 return Some(def.name_interned);

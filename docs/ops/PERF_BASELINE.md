@@ -235,6 +235,35 @@ out (see "Reproducing" section — bump `--measurement-time` to 5+).
 
 Zero regressions, broad workspace test sweep stays at 1179/0.
 
+## After Opt B — `execute_set` uses single-field index
+
+Change: `lookup_existing_for_set` helper added to `write_exec.rs`.
+When `set.key` has exactly one field AND a regular single-field
+index covers that field, we go through `IndexManager::lookup_by_index`
+(O(log n) BTreeSet read out of `info_store`) instead of the
+full-table scan. Falls back to scan when no index exists or the key
+is composite.
+
+Headline numbers (10K records, set on the LAST seeded record):
+
+| Bench                            | Baseline | After A   | After B   | Speed-up vs baseline |
+|----------------------------------|---------:|----------:|----------:|---------------------:|
+| **set_existing_with_index/100**  |   821 µs |   821 µs  |   78 µs   | **10.5×**            |
+| **set_existing_with_index/1000** |  8.02 ms |  8.4 ms   |   84 µs   | **95×**              |
+| **set_existing_with_index/10000**| 82.7 ms  | 100 ms    |  101 µs   | **818×**             |
+| set_existing_no_index/100        |   898 µs |   867 µs  |   852 µs  | unchanged (no index → fallback to scan) |
+| set_existing_no_index/1000       |  8.12 ms |  7.85 ms  |  7.57 ms  | unchanged |
+| set_existing_no_index/10000      | 79.5 ms  | 77.5 ms   | 77.8 ms   | unchanged |
+
+The "no index" path is unchanged by design — Opt B opts INTO the
+index path; absence of an index keeps the original scan behaviour.
+
+Other benches (read / update / delete / complex_filter / order /
+batch) are within noise vs Opt A. They don't go through the
+modified `lookup_existing_for_set` helper.
+
+Workspace test sweep stays at 1179/0.
+
 ## Next
 
 Optimisations land in PR sequence A → B → C → D. Each PR re-runs the
