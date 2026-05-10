@@ -2606,6 +2606,7 @@ dependencies = [
  "dashmap 6.1.0",
  "futures-util",
  "hex",
+ "indexmap",
  "ktav",
  "parking_lot 0.12.5",
  "redb",

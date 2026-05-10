@@ -39,6 +39,7 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::Error as ConnectError;
 
 use crate::user_directory::RedbUserDirectory;
+use crate::version::check_handshake_proto;
 
 use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::extract_tls_exporter;
@@ -225,6 +226,9 @@ enum HandshakeError {
     BadProof,
     UnknownUser,
     LockedOut,
+    /// Client requested a handshake-protocol version this server does not
+    /// implement. Fast-rejected before any Argon2id work.
+    UnsupportedVersion,
 }
 
 async fn run_handshake<R, W>(
@@ -249,6 +253,17 @@ where
         Ok(v) => v,
         Err(_) => return Err(HandshakeError::Decode),
     };
+    // Version dispatch — fast reject on unsupported versions BEFORE any
+    // Argon2id work or username lookup. Hardcoded list lives in
+    // `crate::version::SUPPORTED_HANDSHAKE_PROTO_VERSIONS`.
+    if let Err(e) = check_handshake_proto(init.version) {
+        tracing::info!(
+            requested = init.version,
+            err = %e,
+            "handshake rejected: unsupported protocol version",
+        );
+        return Err(HandshakeError::UnsupportedVersion);
+    }
     if init.client_nonce.len() != 32 {
         return Err(HandshakeError::Decode);
     }
