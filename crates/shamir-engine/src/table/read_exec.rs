@@ -254,6 +254,61 @@ impl TableManager {
             && query.pagination.is_none()
             && query.select.items.len() == 1
         {
+            // Q1 (1000×-class for MIN-only aggregate): if SELECT is
+            // exactly `min(field)` and there's a sorted index on
+            // `field`, we walk the index to its first key and return
+            // a single-record answer. O(log n) instead of full scan.
+            // MAX is symmetric but needs reverse iter on Store
+            // (Opt R) — not wired yet, falls through to full scan.
+            if let SelectItem::Aggregate {
+                func: shamir_query_types::read::AggFunc::Min,
+                field: shamir_query_types::read::AggregateField::Field(path),
+                alias,
+                ..
+            } = &query.select.items[0]
+            {
+                if let Some(field_path) = intern_field_path(path, interner) {
+                    if let Some(def) = self.sorted_indexes().find_by_field(&field_path) {
+                        if let Some(id) =
+                            self.sorted_indexes().lookup_min(def.name_interned).await?
+                        {
+                            // Load the record and extract the field value.
+                            let record = self.get(id).await?;
+                            let val = crate::query::filter::eval::resolve_field(
+                                &record, &field_path,
+                            );
+                            let json_val = match val {
+                                Some(v) => shamir_types::codecs::interned::inner_to_json_value(
+                                    &v, interner,
+                                ),
+                                None => serde_json::Value::Null,
+                            };
+                            let key = alias
+                                .as_deref()
+                                .unwrap_or_else(|| {
+                                    path.last().map(|s| s.as_str()).unwrap_or("min")
+                                })
+                                .to_string();
+                            let mut obj = serde_json::Map::new();
+                            obj.insert(key, json_val);
+                            return Ok(QueryResult {
+                                records: vec![serde_json::Value::Object(obj)],
+                                stats: Some(QueryStats {
+                                    index_used: Some(format!(
+                                        "sorted_idx_{}_min",
+                                        def.name_interned
+                                    )),
+                                    records_scanned: 1,
+                                    records_returned: 1,
+                                    execution_time_us: start.elapsed().as_micros() as u64,
+                                }),
+                                pagination: None,
+                            });
+                        }
+                    }
+                }
+            }
+
             if let SelectItem::CountAll { alias } = &query.select.items[0] {
                 let count: u64 = self.counter().get().await?;
                 let key = alias.as_deref().unwrap_or("count").to_string();
