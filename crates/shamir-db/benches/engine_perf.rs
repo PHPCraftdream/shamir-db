@@ -917,6 +917,38 @@ fn bench_bulk_insert_sled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same as `bulk_insert_sled` but with a regular index on the
+/// `city` field (cardinality 8 → high-fanout posting lists).
+/// Exposes the cost of index posting-list updates per insert.
+fn bench_bulk_insert_with_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("bulk_insert_with_index_sled");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(10));
+
+    for &count in &[100usize, 1_000] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.to_async(&rt).iter_custom(|iters| async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let tempdir = tempfile::TempDir::new().expect("tempdir");
+                    let shamir = fresh_db_sled(tempdir.path()).await;
+                    create_index(&shamir, "users", "by_city", "city", false).await;
+                    let req = req_bulk_insert(0, count);
+                    let start = Instant::now();
+                    shamir.execute("bench", &req).await.unwrap();
+                    total += start.elapsed();
+                    drop(shamir);
+                    drop(tempdir);
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_range_query_no_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_no_index_sled");
@@ -1069,6 +1101,7 @@ criterion_group!(
     bench_range_query_no_index,
     bench_range_query_with_index,
     bench_bulk_insert_sled,
+    bench_bulk_insert_with_index_sled,
     bench_range_query_no_index_sled,
     bench_range_query_with_index_sled,
     bench_range_query_narrow_no_index_sled,

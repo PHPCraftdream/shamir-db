@@ -601,10 +601,73 @@ bound. Wide ranges at low `start` (age=30 out of 18..78 → ~20%
 waste) get ~1.4×. Narrow ranges (age=30 exactly, single value)
 where we used to walk from age=18 → ~2.5×. As expected.
 
+## After hash-index posting layout: blob → key-per-record (2026-05-11)
+
+Before: each regular (non-unique) index value held its entire posting
+list as a serialised `BTreeSet<RecordId>` blob in one KV. Every
+`add_index_entry` did read-blob → deserialise → insert → serialise →
+write-blob — **O(K)** per write, where K is the cardinality of that
+particular index value. For a low-cardinality field (e.g. `city`
+with 8 unique values over 10 000 records → K up to 1250 per value),
+the blob grew to ~30 KB and every insert re-(de)serialised it.
+
+After: one physical KV per `(index_value, record_id)`:
+
+```
+key   = index_key (25 bytes) || record_id (16 bytes)   →   41 bytes
+value = empty
+```
+
+Same approach as the sorted-index layout (which always worked this
+way). Write is now **O(1)** regardless of K: just
+`info_store.set(composite_key, empty)`. Read does
+`scan_prefix(index_key, 25b)` and decodes record_ids from the last
+16 bytes of each key.
+
+Side-effects:
+- **Concurrent writes for distinct record_ids no longer race** for
+  one shared blob.
+- **drop_index** unchanged — it already scans by the 9-byte
+  `name_interned` prefix; both old (25b) and new (41b) keys match
+  it, so the migration story is "drop_index + create_index"
+  rebuilds in the new format.
+- **Opt G posting-list cache** still works at the (25-byte
+  logical-key → `Arc<BTreeSet<RecordId>>`) layer; populated by
+  scan-and-collect instead of by bincode deserialise.
+
+### Bench impact
+
+Write paths (sled, with `by_city` regular index, cardinality 8 →
+posting list grows toward 125/1000 records):
+
+| Bench                            | Pre #6 | Post #6 | Speedup |
+|----------------------------------|--------|---------|---------|
+| bulk_insert_with_index_sled/100  | 16.0 ms | 12.2 ms | **1.31×** |
+| bulk_insert_with_index_sled/1000 | 180 ms  | 121 ms  | **1.49×** |
+
+The indexed bulk insert now costs ~55 µs/record of index overhead
+(down from ~113 µs/record). The remaining gap vs no-index bulk
+insert (66 ms / 1000 = 66 µs/record) is mostly the per-insert
+posting set + cache invalidation.
+
+Read paths (in-memory; same hot scenarios, the lookup_by_index now
+goes scan_prefix instead of blob-get + deserialise):
+
+| Bench                                  | Pre #6 | Post #6 | Speedup |
+|----------------------------------------|--------|---------|---------|
+| read_by_city_with_index/10000          | 19.6 ms | 15.2 ms | **1.29×** |
+| read_by_city_with_index/1000           | 1.83 ms | 1.40 ms | **1.30×** |
+| update_by_id_with_index/10000          | 51 µs   | 42 µs   | **1.21×** |
+| count_with_filter_with_index/10000     | 88 µs   | 81 µs   | **1.09×** |
+
+Read wins come from "no bincode deserialisation of a 30 KB blob" —
+even for cached lookups the cold-fill is faster, and warm lookups
+inherit a smaller average path.
+
 ## Next
 
 Sprint γ remaining:
-- **#6** — hash-index posting layout from blob → key-per-record
-  (high-cardinality index writes; O(K)→O(1)).
 - **#3 / Opt O** — covering indexes (range-by-index without per-record
   data fetch — break the 6%-selectivity ceiling on sled).
+- **#4 / Opt P** — `Store::get_many` — batch the N random reads after
+  an index lookup into one spawn_blocking on disk backends.
