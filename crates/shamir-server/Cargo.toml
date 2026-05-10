@@ -18,7 +18,7 @@ path = "src/main.rs"
 shamir-connect = { path = "../shamir-connect", features = ["server", "client", "durable-redb"] }
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
 shamir-transport-ws = { path = "../shamir-transport-ws" }
-shamir-db = { path = "../.." }
+shamir-db = { path = "../shamir-db" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -1,6 +1,7 @@
 /target
 .idea
 /test_data/
+/crates/shamir-db/test_data/
 /web/node_modules/.bin/autoprefixer
 /web/node_modules/.bin/autoprefixer.cmd
 /web/node_modules/.bin/autoprefixer.ps1
