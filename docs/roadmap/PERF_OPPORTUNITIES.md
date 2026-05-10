@@ -307,19 +307,34 @@ future `Store` partial-read APIs.
 
 Real, but expensive. After F / L / Q1 / Q2 / G.
 
-### Opt L — batch `RecordId` allocator ✓ KEEP
+### Opt L — batch `RecordId` allocator ❌ TRIED AND REVERTED
 
-**Symptom (verified).** `RecordId::new()` calls `Utc::now()` (vDSO on
-Linux, ~20 ns) + `OsRng.fill_bytes(&mut bytes[8..16])` (real
-`getrandom` syscall, ~1 µs). Bulk insert N=1000 → ~1 ms wasted
-purely on syscalls before any storage write.
+The premise: `RecordId::new()` does `OsRng.fill_bytes(&mut
+bytes[8..16])` per id, which "must be" a getrandom syscall. Bulk
+insert 1000 → 1000 syscalls. Fix it with a thread-local pool of
+pre-drawn bytes, refilled every 1024 ids; expect 3–8 % on bulk
+insert.
 
-**Fix.** Thread-local `RecordIdAllocator` with 16 KB random pool;
-refill every 1024 ids. Single syscall per pool.
+**What actually happened.** Implemented as `thread_local!
+RefCell<RecordIdPool>` (16 KB pool, cursor advance, refill on
+exhaustion). Bench: bulk_insert/1000 **21.6 ms → 46 ms (+113 %)**.
 
-**Effort.** 1-2 hours.
+**Why.** Modern OS RNG isn't a per-call syscall:
 
-**Win.** 3–8 % on bulk insert (from `~1 ms / 25 ms`).
+- Linux: vDSO-backed getrandom is buffered in libc/std, syscalls
+  amortised per CPU.
+- Windows: BCryptGenRandom has internal buffering of the same shape.
+
+The 8-byte fill is ~10 ns of memcpy from an existing buffer. The
+TLS lookup + `RefCell::borrow_mut` + bounds-checked slice + the
+pool's own copy adds ~50 ns. Net regression.
+
+Reverted; `record_id.rs` is unchanged on `master`. Entry kept so
+the next person doesn't redo this experiment.
+
+**Lesson.** Cost predictions based on textbook syscall numbers
+("getrandom is ~1 µs") need to be checked against the actual
+runtime — both std and the OS have been buffering this for years.
 
 ### Opt M — specialised hot filter shapes ❌ DEFER
 
