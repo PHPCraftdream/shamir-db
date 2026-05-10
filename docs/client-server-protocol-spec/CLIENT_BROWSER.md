@@ -295,7 +295,7 @@ SDK responsibilities: Worker для Argon2id, lifecycle, auto-resume в той �
 
 ---
 
-## 10. Future (см. ROADMAP.md)
+## 10. Future (см. ../roadmap/ROADMAP.md)
 
 - WebAuthn second factor для admin
 - WebTransport API когда TLS exporter станет доступен в browser

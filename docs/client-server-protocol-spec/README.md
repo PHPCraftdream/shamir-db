@@ -45,8 +45,8 @@
 ### Clients
 - **[CLIENT_BROWSER.md](CLIENT_BROWSER.md)** — browser SDK: WASM crypto, CSP, anti-XSS.
 
-### Future (вне `docs/protocol/`)
-- **[../ROADMAP.md](../ROADMAP.md)** — v1.1+ planned features.
+### Future (вне `docs/client-server-protocol-spec/`)
+- **[../roadmap/ROADMAP.md](../roadmap/ROADMAP.md)** — v1.1+ planned features.
 
 ### Diagrams
 - **[diagrams/](diagrams/)** — Mermaid sequence + state diagrams для всех flows. Renders на GitHub inline.

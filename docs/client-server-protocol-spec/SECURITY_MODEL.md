@@ -3,7 +3,7 @@
 Adversary model, threat coverage, non-guarantees, compromise recovery overview.
 
 Operational детали (метрики, audit log, log redaction, recovery runbooks) — **IMPLEMENTATION_GUIDE.md**.
-Future hardening — **../ROADMAP.md**.
+Future hardening — **../roadmap/ROADMAP.md**.
 
 ---
 
@@ -160,4 +160,4 @@ Resumption tickets из browser path **не могут upgrade** в native sessi
 - **AUTH_PROTOCOL.md** — нормативный протокол
 - **IMPLEMENTATION_GUIDE.md** — operational details + audit chain HMAC
 - **SESSION_RESUMPTION.md** — ticket protocol
-- **../ROADMAP.md** — v1.1+ roadmap
+- **../roadmap/ROADMAP.md** — v1.1+ roadmap

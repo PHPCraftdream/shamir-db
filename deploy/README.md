@@ -112,7 +112,7 @@ out of the box.
 
 ## See also
 
-* `CAPACITY_PLANNING.md` (repo root) — sizing reference: per-unit RAM,
+* `docs/ops/CAPACITY_PLANNING.md` — sizing reference: per-unit RAM,
   CPU costs, disk growth rates, recommended VM sizes.
-* `PRODUCTION_HARDENING_ROADMAP.md` (repo root) — what's still
+* `docs/roadmap/PRODUCTION_HARDENING_ROADMAP.md` — what's still
   outstanding for full production maturity.

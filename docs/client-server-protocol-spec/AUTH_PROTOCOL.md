@@ -967,7 +967,7 @@ Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **M
 
 ## 16. Test Vectors
 
-**Release blocker для v1.** Файл `docs/protocol/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
+**Release blocker для v1.** Файл `docs/client-server-protocol-spec/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
 
 ### Example: auth_message hex dump
 
@@ -1053,4 +1053,4 @@ Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 14
 - **TRANSPORT_TCP.md, TRANSPORT_WS.md** — конкретные transport bindings
 - **ADMIN_UI_HOSTING.md** — static admin UI delivery + REST для активных сессий
 - **CLIENT_BROWSER.md** — browser SDK guidelines
-- **../ROADMAP.md** — v1.1+ planned features
+- **../roadmap/ROADMAP.md** — v1.1+ planned features
