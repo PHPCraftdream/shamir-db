@@ -50,7 +50,6 @@ flowchart TB
         SCRAM["SCRAM Verifier<br/>(real/fake constant-time)"]
         Identity["Ed25519 Signer<br/>(identity_sig +<br/>rotation orphan recovery)"]
         Bootstrap["Bootstrap Handler<br/>(CAS + invariants)"]
-        ChangePw["changePassword<br/>(no server Argon2id)"]
     end
     
     subgraph "Session Layer"
@@ -83,7 +82,6 @@ flowchart TB
     SCRAM --> Sessions
     Bootstrap --> Users
     Bootstrap --> Meta
-    ChangePw --> Sessions
     Resume --> Sessions
     AdminCmds --> Sessions
     AdminCmds --> Users
@@ -97,7 +95,6 @@ flowchart TB
     
     Sessions --> AuditLog
     Bootstrap --> AuditLog
-    ChangePw --> AuditLog
     AdminCmds --> AuditLog
     
     AuditLog --> AuditDB

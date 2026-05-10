@@ -565,7 +565,6 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 
 8.2. Cross-record updates — single transaction:
 - bootstrap (create admin + invalidate token + set superuser_ever_existed)
-- changePassword (update user record + invalidate sessions + invalidate tickets)
 - updateUser (update record + tickets_invalid_before + kick sessions)
 - rotateServerIdentity (update keypair + start transition window + audit)
 
@@ -617,7 +616,6 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 - Channel binding mismatch detection
 - Argon2id semaphore exhaustion
 - Pre-Argon2id binding_mode rejection (DoS-amp)
-- changePassword fresh challenge flow
 - updateUser → ticket invalidation (всех families)
 - Restart warmup window
 - **Multi-device family isolation:** device A refresh не invalidates device B

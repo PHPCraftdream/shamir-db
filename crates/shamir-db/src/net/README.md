@@ -258,37 +258,20 @@
 
 ## 8. Key Rotation
 
-### 8.1. Смена пароля
+> **Self-service password rotation удалён в v1.** Admin пересоздаёт SCRAM-юзера
+> через `CreateScramUser` (с предварительным удалением старой записи через
+> `RedbUserDirectory`). См. `docs/roadmap/PRODUCTION_HARDENING_ROADMAP.md` P0 #9.
 
-8.1.1. Двухшаговый: server challenge + повторный SCRAM proof
-8.1.2. `Client: {"change_password_init": {}}`
-8.1.3. `Server: {"challenge_nonce": "base64(32)"}`
-8.1.4. `scram_auth_message = session_id || challenge_nonce`
-8.1.5. `scram_proof = client_key XOR HMAC(stored_key_client, scram_auth_message)` — Argon2id от текущего пароля
-8.1.6. `{"change_password": {"scram_proof", "new_stored_key", "new_server_key", "new_salt", "invalidate_sessions": true}}`
-8.1.7. `invalidate_sessions` default `true`. `false` только для planned rotation
-8.1.8. Инвалидирует все сессии **кроме текущей**
-8.1.9. In-flight handshakes → `authentication_failed`, retry
-8.1.10. Serialized per user (mutex). Атомарная проверка + обновление
+### 8.1. Смена Ed25519 ключа
 
-### 8.2. Crash recovery (change_password)
+8.1.1. Server challenge + SCRAM proof + подпись старым ключом
+8.1.2. `old_signature = Ed25519::sign(old_private_key, "ShamirDB-KeyChange" || session_id || challenge_nonce || new_public_key)`
+8.1.3. `{"change_key": {"scram_proof", "old_signature", "new_public_key", "invalidate_sessions": true}}`
+8.1.4. Crash recovery: запись новой версии .key.new → `fsync(file)` → `fsync(directory)`, после server OK атомарный rename.
 
-8.2.1. Записать alice.key.new → `fsync(file)` → close → `fsync(directory)`
-8.2.2. Отправить change_password → OK
-8.2.3. `rename alice.key.new → alice.key` (POSIX atomic) → `fsync(directory)`
-8.2.4. Recovery при старте (без сети): ввести пароль → Argon2id → попробовать расшифровать .new (AES-GCM tag + Ed25519 self-check). Success → попробовать логин на сервер. Server OK → rename .new → .key. Server fail → fallback на .key локально. Расшифровка .new fail → попробовать .key. Всё локально до первого сетевого запроса
-8.2.5. Покрывает: crash до сервера, crash после сервера, потеря OK
+### 8.2. Admin reset
 
-### 8.3. Смена Ed25519 ключа
-
-8.3.1. Server challenge + SCRAM proof + подпись старым ключом
-8.3.2. `old_signature = Ed25519::sign(old_private_key, "ShamirDB-KeyChange" || session_id || challenge_nonce || new_public_key)`
-8.3.3. `{"change_key": {"scram_proof", "old_signature", "new_public_key", "invalidate_sessions": true}}`
-8.3.4. Crash recovery аналогичен 8.2
-
-### 8.4. Admin reset
-
-8.4.1. Удаление auth записи → re-registration через admin
+8.2.1. Удаление auth записи → re-registration через admin
 
 ## 9. Session
 
@@ -378,12 +361,11 @@
 15.8. **HKDF local_key:** фиксированный HKDF salt "local". Однако local_key зависит от серверного salt через salted_password (Argon2id). Salt mismatch → hard failure (15.4)
 15.9. **Server identity:** Ed25519 server key (6.5) + TOFU pinning. Server binding через Ed25519::sign (не HMAC(server_key)). Независим от пароля. Компрометация пароля **не** = MITM
 15.10. **Post-compromise:** backward secrecy only. Rekey interval = 2^32. DH re-handshake (Signal ratchet) — future
-15.11. **Audit logging:** auth success/fail, change_password, change_key, admin kill
+15.11. **Audit logging:** auth success/fail, change_key, admin kill
 15.12. **Rekeying sync:** TCP ordered delivery. Десинхронизация = баг → disconnect
 15.13. **Backoff entries:** TTL = BACKOFF_RESET. Eviction по TTL
-15.14. **change_password:** требует повторного ввода пароля
-15.15. **Cluster:** nonce cache per-node. Multi-node: sticky sessions или shared cache
-15.16. **auth_init unsigned:** mitigated через auth_message inclusion + constant-time
+15.14. **Cluster:** nonce cache per-node. Multi-node: sticky sessions или shared cache
+15.15. **auth_init unsigned:** mitigated через auth_message inclusion + constant-time
 
 ## 16. Flow
 

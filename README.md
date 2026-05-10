@@ -9,36 +9,57 @@ A modern, modular embedded database written in Rust with pluggable storage backe
 **Version:** 0.1.0 (Alpha)
 
 **Current Features:**
-- ✅ 6 storage backend abstraction (Sled, Redb, Fjall, Nebari, Persy, Canopy)
+- ✅ 6 storage backend abstraction (Sled, Redb, Fjall, Nebari, Persy, Canopy) — feature-gated
 - ✅ Key interning system (strings → u64 for memory efficiency)
-- ✅ Async streaming with batch generators (PHP-style)
+- ✅ Async streaming with batch generators
 - ✅ High-level Table engine with UserValue/InnerValue transformations
-- ✅ Comprehensive test coverage (91+ tests)
+- ✅ Multi-database / multi-repo system store with durable metadata
+- ✅ JSON-based Batch query API: WHERE / SELECT / GROUP BY / ORDER BY / LIMIT / pagination
+- ✅ Cross-query references via `{"$query": "@alias[].field"}`
+- ✅ Admin DDL (Create/Drop Db / Repo / Table / Index, List)
+- ✅ Auth ops (Create/Drop User / Role, Grant / Revoke)
+- ✅ Secondary indexes + query planner
+- ✅ Wire protocol: TLS 1.3 + SCRAM-Argon2id + Ed25519 channel binding
+- ✅ Transports: TCP, WebSocket (native + browser)
+- ✅ Session resumption tickets (AES-256-GCM, anti-downgrade, multi-device families)
+- ✅ Audit log with HMAC chain
+- ✅ 1178+ workspace tests
 
-**Planned Features:**
-- 🔜 Internal indexes for fast lookups
-- 🔜 Secondary indexes
-- 🔜 Query planner
-- 🔜 SQL-like query language
+**Planned Features (see [docs/roadmap/ROADMAP.md](docs/roadmap/ROADMAP.md)):**
+- 🔜 Browser WASM client (Argon2id in Web Worker)
+- 🔜 SQL-like query frontend (today: structured JSON queries)
+- 🔜 QUIC transport
+- 🔜 Post-quantum hybrid handshake
 
 ## 🏗️ Architecture
 
+Cargo workspace, layered from foundation upward:
+
 ```
-src/
-├── api/           # Public API layer (REST, gRPC, etc.)
-├── codecs/        # Serialization/deserialization
-├── core/          # Core abstractions (Interner, Transform)
-├── db/            # Database layer
-│   ├── engine/    # Table engine with interning
-│   └── storage/   # Storage backend implementations
-└── types/         # Type definitions (Value, RecordId, etc.)
+crates/
+├── shamir-types/         # Value model, identifiers, codecs, interner
+├── shamir-storage/       # Store/Repo traits + 7 backend impls (feature-gated)
+├── shamir-engine/        # Table engine + query language + batch executor
+├── shamir-query-types/   # Query DTOs (filter, read, write, batch — wire-shareable)
+├── shamir-db/            # Top-level facade: SystemStore, ShamirDb::execute(batch)
+├── shamir-connect/       # Wire protocol: SCRAM-Argon2id + envelopes + session
+├── shamir-transport-tcp/ # TLS 1.3 over TCP
+├── shamir-transport-ws/  # WebSocket (native WSS + browser WSS)
+├── shamir-transport-udp/ # UDP framing (experimental)
+└── shamir-server/        # ServerLauncher: bootstrap, listeners, RBAC, audit
 ```
+
+Documentation:
+- **[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** — DB internals (storage, types, indexes)
+- **[docs/client-server-protocol-spec/](docs/client-server-protocol-spec/)** — wire protocol (auth, session, transports)
+- **[docs/roadmap/](docs/roadmap/)** — production hardening, server plan, feature roadmap
+- **[docs/ops/](docs/ops/)** — capacity planning, perf tuning
 
 ## 🚀 Quick Start
 
 ```rust
-use shamir_db::db::storage::storage_sled::SledRepo;
-use shamir_db::db::engine::Table;
+use shamir_db::storage::storage_sled::SledRepo;
+use shamir_db::engine::Table;
 use shamir_db::types::value::Value;
 
 #[tokio::main]
@@ -83,15 +104,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## 🧪 Testing
 
 ```bash
-# Run all tests
-cargo test
+# Full workspace test sweep (1178+ tests, ~90s)
+bash scripts/test-all.sh
 
-# Run specific storage tests
-cargo test test_sled
-cargo test test_redb
-
-# Run streaming tests
-cargo test iter_stream
+# Specific crate
+cargo test -p shamir-engine
+cargo test -p shamir-server
 ```
 
 ## 📊 Performance

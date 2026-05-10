@@ -144,7 +144,7 @@ full_value_idx:
 ## Loading Configuration
 
 ```rust
-use shamir_db::db::engine::dispatcher::ConfigLoader;
+use shamir_db::engine::dispatcher::ConfigLoader;
 
 // Load from file
 let config = ConfigLoader::load_from_file("config/database.yaml")?;

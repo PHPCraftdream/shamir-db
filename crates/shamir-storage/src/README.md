@@ -69,8 +69,8 @@ pub trait Repo: Send + Sync {
 ## Usage Example
 
 ```rust
-use shamir_db::db::storage::storage_sled::SledRepo;
-use shamir_db::db::storage::types::Repo;
+use shamir_db::storage::storage_sled::SledRepo;
+use shamir_db::storage::types::Repo;
 
 // Open repository
 let repo = SledRepo::new("./my_db")?;

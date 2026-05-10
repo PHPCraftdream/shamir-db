@@ -37,7 +37,7 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | User enumeration via timing | A1, A2 | Constant-time fake values via HKDF, generic errors, padded latency |
 | User enumeration via channel binding | A2 | binding_mode embedded в auth_message → MITM detection |
 | KDF param downgrade | A2 | Raw kdf_params в auth_message; server-side floor |
-| Mid-session downgrade через changePassword | A5 | Server игнорирует client kdf_params, всегда defaults |
+| Mid-session downgrade через admin user update | A5 | Server игнорирует client kdf_params в `createUser`, всегда defaults |
 | Online brute-force | A2 | Backoff + rate limit per (subnet, user_hash), silent lockout |
 | Distributed brute-force через ботнет | A2, A10 | Backoff per subnet; lockout cross subnets per user |
 | Offline brute-force после DB leak | A3 | Argon2id 128 MB / time=4 — memory-hard |
@@ -50,7 +50,7 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | Session theft via file read | A6 | Session не persist'ится; ticket в memory only (browser) |
 | Cross-transport resumption downgrade | A2, A6 | binding_strength monotonicity rule |
 | Resumption ticket replay | A6 | Monotonic counter с synchronous persist |
-| Stale resumption после revoke ролей | A5 (mitigated) | `tickets_invalid_before` инвалидирует tickets, обновляется через kickSession/changePassword/updateUser |
+| Stale resumption после revoke ролей | A5 (mitigated) | `tickets_invalid_before` инвалидирует tickets, обновляется через kickSession/updateUser |
 | Identity rotation event replay | A2 | Per-recipient `session_id` (32 байта) в подписи |
 | Identity rotation chain attack (stale pin) | A2 | `SHA256(old_pub)` в подписи |
 | KCI (Key Compromise Impersonation) | A3 | Ed25519 priv независим от пароля |

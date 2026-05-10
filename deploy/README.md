@@ -36,8 +36,9 @@ curl -fsS http://127.0.0.1:9090/readyz    # → "ready"
 ```
 
 First boot: a random `bootstrap_token.txt` appears in `data_dir/` AND
-in the service log at WARN level. Use it to log in once and run
-`changePassword` (when wired — Sprint 2.1) before deleting the file.
+in the service log at WARN level. Use it for the first SCRAM login,
+then have an admin pre-create operator users via `CreateScramUser`
+and delete the bootstrap token file.
 
 ## Quick start (Docker)
 

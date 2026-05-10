@@ -256,8 +256,7 @@ consumed_counters: DashMap<(user_id, ticket_family_id), u64>
 
 Сервер invalidates **все** tickets **всех families** юзера через `tickets_invalid_before_ns` (см. AUTH_PROTOCOL §3.5). Triggers:
 - `kickSession` admin command (§12.4 AUTH)
-- `changePassword`
-- `updateUser` с new roles (§12.6 AUTH)
+- `updateUser` с new roles (§12.5 AUTH)
 - Manual `revokeUserTickets` admin command (см. §7)
 
 При resume (§5.4 step 6): `ticket.original_auth_at_ns > user.tickets_invalid_before_ns` обязательно. **Строгое `>`** (не `>=`) исключает race window даже если timestamp resolution коллидирует.

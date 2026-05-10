@@ -95,7 +95,7 @@ pub struct Table<R: Repo> {
 ## ✅ Completed Refactoring (2025-02-08)
 
 ### Phase 1: Extract RecordCounter ✅
-**File:** `src/db/engine/table/counter.rs`
+**File:** `src/table/counter.rs`
 
 ```rust
 pub struct RecordCounter {
@@ -119,7 +119,7 @@ impl RecordCounter {
 ---
 
 ### Phase 2: Extract InternerManager ✅
-**File:** `src/db/engine/table/interner.rs`
+**File:** `src/table/interner.rs`
 
 ```rust
 pub struct InternerManager {
@@ -152,7 +152,7 @@ impl Clone for InternerManager {
 ---
 
 ### Phase 3: InnerValue-Only Table Implementation ✅
-**File:** `src/db/engine/table/table.rs`
+**File:** `src/table/table.rs`
 
 ```rust
 pub struct Table<R: Repo> {
@@ -176,7 +176,7 @@ pub struct Table<R: Repo> {
 ### Phase 4: Test Organization ✅
 **Structure:**
 ```
-src/db/engine/table/
+src/table/
 ├── mod.rs              # Facade with only exports
 ├── counter.rs          # RecordCounter implementation + 5 tests
 ├── interner.rs         # InternerManager implementation + 5 tests
@@ -403,7 +403,7 @@ All tests are organized in separate `tests/` folders with:
 
 **Example:**
 ```
-src/db/engine/index/
+src/index/
 ├── index_definition.rs
 ├── index_info.rs
 ├── index_info_item.rs
@@ -521,7 +521,7 @@ pub use interner::InternerManager;  // ✅ Export for higher-level use
 ### At Test Level
 ```rust
 use crate::core::transform;
-use crate::db::engine::table::{Table, InternerManager};
+use crate::table::{Table, InternerManager};
 
 async fn create_test_setup() -> (Table<SledRepo>, InternerManager) {
     let repo = Arc::new(SledRepo::new(path)?);
@@ -774,22 +774,22 @@ The Table module has been successfully refactored from a 1100-line God object in
 ## Files Changed
 
 ### Created
-- `src/db/engine/table/counter.rs` (170 lines)
-- `src/db/engine/table/interner.rs` (185 lines, with Clone impl)
-- `src/db/engine/table/table.rs` (236 lines - InnerValue-only, no interning!)
-- `src/db/engine/table/mod.rs` (10 lines)
-- `src/db/engine/table/tests/mod.rs` (6 lines)
-- `src/db/engine/table/tests/crud_tests.rs` (373 lines - test-level interning)
-- `src/db/engine/table/tests/concurrent_tests.rs` (310 lines - shared InternerManager)
-- `src/db/engine/table/tests/persistence_tests.rs` (262 lines - persisted interner keys)
+- `src/table/counter.rs` (170 lines)
+- `src/table/interner.rs` (185 lines, with Clone impl)
+- `src/table/table.rs` (236 lines - InnerValue-only, no interning!)
+- `src/table/mod.rs` (10 lines)
+- `src/table/tests/mod.rs` (6 lines)
+- `src/table/tests/crud_tests.rs` (373 lines - test-level interning)
+- `src/table/tests/concurrent_tests.rs` (310 lines - shared InternerManager)
+- `src/table/tests/persistence_tests.rs` (262 lines - persisted interner keys)
 
 ### Deleted
-- `src/db/engine/table.rs` (1100 lines - old monolithic file)
-- `src/db/engine/table/table_inner.rs` (236 lines - temporary file, merged into table.rs)
+- `src/table.rs` (1100 lines - old monolithic file)
+- `src/table/table_inner.rs` (236 lines - temporary file, merged into table.rs)
 
 ### Updated
-- `src/db/engine/mod.rs` (already had correct exports)
-- `src/db/engine/table.md` (updated with new architecture documentation)
+- `src/mod.rs` (already had correct exports)
+- `src/table.md` (updated with new architecture documentation)
 
 ---
 
@@ -813,7 +813,7 @@ All tests have been reorganized into separate `tests/` folders to:
 
 ### New Structure
 ```
-src/db/engine/
+src/
 ├── dispatcher/
 │   ├── config.rs
 │   ├── dispatcher.rs

@@ -53,7 +53,7 @@
 
 ### Правила для модулей с тестами:
 1. **Структура директорий:** Каждый модуль (тип, компонент) имеет отдельную папку `tests/`
-   - Пример: `crates/shamir-db/src/types/tests/`, `crates/shamir-db/src/core/tests/`, `crates/shamir-db/src/db/engine/table/tests/`
+   - Пример: `crates/shamir-db/src/types/tests/`, `crates/shamir-db/src/core/tests/`, `crates/shamir-engine/src/table/tests/`
 
 2. **Разделение тестов по типам:**
    - Создавай отдельные файлы для логически связанных тестов
