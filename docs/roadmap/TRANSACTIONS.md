@@ -13,6 +13,10 @@ turning that hollow promise into reality.
 > `Store` / `Repo` traits. The current direction below builds the
 > transactional layer **above** the trait, on the dumb-KV API — every
 > backend behaves identically.
+>
+> Implementation analysis (current code recon, type changes,
+> zero-overhead non-tx path, concurrent-test scenarios) lives in a
+> companion file: [`TRANSACTIONS_IMPL.md`](./TRANSACTIONS_IMPL.md).
 
 ---
 
