@@ -1,6 +1,6 @@
 //! ShamirDB connection protocol library.
 //!
-//! Implements `spec/AUTH_PROTOCOL.md` v1: transport-agnostic SCRAM-Argon2id
+//! Implements `docs/protocol/AUTH_PROTOCOL.md` v1: transport-agnostic SCRAM-Argon2id
 //! authentication with Ed25519 server identity.
 //!
 //! # Modules
@@ -14,7 +14,7 @@
 //! # Spec compliance
 //!
 //! Domain separation tags, byte layouts, and validation rules follow
-//! `spec/AUTH_PROTOCOL.md` §1-§19. Wire-level test vectors live in
+//! `docs/protocol/AUTH_PROTOCOL.md` §1-§19. Wire-level test vectors live in
 //! `crates/shamir-connect/test-vectors/`.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]

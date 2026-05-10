@@ -1,6 +1,6 @@
 # ShamirDB Authentication Protocol v1 — Complete Specification
 
-> Single-file consolidated specification. Source: `spec/` directory + `ROADMAP.md`.
+> Single-file consolidated specification. Source: `docs/protocol/` directory + `ROADMAP.md`.
 > Order matches recommended reading flow.
 >
 > Prepared for external review.
@@ -27,7 +27,7 @@
 
 ## Part 1: README
 
-> Source file: `spec/README.md`
+> Source file: `docs/protocol/README.md`
 
 ## ShamirDB Protocol Specification
 
@@ -76,7 +76,7 @@
 #### Clients
 - **[CLIENT_BROWSER.md](CLIENT_BROWSER.md)** — browser SDK: WASM crypto, CSP, anti-XSS.
 
-#### Future (вне `spec/`)
+#### Future (вне `docs/protocol/`)
 - **[../ROADMAP.md](../ROADMAP.md)** — v1.1+ planned features.
 
 #### Test vectors
@@ -97,7 +97,7 @@
 
 ## Part 2: AUTH_PROTOCOL
 
-> Source file: `spec/AUTH_PROTOCOL.md`
+> Source file: `docs/protocol/AUTH_PROTOCOL.md`
 
 ## ShamirDB Authentication Protocol v1
 
@@ -1068,7 +1068,7 @@ Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **M
 
 ### 16. Test Vectors
 
-**Release blocker для v1.** Файл `spec/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
+**Release blocker для v1.** Файл `docs/protocol/test-vectors/auth_v1.json` обязан содержать полный набор. Inline minimal example для bootstrapping имплементаций:
 
 #### Example: auth_message hex dump
 
@@ -1160,7 +1160,7 @@ Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 14
 
 ## Part 3: SECURITY_MODEL
 
-> Source file: `spec/SECURITY_MODEL.md`
+> Source file: `docs/protocol/SECURITY_MODEL.md`
 
 ## ShamirDB Security Model v1
 
@@ -1330,7 +1330,7 @@ Resumption tickets из browser path **не могут upgrade** в native sessi
 
 ## Part 4: SESSION_RESUMPTION
 
-> Source file: `spec/SESSION_RESUMPTION.md`
+> Source file: `docs/protocol/SESSION_RESUMPTION.md`
 
 ## ShamirDB Session Resumption v1
 
@@ -1705,7 +1705,7 @@ consumed_counters: DashMap<(user_id, ticket_family_id), u64>
 
 ## Part 5: TRANSPORT_TCP
 
-> Source file: `spec/TRANSPORT_TCP.md`
+> Source file: `docs/protocol/TRANSPORT_TCP.md`
 
 ## Transport: TCP
 
@@ -1823,7 +1823,7 @@ shamir+tcp://alice@10.0.0.5:7331?pin=...&accept_new_host=1   # TOFU first time
 
 ## Part 6: TRANSPORT_WS
 
-> Source file: `spec/TRANSPORT_WS.md`
+> Source file: `docs/protocol/TRANSPORT_WS.md`
 
 ## Transport: WebSocket
 
@@ -1942,7 +1942,7 @@ WS ping/pong каждые 30 секунд (server-initiated). Client долже�
 
 ## Part 7: ADMIN_UI_HOSTING
 
-> Source file: `spec/ADMIN_UI_HOSTING.md`
+> Source file: `docs/protocol/ADMIN_UI_HOSTING.md`
 
 ## Admin UI Hosting
 
@@ -2103,7 +2103,7 @@ Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
 ## Part 8: CLIENT_BROWSER
 
-> Source file: `spec/CLIENT_BROWSER.md`
+> Source file: `docs/protocol/CLIENT_BROWSER.md`
 
 ## Browser Client SDK
 
@@ -2413,7 +2413,7 @@ SDK responsibilities: Worker для Argon2id, lifecycle, auto-resume в той �
 
 ## Part 9: IMPLEMENTATION_GUIDE
 
-> Source file: `spec/IMPLEMENTATION_GUIDE.md`
+> Source file: `docs/protocol/IMPLEMENTATION_GUIDE.md`
 
 ## ShamirDB Implementation Guide
 
@@ -3020,7 +3020,7 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 
 ### 11. Test Plan (release blockers)
 
-11.1. **Test vectors** — `spec/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
+11.1. **Test vectors** — `docs/protocol/test-vectors/auth_v1.json` обязателен (см. AUTH §16).
 
 11.2. **Integration tests:**
 - Full TCP+TLS auth round-trip
