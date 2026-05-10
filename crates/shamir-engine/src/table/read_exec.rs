@@ -29,7 +29,7 @@ impl TableManager {
     /// Returns `Some((index_name_interned, lookup_value_sets, residual_filter))`:
     /// - `lookup_value_sets` — one set per lookup (Eq -> 1 set, In -> N sets)
     /// - Each set is passed to `lookup_by_index` separately, results are unioned
-    fn try_plan_index_scan(
+    pub fn try_plan_index_scan(
         &self,
         filter: &Filter,
         interner: &Interner,
