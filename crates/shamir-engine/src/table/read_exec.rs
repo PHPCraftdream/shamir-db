@@ -463,6 +463,33 @@ impl TableManager {
                 let hi = encode_filter_value_for_sort(value)?;
                 Some((def.name_interned, None, Some(hi), None))
             }
+            // Q2: strict-bound variants. We don't try to compute an
+            // exclusive byte-suffix successor (encoding-dependent,
+            // brittle); instead we use the inclusive Gte/Lte index
+            // window and add an `Ne(value)` residual filter to
+            // exclude the boundary at evaluation time. Cheap — the
+            // boundary value typically yields at most a handful of
+            // records to filter.
+            Filter::Gt { field, value } => {
+                let field_path = intern_field_path(field, interner)?;
+                let def = mgr.find_by_field(&field_path)?;
+                let lo = encode_filter_value_for_sort(value)?;
+                let residual = Filter::Ne {
+                    field: field.clone(),
+                    value: value.clone(),
+                };
+                Some((def.name_interned, Some(lo), None, Some(residual)))
+            }
+            Filter::Lt { field, value } => {
+                let field_path = intern_field_path(field, interner)?;
+                let def = mgr.find_by_field(&field_path)?;
+                let hi = encode_filter_value_for_sort(value)?;
+                let residual = Filter::Ne {
+                    field: field.clone(),
+                    value: value.clone(),
+                };
+                Some((def.name_interned, None, Some(hi), Some(residual)))
+            }
             _ => None,
         }
     }
