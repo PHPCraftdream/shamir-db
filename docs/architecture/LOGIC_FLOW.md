@@ -143,6 +143,12 @@ boundaries stay clean.
   available (client computes vector); optional auto-embed-on-change
   through configured embedders for convenience. Full design in
   `docs/roadmap/EMBEDDINGS_AND_VECTORS.md`.
+- *Full-text search* — not implemented yet; the design adds a new
+  `IndexKind::FullText` alongside Regular/Unique/Vector, with own
+  tokenizer (Unicode by default for Cyrillic-friendly handling),
+  per-token posting lists, and BM25 scoring. Phase 0 is boolean
+  match; Phase 1 adds relevance ranking. Full design in
+  `docs/roadmap/FULL_TEXT_SEARCH.md`.
 - All three layers — DTOs (`shamir-query-types`), pure planning, and
   runtime execution — are now properly separated. The batch planner
   and `$query` reference parser live in `shamir-query-types::batch`
