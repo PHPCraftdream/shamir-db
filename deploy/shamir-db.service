@@ -1,0 +1,52 @@
+[Unit]
+Description=ShamirDB — production database server
+Documentation=https://github.com/PHPCraftdream/shamir-db
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shamir
+Group=shamir
+ExecStart=/usr/local/bin/shamir-server --config /etc/shamir/server.ktav
+Restart=on-failure
+RestartSec=5
+
+# Process limits — match the server's expected workload.
+# 65536 open files: enough for ~10K concurrent connections (one fd per
+# socket + several per redb mmap region) plus headroom.
+LimitNOFILE=65536
+
+# Logging — go to journald, the operator runs `journalctl -u shamir-db`.
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — defence in depth. Each setting below is a *narrowing* of
+# the privileges this service has; if any of them break a deployment,
+# revisit the assumption (e.g. ProtectHome=read-only if the data dir is
+# under /home for some reason — but it shouldn't be).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/shamir-db /var/log/shamir-db
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Resource caps — operator should size these to the host. Defaults
+# below are reasonable for a small/medium VM.
+MemoryMax=4G
+TasksMax=4096
+
+[Install]
+WantedBy=multi-user.target
