@@ -2,6 +2,7 @@
 //!
 //! Implements execute_insert, execute_update, execute_delete for TableManager.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -9,11 +10,13 @@ use serde_json as json;
 
 use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
 use shamir_types::core::interner::InternerKey;
-use crate::query::filter::eval::compile_filter;
+use crate::query::filter::eval::{compile_filter, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::eval::resolve_field;
+use crate::query::filter::Filter;
 use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
 use shamir_storage::error::DbResult;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
@@ -80,23 +83,31 @@ impl TableManager {
             }
         };
 
-        // Collect matching records (need to read-then-write)
+        // Collect matching records — Opt C: try index path first, fall
+        // back to scan when no index plan applies.
         let matched = if let Some(ref filter) = op.where_clause {
-            let callback = compile_filter(filter, interner);
-            let mut result = Vec::new();
-            let stream = self.list_stream(batch_size);
-            futures::pin_mut!(stream);
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result?;
-                for (id, record) in batch {
-                    if callback.matches(&record, ctx) {
-                        result.push((id, record));
+            if let Some(via_index) = self
+                .lookup_records_via_index(filter, ctx)
+                .await?
+            {
+                via_index
+            } else {
+                let callback = compile_filter(filter, interner);
+                let mut result = Vec::new();
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result?;
+                    for (id, record) in batch {
+                        if callback.matches(&record, ctx) {
+                            result.push((id, record));
+                        }
                     }
                 }
+                result
             }
-            result
         } else {
-            // No where clause — update ALL records
+            // No where clause — update ALL records (no index can help).
             let mut result = Vec::new();
             let stream = self.list_stream(batch_size);
             futures::pin_mut!(stream);
@@ -162,20 +173,27 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        let callback = compile_filter(&op.where_clause, interner);
-
-        // Collect IDs to delete (can't delete while streaming)
-        let mut to_delete = Vec::new();
-        let stream = self.list_stream(batch_size);
-        futures::pin_mut!(stream);
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            for (id, record) in batch {
-                if callback.matches(&record, ctx) {
-                    to_delete.push(id);
+        // Collect IDs to delete — Opt C: try index path, fall back to scan.
+        let to_delete: Vec<RecordId> = if let Some(via_index) = self
+            .lookup_records_via_index(&op.where_clause, ctx)
+            .await?
+        {
+            via_index.into_iter().map(|(id, _)| id).collect()
+        } else {
+            let callback = compile_filter(&op.where_clause, interner);
+            let mut result = Vec::new();
+            let stream = self.list_stream(batch_size);
+            futures::pin_mut!(stream);
+            while let Some(batch_result) = stream.next().await {
+                let batch = batch_result?;
+                for (id, record) in batch {
+                    if callback.matches(&record, ctx) {
+                        result.push(id);
+                    }
                 }
             }
-        }
+            result
+        };
 
         let mut affected: u64 = 0;
         for id in to_delete {
@@ -284,6 +302,60 @@ impl TableManager {
 }
 
 impl TableManager {
+    /// **Opt C (write-path index planning).** Try to satisfy `filter`
+    /// via an index lookup the same way `read` does — same planner
+    /// (`try_plan_index_scan`), same residual-filter handling.
+    ///
+    /// Returns:
+    ///   - `Ok(Some(records))` — index plan applied, returns the
+    ///     matching records (already filtered by residual if any)
+    ///   - `Ok(None)` — no index plan applies, caller must do a scan
+    ///   - `Err(_)` — actual storage / planner error
+    ///
+    /// Used by `execute_update` and `execute_delete` to short-circuit
+    /// the previous always-scan behaviour when a covering index exists.
+    async fn lookup_records_via_index(
+        &self,
+        filter: &Filter,
+        ctx: &FilterContext<'_>,
+    ) -> DbResult<Option<Vec<(RecordId, InnerValue)>>> {
+        let interner = self.interner().get().await?;
+        let Some((idx_name, lookup_sets, residual)) =
+            self.try_plan_index_scan(filter, interner)
+        else {
+            return Ok(None);
+        };
+
+        // Union the matching record IDs across every value-set the
+        // planner produced (Eq → 1 set, In → N sets).
+        let mut record_ids: BTreeSet<RecordId> = BTreeSet::new();
+        for values in lookup_sets {
+            let ids = self
+                .index_manager_ref()
+                .lookup_by_index(idx_name, &values)
+                .await?;
+            record_ids.extend(ids);
+        }
+
+        // Compile the residual filter once (if any) so we evaluate it
+        // per-record without re-compilation.
+        let residual_cb: Option<Box<dyn FilterCallback>> =
+            residual.as_ref().map(|f| compile_filter(f, interner));
+
+        let mut result = Vec::with_capacity(record_ids.len());
+        for id in record_ids {
+            let record = self.get(id).await?;
+            let matches = match &residual_cb {
+                Some(cb) => cb.matches(&record, ctx),
+                None => true,
+            };
+            if matches {
+                result.push((id, record));
+            }
+        }
+        Ok(Some(result))
+    }
+
     /// Locate the record matching `key_fields` for `execute_set`.
     ///
     /// **Opt B (write-path index lookup).** If the key has exactly one

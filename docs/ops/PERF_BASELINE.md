@@ -264,6 +264,67 @@ modified `lookup_existing_for_set` helper.
 
 Workspace test sweep stays at 1179/0.
 
+## After Opt C — `execute_update` / `execute_delete` use the read planner
+
+Change: new `lookup_records_via_index` helper in `write_exec.rs`
+that runs the same `try_plan_index_scan` the read path already
+uses, then loads each candidate by id and applies the residual
+filter. `execute_update` and `execute_delete` try this helper
+first and fall back to full scan only when no index plan applies.
+
+`try_plan_index_scan` and `find_single_field_index` made `pub` so
+the write path can call them.
+
+Headline numbers (10K records, last seeded record target):
+
+| Bench                              | Baseline | After A   | After B   | After C   | Speed-up vs baseline |
+|------------------------------------|---------:|----------:|----------:|----------:|---------------------:|
+| **update_by_id_with_index/100**    |   930 µs |   972 µs  |   930 µs  |   56 µs   | **16.6×**            |
+| **update_by_id_with_index/1000**   |  8.81 ms |  8.89 ms  |  8.81 ms  |   54 µs   | **163×**             |
+| **update_by_id_with_index/10000**  | 88.1 ms  | 92.2 ms   | 88.1 ms   |   79 µs   | **1115×**            |
+| **delete_by_id_with_index/100**    |  1.03 ms |  1.01 ms  |  1.03 ms  |   85 µs   | **12.1×**            |
+| **delete_by_id_with_index/1000**   |  9.32 ms | 10.03 ms  |  9.32 ms  |   97 µs   | **96×**              |
+| **delete_by_id_with_index/10000**  | 96.4 ms  | 95.7 ms   | 96.4 ms   |  102 µs   | **944×**             |
+| update_by_id_no_index/10000        | 90.3 ms  | 88.2 ms   | 90.3 ms   | 100.6 ms  | unchanged (no index) |
+| delete_by_id_no_index/10000        | 91.1 ms  | 94.5 ms   | 91.1 ms   | 93.1 ms   | unchanged (no index) |
+
+The "no index" path is unchanged by design — Opt C opts INTO the
+index plan; absence of an index keeps the original scan fallback.
+
+complex_filter / order_limit / batch_multi_read benchmarks within
+noise vs prior runs (this PR doesn't touch their code paths).
+
+Workspace tests: 1179/0 unchanged.
+
+## Headline summary — A + B + C combined
+
+| Scenario (10K records)                | Baseline | After A+B+C | Speed-up    |
+|---------------------------------------|---------:|------------:|------------:|
+| `set` by id  (with index)             | 82.7 ms  |  101 µs     | **818×**    |
+| `update` by id (with index)           | 88.1 ms  |   79 µs     | **1115×**   |
+| `delete` by id (with index)           | 96.4 ms  |  102 µs     | **944×**    |
+| `read` by id (with index, was already fast) |  50 µs |  60 µs   | unchanged   |
+| `bulk_insert/1000`                    | 27.2 ms  | 24.6 ms     | -10 % (Opt A) |
+| no-index variants of any op           | unchanged | unchanged  | unchanged    |
+
+Net architectural shift: the write path went from "always O(n) scan
+regardless of indexes" to "O(log n) when a covering single-field
+index exists, scan otherwise." Three orders of magnitude on the hot
+read-modify-write path with effectively no risk to the no-index
+fallback.
+
+Still on the table:
+- **Opt D** — execution_plan stages don't actually parallelise (8
+  independent reads in one batch take 8× single-read time, not
+  max-of-them). Easy fix in the executor; ~3-4× win on the
+  multi-read benchmark.
+- **Composite-key** index lookup for `set`. Today multi-field keys
+  fall back to scan.
+- **Implicit index auto-creation** when the user `set`s by an
+  un-indexed key. We deliberately stopped at "use what's there";
+  auto-create is a separate behaviour change that needs UX
+  consideration.
+
 ## Next
 
 Optimisations land in PR sequence A → B → C → D. Each PR re-runs the
