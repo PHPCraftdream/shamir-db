@@ -121,9 +121,20 @@ async fn validate_tables(
 
 /// Execute a planned batch stage by stage.
 ///
-/// For each stage, executes all queries (sequentially within a stage for now).
-/// Each query's FilterContext gets only the resolved_refs from its declared
-/// dependencies — not all accumulated results.
+/// For each stage, executes all queries sequentially within a stage.
+/// Each query's FilterContext gets only the resolved_refs from its
+/// declared dependencies — not all accumulated results.
+///
+/// **Note on parallelism.** The planner labels independent queries
+/// within one stage with the intent that they run in parallel.
+/// Driving them concurrently on a single task via
+/// `futures::future::try_join_all` was tried and measured as a
+/// no-op on in-memory CPU-bound workloads — there are no await
+/// suspension points inside the queries that would yield to peers.
+/// Real parallelism needs `tokio::spawn`-per-query, which in turn
+/// needs `Arc<dyn TableResolver>` / `Arc<dyn AdminExecutor>` (or a
+/// scoped-spawn helper); kept out of scope for now and tracked as a
+/// future opt.
 async fn execute_plan(
     plan: &BatchPlan,
     queries: &TMap<String, QueryEntry>,
