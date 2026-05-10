@@ -296,6 +296,72 @@ noise vs prior runs (this PR doesn't touch their code paths).
 
 Workspace tests: 1179/0 unchanged.
 
+## Sorted index on disk backend (sled) — real-world numbers
+
+Added bench groups `range_query_*_sled` that run the same scenarios
+against a sled-backed repo. Sled exercises the native
+`iter_range_stream` path (B-tree `range()`) added in `dab2b19`.
+
+### Wide range — `age between 30 and 35` (~10 % selectivity)
+
+| Records | no_index    | with_index   | Speed-up   |
+|--------:|------------:|-------------:|-----------:|
+|     100 |    1.16 ms  |    665 µs    |  **1.7×**  |
+|   1 000 |    9.53 ms  |    5.36 ms   |  **1.8×**  |
+|  10 000 |   81.3 ms   |   66.5 ms    |  **1.22×** |
+
+### Narrow range — `age = 30` (~1.6 % selectivity)
+
+| Records | no_index    | with_index   | Speed-up   |
+|--------:|------------:|-------------:|-----------:|
+|     100 |    944 µs   |    344 µs    |  **2.7×**  |
+|   1 000 |    7.95 ms  |    1.14 ms   |  **7.0×**  |
+|  10 000 |   79.5 ms   |   21.0 ms    |  **3.8×**  |
+
+### Why "only" 1–7× on disk (and 100–1000× on in_memory)
+
+This is real database physics, not a missed optimisation. The
+sorted-index flow on disk:
+
+1. Native B-tree range scan over the index store. Cheap, scales
+   with K matching keys.
+2. **For each matched RecordId — one `data_store.get(id)`.**
+   Random read.
+3. Apply residual filter, build output.
+
+Costs (measured on this Windows / sled host):
+
+- sequential scan via `iter_stream` (full-scan path):
+  **~8 µs / record** — batched, cache-friendly.
+- random `get(id)` against sled (sorted-index path):
+  **~125 µs / record** — B-tree walk from root for each key.
+
+Break-even: `K / N < 8 / 125 ≈ 6 %`. Below that, sorted index
+wins. Above, the random-read penalty eats the records-not-loaded
+savings. Our wide-range (10 %) sits right above; narrow-range
+(1.6 %) is comfortably below — exactly what the numbers show.
+
+In-memory doesn't see this trade-off because `DashMap.get` is
+~50 ns regardless of N — per-record load is essentially free,
+so the "skip non-matching records" win pays clean.
+
+### Path to true 1000× on disk
+
+Two real options, both architectural:
+
+- **Covering index** — store the projected fields directly in the
+  index entry, so range queries answer from the index alone without
+  per-record gets. Costs: extra disk + index maintenance on every
+  update touching those fields. Wins: zero per-record disk reads →
+  range queries become genuinely O(log N + K).
+- **Vectored / batched get** — instead of N independent gets,
+  hand the BTreeSet of RecordIds to a single helper that does
+  one B-tree walk over the data store. Some backends (sled, redb)
+  expose multi-get / scan-with-key-list primitives that can fold
+  these into far fewer disk seeks.
+
+Tracked as future work.
+
 ## After sorted-index v1 (range queries via `Between`)
 
 `SortedIndexManager` lands as a parallel index variant alongside
