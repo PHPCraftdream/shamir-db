@@ -35,6 +35,13 @@ single-writer per file. Если моя tx открыта, другой writer �
 блокируется навсегда — просто сериализуется. Читатели в это время
 гуляют по своим снимкам без блокировок.
 
+> ⚠️ **MVCC поддерживают НЕ все наши бэкенды.** Точно поддерживает —
+> redb. Остальные имеют какой-то транзакционный API, но семантику
+> изоляции мы для них пока **не верифицировали**. Поэтому Phase A
+> запускаем только для redb; остальные жёстко отвечают
+> `not_supported_by_backend` пока их семантика не проверена. См.
+> «Backend support matrix» ниже.
+
 ### Конкретно на временной шкале
 
 ```
@@ -115,9 +122,10 @@ Phase A first. Phase B when there is concrete demand.
 > transactions?"*
 
 Short answer: **we don't add row-level locks.** We rely on what the
-storage backend already gives us — **MVCC** for the engines that
-support it (redb, persy, canopy), and we forbid transactional batches
-on engines that don't (sled, fjall).
+storage backend already gives us. Crucially — *not all of our backends
+support transactional semantics in the same way*; see the matrix
+below. We forbid `transactional: true` on backends that can't honor
+the contract.
 
 ### MVCC in plain words
 
@@ -210,6 +218,50 @@ embedded-grade, simple semantics."
 
 ---
 
+## Backend support matrix
+
+What each storage crate actually exposes — and whether that maps to
+the contract Phase A needs (snapshot for reads, working set for
+writes, atomic publish on commit, drop = rollback):
+
+| Backend     | Library API                       | MVCC snapshot? | Phase A status |
+|-------------|-----------------------------------|----------------|----------------|
+| **redb**    | `WriteTxn` exclusive + `ReadTxn` MVCC | **Yes** (verified) | **Supported** — primary target |
+| **persy**   | `db.begin()` ACID transaction     | Has ACID, isolation level needs library-specific check | Candidate; needs research before opt-in |
+| **canopy**  | `begin_write()` / `commit()`      | Likely (CoW B+-tree) but unverified | Candidate; needs research |
+| **nebari**  | `Roots::transaction()`            | Versioned trees, ACID, but API surface is complex | Candidate; lowest priority |
+| **fjall**   | LSM atomic batches                | **No snapshot semantics** across reads + writes | Reject |
+| **sled**    | `Tree::transaction()` (CAS-style mini-tx) | Snapshot only inside the closure, not multi-stage | Reject |
+| **in_memory** | DashMap, no native tx           | Can be emulated via single Mutex, but blocks all readers | Reject for now (use redb in tests when atomicity matters) |
+| **cached**  | wrapper over a base store         | Inherits whatever the base provides | Inherit base; reject if base rejects |
+
+The honest read: **only redb is verified**. The rest of this document
+talks about the contract, the trait shape, and the executor flow —
+all of which work the same regardless of which backends are eventually
+opted in. Opt-in happens **per-backend, with its own PR, its own test
+coverage, and its own write-up of how its isolation semantics actually
+match the contract.**
+
+This is the discipline: don't claim ACID where we haven't proven it.
+
+### Order of opt-in
+
+1. **redb** (already MVCC, the canonical case) — Phase A scope.
+2. **canopy** if its CoW B+-tree exposes a `WriteTxn`-equivalent
+   primitive — research, then opt in.
+3. **persy** if its ACID tx gives snapshot reads inside the same tx.
+4. **nebari** last; complex API and not many users would pick it as
+   primary.
+5. **fjall**, **sled**, **fjall** — never opt in. Different value
+   proposition (LSM throughput, eventual consistency); using them with
+   `transactional: true` is a category error. Reject up front.
+
+A user who wants transactions and chose `sled` for a repo gets a
+clear `not_supported_by_backend` from the very first call — no silent
+inconsistency.
+
+---
+
 ## Phase A — what gets built
 
 ### Boundary rules
@@ -218,9 +270,11 @@ embedded-grade, simple semantics."
    ops touch more than one repo, return `not_supported` error
    ("transactional batch must target a single repo"). Two-phase commit
    across heterogeneous backends is out of scope.
-2. **Backend must support tx.** `redb`, `persy`, `canopy`, `nebari`
-   (with care), and `in_memory` (via Mutex). `sled` and `fjall` reject
-   with `not_supported_by_backend`. We don't fake atomicity.
+2. **Backend must support tx.** Strictly: only backends whose
+   isolation semantics we have *verified* against the contract above.
+   See the **backend support matrix** below. The default impl on the
+   `Repo` trait rejects with `not_supported_by_backend`, and each
+   backend opts in only after its tx semantics are confirmed.
 3. **Serial execution inside the tx.** The planner's parallel stages
    are flattened — a single WriteTxn handle is rarely `Send`-safe
    across tasks. Reads and writes in the batch run one after another.
@@ -406,9 +460,13 @@ This is real work and earns it own sprint. Phase A first.
 
 1. Storage trait extension + `WriteTx` shape (1 h)
 2. redb backend `begin_write_tx` impl (3-4 h, including index store glue)
-3. persy + canopy impls (2 h each)
-4. in-memory impl (Mutex-based, 1 h)
-5. Sled/Fjall reject path + `not_supported` error code (30 min)
+3. Reject path + `not_supported_by_backend` error code for everything
+   else, with a clear "supported on redb only for now" message
+   (30 min)
+4. persy / canopy / nebari opt-in — *separate work, after redb lands
+   and its real-world behaviour is known*. Each gets its own
+   read-the-library-docs sprint to confirm isolation semantics before
+   the trait impl lands
 6. Executor integration — single-repo check, serial exec, commit/rollback (2-3 h)
 7. Interner-persist deferral fix (1 h)
 8. IndexManager tx-aware writes (audit + fix, 2-3 h)
