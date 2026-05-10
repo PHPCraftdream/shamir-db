@@ -2852,6 +2852,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-client"
+version = "0.1.0"
+dependencies = [
+ "rmp-serde",
+ "rustls",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "shamir-connect",
+ "shamir-db",
+ "shamir-engine",
+ "shamir-query-types",
+ "shamir-server",
+ "shamir-transport-tcp",
+ "shamir-types",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
 name = "shamir-connect"
 version = "0.1.0"
 dependencies = [
@@ -2965,6 +2989,7 @@ dependencies = [
  "serde_json",
  "shamir-connect",
  "shamir-db",
+ "shamir-query-types",
  "shamir-transport-tcp",
  "shamir-transport-ws",
  "tempfile",

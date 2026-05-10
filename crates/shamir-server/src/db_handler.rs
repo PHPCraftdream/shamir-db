@@ -66,12 +66,17 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 
-use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest, BatchResponse};
+use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_db::ShamirDb;
+
+// Wire DTOs are defined once in `shamir-query-types::wire` so that the
+// SDK (`shamir-client`) and the server share the same definition. Re-
+// exported here so existing `shamir_server::db_handler::DbRequest` import
+// paths keep resolving.
+pub use shamir_query_types::wire::{DbRequest, DbResponse};
 
 use shamir_connect::common::crypto::random_array;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -82,110 +87,16 @@ use zeroize::Zeroizing;
 
 use crate::tables_registry::TablesRegistry;
 use crate::user_directory::RedbUserDirectory;
-use crate::version::{check_query_lang, CURRENT_QUERY_LANG_VERSION};
+use crate::version::check_query_lang;
 
 // --------------------------------------------------------------------------
 // Wire schema
 // --------------------------------------------------------------------------
-
-/// Application-layer DB request (msgpack-encoded payload of
-/// `RequestEnvelope.req`).
-///
-/// # Versioning
-///
-/// `Execute` carries an explicit `query_version: u32` so the server can
-/// reject unknown versions before invoking the DB layer. The supported
-/// list is hardcoded in [`crate::version::SUPPORTED_QUERY_LANG_VERSIONS`].
-/// Today there is exactly one supported version (1); when the schema of
-/// `BatchRequest` changes incompatibly, bump the version, add it to the
-/// supported list, and either translate or reject older versions
-/// explicitly.
-///
-/// `Ping` does not carry a version — it has no payload to interpret.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum DbRequest {
-    /// Health check — no DB lookup, no version negotiation.
-    Ping,
-    /// Execute a [`BatchRequest`] against the named database. The batch
-    /// payload is forwarded verbatim to [`ShamirDb::execute`]; the full
-    /// [`BatchResponse`] (records, stats, pagination, plan, transaction
-    /// info) is returned to the client.
-    Execute {
-        /// Query-language version. Hardcoded supported list lives in
-        /// [`crate::version::SUPPORTED_QUERY_LANG_VERSIONS`]. Today: `1`.
-        #[serde(default = "default_query_version")]
-        query_version: u32,
-        /// Target database name (must already exist, or be created within
-        /// the same batch via a `create_db` op).
-        db: String,
-        /// Batch payload — see `shamir_db::query::batch::BatchRequest`.
-        batch: BatchRequest,
-    },
-    /// Create a SCRAM-authenticatable user — the kind of user that can
-    /// actually log in over the wire. Distinct from `BatchOp::CreateUser`
-    /// (which creates a DB-level user for table-level permissions). The
-    /// server runs Argon2id with its configured KDF defaults to derive the
-    /// `stored_key` / `server_key` for the supplied password, then writes
-    /// the record to the durable [`RedbUserDirectory`].
-    ///
-    /// Requires `session.permissions.is_superuser`.
-    CreateScramUser {
-        /// Username (will be NFC + UsernameCaseMapped normalised by the
-        /// `RedbUserDirectory` write path).
-        name: String,
-        /// Plaintext password. Hashed server-side; the server zeroizes the
-        /// buffer immediately after derivation.
-        password: String,
-        /// Roles to grant. Use `["superuser"]` to give admin powers; any
-        /// other role string is opaque to the protocol layer (RBAC
-        /// matching is application-defined).
-        #[serde(default)]
-        roles: Vec<String>,
-    },
-}
-
-/// Default `query_version` used when the field is absent from an older
-/// client's payload. Today: `1` (the only supported version), so an
-/// older client without the field is treated as a v1 request rather
-/// than a hard error.
-fn default_query_version() -> u32 {
-    CURRENT_QUERY_LANG_VERSION
-}
-
-/// Application-layer DB response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum DbResponse {
-    /// Reply to [`DbRequest::Ping`].
-    Pong,
-    /// Successful batch execution. Carries the full [`BatchResponse`] with
-    /// no fields dropped.
-    Batch {
-        /// Echoed `id`, results map, execution_plan, execution_time_us,
-        /// optional transaction info.
-        response: BatchResponse,
-    },
-    /// Successful [`DbRequest::CreateScramUser`].
-    UserCreated {
-        /// Echoed user name (post-normalisation).
-        name: String,
-        /// Stable 16-byte user_id assigned by the directory.
-        #[serde(with = "serde_bytes")]
-        user_id: Vec<u8>,
-    },
-    /// DB-layer failure (permission, planner, query, lock-timeout, …).
-    /// Not a protocol error; the wire frame is a normal `ResponseEnvelope`.
-    Error {
-        /// Coarse classification so clients can switch without parsing
-        /// the message. One of: `permission_denied`, `validation`,
-        /// `limits`, `query`, `timeout`, `lock_timeout`, `unknown_db`,
-        /// `not_supported`, `user_exists`.
-        code: String,
-        /// Human-readable detail.
-        message: String,
-    },
-}
+//
+// `DbRequest` / `DbResponse` are defined in `shamir-query-types::wire`
+// (re-exported above). Server-side validation of `query_version`
+// against the hardcoded `SUPPORTED_QUERY_LANG_VERSIONS` list happens
+// inside `RequestHandler::handle` below.
 
 // --------------------------------------------------------------------------
 // Handler

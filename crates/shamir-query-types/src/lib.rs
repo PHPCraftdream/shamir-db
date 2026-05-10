@@ -27,6 +27,10 @@
 //!   planning + execution logic.
 //! * `auth::session::SessionPermissions::check_batch` — permission logic.
 //! * `common::filter_from_value` — JSON → Filter parser.
+//! * Note: `batch::planner` and `batch::reference` were lifted in here
+//!   from `shamir-engine` once it became clear they only consume DTOs.
+//!   `batch::executor` still lives in the engine since it drives a
+//!   `TableManager`.
 
 pub mod admin;
 pub mod auth;
@@ -34,6 +38,7 @@ pub mod batch;
 pub mod filter;
 pub mod read;
 pub mod table_ref;
+pub mod wire;
 pub mod write;
 
 pub use table_ref::TableRef;
