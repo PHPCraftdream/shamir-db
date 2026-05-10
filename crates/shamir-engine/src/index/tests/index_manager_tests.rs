@@ -2164,6 +2164,119 @@ async fn test_concurrent_unique_index_validation() {
     }
 }
 
+/// Opt G — posting-list cache correctness.
+///
+/// Reads should return the freshest BTreeSet after every write. The
+/// hash-keyed in-memory cache is invalidated on `on_record_*` hooks;
+/// these tests pin the invalidation paths so a future "forgot to drop
+/// the cache" regression fails immediately.
+#[tokio::test]
+async fn test_cache_invalidated_on_create() {
+    let (_, _, manager) = create_manager();
+    let def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(def).await.unwrap();
+
+    // Prime the cache with an empty result.
+    let r0 = manager
+        .lookup_by_index(1001, &[InnerValue::Int(42)])
+        .await
+        .unwrap();
+    assert!(r0.is_empty());
+
+    // Write — must invalidate the cached empty result.
+    let id = RecordId::new();
+    let val = create_test_value(&[(1, InnerValue::Int(42))]);
+    manager.on_record_created(&id, &val).await.unwrap();
+
+    let r1 = manager
+        .lookup_by_index(1001, &[InnerValue::Int(42)])
+        .await
+        .unwrap();
+    assert_eq!(r1.len(), 1, "create must invalidate the cached empty set");
+    assert!(r1.contains(&id));
+}
+
+#[tokio::test]
+async fn test_cache_invalidated_on_delete() {
+    let (_, _, manager) = create_manager();
+    let def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(def).await.unwrap();
+
+    let id = RecordId::new();
+    let val = create_test_value(&[(1, InnerValue::Int(7))]);
+    manager.on_record_created(&id, &val).await.unwrap();
+
+    // Prime cache with the populated result.
+    let r0 = manager
+        .lookup_by_index(1001, &[InnerValue::Int(7)])
+        .await
+        .unwrap();
+    assert_eq!(r0.len(), 1);
+
+    // Delete — must invalidate.
+    manager.on_record_deleted(&id, &val).await.unwrap();
+    let r1 = manager
+        .lookup_by_index(1001, &[InnerValue::Int(7)])
+        .await
+        .unwrap();
+    assert!(
+        r1.is_empty(),
+        "delete must invalidate the stale (id-still-present) cached set"
+    );
+}
+
+#[tokio::test]
+async fn test_cache_invalidated_on_update_value_change() {
+    let (_, _, manager) = create_manager();
+    let def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(def).await.unwrap();
+
+    let id = RecordId::new();
+    let old_val = create_test_value(&[(1, InnerValue::Int(10))]);
+    let new_val = create_test_value(&[(1, InnerValue::Int(20))]);
+    manager.on_record_created(&id, &old_val).await.unwrap();
+
+    // Prime the cached old-bucket and the (empty) new-bucket.
+    assert_eq!(
+        manager
+            .lookup_by_index(1001, &[InnerValue::Int(10)])
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(manager
+        .lookup_by_index(1001, &[InnerValue::Int(20)])
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Update — value moves from 10 to 20. Both cache entries must
+    // be invalidated for subsequent reads to be correct.
+    manager
+        .on_record_updated(&id, &old_val, &new_val)
+        .await
+        .unwrap();
+
+    assert!(
+        manager
+            .lookup_by_index(1001, &[InnerValue::Int(10)])
+            .await
+            .unwrap()
+            .is_empty(),
+        "old-bucket cache must be invalidated"
+    );
+    assert_eq!(
+        manager
+            .lookup_by_index(1001, &[InnerValue::Int(20)])
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "new-bucket cache must be invalidated"
+    );
+}
+
 #[tokio::test]
 async fn test_concurrent_reads_with_index() {
     let (_, _, manager) = create_manager();

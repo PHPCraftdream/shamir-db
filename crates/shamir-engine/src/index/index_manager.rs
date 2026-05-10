@@ -24,9 +24,17 @@ use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use bytes::Bytes;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+/// Maximum number of posting-list entries cached in memory per
+/// `IndexManager`. Hit on a cached entry is a single `HashMap::get`
+/// + `Arc::clone`; miss falls back to `info_store.get` + bincode
+/// deserialise. Capacity is intentionally small — typical workloads
+/// (admin UIs, filter-by-status, find-by-id) concentrate on a handful
+/// of values per index.
+const POSTING_CACHE_CAP: usize = 512;
 
 /// Менеджер индексов для одной таблицы.
 ///
@@ -56,6 +64,19 @@ pub struct IndexManager {
     has_indexes: Arc<AtomicBool>,
     /// Атомарный флаг: есть ли хоть один уникальный индекс
     has_indexes_unique: Arc<AtomicBool>,
+
+    /// **Opt G** — in-memory cache for posting lists. Keys are the
+    /// raw physical index keys (`build_index_key(...).to_bytes()`);
+    /// values are `Arc<BTreeSet<RecordId>>` — shared between hits so
+    /// the lookup hot path is `HashMap::get` + `Arc::clone` + a final
+    /// `BTreeSet::clone` at the boundary (caller already takes the
+    /// set by value).
+    ///
+    /// Invalidated by every write hook on the affected
+    /// `(index_name, value)` key. Bounded — when full we evict an
+    /// arbitrary entry (exact LRU not worth the dep here; index
+    /// hotsets are typically small).
+    posting_cache: Arc<Mutex<HashMap<Bytes, Arc<BTreeSet<RecordId>>>>>,
 }
 
 impl Clone for IndexManager {
@@ -67,6 +88,7 @@ impl Clone for IndexManager {
             indexes_unique: Arc::clone(&self.indexes_unique),
             has_indexes: Arc::clone(&self.has_indexes),
             has_indexes_unique: Arc::clone(&self.has_indexes_unique),
+            posting_cache: Arc::clone(&self.posting_cache),
         }
     }
 }
@@ -124,6 +146,7 @@ impl IndexManager {
             indexes_unique: Arc::new(indexes_unique),
             has_indexes: Arc::new(AtomicBool::new(has_indexes_flag)),
             has_indexes_unique: Arc::new(AtomicBool::new(has_indexes_unique_flag)),
+            posting_cache: Arc::new(Mutex::new(HashMap::with_capacity(POSTING_CACHE_CAP))),
         };
 
         // Синхронизируем флаги с состоянием IndexInfo
@@ -271,6 +294,9 @@ impl IndexManager {
         let bytes = bincode::serialize(&record_ids)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(index_key, Bytes::from(bytes)).await?;
+        // Opt G: drop the cached posting list for this (name, values)
+        // — the next reader pulls the fresh version.
+        self.invalidate_posting_cache(name_interned, values);
         Ok(())
     }
 
@@ -308,6 +334,8 @@ impl IndexManager {
             self.info_store.set(index_key, Bytes::from(bytes)).await?;
         }
 
+        // Opt G: drop the cached posting list for this (name, values).
+        self.invalidate_posting_cache(name_interned, values);
         Ok(())
     }
 
@@ -564,14 +592,57 @@ impl IndexManager {
     ) -> DbResult<BTreeSet<RecordId>> {
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
 
-        match self.info_store.get(index_key).await {
+        // Opt G: try the in-memory posting cache first.
+        if let Some(cached) = self
+            .posting_cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&index_key).cloned())
+        {
+            return Ok((*cached).clone());
+        }
+
+        match self.info_store.get(index_key.clone()).await {
             Ok(bytes) => {
                 let record_ids =
                     bincode::deserialize::<BTreeSet<RecordId>>(&bytes).unwrap_or_default();
+                // Populate cache (bounded — evict arbitrary entry on
+                // overflow; exact LRU isn't worth the dep, index
+                // hotsets are small).
+                if let Ok(mut cache) = self.posting_cache.lock() {
+                    if cache.len() >= POSTING_CACHE_CAP {
+                        if let Some(k) = cache.keys().next().cloned() {
+                            cache.remove(&k);
+                        }
+                    }
+                    cache.insert(index_key, Arc::new(record_ids.clone()));
+                }
                 Ok(record_ids)
             }
-            Err(shamir_storage::error::DbError::NotFound(_)) => Ok(BTreeSet::new()),
+            Err(shamir_storage::error::DbError::NotFound(_)) => {
+                // Cache the empty result too — same lookup repeating
+                // should not hit the store again.
+                if let Ok(mut cache) = self.posting_cache.lock() {
+                    if cache.len() >= POSTING_CACHE_CAP {
+                        if let Some(k) = cache.keys().next().cloned() {
+                            cache.remove(&k);
+                        }
+                    }
+                    cache.insert(index_key, Arc::new(BTreeSet::new()));
+                }
+                Ok(BTreeSet::new())
+            }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Invalidate any cached posting list for `(name_interned,
+    /// values)`. Called from write hooks after the durable update
+    /// landed, so the next `lookup_by_index` re-fetches.
+    fn invalidate_posting_cache(&self, name_interned: u64, values: &[InnerValue]) {
+        let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
+        if let Ok(mut cache) = self.posting_cache.lock() {
+            cache.remove(&index_key);
         }
     }
 

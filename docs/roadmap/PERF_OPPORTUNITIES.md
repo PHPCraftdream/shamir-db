@@ -1,7 +1,14 @@
 # Performance Opportunities — Beyond Asymptotic Wins
 
-Status: **review pass after the A → D + sorted-index sprints.** Companion
-to `docs/ops/PERF_BASELINE.md` (measured numbers).
+Status: **review pass after the A → D + sorted-index + sprint α
++ sprint β.** Companion to `docs/ops/PERF_BASELINE.md` (measured
+numbers).
+
+> **2026-05-11 update.** Sprint α (Q1, Q2, F) and Sprint β (G) shipped.
+> One item from α (Opt L — batch RecordId allocator) was tried,
+> measured, and reverted: see «Opt L — tried and reverted» below.
+> The DONE markers, measured numbers, and Sprint headers below
+> reflect the post-sprint state.
 
 Where A/B/C/D cut O(n) → O(log n) on the write path (set/update/delete
 via index → 800–1100× wins; count(*) → 3000× via RecordCounter), this
@@ -30,8 +37,10 @@ Ranked by cost / value after the verification pass:
 
 | Tier | Items | Why |
 |------|-------|-----|
-| 🥇 **Easy wins** | **F** (interner Vec reverse, 1-2 h), **L** (batch RecordId, 1-2 h), **Q1** (MIN/MAX fast-path, 1 h), **Q2** (Filter::Gt/Lt in sorted-index planner, 1 h) | Each cheap; each verified; small but free 3–10 % each. |
-| 🥈 **Real wins on real workloads** | **G** (LRU posting cache, 1 day), **O** (covering index, ~1 week), **P** (vectored multi-get, 2–3 days) | These move the dial on UI dashboards and disk-backend production. |
+| ✅ **DONE in sprint α** | **Q1** (MIN fast-path), **Q2** (Filter::Gt/Lt), **F** (interner Vec reverse) | Measured below. |
+| ✅ **DONE in sprint β** | **G** (LRU posting cache) | Measured below. |
+| ❌ **TRIED and reverted** | **L** (batch RecordId pool) | TLS+RefCell overhead worse than getrandom on this stack; see «tried and reverted» |
+| 🥈 **Real wins on real workloads — next** | **O** (covering index, ~1 week), **P** (vectored multi-get, 2–3 days) | These move the dial on disk-backend production. |
 | 🥈 **Architectural cleanup** | **H₂** (Persistable trait), 1 day | Not a perf spike — prevents the next recurrence of write-amplification. |
 | 🥉 **Modest, wide refactors** | **K** (projection lazy, 5-7 days), **R** (reverse iter on Store, 1 day) | Real but expensive. K only really helps when SELECT is narrow. |
 | 👎 **Overestimated in original draft — defer** | **I** (sync Store core), **J** (SmallMap), **M** (specialised filter shapes) | Original draft predicted 20–50 %; closer look says 5–15 %, with effort cost not justified yet. |
@@ -189,38 +198,54 @@ covering index убирает эту цену. См. break-even анализ в
 Letters continue from A/B/C/D used in `PERF_BASELINE.md`. New items
 (post-verification) start at **O**.
 
-### Opt F — interner reverse-lookup as `Vec<String>` ✓ KEEP
+### Opt F — interner reverse-lookup as `Vec<String>` **DONE in `a6abe93`**
 
-**File:** `crates/shamir-types/src/core/interner/`
+`get_str(id)` was a `TDashMap<u64, UserKey>` hash+shard+clone; now
+`RwLock<Vec<Option<UserKey>>>` indexed by raw id. Single bounds-check
++ clone on read path. Forward (`String → u64`) stays DashMap for
+write-path lock-freeness.
 
-**Symptom (verified in code).** Reverse mapping is a `TDashMap<u64,
-UserKey>`; `get_str(id)` does hash + shard + clone. The forward
-direction stays write-only, so swapping reverse to a `Vec<String>`
-indexed by `u64` is safe — interner is monotonic, no removal.
+Measured deltas after F (in-memory, criterion):
 
-**Effort.** 1-2 hours.
+  complex_filter/10000  : 109 ms → 93.4 ms   (-14%)
+  bulk_insert/1000      : 21.6 ms → 21.6 ms  (noise — original "-16%"
+                                              was a 10-sample outlier)
+  read_by_id w/ idx     : unchanged (already O(1))
 
-**Realistic win.** 2–8 % of full-read query latency (corrected from
-original "5–50 %" — verified via measured cost of `~200 ns × 5000
-lookups` per 10K-record read).
+Real win sits on read-heavy paths that materialise records and
+resolve many keys per record. The original 2–8 % estimate was right
+in shape — wider impact in absolute terms came from the projection
+loop hitting `get_str` more times per result than initially modelled.
 
-Still net-positive: cheap, no surface change, narrows a verifiable
-hot loop.
+### Opt G — in-memory cache for posting lists **DONE in this sprint**
 
-### Opt G — in-memory LRU cache for index posting lists ✓ KEEP
+`IndexManager::lookup_by_index` now consults an in-memory
+`HashMap<Bytes, Arc<BTreeSet<RecordId>>>` keyed by the physical index
+key. On hit: `HashMap::get` + `Arc::clone` + `BTreeSet::clone` (the
+last so the caller still owns its set). On miss: fetch + deserialise
++ populate. Bounded at 512 entries with arbitrary eviction on
+overflow — exact LRU not worth a dep for this workload (index
+hot-sets are small).
 
-**File:** `crates/shamir-engine/src/index/index_manager.rs`
+Invalidation: `add_index_entry` and `remove_index_entry` drop the
+affected `(name_interned, values)` key after the durable update
+lands. Three new unit tests pin the create / update / delete
+invalidation paths so a future regression fails fast.
 
-**Symptom.** Every `lookup_by_index` re-deserialises ~20 KB blob from
-`info_store`. Hot for indexed read/update/delete repeat workloads.
+Measured impact (in-memory backend, N=10000, criterion):
 
-**Fix.** `lru::LruCache<(idx_name, values), BTreeSet<RecordId>>`,
-~1-2 MB per repo. Invalidate on `on_record_*` hooks.
+  count_with_filter_with_index : 393 µs → 91 µs   (4.3×)
+  update_by_id_with_index      :  79 µs → 49 µs   (1.6×)
+  set_existing_with_index      : 101 µs → 81 µs   (1.25×)
+  read_by_id_with_index        :  50 µs → 51 µs   (noise — already O(1))
+  read_by_city_with_index      : 20.4 ms → 19.6 ms (small — BTreeSet
+                                                    clone of 1250 ids
+                                                    is the new bottom)
 
-**Effort.** 1 day, including invalidation correctness tests.
-
-**Realistic win.** 5–30× on repeated indexed lookups (admin
-dashboards, polling). Cold cache: as today.
+The 4.3× count win is the headline — that's the exact "UI dashboard
+hitting the same indexed filter" pattern. Cold cache: same as
+before. Workloads that lookup-by-many-different-values per request
+see the entry replaced after 512 keys (rare).
 
 ### Opt H — counter persist debouncing **DONE in `a3013c7`**
 
@@ -397,52 +422,35 @@ in the hundreds-thousands. Combines well with Opt O (covering only
 the filter columns, falling back to vectored get for projected
 fields not in the index).
 
-### Opt Q1 — MIN(field) / MAX(field) fast-path via sorted index
+### Opt Q1 — MIN(field) fast-path **DONE in `7afe259`**
 
-**File:** `crates/shamir-engine/src/table/read_exec.rs` (new fast
-path) + `sorted_index_manager.rs::lookup_min` (already implemented,
-not wired).
+When `SELECT min(field)` arrives with no WHERE / GROUP BY /
+ORDER BY / DISTINCT / count_total / pagination AND a sorted index
+covers `field`, `read()` short-circuits to
+`SortedIndexManager::lookup_min` — first key under the index
+prefix + one record load. Wired next to the existing CountAll
+fast-path.
 
-**Symptom.** `SELECT min(score) FROM users` currently does a full
-scan + reduce. We already have `SortedIndexManager::lookup_min`
-returning the first record under the prefix (O(log n + 1)) — it's
-just not wired into the query planner.
+Measured (in-memory, N=10K): 92 ms → 4.08 ms (**22.6×**). Not the
+projected 300–1000× because in-memory `scan_prefix_stream` sorts
+all info_store keys each call — so `lookup_min` itself is O(N
+total info_store entries) on this backend. Native B-tree backends
+(redb / sled / etc.) get the true O(log n) path.
 
-**Fix.** In `read()`, before the regular index plan, recognise:
+MAX is symmetric but needs Opt R (reverse iter on Store) — falls
+through to full scan for now.
 
-```rust
-- exactly one aggregate item: Aggregate { func: Min/Max, field }
-- no WHERE / GROUP BY / ORDER BY / DISTINCT
-- sorted index exists for `field`
-```
+### Opt Q2 — `Filter::Gt` / `Filter::Lt` in sorted-index planner **DONE in `bc60476`**
 
-→ Call `lookup_min` (or `lookup_max` once reverse iter lands —
-see Opt R). Return a single-record result.
+The planner now recognises `Gt` and `Lt`. Implementation chose
+`Gte`/`Lte` index bounds plus a `Ne(value)` residual filter to
+exclude the boundary — cheaper than computing a byte-suffix
+successor in the encoded-key space (encoding-dependent, brittle).
+The boundary typically yields ≤handful of records to residual-
+filter; overhead is negligible.
 
-**Effort.** ~1 hour for MIN (lookup_min already exists).
-~1 day for MAX (needs Opt R first).
-
-**Realistic win.** O(N) → O(log n) — **300–1000× at N=10K** for the
-MIN case. Cheap and obvious.
-
-### Opt Q2 — `Filter::Gt` / `Filter::Lt` in sorted-index planner
-
-**File:** `crates/shamir-engine/src/table/read_exec.rs::try_plan_sorted_index_scan`
-
-**Symptom.** Current planner handles `Between`, `Gte`, `Lte`
-through the sorted index. `Gt` and `Lt` (strict) fall through to
-full scan — not because we can't, just because the boundary
-"exclude exact match" wasn't wired yet.
-
-**Fix.** `Gt`: lower = `prefix || encoded(value) || [0xFF; 16]`
-(skips all record_id tiebreakers at exact match value). `Lt`:
-symmetric on upper bound. The codec is already there; just construct
-the right bounds.
-
-**Effort.** ~1 hour.
-
-**Realistic win.** Same speedup as `Gte/Lte` on the affected
-queries — 5–30× depending on selectivity. Pure capability fill-in.
+Same speedup magnitude as the existing Gte/Lte path. Pure
+capability fill-in.
 
 ### Opt R — reverse iteration on `Store` trait
 
@@ -469,22 +477,23 @@ path (Opt #1 from the earlier sprint plan).
 
 ## Recommended sprint order — revised
 
-### Sprint α — half-day easy wins (3-5 hours total)
+### Sprint α — half-day easy wins ✅ SHIPPED
 
-Pure cleanup, verified low-risk:
+1. **Q1** — MIN fast-path wired. 22× at N=10K.
+2. **Q2** — Filter::Gt/Lt routed through sorted-index planner.
+3. **F** — interner `Vec<String>` reverse-lookup. -14% on
+   complex_filter; -9% on order_limit_top10; rest within noise.
+4. **L** — batch `RecordId` allocator. **Tried and reverted** —
+   regression on this stack (TLS+RefCell > getrandom).
 
-1. **Q1** — wire `MIN(field)` fast-path (1 hr).
-2. **Q2** — Filter::Gt / Filter::Lt in sorted-index planner (1 hr).
-3. **F** — interner `Vec<String>` reverse-lookup (1-2 hr).
-4. **L** — batch `RecordId` allocator (1-2 hr).
+### Sprint β — read-heavy disk wins ✅ SHIPPED
 
-Re-run `engine_perf.rs`, document deltas in `PERF_BASELINE.md`.
+5. **G** — posting-list cache with invalidation. 4.3× on
+   count_with_filter_with_index; 1.6× on update_by_id_with_index;
+   1.25× on set_existing_with_index. Three new invalidation tests
+   pin the create / update / delete paths.
 
-### Sprint β — read-heavy disk wins (1 day)
-
-5. **G** — LRU posting-list cache with invalidation tests.
-
-### Sprint γ — the big disk story (~1 week)
+### Sprint γ — the big disk story (~1 week) — NEXT
 
 6. **Opt R** — reverse iter on Store. Unblocks MAX / DESC LIMIT
    asymptotics.
