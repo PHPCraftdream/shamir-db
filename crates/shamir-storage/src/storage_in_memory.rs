@@ -316,6 +316,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_inmemory_iter_range_stream_inclusive_bounds() {
+        // Seed deterministic keys: "k00".."k19" — sortable bytes.
+        let store = InMemoryStore::new();
+        for i in 0..20 {
+            let key = Bytes::from(format!("k{:02}", i));
+            let value = Bytes::from(format!("v{}", i));
+            store.set(key, value).await.unwrap();
+        }
+
+        // Range [k05 ..= k10] — six entries inclusive.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("k05")),
+            Some(Bytes::from("k10")),
+            100,
+        );
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["k05", "k06", "k07", "k08", "k09", "k10"],
+            "range filter must include both bounds"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_iter_range_stream_unbounded_lower() {
+        let store = InMemoryStore::new();
+        for i in 0..10 {
+            let key = Bytes::from(format!("k{:02}", i));
+            store.set(key, Bytes::from(format!("v{i}"))).await.unwrap();
+        }
+        let stream = store.iter_range_stream(None, Some(Bytes::from("k02")), 100);
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k00", "k01", "k02"]);
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_iter_range_stream_unbounded_upper() {
+        let store = InMemoryStore::new();
+        for i in 0..5 {
+            let key = Bytes::from(format!("k{:02}", i));
+            store.set(key, Bytes::from(format!("v{i}"))).await.unwrap();
+        }
+        let stream = store.iter_range_stream(Some(Bytes::from("k02")), None, 100);
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k02", "k03", "k04"]);
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_iter_range_stream_unbounded_both() {
+        let store = InMemoryStore::new();
+        for i in 0..3 {
+            let key = Bytes::from(format!("k{i}"));
+            store.set(key, Bytes::from(format!("v{i}"))).await.unwrap();
+        }
+        let stream = store.iter_range_stream(None, None, 100);
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k0", "k1", "k2"], "fully unbounded = full scan");
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_iter_range_stream_empty_range() {
+        let store = InMemoryStore::new();
+        for i in 0..5 {
+            store
+                .set(Bytes::from(format!("k{i}")), Bytes::from("v"))
+                .await
+                .unwrap();
+        }
+        // Bounds outside the data — no matches.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("z0")),
+            Some(Bytes::from("z9")),
+            100,
+        );
+        let mut count = 0;
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            count += batch.unwrap().len();
+        }
+        assert_eq!(count, 0, "empty range yields nothing");
+    }
+
+    #[tokio::test]
+    async fn test_inmemory_iter_range_stream_batching() {
+        let store = InMemoryStore::new();
+        for i in 0..50 {
+            store
+                .set(Bytes::from(format!("k{i:03}")), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+        // batch_size=10 over a 25-key window.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("k010")),
+            Some(Bytes::from("k034")),
+            10,
+        );
+        let mut total = 0;
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            let b = batch.unwrap();
+            assert!(b.len() <= 10, "no batch exceeds requested size: {}", b.len());
+            total += b.len();
+        }
+        assert_eq!(total, 25, "25 keys in [k010..=k034]");
+    }
+
+    #[tokio::test]
     async fn test_inmemory_concurrent_access() {
         use tokio::task::JoinSet;
 

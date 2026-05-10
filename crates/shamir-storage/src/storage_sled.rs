@@ -276,6 +276,66 @@ impl Store for SledStore {
             }
         })
     }
+
+    fn iter_range_stream(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let tree = self.tree.clone();
+        let start_bytes = start_inclusive.map(|b| b.to_vec());
+        let end_bytes = end_inclusive.map(|b| b.to_vec());
+
+        Box::pin(stream! {
+            // After the first batch we advance past the last yielded key.
+            let mut cursor: Option<Vec<u8>> = None;
+
+            loop {
+                let tree_clone = tree.clone();
+                let cur = cursor.clone();
+                let initial_start = start_bytes.clone();
+                let upper = end_bytes.clone();
+
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
+                    // sled's `range` takes any RangeBounds<IVec>;
+                    // we build it from Vec<u8>. Use `(Bound, Bound)`
+                    // for explicit inclusive/exclusive control.
+                    use std::ops::Bound;
+                    let lower: Bound<&[u8]> = match (&cur, &initial_start) {
+                        (Some(c), _) => Bound::Excluded(c.as_slice()),
+                        (None, Some(s)) => Bound::Included(s.as_slice()),
+                        (None, None) => Bound::Unbounded,
+                    };
+                    let upper: Bound<&[u8]> = match &upper {
+                        Some(e) => Bound::Included(e.as_slice()),
+                        None => Bound::Unbounded,
+                    };
+
+                    let mut items = Vec::new();
+                    for kv in tree_clone.range::<&[u8], _>((lower, upper)).take(batch_size) {
+                        let (key, val) = kv.map_err(|e| {
+                            DbError::Storage(format!("SledDB range item: {}", e))
+                        })?;
+                        items.push((
+                            Bytes::copy_from_slice(&key),
+                            Bytes::copy_from_slice(&val),
+                        ));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let batch = batch?;
+                if batch.is_empty() {
+                    break;
+                }
+                cursor = batch.last().map(|(k, _)| k.to_vec());
+                yield Ok(batch);
+            }
+        })
+    }
 }
 
 // ============================================================================
@@ -471,5 +531,84 @@ mod tests {
         for key in &expected_keys {
             assert!(all_records.iter().any(|(rec_key, _)| rec_key == key));
         }
+    }
+
+    /// Native `iter_range_stream` on sled — exercises the
+    /// `tree.range((Bound, Bound))` path.
+    #[tokio::test]
+    async fn test_sled_iter_range_stream_native() {
+        let path = "./test_data/sled_iter_range";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let repo = SledRepo::new(path).unwrap();
+        let store = repo.store_get("range_test").await.unwrap();
+
+        for i in 0..20 {
+            let key = Bytes::from(format!("k{i:02}"));
+            let val = Bytes::from(format!("v{i}"));
+            store.set(key, val).await.unwrap();
+        }
+
+        // Closed range.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("k05")),
+            Some(Bytes::from("k10")),
+            100,
+        );
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k05", "k06", "k07", "k08", "k09", "k10"]);
+
+        // Unbounded lower.
+        let stream = store.iter_range_stream(None, Some(Bytes::from("k02")), 100);
+        let mut got: Vec<String> = Vec::new();
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _) in batch.unwrap() {
+                got.push(String::from_utf8(k.to_vec()).unwrap());
+            }
+        }
+        got.sort();
+        assert_eq!(got, vec!["k00", "k01", "k02"]);
+
+        // Empty range.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("z0")),
+            Some(Bytes::from("z9")),
+            100,
+        );
+        let mut count = 0;
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            count += batch.unwrap().len();
+        }
+        assert_eq!(count, 0);
+
+        // Multi-batch cursor advance.
+        let stream = store.iter_range_stream(
+            Some(Bytes::from("k00")),
+            Some(Bytes::from("k19")),
+            6,
+        );
+        let mut total = 0;
+        let mut batches = 0;
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            let b = batch.unwrap();
+            assert!(b.len() <= 6);
+            total += b.len();
+            batches += 1;
+        }
+        assert_eq!(total, 20);
+        assert!(batches >= 4, "expected ≥4 batches, got {batches}");
+
+        fs::remove_dir_all(path).ok();
     }
 }
