@@ -22,6 +22,7 @@ pub mod conn_limiter;
 pub mod connection;
 pub mod db_handler;
 pub mod framer;
+pub mod observability;
 pub mod scheduler;
 pub mod server;
 pub mod server_meta;

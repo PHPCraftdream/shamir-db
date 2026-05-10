@@ -128,6 +128,8 @@ pub struct ServerHandle {
     audit_appender: Arc<RedbAuditAppender>,
     /// Notify that signals all accept loops to stop.
     shutdown_notify: Arc<Notify>,
+    /// Optional observability HTTP server.
+    observability: Option<crate::observability::ObservabilityHandle>,
 }
 
 impl ServerHandle {
@@ -145,6 +147,10 @@ impl ServerHandle {
         // 3. Drain the audit chain + scheduler.
         self.audit_appender.shutdown().await;
         self.scheduler.shutdown().await;
+        // 4. Stop the observability HTTP server (if any).
+        if let Some(obs) = self.observability {
+            obs.shutdown().await;
+        }
     }
 
     /// Returns the first bound TCP+TLS-exporter address — useful for
@@ -551,12 +557,52 @@ impl ServerLauncher {
             bound_addrs.push(Some(local_addr));
         }
 
+        // 11. Optional observability HTTP server. Spawned LAST so its
+        //     `/readyz` flips to 200 only after every listener is bound.
+        let observability = if config.observability.addr.is_empty() {
+            None
+        } else {
+            let addr: std::net::SocketAddr = config
+                .observability
+                .addr
+                .parse()
+                .map_err(|e| BootError::Bind(format!(
+                    "observability.addr {} invalid: {e}",
+                    config.observability.addr
+                )))?;
+            let state = crate::observability::ObservabilityState::new();
+            // Record what the data-path bound to — `/info` surfaces this.
+            state.set_bound_addrs(
+                bound_addrs.iter().filter_map(|a| *a).collect(),
+            );
+            // The Prometheus recorder is global per-process. In integration
+            // tests where multiple servers spawn back-to-back the second
+            // launcher would error on `set_global_recorder`. We swallow
+            // that specific failure (recorder already installed = OK,
+            // we use the existing one) and continue without an exporter
+            // handle in that case.
+            let handle = match crate::observability::spawn(addr, state.clone(), true).await {
+                Ok(h) => h,
+                Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
+                    // Recorder already installed (typical in test process):
+                    // re-spawn without trying to install again.
+                    crate::observability::spawn(addr, state.clone(), false)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("observability: {e}")))?
+                }
+                Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
+            };
+            handle.state.mark_ready();
+            Some(handle)
+        };
+
         Ok(ServerHandle {
             bound_addrs,
             listener_tasks,
             scheduler,
             audit_appender,
             shutdown_notify,
+            observability,
         })
     }
 }

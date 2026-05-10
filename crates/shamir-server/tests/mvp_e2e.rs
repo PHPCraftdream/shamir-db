@@ -172,6 +172,7 @@ fn make_test_config(temp: &TempDir) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
+        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
     }
 }
 
