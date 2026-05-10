@@ -48,6 +48,7 @@ impl TableManager {
 
         // Persist any newly interned keys
         self.interner().persist().await?;
+        self.counter().persist().await?;
 
         let affected = records.len() as u64;
         Ok(WriteResult {
@@ -151,6 +152,7 @@ impl TableManager {
         // Persist any newly interned keys (set fields may have new keys)
         if affected > 0 {
             self.interner().persist().await?;
+        self.counter().persist().await?;
         }
 
         Ok(WriteResult {
@@ -200,6 +202,11 @@ impl TableManager {
             if self.delete(id).await? {
                 affected += 1;
             }
+        }
+
+        // Flush the counter cache (delete decremented it).
+        if affected > 0 {
+            self.counter().persist().await?;
         }
 
         Ok(WriteResult {
@@ -292,6 +299,7 @@ impl TableManager {
 
         // Persist any newly interned keys
         self.interner().persist().await?;
+        self.counter().persist().await?;
 
         Ok(WriteResult {
             affected: 1,

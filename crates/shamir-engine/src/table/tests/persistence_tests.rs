@@ -95,6 +95,14 @@ async fn test_interner_persistence_after_restart() {
     let count1 = counter1.get().await.unwrap() as usize;
     assert_eq!(count1, 2);
 
+    // Flush in-memory state before drop. After the lazy-persist
+    // optimisations (interner: monotonic-len short-circuit; counter:
+    // AtomicU64 cache) low-level callers must call persist()
+    // explicitly to make the latest values durable on disk.
+    // TableManager users get this automatically inside execute_*.
+    interner1.persist().await.unwrap();
+    counter1.persist().await.unwrap();
+
     // table1, repo1, interner1 and counter1 are dropped here, closing database
     drop(counter1);
     drop(table1);
@@ -206,6 +214,11 @@ async fn test_counter_persistence_after_restart() {
     let count1 = counter1.get().await.unwrap() as usize;
     assert_eq!(count1, 5, "Should have 5 records in first session");
 
+    // Flush in-memory state before drop (see comment in
+    // test_interner_persistence_after_restart for the why).
+    interner1.persist().await.unwrap();
+    counter1.persist().await.unwrap();
+
     // table1, repo1, interner1 and counter1 are dropped here
     drop(counter1);
     drop(table1);
@@ -242,6 +255,10 @@ async fn test_counter_persistence_after_restart() {
 
     let count3 = counter2.get().await.unwrap() as usize;
     assert_eq!(count3, 10, "Counter should update correctly");
+
+    // Flush again — same reason as above.
+    interner2.persist().await.unwrap();
+    counter2.persist().await.unwrap();
 
     // table2, repo2, interner2 and counter2 are dropped here
     drop(counter2);

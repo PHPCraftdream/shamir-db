@@ -296,6 +296,66 @@ noise vs prior runs (this PR doesn't touch their code paths).
 
 Workspace tests: 1179/0 unchanged.
 
+## After Opt D-class (#2, #2.5, counter cache)
+
+Three more optimisations after A+B+C, all surfaced through bench-
+driven analysis:
+
+- **#2** — `SELECT count(*)` (no filter) wires to the existing
+  `RecordCounter` instead of materialising every record just to
+  count the result vec. Truly O(1).
+- **#2.5** — `SELECT count(*) WHERE indexed_eq = X` uses the
+  index's `BTreeSet::len()` directly, never loads any record.
+- **Counter cache** — `RecordCounter::increment` was doing 2 store
+  ops per call (read-old + write-new) inside a mutex. Now an
+  in-memory `AtomicU64` + `dirty` flag; `persist()` no-ops when
+  unchanged, and the bulk write path persists once at the end.
+  Mirrors the Opt A pattern for the interner.
+
+| Bench                          | A+B+C    | After +D-class | Speed-up vs baseline |
+|--------------------------------|---------:|---------------:|---------------------:|
+| **count_all_no_filter/100**    |   674 µs |     20.7 µs    |  **33×**             |
+| **count_all_no_filter/1000**   |  7.17 ms |     19.2 µs    |  **374×**            |
+| **count_all_no_filter/10000**  |  79.5 ms |     23.5 µs    |  **3383×**           |
+| **count_with_filter_with_index/100**  |  130 µs |   32 µs    |  4×                  |
+| **count_with_filter_with_index/1000** |  873 µs |   54 µs    |  16×                 |
+| **count_with_filter_with_index/10000**| 8.5 ms  |  393 µs    |  **22×**             |
+| **bulk_insert/100**            |  1.91 ms |   1.56 ms      |  **-18 %** (p=0.00)  |
+| **bulk_insert/1000**           |  24.6 ms |   19.4 ms      |  **-21 %** (p=0.00)  |
+
+`count_all_no_filter` is now genuinely O(1) — time is flat across
+N=100/1000/10000 at ~20 µs (the fixed envelope cost: serde + batch
+planner + result wrapper).
+
+### Architectural finding: 1000×-class index optimisations not on
+the current layout
+
+Originally targeted #1 (order_by+LIMIT via index), #4 (MIN/MAX via
+index), #5 (range queries via index). All three need an index that
+is **sorted by value** (B-tree keyed by the indexed-value bytes).
+The current index format is hash-based (`IndexRecordKey { is_unique,
+name_interned, hash1, hash2 }`) — fast for equality lookup, but
+fundamentally cannot serve range / order / min-max queries.
+
+To unlock these wins we'd need a second index variant (sorted
+B-tree, key=value-bytes, value=BTreeSet<RecordId>) — that's an
+architectural addition, not a small change. Tracked as a future
+sprint; see "What's next" below.
+
+### Opt D (parallel stages) — tried and reverted
+
+`futures::future::try_join_all` was added inside the stage loop
+and measured against `batch_multi_read_8`. Zero win on in-memory
+CPU-bound workloads — there are no await suspension points inside
+in-memory queries, so concurrent futures on a single task degrade
+to serial. Real parallelism needs `tokio::spawn`-per-query, which
+requires `Arc<dyn TableResolver>` and `Arc<dyn AdminExecutor>`
+through the executor signature. Kept out of scope; reverted to
+the original sequential loop. Disk-backed backends would benefit
+from a `try_join_all` since their I/O awaits actually yield — but
+without `tokio::spawn` we still can't put N queries on N worker
+threads.
+
 ## Headline summary — A + B + C combined
 
 | Scenario (10K records)                | Baseline | After A+B+C | Speed-up    |
@@ -314,12 +374,18 @@ read-modify-write path with effectively no risk to the no-index
 fallback.
 
 Still on the table:
-- **Opt D** — execution_plan stages don't actually parallelise (8
-  independent reads in one batch take 8× single-read time, not
-  max-of-them). Easy fix in the executor; ~3-4× win on the
-  multi-read benchmark.
-- **Composite-key** index lookup for `set`. Today multi-field keys
-  fall back to scan.
+- **Sorted (B-tree-by-value) indexes** — unlocks the 1000×-class
+  wins for `order_by + LIMIT`, `MIN/MAX`, and range queries. Real
+  architectural addition (second index variant alongside the
+  current hash index).
+- **`tokio::spawn`-per-query** parallel stage execution — requires
+  Arc-ifying the resolver/admin trait objects. ~N_cores× for
+  read-heavy batches.
+- **`Store::set_many`** native batch write on durable backends
+  (redb/sled/fjall WriteBatch). Big win for bulk insert on disk;
+  marginal on in-memory.
+- **Composite-key** index lookup for `set/update/delete`. Today
+  multi-field keys fall back to scan.
 - **Implicit index auto-creation** when the user `set`s by an
   un-indexed key. We deliberately stopped at "use what's there";
   auto-create is a separate behaviour change that needs UX
