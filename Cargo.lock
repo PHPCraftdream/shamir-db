@@ -2908,6 +2908,7 @@ name = "shamir-db"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "criterion",
  "dashmap 6.1.0",
  "log",
  "rand 0.8.5",
