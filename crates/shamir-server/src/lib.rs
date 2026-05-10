@@ -19,6 +19,7 @@ pub mod bootstrap;
 pub mod config;
 pub mod connection;
 pub mod db_handler;
+pub mod framer;
 pub mod scheduler;
 pub mod server;
 pub mod server_meta;
