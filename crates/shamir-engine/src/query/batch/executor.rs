@@ -42,7 +42,7 @@ pub async fn execute_batch(
     let start = Instant::now();
 
     // 1. Plan
-    let plan = crate::query::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
+    let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
 
     // 2. Validate: all referenced tables exist (skip admin ops)
     validate_tables(&request.queries, resolver).await?;

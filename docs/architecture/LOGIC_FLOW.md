@@ -115,18 +115,28 @@ boundaries stay clean.
 
 ---
 
-## Where tension remains
+## Notes on a few design choices
 
-- `query/batch` still lives in `shamir-engine`, even though the DTOs
-  were lifted into `shamir-query-types`. A half-step split — runtime
-  cannot yet be separated from the DTOs without introducing a
-  dependency cycle.
 - `SystemStore` uses the same query operations (`SetOp`, `DeleteOp`,
-  `ReadQuery`) as user databases — an elegant recursion of the
-  abstraction, but slightly vertiginous to reason about.
-- *Resumption tickets* are a system-within-a-system: a separate
-  family-counter semantics layered over `Session`, with durable
-  `consumed_counters` and a full anti-downgrade matrix.
+  `ReadQuery`) as user databases — a deliberate recursion of the
+  abstraction. The system store is itself a `DbInstance` with a single
+  repo `system` and five tables (`databases`, `repositories`,
+  `settings`, `users`, `roles`). The bootstrap chicken-and-egg is
+  resolved in `ShamirDb::init()`, which opens the system store
+  directly before the regular API is available. The reuse keeps the
+  read/write path single — the alternative would be a parallel
+  specialized binary path for system metadata.
+- *Resumption tickets* are a system-within-a-system. The complexity is
+  not accidental: each piece (rotating `ticket_key`, family-counter,
+  durable `consumed_counters`, anti-downgrade matrix, TLS-exporter
+  AAD, 24 h max chain age) defends against a distinct threat. See
+  `docs/client-server-protocol-spec/SESSION_RESUMPTION.md` for the
+  full mapping.
+- All three layers — DTOs (`shamir-query-types`), pure planning, and
+  runtime execution — are now properly separated. The batch planner
+  and `$query` reference parser live in `shamir-query-types::batch`
+  next to the DTOs; only the executor (which actually drives a
+  `TableManager`) stays in `shamir-engine::query::batch::executor`.
 
 ---
 

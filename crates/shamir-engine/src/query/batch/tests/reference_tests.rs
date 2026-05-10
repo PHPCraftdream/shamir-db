@@ -6,7 +6,7 @@ use crate::query::batch::{QueryPath, QueryReference};
 
 fn parse(
     s: &str,
-) -> Result<QueryReference, crate::query::batch::reference::ReferenceParseError> {
+) -> Result<QueryReference, crate::query::batch::ReferenceParseError> {
     QueryReference::parse(s)
 }
 
@@ -134,7 +134,7 @@ fn test_parse_missing_at() {
     let err = parse(ref_str).unwrap_err();
     assert!(matches!(
         err,
-        crate::query::batch::reference::ReferenceParseError::MissingAt
+        crate::query::batch::ReferenceParseError::MissingAt
     ));
 }
 
@@ -144,7 +144,7 @@ fn test_parse_empty_alias() {
     let err = parse(ref_str).unwrap_err();
     assert!(matches!(
         err,
-        crate::query::batch::reference::ReferenceParseError::EmptyAlias
+        crate::query::batch::ReferenceParseError::EmptyAlias
     ));
 }
 
@@ -154,7 +154,7 @@ fn test_parse_invalid_alias() {
     let err = parse(ref_str).unwrap_err();
     assert!(matches!(
         err,
-        crate::query::batch::reference::ReferenceParseError::InvalidAlias(_)
+        crate::query::batch::ReferenceParseError::InvalidAlias(_)
     ));
 }
 
@@ -164,7 +164,7 @@ fn test_parse_unclosed_bracket() {
     let err = parse(ref_str).unwrap_err();
     assert!(matches!(
         err,
-        crate::query::batch::reference::ReferenceParseError::UnclosedBracket
+        crate::query::batch::ReferenceParseError::UnclosedBracket
     ));
 }
 
@@ -174,7 +174,7 @@ fn test_parse_invalid_index() {
     let err = parse(ref_str).unwrap_err();
     assert!(matches!(
         err,
-        crate::query::batch::reference::ReferenceParseError::InvalidIndex(_)
+        crate::query::batch::ReferenceParseError::InvalidIndex(_)
     ));
 }
 
@@ -184,7 +184,7 @@ fn test_parse_trailing_dot() {
     let err = parse(ref_str).unwrap_err();
     assert!(matches!(
         err,
-        crate::query::batch::reference::ReferenceParseError::TrailingDot
+        crate::query::batch::ReferenceParseError::TrailingDot
     ));
 }
 
