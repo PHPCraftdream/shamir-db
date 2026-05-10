@@ -80,6 +80,19 @@ async fn fresh_db() -> Arc<ShamirDb> {
     shamir
 }
 
+/// Same as `fresh_db()` but the repo is backed by a sled on-disk
+/// store at `path`. Caller must keep the corresponding `TempDir`
+/// alive at least as long as the returned `ShamirDb` (sled holds
+/// the directory open).
+async fn fresh_db_sled(path: &std::path::Path) -> Arc<ShamirDb> {
+    let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
+    shamir.create_db("bench").await;
+    let cfg = RepoConfig::new("main", BoxRepoFactory::sled(path.to_path_buf()))
+        .add_table(TableConfig::new("users"));
+    shamir.add_repo("bench", cfg).await.expect("add_repo");
+    shamir
+}
+
 /// Seed `n` records via a single `insert_into` op (does NOT scan).
 async fn seed_users(shamir: &ShamirDb, n: usize) {
     let values: Vec<JsonValue> = (0..n).map(gen_user).collect();
@@ -300,6 +313,22 @@ fn req_range_age() -> BatchRequest {
             "r": {
                 "from": "users",
                 "where": { "op": "between", "field": ["age"], "from": 30, "to": 35 }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+/// Narrow range — ~1.6 % selectivity (one age value out of 60). Shows
+/// where sorted-index wins really matter: when most records are
+/// filtered out, avoiding the per-record load dominates.
+fn req_range_age_narrow() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "r",
+        "queries": {
+            "r": {
+                "from": "users",
+                "where": { "op": "between", "field": ["age"], "from": 30, "to": 30 }
             }
         }
     }))
@@ -787,6 +816,115 @@ fn bench_range_query_with_index(c: &mut Criterion) {
     group.finish();
 }
 
+// --------------------------------------------------------------------------
+// Sled-backed range bench — exercises the native `iter_range_stream`
+// path on a real disk backend. Contrast with `range_query_*` (above)
+// which run against `in_memory` where the default O(N) fallback is
+// used. Same scenarios, different backend, fair before/after picture
+// of what the sorted-index work actually buys in production.
+// --------------------------------------------------------------------------
+
+fn bench_range_query_no_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_no_index_sled");
+
+    for &n in SIZES {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users(&s, n).await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+        // Drop shamir before tempdir so sled releases the directory.
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+fn bench_range_query_with_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_with_index_sled");
+
+    for &n in SIZES {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users(&s, n).await;
+            create_sorted_index(&s, "users", "by_age", "age").await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+/// Narrow range on sled — shows where sorted-index gives the biggest
+/// payoff: low selectivity means we avoid most per-record loads.
+fn bench_range_query_narrow_no_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_narrow_no_index_sled");
+
+    for &n in SIZES {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users(&s, n).await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age_narrow();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_narrow_with_index_sled");
+
+    for &n in SIZES {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users(&s, n).await;
+            create_sorted_index(&s, "users", "by_age", "age").await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age_narrow();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
 /// 8 independent reads in a single batch — exercises the parallel
 /// stage planner.
 fn bench_batch_multi_read(c: &mut Criterion) {
@@ -835,6 +973,10 @@ criterion_group!(
     bench_order_limit_with_index,
     bench_range_query_no_index,
     bench_range_query_with_index,
+    bench_range_query_no_index_sled,
+    bench_range_query_with_index_sled,
+    bench_range_query_narrow_no_index_sled,
+    bench_range_query_narrow_with_index_sled,
     bench_batch_multi_read,
 );
 criterion_main!(benches);
