@@ -1,6 +1,6 @@
-use crate::db::engine::repo::{BoxRepoFactory, RepoConfig};
-use crate::db::engine::table::TableConfig;
-use crate::db::shamir_db::ShamirDb;
+use crate::engine::repo::{BoxRepoFactory, RepoConfig};
+use crate::engine::table::TableConfig;
+use crate::shamir_db::ShamirDb;
 
 #[tokio::test]
 async fn test_shamir_db_creation() {

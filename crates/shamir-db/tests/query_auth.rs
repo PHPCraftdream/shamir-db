@@ -2,10 +2,10 @@
 
 use serde_json::json;
 
-use shamir_db::db::engine::repo::repo_types::BoxRepoFactory;
-use shamir_db::db::engine::repo::RepoConfig;
-use shamir_db::db::engine::table::TableConfig;
-use shamir_db::db::query::batch::BatchRequest;
+use shamir_db::engine::repo::repo_types::BoxRepoFactory;
+use shamir_db::engine::repo::RepoConfig;
+use shamir_db::engine::table::TableConfig;
+use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
 async fn setup_shamir() -> ShamirDb {
@@ -338,17 +338,17 @@ async fn test_grant_role_to_nonexistent_user() {
     })).unwrap();
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
-    assert!(matches!(err, shamir_db::db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(err, shamir_db::query::batch::BatchError::QueryError { .. }));
 }
 
 // ============================================================================
 // SessionPermissions — unit tests
 // ============================================================================
 
-use shamir_db::db::query::auth::{
+use shamir_db::query::auth::{
     Action, Effect, Permission, Resource, Role, SessionPermissions,
 };
-use shamir_db::db::query::filter::Filter;
+use shamir_db::query::filter::Filter;
 
 #[test]
 fn test_superadmin_allows_everything() {
@@ -598,7 +598,7 @@ fn test_row_filter_merging_or() {
                 },
                 row_filter: Some(Filter::Eq {
                     field: vec!["region".into()],
-                    value: shamir_db::db::query::filter::FilterValue::String("eu".into()),
+                    value: shamir_db::query::filter::FilterValue::String("eu".into()),
                 }),
             }],
         },
@@ -614,7 +614,7 @@ fn test_row_filter_merging_or() {
                 },
                 row_filter: Some(Filter::Eq {
                     field: vec!["region".into()],
-                    value: shamir_db::db::query::filter::FilterValue::String("us".into()),
+                    value: shamir_db::query::filter::FilterValue::String("us".into()),
                 }),
             }],
         },
@@ -651,7 +651,7 @@ fn test_row_filter_unrestricted_wins() {
                 },
                 row_filter: Some(Filter::Eq {
                     field: vec!["region".into()],
-                    value: shamir_db::db::query::filter::FilterValue::String("eu".into()),
+                    value: shamir_db::query::filter::FilterValue::String("eu".into()),
                 }),
             }],
         },
@@ -683,8 +683,8 @@ fn test_row_filter_unrestricted_wins() {
 
 #[test]
 fn test_check_batch_allows() {
-    use shamir_db::db::query::batch::{BatchOp, QueryEntry};
-    use shamir_db::db::query::read::ReadQuery;
+    use shamir_db::query::batch::{BatchOp, QueryEntry};
+    use shamir_db::query::read::ReadQuery;
     use shamir_types::types::common::new_map;
 
     let roles = vec![Role {
@@ -712,9 +712,9 @@ fn test_check_batch_allows() {
 
 #[test]
 fn test_check_batch_denies() {
-    use shamir_db::db::query::batch::{BatchOp, QueryEntry};
-    use shamir_db::db::query::write::InsertOp;
-    use shamir_db::db::query::TableRef;
+    use shamir_db::query::batch::{BatchOp, QueryEntry};
+    use shamir_db::query::write::InsertOp;
+    use shamir_db::query::TableRef;
     use shamir_types::types::common::new_map;
 
     let roles = vec![Role {

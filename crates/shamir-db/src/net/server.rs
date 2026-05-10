@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 use super::framing::{read_msg, write_msg, FrameError};
-use crate::db::ShamirDb;
+use crate::ShamirDb;
 
 /// Server configuration.
 pub struct ServerConfig {
@@ -106,7 +106,7 @@ async fn handle_connection(
 
     // Phase 2: Query loop — msgpack BatchRequest → BatchResponse
     loop {
-        let request: crate::db::query::batch::BatchRequest = match read_msg(&mut reader).await {
+        let request: crate::query::batch::BatchRequest = match read_msg(&mut reader).await {
             Ok(req) => req,
             Err(FrameError::ConnectionClosed) => break,
             Err(e) => {
@@ -143,12 +143,12 @@ async fn authenticate(
     let interner = users_table.interner().get().await
         .map_err(|e| format!("Interner error: {}", e))?;
     let refs = crate::types::common::new_map();
-    let ctx = crate::db::query::filter::FilterContext::new(interner, &refs);
+    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
 
-    let query = crate::db::query::read::ReadQuery::new("users")
-        .filter(crate::db::query::filter::Filter::Eq {
+    let query = crate::query::read::ReadQuery::new("users")
+        .filter(crate::query::filter::Filter::Eq {
             field: vec!["name".to_string()],
-            value: crate::db::query::filter::FilterValue::String(req.user.clone()),
+            value: crate::query::filter::FilterValue::String(req.user.clone()),
         });
 
     let result = users_table.read(&query, &ctx).await

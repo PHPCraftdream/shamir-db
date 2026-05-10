@@ -29,9 +29,9 @@ use shamir_connect::server::rate_limit::InMemoryRateLimiter;
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
 
-use shamir_db::db::engine::repo::{BoxRepoFactory, RepoConfig};
-use shamir_db::db::shamir_db::SystemStoreConfig;
-use shamir_db::db::ShamirDb;
+use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
+use shamir_db::shamir_db::SystemStoreConfig;
+use shamir_db::ShamirDb;
 
 use shamir_transport_tcp::listener::{
     bind_validated as bind_tcp, ListenerProfile as TcpListenerProfile,

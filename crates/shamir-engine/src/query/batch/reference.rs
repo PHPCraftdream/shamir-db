@@ -53,7 +53,7 @@ use std::fmt;
 /// # Examples
 ///
 /// ```
-/// use shamir_db::db::query::batch::QueryReference;
+/// use shamir_db::query::batch::QueryReference;
 ///
 /// let r = QueryReference::parse("@users[0].name").unwrap();
 /// assert_eq!(r.alias, "users");
@@ -97,7 +97,7 @@ impl QueryReference {
     /// # Examples
     ///
     /// ```
-    /// use shamir_db::db::query::batch::{QueryReference, QueryPath};
+    /// use shamir_db::query::batch::{QueryReference, QueryPath};
     ///
     /// // Simple alias
     /// let r = QueryReference::parse("@users").unwrap();

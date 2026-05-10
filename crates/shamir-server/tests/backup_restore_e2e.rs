@@ -259,7 +259,7 @@ where
 }
 
 fn create_table_req(name: &str) -> DbRequest {
-    let batch: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let batch: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "tbl",
         "queries": { "tb": { "create_table": name, "repo": "main" } }
     }))
@@ -271,7 +271,7 @@ fn create_table_req(name: &str) -> DbRequest {
     }
 }
 fn write_req(table: &str, sku: &str, qty: i64) -> DbRequest {
-    let batch: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let batch: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "wr",
         "queries": {
             "ins": { "set": table, "key": {"sku": sku}, "value": {"sku": sku, "qty": qty} }
@@ -285,7 +285,7 @@ fn write_req(table: &str, sku: &str, qty: i64) -> DbRequest {
     }
 }
 fn read_req(table: &str) -> DbRequest {
-    let batch: shamir_db::db::query::batch::BatchRequest = serde_json::from_value(json!({
+    let batch: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "rd",
         "queries": { "rd": { "from": table } }
     }))
