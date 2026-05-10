@@ -20,7 +20,10 @@ use shamir_db::db::engine::table::TableConfig;
 use shamir_db::db::query::batch::BatchRequest;
 use shamir_db::db::ShamirDb;
 
-use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
+use shamir_server::db_handler::{AdminGlue, DbRequest, DbResponse, ShamirDbHandler};
+use shamir_connect::common::kdf_params::KdfParams;
+use shamir_server::user_directory::RedbUserDirectory;
+use tempfile::TempDir;
 
 // --------------------------------------------------------------------------
 // Fixtures
@@ -63,11 +66,19 @@ fn decode(bytes: &[u8]) -> DbResponse {
     rmp_serde::from_slice(bytes).expect("decode response")
 }
 
-/// Build a `DbRequest::Execute` from a JSON batch body. Keeps tests terse
-/// and readable — each test reads like the JSON a real client would send.
+/// Build a `DbRequest::Execute` from a JSON batch body, defaulting the
+/// query-language version to `CURRENT_QUERY_LANG_VERSION`. Keeps tests
+/// terse — each test reads like the JSON a real client would send.
 fn execute(db: &str, body: serde_json::Value) -> DbRequest {
+    execute_with_version(db, shamir_server::version::CURRENT_QUERY_LANG_VERSION, body)
+}
+
+/// Same as [`execute`] but with an explicit `query_version` for the
+/// version-dispatch tests.
+fn execute_with_version(db: &str, query_version: u32, body: serde_json::Value) -> DbRequest {
     let batch: BatchRequest = serde_json::from_value(body).expect("parse batch");
     DbRequest::Execute {
+        query_version,
         db: db.to_string(),
         batch,
     }
@@ -388,6 +399,152 @@ async fn batch_response_echoes_request_id() {
             );
         }
         other => panic!("expected Batch, got {:?}", other),
+    }
+}
+
+// --------------------------------------------------------------------------
+// Query-language version dispatch — unsupported version → typed error.
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unsupported_query_version_rejected_before_db_work() {
+    let shamir = make_db_with_table("prod", "main", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = user_session();
+
+    // 99 is not in `SUPPORTED_QUERY_LANG_VERSIONS`. Expect a typed error
+    // BEFORE the batch hits the DB layer.
+    let req = execute_with_version(
+        "prod",
+        99,
+        json!({
+            "id": "v",
+            "queries": { "all": { "from": "items" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    match res {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "unsupported_query_version");
+            assert!(message.contains("99"), "got {:?}", message);
+        }
+        other => panic!("expected unsupported_query_version, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_query_version_accepted() {
+    let shamir = make_db_with_table("prod", "main", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = user_session();
+
+    let req = execute_with_version(
+        "prod",
+        shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        json!({
+            "id": "v",
+            "queries": { "all": { "from": "items" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    assert!(matches!(res, DbResponse::Batch { .. }),
+        "current version must be accepted; got {:?}", res);
+}
+
+// --------------------------------------------------------------------------
+// CreateScramUser — wire-side SCRAM user creation.
+// --------------------------------------------------------------------------
+
+fn fast_kdf() -> KdfParams {
+    KdfParams {
+        memory_kb: 19_456,
+        time: 2,
+        parallelism: 1,
+        argon2_version: 0x13,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_denied_without_admin_glue() {
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::new(Arc::new(db)); // no admin glue
+    let session = root_session();
+
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: vec!["user".into()],
+    };
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    match res {
+        DbResponse::Error { code, .. } => assert_eq!(code, "not_supported"),
+        other => panic!("expected not_supported, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_denied_for_non_superuser() {
+    let tmp = TempDir::new().unwrap();
+    let user_dir = Arc::new(RedbUserDirectory::open(tmp.path().join("u.redb")).unwrap());
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::with_admin(
+        Arc::new(db),
+        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf() },
+    );
+    let session = user_session();
+
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: vec![],
+    };
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    match res {
+        DbResponse::Error { code, .. } => assert_eq!(code, "permission_denied"),
+        other => panic!("expected permission_denied, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_scram_user_success_then_duplicate() {
+    let tmp = TempDir::new().unwrap();
+    let user_dir = Arc::new(RedbUserDirectory::open(tmp.path().join("u.redb")).unwrap());
+    let db = ShamirDb::init_memory().await.expect("init shamir");
+    let handler = ShamirDbHandler::with_admin(
+        Arc::new(db),
+        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf() },
+    );
+    let session = root_session();
+
+    let req = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: vec!["read_write".into()],
+    };
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    match res {
+        DbResponse::UserCreated { name, user_id } => {
+            assert_eq!(name, "bob");
+            assert_eq!(user_id.len(), 16, "user_id is a stable 16-byte handle");
+        }
+        other => panic!("expected UserCreated, got {:?}", other),
+    }
+
+    use shamir_connect::server::admin::UserDirectory;
+    assert!(user_dir.lookup_by_name("bob").is_some(), "persisted in directory");
+    let roles = user_dir.lookup_roles("bob").unwrap_or_default();
+    assert!(roles.iter().any(|r| r == "read_write"), "roles attached");
+
+    // Second insert with same name -> typed user_exists error.
+    let req2 = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "another password".into(),
+        roles: vec![],
+    };
+    let res2 = decode(&handler.handle(&session, &encode(&req2)).unwrap());
+    match res2 {
+        DbResponse::Error { code, .. } => assert_eq!(code, "user_exists"),
+        other => panic!("expected user_exists, got {:?}", other),
     }
 }
 

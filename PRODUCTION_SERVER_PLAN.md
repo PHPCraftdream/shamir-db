@@ -18,7 +18,12 @@ parent-крейта `shamir-db` на Windows и не завершён в рам�
 | Background scheduler | `scheduler.rs` | 303 | written | 🟡 not validated this session |
 | DB handler bridge (full Batch API) | `db_handler.rs` | 215 | 8/8 | ✅ |
 | Connection orchestration | `connection.rs` | ~600 | none | 🟡 compiles, needs e2e |
-| Main binary | `main.rs` | ~150 | none | 🟡 compiles, listeners not yet bound |
+| Main binary | `main.rs` | ~80 | smoke via mvp_e2e | ✅ thin CLI wrapper over ServerLauncher |
+| Boot orchestration | `server.rs` | ~310 | smoke via mvp_e2e | ✅ accept loops + bootstrap + TLS lifecycle |
+| TLS cert lifecycle | `tls.rs` | ~165 | 4/4 | ✅ load existing or generate self-signed |
+| Bootstrap helper | `bootstrap.rs` | ~245 | 3/3 | ✅ password / random-token modes |
+| Version dispatch | `version.rs` | ~120 | 5/5 | ✅ handshake + query lang versions |
+| MVP E2E test | `tests/mvp_e2e.rs` | ~380 | 1/1 | ✅ TLS + SCRAM + 3 batches roundtrip |
 
 Плюс: **WS profile enforcement** (`shamir-transport-ws::listener`) — 9
 тестов, release-blocker закрыт.

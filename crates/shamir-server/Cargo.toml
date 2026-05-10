@@ -59,6 +59,9 @@ dashmap = "6.1"
 tempfile = "3"
 hex = "0.4"
 indexmap = "2"
+# E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM.
+shamir-transport-tcp = { path = "../shamir-transport-tcp" }
+zeroize = "1.7"
 
 [lints.clippy]
 all = "warn"

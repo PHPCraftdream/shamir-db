@@ -359,6 +359,20 @@ impl ServerMetaStore {
         (current, previous)
     }
 
+    /// Current Ed25519 identity seed (32 bytes). Useful for callers that
+    /// need a raw [`Ed25519Keypair`] alongside the [`ServerIdentityState`]
+    /// — e.g. `connection.rs` holds a separate keypair handle so it can
+    /// pass `&Ed25519Keypair` into `verify_proof` (the rotation state
+    /// doesn't expose the keypair directly).
+    pub fn current_identity_seed(&self) -> [u8; 32] {
+        let p: PersistedIdentity = self
+            .read_blob(KEY_IDENTITY)
+            .ok()
+            .flatten()
+            .expect("server_meta identity missing — store not initialised");
+        bytes32(&p.current_seed)
+    }
+
     /// Rehydrated [`ServerIdentityState`].
     pub fn identity_state(&self) -> ServerIdentityState {
         let p: PersistedIdentity = self
