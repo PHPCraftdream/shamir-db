@@ -327,20 +327,46 @@ driven analysis:
 N=100/1000/10000 at ~20 µs (the fixed envelope cost: serde + batch
 planner + result wrapper).
 
-### Architectural finding: 1000×-class index optimisations not on
-the current layout
+### Sorted-index opportunity (revised — much smaller than originally framed)
 
 Originally targeted #1 (order_by+LIMIT via index), #4 (MIN/MAX via
-index), #5 (range queries via index). All three need an index that
-is **sorted by value** (B-tree keyed by the indexed-value bytes).
-The current index format is hash-based (`IndexRecordKey { is_unique,
-name_interned, hash1, hash2 }`) — fast for equality lookup, but
-fundamentally cannot serve range / order / min-max queries.
+index), #5 (range queries via index). All three need an index that's
+ordered **by value**. The current index format is hash-keyed
+(`IndexRecordKey { is_unique, name_interned, hash1, hash2 }`) —
+great for equality, no help for range/order/min-max.
 
-To unlock these wins we'd need a second index variant (sorted
-B-tree, key=value-bytes, value=BTreeSet<RecordId>) — that's an
-architectural addition, not a small change. Tracked as a future
-sprint; see "What's next" below.
+The fix is *not* a big architectural addition. Every storage backend
+we wrap (sled / redb / fjall / nebari / canopy) already stores keys
+in an ordered B-tree natively — that ordering comes for free. We just
+need to:
+
+1. **Order-preserving codec** for `i64` / `u64` / `f64` / `String` /
+   `bool` — write a value as bytes that sort the same way the value
+   does (big-endian for unsigned ints, sign-bit-flipped big-endian
+   for signed ints, raw UTF-8 for strings, etc.). Pure functions in
+   `shamir-types::core::sort_codec`. ~150 lines.
+2. **Separate per-index store** like
+   `__sorted_idx_<table>_<index_name>__`. Not system records; just
+   ordinary KV entries whose physical key is
+   `<encoded_value> || <record_id>` and value is empty (or a small
+   pointer payload).
+3. **`Store::iter_range_stream(start, end)`** — already partially
+   there via `scan_prefix_stream`; add a true range form with default
+   impl over `iter_stream + filter`, native impls on backends that
+   expose `range()` directly (redb, sled, fjall).
+4. **`IndexKind::Sorted`** variant on `IndexDefinition`. New hooks
+   `on_record_created_sorted` / `on_record_deleted_sorted` mirror the
+   existing regular-index hooks.
+5. **Planner extension** — recognise `Filter::Between/Gt/Gte/Lt/Lte`
+   and `order_by + limit` and pick a sorted index when one matches.
+   New planner cases sit next to `try_plan_index_scan`.
+
+A day's work, not a sprint. System records are *not* used — those
+are for engine metadata (interner blob, counter, index definitions).
+Sorted indexes are ordinary data records whose key is the indexed
+value bytes.
+
+Tracked as the next perf work item.
 
 ### Opt D (parallel stages) — tried and reverted
 
