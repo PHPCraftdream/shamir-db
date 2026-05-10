@@ -89,6 +89,38 @@ pub struct Config {
     /// Connection / per-request security knobs.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Audit log knobs (rotation, retention).
+    #[serde(default)]
+    pub audit: AuditConfig,
+}
+
+/// Audit log file management.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditConfig {
+    /// Max size of the active `audit_log.jsonl` file before it is
+    /// rotated. `0` disables rotation. Default 100 MB.
+    #[serde(default = "default_audit_max_size_mb")]
+    pub max_file_size_mb: u64,
+    /// Delete rotated audit files older than this. `0` disables cleanup
+    /// (operator manages retention out-of-band). Default 30 days.
+    #[serde(default = "default_audit_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            max_file_size_mb: default_audit_max_size_mb(),
+            retention_days: default_audit_retention_days(),
+        }
+    }
+}
+
+fn default_audit_max_size_mb() -> u64 {
+    100
+}
+fn default_audit_retention_days() -> u32 {
+    30
 }
 
 /// Connection-level security limits — apply to every listener.

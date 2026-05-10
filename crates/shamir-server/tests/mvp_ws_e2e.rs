@@ -129,6 +129,7 @@ fn make_test_config(temp: &TempDir) -> Config {
             key_path: data_dir.join("key.pem"),
         },
         security: Default::default(),
+        audit: Default::default(),
     }
 }
 

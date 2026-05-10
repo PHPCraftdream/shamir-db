@@ -59,6 +59,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
             },
             query_limits: Default::default(),
         },
+        audit: Default::default(),
     }
 }
 

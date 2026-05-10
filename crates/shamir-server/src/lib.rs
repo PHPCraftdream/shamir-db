@@ -15,6 +15,7 @@
 //! - [`db_handler`] — `RequestHandler` bridge to `ShamirDb` query layer.
 
 pub mod audit_appender;
+pub mod backup;
 pub mod bootstrap;
 pub mod config;
 pub mod conn_limiter;

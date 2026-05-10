@@ -192,9 +192,15 @@ impl ServerLauncher {
                 .map_err(|e| BootError::Counters(e.to_string()))?,
         );
 
-        let audit_appender = RedbAuditAppender::open_batched(
+        let audit_max_bytes = if config.audit.max_file_size_mb == 0 {
+            None
+        } else {
+            Some(config.audit.max_file_size_mb.saturating_mul(1024 * 1024))
+        };
+        let audit_appender = RedbAuditAppender::open_batched_with_rotation(
             &config.data_dir,
             std::time::Duration::from_secs(5),
+            audit_max_bytes,
         )
         .map_err(|e| BootError::AuditAppender(e.to_string()))?;
 
