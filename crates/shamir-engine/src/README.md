@@ -210,7 +210,7 @@ tokio::join!(t1, t2);
 ## Error Handling
 
 ```rust
-use shamir_db::db::DbError;
+use shamir_db::DbError;
 
 match table.read(&query, &ctx).await {
     Ok(result) => println!("Found {} records", result.records.len()),

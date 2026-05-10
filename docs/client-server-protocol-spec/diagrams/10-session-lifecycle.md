@@ -27,9 +27,6 @@ stateDiagram-v2
         Idle --> Processing: request {sid, req}
         Processing --> Idle: response sent
         
-        Idle --> ChangePwPending: changePasswordChallenge<br/>(stores pending_changepw_challenge)
-        ChangePwPending --> Idle: challenge expired (5min)<br/>OR proof verification fail<br/>(success path terminates session — see outer)
-        
         note right of Processing
             §7.5 Per-request validity check:
             if created_at_ns <= 
@@ -42,7 +39,6 @@ stateDiagram-v2
     ActiveSession --> [*]: max_age_expired (24h)
     ActiveSession --> [*]: logout
     ActiveSession --> [*]: kickSession admin
-    ActiveSession --> [*]: changePassword (kills self)
     ActiveSession --> [*]: updateUser (если this user) → §7.5 kicks
     ActiveSession --> [*]: identity_rotation (если client refuses pin update)
     ActiveSession --> [*]: server shutdown
@@ -62,7 +58,6 @@ stateDiagram-v2
 | `max_age_expired` | `session_evicted{reason="max_age"}` | Full auth (24h limit absolute) |
 | `logout` | `session_evicted{reason="logout"}` | Explicit user action |
 | `kickSession admin` | `kick_session` | Admin action, full re-auth required |
-| `changePassword` | `password_changed` + `session_evicted{reason="kicked"}` | Full re-auth с new password |
 | `updateUser` (per §7.5) | `session_evicted{reason="invalidated"}` | Full re-auth с updated permissions |
 | `disconnect (no resume)` | `session_evicted{reason="disconnect"}` | Resume или full auth |
 | `max_sessions overflow` | `session_evicted{reason="max_sessions_lru"}` | Older session killed |
@@ -79,7 +74,7 @@ stateDiagram-v2
     
     Consumed --> Active: NEW issued ticket с counter = N+1
     
-    Active --> [*]: tickets_invalid_before_ns updated<br/>(kickSession / changePassword / updateUser /<br/>revokeUserTickets / revokeAllTickets)
+    Active --> [*]: tickets_invalid_before_ns updated<br/>(kickSession / updateUser /<br/>revokeUserTickets / revokeAllTickets)
     
     Active --> [*]: original_auth_at_ns + 24h expired<br/>RESUMPTION_MAX_CHAIN_AGE
     

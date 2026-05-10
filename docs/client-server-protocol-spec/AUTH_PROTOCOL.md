@@ -429,16 +429,10 @@ struct Session {
     transport_kind: u8,                     // tcp=0x01, ws=0x02
     binding_mode: u8,                       // см. §4.2
     channel_binding_at_auth: bytes(32),     // снят с auth — для resumption check
-    pending_changepw_challenge: Option<{    // см. §12.5
-        server_nonce_cp: bytes(32),
-        client_nonce_cp: bytes(32),
-        issued_at_ns: u64,                  // SHOULD expire после CHANGEPW_CHALLENGE_TTL = 5 минут
-                                            // (защита от stale state confusion в multi-tab scenarios)
-    }>
 }
 ```
 
-(Nonces `client_nonce`/`server_nonce` НЕ хранятся в Session после handshake. См. §12.5 — `changePassword` использует свой challenge cycle.)
+(Nonces `client_nonce`/`server_nonce` НЕ хранятся в Session после handshake.)
 
 7.3. **SessionPermissions** — snapshot ролей в момент auth:
 ```
@@ -448,7 +442,7 @@ struct SessionPermissions {
     // имплементация может добавлять precomputed bitmasks
 }
 ```
-Изменение ролей админом (`updateUser`, §12.7) автоматически invalidates все existing sessions И tickets для затронутого юзера.
+Изменение ролей админом (`updateUser`, §12.5) автоматически invalidates все existing sessions И tickets для затронутого юзера.
 
 7.4. Лимиты:
 | Параметр | Значение |
@@ -768,92 +762,7 @@ Response: { "ok": { "killed_count": u32 } }
 
 **Атомарно (single transaction):** kill matching sessions + update `user.tickets_invalid_before_ns = now_ns` для затронутых юзеров (защита от resumption через украденный ticket с устаревшими ролями).
 
-### 12.5. `changePassword` (self-service)
-
-Любой пользователь меняет свой пароль внутри своей сессии. **Двухшаговый flow с fresh challenge** (не использует старый auth_message — Session struct не хранит nonces).
-
-```
-Step 1 — Request challenge:
-Client → Server: { "changePasswordChallenge": {
-    "client_nonce_cp": bytes(32)                // CSPRNG, anti-malicious-server-replay
-}}
-
-Step 2 — Server fresh challenge:
-Server → Client: { "challenge_cp": {
-    "server_nonce_cp": bytes(32),               // CSPRNG, per-request
-    "salt": bytes(16),                          // current user salt
-    "memory_kb": u32, "time": u32,              // current user kdf params
-    "parallelism": u32, "argon2_version": u8
-}}
-
-# [NORMATIVE] Single in-flight challenge per session_id:
-# Server stores pending_changepw_challenge в Session struct (§7.2).
-# Повторный changePasswordChallenge от той же session → **invalidates** previous
-# (overwrites pending_changepw_challenge). Multi-tab user должен это понимать —
-# первый submit fails если другой tab инициировал свой challenge ранее.
-
-Step 3 — Both compute auth_message_cp:
-auth_message_cp =
-    "SHAMIR-CHGPW-v1"
- || u16_be(byte_len(username_nfc)) || username_nfc
- || session_id(32)                              // binding к текущей сессии
- || client_nonce_cp(32)                         // anti malicious-server replay
- || server_nonce_cp(32)                         // anti malicious-client replay
- || salt(16)
- || u32_be(memory_kb) || u32_be(time) || u32_be(parallelism) || u8(argon2_version)
- || u8(transport_kind)                          // symmetry с main auth_message §4.1
- || u8(binding_mode)
- || channel_binding_at_auth(32)                 // session.channel_binding_at_auth
-
-# Client derives заново (Argon2id ~2с):
-salted_old      = Argon2id(old_password, salt, kdf_params)
-client_key_old  = HMAC(salted_old, "Client Key")
-stored_key_old  = SHA256(client_key_old)
-client_sig_cp   = HMAC(stored_key_old, auth_message_cp)
-client_proof_old = client_key_old XOR client_sig_cp
-
-# New material:
-new_salt = random(16)
-new_salted = Argon2id(new_password, new_salt, server_defaults)
-new_client_key = HMAC(new_salted, "Client Key")
-new_stored_key = SHA256(new_client_key)
-new_server_key = HMAC(new_salted, "Server Key")
-zeroize: old_password, salted_old, client_key_old, new_password, new_salted, new_client_key
-
-Step 4 — Client → Server:
-{ "changePassword": {
-    "client_proof_old": bytes(32),
-    "new_salt": bytes(16),
-    "new_stored_key": bytes(32),
-    "new_server_key": bytes(32)
-}}
-# kdf_params от клиента игнорируются — server применяет current defaults
-
-Step 5 — Server verifies:
-# Lookup session.pending_changepw_challenge — должен быть present
-# (иначе client пытается submit без prior changePasswordChallenge → reject)
-# Verify: now_ns - pending.issued_at_ns ≤ CHANGEPW_CHALLENGE_TTL (5 min)
-# (если истёк → reject, client должен повторно changePasswordChallenge)
-# Использует server_nonce_cp + client_nonce_cp ИЗ session.pending state, не из network message.
-
-client_signature = HMAC(user.stored_key, auth_message_cp)
-recovered = client_proof_old XOR client_signature
-ok = ConstantTimeEq(SHA256(recovered), user.stored_key)
-
-# Atomic on success: clear session.pending_changepw_challenge (single-use), persist new keys.
-
-Step 6 — Server → Client: { "ok": {} } или { "error": "authentication_failed" }
-```
-
-12.5.1. Server проверяет SCRAM proof старого пароля **без plain password** и **без серверного Argon2id** (нет DoS amplification).
-
-12.5.2. Server **игнорирует** client-supplied kdf_params — всегда server defaults.
-
-12.5.3. **Все сессии юзера убиваются** (включая текущую) И `tickets_invalid_before_ns = now_ns`. Клиент должен переаутентифицироваться.
-
-12.5.4. Serialized per user (mutex). Atomic update.
-
-### 12.6. `updateUser` (admin)
+### 12.5. `updateUser` (admin)
 
 ```
 Request:  { "updateUser": {
@@ -881,9 +790,9 @@ Response: { "ok": { "changes_applied": bool } }
 - (b) **Sessions созданные между step 2 и step 4** (resume concurrent): покрываются **per-request session validity check** (§7.5) — на следующем request session detected as invalidated и kicked
 - Step 4 = best-effort eager eviction для immediate kill TCP connection. Без §7.5 step 4 был бы insufficient race window.
 
-(Принудительная смена пароля — v1.1; для v1: admin удаляет user через CLI и создаёт заново через `createUser`, или просит юзера сменить через §12.5 self-service.)
+(Self-service смена пароля удалена в v1: admin пересоздаёт юзера через CLI delete + `createUser` (§12.1). Self-service password rotation — кандидат на v1.1.)
 
-### 12.7. Информационные команды
+### 12.6. Информационные команды
 
 `whoami`, `listSessions`, `serverInfo` — schemas и поведение в IMPLEMENTATION_GUIDE.md §13. Не security-критичны, не требуют superuser (кроме `listSessions` всех юзеров).
 
@@ -898,15 +807,10 @@ Response: { "ok": { "changes_applied": bool } }
 13.3. При login сервер использует stored kdf_params для verify.
 
 13.4. Если `user.kdf_params != kdf_params_current` AND все params strictly_weaker (memory_kb/time/parallelism все ≤ current):
-- В `auth_ok` сервер шлёт `"kdf_upgrade_required": true`.
-- Клиент использует **тот же** two-step flow что в §12.5 (`changePasswordChallenge` → `changePassword`) с тем же паролем для re-derive под новыми params.
-- Audit event `kdf_params_upgraded`.
-
-**UX caveat:** §12.5 changePassword kills все сессии включая текущую (§12.5.3) → user внезапно logged out после kdf upgrade. Двойной 2-секундный Argon2id freeze (initial auth + upgrade re-derive). Clients SHOULD:
-- Show explicit progress UI: "Updating security parameters... (~4 seconds)"
-- Auto-resume через resumption ticket после upgrade (если выдан)
-- Avoid showing "session expired" alarm
-- v1.1 ROADMAP: dedicated kdf_upgrade endpoint без kill sessions (re-derive только stored_key/server_key, session_id остаётся)
+- В `auth_ok` сервер шлёт `"kdf_upgrade_required": true` как **информационный hint** для клиента/operator audit.
+- В v1 self-service KDF upgrade **отсутствует** (вместе с self-service password rotation — удалена в v1). Migration выполняется admin-driven: пересоздание юзера через `createUser` (§12.1) с current `kdf_params_current`.
+- Audit event `kdf_params_upgrade_required` (server-side hint).
+- v1.1 ROADMAP: dedicated `kdfUpgrade` endpoint, который re-derive'ит `stored_key`/`server_key` под current params без kill sessions.
 
 13.5. Anti-enumeration: для unknown user сервер возвращает **current** kdf_params. Старые юзеры с устаревшими params видны атакующему — known trade-off.
 
@@ -1023,7 +927,6 @@ Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 14
 | `"Server Key"` | HMAC(salted_password) → server_key |
 | `"SHAMIR-FAKE-SALT-v1"` | HKDF salt для fake values |
 | `"SHAMIR-AUTH-v1"` | Header auth_message |
-| `"SHAMIR-CHGPW-v1"` | Header auth_message_cp в changePassword |
 | `"SHAMIR-IDENTITY-v1"` | Префикс identity_sig |
 | `"SHAMIR-BOOTSTRAP-v1"` | Bootstrap challenge sig |
 | `"SHAMIR-ROTATE-v1"` | Identity rotation event sig (active session broadcast) |

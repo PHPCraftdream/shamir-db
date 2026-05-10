@@ -1,6 +1,6 @@
 # 06 — Update User (admin) + Race Protection
 
-Atomic role update с двухуровневой защитой от race с in-flight resumption. См. AUTH §12.6 + §7.5.
+Atomic role update с двухуровневой защитой от race с in-flight resumption. См. AUTH §12.5 + §7.5.
 
 ```mermaid
 sequenceDiagram
@@ -102,5 +102,4 @@ Cost для §7.5 — один `u64 ≤` compare per request. Тривиальн
 
 Те же двухуровневые защиты применяются для:
 - `kickSession` (§12.4) — устанавливает `tickets_invalid_before_ns = now_ns`
-- `changePassword` (§12.5.3) — same
 - `revokeUserTickets` admin (SESSION_RESUMPTION §7.2) — same

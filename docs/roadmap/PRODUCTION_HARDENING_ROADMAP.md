@@ -66,7 +66,7 @@
 | 10 | Server-side query limits cap | ~1 ч | `[security.query_limits] max_result_size_bytes`, `max_execution_time_ms`, `max_queries_per_batch`. Клиент может **уменьшить**, не **увеличить**. Сейчас 10MB-default — произвольный, нужен явный operator-knob |
 | 11 | Capacity planning docs | ~1 ч | Не код. README: "1 session = ~2 KB RAM, audit entry = ~200 bytes, redb growth ~X/день при Y запросов/сек" |
 
-**Итого P0 ≈ 15 часов** (после удаления changePassword, было 18).
+**Итого P0 ≈ 15 часов.**
 
 ### P1 — нужно если multi-user / долгосрочная эксплуатация
 
@@ -120,7 +120,6 @@
 9. systemd unit + Dockerfile                      ~2 ч
 
 == Sprint 2 (~1 час): docs ==
-# changePassword removed — see P0 #9 above for rationale.
 11. Capacity planning docs                        ~1 ч
 
 == Optional sprint 3 (~14 часов): multi-user maturity ==
@@ -185,8 +184,7 @@ services:
 ## Сводная оценка после ревью
 
 ```
-было P0    ~11 ч    →   стало P0     ~15 ч  (+ slow-query log, query-limits cap, capacity docs;
-                                                     – changePassword)
+было P0    ~11 ч    →   стало P0     ~15 ч  (+ slow-query log, query-limits cap, capacity docs)
 было P1    ~22 ч    →   стало P1     ~14 ч  (выкинул IP-allowlist, cert-rotation, отдельный drain mode)
 было P2    ~49 ч    →   стало P2 на потребность  (HA, streaming, HSM — feature-driven, не roadmap)
 ─────────────────────────────────────────

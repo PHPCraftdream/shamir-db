@@ -81,7 +81,7 @@ db.create_index("main", "users", "email_idx", &["email"]).await?;
 ### Файловая структура
 
 ```
-src/db/engine/
+src/
 ├── db_instance/
 │   └── db_instance.rs    → DbInstance
 ├── repo/

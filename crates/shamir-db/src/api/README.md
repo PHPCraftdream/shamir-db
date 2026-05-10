@@ -11,9 +11,9 @@ All database operations are accessed through the **Batch API** — a unified JSO
 ### Entry Point
 
 ```rust
-use shamir_db::db::ShamirDb;
-use shamir_db::db::SystemStoreConfig;
-use shamir_db::db::query::BatchRequest;
+use shamir_db::ShamirDb;
+use shamir_db::SystemStoreConfig;
+use shamir_db::query::BatchRequest;
 
 // Initialize database
 let db = ShamirDb::init(SystemStoreConfig::InMemory).await?;

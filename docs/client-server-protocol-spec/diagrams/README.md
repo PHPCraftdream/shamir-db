@@ -8,7 +8,6 @@ Visual reference for ShamirDB Auth Protocol v1. Diagrams в Mermaid syntax — �
 - [01 — Initial Auth (full SCRAM)](01-initial-auth.md) — основной auth flow с channel binding и Ed25519 identity verify
 - [02 — Resumption](02-resumption.md) — fast reconnect через ticket с anti-downgrade и family counter
 - [03 — Bootstrap](03-bootstrap.md) — создание первого admin (out-of-band pin mandatory)
-- [04 — Change Password](04-change-password.md) — two-step с pending challenge, без серверного Argon2id
 - [05 — Identity Rotation](05-identity-rotation.md) — broadcast active sessions + orphan recovery
 - [06 — Update User](06-update-user.md) — admin command с persist barrier и per-request validity
 
