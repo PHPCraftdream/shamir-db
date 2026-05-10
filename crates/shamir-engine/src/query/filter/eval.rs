@@ -106,7 +106,11 @@ fn resolve_filter_value(
             resolve_field(record, &keys)
         }
         FilterValue::QueryRef { alias, path } => {
-            let qr = ctx.resolved_refs.get(alias.as_str())?;
+            // Strip the optional `@` prefix — the spec/diagrams show
+            // `{ "$query": "@user", "path": "[0].id" }` while queries
+            // map keys are bare (`{ user: ... }`).
+            let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
+            let qr = ctx.resolved_refs.get(key)?;
             resolve_query_ref_value(qr, path.as_deref())
         }
         // FnCall, Expr, Cond — not yet supported in eval
@@ -318,7 +322,9 @@ impl FilterCallback for InCallback {
             // Column QueryRef: expand to all values from the query result
             if is_column_query_ref(fv) {
                 if let FilterValue::QueryRef { alias, path } = fv {
-                    if let Some(qr) = ctx.resolved_refs.get(alias.as_str()) {
+                    // Strip optional `@` — same convention as scalar refs.
+                    let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
+                    if let Some(qr) = ctx.resolved_refs.get(key) {
                         let column = resolve_query_ref_column(qr, path.as_deref());
                         return column
                             .iter()

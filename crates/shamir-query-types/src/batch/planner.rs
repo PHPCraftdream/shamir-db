@@ -269,8 +269,16 @@ impl BatchPlanner {
         }
     }
 
-    /// Extract base alias from a string like "users[0].id" -> "users".
+    /// Extract base alias from a `$query` reference string like
+    /// `"@users[0].id"` → `"users"`.
+    ///
+    /// The leading `@` is the explicit reference marker (per spec) and
+    /// is stripped before lookup against the queries map (whose keys
+    /// never carry `@`). Both forms are accepted on input — `@user` and
+    /// bare `user` map to the same alias — but the canonical, documented
+    /// form is **with** the `@`.
     fn extract_base_alias(s: &str) -> String {
+        let s = s.strip_prefix('@').unwrap_or(s);
         s.find(['[', '.'])
             .map(|pos| s[..pos].to_string())
             .unwrap_or_else(|| s.to_string())
