@@ -50,6 +50,7 @@ crates/
 ```
 
 Documentation:
+- **[docs/architecture/LOGIC_FLOW.md](docs/architecture/LOGIC_FLOW.md)** — view from above: how a request travels through the crates
 - **[docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** — DB internals (storage, types, indexes)
 - **[docs/client-server-protocol-spec/](docs/client-server-protocol-spec/)** — wire protocol (auth, session, transports)
 - **[docs/roadmap/](docs/roadmap/)** — production hardening, server plan, feature roadmap
