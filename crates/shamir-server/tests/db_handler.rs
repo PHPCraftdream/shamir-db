@@ -20,7 +20,9 @@ use shamir_db::db::engine::table::TableConfig;
 use shamir_db::db::query::batch::BatchRequest;
 use shamir_db::db::ShamirDb;
 
-use shamir_server::db_handler::{AdminGlue, DbRequest, DbResponse, ShamirDbHandler};
+use shamir_server::db_handler::{
+    AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler,
+};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_server::user_directory::RedbUserDirectory;
 use tempfile::TempDir;
@@ -399,6 +401,51 @@ async fn batch_response_echoes_request_id() {
             );
         }
         other => panic!("expected Batch, got {:?}", other),
+    }
+}
+
+// --------------------------------------------------------------------------
+// Server-side query-limits cap — operator's max wins over client payload.
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_query_limits_cap_clamps_max_queries() {
+    let shamir = make_db_with_table("prod", "main", "items").await;
+    // Hard cap at 2 queries per batch — way below the client default of 50.
+    let handler = ShamirDbHandler::new(shamir).with_query_limits(QueryLimitsCap {
+        max_result_size_bytes: usize::MAX,
+        max_execution_time_secs: u64::MAX,
+        max_queries_per_batch: 2,
+    });
+    let session = user_session();
+
+    // Client sends 5 queries with the default `BatchLimits` (max_queries=50).
+    // Server-side cap clamps to 2 → planner returns TooManyQueries with
+    // max=2, not max=50.
+    let req = execute(
+        "prod",
+        json!({
+            "id": "v",
+            "queries": {
+                "q1": { "from": "items" },
+                "q2": { "from": "items" },
+                "q3": { "from": "items" },
+                "q4": { "from": "items" },
+                "q5": { "from": "items" }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    match res {
+        DbResponse::Error { code, message } => {
+            assert_eq!(code, "limits", "TooManyQueries → 'limits' code");
+            assert!(
+                message.contains("max: 2"),
+                "error message must surface the SERVER cap (2), not the client default (50); got {:?}",
+                message
+            );
+        }
+        other => panic!("expected limits error, got {:?}", other),
     }
 }
 

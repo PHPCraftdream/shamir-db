@@ -130,6 +130,12 @@ pub struct ConnectionContext {
     /// Listener-pinned KDF override, if any (browser endpoints lower the
     /// floor per `BROWSER_WASM_PLAN.md`).
     pub kdf_override: Option<KdfParams>,
+    /// Maximum wall-clock time to wait for the client's `auth_init` after
+    /// the TLS handshake completes. Defends against slow-loris attacks —
+    /// a TLS-accepted client that never sends a frame holds a per-connection
+    /// task + buffers indefinitely otherwise. Real clients send `auth_init`
+    /// within ~50 ms; the default of 5 s is comfortably above network jitter.
+    pub auth_init_timeout: Duration,
 }
 
 /// Top-level entry — drive a single accepted connection through the
@@ -246,10 +252,28 @@ async fn run_handshake<F: Framer>(
     subnet: shamir_connect::server::lockout::Subnet,
     exporter: [u8; 32],
 ) -> Result<[u8; 32], HandshakeError> {
-    // 1. Read auth_init.
-    if let Err(e) = framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf).await {
-        tracing::debug!(?e, "auth_init read failed");
-        return Err(HandshakeError::Io);
+    // 1. Read auth_init — bounded by `auth_init_timeout` so a TLS-accepted
+    //    client that never sends data (slow-loris) is dropped instead of
+    //    holding a tokio task + per-connection memory forever.
+    //
+    //    Real clients send auth_init within a single RTT (~50 ms typically).
+    //    The default ceiling of 5 s is comfortably above network jitter +
+    //    TLS handshake overhead while still cutting attackers off quickly.
+    let read_fut = framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf);
+    match tokio::time::timeout(ctx.auth_init_timeout, read_fut).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::debug!(?e, "auth_init read failed");
+            return Err(HandshakeError::Io);
+        }
+        Err(_elapsed) => {
+            tracing::info!(
+                timeout_ms = ctx.auth_init_timeout.as_millis() as u64,
+                ?subnet,
+                "auth_init timeout (slow-loris)",
+            );
+            return Err(HandshakeError::Io);
+        }
     }
     let init: wire::AuthInit = match rmp_serde::from_slice(frame_buf) {
         Ok(v) => v,
@@ -686,6 +710,7 @@ impl ConnectionContext {
         binding_mode: BindingMode,
         transport_kind: TransportKind,
         kdf_override: Option<KdfParams>,
+        auth_init_timeout: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             identity,
@@ -703,6 +728,7 @@ impl ConnectionContext {
             binding_mode,
             transport_kind,
             kdf_override,
+            auth_init_timeout,
         })
     }
 }

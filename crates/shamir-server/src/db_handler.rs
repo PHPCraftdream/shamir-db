@@ -208,6 +208,45 @@ pub struct AdminGlue {
     pub tables_registry: Option<Arc<TablesRegistry>>,
 }
 
+/// Per-batch slow-query threshold (in microseconds, matching
+/// `BatchResponse::execution_time_us`). `0` disables the warning.
+/// Set on the handler at boot from `[logging] slow_query_threshold_ms`.
+#[derive(Debug, Clone, Copy)]
+pub struct SlowQueryConfig {
+    pub threshold_us: u64,
+}
+
+impl SlowQueryConfig {
+    pub const DISABLED: Self = Self { threshold_us: 0 };
+    pub fn from_ms(ms: u64) -> Self {
+        Self {
+            threshold_us: ms.saturating_mul(1_000),
+        }
+    }
+}
+
+/// Server-side hard caps on `BatchRequest.limits`. Applied as a max:
+/// the client's payload values are clamped DOWN to these caps before
+/// the batch is dispatched into `ShamirDb::execute`.
+///
+/// Set on the handler at boot from `[security.query_limits]`. Tests that
+/// don't care about resource limits use [`Self::UNLIMITED`].
+#[derive(Debug, Clone, Copy)]
+pub struct QueryLimitsCap {
+    pub max_result_size_bytes: usize,
+    pub max_execution_time_secs: u64,
+    pub max_queries_per_batch: usize,
+}
+
+impl QueryLimitsCap {
+    /// Effectively-no-cap defaults — for unit tests. Matches `BatchLimits::default()`.
+    pub const UNLIMITED: Self = Self {
+        max_result_size_bytes: usize::MAX,
+        max_execution_time_secs: u64::MAX,
+        max_queries_per_batch: usize::MAX,
+    };
+}
+
 /// Bridge handler — routes wire requests to a shared [`ShamirDb`] instance.
 ///
 /// # Permissions (v1)
@@ -224,18 +263,46 @@ pub struct ShamirDbHandler {
     /// `None` means the handler was constructed without admin support;
     /// `CreateScramUser` requests will return `not_supported`.
     admin: Option<AdminGlue>,
+    /// Slow-query log threshold. Default disabled for unit tests; the
+    /// boot path sets this from the operator's config.
+    slow_query: SlowQueryConfig,
+    /// Server-side hard caps on per-batch resources.
+    query_limits: QueryLimitsCap,
 }
 
 impl ShamirDbHandler {
     /// Construct a handler over a shared [`ShamirDb`] without admin support.
     /// Use [`Self::with_admin`] when SCRAM user creation should be possible.
     pub fn new(db: Arc<ShamirDb>) -> Self {
-        Self { db, admin: None }
+        Self {
+            db,
+            admin: None,
+            slow_query: SlowQueryConfig::DISABLED,
+            query_limits: QueryLimitsCap::UNLIMITED,
+        }
     }
 
     /// Construct a handler with admin (SCRAM user-creation) support.
     pub fn with_admin(db: Arc<ShamirDb>, admin: AdminGlue) -> Self {
-        Self { db, admin: Some(admin) }
+        Self {
+            db,
+            admin: Some(admin),
+            slow_query: SlowQueryConfig::DISABLED,
+            query_limits: QueryLimitsCap::UNLIMITED,
+        }
+    }
+
+    /// Set the slow-query threshold (use [`SlowQueryConfig::from_ms`]).
+    /// Returns `self` so the call can be chained after `with_admin`.
+    pub fn with_slow_query(mut self, slow_query: SlowQueryConfig) -> Self {
+        self.slow_query = slow_query;
+        self
+    }
+
+    /// Set server-side hard caps on per-batch resources.
+    pub fn with_query_limits(mut self, query_limits: QueryLimitsCap) -> Self {
+        self.query_limits = query_limits;
+        self
     }
 
     /// Reference to the underlying [`ShamirDb`] (for tests / admin glue).
@@ -271,7 +338,7 @@ impl ShamirDbHandler {
         session: &Session,
         query_version: u32,
         db_name: &str,
-        batch: BatchRequest,
+        mut batch: BatchRequest,
     ) -> DbResponse {
         // Query-language version dispatch — fast reject before any DB work.
         if let Err(e) = check_query_lang(query_version) {
@@ -280,6 +347,24 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             };
         }
+
+        // Server-side cap on `BatchRequest.limits`. Client may shrink any
+        // field, but cannot exceed the operator-configured cap. Applied
+        // BEFORE the planner sees the batch so over-cap requests fail
+        // through `BatchError::TooManyQueries` etc. with the cap as the
+        // reported max — not the client-supplied value.
+        batch.limits.max_result_size = batch
+            .limits
+            .max_result_size
+            .min(self.query_limits.max_result_size_bytes);
+        batch.limits.max_execution_time_secs = batch
+            .limits
+            .max_execution_time_secs
+            .min(self.query_limits.max_execution_time_secs);
+        batch.limits.max_queries = batch
+            .limits
+            .max_queries
+            .min(self.query_limits.max_queries_per_batch);
 
         // Admin / auth gate.
         if !session.permissions.read().is_superuser {
@@ -298,11 +383,22 @@ impl ShamirDbHandler {
 
         match run_blocking(self.db.execute(db_name, &batch)) {
             Ok(response) => {
-                // Side-effect: persist table create/drop into our wire-tables
-                // registry so they survive a restart. Only ops that
-                // actually succeeded are recorded; per-alias success is
-                // implicit because BatchError aborts the whole batch on
-                // any failure (see `execute_batch`).
+                // Slow-query logging: WARN line for batches whose total
+                // execution time exceeds the configured threshold. Useful
+                // for spotting unindexed queries in production. Threshold
+                // = 0 disables (e.g. in unit tests).
+                if self.slow_query.threshold_us > 0
+                    && response.execution_time_us > self.slow_query.threshold_us
+                {
+                    tracing::warn!(
+                        elapsed_us = response.execution_time_us,
+                        threshold_us = self.slow_query.threshold_us,
+                        db = db_name,
+                        queries = batch.queries.len(),
+                        request_id = %response.id,
+                        "slow query",
+                    );
+                }
                 self.persist_table_lifecycle(db_name, &batch);
                 DbResponse::Batch { response }
             }

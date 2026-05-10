@@ -54,8 +54,9 @@ use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
 use crate::config::{Config, ListenerKind, ProfileKind};
+use crate::conn_limiter::ConnLimiter;
 use crate::connection::{handle_connection, ConnectionContext};
-use crate::db_handler::{AdminGlue, ShamirDbHandler};
+use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig};
 use crate::tables_registry::TablesRegistry;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server_meta::ServerMetaStore;
@@ -303,14 +304,24 @@ impl ServerLauncher {
                 }
             }
         }
-        let handler: Arc<dyn RequestHandler> = Arc::new(ShamirDbHandler::with_admin(
-            shamir.clone(),
-            AdminGlue {
-                user_dir: user_dir.clone(),
-                kdf: kdf_for_bootstrap,
-                tables_registry: Some(tables_registry.clone()),
-            },
-        ));
+        let handler: Arc<dyn RequestHandler> = Arc::new(
+            ShamirDbHandler::with_admin(
+                shamir.clone(),
+                AdminGlue {
+                    user_dir: user_dir.clone(),
+                    kdf: kdf_for_bootstrap,
+                    tables_registry: Some(tables_registry.clone()),
+                },
+            )
+            .with_slow_query(SlowQueryConfig::from_ms(
+                config.logging.slow_query_threshold_ms,
+            ))
+            .with_query_limits(QueryLimitsCap {
+                max_result_size_bytes: config.security.query_limits.max_result_size_bytes,
+                max_execution_time_secs: config.security.query_limits.max_execution_time_secs,
+                max_queries_per_batch: config.security.query_limits.max_queries_per_batch,
+            }),
+        );
 
         // 6. ResumeConfig.
         let (current_key, previous_key) = meta.ticket_keys();
@@ -372,6 +383,14 @@ impl ServerLauncher {
         let shutdown_notify = Arc::new(Notify::new());
         let mut bound_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(config.listeners.len());
         let mut listener_tasks: Vec<JoinHandle<()>> = Vec::new();
+
+        // Connection-level security knobs from config (slow-loris timeout, etc.)
+        let auth_init_timeout =
+            Duration::from_millis(config.security.connection.auth_init_timeout_ms);
+        // Global cap on simultaneously-active connections — shared across
+        // every listener.
+        let conn_limiter =
+            ConnLimiter::new(config.security.connection.max_active_connections);
 
         for l in &config.listeners {
             let addr: SocketAddr = match l.addr.parse() {
@@ -444,10 +463,14 @@ impl ServerLauncher {
                         binding_mode,
                         transport_kind,
                         l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
                     );
                     let acceptor = tls_acceptor.clone();
                     let notify = shutdown_notify.clone();
-                    listener_tasks.push(tokio::spawn(accept_loop_tcp(listener, acceptor, ctx, notify)));
+                    let limiter = conn_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_tcp(
+                        listener, acceptor, ctx, notify, limiter,
+                    )));
                     local_addr
                 }
                 AcceptPath::WsNative => {
@@ -474,11 +497,13 @@ impl ServerLauncher {
                         binding_mode,
                         transport_kind,
                         l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
                     );
                     let acceptor = tls_acceptor.clone();
                     let notify = shutdown_notify.clone();
+                    let limiter = conn_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_ws_native(
-                        listener, acceptor, ctx, notify,
+                        listener, acceptor, ctx, notify, limiter,
                     )));
                     local_addr
                 }
@@ -506,11 +531,13 @@ impl ServerLauncher {
                         binding_mode,
                         transport_kind,
                         l.kdf_override.as_ref().map(kdf_from_config),
+                        auth_init_timeout,
                     );
                     let acceptor = tls_acceptor.clone();
                     let notify = shutdown_notify.clone();
+                    let limiter = conn_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
-                        listener, acceptor, ctx, notify, policy,
+                        listener, acceptor, ctx, notify, limiter, policy,
                     )));
                     local_addr
                 }
@@ -573,6 +600,7 @@ fn build_ctx(
     binding_mode: BindingMode,
     transport_kind: TransportKind,
     kdf_override: Option<KdfParams>,
+    auth_init_timeout: Duration,
 ) -> Arc<ConnectionContext> {
     let identity_keypair = Ed25519Keypair::from_seed(&identity_seed);
     ConnectionContext::new(
@@ -591,6 +619,7 @@ fn build_ctx(
         binding_mode,
         transport_kind,
         kdf_override,
+        auth_init_timeout,
     )
 }
 
@@ -603,6 +632,7 @@ async fn accept_loop_tcp(
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
     shutdown: Arc<Notify>,
+    limiter: ConnLimiter,
 ) {
     loop {
         tokio::select! {
@@ -620,9 +650,26 @@ async fn accept_loop_tcp(
                         continue;
                     }
                 };
+                // Reserve a slot BEFORE the TLS handshake so a saturated
+                // server doesn't waste CPU on TLS for connections we're
+                // about to close. Drop closes the TCP socket immediately
+                // (the `tcp` binding goes out of scope) — kernel sends RST.
+                let guard = match limiter.try_acquire() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ?peer_addr,
+                            active = limiter.active(),
+                            cap = limiter.cap(),
+                            "max_active_connections reached, refusing",
+                        );
+                        continue;
+                    }
+                };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
+                    let _guard = guard;  // keep alive for the lifetime of this task
                     let tls = match acceptor.accept(tcp).await {
                         Ok(t) => t,
                         Err(e) => {
@@ -647,6 +694,7 @@ async fn accept_loop_ws_native(
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
     shutdown: Arc<Notify>,
+    limiter: ConnLimiter,
 ) {
     loop {
         tokio::select! {
@@ -664,9 +712,22 @@ async fn accept_loop_ws_native(
                         continue;
                     }
                 };
+                let guard = match limiter.try_acquire() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ?peer_addr,
+                            active = limiter.active(),
+                            cap = limiter.cap(),
+                            "max_active_connections reached (ws native), refusing",
+                        );
+                        continue;
+                    }
+                };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
+                    let _guard = guard;
                     let tls = match acceptor.accept(tcp).await {
                         Ok(t) => t,
                         Err(e) => {
@@ -701,6 +762,7 @@ async fn accept_loop_ws_browser(
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
     shutdown: Arc<Notify>,
+    limiter: ConnLimiter,
     policy: BrowserOriginPolicy,
 ) {
     loop {
@@ -719,10 +781,23 @@ async fn accept_loop_ws_browser(
                         continue;
                     }
                 };
+                let guard = match limiter.try_acquire() {
+                    Some(g) => g,
+                    None => {
+                        tracing::debug!(
+                            ?peer_addr,
+                            active = limiter.active(),
+                            cap = limiter.cap(),
+                            "max_active_connections reached (ws browser), refusing",
+                        );
+                        continue;
+                    }
+                };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
                 let policy = policy.clone();
                 tokio::spawn(async move {
+                    let _guard = guard;
                     let tls = match acceptor.accept(tcp).await {
                         Ok(t) => t,
                         Err(e) => {
