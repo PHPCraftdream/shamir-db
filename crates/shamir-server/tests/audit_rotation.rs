@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry};
+use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditEntry};
 use shamir_server::audit_appender::RedbAuditAppender;
 use tempfile::TempDir;
 
@@ -107,4 +107,65 @@ async fn rotation_disabled_when_max_size_is_none() {
         })
         .count();
     assert_eq!(rotated_count, 0, "rotation must be off when None");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hmac_chain_is_intact_across_rotation() {
+    // Critical security regression test: rotation must NOT break the
+    // HMAC chain. After multiple rotations, reading every file in
+    // chronological order must yield a chain that
+    // `AuditChain::verify_chain` accepts (every prev_hmac matches the
+    // previous entry's hmac, hmacs are recomputable from the chain key).
+
+    let temp = TempDir::new().unwrap();
+    let key = [0xC0u8; 32];
+    let chain = AuditChain::new(key);
+    // Tiny 1 KB threshold to force several rotations.
+    let appender =
+        RedbAuditAppender::open_strict_with_rotation(temp.path(), Some(1024)).unwrap();
+
+    // Write 30 entries via the chain so each one carries a real
+    // `prev_hmac → hmac` link (the make_entry helper above uses fake
+    // hmacs and would fail verify_chain by design).
+    for i in 0..30u64 {
+        let entry = chain.append(
+            "auth_success",
+            "tcp",
+            format!("user_{i:02}"),
+            "127.0.0.0/24",
+            [0u8; 8],
+            "ok",
+            Vec::new(),
+            1_000_000_000 + i,
+        );
+        appender.append_entry(&entry);
+    }
+    // Brief pause so any rename/file-handle settle.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Sanity: there ARE rotated files (otherwise this test trivially
+    // passes by reading just the active file).
+    let rotated_count = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("audit.log."))
+                .unwrap_or(false)
+        })
+        .count();
+    assert!(
+        rotated_count >= 1,
+        "expected at least one rotation to actually exercise the chain check"
+    );
+
+    // The fix in `read_log_for_verify`: it must read rotated files
+    // (lex-sorted) plus the active file, in chronological order.
+    let entries = RedbAuditAppender::read_log_for_verify(temp.path())
+        .expect("read_log_for_verify");
+    assert_eq!(entries.len(), 30, "every entry survives across rotation");
+
+    // The headline assertion: the chain still verifies after rotation.
+    AuditChain::verify_chain(&key, &entries).expect("HMAC chain unbroken across rotation");
 }

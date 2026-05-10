@@ -109,14 +109,24 @@ async fn endpoints_return_expected_codes_and_content() {
     let (status, _body) = http_get(obs_addr, "/readyz").await;
     assert_eq!(status, 200, "readyz status after boot");
 
-    // /metrics — Prometheus text. Should include at least the standard
-    // process_* metrics from metrics-process.
+    // /metrics — Prometheus text. Should include the standard process_*
+    // series from metrics-process, AND the application metrics
+    // pre-registered by `observability::spawn` (so dashboards can
+    // discover the names even before the first event).
     let (status, body) = http_get(obs_addr, "/metrics").await;
     assert_eq!(status, 200, "metrics status");
     assert!(
         body.contains("process_"),
         "metrics body must include process_* series, got first 200 bytes: {:?}",
         &body.chars().take(200).collect::<String>()
+    );
+    assert!(
+        body.contains("auth_attempts_total"),
+        "metrics body must include the application counter \
+         `auth_attempts_total` (pre-registered via describe_counter!) \
+         so Grafana picks it up before the first auth attempt; first \
+         500 bytes: {:?}",
+        &body.chars().take(500).collect::<String>()
     );
 
     // /info — pretty JSON.
