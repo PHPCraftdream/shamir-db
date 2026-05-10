@@ -1,10 +1,15 @@
 {
   "name": "shamir-e2e",
   "private": true,
+  "version": "0.1.0",
+  "description": "End-to-end test harness for ShamirDB — uses the shamir-client native binding to drive a real server subprocess through the full TLS+SCRAM+Batch flow.",
   "scripts": {
-    "test": "node auth.test.js"
+    "build:server": "cd ../.. && cargo build --release -p shamir-server",
+    "build:binding": "cd ../../crates/shamir-client-node && npm install && npx napi build --platform --release",
+    "build": "npm run build:server && npm run build:binding",
+    "test": "node e2e.test.js"
   },
   "dependencies": {
-    "@msgpack/msgpack": "^3.0.0-beta.3"
+    "shamir-client": "file:../../crates/shamir-client-node"
   }
 }

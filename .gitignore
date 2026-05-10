@@ -2198,3 +2198,9 @@
 /chroma_data/chroma.sqlite3
 server-cert.pem
 tests/e2e/node_modules/
+
+# Node binding build artefacts
+crates/shamir-client-node/node_modules/
+crates/shamir-client-node/package-lock.json
+crates/shamir-client-node/*.node
+tests/e2e/package-lock.json

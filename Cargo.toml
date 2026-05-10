@@ -2,6 +2,15 @@
 members = ["crates/*"]
 resolver = "2"
 
+# napi-rs cdylib needs the MSVC toolchain on Windows (it delay-loads
+# Node-API symbols from `node.exe` via `delayimp.lib`, which the
+# build script only wires up for `x86_64-pc-windows-msvc`). Excluded
+# from default workspace ops so `cargo build` / `cargo test` on the
+# host's `windows-gnu` toolchain don't fail trying to link `libnode.dll`.
+# Build it explicitly via `cargo build -p shamir-client-node` (its own
+# `rust-toolchain.toml` pins MSVC) or `napi build` from `npm`.
+exclude = ["crates/shamir-client-node"]
+
 [profile.dev]
 opt-level = 0
 codegen-units = 14
