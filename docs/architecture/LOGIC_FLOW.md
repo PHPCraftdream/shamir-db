@@ -132,6 +132,11 @@ boundaries stay clean.
   AAD, 24 h max chain age) defends against a distinct threat. See
   `docs/client-server-protocol-spec/SESSION_RESUMPTION.md` for the
   full mapping.
+- *Transactions* — `BatchRequest.transactional: bool` exists on the
+  wire but the executor currently ignores it. The plan to wire it
+  through (MVCC via the storage backends that support it; one-repo
+  rule; serial execution inside a tx) is in
+  `docs/roadmap/TRANSACTIONS.md`.
 - All three layers — DTOs (`shamir-query-types`), pure planning, and
   runtime execution — are now properly separated. The batch planner
   and `$query` reference parser live in `shamir-query-types::batch`
