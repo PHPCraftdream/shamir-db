@@ -306,6 +306,25 @@ fn req_min_max_score() -> BatchRequest {
     .unwrap()
 }
 
+/// MIN(score) ONLY — eligible for Q1 sorted-index fast-path
+/// (single aggregate, no other select items, no filter/order/etc).
+fn req_min_score() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "m",
+        "queries": {
+            "m": {
+                "from": "users",
+                "select": {
+                    "items": [
+                        { "type": "aggregate", "func": "min", "field": ["score"], "alias": "lo" }
+                    ]
+                }
+            }
+        }
+    }))
+    .unwrap()
+}
+
 fn req_range_age() -> BatchRequest {
     serde_json::from_value(json!({
         "id": "r",
@@ -751,6 +770,48 @@ fn bench_min_max_with_index(c: &mut Criterion) {
     group.finish();
 }
 
+/// Q1 baseline: MIN alone WITHOUT sorted index — falls through to
+/// full scan + aggregate.
+fn bench_min_only_no_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("min_only_no_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(seeded(n, false));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_min_score();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Q1 fast-path: MIN alone with sorted index on `score`. Should hit
+/// the lookup_min path in read(), O(log n).
+fn bench_min_only_with_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("min_only_with_index");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_sorted_index(&s, "users", "by_score", "score").await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_min_score();
+                async move { shamir.execute("bench", &req).await.unwrap(); }
+            });
+        });
+    }
+    group.finish();
+}
+
 /// `order_by score desc + LIMIT 10` on indexed score field — Opt #1
 /// can read the index in order and stop after K matches.
 fn bench_order_limit_with_index(c: &mut Criterion) {
@@ -970,6 +1031,8 @@ criterion_group!(
     bench_count_with_filter_with_index,
     bench_min_max_no_index,
     bench_min_max_with_index,
+    bench_min_only_no_index,
+    bench_min_only_with_index,
     bench_order_limit_with_index,
     bench_range_query_no_index,
     bench_range_query_with_index,
