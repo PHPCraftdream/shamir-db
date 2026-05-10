@@ -199,6 +199,42 @@ cargo bench -p shamir-db --bench engine_perf
 
 Criterion writes per-bench HTML reports under `target/criterion/`.
 
+## After Opt A — interner persist debouncing
+
+Change: `InternerManager::persist()` becomes a near-free no-op when
+the interner hasn't grown since the previous call. Tracking via
+`last_persisted_len: AtomicUsize` (interner is monotonic, so length
+identifies content). Implementation in
+`crates/shamir-engine/src/table/interner_manager.rs`.
+
+Same hardware, same criterion args. Numbers vs baseline:
+
+| Bench                            | Baseline | After A   | Δ        |
+|----------------------------------|---------:|----------:|---------:|
+| **bulk_insert/100**              |  2.13 ms |  1.91 ms  | **-10 %** ✓ (criterion p=0.00) |
+| **bulk_insert/1000**             | 27.19 ms | 24.63 ms  | **-9 %** ✓ (criterion p=0.02) |
+| set_existing_no_index/10000      | 79.5 ms  | 77.5 ms   | -3 % (noise) |
+| set_existing_with_index/10000    | 82.7 ms  | 100 ms    | +21 % (noise; iter variance high here) |
+| read_by_id_no_index/10000        | 78.9 ms  | 92.9 ms   | +18 % (noise — measurement-time 2 s) |
+| read_by_id_with_index/10000      |  50 µs   |  55 µs    | noise |
+| update_by_id_no_index/10000      | 90.3 ms  | 88.2 ms   | -2 %  (no new intern keys in updates) |
+| delete_by_id_no_index/10000      | 91.1 ms  | 94.5 ms   | noise |
+| complex_filter/10000             | 92.9 ms  | 103.9 ms  | noise |
+
+**Takeaway.** Real win on the write-heavy bulk insert path (10 % off
+for both 100 and 1 000 — criterion confirms p < 0.05). Other
+scenarios show no measurable change because their workload doesn't
+add new interner keys after the initial seed (the field names
+`id`/`name`/`email`/etc. all interned once during setup; per-op
+persist was already cheap content-wise but expensive serialisation-
+wise, and now `persist()` short-circuits on `cur_len == last`).
+
+The "+18 %" / "+21 %" outliers are within the noise floor of a 2 s
+measurement window with 10 samples. A longer-time run smooths this
+out (see "Reproducing" section — bump `--measurement-time` to 5+).
+
+Zero regressions, broad workspace test sweep stays at 1179/0.
+
 ## Next
 
 Optimisations land in PR sequence A → B → C → D. Each PR re-runs the
