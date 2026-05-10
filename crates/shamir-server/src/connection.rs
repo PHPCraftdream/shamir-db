@@ -42,6 +42,12 @@ use crate::framer::Framer;
 use crate::user_directory::RedbUserDirectory;
 use crate::version::check_handshake_proto;
 
+/// Helper for the auth_attempts_total counter — keeps the result label
+/// values consistent across emit sites.
+fn record_auth_attempt(result: &'static str) {
+    metrics::counter!("auth_attempts_total", "result" => result).increment(1);
+}
+
 use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
 /// Wire view of `auth_init`, `challenge`, `client_proof`, `auth_ok` —
@@ -179,6 +185,7 @@ pub async fn handle_connection<F>(
                 None,
                 "rate_limited",
             );
+            record_auth_attempt("rate_limited");
             // Best-effort drop — peer hasn't sent anything yet.
             framer.shutdown().await;
             return;
@@ -203,8 +210,23 @@ pub async fn handle_connection<F>(
     )
     .await
     {
-        Ok(sid) => sid,
-        Err(_) => {
+        Ok(sid) => {
+            record_auth_attempt("success");
+            sid
+        }
+        Err(e) => {
+            // Bucket the failure into a coarse counter label. Detailed
+            // categorisation (which user / which subnet) lives in the
+            // audit log; the counter is for at-a-glance dashboards.
+            let label = match e {
+                HandshakeError::LockedOut => "locked_out",
+                HandshakeError::BadProof => "bad_proof",
+                HandshakeError::UnknownUser => "unknown_user",
+                HandshakeError::UnsupportedVersion => "unsupported_version",
+                HandshakeError::Policy => "policy",
+                HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
+            };
+            record_auth_attempt(label);
             // Pad to spec §8.5 floor before disconnecting on the negative
             // path — defeats real-vs-fake user timing oracles.
             let pad = pad_guard.finish_with_target(target_constant_time_ms());

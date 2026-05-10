@@ -402,19 +402,51 @@ impl RedbAuditAppender {
         data_dir: impl AsRef<Path>,
     ) -> Result<Vec<AuditEntry>, AppenderError> {
         let (log_path, _db_path) = Self::paths(data_dir.as_ref());
-        if !log_path.exists() {
-            return Ok(Vec::new());
+        let dir = data_dir.as_ref();
+        // Collect rotated files (`audit.log.<timestamp>`) AND the active
+        // `audit.log` in chronological order (oldest → newest). Since the
+        // rotated suffix is a zero-padded `unix_nanos` (20 digits), a
+        // lexicographic sort matches chronological order. The active
+        // file is read LAST because its entries are the most recent.
+        let active_name = log_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(AUDIT_LOG_FILENAME)
+            .to_string();
+        let prefix = format!("{active_name}.");
+
+        let mut rotated: Vec<PathBuf> = if dir.exists() {
+            std::fs::read_dir(dir)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.starts_with(&prefix))
+                        .unwrap_or(false)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        rotated.sort();
+
+        let mut all_paths = rotated;
+        if log_path.exists() {
+            all_paths.push(log_path);
         }
-        let f = File::open(&log_path)?;
-        let r = BufReader::new(f);
+
         let mut out = Vec::new();
-        for line in r.lines() {
-            let line = line?;
-            if line.is_empty() {
-                continue;
+        for path in all_paths {
+            let f = File::open(&path)?;
+            let r = BufReader::new(f);
+            for line in r.lines() {
+                let line = line?;
+                if line.is_empty() {
+                    continue;
+                }
+                let je: JsonEntry = serde_json::from_str(&line)?;
+                out.push(je.into_audit()?);
             }
-            let je: JsonEntry = serde_json::from_str(&line)?;
-            out.push(je.into_audit()?);
         }
         Ok(out)
     }

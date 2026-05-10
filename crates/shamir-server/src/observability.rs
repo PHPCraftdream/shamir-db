@@ -148,7 +148,36 @@ pub async fn spawn(
     let collector = Collector::default();
     collector.describe();
 
-    // 3. Background poller: refresh process metrics every 5 s. Cheap
+    // 3. Application metrics — describe + register-by-zero-touch so
+    // they appear in `/metrics` even before the first real event
+    // (otherwise Prometheus scrapers see them only after the first
+    // counter increment, which makes Grafana panel discovery flaky).
+    //
+    // The `metrics::counter!(...).increment(0)` is the canonical way to
+    // "register without changing the value" — `describe_*` alone only
+    // attaches metadata, the counter itself remains absent from the
+    // exporter's output until first touched.
+    metrics::describe_counter!(
+        "auth_attempts_total",
+        metrics::Unit::Count,
+        "Number of authentication attempts, bucketed by terminal result \
+         label: success / bad_proof / locked_out / unknown_user / \
+         rate_limited / unsupported_version / policy / io_or_decode"
+    );
+    for label in [
+        "success",
+        "bad_proof",
+        "locked_out",
+        "unknown_user",
+        "rate_limited",
+        "unsupported_version",
+        "policy",
+        "io_or_decode",
+    ] {
+        metrics::counter!("auth_attempts_total", "result" => label).increment(0);
+    }
+
+    // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
     // so /metrics returns useful data immediately.
     collector.collect();
