@@ -38,14 +38,11 @@ use shamir_connect::server::user_record::UserRecord;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::Error as ConnectError;
 
+use crate::framer::Framer;
 use crate::user_directory::RedbUserDirectory;
 use crate::version::check_handshake_proto;
 
-use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
-use shamir_transport_tcp::tls::extract_tls_exporter;
-use tokio::io::{split, AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-use tokio_rustls::server::TlsStream;
-use tokio::net::TcpStream;
+use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
 /// Wire view of `auth_init`, `challenge`, `client_proof`, `auth_ok` —
 /// these match the shapes used by the transport-tcp e2e test, kept
@@ -135,17 +132,27 @@ pub struct ConnectionContext {
     pub kdf_override: Option<KdfParams>,
 }
 
-/// Top-level entry — drive a single accepted TLS+TCP connection through
-/// the entire SCRAM handshake + post-handshake request loop.
+/// Top-level entry — drive a single accepted connection through the
+/// entire SCRAM handshake + post-handshake request loop.
 ///
-/// `peer_addr` is the client socket address; subnet is derived for rate
-/// limit / lockout keys. `tls_stream` is the post-`accept` TLS stream
-/// (exporter-extractable for native binding modes).
-pub async fn handle_connection(
+/// Generic over [`Framer`] so the same code path serves both TCP+TLS
+/// (`TcpFramer`) and WebSocket (`WsFramer`). Caller is responsible for:
+/// - Performing the TLS handshake (and WS upgrade for WS listeners).
+/// - Extracting the TLS exporter BEFORE constructing the framer (the
+///   raw TLS stream is moved into the framer at construction time).
+/// - Choosing the right exporter (`[0u8; 32]` for `binding_mode = 0x00`
+///   or `0x02`; real exporter for `0x01`).
+/// - Wiring the listener-pinned `binding_mode` into [`ConnectionContext`].
+///
+/// `peer_addr` is used for subnet derivation (rate-limit / lockout keys).
+pub async fn handle_connection<F>(
     ctx: Arc<ConnectionContext>,
     peer_addr: SocketAddr,
-    tls_stream: TlsStream<TcpStream>,
-) {
+    mut framer: F,
+    exporter: [u8; 32],
+) where
+    F: Framer,
+{
     let subnet = subnet_of(peer_addr.ip());
 
     // Pre-handshake: rate-limit per-subnet.
@@ -166,20 +173,11 @@ pub async fn handle_connection(
                 None,
                 "rate_limited",
             );
-            // Best-effort short error then drop.
-            let _ = tls_stream;
+            // Best-effort drop — peer hasn't sent anything yet.
+            framer.shutdown().await;
             return;
         }
     }
-
-    // Channel binding from TLS exporter (binding_mode 0x01 only — for
-    // 0x02 / 0x00 the placeholder is zeros).
-    let exporter = match ctx.binding_mode {
-        BindingMode::TlsExporter => extract_tls_exporter(&tls_stream).unwrap_or([0u8; 32]),
-        _ => [0u8; 32],
-    };
-
-    let (mut r, mut w) = split(tls_stream);
 
     // Per-connection scratch buffers (Optim #1 / Optim #7 zero-alloc loop).
     let mut frame_buf: Vec<u8> = Vec::with_capacity(4096);
@@ -189,12 +187,9 @@ pub async fn handle_connection(
     // negative paths can't be timed (spec §8.5).
     let pad_guard = LatencyPadGuard::start();
 
-    // Run handshake; accept_outcome encodes the resulting session_id (ok)
-    // OR triggers a generic authentication_failed.
     let session_id = match run_handshake(
         &ctx,
-        &mut r,
-        &mut w,
+        &mut framer,
         &mut frame_buf,
         &mut write_scratch,
         subnet,
@@ -210,8 +205,7 @@ pub async fn handle_connection(
             if pad > Duration::ZERO {
                 tokio::time::sleep(pad).await;
             }
-            // Best-effort drain: peer may already have closed.
-            let _ = w.shutdown().await;
+            framer.shutdown().await;
             return;
         }
     };
@@ -222,15 +216,13 @@ pub async fn handle_connection(
         tokio::time::sleep(pad).await;
     }
 
-    // Drain `auth_ok` byte queue (already written inside run_handshake).
-    // Now run the per-request loop.
-    request_loop(&ctx, &mut r, &mut w, &mut frame_buf, &mut write_scratch, session_id).await;
+    request_loop(&ctx, &mut framer, &mut frame_buf, &mut write_scratch, session_id).await;
 
     // Terminal: 5s grace is a transport-layer concept (the session sticks
     // around in SessionStore after disconnect; resume can re-bind within
-    // grace). Here we simply drop the read/write halves; the session
-    // remains in the store until session GC evicts it by idle TTL.
-    let _ = w.shutdown().await;
+    // grace). Here we simply close the framer; the session remains in the
+    // store until session GC evicts it by idle TTL.
+    framer.shutdown().await;
 }
 
 #[derive(Debug)]
@@ -246,21 +238,16 @@ enum HandshakeError {
     UnsupportedVersion,
 }
 
-async fn run_handshake<R, W>(
+async fn run_handshake<F: Framer>(
     ctx: &ConnectionContext,
-    r: &mut R,
-    w: &mut W,
+    framer: &mut F,
     frame_buf: &mut Vec<u8>,
     write_scratch: &mut Vec<u8>,
     subnet: shamir_connect::server::lockout::Subnet,
     exporter: [u8; 32],
-) -> Result<[u8; 32], HandshakeError>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) -> Result<[u8; 32], HandshakeError> {
     // 1. Read auth_init.
-    if let Err(e) = read_frame_into(r, MAX_FRAME_SIZE_DEFAULT, frame_buf).await {
+    if let Err(e) = framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf).await {
         tracing::debug!(?e, "auth_init read failed");
         return Err(HandshakeError::Io);
     }
@@ -355,12 +342,12 @@ where
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Decode),
     };
-    if write_frame_into(w, &bytes, write_scratch).await.is_err() {
+    if framer.write_frame_into(&bytes, write_scratch).await.is_err() {
         return Err(HandshakeError::Io);
     }
 
     // 5. Read client_proof (Argon2id ran on the client side, ~2s).
-    if read_frame_into(r, MAX_FRAME_SIZE_DEFAULT, frame_buf)
+    if framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
         .await
         .is_err()
     {
@@ -525,24 +512,20 @@ where
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),
     };
-    if write_frame_into(w, &bytes, write_scratch).await.is_err() {
+    if framer.write_frame_into(&bytes, write_scratch).await.is_err() {
         return Err(HandshakeError::Io);
     }
 
     Ok(auth_ok.session_id)
 }
 
-async fn request_loop<R, W>(
+async fn request_loop<F: Framer>(
     ctx: &ConnectionContext,
-    r: &mut R,
-    w: &mut W,
+    framer: &mut F,
     frame_buf: &mut Vec<u8>,
     write_scratch: &mut Vec<u8>,
     sid: [u8; 32],
-) where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) {
     let user_dir = ctx.user_dir.clone();
     let lookup_tib = move |uid: &[u8; 16]| -> u64 {
         // Spec §7.5 NORMATIVE: each request runs through this fast read so
@@ -554,7 +537,7 @@ async fn request_loop<R, W>(
     };
 
     loop {
-        match read_frame_into(r, MAX_FRAME_SIZE_DEFAULT, frame_buf).await {
+        match framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf).await {
             Ok(()) => {}
             Err(_) => break, // client closed
         }
@@ -564,7 +547,7 @@ async fn request_loop<R, W>(
                 // Malformed envelope — emit generic error envelope back.
                 let err = ErrorEnvelope::new(None, "invalid_envelope");
                 if let Ok(bytes) = err.to_msgpack() {
-                    let _ = write_frame_into(w, &bytes, write_scratch).await;
+                    let _ = framer.write_frame_into(&bytes, write_scratch).await;
                 }
                 continue;
             }
@@ -596,7 +579,7 @@ async fn request_loop<R, W>(
                 // Internal error — best-effort error envelope.
                 let err = ErrorEnvelope::new(view.request_id, "internal_error");
                 if let Ok(bytes) = err.to_msgpack() {
-                    let _ = write_frame_into(w, &bytes, write_scratch).await;
+                    let _ = framer.write_frame_into(&bytes, write_scratch).await;
                 }
                 continue;
             }
@@ -613,7 +596,7 @@ async fn request_loop<R, W>(
                     Ok(b) => b,
                     Err(_) => continue,
                 };
-                let _ = write_frame_into(w, &bytes, write_scratch).await;
+                let _ = framer.write_frame_into(&bytes, write_scratch).await;
                 if invalidated {
                     // §7.5 has already removed the session; close the loop.
                     break;
@@ -621,7 +604,7 @@ async fn request_loop<R, W>(
                 continue;
             }
         };
-        if write_frame_into(w, &reply_bytes, write_scratch).await.is_err() {
+        if framer.write_frame_into(&reply_bytes, write_scratch).await.is_err() {
             break;
         }
     }

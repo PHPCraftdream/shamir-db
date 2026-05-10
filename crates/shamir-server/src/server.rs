@@ -33,7 +33,15 @@ use shamir_db::db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::db::shamir_db::SystemStoreConfig;
 use shamir_db::db::ShamirDb;
 
-use shamir_transport_tcp::listener::{bind_validated, ListenerProfile};
+use shamir_transport_tcp::listener::{
+    bind_validated as bind_tcp, ListenerProfile as TcpListenerProfile,
+};
+use shamir_transport_tcp::tls::extract_tls_exporter;
+use shamir_transport_ws::browser::BrowserOriginPolicy;
+use shamir_transport_ws::listener::{bind_validated as bind_ws, WsListenerProfile};
+use shamir_transport_ws::server::{accept_browser_ws, accept_native_ws};
+
+use crate::framer::{TcpFramer, WsFramer};
 
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -375,65 +383,139 @@ impl ServerLauncher {
                     )));
                 }
             };
-            // MVP: accept loops only for TCP+TlsExporter. WS and PlainLoopback
-            // are recognised but skipped (with a warning) so an operator config
-            // listing them doesn't fail-closed.
-            if !(l.kind == ListenerKind::Tcp && l.profile == ProfileKind::TlsExporter) {
-                tracing::warn!(
-                    addr = %addr,
-                    kind = ?l.kind,
-                    profile = ?l.profile,
-                    "listener skipped (MVP boot path supports tcp+tls_exporter only)",
-                );
-                bound_addrs.push(None);
-                continue;
-            }
 
-            let listener =
-                bind_validated(addr, ListenerProfile::TlsExporter)
-                    .await
-                    .map_err(|e| BootError::Bind(format!("{addr}: {e}")))?;
-            let local_addr = listener
-                .local_addr()
-                .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-            tracing::info!(local_addr = %local_addr, "listener bound (tcp+tls_exporter)");
+            // Resolve the right (transport, binding_mode) tuple for this
+            // listener. Plain (binding_mode = 0x00) is still routed through
+            // the TLS code path for now — a follow-up will add a true
+            // plain-tcp accept loop for loopback debugging.
+            let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
+                (ListenerKind::Tcp, ProfileKind::TlsExporter) => (
+                    TransportKind::Tcp,
+                    BindingMode::TlsExporter,
+                    AcceptPath::TcpTlsExporter,
+                ),
+                (ListenerKind::Ws, ProfileKind::TlsExporter) => (
+                    TransportKind::WebSocket,
+                    BindingMode::TlsExporter,
+                    AcceptPath::WsNative,
+                ),
+                (ListenerKind::Ws, ProfileKind::TlsNoExport) => {
+                    let policy = browser_origin_policy_from(&l.browser_origin_allowlist)?;
+                    (
+                        TransportKind::WebSocket,
+                        BindingMode::TlsNoExport,
+                        AcceptPath::WsBrowser(policy),
+                    )
+                }
+                (kind, profile) => {
+                    tracing::warn!(
+                        addr = %addr,
+                        ?kind,
+                        ?profile,
+                        "listener skipped (unsupported MVP combination)",
+                    );
+                    bound_addrs.push(None);
+                    continue;
+                }
+            };
+
+            let local_addr = match accept_path {
+                AcceptPath::TcpTlsExporter => {
+                    let listener = bind_tcp(addr, TcpListenerProfile::TlsExporter)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                    );
+                    let acceptor = tls_acceptor.clone();
+                    let notify = shutdown_notify.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_tcp(listener, acceptor, ctx, notify)));
+                    local_addr
+                }
+                AcceptPath::WsNative => {
+                    let listener = bind_ws(addr, WsListenerProfile::Wss)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                    );
+                    let acceptor = tls_acceptor.clone();
+                    let notify = shutdown_notify.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_ws_native(
+                        listener, acceptor, ctx, notify,
+                    )));
+                    local_addr
+                }
+                AcceptPath::WsBrowser(policy) => {
+                    let listener = bind_ws(addr, WsListenerProfile::WssBrowser)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = build_ctx(
+                        &identity,
+                        identity_seed,
+                        &secrets,
+                        kdf_for_bootstrap,
+                        &session_store,
+                        &user_dir,
+                        lockout.clone(),
+                        rate_limit.clone(),
+                        &argon2_sem,
+                        &audit_writer,
+                        &resume_config,
+                        &handler,
+                        binding_mode,
+                        transport_kind,
+                        l.kdf_override.as_ref().map(kdf_from_config),
+                    );
+                    let acceptor = tls_acceptor.clone();
+                    let notify = shutdown_notify.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
+                        listener, acceptor, ctx, notify, policy,
+                    )));
+                    local_addr
+                }
+            };
             bound_addrs.push(Some(local_addr));
-
-            let kdf_default_for_listener = kdf_for_bootstrap;
-            let listener_kdf_override = l
-                .kdf_override
-                .as_ref()
-                .map(kdf_from_config);
-
-            // Build the per-listener ConnectionContext.
-            let identity_keypair = Ed25519Keypair::from_seed(&identity_seed);
-            let ctx = ConnectionContext::new(
-                identity.clone(),
-                identity_keypair,
-                secrets.clone(),
-                kdf_default_for_listener,
-                session_store.clone(),
-                user_dir.clone(),
-                lockout.clone(),
-                rate_limit.clone(),
-                argon2_sem.clone(),
-                audit_writer.clone(),
-                resume_config.clone(),
-                handler.clone(),
-                BindingMode::TlsExporter,
-                TransportKind::Tcp,
-                listener_kdf_override,
-            );
-
-            let acceptor = tls_acceptor.clone();
-            let notify = shutdown_notify.clone();
-            let handle = tokio::spawn(accept_loop_tls_exporter(
-                listener,
-                acceptor,
-                ctx,
-                notify,
-            ));
-            listener_tasks.push(handle);
         }
 
         Ok(ServerHandle {
@@ -446,8 +528,77 @@ impl ServerLauncher {
     }
 }
 
-/// Per-listener accept loop for the TCP + TLS-exporter profile.
-async fn accept_loop_tls_exporter(
+/// Per-listener loop dispatch — picked at config-validation time, used at
+/// boot to decide which `accept_loop_*` to spawn.
+enum AcceptPath {
+    /// `kind=tcp + profile=tls_exporter`: native binding_mode 0x01.
+    TcpTlsExporter,
+    /// `kind=ws + profile=tls_exporter`: native WSS, binding_mode 0x01.
+    WsNative,
+    /// `kind=ws + profile=tls_no_export`: browser WSS, binding_mode 0x02
+    /// with mandatory Origin allowlist.
+    WsBrowser(BrowserOriginPolicy),
+}
+
+/// Build a `BrowserOriginPolicy` from the listener's `browser_origin_allowlist`.
+/// Empty allowlist is rejected at config validation, so by the time we get
+/// here we always have at least one origin.
+fn browser_origin_policy_from(allowlist: &[String]) -> Result<BrowserOriginPolicy, BootError> {
+    if allowlist.is_empty() {
+        return Err(BootError::Bind(
+            "browser_origin_allowlist must not be empty for tls_no_export ws listeners".into(),
+        ));
+    }
+    Ok(BrowserOriginPolicy::allow(allowlist.iter().cloned()))
+}
+
+/// Build a per-listener `ConnectionContext`. Each listener gets its own
+/// `Ed25519Keypair` reconstructed from the same identity seed — this is a
+/// workaround for shamir-connect's `verify_proof` API requiring
+/// `&Ed25519Keypair` while `ServerIdentityState` doesn't expose the keypair.
+#[allow(clippy::too_many_arguments)]
+fn build_ctx(
+    identity: &Arc<shamir_connect::server::rotation::ServerIdentityState>,
+    identity_seed: [u8; 32],
+    secrets: &Arc<ServerSecrets>,
+    kdf: KdfParams,
+    session_store: &Arc<SessionStore>,
+    user_dir: &Arc<RedbUserDirectory>,
+    lockout: Arc<dyn shamir_connect::server::lockout::LockoutStore>,
+    rate_limit: Arc<dyn shamir_connect::server::rate_limit::RateLimiter>,
+    argon2_sem: &Arc<Argon2Semaphore>,
+    audit_writer: &Arc<AuditChainWriter>,
+    resume_config: &Arc<ResumeConfig>,
+    handler: &Arc<dyn shamir_connect::server::dispatch::RequestHandler>,
+    binding_mode: BindingMode,
+    transport_kind: TransportKind,
+    kdf_override: Option<KdfParams>,
+) -> Arc<ConnectionContext> {
+    let identity_keypair = Ed25519Keypair::from_seed(&identity_seed);
+    ConnectionContext::new(
+        identity.clone(),
+        identity_keypair,
+        secrets.clone(),
+        kdf,
+        session_store.clone(),
+        user_dir.clone(),
+        lockout,
+        rate_limit,
+        argon2_sem.clone(),
+        audit_writer.clone(),
+        resume_config.clone(),
+        handler.clone(),
+        binding_mode,
+        transport_kind,
+        kdf_override,
+    )
+}
+
+/// TCP+TLS accept loop. The accept_loop itself never blocks: every step
+/// is async, and per-connection work is `tokio::spawn`'d so multiple
+/// in-flight TLS handshakes / Argon2id verifies don't serialise on the
+/// listener.
+async fn accept_loop_tcp(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
@@ -457,14 +608,14 @@ async fn accept_loop_tls_exporter(
         tokio::select! {
             biased;
             _ = shutdown.notified() => {
-                tracing::debug!("accept_loop: shutdown notified, exiting");
+                tracing::debug!("accept_loop_tcp: shutdown notified, exiting");
                 break;
             }
             res = listener.accept() => {
                 let (tcp, peer_addr) = match res {
                     Ok(v) => v,
                     Err(e) => {
-                        tracing::warn!(?e, "accept failed; sleeping briefly");
+                        tracing::warn!(?e, "tcp accept failed; sleeping briefly");
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     }
@@ -479,7 +630,117 @@ async fn accept_loop_tls_exporter(
                             return;
                         }
                     };
-                    handle_connection(ctx, peer_addr, tls).await;
+                    let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
+                    let framer = TcpFramer::new(tls);
+                    handle_connection(ctx, peer_addr, framer, exporter).await;
+                });
+            }
+        }
+    }
+}
+
+/// Native WSS accept loop — `tcp -> tls -> ws upgrade -> handle_connection`
+/// with the TLS exporter extracted before the WS upgrade consumes the
+/// stream. binding_mode = TlsExporter.
+async fn accept_loop_ws_native(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    ctx: Arc<ConnectionContext>,
+    shutdown: Arc<Notify>,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                tracing::debug!("accept_loop_ws_native: shutdown notified, exiting");
+                break;
+            }
+            res = listener.accept() => {
+                let (tcp, peer_addr) = match res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(?e, "ws accept failed; sleeping briefly");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let acceptor = acceptor.clone();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let tls = match acceptor.accept(tcp).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::debug!(?peer_addr, ?e, "tls handshake failed (ws native)");
+                            return;
+                        }
+                    };
+                    // CRITICAL: extract exporter BEFORE the WS upgrade
+                    // consumes `tls`. After upgrade the TLS state is owned
+                    // by the WebSocketStream and not directly accessible.
+                    let exporter = extract_tls_exporter(&tls).unwrap_or([0u8; 32]);
+                    let ws = match accept_native_ws(tls).await {
+                        Ok(ws) => ws,
+                        Err(e) => {
+                            tracing::debug!(?peer_addr, ?e, "ws native upgrade failed");
+                            return;
+                        }
+                    };
+                    let framer = WsFramer::new(ws);
+                    handle_connection(ctx, peer_addr, framer, exporter).await;
+                });
+            }
+        }
+    }
+}
+
+/// Browser WSS accept loop — origin-allowlist enforced inside
+/// `accept_browser_ws`. binding_mode = TlsNoExport (exporter = zeros per
+/// spec §6.4 because the JS environment can't access it).
+async fn accept_loop_ws_browser(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    ctx: Arc<ConnectionContext>,
+    shutdown: Arc<Notify>,
+    policy: BrowserOriginPolicy,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.notified() => {
+                tracing::debug!("accept_loop_ws_browser: shutdown notified, exiting");
+                break;
+            }
+            res = listener.accept() => {
+                let (tcp, peer_addr) = match res {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(?e, "ws-browser accept failed; sleeping briefly");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let acceptor = acceptor.clone();
+                let ctx = ctx.clone();
+                let policy = policy.clone();
+                tokio::spawn(async move {
+                    let tls = match acceptor.accept(tcp).await {
+                        Ok(t) => t,
+                        Err(e) => {
+                            tracing::debug!(?peer_addr, ?e, "tls handshake failed (ws browser)");
+                            return;
+                        }
+                    };
+                    // Browser binding mode: exporter MUST be zeros per spec.
+                    let exporter = [0u8; 32];
+                    let ws = match accept_browser_ws(tls, &policy).await {
+                        Ok(ws) => ws,
+                        Err(e) => {
+                            tracing::debug!(?peer_addr, ?e, "ws browser upgrade failed");
+                            return;
+                        }
+                    };
+                    let framer = WsFramer::new(ws);
+                    handle_connection(ctx, peer_addr, framer, exporter).await;
                 });
             }
         }
