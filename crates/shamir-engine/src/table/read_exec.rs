@@ -10,14 +10,32 @@ use futures::StreamExt;
 use shamir_types::core::interner::{Interner, InternerKey};
 use crate::query::filter::eval::{compile_filter, filter_value_to_inner, intern_field_path, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::Filter;
+use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, PaginationInfo, QueryResult, QueryStats, ReadQuery, SelectItem};
+use shamir_types::core::sort_codec;
 use shamir_storage::error::DbResult;
 use shamir_types::types::common::new_set;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+
+/// Encode a scalar `FilterValue` with `sort_codec` so range bounds
+/// can be compared to physical sorted-index keys. Returns `None` for
+/// values that can't be indexed (NaN floats, non-scalars).
+fn encode_filter_value_for_sort(value: &FilterValue) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    match value {
+        FilterValue::Int(i) => sort_codec::encode_i64(&mut buf, *i),
+        FilterValue::Float(f) => sort_codec::encode_f64(&mut buf, *f).ok()?,
+        FilterValue::String(s) => sort_codec::encode_str(&mut buf, s),
+        FilterValue::Bool(b) => sort_codec::encode_bool(&mut buf, *b),
+        FilterValue::Null => sort_codec::encode_null(&mut buf),
+        FilterValue::Binary(b) => sort_codec::encode_bytes(&mut buf, b),
+        _ => return None,
+    }
+    Some(buf)
+}
 
 impl TableManager {
     // ============================================================================
@@ -304,6 +322,28 @@ impl TableManager {
             }
         }
 
+        // Sorted-index plan (range / Gte / Lte / Between). Only kicks
+        // in for the supported filter shapes — falls through to scan
+        // otherwise.
+        if let Some(ref filter) = query.r#where {
+            if let Some((idx_name, lo, hi, residual)) =
+                self.try_plan_sorted_index_scan(filter, interner)
+            {
+                return self
+                    .read_sorted_index_scan(
+                        query,
+                        ctx,
+                        interner,
+                        idx_name,
+                        lo.as_deref(),
+                        hi.as_deref(),
+                        residual.as_ref(),
+                        start,
+                    )
+                    .await;
+            }
+        }
+
         // Fall back to full scan
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
@@ -327,6 +367,137 @@ impl TableManager {
         }
     }
 
+    /// Try to plan a sorted-index scan for the supported range
+    /// filters (`Between`, `Gte`, `Lte`). Returns
+    /// `(name_interned, lower_encoded, upper_encoded, residual)` or
+    /// `None` if no sorted index applies.
+    ///
+    /// `lower_encoded` / `upper_encoded` are bytes produced by
+    /// `sort_codec` — `None` for an open bound.
+    ///
+    /// Gt / Lt are intentionally NOT routed here yet — they need an
+    /// "exclude exact-match boundary" trick that we'll add in a
+    /// follow-up. They fall through to the full-scan path.
+    pub fn try_plan_sorted_index_scan(
+        &self,
+        filter: &Filter,
+        interner: &Interner,
+    ) -> Option<(u64, Option<Vec<u8>>, Option<Vec<u8>>, Option<Filter>)> {
+        let mgr = self.sorted_indexes();
+        if !mgr.has_indexes() {
+            return None;
+        }
+
+        match filter {
+            Filter::Between { field, from, to } => {
+                let field_path = intern_field_path(field, interner)?;
+                let def = mgr.find_by_field(&field_path)?;
+                let lo = encode_filter_value_for_sort(from)?;
+                let hi = encode_filter_value_for_sort(to)?;
+                Some((def.name_interned, Some(lo), Some(hi), None))
+            }
+            Filter::Gte { field, value } => {
+                let field_path = intern_field_path(field, interner)?;
+                let def = mgr.find_by_field(&field_path)?;
+                let lo = encode_filter_value_for_sort(value)?;
+                Some((def.name_interned, Some(lo), None, None))
+            }
+            Filter::Lte { field, value } => {
+                let field_path = intern_field_path(field, interner)?;
+                let def = mgr.find_by_field(&field_path)?;
+                let hi = encode_filter_value_for_sort(value)?;
+                Some((def.name_interned, None, Some(hi), None))
+            }
+            _ => None,
+        }
+    }
+
+    /// Scan a sorted index for a range of record_ids, then apply the
+    /// usual read pipeline (residual filter, projection, group_by,
+    /// aggregates, sort, paginate).
+    async fn read_sorted_index_scan(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        index_name: u64,
+        lower_encoded: Option<&[u8]>,
+        upper_encoded: Option<&[u8]>,
+        residual: Option<&Filter>,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        // 1. Lookup matching RecordIds from the sorted index.
+        let record_ids = self
+            .sorted_indexes()
+            .lookup_range(index_name, lower_encoded, upper_encoded)
+            .await?;
+
+        // 2. Compile residual filter if present.
+        let residual_cb: Option<Box<dyn FilterCallback>> =
+            residual.map(|f| compile_filter(f, interner));
+
+        // 3. Fetch records and apply residual filter.
+        let mut matched: Vec<(RecordId, InnerValue)> =
+            Vec::with_capacity(record_ids.len());
+        for id in &record_ids {
+            match self.get(*id).await {
+                Ok(record) => {
+                    let passes = match &residual_cb {
+                        Some(cb) => cb.matches(&record, ctx),
+                        None => true,
+                    };
+                    if passes {
+                        matched.push((*id, record));
+                    }
+                }
+                Err(shamir_storage::error::DbError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        // 4. Re-use the same pipeline tail as the equality index path
+        //    by calling the same projection / sort / paginate helpers.
+        //    Inline the bits we need from `read_index_scan` body.
+        let records_scanned = matched.len() as u64;
+
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+
+        let mut result = if has_group_by {
+            let group_by = query.group_by.as_ref().unwrap();
+            exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+        } else if has_agg {
+            exec::apply_aggregate_all(&matched, &query.select, interner)
+        } else {
+            exec::apply_select(&matched, &query.select, interner)
+        };
+
+        if let Some(ref order_by) = query.order_by {
+            exec::apply_order_by(&mut result, order_by);
+        }
+
+        let (paged, pagination) =
+            exec::apply_pagination(result, &query.pagination, query.count_total);
+        let records_returned = paged.len() as u64;
+
+        Ok(QueryResult {
+            records: paged,
+            stats: Some(QueryStats {
+                index_used: Some(format!("sorted_idx_{index_name}")),
+                records_scanned,
+                records_returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            }),
+            pagination,
+        })
+    }
+
+    /// (helper)
+    /// Encode a FilterValue scalar into sort-stable bytes. Returns
+    /// None for values we can't index (NaN, Null, arrays, maps).
+    /// kept inside this impl block as a free fn via `fn encode_*`
+    /// below.
+    ///
     /// Index scan path: fetch records by index, apply residual filter + pipeline.
     ///
     /// `lookup_sets` contains one or more value sets to look up.

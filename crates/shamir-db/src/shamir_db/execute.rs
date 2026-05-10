@@ -111,7 +111,23 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .collect();
                 let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
-                if op.unique {
+                if op.sorted && op.unique {
+                    return Err(err(
+                        "Index cannot be both sorted and unique".to_string(),
+                    ));
+                }
+                if op.sorted {
+                    if op.fields.len() != 1 {
+                        return Err(err(
+                            "Sorted index requires exactly one field (composite TBD)"
+                                .to_string(),
+                        ));
+                    }
+                    table
+                        .create_sorted_index(&op.create_index, &path_refs)
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
+                } else if op.unique {
                     table.create_unique_index(&op.create_index, &path_refs).await
                         .map_err(|e| err(e.to_string()))?;
                 } else {
@@ -122,7 +138,8 @@ impl AdminExecutor for ShamirAdminExecutor {
                 Ok(admin_result(json!({
                     "created_index": op.create_index,
                     "table": op.table,
-                    "unique": op.unique
+                    "unique": op.unique,
+                    "sorted": op.sorted
                 })))
             }
 

@@ -296,6 +296,51 @@ noise vs prior runs (this PR doesn't touch their code paths).
 
 Workspace tests: 1179/0 unchanged.
 
+## After sorted-index v1 (range queries via `Between`)
+
+`SortedIndexManager` lands as a parallel index variant alongside
+the hash-based `IndexManager`. Creating an index with `sorted: true`
+encodes each indexed value through `shamir-types::core::sort_codec`
+into bytes that sort the same way the value itself does, then stores
+`<sorted_tag>||<name_interned>||<encoded_value>||<record_id>` →
+empty as a separate info_store record. Within one index, scan_prefix
+returns every record in value order — the storage backend's B-tree
+does the work.
+
+Planner adds `try_plan_sorted_index_scan` for `Filter::Between` /
+`Gte` / `Lte`; routes to `read_sorted_index_scan` which loads
+matched records and applies residual + select + order + paginate
+through the existing pipeline.
+
+| Bench                            | After A+B+C+D-class | After sorted v1 | Speed-up |
+|----------------------------------|---------------------:|----------------:|---------:|
+| **range_query_with_index/100**   |              1.14 ms |          183 µs |  **6.2×**|
+| **range_query_with_index/1000**  |             10.80 ms |         1.52 ms |  **7.1×**|
+| **range_query_with_index/10000** |              111 ms  |         19.7 ms |  **5.6×**|
+| range_query_no_index/10000       |             104.7 ms |          80.1 ms| unchanged baseline |
+
+**Why ~5× and not 1000×.** This v1 uses `scan_prefix_stream` (filter
+upper-bound on each entry, early termination) — not a true B-tree
+range scan from `lower` to `upper`. So for an index of N=10 000
+entries we still iterate roughly N keys even when only K=1 000 match
+the range. The win comes from skipping record decode for the
+non-matching keys (we only deserialize record bytes for matched
+RecordIds) — not from skipping the index scan.
+
+To unlock the actual O(log N + K) cost (and the full 100×–1000×
+class), `Store::iter_range_stream(start, end)` needs to be added,
+with native impls on sled/redb/fjall (they all expose `range()` in
+their underlying API). That's the next step — left out of this
+commit to keep scope tight; v1 already demonstrates the layout
+works end-to-end.
+
+Not yet:
+- `Filter::Gt` / `Filter::Lt` — need "skip boundary value" trick.
+- `MIN(field)` aggregate fast-path via `lookup_min` (one B-tree seek).
+- `MAX(field)` and `order_by DESC + LIMIT K` — needs reverse iter
+  on `Store`.
+- Composite sorted indexes over multiple columns.
+
 ## After Opt D-class (#2, #2.5, counter cache)
 
 Three more optimisations after A+B+C, all surfaced through bench-

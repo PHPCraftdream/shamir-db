@@ -57,6 +57,15 @@ pub struct DropTableOp {
 }
 
 /// Create an index on a table.
+///
+/// Variants (mutually exclusive):
+/// - default — hash-keyed regular index. Equality lookups O(log n).
+/// - `unique=true` — hash-keyed unique index with constraint check.
+/// - `sorted=true` — value-ordered sorted index. Backs range
+///   (`between`/`gt`/`gte`/`lt`/`lte`), `order by field asc + LIMIT
+///   K`, and `MIN(field)`. Single-field scalar column only.
+///
+/// `unique=true` + `sorted=true` is rejected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateIndexOp {
     pub create_index: String,
@@ -64,6 +73,10 @@ pub struct CreateIndexOp {
     pub fields: Vec<Vec<String>>,
     #[serde(default)]
     pub unique: bool,
+    /// Register as sorted (value-ordered) index for range / order /
+    /// min queries. See doc-comment on the struct.
+    #[serde(default)]
+    pub sorted: bool,
     #[serde(default = "default_repo")]
     pub repo: String,
 }

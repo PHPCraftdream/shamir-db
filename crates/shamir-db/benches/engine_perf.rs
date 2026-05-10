@@ -95,6 +95,21 @@ async fn seed_users(shamir: &ShamirDb, n: usize) {
 }
 
 async fn create_index(shamir: &ShamirDb, table: &str, index_name: &str, field: &str, unique: bool) {
+    create_index_inner(shamir, table, index_name, field, unique, false).await
+}
+
+async fn create_sorted_index(shamir: &ShamirDb, table: &str, index_name: &str, field: &str) {
+    create_index_inner(shamir, table, index_name, field, false, true).await
+}
+
+async fn create_index_inner(
+    shamir: &ShamirDb,
+    table: &str,
+    index_name: &str,
+    field: &str,
+    unique: bool,
+    sorted: bool,
+) {
     let req: BatchRequest = serde_json::from_value(json!({
         "id": "idx",
         "queries": {
@@ -102,7 +117,8 @@ async fn create_index(shamir: &ShamirDb, table: &str, index_name: &str, field: &
                 "create_index": index_name,
                 "table": table,
                 "fields": [[field]],
-                "unique": unique
+                "unique": unique,
+                "sorted": sorted
             }
         }
     }))
@@ -755,7 +771,9 @@ fn bench_range_query_with_index(c: &mut Criterion) {
     for &n in SIZES {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
-            create_index(&s, "users", "by_age", "age", false).await;
+            // Sorted index for range queries — equality (hash) index
+            // wouldn't help here.
+            create_sorted_index(&s, "users", "by_age", "age").await;
             s
         });
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
