@@ -112,7 +112,7 @@ fn fast_kdf() -> KdfConfig {
 fn make_config(data_dir: PathBuf, port: u16) -> Config {
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into() },
+        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -127,6 +127,7 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
             cert_path: data_dir.join("cert.pem"),
             key_path: data_dir.join("key.pem"),
         },
+        security: Default::default(),
     }
 }
 

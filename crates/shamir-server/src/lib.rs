@@ -17,6 +17,7 @@
 pub mod audit_appender;
 pub mod bootstrap;
 pub mod config;
+pub mod conn_limiter;
 pub mod connection;
 pub mod db_handler;
 pub mod framer;

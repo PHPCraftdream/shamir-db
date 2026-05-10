@@ -112,7 +112,7 @@ fn make_test_config(temp: &TempDir) -> Config {
     let data_dir = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into() },
+        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -128,6 +128,7 @@ fn make_test_config(temp: &TempDir) -> Config {
             cert_path: data_dir.join("cert.pem"),
             key_path: data_dir.join("key.pem"),
         },
+        security: Default::default(),
     }
 }
 

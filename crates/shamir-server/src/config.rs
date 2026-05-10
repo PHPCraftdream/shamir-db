@@ -86,6 +86,96 @@ pub struct Config {
     pub listeners: Vec<ListenerConfig>,
     /// TLS material for the TLS-bearing listeners.
     pub tls: TlsConfig,
+    /// Connection / per-request security knobs.
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// Connection-level security limits — apply to every listener.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SecurityConfig {
+    /// Slow-loris defence: max wall-clock time to wait for the client's
+    /// `auth_init` after the TLS handshake completes. Real clients send
+    /// it within ~50 ms; the default 5 s is comfortably above network
+    /// jitter while still cutting attackers off quickly.
+    #[serde(default)]
+    pub connection: ConnectionSecurity,
+    /// Hard caps on per-batch resources. Applied as a max — the client's
+    /// `BatchRequest.limits` may shrink them, but cannot exceed.
+    #[serde(default)]
+    pub query_limits: QueryLimitsConfig,
+}
+
+/// Server-side hard caps on `BatchRequest.limits`.
+///
+/// Without this block, the limits the server applies come from the client
+/// payload (`BatchRequest.limits`) — meaning a malicious client can ask for
+/// `max_result_size = 1 TB` and the server will trust it. With it, the
+/// server always clamps each field to the configured cap.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QueryLimitsConfig {
+    /// Maximum total result size (bytes) — clamps `BatchLimits::max_result_size`.
+    /// Default 1 GiB.
+    #[serde(default = "default_max_result_size_bytes")]
+    pub max_result_size_bytes: usize,
+    /// Maximum total execution time (seconds) — clamps
+    /// `BatchLimits::max_execution_time_secs`. Default 60.
+    #[serde(default = "default_max_execution_time_secs")]
+    pub max_execution_time_secs: u64,
+    /// Maximum number of queries per batch — clamps `BatchLimits::max_queries`.
+    /// Default 100.
+    #[serde(default = "default_max_queries_per_batch")]
+    pub max_queries_per_batch: usize,
+}
+
+impl Default for QueryLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_result_size_bytes: default_max_result_size_bytes(),
+            max_execution_time_secs: default_max_execution_time_secs(),
+            max_queries_per_batch: default_max_queries_per_batch(),
+        }
+    }
+}
+
+fn default_max_result_size_bytes() -> usize {
+    1024 * 1024 * 1024 // 1 GiB
+}
+fn default_max_execution_time_secs() -> u64 {
+    60
+}
+fn default_max_queries_per_batch() -> usize {
+    100
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConnectionSecurity {
+    /// Slow-loris timeout for `auth_init` in milliseconds. Default 5000.
+    #[serde(default = "default_auth_init_timeout_ms")]
+    pub auth_init_timeout_ms: u64,
+    /// Global hard cap on simultaneously-active connections across all
+    /// listeners. Reached → server closes the new TCP socket immediately
+    /// (TCP RST, no TLS handshake) so an attacker can't waste server CPU
+    /// on TLS for connections that won't be served. Default 10000.
+    #[serde(default = "default_max_active_connections")]
+    pub max_active_connections: usize,
+}
+
+impl Default for ConnectionSecurity {
+    fn default() -> Self {
+        Self {
+            auth_init_timeout_ms: default_auth_init_timeout_ms(),
+            max_active_connections: default_max_active_connections(),
+        }
+    }
+}
+
+fn default_auth_init_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_max_active_connections() -> usize {
+    10_000
 }
 
 /// Logging / tracing configuration.
@@ -95,6 +185,11 @@ pub struct LoggingConfig {
     /// Defaults to `info` when the whole `logging` block is omitted.
     #[serde(default = "default_log_level")]
     pub level: String,
+    /// Log a `WARN` line for every batch whose `execution_time_us`
+    /// exceeds this many milliseconds. Set to `0` to disable. Default
+    /// 1000 ms (1 second).
+    #[serde(default = "default_slow_query_threshold_ms")]
+    pub slow_query_threshold_ms: u64,
 }
 
 impl Default for LoggingConfig {
@@ -105,8 +200,13 @@ impl Default for LoggingConfig {
         // omitted from the config.
         Self {
             level: default_log_level(),
+            slow_query_threshold_ms: default_slow_query_threshold_ms(),
         }
     }
+}
+
+fn default_slow_query_threshold_ms() -> u64 {
+    1_000
 }
 
 /// Argon2id KDF parameters (spec §3.7).
