@@ -5,105 +5,182 @@ flag exists in the wire schema but the executor currently ignores it and
 always returns `transaction: None`. This document is the contour for
 turning that hollow promise into reality.
 
----
-
-## Краткий ответ на главный вопрос
-
-> *Как это работает на уровне записей, при том что параллельные потоки
-> могут изменить часть наших данных пока транзакция в полёте? Нужны
-> локи?*
-
-**Локов на уровне записей мы не добавляем.** Их даёт сам storage
-backend через MVCC — мы просто соблюдаем его правила.
-
-### В трёх образах
-
-**1. Снимок как стена.** Когда транзакция начинается, storage engine
-«фотографирует» состояние БД на этот тик. Все мои чтения резолвятся
-ИЗ снимка — даже если параллельный поток в этот момент пишет, его
-запись идёт в **новую версию**, а моя видит **старую**. Данные не
-«отменяются» — они *перекрываются* новой версией; старая остаётся
-жить ровно столько, сколько нужно открытым читателям.
-
-**2. Свой рабочий стол.** Мои writes не идут сразу в общую таблицу —
-они копятся в приватном буфере (working set). Никто их не видит. На
-`commit` буфер публикуется как новая версия. На `rollback` —
-выбрасывается, никто и не узнал.
-
-**3. Очередь у писателей.** redb (наш базовый MVCC бэкенд) —
-single-writer per file. Если моя tx открыта, другой writer ждёт. Не
-блокируется навсегда — просто сериализуется. Читатели в это время
-гуляют по своим снимкам без блокировок.
-
-> ⚠️ **MVCC поддерживают НЕ все наши бэкенды.** Точно поддерживает —
-> redb. Остальные имеют какой-то транзакционный API, но семантику
-> изоляции мы для них пока **не верифицировали**. Поэтому Phase A
-> запускаем только для redb; остальные жёстко отвечают
-> `not_supported_by_backend` пока их семантика не проверена. См.
-> «Backend support matrix» ниже.
-
-### Конкретно на временной шкале
-
-```
-T1 (моя):     begin──read balance=1000──compute──write 800──commit
-                  ↑                                          ↑
-                  снимок v100                                публикует v101
-
-T2 (другая):                       begin──read balance=?──...
-                                     ↑
-                                     если началась ПОСЛЕ commit'а T1 → видит 800
-                                     если ДО → ждёт пока T1 закончит
-```
-
-Три гарантии:
-- T1 никогда не видит T2 в полёте — её мир заморожен на v100.
-- T2 не начинается посреди T1 — redb queue для писателей.
-- Чистый читатель на v100 продолжает видеть v100 даже после commit'а
-  v101 — старая версия живёт пока кто-то её держит.
-
-### Почему не локи
-
-Локи на отдельных записях — это:
-- **сложно** (lock manager, deadlock detection, escalation, stale-lock
-  cleanup)
-- **медленно** (lock acquire = atomic op + потенциальное ожидание)
-- **не нужно с MVCC** — конфликт разрешается на уровне «слота
-  писателя» (одного на repo), а не каждой строки
-
-Trade-off: при transactional batch на repo держится exclusive writer
-slot. Это **грубее** чем построчная блокировка, но **радикально
-проще**. Для embedded БД с разумной нагрузкой — правильный выбор.
-
-### Что делать, если хочется параллелизма writers
-
-Это и есть смысл design choice. Ответ — **разделять данные по
-repo'sам**:
-
-- `users` repo (низкая нагрузка на запись) — отдельный redb-файл
-- `audit_log` repo — отдельный redb-файл
-- `hot_orders` repo — отдельный redb-файл
-
-Каждый repo = свой writer slot. Распределение `(table → repo)`
-становится не косметикой, а **throughput-настройкой**.
-
-Если нужен реально N-writer per logical table — это уже не embedded
-БД, это PostgreSQL/FoundationDB. ShamirDB оптимизирует под «embedded,
-простая семантика», не пытается быть и тем и другим одновременно.
+> **Note on prior drafts.** Earlier revisions of this file proposed
+> "rely on the storage backend's native MVCC (redb / persy / canopy)".
+> That direction is **abandoned** — it leaks backend identity into the
+> abstraction, gives different semantics depending on which engine
+> backs each repo, and breaks the whole point of the unified
+> `Store` / `Repo` traits. The current direction below builds the
+> transactional layer **above** the trait, on the dumb-KV API — every
+> backend behaves identically.
 
 ---
 
-Дальше идёт формальный design contract на английском.
+## Что это значит — по-русски
+
+### Где была ошибка
+
+Первая мысль была — «у redb уже есть MVCC, давайте его пробросим
+наверх». Это сразу даёт несколько проблем:
+
+1. **Утечка абстракции.** Клиент должен знать, какой бэкенд под
+   капотом. Транзакция работает на одном repo, не работает на другом.
+2. **Разная семантика.** sled-репо и redb-репо ведут себя
+   по-разному. Spec на транзакции становится «зависит».
+3. **Теряется смысл `Store` / `Repo` trait'ов.** Их задача — спрятать
+   особенности backend'а. А мы наоборот их выпускаем.
+
+### Куда идём
+
+Транзакционный слой строится **поверх простого KV-интерфейса**.
+Backend остаётся «тупым» хранилищем — атомарный `set`, range scan,
+ничего больше. Вся транзакционная логика живёт в engine layer.
+Любой backend (даже `DashMap` без какого-либо tx API) получает
+транзакции одинаково.
+
+### Как это устроено
+
+Идея простая и хорошо известна — так делают PostgreSQL,
+FoundationDB, etcd, CockroachDB.
+
+**Не пишем `key → value`. Пишем `key:version → value`.**
+Storage хранит много версий каждой записи. Engine сам управляет
+видимостью.
+
+#### Три кита
+
+**1. Версионированный layout.** Физический ключ —
+`<original_key>::<version_u64_be>`. Range scan по префиксу даёт всю
+историю. Чтобы получить «значение на момент `version=V`» — берём
+наибольшую версию ≤ V (один range query, O(log n) у любого
+ordered KV).
+
+**2. Логические часы.** Один атомарный счётчик per repo (хранится в
+служебном ключе `__version_counter__`). Каждый commit берёт
+`next_version = counter.fetch_add(1)`. Поскольку commit-фаза идёт
+через единый Mutex per repo (см. ниже), increment безопасен.
+
+**3. Working set + commit.** Транзакция:
+
+- На `begin` — берёт `snapshot_version = current_counter` (без
+  увеличения).
+- Writes идут в `Map<Key, Value>` в памяти (working set).
+- Reads сначала смотрят в working set (свои writes — first); потом
+  в storage (наибольшая версия ≤ snapshot_version).
+- Commit: берёт `new_version`, проверяет конфликты (см. ниже),
+  пишет всё working set с новой версией.
+
+#### Изоляция — два уровня сложности
+
+**A. Snapshot Isolation + last-writer-wins (простое):**
+- Reads видят snapshot.
+- Writes на commit пишутся с новой версией — overwrite.
+- Lost update возможен (T1 и T2 обе писали в `X`; чья запись позже —
+  её версия выше — побеждает).
+- Достаточно для большинства кейсов; быстрее.
+
+**B. Serializable Snapshot Isolation (SSI):**
+- На read запоминаем `(key, version_seen)` в read-set транзакции.
+- На write добавляем в write-set.
+- На commit проверяем: для каждого `(key, version_seen)` из read-set —
+  `current_max_version(key) == version_seen`? Если другая tx
+  обогнала — abort, retry.
+- Никаких lost updates. Полный serializability.
+
+A проще и достаточно по умолчанию. B можно включать опционально для
+данных где lost update недопустим (счётчики, балансы, бронирования).
+
+#### Single-writer commit-gate
+
+Чтобы избежать гонки на counter и упростить conflict detection —
+держим **в engine один Mutex per repo для commit-фазы**. Не на reads,
+не на writes-в-память — только на 5-миллисекундный commit (assign
+new_version, conflict check, batch write).
+
+Это инженерный single-writer, не зависящий от backend. Как раз то
+поведение, которое мы хотели от redb — но теперь у нас оно есть **на
+любом backend**.
+
+#### Garbage Collection
+
+Старые версии копятся → диск растёт. Нужен GC:
+
+- Background task раз в N секунд.
+- Знаем `min_alive_snapshot` = минимальный snapshot всех живых tx.
+- Все версии < `min_alive_snapshot`, кроме последней per ключ — можно
+  удалить.
+- Простая реализация: range scan + delete batch.
+
+#### Crash recovery
+
+- Counter в storage → восстанавливается на open.
+- Working set ушёл при crash → транзакция aborted (поведение по
+  умолчанию).
+- Уже committed данные на диске → видны.
+- Ключ `__last_committed_version__` атомарно обновляется в самом
+  конце commit (после всех writes); reads видят только версии
+  ≤ `__last_committed_version__`. Это решает «писали 5 ключей, crash
+  после 3-го» — без атомарного маркера новые версии «не видны»,
+  значит с точки зрения внешнего мира commit'а не было.
+
+### Что остаётся от backend
+
+Только три гарантии:
+
+1. **Atomic single put** — `set(key, value)` либо весь либо никакой.
+   Все наши backends это дают (это базовое свойство любого KV).
+2. **Range scan** — `iter_stream` уже есть.
+3. **Atomic CAS на одной записи** — для counter increment. Если
+   backend не даёт CAS, коммит-mutex в engine закрывает дыру: внутри
+   mutex'а простой `read counter → increment → write counter` —
+   эквивалентен CAS.
+
+Никакого «настоящего MVCC от backend'а» не требуется. Backend = dumb KV.
+
+### Цена этой красоты
+
+- **+50% storage overhead** на metadata (версии в ключах, история).
+- **GC процесс в фоне** — ещё одна вещь, которая может ломаться.
+- **Сложность в engine** — реальная, не маленькая (~ 2-3 недели
+  аккуратной работы, не 2 дня).
+- **Чтения чуть медленнее** — нужен range scan вместо point lookup.
+  Можно компенсировать кешем «current version per key».
+
+Взамен:
+
+- Один интерфейс `Store` остаётся одним интерфейсом.
+- Все backends работают одинаково (с точки зрения нашего пользователя).
+- Семантика транзакций — наша спецификация, не наследие redb / persy /
+  sled.
+- Можно добавить любой новый backend (RocksDB, LMDB, S3) без
+  переписывания tx-логики.
+- Тесты транзакций гоняются на in-memory backend → быстрые.
+
+### Что это меняет в дизайне
+
+- `Store` trait не растёт — никаких `begin_write_tx()`. Backend ничего
+  не знает о транзакциях.
+- В engine появляется новый слой: `MvccStore` — обёртка над
+  `Arc<dyn Store>`, который кодирует версии в ключах.
+- `TransactionContext` хранит snapshot_version + working set.
+- Engine commits идут через `RepoTxGate { mutex, version_counter }`.
+- Background `GcWorker` per repo, тикает по таймеру.
+
+Это «движок транзакций» как самостоятельный модуль внутри
+`shamir-engine`, а не feature storage layer.
+
+---
 
 ## Why two phases
 
 The value cleanly splits into two levels of ambition:
 
 - **Phase A — single-batch transactions.** All operations inside one
-  `client.execute(db, batch)` call run atomically. No server-side state
-  between calls. Drop-in for the existing API.
-- **Phase B — interactive (multi-call) transactions.** A client starts a
-  transaction, sends a sequence of independent batches, then commits or
-  aborts. Requires session-scoped server state and abort-on-disconnect
+  `client.execute(db, batch)` call run atomically. No server-side
+  state between calls. Drop-in for the existing API.
+- **Phase B — interactive (multi-call) transactions.** A client starts
+  a transaction, sends a sequence of independent batches, then commits
+  or aborts. Requires session-scoped server state and abort-on-disconnect
   plumbing.
 
 Phase A is enough for ~80% of transactional needs (atomic multi-record
@@ -115,278 +192,139 @@ Phase A first. Phase B when there is concrete demand.
 
 ---
 
-## How isolation actually works (the question this answers)
+## What we require from the storage backend
 
-> *"How does this work at the record level when other threads can
-> simultaneously modify part of our data? Do we need locks for
-> transactions?"*
+Already supplied by every backend in `shamir-storage` today:
 
-Short answer: **we don't add row-level locks.** We rely on what the
-storage backend already gives us. Crucially — *not all of our backends
-support transactional semantics in the same way*; see the matrix
-below. We forbid `transactional: true` on backends that can't honor
-the contract.
+- `set(key, value)` is atomic — partial writes never observable.
+- `iter_stream(prefix)` (or full `iter()`) returns a stable scan.
+- Reads are not torn (no half-written value visible).
 
-### MVCC in plain words
+Optionally helpful but not required:
 
-MVCC = Multi-Version Concurrency Control. The storage engine never
-overwrites data in place — every write produces a new version, the old
-versions stay for readers that already started.
+- Atomic compare-and-swap. Used as a fast path for counter increment;
+  fall back to commit-gate mutex if absent.
+- Bulk `set_many` / batch op. Used as a fast path for committing a
+  large working set; fall back to N sequential `set` calls.
 
-When a transaction begins it captures a **snapshot** — a logical "the
-database as it was at this exact tick". From then on:
+We do **not** require:
 
-1. **All reads inside the tx come from that snapshot.** Even if another
-   process commits a new value while my tx is open, I keep seeing the
-   old value. The "data" hasn't been invalidated — it has been
-   *superseded* by a newer version, but my snapshot still resolves my
-   reads correctly. The old version stays alive as long as any open
-   reader needs it.
-2. **My writes go into a private working set,** not into the shared
-   table. Other transactions don't see them.
-3. **At commit** the working set is published as a new version. From
-   that moment on, new transactions starting up see *my* version.
-4. **At abort** the working set is discarded and nobody else ever knew
-   it existed.
+- Native transactions / WriteTxn / ReadTxn primitives.
+- Snapshot isolation in the backend's read API.
+- Lock manager / row locks.
+- Versioning / time travel.
+- Any form of MVCC at the storage layer.
 
-So at the record level there are no locks — locks are at the
-**writer-slot level** of the whole repo. Readers and writers never
-block each other. Two writers serialize.
-
-### Concrete example — single-writer MVCC (redb)
-
-```
-time →
-
-T1 (mine):     begin─────read user.balance=1000──compute──write 800──commit
-                  ↑                                                 ↑
-                  └─ snapshot v100                                  └─ publishes v101
-
-T2 (other):                          begin─────read user.balance=?──...
-                                       ↑
-                                       └─ if T2 begins after T1 commits → sees 800
-                                          if T2 begins before T1 commits → must wait
-                                          (redb is single-writer per file)
-```
-
-Three things are guaranteed here:
-
-- T1 never sees T2's in-flight writes. T1's view is frozen at v100.
-- T2 doesn't start *until* T1 finishes. redb serializes writers.
-  This is coarser than row-locking but radically simpler — no deadlock
-  detection, no lock escalation, no stale-lock cleanup.
-- A pure reader started at v100 keeps seeing v100 for as long as it
-  needs, even after T1 commits v101. Reads never block writers either.
-
-### Multi-writer scenarios (not us, for context)
-
-Postgres / MySQL allow N concurrent writers and detect conflicts at
-commit time:
-
-```
-T1: read X=10, write X=20, commit  → succeeds
-T2: read X=10, write X=30, commit  → CONFLICT, abort + retry
-```
-
-This needs read-set tracking, write-set diffing, and a lock manager.
-ShamirDB doesn't go there — redb's single-writer model is enough for
-our throughput targets and orders of magnitude simpler.
-
-### "What if my reads and writes interleave with someone else's?"
-
-Inside a tx, they can't. The snapshot is a wall. Writers serialize.
-
-Outside a tx (today's behavior, no `transactional: true`), each
-operation commits on its own and there is no atomicity across them —
-that's exactly the problem this whole design solves.
-
-### What if I want finer concurrency than "one writer per repo"?
-
-That's the trade-off you accept by choosing transactional mode. Two
-mitigations:
-
-- **Split your data across repos.** A repo per high-contention table
-  family. Each repo gets its own redb file, its own writer slot.
-- **Keep transactions short.** Read what you need, write, commit. Don't
-  hold a tx open across user interaction (that's why Phase B is risky
-  and waits for clear demand).
-
-If you genuinely need multi-writer per repo, the answer is to switch
-to a backend with that property (Postgres, FoundationDB) — but then
-you're running a different database. ShamirDB optimises for "embedded,
-embedded-grade, simple semantics."
-
----
-
-## Backend support matrix
-
-What each storage crate actually exposes — and whether that maps to
-the contract Phase A needs (snapshot for reads, working set for
-writes, atomic publish on commit, drop = rollback):
-
-| Backend     | Library API                       | MVCC snapshot? | Phase A status |
-|-------------|-----------------------------------|----------------|----------------|
-| **redb**    | `WriteTxn` exclusive + `ReadTxn` MVCC | **Yes** (verified) | **Supported** — primary target |
-| **persy**   | `db.begin()` ACID transaction     | Has ACID, isolation level needs library-specific check | Candidate; needs research before opt-in |
-| **canopy**  | `begin_write()` / `commit()`      | Likely (CoW B+-tree) but unverified | Candidate; needs research |
-| **nebari**  | `Roots::transaction()`            | Versioned trees, ACID, but API surface is complex | Candidate; lowest priority |
-| **fjall**   | LSM atomic batches                | **No snapshot semantics** across reads + writes | Reject |
-| **sled**    | `Tree::transaction()` (CAS-style mini-tx) | Snapshot only inside the closure, not multi-stage | Reject |
-| **in_memory** | DashMap, no native tx           | Can be emulated via single Mutex, but blocks all readers | Reject for now (use redb in tests when atomicity matters) |
-| **cached**  | wrapper over a base store         | Inherits whatever the base provides | Inherit base; reject if base rejects |
-
-The honest read: **only redb is verified**. The rest of this document
-talks about the contract, the trait shape, and the executor flow —
-all of which work the same regardless of which backends are eventually
-opted in. Opt-in happens **per-backend, with its own PR, its own test
-coverage, and its own write-up of how its isolation semantics actually
-match the contract.**
-
-This is the discipline: don't claim ACID where we haven't proven it.
-
-### Order of opt-in
-
-1. **redb** (already MVCC, the canonical case) — Phase A scope.
-2. **canopy** if its CoW B+-tree exposes a `WriteTxn`-equivalent
-   primitive — research, then opt in.
-3. **persy** if its ACID tx gives snapshot reads inside the same tx.
-4. **nebari** last; complex API and not many users would pick it as
-   primary.
-5. **fjall**, **sled**, **fjall** — never opt in. Different value
-   proposition (LSM throughput, eventual consistency); using them with
-   `transactional: true` is a category error. Reject up front.
-
-A user who wants transactions and chose `sled` for a repo gets a
-clear `not_supported_by_backend` from the very first call — no silent
-inconsistency.
+The trait surface stays the way it is. The transactional engine sits
+above it.
 
 ---
 
 ## Phase A — what gets built
 
-### Boundary rules
+### Engine-side modules (new)
 
-1. **One repo per transactional batch.** If `transactional: true` and
-   ops touch more than one repo, return `not_supported` error
-   ("transactional batch must target a single repo"). Two-phase commit
-   across heterogeneous backends is out of scope.
-2. **Backend must support tx.** Strictly: only backends whose
-   isolation semantics we have *verified* against the contract above.
-   See the **backend support matrix** below. The default impl on the
-   `Repo` trait rejects with `not_supported_by_backend`, and each
-   backend opts in only after its tx semantics are confirmed.
-3. **Serial execution inside the tx.** The planner's parallel stages
-   are flattened — a single WriteTxn handle is rarely `Send`-safe
-   across tasks. Reads and writes in the batch run one after another.
-   Trade-off: slower than parallel batches; correct.
-4. **Read-after-write inside the tx.** A `from` query later in the
-   batch sees the writes earlier in the batch. This is "free" with
-   MVCC backends — the WriteTxn naturally exposes its own pending
-   writes to its own reads.
-5. **Drop = rollback.** If the executor returns early for any reason
-   (panic, I/O error, validation), the WriteTxn is dropped without
-   commit and storage rolls back. Rust RAII does the work; we just
-   don't forget to NOT call `commit()` on the error path.
+```
+crates/shamir-engine/src/tx/
+├── mvcc_store.rs        — Arc<dyn Store> wrapper that encodes versions
+│                          in physical keys
+├── version_codec.rs     — `<key>::<version_be_8>` encode / decode
+├── tx_context.rs        — snapshot_version + read-set + write-set
+├── repo_tx_gate.rs      — per-repo Mutex + version counter (durable)
+├── recovery_marker.rs   — `__last_committed_version__` read/write
+├── gc.rs                — background "compact below min_alive_snapshot"
+└── mod.rs
+```
 
-### Storage trait extension
+### MVCC store API (engine-internal)
 
 ```rust
-// crates/shamir-storage/src/types.rs
-
-#[async_trait]
-pub trait Repo: Send + Sync {
-    // existing
-    async fn store_get(&self, name: &str) -> DbResult<Arc<dyn Store>>;
-    async fn store_delete(&self, name: &str) -> DbResult<bool>;
-    async fn stores_list(&self) -> DbResult<Vec<String>>;
-
-    // NEW — opt-in. Default: not supported.
-    async fn begin_write_tx(&self) -> DbResult<Box<dyn WriteTx>> {
-        Err(DbError::NotSupported(
-            "transactions not supported by this backend".into(),
-        ))
-    }
+pub struct MvccStore {
+    inner: Arc<dyn Store>,
+    table_name: String,
 }
 
-#[async_trait]
-pub trait WriteTx: Send {
-    /// Get a tx-scoped write handle for one of the stores in this repo.
-    /// All writes through this handle are buffered until `commit()`.
-    async fn store(&mut self, name: &str) -> DbResult<&mut dyn Store>;
+impl MvccStore {
+    /// Read at a specific snapshot — returns the highest committed
+    /// version with `version <= snapshot_version`.
+    pub async fn get_at(&self, key: &[u8], snapshot: u64) -> DbResult<Option<Bytes>>;
 
-    /// Publish the working set. Consumes self — caller can't reuse.
-    async fn commit(self: Box<Self>) -> DbResult<()>;
+    /// Write a new version. Caller is responsible for picking
+    /// `version` from `RepoTxGate`.
+    pub async fn put_versioned(&self, key: &[u8], value: Bytes, version: u64) -> DbResult<()>;
 
-    /// Discard the working set explicitly. Same effect as Drop.
-    async fn rollback(self: Box<Self>) -> DbResult<()>;
+    /// Iterate live records at a given snapshot — for SELECT queries
+    /// inside a tx.
+    pub fn scan_at(&self, snapshot: u64) -> impl Stream<Item = ...>;
 }
 ```
 
-Backends with native MVCC implement `begin_write_tx` over their own
-WriteTxn primitive. The default impl rejects, so unsupported backends
-fail loudly the moment a client asks for `transactional: true`.
-
-### Engine + executor integration
+### Tx context flow
 
 ```rust
-// pseudocode — crates/shamir-engine/src/query/batch/executor.rs
+let gate = repo.tx_gate(); // Arc<RepoTxGate>
+let snapshot = gate.current_committed_version();
 
-let tx = if request.transactional {
-    let repo = unique_repo_targeted_by(&request)?; // errors if multi-repo
-    Some(repo.begin_write_tx().await?)
-} else {
-    None
-};
+let mut ctx = TxContext::new(snapshot);
 
-let outcome = if tx.is_some() {
-    run_stages_serially(stages, tx.as_mut()).await
-} else {
-    run_stages_in_parallel(stages).await
-};
+// during execution
+let value = ctx.read(&store, key).await?;   // working_set first, then storage
+ctx.write(key, value);                       // working_set only
 
-let (committed, txn_id) = match (outcome, tx) {
-    (Ok(_), Some(t)) => {
-        t.commit().await?;
-        (true, Some(random_u64()))
-    }
-    (Err(e), Some(t)) => {
-        // Drop is enough but explicit rollback gives backends a hook
-        // for diagnostics.
-        let _ = t.rollback().await;
-        return Err(e);
-    }
-    (Ok(_), None) => (false, None),
-    (Err(e), None) => return Err(e),
-};
-
-response.transaction = txn_id.map(|id| TransactionInfo { id, committed });
+// at commit
+let lock = gate.commit_lock().await;          // single-writer fence
+let new_version = gate.assign_next_version();
+if isolation == Serializable {
+    gate.validate_read_set(&ctx.read_set, snapshot)?;  // SSI check
+}
+for (key, value) in ctx.write_set {
+    store.put_versioned(key, value, new_version).await?;
+}
+gate.publish_committed(new_version).await?;   // updates __last_committed_version__
+drop(lock);
 ```
 
-### Test coverage to add
+### Executor integration
+
+Same shape as before: `transactional: true` on the batch opens a
+`TxContext`, runs queries serially against it, commits/rollbacks at
+the end, and fills in `BatchResponse.transaction = Some(...)`.
+
+Cross-repo rule still applies: a transactional batch must target a
+single repo (each repo has its own gate + counter). Multi-repo
+atomicity stays out of scope (it would need 2PC at the engine layer —
+real but separate work).
+
+### Test coverage
 
 In `tests/e2e/tests/11-transactions.test.js`:
 
-- happy path: 5 writes + 1 read in one tx, commit, read back from
-  outside the tx, see all writes
-- abort path: 2 writes + 1 deliberately-failing op, verify table is
-  unchanged afterward
-- single-repo rule: tx batch touching two repos → `not_supported`
-- read-after-write: write inside tx then read inside same tx → sees
-  the new value
-- backend rejection: open tx batch against a `sled` repo →
-  `not_supported_by_backend`
-- isolation: open long-ish tx, in parallel run a regular write from
-  another connection, observe it doesn't appear inside the tx but does
-  appear after commit
+- happy path: 5 writes + 1 read, commit, read back from outside, see all writes
+- abort path: 2 writes + deliberately failing op → table unchanged
+- read-after-write inside the same tx
+- isolation: long tx + parallel write from another connection;
+  tx doesn't see the parallel write; outside readers do
+- conflict (when SSI is enabled): two tx read same key, both write
+  it, second one aborts with `tx_conflict`
+- single-repo enforcement: tx batch touching two repos → `not_supported`
 
-Plus Rust integration tests in `crates/shamir-engine/tests/` for the
-storage-level WriteTx contract.
+Plus pure-Rust integration tests in `crates/shamir-engine/tests/`:
+
+- VersionCodec round-trip
+- MvccStore.get_at picks the right version under a busy history
+- RepoTxGate.assign_next_version is monotonic under concurrent calls
+- GC respects min_alive_snapshot
+- Recovery marker: simulated crash mid-commit → reads see pre-tx state
+
+The crucial property: **all tests run uniformly on every backend**
+(InMemory, Sled, Redb, Fjall, Persy, Nebari, Canopy) via a backend
+parameter — no per-backend test code. Same tx semantics everywhere.
 
 ---
 
 ## Phase B — interactive transactions (later)
 
-Sketch only — committed to no API yet.
+Sketch only.
 
 ```
 client.beginTx()                           → { txId }
@@ -398,80 +336,75 @@ client.abortTx(txId)                       → ok
 Server-side state per session:
 
 ```rust
-struct Session {
-    // existing fields...
-    active_tx: Option<ActiveTx>,
-}
-
 struct ActiveTx {
     tx_id: u64,
     repo_path: (String /* db */, String /* repo */),
-    write_tx: Box<dyn WriteTx>,
-    expires_at: Instant,         // server-side TTL — auto-abort if client vanishes
+    ctx: TxContext,                  // snapshot + working set
+    expires_at: Instant,             // server-side TTL
     last_activity_ns: u64,
 }
 ```
 
-Hard parts:
-- **Lease management.** TTL needs to be short enough to free writer
-  slots quickly, long enough to survive a slow client. 30 s feels
-  right; configurable.
-- **Disconnect → abort.** TCP close handler must drop `active_tx` so
-  the writer slot frees immediately, not after TTL.
-- **Protocol echoes tx_id** in every `RequestEnvelope` belonging to a
-  tx, so the server can route. Otherwise the dispatcher would have to
-  consult session state on every request.
-- **One tx per session** is the simplest rule — nested or parallel tx
-  in the same session is a YAGNI hole.
-- **Heartbeat.** If client wants to hold a tx longer than TTL, it
-  pings the tx. Adds a wire op.
+Hard parts (familiar territory now that the engine machinery exists):
 
-This is real work and earns it own sprint. Phase A first.
+- **Lease management** — TTL ~30 s, configurable.
+- **Disconnect → abort** — TCP close handler drops `ActiveTx`.
+- **Protocol echoes `tx_id`** in `RequestEnvelope` so dispatcher
+  routes correctly.
+- **One tx per session** — keep nesting / parallel tx out (YAGNI).
+- **Heartbeat op** — for tx that need to outlive the default TTL.
 
 ---
 
 ## Risks and corners
 
-- **Interner persistence and tx commit order.** TableManager keeps a
-  string-interner that lazy-persists to the `__info__` store. If the
-  interner persists *outside* the tx but the tx then aborts, we leak
-  intern slots. Fix: interner persist must ride the same WriteTxn, OR
-  must be deferred until after commit. Probably the latter — the
-  interner is monotonic so leaking a slot is harmless except for size.
-- **Index updates.** IndexManager updates secondary indexes on every
-  write. Inside a tx, those updates must go through the tx handle too —
-  otherwise an aborted tx leaves orphan index entries. The
-  IndexManager code path needs an audit.
-- **redb WriteTxn is exclusive per file.** During a long-running
-  transactional batch, no other write can touch that repo. Document.
-  Makes "split repos by access pattern" advice not just style — it's
-  a throughput knob.
-- **Audit log writes.** Every batch emits an audit entry. Should the
-  audit entry ride the same tx? Probably yes for transactional
-  batches — otherwise we can audit a batch that ended up rolled back.
-  But the audit chain is in a different store entirely; making it
-  cross-store consistent is exactly the multi-repo problem we banned.
-  Pragmatic compromise: audit entry is appended *after* successful
-  commit, with `outcome: aborted` for failed transactional batches.
+- **Interner persistence ordering.** TableManager's string interner
+  lazy-persists to the `__info__` store. Inside a tx, intern slots
+  added during execution must EITHER ride the same versioned write
+  set (so they roll back atomically) OR be deferred until after
+  commit. Latter is simpler and safe — interner slots are monotonic;
+  leaking a slot is harmless, only costs a few bytes.
+- **Index updates.** Secondary indexes also need versioned writes
+  (otherwise an aborted tx leaves orphan index entries). Index store
+  uses the same MvccStore wrapper.
+- **Audit log.** Audit chain lives in a different repo entirely;
+  cross-repo atomicity is out of scope. Pragmatic compromise: append
+  the audit entry **after** successful commit, with `outcome:
+  aborted` for failed transactional batches.
+- **GC lag.** If GC falls behind, disk grows. Telemetry: emit
+  `tx_versions_per_key` histogram + `gc_lag_versions` gauge so
+  operators see this.
+- **Long-running tx blocks GC.** Min_alive_snapshot is held back by
+  the oldest open tx. Phase B in particular needs a max-tx-lifetime
+  cap (e.g. 5 min) — otherwise one stuck client wedges the whole
+  GC pipeline.
+- **Read amplification.** Versioned reads do range scans where
+  point reads sufficed before. Mitigation: cache `(key →
+  current_version)` in memory per repo; invalidate on commit.
 
 ---
 
 ## Order of work (when we pick this up)
 
-1. Storage trait extension + `WriteTx` shape (1 h)
-2. redb backend `begin_write_tx` impl (3-4 h, including index store glue)
-3. Reject path + `not_supported_by_backend` error code for everything
-   else, with a clear "supported on redb only for now" message
-   (30 min)
-4. persy / canopy / nebari opt-in — *separate work, after redb lands
-   and its real-world behaviour is known*. Each gets its own
-   read-the-library-docs sprint to confirm isolation semantics before
-   the trait impl lands
-6. Executor integration — single-repo check, serial exec, commit/rollback (2-3 h)
-7. Interner-persist deferral fix (1 h)
-8. IndexManager tx-aware writes (audit + fix, 2-3 h)
-9. Rust tests + e2e test file (2 h)
-10. Docs: this file marked "implemented", LOGIC_FLOW updated, root
+1. `version_codec.rs` + tests — encode / decode / sort order (1 h)
+2. `repo_tx_gate.rs` — Mutex + counter + recovery marker, with
+   crash-mid-commit simulated tests (3 h)
+3. `mvcc_store.rs` — wrap a `Store`, implement `get_at` / `put_versioned`
+   / `scan_at` (4-6 h, depends on prefix-scan ergonomics per backend)
+4. `tx_context.rs` — read-set / write-set / read-through-working-set (2 h)
+5. Executor integration — single-repo check, serial run, commit/abort,
+   `BatchResponse.transaction` filled in (3-4 h)
+6. Interner-persist deferral fix (1 h)
+7. IndexManager port to MvccStore (2-3 h)
+8. GC worker (3 h, including telemetry hooks)
+9. Phase A boundary: SI + last-writer-wins (cheap default).
+   Optional: SSI mode behind a flag (4 h).
+10. Rust integration tests + e2e `11-transactions.test.js` (3-4 h)
+11. Docs: this file marked "implemented", LOGIC_FLOW updated, root
     README capability list updated (30 min)
 
-Total: roughly 1.5-2 days of focused work. Phase A only.
+Total: roughly 2-3 weeks of focused work. Phase A only.
+
+The cost is real, but the architectural payoff is also real: every
+backend behaves identically, the `Store` trait stays narrow, and
+adding a new backend tomorrow doesn't touch a single line of tx code.
