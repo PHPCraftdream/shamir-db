@@ -6,6 +6,14 @@
 честная карта того, что **ещё нужно** для production-grade развёртывания,
 с приоритетами и оценками.
 
+> **TL;DR ревью первоначального плана**: из 25 пунктов реально нужно
+> ~12. Половина — перфекционизм или решается уровнем инфраструктуры
+> (firewall, FS-level encryption, K8s rolling restart). Реальная
+> production-готовность достижима за **~25 часов** работы, не 82.
+>
+> Что **выкинуто** как избыточное и почему — в разделе "Что НЕ делать"
+> ниже.
+
 ## Что уже есть (validated, в коде)
 
 | Категория | Что | Где |
@@ -40,71 +48,91 @@
   (overlap-окно, finalize по timer'у), но **admin op для триггера
   rotation не подключён в db_handler**.
 
-## Дорожная карта
+## Дорожная карта (после ревью)
 
-### P0 — нельзя в production без этого
-
-| # | Задача | Время | Что и зачем |
-|---|--------|-------|-------------|
-| 1 | Health checks `/healthz`, `/readyz` | ~1 ч | K8s readiness probe + L4 health check |
-| 2 | Backups (`Database::backup()`) | ~3 ч | `BackupScheduler` task + CLI `shamir-server backup --to /path`. Без этого — потеря всего при corrupted redb |
-| 3 | Глобальный max-connections cap | ~2 ч | counter в state, отказ accept'а при лимите. Защита от resource-exhaustion |
-| 4 | Pre-handshake read/write timeout | ~1 ч | Slow-loris защита: TLS-accepted клиент не должен висеть бесконечно без `auth_init` |
-| 5 | Connection drain mode | ~2 ч | `SIGUSR1` → перестать accept'ить, дождаться N секунд активных. Для blue/green |
-| 6 | Audit log rotation | ~2 ч | Сейчас файл растёт бесконечно. По size/age, либо `logrotate`-friendly hook |
-
-**Итого P0 ≈ 11 часов.**
-
-### P1 — production-grade, deploy + добавить параллельно
+### P0 — реально нужно для production
 
 | # | Задача | Время | Что и зачем |
 |---|--------|-------|-------------|
-| 7 | Prometheus `/metrics` | ~3 ч | `auth_attempts_total{result}`, `active_sessions`, `argon2_busy`, `audit_chain_seq`, `connections_active`, `frame_size_bytes_p99`. Labels по listener |
-| 8 | IP allowlist/denylist | ~2 ч | Config `[security.network] allow_subnets = [..] deny_subnets = [..]`. Reject до TLS accept'а — экономия CPU |
-| 9 | Real RBAC | ~4 ч | Wire `shamir_db::db::query::auth::SessionPermissions` в session.rs. Сейчас бинарный superuser-or-not |
-| 10 | Resume PATH (server-side) | ~3 ч | Мы issue'им ticket, но не принимаем. Нужен `resume_init` frame + `resume_session(...)` |
-| 11 | TLS cert rotation без рестарта | ~3 ч | File watcher на `cert.pem` → reload `TlsAcceptor`. Без этого Let's Encrypt expiry = downtime |
-| 12 | Per-session resource limits | ~3 ч | Max queries/sec, max in-flight requests, max result size. Один клиент не должен задушить сервер |
-| 13 | Slow query logging | ~1 ч | Log при `execution_time_us > N`. Critical для отладки production |
-| 14 | systemd unit + Dockerfile + Helm chart | ~3 ч | Ops-команда не сможет деплоить без этого |
+| 1 | Health checks `/healthz`, `/readyz` | ~1 ч | LB / K8s probe знает живой ли сервер. Без этого rolling deploy слепой |
+| 2 | Backups | ~3 ч | `Database::backup()` + CLI `shamir-server backup --to /path`. Кэш regenerate'ит, но user data → терять нельзя |
+| 3 | Global max-connections cap | ~2 ч | Atomic counter, отказ accept'а при лимите. Без этого DDoS = OOM |
+| 4 | Pre-handshake read/write timeout | ~1 ч | Slow-loris защита. Одна `tokio::time::timeout` на auth_init read |
+| 5 | Audit log rotation | ~2 ч | Файл растёт бесконечно → диск переполнится. Простой rotation by size/age |
+| 6 | Prometheus `/metrics` | ~3 ч | Без него production слепой. `auth_attempts`, `active_sessions`, `argon2_busy`, `connections_active`, p99 latency |
+| 7 | Slow query logging | ~1 ч | `if execution_time_us > N { tracing::warn!(..) }`. Тривиально, спасает от безумия в продакшене |
+| 8 | systemd unit + Dockerfile | ~2 ч | Без них ops-команда не задеплоит |
+| 9 | `changePassword` SCRAM | ~3 ч | Базовый user flow. Уже реализован в `shamir-connect::changepw`, нужно подключить через wire. Без него юзер не может сменить пароль = security incident response невозможен |
+| 10 | Capacity planning docs | ~1 ч | Не код. README: "1 session = ~2 KB RAM, audit entry = ~200 bytes, redb growth ~X/день при Y запросов/сек" |
 
-**Итого P1 ≈ 22 часа.**
+**Итого P0 ≈ 19 часов.**
 
-### P2 — strongly recommended, не блокер
+### P1 — нужно если multi-user / долгосрочная эксплуатация
 
-| # | Задача | Время | Что и зачем |
-|---|--------|-------|-------------|
-| 15 | OpenTelemetry distributed tracing | ~4 ч | Propagate `trace_id` через RequestEnvelope. Spans accept→handshake→batch→response |
-| 16 | Encryption at rest | ~6 ч | redb-файлы зашифрованы (SQLCipher-style). Для shared infra / cloud disks |
-| 17 | HSM/KMS integration | ~5 ч | Ed25519 server identity seed сейчас plaintext в `server_meta.redb` |
-| 18 | Replication / HA | ~10+ ч | Read-replica или Raft. Single-point-of-failure без этого |
-| 19 | Schema migrations | ~5 ч | При изменении `BatchRequest` schema нужна миграция durable данных |
-| 20 | Audit query API | ~3 ч | Admin op для поиска по audit log без `tail`-инга файла |
-| 21 | `changePassword` SCRAM | ~3 ч | Реализован в `shamir-connect::changepw`, через wire не подключён |
-| 22 | Query result streaming | ~5 ч | Cursor для 100MB+ результатов вместо одного сообщения |
-| 23 | CLI admin tool | ~5 ч | `shamir-server-admin user/audit/backup/migrate` |
-| 24 | Capacity planning docs | ~2 ч | RAM per session, RAM per audit entry, redb growth rate |
-| 25 | Connection draining metrics | ~1 ч | Counter активных per-connection tasks для graceful shutdown |
+| # | Задача | Время | Что и зачем | Когда нужно |
+|---|--------|-------|-------------|-------------|
+| 11 | Real RBAC | ~4 ч | Per-table permissions. Сейчас бинарный superuser-or-not | Когда >1 типа пользователей с разными правами |
+| 12 | Resume PATH (server-side) | ~3 ч | Issue'им ticket но не принимаем — мёртвый функционал | Когда долгие mobile-сессии (re-auth дорогой Argon2id) |
+| 13 | Per-session resource limits на сервере | ~3 ч | Сейчас `BatchLimits` в payload — клиент сам себе верит. Server-side override | Когда >1 organization sharing tenant |
+| 14 | CLI admin tool | ~5 ч | `shamir-server-admin user/audit/backup`. Иначе ops пишет custom client | Когда есть отдельная ops-команда |
+| 15 | Connection drain mode (SIGUSR1) | ~2 ч | Blue/green deploy без потерянных соединений | Только если blue/green — иначе SIGTERM с timeout достаточен |
 
-**Итого P2 ≈ 49 часов.**
+**Итого P1 ≈ 17 часов** (если все нужны).
 
-## Рекомендуемый порядок до production-MVP-2
+### P2 — отдельные крупные проекты, не roadmap item
 
-Чтобы можно было реально ставить за nginx и принимать клиентов:
+| Задача | Когда делать |
+|---|---|
+| Replication / HA (Raft / master-replica) | Когда uptime требование >99.9%. Это **месяц работы**, не 10 часов из исходного плана. Не roadmap, а отдельный design doc |
+| HSM/KMS для identity seed | Когда compliance требует (SOC2, FedRAMP). Иначе chmod 600 + encrypted disk достаточно |
+| Schema migrations | Когда **впервые** придётся бампать `BatchRequest` version. Сейчас version=1 hardcoded — преждевременно |
+| Encryption at rest на app уровне | Только если FS-level encryption недоступна. На AWS EBS/Azure managed disk избыточно |
+
+## Что НЕ делать (выкинуто из исходного плана)
+
+| Было | Почему выкинуто |
+|------|-----------------|
+| **OpenTelemetry distributed tracing** | `tracing` (уже есть) + slow query log покрывают 95% debugging. OTEL setup-complexity не оправдана для системы с одним сервисом. Когда появится 5+ микросервисов — добавить |
+| **TLS cert rotation без рестарта** | Let's Encrypt = 90 дней. Rolling restart раз в 90 дней OK для 99% случаев. File-watcher reload — bug-prone, сложный (race с in-flight handshakes). Овчинка не стоит выделки |
+| **IP allowlist/denylist в config** | Делается на firewall (iptables/cloud security groups/nginx). На application уровне — дублирование. Если за nginx — он лучше это умеет |
+| **Encryption at rest** | LUKS / cloud-managed encryption (EBS, GCP PD) делают это лучше + transparent. SQLCipher-style — много кода, slow, ключи всё равно нужно где-то хранить → та же проблема |
+| **HSM/KMS** для большинства | Если seed файл с `chmod 600` + диск зашифрован — этого достаточно для всего кроме FedRAMP-grade compliance. Откладываем до compliance-driver |
+| **Schema migrations infrastructure** | Сейчас одна версия. Преждевременная оптимизация. Сделаем когда впервые понадобится |
+| **Audit query API** | `jq` + `tail -f` + `grep` работают на JSON-line файле. Admin API — сахар. Если есть Splunk/ELK — туда отправлять важнее чем API |
+| **Query result streaming (cursor)** | `BatchRequest::limits.max_result_size = 10MB` уже limits. Если ответ 100MB — это проектная проблема, не недостаток сервера. LIMIT/pagination существуют |
+| **Connection draining metrics** | Часть P0 #6 (Prometheus metrics) |
+| **Replication / HA** | Не "10 часов задача" — это **месяц** работы (Raft consensus или conflict resolution). Отдельный major feature, не пункт в roadmap |
+| **Connection drain SIGUSR1** для всех | SIGTERM с graceful timeout (уже есть) покрывает 95%. SIGUSR1 — только для blue/green. Перенесено в P1 как опциональное |
+
+## Рекомендуемый порядок до production-готовности
 
 ```
-1. Health checks (/healthz, /readyz)              ~1 ч  [P0]
-2. Pre-handshake timeout (slow-loris)             ~1 ч  [P0]
-3. Global max-connections cap                     ~2 ч  [P0]
-4. Audit log rotation                             ~2 ч  [P0]
-5. Backup task + CLI                              ~3 ч  [P0]
-6. /metrics (Prometheus)                          ~3 ч  [P1]
-7. IP allowlist в config                          ~2 ч  [P1]
-8. Connection drain mode (SIGUSR1)                ~2 ч  [P0]
-9. systemd unit + Dockerfile + healthcheck       ~2 ч  [P1]
+== Sprint 1 (~15 часов): ship-able state ==
+1. Health checks (/healthz, /readyz)              ~1 ч
+2. Pre-handshake timeout                          ~1 ч
+3. Global max-connections cap                     ~2 ч
+4. Audit log rotation                             ~2 ч
+5. Slow query logging                             ~1 ч
+6. Backup task + CLI                              ~3 ч
+7. Prometheus /metrics                            ~3 ч
+8. systemd unit + Dockerfile                      ~2 ч
+
+== Sprint 2 (~4 часов): user lifecycle ==
+9. changePassword wire-side                       ~3 ч
+10. Capacity planning docs                        ~1 ч
+
+== Optional sprint 3 (~17 часов): multi-user maturity ==
+11. Real RBAC                                     ~4 ч
+12. Resume PATH (server-side)                     ~3 ч
+13. Per-session server-side limits                ~3 ч
+14. CLI admin tool                                ~5 ч
+15. Connection drain SIGUSR1                      ~2 ч
 ```
 
-**Итого: ~18 часов.** После этого получится:
+**Минимально достаточно: Sprint 1 + 2 = ~19 часов.**
+Полная зрелость для multi-tenant: + Sprint 3 = ~36 часов.
+
+После Sprint 1+2 получится:
 
 ```yaml
 # docker-compose.yml
@@ -130,32 +158,37 @@ services:
           cpus: "2"
 ```
 
-## Что НЕ нужно для production (но полезно потом)
+## Что НЕ нужно для production (никогда или очень нескоро)
 
-- **Multi-tenancy isolation** — если все клиенты одной организации, не критично.
-- **GDPR data deletion API** — зависит от юрисдикции, не universal.
-- **Real-time admin dashboard UI** — оперативно покрывает Grafana.
-- **Compliance attestations (SOC2, ISO 27001)** — отдельный non-engineering трек.
+- **Multi-tenancy isolation** — если все клиенты одной организации.
+- **GDPR data deletion API** — пишется когда придёт юрист.
+- **Real-time admin dashboard UI** — Grafana покрывает всё.
+- **Compliance attestations (SOC2, ISO 27001)** — отдельный нон-инженерный трек.
+- **gRPC / GraphQL gateway** — у нас свой бинарный протокол, конвертеры — overkill.
+- **Built-in load balancing** — nginx/envoy решают.
+- **Plugin система** — преждевременная гибкость.
 
 ## Известные ограничения архитектуры
 
-| Ограничение | Воркараунд |
+| Ограничение | Воркараунд / план |
 |---|---|
-| ShamirAdminExecutor.create_repo принимает только `engine: "in_memory"` | Pre-create durable репо в boot path (как `default.main`); wire-side вторичные репо in-memory only до патча shamir-db |
-| `db_handler` blocks Tokio worker через `block_in_place` | Это **не блокирует** runtime (block_in_place именно для этого), но один long-running query занимает worker'а целиком — нужен query timeout |
-| `BatchRequest::limits.max_queries=50` — global default | Настраивается per-request, но защиты на сервере нет (доверяем `BatchLimits` из payload) |
-| Identity Ed25519 seed в plaintext | Перенести в HSM/KMS (P2 #17) |
-| TLS exporter не работает на windows-msvc target | Не блокер: используем windows-gnu или Linux в проде |
+| `ShamirAdminExecutor.create_repo` принимает только `engine: "in_memory"` | Pre-create durable репо в boot path (как `default.main`); вторичные репо in-memory only |
+| `db_handler` blocks Tokio worker через `block_in_place` | Это **не блокирует** runtime (block_in_place именно для этого), но один long-running query занимает worker'а целиком — нужен query timeout (P1 #13) |
+| `BatchRequest::limits.max_queries=50` — global default | Настраивается per-request, но server-side cap нет (доверяем payload). Закроется P1 #13 |
+| Identity Ed25519 seed в plaintext | `chmod 600` + encrypted disk достаточно. HSM только если compliance требует |
+| TLS exporter не работает на windows-msvc target | Не блокер: windows-gnu или Linux в проде |
 
-## Сводная оценка до full-production
+## Сводная оценка после ревью
 
 ```
-P0 (must)        ~11 часов
-P1 (production)  ~22 часов
-P2 (recommended) ~49 часов
-─────────────────────────
-Total            ~82 часа
+было P0    ~11 ч    →   стало P0     ~19 ч  (включил часть P1+P2 что реально важно)
+было P1    ~22 ч    →   стало P1     ~17 ч  (выкинул IP-allowlist, cert-rotation, drain mode)
+было P2    ~49 ч    →   стало P2      0 ч   (всё в "проекты" или "не делать")
+─────────────────────────────────────────
+было total ~82 ч    →   стало total  ~36 ч  (-56%)
 ```
 
-С одним инженером — 2-3 спринта. С 2-3 параллельно работающими над
-независимыми пунктами — 3-4 недели.
+**Production-ready минимум: ~19 часов** (Sprint 1+2).
+**Multi-user maturity: +17 часов** = ~36 часов всего.
+**HA/replication, encryption-at-rest, HSM**: отдельные проекты,
+не roadmap items.
