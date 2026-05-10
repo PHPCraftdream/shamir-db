@@ -1,18 +1,41 @@
 # Performance Opportunities — Beyond Asymptotic Wins
 
-Status: **planned/ideated, no code yet.** Companion to
-`docs/ops/PERF_BASELINE.md` (which captures measured numbers and the
-A → B → C → D round of asymptotic optimisations).
+Status: **review pass after the A → D + sorted-index sprints.** Companion
+to `docs/ops/PERF_BASELINE.md` (measured numbers).
 
-Where A/B/C cut O(n) → O(log n) on the write path's hot scenarios
-(set/update/delete via index — 800-1100× wins), this document is
-about the **next class** — reducing the per-record constant factor.
-No single item here is a 1000× spike; cumulatively they should give
-3-10× across the whole read/write profile, on every workload.
+Where A/B/C/D cut O(n) → O(log n) on the write path (set/update/delete
+via index → 800–1100× wins; count(*) → 3000× via RecordCounter), this
+document is about **next-class wins**. Two flavours mixed in:
 
-These are observations from a fresh re-walk of the codebase after the
-A-D sprint. The lens: «что лишнее тут делается каждую миллисекунду» —
-because next-class wins come from removal, not addition.
+- **Per-record constant-factor reduction** — chip away at the
+  "ceremony" each op does. Cumulatively 3–10× across the profile.
+- **Architectural feature additions** that unlock new asymptotic
+  paths — most notably covering indexes for disk-backend range
+  queries, which the latest bench (`796cdbf` / `c1f0520`) showed as
+  the gap between in-memory wins (4×) and disk wins (1.2–1.8×) at
+  the same selectivity.
+
+> **2025-05-10 update.** This pass re-graded every item against
+> measured bench data and verified each symptom in code. Win
+> estimates from the original draft were trimmed where they
+> overshot. Items that landed during the sprint are marked **DONE**
+> and kept for history. New items surfaced by the sled-bench cost
+> model are marked **NEW** at the bottom.
+
+---
+
+## Quick map — what's worth doing first
+
+Ranked by cost / value after the verification pass:
+
+| Tier | Items | Why |
+|------|-------|-----|
+| 🥇 **Easy wins** | **F** (interner Vec reverse, 1-2 h), **L** (batch RecordId, 1-2 h), **Q1** (MIN/MAX fast-path, 1 h), **Q2** (Filter::Gt/Lt in sorted-index planner, 1 h) | Each cheap; each verified; small but free 3–10 % each. |
+| 🥈 **Real wins on real workloads** | **G** (LRU posting cache, 1 day), **O** (covering index, ~1 week), **P** (vectored multi-get, 2–3 days) | These move the dial on UI dashboards and disk-backend production. |
+| 🥈 **Architectural cleanup** | **H₂** (Persistable trait), 1 day | Not a perf spike — prevents the next recurrence of write-amplification. |
+| 🥉 **Modest, wide refactors** | **K** (projection lazy, 5-7 days), **R** (reverse iter on Store, 1 day) | Real but expensive. K only really helps when SELECT is narrow. |
+| 👎 **Overestimated in original draft — defer** | **I** (sync Store core), **J** (SmallMap), **M** (specialised filter shapes) | Original draft predicted 20–50 %; closer look says 5–15 %, with effort cost not justified yet. |
+| 🚫 **Later, conditional** | **N** (prepared plan cache), **rkyv** | Only after profiling against real workload. |
 
 ---
 
@@ -20,522 +43,495 @@ because next-class wins come from removal, not addition.
 
 ### Что вижу как структурную трату
 
-#### 1. Async ceremony там где работа синхронная
+#### 1. Async ceremony там где работа синхронная — **REVISED**
 
-Каждая операция в `Store` trait объявлена `async fn`. Для
-in-memory backend — `DashMap.insert` чистый синхронный. Для redb —
-синхронный с маленькой блокировкой. Но snapshot всех вызовов
-проходит через tokio state machine: future, waker, poll. На `set`
-нет ни одного `await` внутри backend'а — есть только async-обёртка
-вокруг sync работы.
+Каждая операция в `Store` trait объявлена `async fn`. Для in-memory
+backend — `DashMap.insert` чистый синхронный. Для redb — синхронный с
+маленькой блокировкой. Но snapshot всех вызовов проходит через tokio
+state machine: future, waker, poll. На `set` нет ни одного `await`
+внутри backend'а — только async-обёртка вокруг sync работы.
 
-Эта церемония стоит **сотни наносекунд на вызов**. На горячем пути
-с 100K op/s — заметные проценты.
+**Original draft:** 20–40 % win на in-memory.
+**Actual:** ~5–15 %. Async overhead per call ~50–100 ns. Для
+in-memory ops в микросекундах это ~5 % per call; накапливается, но
+не до 40 %.
 
-#### 2. Allocation pressure повсюду
+Эффорт: 2–3 дня в исходном плане → **реалистично 1 неделя**. Все
+backend impls + все engine call sites — wide mechanical refactor.
 
-Каждое чтение проходит через `Bytes` (heap-allocated ref-counted
-slice), которое потом дешифруется в новый `Vec<u8>` и из него — в
-`InnerValue` с `HashMap` для каждого Map'а. Запись 5-полевая =
-~6 heap-allocations.
+Cost / benefit не оправдан в текущей фазе.
 
-На 1000 records read = ~6000 allocations + GC pressure. Аллокаторы
-в Rust быстрые, но не бесплатные.
+#### 2. Allocation pressure повсюду — **REVISED**
 
-Подсказка какие у нас типичные records: маленькие, плоские,
-≤8 полей. Идеально для **inline storage** — `SmallVec<[(K, V); 8]>`
-вместо HashMap, `[u8; 16]` inline вместо Bytes для коротких ключей.
+`InnerValue::Map` каждый — heap-allocated HashMap. 1000 records на
+read = 1000 HashMap allocations.
 
-#### 3. Interner reverse-lookup на каждом field-resolve
+**Original draft:** 10–30 % via SmallMap (inline для ≤8 полей).
+**Actual:** ~3–8 %. Rust allocator очень быстрый; HashMap allocation
+~50 ns. Per-record decode + interner lookups доминируют.
 
-Read возвращает 1000 records. Каждый record — 5 полей. Каждое поле —
-`inner_to_json_value(value, interner)` → `interner.get_string(key_id)`
-на каждом ключе. **5000 DashMap lookups** на один read query, при
-том что `key_id → String` — это просто массив (interner монотонный,
-никогда не сжимается).
+Эффорт реально 2-3 дня — Map тип фундаментальный, правки рябят по
+codec + tests. Win не оправдывает риск регрессии в текущей фазе.
 
-Решение очевидное: `Vec<String>` индексированный по u64 для reverse
-lookup. **O(1) array index** вместо hashmap. Forward map
-(`String → u64`) можно оставить DashMap — он только на write.
+#### 3. Interner reverse-lookup на каждом field-resolve — **REVISED**
 
-Копеечная правка, но 5000× ускорение конкретного hot inner loop.
+Read возвращает 1000 records × 5 полей = 5000 `interner.get_str`
+calls. Реализация: `map_interned_to_user.get(id).map(|k|
+k.clone())` — DashMap shard lookup + Arc clone.
 
-#### 4. Index хранится как монолитный bincoded BTreeSet
+Это реально (верифицировано в коде).
+
+**Original draft:** 5–50 % win.
+**Actual:** ~2–8 %. DashMap lookup ~80–150 ns + clone ~40 ns =
+~200 ns × 5000 = 1 ms из 80 ms read = 1.2 %. Уберём — небольшой
+кусочек, но дёшево.
+
+Эффорт 1-2 ч, верно. Просто чистый win — делаем.
+
+#### 4. Index posting list — монолитный bincoded blob — **REAL, KEEP**
 
 `lookup_by_index(idx_name, value)` лезет в info_store, читает ВЕСЬ
-BTreeSet matching docs, десериализует. Для индекса по `city`, при
-равномерном распределении 10K records / 8 cities = 1250 ids per
-city = ~20KB blob. **На каждый lookup — 20KB парсинг**.
+BTreeSet, десериализует. Для city-index ~1250 ids = ~20 KB parse per
+lookup.
 
-Решение: **in-memory index cache.** LRU mapping
-`(table, idx, value) → BTreeSet<RecordId>`. Read из info_store
-происходит один раз, дальше — память. Invalidate на write по тому
-же ключу. Один-два MB кеша покрывают 99% query workloads.
+LRU cache `(table, idx, value) → BTreeSet<RecordId>` — read из
+info_store происходит один раз, дальше — память. Invalidate на
+write.
 
-#### 5. Filter evaluation через vtable
+Win **5–30× на repeat lookups** (UI dashboards, admin tables) —
+оценка реальная. Cold cache: as today.
 
-`compile_filter` возвращает `Box<dyn FilterCallback>`. На каждый из
-10 000 records — virtual call `cb.matches(&record, ctx)`. Inner loop
-горячий — vtable lookup + indirect call вместо inlined comparison.
+Эффорт 1 день — invalidation correctness требует careful tests.
 
-Для 90% запросов filter — это `Eq { field, value }` или `And` of
-`Eq`'s. Для них vtable не нужен. **Specialized fast paths** для
-top-3 filter shapes — direct call, inlinable.
+#### 5. Filter evaluation через vtable — **REVISED**
 
-Не 1000×, но 30-50% на простых запросах.
+`compile_filter` → `Box<dyn FilterCallback>`. `cb.matches(record,
+ctx)` per record — virtual call.
 
-#### 6. Persist amplification — паттерн который никуда не делся
+**Original draft:** 30–50 % win на simple-filter scans.
+**Actual:** ~5–15 %. vtable dispatch ~5–10 ns/call. Для 10K records
+× ~10 ns = 100 µs из 90 ms scan = 0.1 %. На scan-heavy путях фильтр
+не bottleneck; data load доминирует.
 
-Уже исправили для interner (Opt A). Сейчас **тот же паттерн
-возникает для counter** (вижу в working tree — `counter.persist()`
-добавлено в insert/update/delete). И **тот же паттерн будет
-возникать снова и снова** для каждого нового metadata-state'а
-который БД захочет durable.
+Эффорт 1 день, верно — но win скромный.
 
-Это структурная проблема, не точечная. Решение — **общий
-"dirty-flag flush" механизм**: trait/struct `Persistable` с
-методами `mark_dirty()` + `persist_if_dirty()`. Один backend
-timer / batch-end hook вызывает `persist_if_dirty()` на всех
-зарегистрированных. Никто не должен помнить про persist по месту.
+#### 6. Persist amplification — **DONE** ✓
 
-#### 7. Lazy materialization отсутствует
+> Закрыто в `a3013c7` (counter cache + bulk_insert -29 %). Counter
+> теперь in-memory `AtomicU64`; `persist()` no-op'ится при unchanged.
+> Тот же паттерн что Opt A для interner.
 
-`SELECT email FROM users LIMIT 100` сейчас:
+H₂ (generic `Persistable` trait) — рекомендуется отдельным
+архитектурным sprint'ом чтобы рецидив не повторился для следующего
+metadata-state'а. ~1 день.
 
-1. Full scan all records (или index)
-2. Полная десериализация bytes → InnerValue для **всех** полей
-   каждой записи
-3. `inner_to_json_value` всей структуры
-4. **Потом** `apply_select` отбрасывает все поля кроме `email`
+#### 7. Lazy materialization отсутствует — **REAL, NARROWED**
 
-Мы потратили работу на 95% полей которые потом выкинули.
+`SELECT email FROM users LIMIT 100` сейчас декодирует все поля каждой
+matched записи, потом `apply_select` отбрасывает 95 %.
 
-Решение: `SelectProjection` определяется до материализации, и
-`inner_to_json_value` принимает projection mask, читает только
-нужные поля. Подобные partial-decode оптимизации — стандартные в
-современных БД (Postgres, ClickHouse).
+Win: **3–7× для projection-heavy queries** (узкая выборка из широких
+записей). Эффорт 5–7 дней — codec module + read executor.
 
-Win зависит от схемы — для записи на 10 полей с проекцией 1:
-~10× меньше работы codec'а.
+Полезно когда workload — SELECT с явной проекцией. Для SELECT * win
+нулевой.
 
-#### 8. Bincode vs zero-copy
+#### 8. Bincode vs zero-copy — **CONDITIONAL**
 
-Каждый `data_store.get(key)` → bytes → bincode::from_bytes →
-InnerValue. Аллокации, копирование. Bincode — **decent but not fast**.
+rkyv даёт zero-copy чтение через `unsafe archived_root`. Для
+schema-less `InnerValue` — sloppy fit (рябит по типу). Реально
+оправдано для **system records** (interner state, counter, index
+meta) где shape известен. Подождать.
 
-`rkyv` — zero-copy serialization. На write пишем archived bytes. На
-read — `unsafe { rkyv::archived_root<...>(bytes) }` даёт **ссылку**
-прямо в bytes без копирования. Чтение поля — pointer arithmetic.
-
-Цена: rkyv требует специфичного derive, формат жёстче. Cost-benefit
-для нашей schema-less InnerValue — sloppy. Может оправдаться для
-**system records** (interner state, counter, index meta) где shape
-известен.
-
-#### 9. RecordId::new — три syscall'а на insert
+#### 9. RecordId::new — три syscall'а на insert — **REAL, KEEP**
 
 ```rust
-let now_micros = Utc::now().timestamp_micros();    // syscall (Linux)
-rand::rngs::OsRng.fill_bytes(&mut bytes[8..16]);    // syscall
+let now_micros = Utc::now().timestamp_micros();   // vDSO на Linux
+rand::rngs::OsRng.fill_bytes(&mut bytes[8..16]);   // getrandom syscall
 ```
 
-На bulk insert 1000 = 2000 syscall'ов **до даже одного storage call**.
+Bulk insert 1000 = 1000 syscalls (главное — OsRng). На нашем хосте
+syscall ~1 µs → 1 ms из 25 ms bulk_insert = 4 %.
 
-Решение: **batch RecordId allocator**. Один `now()` + один
-`OsRng.fill_bytes(&mut [u8; 16384])` на 1024 ids. Lazy раздача из
-pool. Bulk insert на 1000 = 2 syscall'а.
+Batch allocator (1024 ids worth of randomness one call) сводит к
+**1 syscall на 1000 inserts**. Win 3–8 %, эффорт 1-2 ч.
 
-#### 10. JSON parsing на каждом execute()
+#### 10. JSON parsing на каждом execute() — **DEFER (Opt N)**
 
-Wire payload — msgpack. Сервер декодирует в DbRequest. Внутри —
-`BatchRequest` уже DTO. Но затем для каждой query value мы
-конвертируем `serde_json::Value` → `InnerValue` через recursive walk.
+Re-parse одного и того же query shape. Win 10–30 % только на
+**стационарном** workload (UI dashboards с фиксированным набором
+запросов). Эффорт 1 неделя (parameter detection в AST).
 
-Если те же query JSON-shapes приходят повторно (typical для admin
-UI), мы парсим re-парсим. **Prepared statements** — query template +
-parameters. Парс плана раз, params подставляются.
-
-Win зависит от стационарности workload. Для UI бэкенда c
-фиксированным набором запросов — 10-30%.
+Оставить на потом — не делать пока не появится profile-evidence что
+parse cost доминирует.
 
 ### Один взгляд под другим углом
 
-Если посмотреть на эти 10 пунктов одной фразой — **БД выполняет
-много "церемониальной" работы для каждого record'а на каждом
-проходе.** Async wrapping синхронной работы. Reverse lookup
-интернера через хешмап вместо массива. Пере-десериализация bincode'а.
-Проекция после материализации. Persist каждой metadata-копейки на
-каждое write.
+Эти 10 пунктов = «БД выполняет много церемониальной работы для
+каждого record на каждом проходе». Каждый по отдельности — 3–15 %.
+Сумма дешёвых (F + L + Q1 + Q2): ~10–25 % cumulative за полдня
+работы.
 
-Каждый пункт по отдельности — 5-30%. Но сумма этих 30%-х =
-**3-10× cumulative**. И это на всём, не только на specific scenario.
+Дорогие (G, O, P): реальные win'ы для production workloads на
+disk-backend и UI-style read-heavy — но это уже sprint'ы, не «между
+делом».
 
-Это **другой класс оптимизаций чем A/B/C** (которые были про
-асимптотику конкретного hot path). Это — **снижение per-record
-constant factor**. Не 1000× spike, но 5× по всему профилю.
-
-И, важное: эти win'ы **не требуют новых фич**. Это чистка того что
-уже есть. Никакого нового API surface, никакого нового type.
-Только аккуратная переработка hot path.
+И — критическое наблюдение из последнего бенч-прогона на sled:
+**самый большой неисследованный win — covering index (Opt O ниже).**
+Disk range queries сейчас платят K random reads после index lookup;
+covering index убирает эту цену. См. break-even анализ в
+`PERF_BASELINE.md` (раздел «Sorted index on disk backend»).
 
 ---
 
 ## Per-item details (English)
 
-Letters continue from A/B/C/D used in `PERF_BASELINE.md`.
+Letters continue from A/B/C/D used in `PERF_BASELINE.md`. New items
+(post-verification) start at **O**.
 
-### Opt F — interner reverse-lookup as `Vec<String>`
+### Opt F — interner reverse-lookup as `Vec<String>` ✓ KEEP
 
-**File:** `crates/shamir-types/src/core/interner/*`
+**File:** `crates/shamir-types/src/core/interner/`
 
-**Symptom.** Every read materialisation calls
-`interner.get_string(key_id)` per field, per record. The reverse
-mapping is a `DashMap<u64, String>` — hash + lookup + Arc clone for
-each call. For 1000 records × 5 fields → 5000 hashmap lookups per
-read query.
-
-**Fix.** Interner is monotonic (keys never removed). Use
-`Vec<String>` indexed by `u64` for the reverse direction; forward
-direction (`String → u64`) stays a `DashMap` (only touched on write).
-
-```rust
-struct Interner {
-    forward: DashMap<String, u64>,            // write path
-    reverse: parking_lot::RwLock<Vec<String>>, // read path, append-only
-}
-```
-
-`get_string(id)` becomes `reverse.read()[id as usize].clone()`
-(or return `&str` if we can plumb lifetimes — even better).
-
-**Effort.** 1-2 hours. Small change in `core/interner/`, no API
-surface change.
-
-**Win estimate.** 5-50% of full-read query latency depending on
-record-field count.
-
-### Opt G — in-memory LRU cache for index posting lists
-
-**File:** `crates/shamir-engine/src/index/index_manager.rs`
-
-**Symptom.** `lookup_by_index(name, values)` reads the entire
-posting blob from `info_store`, deserialises a `BTreeSet<RecordId>`,
-returns. For a city-index with 1250 docs per value, that's a ~20 KB
-parse per lookup — and a hot one (called from every indexed
-read/update/delete).
-
-**Fix.** Per-`IndexManager` instance, keep an LRU map:
-
-```rust
-type CacheKey = (u64 /* index_name_interned */, Vec<InnerValue> /* values */);
-struct IndexCache {
-    entries: lru::LruCache<CacheKey, BTreeSet<RecordId>>,
-    capacity_bytes: usize,
-}
-```
-
-Look up in cache first; on miss, fall back to `info_store.get`,
-populate cache. Write path invalidates affected `(index, value)`
-entries on `on_record_created/updated/deleted`.
-
-Capacity tuning: ~1-2 MB per repo by default; configurable.
-
-**Effort.** 1 day, including invalidation correctness tests.
-
-**Win estimate.** 5-30× on repeated indexed lookups (which dominate
-read-heavy workloads). Cold cache: same as today.
-
-### Opt H — counter persist debouncing (recurrence of Opt A pattern)
-
-**File:** `crates/shamir-engine/src/table/record_counter.rs` and
-`write_exec.rs`
-
-**Symptom.** Working tree currently shows `counter.persist().await`
-calls added after every insert/update/delete — same write
-amplification we just fixed for interner (Opt A). Counter blob is
-small (8 bytes), but the `info_store.set` round-trip costs
-async + serialisation regardless of payload size.
-
-**Fix.** Same trick as Opt A — track `last_persisted_count: AtomicU64`,
-`persist()` no-ops when current value equals it. Or better: integrate
-with Opt H₂ (`Persistable` trait) below.
-
-**Effort.** 30 minutes for the standalone fix.
-
-**Win estimate.** 5-10% on write-heavy benchmarks (matches the gain
-Opt A gave).
-
-### Opt H₂ — generic `Persistable` mechanism (eliminate the recurrence)
-
-**File:** new module in `shamir-engine`
-
-**Symptom.** Persist amplification is a *pattern*, not a one-off. We
-fixed it for interner; now it surfaced for counter; it'll surface
-again for every metadata blob we add (index_meta, audit-tail,
-fts-totals, vector-graph stats…).
-
-**Fix.** Single mechanism every persistable metadata uses:
-
-```rust
-pub trait Persistable: Send + Sync {
-    fn name(&self) -> &str;
-    /// Return true if state changed since last persist.
-    fn is_dirty(&self) -> bool;
-    /// Write to durable storage and clear dirty.
-    async fn persist(&self) -> DbResult<()>;
-}
-
-pub struct PersistRegistry { items: Vec<Arc<dyn Persistable>> }
-
-impl PersistRegistry {
-    /// Called at end of every batch (or by background timer).
-    pub async fn flush_dirty(&self) -> DbResult<()>;
-}
-```
-
-Every metadata holder registers itself. End-of-batch hook in
-executor calls `flush_dirty()` once. No more per-op `.persist().await`
-sprinkled across the code.
-
-**Effort.** ~1 day including migrating interner + counter + index
-meta to use it.
-
-**Win estimate.** 5-15% on write workloads + protection against
-future regressions.
-
-### Opt I — sync `Store` API + async wrapper
-
-**File:** `crates/shamir-storage/src/types.rs` + all backend impls
-
-**Symptom.** `Store::get/set/insert/remove` all `async fn`, but
-in-memory backend is pure-sync DashMap and redb is sync-with-mutex.
-Each call costs a tokio state-machine + waker-plumbing yield (~100
-ns) for nothing.
-
-**Fix.** Reshape `Store` to have sync core + optional async wrapper:
-
-```rust
-pub trait Store: Send + Sync {
-    // sync core
-    fn get_sync(&self, key: &[u8]) -> DbResult<Option<Bytes>>;
-    fn set_sync(&self, key: Bytes, value: Bytes) -> DbResult<bool>;
-    // ...
-
-    // async wrapper — default impl wraps sync; backends with real
-    // I/O (sled mmap, fjall LSM compaction) override to spawn_blocking
-    async fn get(&self, key: Bytes) -> DbResult<Bytes> { ... }
-}
-```
-
-Engine on read path calls sync core when not crossing thread
-boundaries. Backends that need true async (network-attached future
-backends?) override.
-
-**Effort.** 2-3 days — touches every backend impl + engine call sites.
-Mechanical but wide.
-
-**Win estimate.** 20-40% on in-memory backend; 5-15% on disk
-backends (still saves the spawn_blocking hop for cached reads).
-
-### Opt J — inline `SmallMap` for small records
-
-**File:** `crates/shamir-types/src/types/value.rs` (`InnerValue::Map`)
-
-**Symptom.** `InnerValue::Map` wraps `HashMap`-like structure. For
-typical record (5-8 fields) every Map is a heap allocation +
-HashMap overhead (capacity 16, fill factor wastage). On a read of
-1000 records → 1000 HashMap allocations.
-
-**Fix.** Use a stack-or-heap structure: inline `SmallVec<[(K, V); 8]>`
-for ≤8 entries (no allocation, linear scan), spill to HashMap above.
-For records of typical width — zero map allocations.
-
-**Effort.** 2-3 days. The Map is a foundational type so changes ripple,
-but the API can stay shape-compatible.
-
-**Win estimate.** 10-30% allocation reduction on read-heavy
-workloads, GC pressure drops correspondingly.
-
-### Opt K — projection-aware lazy materialisation
-
-**File:** `crates/shamir-engine/src/query/read/exec.rs::apply_select`
-+ `shamir-types/src/codecs/interned/`
-
-**Symptom.** `SELECT email FROM users LIMIT 100` materialises every
-field of every matched record then drops 95 % of the result during
-projection. We did the work and threw it out.
-
-**Fix.** Two-step:
-
-1. Plan the `SelectProjection` *before* materialisation — extract
-   the set of needed field paths.
-2. `inner_to_json_value_partial(value, projection, interner)` walks
-   only the requested paths, leaves the rest as raw bytes / unread.
-
-Bonus: the same projection mask can flow into the `Store::get`
-layer for backends that support partial-record reads (none today,
-but architecturally clean).
-
-**Effort.** 3-5 days. Touches the codec module + read executor.
-
-**Win estimate.** 5-10× for projections of 1-2 fields out of
-8-10 wide records. Depends on workload.
-
-### Opt L — batch `RecordId` allocator
-
-**File:** `crates/shamir-types/src/types/record_id.rs`
-
-**Symptom.** `RecordId::new()` does one `Utc::now()` syscall + one
-`OsRng.fill_bytes(8)` call per id. Bulk insert 1000 → 2000 syscalls
-before a single storage write.
-
-**Fix.** Per-thread `RecordIdAllocator`:
-
-```rust
-struct RecordIdAllocator {
-    timestamp_base: i64,           // captured once
-    random_pool: [u8; 16384],      // 1024 ids worth
-    cursor: usize,
-}
-```
-
-`new()` returns `RecordId { timestamp_base + delta, &random_pool[cursor..]} `.
-Refill when cursor exhausts.
-
-For sub-microsecond ordering across allocations within the same
-batch: `delta` increments per-call (still timestamped, monotonic
-within the burst).
+**Symptom (verified in code).** Reverse mapping is a `TDashMap<u64,
+UserKey>`; `get_str(id)` does hash + shard + clone. The forward
+direction stays write-only, so swapping reverse to a `Vec<String>`
+indexed by `u64` is safe — interner is monotonic, no removal.
 
 **Effort.** 1-2 hours.
 
-**Win estimate.** 5-15% on bulk insert throughput; bigger relative
-gain on Linux where syscalls cost more.
+**Realistic win.** 2–8 % of full-read query latency (corrected from
+original "5–50 %" — verified via measured cost of `~200 ns × 5000
+lookups` per 10K-record read).
 
-### Opt M — specialise hot filter shapes
+Still net-positive: cheap, no surface change, narrows a verifiable
+hot loop.
 
-**File:** `crates/shamir-engine/src/query/filter/eval.rs::compile_filter`
+### Opt G — in-memory LRU cache for index posting lists ✓ KEEP
 
-**Symptom.** Every filter compiled to `Box<dyn FilterCallback>` →
-`vtable lookup + indirect call` per record. For 10K records the
-pointer-chasing dominates simple Eq filters.
+**File:** `crates/shamir-engine/src/index/index_manager.rs`
 
-**Fix.** Recognise the 3-4 most common shapes and return a non-boxed
-specialised closure inlined at call site. For complex shapes fall back
-to Box. For example:
+**Symptom.** Every `lookup_by_index` re-deserialises ~20 KB blob from
+`info_store`. Hot for indexed read/update/delete repeat workloads.
 
-```rust
-pub enum CompiledFilter {
-    Eq { field_path: Vec<u64>, value: InnerValue },     // most common
-    AndOfEq(Vec<(Vec<u64>, InnerValue)>),                // second most
-    Custom(Box<dyn FilterCallback>),                     // fallback
-}
+**Fix.** `lru::LruCache<(idx_name, values), BTreeSet<RecordId>>`,
+~1-2 MB per repo. Invalidate on `on_record_*` hooks.
 
-impl CompiledFilter {
-    #[inline]
-    pub fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        match self {
-            Self::Eq { field_path, value } => /* inlined */,
-            Self::AndOfEq(parts) => /* inlined */,
-            Self::Custom(b) => b.matches(record, ctx),
-        }
-    }
-}
-```
+**Effort.** 1 day, including invalidation correctness tests.
 
-**Effort.** 1 day.
+**Realistic win.** 5–30× on repeated indexed lookups (admin
+dashboards, polling). Cold cache: as today.
 
-**Win estimate.** 30-50 % on simple-filter scans.
+### Opt H — counter persist debouncing **DONE in `a3013c7`**
 
-### Opt N — prepared-query plan cache (mentioned, lowest priority)
+In-memory `AtomicU64` cache + `persist()` short-circuit on unchanged.
+Measured `bulk_insert/1000` win: 27.2 ms → 19.4 ms (-29 %).
 
-**File:** would be new in `shamir-engine::query::batch`
+### Opt H₂ — generic `Persistable` mechanism ✓ KEEP
 
-**Symptom.** Same JSON shape repeatedly arriving: `{"from":"users","where":{"op":"eq",...}}`.
-Each time: full JSON tree walk → `BatchRequest` → `BatchPlanner` →
-filter compile → execute. Plan/parse cost is shared across executions
-of "the same query with different parameters".
+**File:** new module in `shamir-engine`.
 
-**Fix.** Hash the query AST minus parameters; cache compiled plan +
-filter callback. Reuse on cache hit, substituting parameters.
+**Symptom.** Persist amplification is a **pattern**. Fixed once for
+interner (Opt A), again for counter (Opt H); will recur for every
+metadata blob.
 
-**Effort.** 1 week (parameter detection requires careful AST
-analysis).
+**Fix.** `Persistable` trait + `PersistRegistry`. End-of-batch hook
+calls `flush_dirty()` once. No more per-op `.persist().await`
+sprinkled across write_exec.rs.
 
-**Win estimate.** 10-30 % on UI-style stationary workloads with
-repeated query shapes; near zero on ad-hoc queries.
+**Effort.** ~1 day including migrating interner + counter onto it.
+
+**Win.** Not a perf spike — recurrence prevention. 0–5 % directly;
+infinite value in not having to fix it again next time.
+
+### Opt I — sync `Store` API + async wrapper ❌ DEFER
+
+**Win revised down.** Original "20–40 % on in-memory" was optimistic.
+Async per-call overhead is ~50–100 ns; for in-memory ops in
+microseconds that's ~5 % per call, accumulating to maybe 10–15 %
+across a full operation chain — **not 40 %**.
+
+**Effort revised up.** "2-3 days" → **~1 week**. Every backend impl
++ every engine call site. Mechanical but wide.
+
+Cost / benefit not justified yet. Re-consider when other dirt is
+out.
+
+### Opt J — inline `SmallMap` for small records ❌ DEFER
+
+**Win revised down.** Original "10–30 %". Reality: Rust allocator
+~50 ns per HashMap alloc; codec decode cost dominates. ~3–8 % real
+win.
+
+**Effort.** 2-3 days, foundational type, ripples through codec +
+tests.
+
+Defer.
+
+### Opt K — projection-aware lazy materialisation ✓ KEEP, NARROWED
+
+**Symptom.** `SELECT email LIMIT 100` decodes all fields then drops
+95 %.
+
+**Realistic win.** 3–7× for projection-heavy queries (narrow SELECT
+out of wide records). Zero win for SELECT *.
+
+**Effort.** Revised 3-5 days → **5-7 days**. Touches codec module +
+read executor. Done right, the projection mask can also flow into
+future `Store` partial-read APIs.
+
+Real, but expensive. After F / L / Q1 / Q2 / G.
+
+### Opt L — batch `RecordId` allocator ✓ KEEP
+
+**Symptom (verified).** `RecordId::new()` calls `Utc::now()` (vDSO on
+Linux, ~20 ns) + `OsRng.fill_bytes(&mut bytes[8..16])` (real
+`getrandom` syscall, ~1 µs). Bulk insert N=1000 → ~1 ms wasted
+purely on syscalls before any storage write.
+
+**Fix.** Thread-local `RecordIdAllocator` with 16 KB random pool;
+refill every 1024 ids. Single syscall per pool.
+
+**Effort.** 1-2 hours.
+
+**Win.** 3–8 % on bulk insert (from `~1 ms / 25 ms`).
+
+### Opt M — specialised hot filter shapes ❌ DEFER
+
+**Win revised down.** Original "30–50 % on simple-filter scans".
+Reality: vtable dispatch ~5–10 ns; for 10K records × 10 ns = 100 µs
+out of 90 ms scan = 0.1 %. Scan-heavy paths bottleneck on data load,
+not filter eval.
+
+**Realistic win.** 5–15 %. Effort 1 day — reasonable, but win is
+too small relative to F / G / Q1 / Q2.
+
+Defer.
+
+### Opt N — prepared-query plan cache ❌ DEFER
+
+**Conditional.** Only meaningful on stationary workloads (UI
+dashboards reusing same query shape). Effort ~1 week (AST
+parameterisation is non-trivial). Wait for profile evidence.
 
 ---
 
-## Recommended sprint order
+## NEW post-bench items
 
-A pragmatic batching of the items above into shippable cycles:
+These surfaced during the sled-bench cost analysis (commit `c1f0520`
+in `PERF_BASELINE.md`) — they're not in the original draft.
 
-### Sprint α — gardener pass (3-4 hours total)
+### Opt O — covering index ★ HIGH-IMPACT
 
-Pure cleanup, 30%-class wins, recurring-pattern protection:
+**File:** `crates/shamir-engine/src/index/sorted_index_manager.rs`
+(extend with optional `included_fields` per index).
 
-1. **Opt H** — counter persist debouncing (currently in-flight in
-   working tree; finish the same way Opt A handled interner).
-2. **Opt H₂** — extract `Persistable` trait so the recurrence stops
-   here. Migrate interner + counter onto it.
-3. **Opt F** — interner reverse-lookup as `Vec<String>`.
-4. **Opt L** — batch RecordId allocator.
+**Symptom (measured).** On sled at 10 % selectivity, sorted-index
+range queries are only **1.2–1.8×** faster than full scan. Break-down:
+
+- B-tree index range scan: cheap, scales with K matches.
+- **N×random `data_store.get(id)`: ~125 µs/record** on sled.
+- Sequential scan (full scan path): ~8 µs/record.
+- Break-even: K/N < ~6 %.
+
+So when selectivity is ≥ 6 %, the per-record random-read penalty
+eats the records-not-loaded savings. This is real DB physics.
+
+**Fix.** Store projected fields directly in the index entry:
+
+```text
+physical_key  = SORTED_TAG || name_interned || encoded_value || record_id
+physical_value = bincode(Map of included_fields)  ← NEW (was empty)
+```
+
+On range query that touches only `included_fields`, the data store
+is **never opened**. Index scan returns the answer directly.
+True O(log N + K) on disk.
+
+DDL:
+
+```json
+{ "create_index": "by_age_with_email",
+  "table": "users",
+  "fields": [["age"]],
+  "sorted": true,
+  "include": ["email", "name"] }
+```
+
+**Effort.** ~1 week. Storage layout extension, write-path
+maintenance (covered fields update on every record change), planner
+extension (recognise when query is covered).
+
+**Realistic win.** **100–1000× on disk for range queries where the
+SELECT is satisfied by `included_fields`** — eliminates the random-
+read penalty entirely. This is the path to Postgres-class
+range-scan performance.
+
+The single most impactful item left.
+
+### Opt P — vectored / batched data-store get
+
+**File:** `crates/shamir-storage/src/types.rs` + backend impls.
+
+**Symptom.** Where Opt O isn't applicable (query needs fields not in
+the index), we still do N independent `data_store.get(id)` calls.
+On sled each is a B-tree walk from root = ~125 µs. For K=1000
+matches, 125 ms purely in random reads.
+
+**Fix.** Add `Store::get_many(keys: Vec<Bytes>) -> Vec<DbResult<Bytes>>`
+to the trait, with native impls on backends that can fold multiple
+gets into a single B-tree pass:
+
+- **sled** has `Tree::iter` from any starting point — sort keys,
+  iter once, pick up each.
+- **redb** allows multiple `get`s inside one read transaction —
+  amortises txn setup cost.
+- **fjall / nebari / persy** — similar patterns.
+- Default impl: loop over `get` — same as today.
+
+**Effort.** 2-3 days. Trait extension + 5 backend impls + engine
+hook into `lookup_records_via_index`.
+
+**Realistic win.** 3–10× on disk for index-based lookups when K is
+in the hundreds-thousands. Combines well with Opt O (covering only
+the filter columns, falling back to vectored get for projected
+fields not in the index).
+
+### Opt Q1 — MIN(field) / MAX(field) fast-path via sorted index
+
+**File:** `crates/shamir-engine/src/table/read_exec.rs` (new fast
+path) + `sorted_index_manager.rs::lookup_min` (already implemented,
+not wired).
+
+**Symptom.** `SELECT min(score) FROM users` currently does a full
+scan + reduce. We already have `SortedIndexManager::lookup_min`
+returning the first record under the prefix (O(log n + 1)) — it's
+just not wired into the query planner.
+
+**Fix.** In `read()`, before the regular index plan, recognise:
+
+```rust
+- exactly one aggregate item: Aggregate { func: Min/Max, field }
+- no WHERE / GROUP BY / ORDER BY / DISTINCT
+- sorted index exists for `field`
+```
+
+→ Call `lookup_min` (or `lookup_max` once reverse iter lands —
+see Opt R). Return a single-record result.
+
+**Effort.** ~1 hour for MIN (lookup_min already exists).
+~1 day for MAX (needs Opt R first).
+
+**Realistic win.** O(N) → O(log n) — **300–1000× at N=10K** for the
+MIN case. Cheap and obvious.
+
+### Opt Q2 — `Filter::Gt` / `Filter::Lt` in sorted-index planner
+
+**File:** `crates/shamir-engine/src/table/read_exec.rs::try_plan_sorted_index_scan`
+
+**Symptom.** Current planner handles `Between`, `Gte`, `Lte`
+through the sorted index. `Gt` and `Lt` (strict) fall through to
+full scan — not because we can't, just because the boundary
+"exclude exact match" wasn't wired yet.
+
+**Fix.** `Gt`: lower = `prefix || encoded(value) || [0xFF; 16]`
+(skips all record_id tiebreakers at exact match value). `Lt`:
+symmetric on upper bound. The codec is already there; just construct
+the right bounds.
+
+**Effort.** ~1 hour.
+
+**Realistic win.** Same speedup as `Gte/Lte` on the affected
+queries — 5–30× depending on selectivity. Pure capability fill-in.
+
+### Opt R — reverse iteration on `Store` trait
+
+**File:** `crates/shamir-storage/src/types.rs` + backend impls.
+
+**Symptom.** `MAX(field)` and `ORDER BY field DESC + LIMIT K` need
+to read the index from the end. Today no `Store` method supports
+reverse iteration; both queries fall back to full scan + in-memory
+sort.
+
+**Fix.** Add `iter_range_stream_reverse(start_inclusive,
+end_inclusive, batch_size)` to the trait. Default impl: collect to
+Vec, reverse, yield. Native impls: sled `tree.range(...).rev()`,
+redb `range(...).rev()`, etc. — they all support it cheaply.
+
+**Effort.** ~1 day (mirror of the forward range work; 28 tests
+ported with `_reverse` suffix).
+
+**Realistic win.** Unlocks Q1 (MAX), and `ORDER BY DESC + LIMIT K`
+on indexed columns — same magnitude as the existing ascending fast
+path (Opt #1 from the earlier sprint plan).
+
+---
+
+## Recommended sprint order — revised
+
+### Sprint α — half-day easy wins (3-5 hours total)
+
+Pure cleanup, verified low-risk:
+
+1. **Q1** — wire `MIN(field)` fast-path (1 hr).
+2. **Q2** — Filter::Gt / Filter::Lt in sorted-index planner (1 hr).
+3. **F** — interner `Vec<String>` reverse-lookup (1-2 hr).
+4. **L** — batch `RecordId` allocator (1-2 hr).
 
 Re-run `engine_perf.rs`, document deltas in `PERF_BASELINE.md`.
 
-### Sprint β — index cache (1-2 days)
+### Sprint β — read-heavy disk wins (1 day)
 
-5. **Opt G** — in-memory LRU cache for posting lists with proper
-   invalidation hooks.
+5. **G** — LRU posting-list cache with invalidation tests.
 
-This is the single most impactful item left for read-heavy workloads
-where the same indexed lookups repeat (admin UIs, dashboards).
+### Sprint γ — the big disk story (~1 week)
 
-### Sprint γ — async/sync layering (3-4 days)
+6. **Opt R** — reverse iter on Store. Unblocks MAX / DESC LIMIT
+   asymptotics.
+7. **Opt O** — covering index. **THE** path to Postgres-class
+   range-query latency on disk.
+8. **Opt P** — vectored multi-get for non-covered queries.
 
-6. **Opt I** — sync `Store` core + async wrapper; engine hot paths
-   stop paying tokio state-machine cost for synchronous backends.
+This is the single most impactful chunk left in the whole
+performance picture.
 
-This is wide but mechanical — biggest CPU win without changing
-algorithmic shape.
+### Sprint δ — architectural cleanup (1 day)
 
-### Sprint δ — projection (4-5 days)
+9. **H₂** — `Persistable` trait + registry. Migrate interner +
+   counter onto it. Stops the next write-amplification recurrence
+   before it starts.
 
-7. **Opt K** — projection-aware lazy materialisation. Largest impact
-   on workloads with narrow `SELECT` clauses over wide records.
+### Sprint ε — projection (~1 week, conditional)
 
-### Sprint ε — fast-path filters + small maps (3-4 days)
+10. **K** — projection-aware lazy materialisation. Only if a real
+    SELECT-narrow workload appears.
 
-8. **Opt M** — specialised compiled-filter variants for top-3
-   shapes.
-9. **Opt J** — inline SmallMap for ≤8-field records.
+### Deferred / no plans yet
 
-### Later, conditional
+- **I, J, M** — overestimated in the original draft. Revisit after
+  γ is shipped and we have new profile data.
+- **N** — prepared-query plan cache. Conditional on observed
+  re-parse cost.
+- **rkyv** for system records only. Wait for shape stability.
 
-10. **Opt N** — prepared-query plan cache. Only if profiling against
-    a real UI workload shows query-parse cost dominating.
-11. **rkyv for system records** — zero-copy reads of interner /
-    index meta. Specialised, opt-in, after we know the shape is
-    stable.
-
-Total Sprint α-ε: roughly 3 weeks of focused work for a cumulative
-3-10× across the entire profile (not concentrated on one scenario
-like A/B/C/D were).
+Total Sprint α + β + γ: ~1.5 weeks of focused work. Cumulative gain
+is hard to predict without re-bench, but α alone is +10–25 % across
+the profile, and γ unlocks the disk-side ceiling that the latest
+benchmark explicitly identified.
 
 ---
 
 ## What we deliberately skip — and why
 
 - **Static dispatch through generics over backend.** Refactor of
-  2-3 weeks for a 10-15 % win. Not worth it while simpler wins are
-  on the table.
-- **rkyv for `InnerValue` itself** (not just system records). Format
-  lock-in, big test surface, ~2-3× win. Wait.
-- **SIMD for filter evaluation.** Niche (large numeric scans), not
-  our typical workload. Reconsider if column-oriented analytics
-  becomes a use case.
-- **Custom binary protocol on the wire** instead of msgpack. msgpack
-  is good enough; replacement complexity not justified.
+  2-3 weeks for 10–15 % win. Not worth it while simpler wins are on
+  the table.
+- **rkyv for `InnerValue` itself.** Format lock-in, big test
+  surface, modest win. Wait.
+- **SIMD for filter evaluation.** Niche, not our typical workload.
+  Reconsider for column-oriented analytics.
+- **Custom binary protocol on the wire** instead of msgpack.
+  Replacement complexity unjustified.
 
 ---
 
@@ -543,10 +539,16 @@ like A/B/C/D were).
 
 A reminder: every item above is *expected* — based on reading code
 and structural reasoning. Before committing time to any of them,
-**run `engine_perf.rs` first**, profile (`flamegraph` /
-`samply`) the actual hot scenario, and confirm the symptom matches
-the prediction.
+**run `engine_perf.rs` first**, profile (`flamegraph` / `samply`)
+the actual hot scenario, and confirm the symptom matches the
+prediction.
 
-The A/B/C results validated this loop: predictions in
+The A → D results validated this loop: predictions in
 `TRANSACTIONS_IMPL.md` matched what the bench surfaced + what the
 fix removed. Keep that discipline.
+
+The 2025-05-10 review pass on this doc itself is the same discipline
+applied **to the predictions**: where measured numbers (sled bench
+in `PERF_BASELINE.md`) showed the original win estimates were off,
+the estimates here are corrected. Where new items emerged from the
+measurement (Opt O, P, Q1, Q2, R), they're added.
