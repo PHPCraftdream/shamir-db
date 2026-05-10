@@ -885,6 +885,38 @@ fn bench_range_query_with_index(c: &mut Criterion) {
 // of what the sorted-index work actually buys in production.
 // --------------------------------------------------------------------------
 
+/// Bulk insert on sled — exercises the write-path of a real disk
+/// backend. Sample counts kept low (each iter creates a fresh
+/// tempdir and does N inserts on a disk-backed tree, which is slow
+/// when every write fsyncs).
+fn bench_bulk_insert_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("bulk_insert_sled");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(8));
+
+    for &count in &[100usize, 1_000] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.to_async(&rt).iter_custom(|iters| async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let tempdir = tempfile::TempDir::new().expect("tempdir");
+                    let shamir = fresh_db_sled(tempdir.path()).await;
+                    let req = req_bulk_insert(0, count);
+                    let start = Instant::now();
+                    shamir.execute("bench", &req).await.unwrap();
+                    total += start.elapsed();
+                    drop(shamir);
+                    drop(tempdir);
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
 fn bench_range_query_no_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_no_index_sled");
@@ -1036,6 +1068,7 @@ criterion_group!(
     bench_order_limit_with_index,
     bench_range_query_no_index,
     bench_range_query_with_index,
+    bench_bulk_insert_sled,
     bench_range_query_no_index_sled,
     bench_range_query_with_index_sled,
     bench_range_query_narrow_no_index_sled,

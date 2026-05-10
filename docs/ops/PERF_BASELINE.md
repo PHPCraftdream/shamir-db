@@ -528,8 +528,49 @@ Still on the table:
   auto-create is a separate behaviour change that needs UX
   consideration.
 
+## After sled durability rework (2026-05-11)
+
+Found: `SledStore::insert / set / remove` called `tree.flush()`
+unconditionally on every write — a real fsync, per record. Bulk
+insert 1000 records = 1000 fsyncs.
+
+Fix at the unified-interface level: added `Store::flush()` to the
+trait (default no-op), removed the per-write `tree.flush()` from
+sled, kept the explicit fsync available via `Store::flush()`. sled's
+own background flusher (default every 500 ms) carries the
+"eventually durable" contract. Callers that need a strict
+commit-boundary call `store.flush().await`.
+
+### Bulk insert — sled backend
+
+| Records | Before (fsync-per-write) | After (background flusher) | Speedup |
+|--------:|-------------------------:|---------------------------:|--------:|
+|     100 |              **272 ms**  |                **7.4 ms**  | **36.7×** |
+|   1,000 |              **2.59 s**  |               **71.1 ms**  | **36.4×** |
+
+Throughput went from ~370 elem/s to ~14 000 elem/s. The previous
+number had no real reason to exist — fsync-per-write was an
+overcautious default with no caller asking for it.
+
+### Durability contract — explicit
+
+| Operation                       | Durability after change                  |
+|---------------------------------|------------------------------------------|
+| `Store::insert/set/remove`      | Buffered; durable on next background flush (≤500 ms by default for sled) |
+| `Store::flush()`                | Forces fsync. Returns when on disk.       |
+| Crash window                    | ≤500 ms of in-flight writes for sled. Same as Postgres `synchronous_commit=off`, MySQL `innodb_flush_log_at_trx_commit=2`, sqlite `PRAGMA synchronous=NORMAL`. |
+
+If a caller needs the old "every write is fsync'd before return"
+semantics, the pattern is now explicit: `store.set(...).await?;
+store.flush().await?;`.
+
 ## Next
 
-Optimisations land in PR sequence A → B → C → D. Each PR re-runs the
-suite and appends a column to this table; final commit summarises
-"before vs after" with speedup factors per scenario.
+Sprint γ candidates from `PERF_OPPORTUNITIES.md`:
+- **#2** — `lookup_range` / `lookup_min` / `lookup_first_k` to use
+  `iter_range_stream` instead of `scan_prefix_stream` (sorted-index
+  range queries on disk).
+- **#6** — hash-index posting layout from blob → key-per-record
+  (high-cardinality index writes).
+- **#3 / Opt O** — covering indexes (range-by-index without per-record
+  data fetch).
