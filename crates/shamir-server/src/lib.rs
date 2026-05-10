@@ -22,6 +22,7 @@ pub mod db_handler;
 pub mod scheduler;
 pub mod server;
 pub mod server_meta;
+pub mod tables_registry;
 pub mod tls;
 pub mod user_directory;
 pub mod version;

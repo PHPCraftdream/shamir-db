@@ -25,8 +25,17 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::user_record::UserRecord;
 
-/// Single redb table: key = username (UTF-8 str), value = msgpack blob.
+/// Primary table: key = username (UTF-8 str), value = msgpack blob.
 const USERS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("users_v1");
+
+/// Secondary index: key = user_id (16 bytes), value = username. Maintained
+/// in lock-step with `USERS_TABLE` writes inside the same redb transaction
+/// so reads from either side see a consistent snapshot. Used by the
+/// connection orchestration layer to look up `tickets_invalid_before_ns`
+/// from a `Session` whose `user_id` is known but whose username string
+/// would otherwise need to be re-derived from the request envelope.
+const USER_ID_INDEX_TABLE: TableDefinition<&[u8], &str> =
+    TableDefinition::new("user_id_to_name_v1");
 
 // ----------------------------------------------------------------------------
 // Persisted blob format
@@ -148,18 +157,56 @@ impl core::fmt::Debug for RedbUserDirectory {
 impl RedbUserDirectory {
     /// Open or create the database file at `path`.
     ///
-    /// On first use the table is created. Subsequent opens reuse the
+    /// On first use the tables are created. Subsequent opens reuse the
     /// existing data — user records survive crash/restart.
     pub fn open(path: impl AsRef<Path>) -> std::result::Result<Self, redb::Error> {
         let db = Database::create(path)?;
-        // Ensure the table exists so later read transactions on a fresh DB
+        // Ensure both tables exist so later read transactions on a fresh DB
         // don't fail with `TableDoesNotExist`.
         let txn = db.begin_write()?;
         {
             let _t = txn.open_table(USERS_TABLE)?;
+            let _i = txn.open_table(USER_ID_INDEX_TABLE)?;
         }
         txn.commit()?;
         Ok(Self { db: Arc::new(db) })
+    }
+
+    /// `tickets_invalid_before_ns` lookup keyed by `user_id` — used by the
+    /// connection orchestration layer's `dispatch_request_view` validity
+    /// check (spec §7.5: bumped sessions die on the next request).
+    ///
+    /// `0` is returned both when the user is unknown AND when the field has
+    /// never been bumped — both are treated as "no invalidation" by the
+    /// caller, so a fail-open default is safe. (A true error would be a
+    /// secondary-index inconsistency, which the write path rules out by
+    /// updating both tables in the same transaction.)
+    pub fn tickets_invalid_before_ns_by_user_id(&self, user_id: &[u8; 16]) -> u64 {
+        let txn = match self.db.begin_read() {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let idx = match txn.open_table(USER_ID_INDEX_TABLE) {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let name = match idx.get(&user_id[..]) {
+            Ok(Some(v)) => v.value().to_string(),
+            _ => return 0,
+        };
+        let users = match txn.open_table(USERS_TABLE) {
+            Ok(t) => t,
+            Err(_) => return 0,
+        };
+        let blob = match users.get(name.as_str()) {
+            Ok(Some(v)) => v.value().to_vec(),
+            _ => return 0,
+        };
+        let user: PersistedUser = match rmp_serde::from_slice(&blob) {
+            Ok(u) => u,
+            Err(_) => return 0,
+        };
+        user.tickets_invalid_before_ns
     }
 
     /// Roles live alongside the SCRAM record but are NOT part of
@@ -233,12 +280,21 @@ impl UserDirectory for RedbUserDirectory {
         let bytes = rmp_serde::to_vec_named(&persisted)
             .map_err(|e| Error::Encoding(format!("rmp encode: {e}")))?;
 
-        self.write_with(|table| {
-            // Reject duplicates atomically inside the same write txn. Scope
-            // the read so the AccessGuard's borrow on `table` ends before we
-            // re-borrow mutably for `insert`.
+        // Insert into BOTH the primary username->blob table and the
+        // secondary user_id->username index in one redb transaction so
+        // the two never disagree.
+        let mut txn = self
+            .db
+            .begin_write()
+            .map_err(|e| Error::Encoding(format!("redb: begin_write: {e}")))?;
+        txn.set_durability(Durability::Immediate)
+            .map_err(|e| Error::Encoding(format!("redb: set_durability: {e}")))?;
+        {
+            let mut users = txn
+                .open_table(USERS_TABLE)
+                .map_err(|e| Error::Encoding(format!("redb: open_table: {e}")))?;
             let exists = {
-                table
+                users
                     .get(username.as_str())
                     .map_err(|e| Error::Encoding(format!("redb: get: {e}")))?
                     .is_some()
@@ -246,11 +302,18 @@ impl UserDirectory for RedbUserDirectory {
             if exists {
                 return Err(Error::InvalidInput("username exists"));
             }
-            table
+            users
                 .insert(username.as_str(), bytes.as_slice())
                 .map_err(|e| Error::Encoding(format!("redb: insert: {e}")))?;
-            Ok(())
-        })?;
+
+            let mut idx = txn
+                .open_table(USER_ID_INDEX_TABLE)
+                .map_err(|e| Error::Encoding(format!("redb: open_index: {e}")))?;
+            idx.insert(&user_id[..], username.as_str())
+                .map_err(|e| Error::Encoding(format!("redb: idx insert: {e}")))?;
+        }
+        txn.commit()
+            .map_err(|e| Error::Encoding(format!("redb: commit: {e}")))?;
 
         Ok(user_id)
     }

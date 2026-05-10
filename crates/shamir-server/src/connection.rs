@@ -91,6 +91,21 @@ mod wire {
         #[serde(with = "serde_bytes")]
         pub session_id: Vec<u8>,
         pub expires_at_ns: u64,
+        /// Optional resumption ticket — when present, the client may
+        /// reconnect later (within the TTL) without re-running Argon2id.
+        /// Wire-encoded form per spec §5.4 / SESSION_RESUMPTION.
+        #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+        pub resumption_ticket: Vec<u8>,
+        /// Absolute (unix nanos) expiry of the ticket above. `0` when no
+        /// ticket was issued.
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        pub resumption_expires_at_ns: u64,
+    }
+
+    /// Helper for `#[serde(skip_serializing_if = ...)]` on the optional
+    /// `resumption_expires_at_ns` field.
+    pub(super) fn is_zero_u64(v: &u64) -> bool {
+        *v == 0
     }
 }
 
@@ -472,12 +487,40 @@ where
         "ok",
     );
 
+    // Spec §5.4 / SESSION_RESUMPTION: issue a fresh resumption ticket so
+    // the client can reconnect without re-running Argon2id. TTL = 24h
+    // matches the session max-age default in `SchedulerInputs::session_max_age_ns`.
+    const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
+    let (ticket_bytes, ticket_expires_at_ns) =
+        match shamir_connect::server::resume::issue_initial_ticket(
+            &ctx.resume_config.ticket_key,
+            user_id,
+            username.as_str().to_string(),
+            ctx.transport_kind.as_u8(),
+            binding_mode.as_u8(),
+            exporter,
+            ctx.user_dir.lookup_roles(username.as_str()).unwrap_or_default(),
+            ctx.identity.current_version(),
+            now_ns,
+            RESUMPTION_TICKET_TTL_NS,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                // Issuing the ticket is best-effort — a failure must not
+                // tank a successful auth. Log and continue with no ticket.
+                tracing::warn!(?e, "resumption ticket issuance failed; auth_ok will carry no ticket");
+                (Vec::new(), 0u64)
+            }
+        };
+
     let bytes = match rmp_serde::to_vec(&wire::AuthOk {
         server_signature: auth_ok.server_signature.to_vec(),
         server_pub_key: auth_ok.server_pub_key.to_vec(),
         identity_sig: auth_ok.identity_sig.to_vec(),
         session_id: auth_ok.session_id.to_vec(),
         expires_at_ns: auth_ok.expires_at_ns,
+        resumption_ticket: ticket_bytes,
+        resumption_expires_at_ns: ticket_expires_at_ns,
     }) {
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),
@@ -502,19 +545,12 @@ async fn request_loop<R, W>(
 {
     let user_dir = ctx.user_dir.clone();
     let lookup_tib = move |uid: &[u8; 16]| -> u64 {
-        // Find the user record carrying tickets_invalid_before_ns by
-        // user_id. The redb dir doesn't expose by-user_id lookup yet —
-        // for v1 we walk by name via session metadata. The session
-        // was inserted by us with the correct user_id, so we can
-        // look up name → UserRecord → tickets_invalid_before_ns.
-        // Simpler approach: 0 (never invalidated). Bumped on
-        // updateUser/kickSession via the directory write path which
-        // already updates the record; the dispatch_request_view §7.5
-        // check then reads tickets_invalid_before_ns on demand.
-        // For v1 we use 0. Production hardening: wire by-uid index.
-        let _ = uid;
-        let _ = &user_dir;
-        0
+        // Spec §7.5 NORMATIVE: each request runs through this fast read so
+        // changes to the user record (role updates, kickSession,
+        // password change) invalidate live sessions on the next request.
+        // Reverse-lookup from `user_id` → username → UserRecord uses the
+        // secondary index maintained inside `RedbUserDirectory::insert`.
+        user_dir.tickets_invalid_before_ns_by_user_id(uid)
     };
 
     loop {

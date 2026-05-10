@@ -70,7 +70,7 @@ use serde::{Deserialize, Serialize};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 
-use shamir_db::db::query::batch::{BatchError, BatchRequest, BatchResponse};
+use shamir_db::db::query::batch::{BatchError, BatchOp, BatchRequest, BatchResponse};
 use shamir_db::db::ShamirDb;
 
 use shamir_connect::common::crypto::random_array;
@@ -80,6 +80,7 @@ use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::user_record::UserRecord;
 use zeroize::Zeroizing;
 
+use crate::tables_registry::TablesRegistry;
 use crate::user_directory::RedbUserDirectory;
 use crate::version::{check_query_lang, CURRENT_QUERY_LANG_VERSION};
 
@@ -192,7 +193,8 @@ pub enum DbResponse {
 
 /// Optional admin glue — supplied by the boot path so admin ops that
 /// require server-side state (the SCRAM user directory + KDF cost
-/// parameters) can run. Tests that don't need user creation omit this.
+/// parameters + the wire-tables persistence registry) can run. Tests
+/// that don't need any of these omit it via `ShamirDbHandler::new`.
 #[derive(Clone)]
 pub struct AdminGlue {
     /// Directory that stores SCRAM-authenticatable users.
@@ -200,6 +202,10 @@ pub struct AdminGlue {
     /// KDF defaults applied to newly created users so they can log in
     /// against the same listener policy.
     pub kdf: KdfParams,
+    /// Tracks tables created/dropped over the wire so the boot path can
+    /// re-register them on restart. `None` means "don't persist table
+    /// changes" — fine for in-memory test setups, wrong for production.
+    pub tables_registry: Option<Arc<TablesRegistry>>,
 }
 
 /// Bridge handler — routes wire requests to a shared [`ShamirDb`] instance.
@@ -291,11 +297,44 @@ impl ShamirDbHandler {
         }
 
         match run_blocking(self.db.execute(db_name, &batch)) {
-            Ok(response) => DbResponse::Batch { response },
+            Ok(response) => {
+                // Side-effect: persist table create/drop into our wire-tables
+                // registry so they survive a restart. Only ops that
+                // actually succeeded are recorded; per-alias success is
+                // implicit because BatchError aborts the whole batch on
+                // any failure (see `execute_batch`).
+                self.persist_table_lifecycle(db_name, &batch);
+                DbResponse::Batch { response }
+            }
             Err(e) => DbResponse::Error {
                 code: error_code(&e).to_string(),
                 message: e.to_string(),
             },
+        }
+    }
+
+    /// Walk through `batch.queries` and record CreateTable/DropTable ops in
+    /// the persistent registry. No-op when `AdminGlue::tables_registry` is
+    /// `None`. Failures here are logged but never break the request — the
+    /// in-memory state already reflects the change; the registry is just a
+    /// boot-replay aid.
+    fn persist_table_lifecycle(&self, db_name: &str, batch: &BatchRequest) {
+        let Some(admin) = &self.admin else { return };
+        let Some(reg) = &admin.tables_registry else { return };
+        for entry in batch.queries.values() {
+            match &entry.op {
+                BatchOp::CreateTable(op) => {
+                    if let Err(e) = reg.add(db_name, &op.repo, &op.create_table) {
+                        tracing::warn!(?e, "tables_registry add failed");
+                    }
+                }
+                BatchOp::DropTable(op) => {
+                    if let Err(e) = reg.remove(db_name, &op.repo, &op.drop_table) {
+                        tracing::warn!(?e, "tables_registry remove failed");
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

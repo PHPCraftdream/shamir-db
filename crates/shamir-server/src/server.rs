@@ -29,6 +29,8 @@ use shamir_connect::server::rate_limit::InMemoryRateLimiter;
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
 
+use shamir_db::db::engine::repo::{BoxRepoFactory, RepoConfig};
+use shamir_db::db::shamir_db::SystemStoreConfig;
 use shamir_db::db::ShamirDb;
 
 use shamir_transport_tcp::listener::{bind_validated, ListenerProfile};
@@ -46,6 +48,7 @@ use crate::bootstrap::{
 use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::connection::{handle_connection, ConnectionContext};
 use crate::db_handler::{AdminGlue, ShamirDbHandler};
+use crate::tables_registry::TablesRegistry;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server_meta::ServerMetaStore;
 use crate::tls::{load_or_generate, subject_alts_from_addrs, LoadedTls};
@@ -98,6 +101,8 @@ pub enum BootError {
     Bind(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("tables_registry: {0}")]
+    TablesRegistry(#[from] crate::tables_registry::RegistryError),
 }
 
 /// Owner of the runtime state of a launched server.
@@ -232,22 +237,70 @@ impl ServerLauncher {
             audit_appender.clone() as Arc<dyn AuditAppender>,
         ));
 
-        // 5. ShamirDb (in-memory for v1; durable persistence is a follow-up).
-        //    Create a `default` database eagerly so wire-side admin batches
-        //    have a target for `create_db`/`drop_db` ops without needing an
-        //    out-of-band ShamirDb handle. (`ShamirDb::execute` requires the
-        //    target `db_name` to already exist for resolver lookup.)
+        // 5. ShamirDb — durable system store + a pre-configured `default.main`
+        //    repo backed by redb. Layout under `data_dir`:
+        //
+        //      shamir_db_meta.redb         — system store (db/repo/setting metadata)
+        //      shamir_db_default_main.redb — the `default.main` repo data
+        //
+        //    Wire-side admin ops can still create additional dbs/repos, but
+        //    those are in-memory (`ShamirAdminExecutor` hardcodes engine =
+        //    "in_memory"; a future patch can extend it to accept "redb" with
+        //    auto-derived paths). For v1 this means the `default.main` repo
+        //    is the durable target for application data.
+        let meta_path = config.data_dir.join("shamir_db_meta.redb");
+        let default_main_path = config.data_dir.join("shamir_db_default_main.redb");
         let shamir = Arc::new(
-            ShamirDb::init_memory()
+            ShamirDb::init(SystemStoreConfig::Redb(meta_path))
                 .await
                 .map_err(|e| BootError::ShamirDbInit(e.to_string()))?,
         );
-        let _ = shamir.create_db("default").await;
+
+        // Idempotent: on the first boot the database+repo are created; on
+        // every subsequent boot `ShamirDb::init` already loaded them from
+        // the system store, so we skip and just use them.
+        if !shamir.has_db("default") {
+            let _ = shamir.create_db("default").await;
+        }
+        let default_db = shamir
+            .get_db("default")
+            .expect("default db must exist after create_db");
+        if !default_db.has_repo("main") {
+            let factory = BoxRepoFactory::redb(&default_main_path);
+            shamir
+                .add_repo("default", RepoConfig::new("main", factory))
+                .await
+                .map_err(|e| BootError::ShamirDbInit(format!("add_repo default.main: {e}")))?;
+            tracing::info!(path = ?default_main_path, "created durable default.main repo");
+        }
+
+        // Replay the wire-tables registry: re-register every table that a
+        // wire client created in a previous boot so its data file is
+        // re-attached to the in-memory `RepoInstance`. Without this step
+        // the redb file on disk still exists but the running server has no
+        // table config pointing at it, so reads return "table not found".
+        let tables_registry = Arc::new(TablesRegistry::open(&config.data_dir)?);
+        {
+            let snap = tables_registry.snapshot();
+            for (db_name, repo_name, table_name) in snap.iter_entries() {
+                if let Some(db) = shamir.get_db(db_name) {
+                    if !db.has_table(repo_name, table_name) {
+                        if let Err(e) = db.create_table(repo_name, table_name) {
+                            tracing::warn!(
+                                db = db_name, repo = repo_name, table = table_name,
+                                ?e, "tables_registry replay: create_table failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
         let handler: Arc<dyn RequestHandler> = Arc::new(ShamirDbHandler::with_admin(
             shamir.clone(),
             AdminGlue {
                 user_dir: user_dir.clone(),
                 kdf: kdf_for_bootstrap,
+                tables_registry: Some(tables_registry.clone()),
             },
         ));
 

@@ -489,7 +489,7 @@ async fn create_scram_user_denied_for_non_superuser() {
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
-        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf() },
+        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf(), tables_registry: None },
     );
     let session = user_session();
 
@@ -512,7 +512,7 @@ async fn create_scram_user_success_then_duplicate() {
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
-        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf() },
+        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf(), tables_registry: None },
     );
     let session = root_session();
 
