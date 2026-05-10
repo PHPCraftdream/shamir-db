@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::query::filter::Filter;
+use crate::filter::Filter;
 
 // ============================================================================
 // Core auth types

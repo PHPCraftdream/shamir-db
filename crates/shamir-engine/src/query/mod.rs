@@ -4,7 +4,6 @@ pub mod batch;
 pub mod common;
 pub mod filter;
 pub mod read;
-mod table_ref;
 pub mod write;
 
 pub use batch::{
@@ -18,5 +17,7 @@ pub use read::{
     OrderByItem, OrderDirection, Pagination, PaginationInfo, QueryResult, QueryStats, ReadQuery,
     Select, SelectExpr, SelectExprValue, SelectItem,
 };
-pub use table_ref::TableRef;
+// `TableRef` lives in shamir-query-types now; re-exported here so
+// `crate::query::TableRef` paths inside the engine keep resolving.
+pub use shamir_query_types::TableRef;
 pub use write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect, WriteResult};

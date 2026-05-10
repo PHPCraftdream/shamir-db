@@ -1,27 +1,20 @@
 //! Read query types (SELECT)
 //!
-//! Types for building SELECT queries.
+//! DTOs (ReadQuery, OrderBy, Pagination, QueryResult, QueryStats,
+//! Select, SelectExpr, GroupBy, AggFunc, AggregateField) live in
+//! `shamir-query-types::read`. Execution (`exec`) and JSON parser
+//! stay here because they touch Interner / runtime state.
 
-mod agg;
 pub mod exec;
-mod group_by;
-mod limit;
-mod order_by;
 mod parser;
-mod query_result;
-mod read_query;
-mod select;
-mod select_expr;
 
-pub use agg::{AggFunc, AggregateField};
-pub use group_by::GroupBy;
-pub use limit::{Pagination, PaginationInfo};
-pub use order_by::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
+// Re-export DTOs from the shared types crate.
+pub use shamir_query_types::read::{
+    AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
+    Pagination, PaginationInfo, QueryResult, QueryStats, ReadQuery, Select, SelectExpr,
+    SelectExprValue, SelectItem,
+};
 pub use parser::query_from_value;
-pub use query_result::{QueryResult, QueryStats};
-pub use read_query::ReadQuery;
-pub use select::{Select, SelectItem};
-pub use select_expr::{SelectExpr, SelectExprValue};
 
 #[cfg(test)]
 mod tests;

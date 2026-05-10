@@ -1,9 +1,23 @@
+//! Type-erased Repo / RepoFactory enums.
+//!
+//! Each backend variant is `#[cfg]`-gated behind the matching feature
+//! flag passed through from `shamir-storage`. With the default
+//! feature set every backend is on; embedded builds can disable
+//! whichever ones they don't need (`default-features = false,
+//! features = ["redb"]`).
+
+#[cfg(feature = "canopy")]
 use shamir_storage::storage_canopy::CanopyRepo;
+#[cfg(feature = "fjall")]
 use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+#[cfg(feature = "nebari")]
 use shamir_storage::storage_nebari::NebariRepo;
+#[cfg(feature = "persy")]
 use shamir_storage::storage_persy::PersyRepo;
+#[cfg(feature = "redb")]
 use shamir_storage::storage_redb::RedbRepo;
+#[cfg(feature = "sled")]
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::{Repo, Store};
 use shamir_storage::error::DbResult;
@@ -14,11 +28,17 @@ use tokio::task;
 #[derive(Clone)]
 pub enum BoxRepo {
     InMemory(Arc<InMemoryRepo>),
+    #[cfg(feature = "sled")]
     Sled(Arc<SledRepo>),
+    #[cfg(feature = "redb")]
     Redb(Arc<RedbRepo>),
+    #[cfg(feature = "fjall")]
     Fjall(Arc<FjallRepo>),
+    #[cfg(feature = "nebari")]
     Nebari(Arc<NebariRepo>),
+    #[cfg(feature = "persy")]
     Persy(Arc<PersyRepo>),
+    #[cfg(feature = "canopy")]
     Canopy(Arc<CanopyRepo>),
 }
 
@@ -30,11 +50,17 @@ impl Repo for BoxRepo {
     {
         match self {
             BoxRepo::InMemory(repo) => repo.store_get(name).await,
+            #[cfg(feature = "sled")]
             BoxRepo::Sled(repo) => repo.store_get(name).await,
+            #[cfg(feature = "redb")]
             BoxRepo::Redb(repo) => repo.store_get(name).await,
+            #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.store_get(name).await,
+            #[cfg(feature = "nebari")]
             BoxRepo::Nebari(repo) => repo.store_get(name).await,
+            #[cfg(feature = "persy")]
             BoxRepo::Persy(repo) => repo.store_get(name).await,
+            #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.store_get(name).await,
         }
     }
@@ -42,11 +68,17 @@ impl Repo for BoxRepo {
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
         match self {
             BoxRepo::InMemory(repo) => repo.store_delete(name).await,
+            #[cfg(feature = "sled")]
             BoxRepo::Sled(repo) => repo.store_delete(name).await,
+            #[cfg(feature = "redb")]
             BoxRepo::Redb(repo) => repo.store_delete(name).await,
+            #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.store_delete(name).await,
+            #[cfg(feature = "nebari")]
             BoxRepo::Nebari(repo) => repo.store_delete(name).await,
+            #[cfg(feature = "persy")]
             BoxRepo::Persy(repo) => repo.store_delete(name).await,
+            #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.store_delete(name).await,
         }
     }
@@ -54,11 +86,17 @@ impl Repo for BoxRepo {
     async fn stores_list(&self) -> DbResult<Vec<String>> {
         match self {
             BoxRepo::InMemory(repo) => repo.stores_list().await,
+            #[cfg(feature = "sled")]
             BoxRepo::Sled(repo) => repo.stores_list().await,
+            #[cfg(feature = "redb")]
             BoxRepo::Redb(repo) => repo.stores_list().await,
+            #[cfg(feature = "fjall")]
             BoxRepo::Fjall(repo) => repo.stores_list().await,
+            #[cfg(feature = "nebari")]
             BoxRepo::Nebari(repo) => repo.stores_list().await,
+            #[cfg(feature = "persy")]
             BoxRepo::Persy(repo) => repo.stores_list().await,
+            #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.stores_list().await,
         }
     }
@@ -70,36 +108,42 @@ impl From<Arc<InMemoryRepo>> for BoxRepo {
     }
 }
 
+#[cfg(feature = "sled")]
 impl From<Arc<SledRepo>> for BoxRepo {
     fn from(repo: Arc<SledRepo>) -> Self {
         BoxRepo::Sled(repo)
     }
 }
 
+#[cfg(feature = "redb")]
 impl From<Arc<RedbRepo>> for BoxRepo {
     fn from(repo: Arc<RedbRepo>) -> Self {
         BoxRepo::Redb(repo)
     }
 }
 
+#[cfg(feature = "fjall")]
 impl From<Arc<FjallRepo>> for BoxRepo {
     fn from(repo: Arc<FjallRepo>) -> Self {
         BoxRepo::Fjall(repo)
     }
 }
 
+#[cfg(feature = "nebari")]
 impl From<Arc<NebariRepo>> for BoxRepo {
     fn from(repo: Arc<NebariRepo>) -> Self {
         BoxRepo::Nebari(repo)
     }
 }
 
+#[cfg(feature = "persy")]
 impl From<Arc<PersyRepo>> for BoxRepo {
     fn from(repo: Arc<PersyRepo>) -> Self {
         BoxRepo::Persy(repo)
     }
 }
 
+#[cfg(feature = "canopy")]
 impl From<Arc<CanopyRepo>> for BoxRepo {
     fn from(repo: Arc<CanopyRepo>) -> Self {
         BoxRepo::Canopy(repo)
@@ -132,11 +176,12 @@ impl RepoFactory for InMemoryRepoFactory {
     }
 }
 
-/// Factory for SledRepo - uses spawn_blocking for file I/O
+#[cfg(feature = "sled")]
 pub struct SledRepoFactory {
     pub path: PathBuf,
 }
 
+#[cfg(feature = "sled")]
 #[async_trait::async_trait]
 impl RepoFactory for SledRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
@@ -148,11 +193,12 @@ impl RepoFactory for SledRepoFactory {
     }
 }
 
-/// Factory for RedbRepo - uses spawn_blocking for file I/O
+#[cfg(feature = "redb")]
 pub struct RedbRepoFactory {
     pub path: PathBuf,
 }
 
+#[cfg(feature = "redb")]
 #[async_trait::async_trait]
 impl RepoFactory for RedbRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
@@ -164,11 +210,12 @@ impl RepoFactory for RedbRepoFactory {
     }
 }
 
-/// Factory for FjallRepo - uses spawn_blocking for file I/O
+#[cfg(feature = "fjall")]
 pub struct FjallRepoFactory {
     pub path: PathBuf,
 }
 
+#[cfg(feature = "fjall")]
 #[async_trait::async_trait]
 impl RepoFactory for FjallRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
@@ -180,11 +227,12 @@ impl RepoFactory for FjallRepoFactory {
     }
 }
 
-/// Factory for NebariRepo - uses spawn_blocking for file I/O
+#[cfg(feature = "nebari")]
 pub struct NebariRepoFactory {
     pub path: PathBuf,
 }
 
+#[cfg(feature = "nebari")]
 #[async_trait::async_trait]
 impl RepoFactory for NebariRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
@@ -196,11 +244,12 @@ impl RepoFactory for NebariRepoFactory {
     }
 }
 
-/// Factory for PersyRepo - uses spawn_blocking for file I/O
+#[cfg(feature = "persy")]
 pub struct PersyRepoFactory {
     pub path: PathBuf,
 }
 
+#[cfg(feature = "persy")]
 #[async_trait::async_trait]
 impl RepoFactory for PersyRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
@@ -212,11 +261,12 @@ impl RepoFactory for PersyRepoFactory {
     }
 }
 
-/// Factory for CanopyRepo - uses spawn_blocking for file I/O
+#[cfg(feature = "canopy")]
 pub struct CanopyRepoFactory {
     pub path: PathBuf,
 }
 
+#[cfg(feature = "canopy")]
 #[async_trait::async_trait]
 impl RepoFactory for CanopyRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
@@ -235,11 +285,17 @@ impl RepoFactory for CanopyRepoFactory {
 /// Type-erased factory that can create any repo type
 pub enum BoxRepoFactory {
     InMemory(InMemoryRepoFactory),
+    #[cfg(feature = "sled")]
     Sled(SledRepoFactory),
+    #[cfg(feature = "redb")]
     Redb(RedbRepoFactory),
+    #[cfg(feature = "fjall")]
     Fjall(FjallRepoFactory),
+    #[cfg(feature = "nebari")]
     Nebari(NebariRepoFactory),
+    #[cfg(feature = "persy")]
     Persy(PersyRepoFactory),
+    #[cfg(feature = "canopy")]
     Canopy(CanopyRepoFactory),
 }
 
@@ -248,26 +304,32 @@ impl BoxRepoFactory {
         BoxRepoFactory::InMemory(InMemoryRepoFactory)
     }
 
+    #[cfg(feature = "sled")]
     pub fn sled(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Sled(SledRepoFactory { path: path.into() })
     }
 
+    #[cfg(feature = "redb")]
     pub fn redb(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Redb(RedbRepoFactory { path: path.into() })
     }
 
+    #[cfg(feature = "fjall")]
     pub fn fjall(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Fjall(FjallRepoFactory { path: path.into() })
     }
 
+    #[cfg(feature = "nebari")]
     pub fn nebari(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Nebari(NebariRepoFactory { path: path.into() })
     }
 
+    #[cfg(feature = "persy")]
     pub fn persy(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Persy(PersyRepoFactory { path: path.into() })
     }
 
+    #[cfg(feature = "canopy")]
     pub fn canopy(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Canopy(CanopyRepoFactory { path: path.into() })
     }
@@ -278,11 +340,17 @@ impl RepoFactory for BoxRepoFactory {
     async fn create(&self) -> DbResult<BoxRepo> {
         match self {
             BoxRepoFactory::InMemory(f) => f.create().await,
+            #[cfg(feature = "sled")]
             BoxRepoFactory::Sled(f) => f.create().await,
+            #[cfg(feature = "redb")]
             BoxRepoFactory::Redb(f) => f.create().await,
+            #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => f.create().await,
+            #[cfg(feature = "nebari")]
             BoxRepoFactory::Nebari(f) => f.create().await,
+            #[cfg(feature = "persy")]
             BoxRepoFactory::Persy(f) => f.create().await,
+            #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => f.create().await,
         }
     }
@@ -292,11 +360,17 @@ impl Clone for BoxRepoFactory {
     fn clone(&self) -> Self {
         match self {
             BoxRepoFactory::InMemory(_) => BoxRepoFactory::in_memory(),
+            #[cfg(feature = "sled")]
             BoxRepoFactory::Sled(f) => BoxRepoFactory::sled(f.path.clone()),
+            #[cfg(feature = "redb")]
             BoxRepoFactory::Redb(f) => BoxRepoFactory::redb(f.path.clone()),
+            #[cfg(feature = "fjall")]
             BoxRepoFactory::Fjall(f) => BoxRepoFactory::fjall(f.path.clone()),
+            #[cfg(feature = "nebari")]
             BoxRepoFactory::Nebari(f) => BoxRepoFactory::nebari(f.path.clone()),
+            #[cfg(feature = "persy")]
             BoxRepoFactory::Persy(f) => BoxRepoFactory::persy(f.path.clone()),
+            #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => BoxRepoFactory::canopy(f.path.clone()),
         }
     }

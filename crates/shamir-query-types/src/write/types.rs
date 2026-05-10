@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::query::filter::Filter;
-use crate::query::TableRef;
+use crate::filter::Filter;
+use crate::TableRef;
 
 // ============================================================================
 // UPDATE SELECT TYPES

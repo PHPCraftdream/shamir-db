@@ -7,7 +7,13 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 shamir-types = { path = "../shamir-types" }
-shamir-storage = { path = "../shamir-storage" }
+# Backends inherit `shamir-storage`'s feature set — the engine doesn't
+# need any backend-specific code, but its `BoxRepoFactory` variants
+# are gated by the same flags so they cascade through.
+shamir-storage = { path = "../shamir-storage", default-features = false }
+# Pure DTOs for the SDBQL surface — re-exported through the engine's
+# `query::*` modules so callers see no path change.
+shamir-query-types = { path = "../shamir-query-types" }
 
 # Async / runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -28,6 +34,25 @@ indexmap = { version = "2.7", features = ["serde"] }  # ordered maps in batch
 rmp-serde = "1.3.0"       # query result encoding helpers
 rmpv = { version = "1.3.1", features = ["serde"] }
 bincode = "1.3.3"         # admin / index serialisation
+
+[features]
+# Cascade `shamir-storage`'s per-backend features upward so callers can
+# pick them at the engine level too:
+#   shamir-engine = { default-features = false, features = ["redb"] }
+#
+# `all-backends` lists every per-backend feature explicitly (NOT just
+# `shamir-storage/all-backends`) because the engine's own `BoxRepo` /
+# `BoxRepoFactory` variants are gated by the engine-level features —
+# enabling storage backends without enabling the matching engine
+# feature would compile away the variant constructors.
+default = ["all-backends"]
+all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
+redb   = ["shamir-storage/redb"]
+sled   = ["shamir-storage/sled"]
+fjall  = ["shamir-storage/fjall"]
+nebari = ["shamir-storage/nebari"]
+persy  = ["shamir-storage/persy"]
+canopy = ["shamir-storage/canopy"]
 
 [dev-dependencies]
 tempfile = "3.10.1"

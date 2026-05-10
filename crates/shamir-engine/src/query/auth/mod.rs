@@ -1,10 +1,14 @@
+//! Auth-related operations module.
+//!
+//! DTOs (User / Role / CreateUserOp etc.) live in
+//! `shamir-query-types::auth`. SessionPermissions + check_batch logic
+//! stays here in `session.rs` because it touches batch-planning
+//! internals.
+
 mod session;
-mod types;
 
 pub use session::SessionPermissions;
-pub use types::{
-    Action, CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, Effect,
-    GrantRoleOp, Permission, Resource, RevokeRoleOp, Role, User,
+pub use shamir_query_types::auth::{
+    Action, CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, Effect, GrantRoleOp,
+    Permission, Resource, RevokeRoleOp, Role, User,
 };
-
-

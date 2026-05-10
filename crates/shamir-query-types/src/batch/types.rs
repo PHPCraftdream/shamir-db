@@ -6,15 +6,15 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
-use crate::query::admin::{
+use crate::admin::{
     CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
     DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, ListOp,
 };
-use crate::query::auth::{
+use crate::auth::{
     CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp,
 };
-use crate::query::read::{ReadQuery, QueryResult};
-use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+use crate::read::{ReadQuery, QueryResult};
+use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_types::types::common::{TMap, TSet};
 
 // ============================================================================
@@ -152,7 +152,7 @@ impl<'de> Deserialize<'de> for BatchOp {
 
 impl BatchOp {
     /// Returns the table reference for data operations, None for admin ops.
-    pub fn table_ref(&self) -> Option<&crate::query::TableRef> {
+    pub fn table_ref(&self) -> Option<&crate::TableRef> {
         match self {
             BatchOp::Read(q) => Some(&q.from),
             BatchOp::Insert(i) => Some(&i.insert_into),
