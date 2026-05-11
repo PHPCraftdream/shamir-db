@@ -2967,10 +2967,12 @@ name = "shamir-query-types"
 version = "0.1.0"
 dependencies = [
  "fxhash",
+ "hmac",
  "indexmap",
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2",
  "shamir-types",
 ]
 

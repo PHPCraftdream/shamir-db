@@ -134,6 +134,12 @@ pub struct CreateUserOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropUserOp {
     pub drop_user: String,
+    /// Hex-encoded HMAC-SHA256 over `b"drop_user\0<username>"`
+    /// keyed by the session HMAC key. See admin types for the key
+    /// derivation. Required at runtime; the field is `Option`
+    /// purely to allow types to roundtrip uncheckedly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Create a role.
@@ -147,6 +153,9 @@ pub struct CreateRoleOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropRoleOp {
     pub drop_role: String,
+    /// Hex HMAC over `b"drop_role\0<role>"`. See `DropUserOp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Grant a role to a user.

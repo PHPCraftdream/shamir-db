@@ -1,0 +1,539 @@
+//! HMAC-gate integration tests.
+//!
+//! Every destructive admin op (drop_db, drop_repo, drop_table,
+//! drop_index, drop_user, drop_role) MUST carry a hex-encoded
+//! HMAC-SHA256 tag over the canonical bytes for that op, keyed by
+//! `SHA256("shamir-db hmac key v1\0" || session_id)`.
+//!
+//! These tests confirm the gate at the wire boundary:
+//!   * missing tag → `hmac_required`
+//!   * wrong tag   → `hmac_mismatch`
+//!   * correct tag → op executes normally
+//!
+//! Non-destructive ops are untouched by the gate.
+
+use std::sync::Arc;
+
+use serde_json::json;
+
+use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::dispatch::RequestHandler;
+use shamir_connect::server::session::{Session, SessionPermissions};
+
+use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
+use shamir_db::engine::table::TableConfig;
+use shamir_db::query::batch::BatchRequest;
+use shamir_db::ShamirDb;
+
+use shamir_query_types::hmac as canon;
+use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
+
+// --------------------------------------------------------------------------
+// Fixtures
+// --------------------------------------------------------------------------
+
+/// Build a superuser session. Bypassing the SessionStore means
+/// `session_id` stays at zeros, which is fine — what matters for
+/// HMAC validation is that the test computes its tag with the
+/// SAME `session_id` the server sees.
+fn root_session() -> Session {
+    Session::new(
+        [0xAB; 16],
+        "alice".into(),
+        SessionPermissions::from_roles(vec!["superuser".into()]),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0u8; 32],
+        1_000_000,
+    )
+}
+
+fn session_key(session: &Session) -> [u8; 32] {
+    canon::derive_session_hmac_key(&session.session_id)
+}
+
+async fn make_db_with_table(db: &str, table: &str) -> Arc<ShamirDb> {
+    let shamir = ShamirDb::init_memory().await.expect("init shamir");
+    shamir.create_db(db).await;
+    let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new(table));
+    shamir.add_repo(db, cfg).await.expect("add repo");
+    Arc::new(shamir)
+}
+
+fn encode(req: &DbRequest) -> Vec<u8> {
+    rmp_serde::to_vec_named(req).expect("encode req")
+}
+
+fn decode(bytes: &[u8]) -> DbResponse {
+    rmp_serde::from_slice(bytes).expect("decode response")
+}
+
+fn execute(db: &str, body: serde_json::Value) -> DbRequest {
+    let batch: BatchRequest = serde_json::from_value(body).expect("parse batch");
+    DbRequest::Execute {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        db: db.to_string(),
+        batch,
+    }
+}
+
+fn expect_error(res: DbResponse) -> (String, String) {
+    match res {
+        DbResponse::Error { code, message } => (code, message),
+        other => panic!("expected Error, got {:?}", other),
+    }
+}
+
+fn expect_batch_ok(res: DbResponse) -> shamir_db::query::batch::BatchResponse {
+    match res {
+        DbResponse::Batch { response } => response,
+        other => panic!("expected Batch, got {:?}", other),
+    }
+}
+
+// --------------------------------------------------------------------------
+// drop_table
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_table_without_hmac_rejected() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": { "drop_table": "items", "repo": "main" }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _msg) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_table_with_wrong_hmac_rejected() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": {
+                    "drop_table": "items",
+                    "repo": "main",
+                    "hmac": "deadbeef".repeat(8) // 64 hex chars but bogus
+                }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _msg) = expect_error(res);
+    assert_eq!(code, "hmac_mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_table_with_correct_hmac_accepted() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let key = session_key(&session);
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_drop_table("prod", "main", "items"),
+    );
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": {
+                    "drop_table": "items",
+                    "repo": "main",
+                    "hmac": tag
+                }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let resp = expect_batch_ok(res);
+    let row = &resp.results["d"].records[0];
+    assert_eq!(row["dropped_table"], json!("items"));
+    assert_eq!(row["existed"], json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_table_tag_bound_to_target_table() {
+    // A tag computed for table A must not work against table B.
+    let shamir = make_db_with_table("prod", "items").await;
+    // Also seed a second table inside the same repo.
+    {
+        let db = shamir.get_db("prod").unwrap();
+        db.create_table("main", "other").unwrap();
+    }
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let key = session_key(&session);
+    let tag_for_items = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_drop_table("prod", "main", "items"),
+    );
+
+    // Submit drop_table for "other" with the items-tag.
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": {
+                    "drop_table": "other",
+                    "repo": "main",
+                    "hmac": tag_for_items
+                }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_mismatch");
+}
+
+// --------------------------------------------------------------------------
+// drop_db
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_db_without_hmac_rejected() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("scratch").await;
+    shamir.create_db("victim").await;
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+    let session = root_session();
+
+    let req = execute(
+        "scratch",
+        json!({
+            "id": 1,
+            "queries": { "d": { "drop_db": "victim" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_db_with_correct_hmac_accepted() {
+    // Need a routing db that exists — ShamirDb::execute(db_name, ..)
+    // looks up `db_name` BEFORE dispatching the batch. The drop_db op
+    // can target any db; we route the batch through `scratch` so the
+    // lookup succeeds, and drop `victim` inside the op.
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("scratch").await;
+    shamir.create_db("victim").await;
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+    let session = root_session();
+
+    let tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_drop_db("victim"),
+    );
+    let req = execute(
+        "scratch",
+        json!({
+            "id": 1,
+            "queries": { "d": { "drop_db": "victim", "hmac": tag } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let resp = expect_batch_ok(res);
+    let row = &resp.results["d"].records[0];
+    assert_eq!(row["dropped"], json!("victim"));
+}
+
+// --------------------------------------------------------------------------
+// drop_index
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_index_without_hmac_rejected() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    // Pre-create an index (no HMAC needed for create_index).
+    let mk = execute(
+        "prod",
+        json!({
+            "id": 0,
+            "queries": {
+                "i": { "create_index": "by_id", "table": "items", "fields": [["id"]] }
+            }
+        }),
+    );
+    let _ = handler.handle(&session, &encode(&mk)).unwrap();
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": { "drop_index": "by_id", "table": "items" }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_index_with_correct_hmac_accepted() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let mk = execute(
+        "prod",
+        json!({
+            "id": 0,
+            "queries": {
+                "i": { "create_index": "by_id", "table": "items", "fields": [["id"]] }
+            }
+        }),
+    );
+    let _ = handler.handle(&session, &encode(&mk)).unwrap();
+
+    let tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_drop_index("prod", "main", "items", "by_id", false),
+    );
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": {
+                    "drop_index": "by_id",
+                    "table": "items",
+                    "hmac": tag
+                }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let resp = expect_batch_ok(res);
+    let row = &resp.results["d"].records[0];
+    assert_eq!(row["dropped_index"], json!("by_id"));
+    assert_eq!(row["existed"], json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_index_unique_flag_changes_canonical() {
+    // unique=true vs unique=false must produce different tags. If
+    // a client signs the non-unique form but sends unique=true, the
+    // gate must refuse.
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let mk = execute(
+        "prod",
+        json!({
+            "id": 0,
+            "queries": {
+                "i": { "create_index": "by_em", "table": "items",
+                       "fields": [["email"]], "unique": true }
+            }
+        }),
+    );
+    let _ = handler.handle(&session, &encode(&mk)).unwrap();
+
+    // Tag computed for unique=false but request says unique=true.
+    let mismatched = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_drop_index("prod", "main", "items", "by_em", false),
+    );
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": {
+                    "drop_index": "by_em",
+                    "table": "items",
+                    "unique": true,
+                    "hmac": mismatched
+                }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_mismatch");
+}
+
+// --------------------------------------------------------------------------
+// drop_user / drop_role
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_user_requires_hmac() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("scratch").await;
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+    let session = root_session();
+
+    let req = execute(
+        "scratch",
+        json!({
+            "id": 1,
+            "queries": { "d": { "drop_user": "bob" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drop_role_requires_hmac() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("scratch").await;
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+    let session = root_session();
+
+    let req = execute(
+        "scratch",
+        json!({
+            "id": 1,
+            "queries": { "d": { "drop_role": "admin" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+}
+
+// --------------------------------------------------------------------------
+// Non-destructive ops untouched
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_op_passes_without_hmac() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": { "r": { "from": "items" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let resp = expect_batch_ok(res);
+    assert_eq!(resp.results["r"].records.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_table_passes_without_hmac() {
+    // CREATE is non-destructive — gate must not apply.
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("prod").await;
+    let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory());
+    shamir.add_repo("prod", cfg).await.unwrap();
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+    let session = root_session();
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": { "t": { "create_table": "x", "repo": "main" } }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let resp = expect_batch_ok(res);
+    let row = &resp.results["t"].records[0];
+    assert_eq!(row["created_table"], json!("x"));
+}
+
+// --------------------------------------------------------------------------
+// Mixed batch: HMAC failure stops the whole batch
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_batch_one_drop_missing_hmac_fails_whole_batch() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    // The read op is harmless; the drop op is missing its HMAC.
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "r": { "from": "items" },
+                "d": { "drop_table": "items", "repo": "main" }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, message) = expect_error(res);
+    assert_eq!(code, "hmac_required");
+    // Error mentions which alias was unsigned.
+    assert!(message.contains("'d'"), "{}", message);
+}
+
+// --------------------------------------------------------------------------
+// Different sessions get different keys
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tag_signed_with_other_session_key_rejected() {
+    let shamir = make_db_with_table("prod", "items").await;
+    let handler = ShamirDbHandler::new(shamir);
+    let session = root_session();
+
+    // Compute a tag using a DIFFERENT session_id (pretending we're
+    // another session). The server uses `session.hmac_key()` which
+    // derives from session.session_id == [0u8;32]; the attacker
+    // session would have a different id (we simulate with [1u8;32]).
+    let other_sid = [1u8; 32];
+    let other_key = canon::derive_session_hmac_key(&other_sid);
+    let tag = canon::compute_tag_hex(
+        &other_key,
+        &canon::canonical_drop_table("prod", "main", "items"),
+    );
+
+    let req = execute(
+        "prod",
+        json!({
+            "id": 1,
+            "queries": {
+                "d": {
+                    "drop_table": "items",
+                    "repo": "main",
+                    "hmac": tag
+                }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_mismatch");
+}

@@ -9,9 +9,17 @@ pub struct CreateDbOp {
 }
 
 /// Drop a database.
+///
+/// Requires an `hmac` field — hex-encoded HMAC-SHA256 tag over
+/// `b"drop_db\0<db_name>"` keyed by the session HMAC key
+/// (`SHA256("shamir-db hmac key v1\0" || session_id)`). Missing /
+/// wrong tag → request rejected with `hmac_required` /
+/// `hmac_mismatch`. See `query_buffer_config.rs` design notes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropDbOp {
     pub drop_db: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Create a new repository within the current database.
@@ -31,9 +39,13 @@ fn default_engine() -> String {
 }
 
 /// Drop a repository.
+///
+/// Requires `hmac` over `b"drop_repo\0<db_in_use>\0<repo>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropRepoOp {
     pub drop_repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Create a table in a repository.
@@ -49,11 +61,15 @@ fn default_repo() -> String {
 }
 
 /// Drop a table.
+///
+/// Requires `hmac` over `b"drop_table\0<db_in_use>\0<repo>\0<table>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropTableOp {
     pub drop_table: String,
     #[serde(default = "default_repo")]
     pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Create an index on a table.
@@ -82,6 +98,9 @@ pub struct CreateIndexOp {
 }
 
 /// Drop an index.
+///
+/// Requires `hmac` over
+/// `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>\0<unique:0|1>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DropIndexOp {
     pub drop_index: String,
@@ -90,6 +109,8 @@ pub struct DropIndexOp {
     pub unique: bool,
     #[serde(default = "default_repo")]
     pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 // ============================================================================

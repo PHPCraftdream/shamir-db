@@ -292,6 +292,19 @@ impl ShamirDbHandler {
             }
         }
 
+        // Destructive-op HMAC gate. Every drop_* op must carry an
+        // `hmac` field whose tag covers the canonical bytes for
+        // that op, keyed by the per-session derived key. This is
+        // not an authentication gate — TLS+SCRAM already proves
+        // the caller — it's a "did you mean it" guard: the client
+        // could not produce the tag by accident.
+        if let Err((alias, code, message)) = check_destructive_hmacs(session, db_name, &batch) {
+            return DbResponse::Error {
+                code: code.into(),
+                message: format!("query '{}': {}", alias, message),
+            };
+        }
+
         match run_blocking(self.db.execute(db_name, &batch)) {
             Ok(response) => {
                 // Slow-query logging: WARN line for batches whose total
@@ -428,6 +441,84 @@ impl ShamirDbHandler {
 // --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
+
+/// Walk the batch and verify the `hmac` tag on every destructive op.
+///
+/// Returns `Err((alias, code, message))` on the first failure
+/// where `code` is one of:
+///   * `"hmac_required"` — the field is missing on a destructive op,
+///   * `"hmac_mismatch"` — the field is present but the tag doesn't
+///     match the recomputed value for this op + this session.
+///
+/// Non-destructive ops pass through untouched. Auth check has
+/// already happened above; this gate runs strictly after that.
+fn check_destructive_hmacs(
+    session: &Session,
+    db_name: &str,
+    batch: &BatchRequest,
+) -> Result<(), (String, &'static str, String)> {
+    use shamir_query_types::hmac as canon;
+
+    // Lazy derive only when there's at least one destructive op.
+    let mut key_opt: Option<[u8; 32]> = None;
+    let key = |k: &mut Option<[u8; 32]>| -> [u8; 32] {
+        if let Some(v) = *k {
+            return v;
+        }
+        let derived = session.hmac_key();
+        *k = Some(derived);
+        derived
+    };
+
+    for (alias, entry) in &batch.queries {
+        let (canonical, supplied): (Vec<u8>, Option<&String>) = match &entry.op {
+            BatchOp::DropDb(op) => (canon::canonical_drop_db(&op.drop_db), op.hmac.as_ref()),
+            BatchOp::DropRepo(op) => (
+                canon::canonical_drop_repo(db_name, &op.drop_repo),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::DropTable(op) => (
+                canon::canonical_drop_table(db_name, &op.repo, &op.drop_table),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::DropIndex(op) => (
+                canon::canonical_drop_index(
+                    db_name,
+                    &op.repo,
+                    &op.table,
+                    &op.drop_index,
+                    op.unique,
+                ),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::DropUser(op) => (
+                canon::canonical_drop_user(&op.drop_user),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::DropRole(op) => (
+                canon::canonical_drop_role(&op.drop_role),
+                op.hmac.as_ref(),
+            ),
+            _ => continue, // non-destructive — pass.
+        };
+
+        let Some(tag) = supplied else {
+            return Err((
+                alias.clone(),
+                "hmac_required",
+                "destructive op missing `hmac` field".to_string(),
+            ));
+        };
+        if !canon::verify_tag_hex(&key(&mut key_opt), &canonical, tag) {
+            return Err((
+                alias.clone(),
+                "hmac_mismatch",
+                "destructive op `hmac` does not match canonical input".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Coarse classification of a [`BatchError`] for the wire `code` tag.
 fn error_code(e: &BatchError) -> &'static str {
