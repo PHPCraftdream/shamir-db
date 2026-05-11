@@ -163,6 +163,60 @@ impl AdminExecutor for ShamirAdminExecutor {
                 })))
             }
 
+            BatchOp::GetBufferConfig(op) => {
+                let db = self.shamir.get_db(&self.db_name)
+                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+                let table = db.get_table(&op.repo, &op.get_buffer_config).await
+                    .map_err(|e| err(e.to_string()))?;
+                let cfg = table.get_buffer_config().await
+                    .map_err(|e| err(e.to_string()))?;
+                let payload = match cfg {
+                    Some(c) => json!({
+                        "table": op.get_buffer_config,
+                        "repo": op.repo,
+                        "config": dto_from_storage(&c),
+                    }),
+                    None => json!({
+                        "table": op.get_buffer_config,
+                        "repo": op.repo,
+                        "config": serde_json::Value::Null,
+                    }),
+                };
+                Ok(admin_result(payload))
+            }
+
+            BatchOp::SetBufferConfig(op) => {
+                let db = self.shamir.get_db(&self.db_name)
+                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+                let table = db.get_table(&op.repo, &op.set_buffer_config).await
+                    .map_err(|e| err(e.to_string()))?;
+                let storage_cfg = storage_from_dto(&op.config);
+                table.set_buffer_config(&storage_cfg).await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "set_buffer_config": op.set_buffer_config,
+                    "repo": op.repo,
+                    "config": dto_from_storage(&storage_cfg),
+                })))
+            }
+
+            BatchOp::AlterBufferConfig(op) => {
+                let db = self.shamir.get_db(&self.db_name)
+                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+                let table = db.get_table(&op.repo, &op.alter_buffer_config).await
+                    .map_err(|e| err(e.to_string()))?;
+                let patch = op.patch.clone();
+                let updated = table
+                    .alter_buffer_config(|c| apply_patch(c, &patch))
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "alter_buffer_config": op.alter_buffer_config,
+                    "repo": op.repo,
+                    "config": dto_from_storage(&updated),
+                })))
+            }
+
             BatchOp::List(list_op) => {
                 use crate::query::admin::ListOp;
                 match list_op {
@@ -385,6 +439,57 @@ impl AdminExecutor for ShamirAdminExecutor {
 
             _ => Err(err("Not an admin operation".to_string())),
         }
+    }
+}
+
+/// Map the wire DTO into the storage struct without dragging the
+/// storage crate's serde-compatible-by-coincidence layout into
+/// the API contract — the two types are intentionally distinct.
+fn storage_from_dto(
+    dto: &crate::query::admin::BufferConfigDto,
+) -> crate::storage::storage_membuffer::MemBufferConfig {
+    crate::storage::storage_membuffer::MemBufferConfig {
+        max_bytes: dto.max_bytes,
+        max_entries: dto.max_entries,
+        ttl_ms: dto.ttl_ms,
+        flush_interval_ms: dto.flush_interval_ms,
+        flush_batch_size: dto.flush_batch_size,
+    }
+}
+
+fn dto_from_storage(
+    cfg: &crate::storage::storage_membuffer::MemBufferConfig,
+) -> crate::query::admin::BufferConfigDto {
+    crate::query::admin::BufferConfigDto {
+        max_bytes: cfg.max_bytes,
+        max_entries: cfg.max_entries,
+        ttl_ms: cfg.ttl_ms,
+        flush_interval_ms: cfg.flush_interval_ms,
+        flush_batch_size: cfg.flush_batch_size,
+    }
+}
+
+/// Apply only the fields the patch actually set; leave the rest
+/// alone. Double-option semantics for `ttl_ms`: `Some(None)` ↔
+/// "clear TTL"; `Some(Some(v))` ↔ "set TTL"; `None` ↔ "untouched".
+fn apply_patch(
+    cfg: &mut crate::storage::storage_membuffer::MemBufferConfig,
+    patch: &crate::query::admin::BufferConfigPatch,
+) {
+    if let Some(v) = patch.max_bytes {
+        cfg.max_bytes = v;
+    }
+    if let Some(v) = patch.max_entries {
+        cfg.max_entries = v;
+    }
+    if let Some(v) = patch.ttl_ms {
+        cfg.ttl_ms = v;
+    }
+    if let Some(v) = patch.flush_interval_ms {
+        cfg.flush_interval_ms = v;
+    }
+    if let Some(v) = patch.flush_batch_size {
+        cfg.flush_batch_size = v;
     }
 }
 

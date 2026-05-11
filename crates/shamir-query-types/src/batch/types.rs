@@ -7,8 +7,9 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
-    DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, ListOp,
+    AlterBufferConfigOp, CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
+    DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp,
+    SetBufferConfigOp,
 };
 use crate::auth::{
     CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp,
@@ -55,6 +56,9 @@ pub enum BatchOp {
     DropTable(DropTableOp),
     CreateIndex(CreateIndexOp),
     DropIndex(DropIndexOp),
+    SetBufferConfig(SetBufferConfigOp),
+    GetBufferConfig(GetBufferConfigOp),
+    AlterBufferConfig(AlterBufferConfigOp),
     List(ListOp),
 
     // Auth operations
@@ -82,6 +86,9 @@ impl Serialize for BatchOp {
             BatchOp::DropTable(op) => op.serialize(serializer),
             BatchOp::CreateIndex(op) => op.serialize(serializer),
             BatchOp::DropIndex(op) => op.serialize(serializer),
+            BatchOp::SetBufferConfig(op) => op.serialize(serializer),
+            BatchOp::GetBufferConfig(op) => op.serialize(serializer),
+            BatchOp::AlterBufferConfig(op) => op.serialize(serializer),
             BatchOp::List(op) => op.serialize(serializer),
             BatchOp::CreateUser(op) => op.serialize(serializer),
             BatchOp::DropUser(op) => op.serialize(serializer),
@@ -125,6 +132,12 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value).map(BatchOp::CreateIndex).map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_index") {
             serde_json::from_value(value).map(BatchOp::DropIndex).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("set_buffer_config") {
+            serde_json::from_value(value).map(BatchOp::SetBufferConfig).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("get_buffer_config") {
+            serde_json::from_value(value).map(BatchOp::GetBufferConfig).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("alter_buffer_config") {
+            serde_json::from_value(value).map(BatchOp::AlterBufferConfig).map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_user") {
             serde_json::from_value(value).map(BatchOp::CreateUser).map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_user") {
@@ -175,6 +188,9 @@ impl BatchOp {
                 | BatchOp::DropTable(_)
                 | BatchOp::CreateIndex(_)
                 | BatchOp::DropIndex(_)
+                | BatchOp::SetBufferConfig(_)
+                | BatchOp::GetBufferConfig(_)
+                | BatchOp::AlterBufferConfig(_)
                 | BatchOp::List(_)
                 | BatchOp::CreateUser(_)
                 | BatchOp::DropUser(_)

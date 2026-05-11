@@ -39,13 +39,14 @@ pub struct SessionPermissions {
 // ============================================================================
 
 /// All individual actions (excluding All, which is expanded).
-const EXPANDED_ACTIONS: [Action; 8] = [
+const EXPANDED_ACTIONS: [Action; 9] = [
     Action::Read,
     Action::Insert,
     Action::Update,
     Action::Delete,
     Action::Create,
     Action::Drop,
+    Action::Alter,
     Action::ManageUsers,
     Action::ManageRoles,
 ];
@@ -296,6 +297,35 @@ impl SessionPermissions {
                     database: db_name.to_string(),
                     repo: op.repo.clone(),
                     table: op.table.clone(),
+                },
+            ),
+
+            // Per-table buffer config — read for get, alter/update
+            // for set + alter. The table-level Alter action is
+            // already used by index DDL; reusing keeps the role
+            // matrix small and predictable.
+            BatchOp::GetBufferConfig(op) => (
+                Action::Read,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.get_buffer_config.clone(),
+                },
+            ),
+            BatchOp::SetBufferConfig(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.set_buffer_config.clone(),
+                },
+            ),
+            BatchOp::AlterBufferConfig(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.alter_buffer_config.clone(),
                 },
             ),
 
