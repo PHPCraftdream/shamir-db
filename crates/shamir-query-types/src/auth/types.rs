@@ -63,6 +63,10 @@ pub enum Action {
     Delete,
     Create,
     Drop,
+    /// Mutate table-level metadata (indexes, buffer config,
+    /// future ALTER-style DDL). Distinct from `Update` (row-level
+    /// mutation) and from `Create` / `Drop` (schema lifecycle).
+    Alter,
     ManageUsers,
     ManageRoles,
     All,

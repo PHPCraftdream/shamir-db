@@ -4,6 +4,7 @@
 //! existing `crate::query::admin::*` paths in the engine resolve.
 
 pub use shamir_query_types::admin::{
-    CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp, DropDbOp, DropIndexOp,
-    DropRepoOp, DropTableOp, ListOp,
+    AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, CreateDbOp, CreateIndexOp,
+    CreateRepoOp, CreateTableOp, DropDbOp, DropIndexOp, DropRepoOp, DropTableOp,
+    GetBufferConfigOp, ListOp, SetBufferConfigOp,
 };
