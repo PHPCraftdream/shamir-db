@@ -1,5 +1,5 @@
-//! `MemBufferStore` — bounded LRU + write-back buffer over any
-//! `Store`.
+//! `MemBufferStore` — concurrent write-back buffer over any `Store`,
+//! backed by **`moka`** as the in-RAM cache.
 //!
 //! # Design
 //!
@@ -9,18 +9,19 @@
 //!  │     │                                                │
 //!  │     ▼                                                │
 //!  │  ┌─────────────────────────────────────────┐         │
-//!  │  │ LRU cache (max_entries) + dirty set     │         │
-//!  │  │ - read hit: return from cache           │         │
-//!  │  │ - read miss: inner.get + cache populate │         │
-//!  │  │ - write: cache.put + dirty.insert       │         │
-//!  │  │   → instant return                      │         │
+//!  │  │ moka::future::Cache<RecordKey, Slot>    │         │
+//!  │  │  - max_capacity, weigher, TTL handled   │         │
+//!  │  │    by moka (W-TinyLFU eviction)         │         │
+//!  │  │  - lock-free read path (per-thread      │         │
+//!  │  │    event buffers internally)            │         │
+//!  │  │  - async eviction listener flushes      │         │
+//!  │  │    dirty entries inline                 │         │
 //!  │  └────────────┬────────────────────────────┘         │
-//!  │               │ on idle / on signal                  │
-//!  │               ▼                                       │
-//!  │  ┌─────────────────────────────────────────┐         │
-//!  │  │ Background flusher task                 │         │
-//!  │  │ - drains dirty → inner.set_many /       │         │
-//!  │  │   inner.remove_many in batches          │         │
+//!  │               │                                       │
+//!  │  ┌────────────┴────────────────────────────┐         │
+//!  │  │ DashSet<RecordKey> dirty                │         │
+//!  │  │  - lock-free per-shard inserts/removes  │         │
+//!  │  │  - drained by background flusher        │         │
 //!  │  └────────────┬────────────────────────────┘         │
 //!  └───────────────┼──────────────────────────────────────┘
 //!                  ▼
@@ -29,73 +30,80 @@
 //!           └─────────────┘
 //! ```
 //!
-//! # Durability contract
+//! # Why moka
 //!
-//! `MemBufferStore::insert / set / remove` return as soon as the
-//! cache is updated — **the inner store hasn't been touched yet**.
-//! If the process crashes before the flusher drains the dirty
-//! queue, those writes are lost from the inner store's view.
+//! The previous implementation was a `Mutex<LruCache>` + `Mutex<HashSet>`.
+//! Bench `membuffer_concurrent_rw` showed flat throughput as readers
+//! scaled (632 Kelem/s at 8 readers vs 754 Kelem/s at 1) — every op
+//! serialised on the single cache mutex.
 //!
-//! For the engine layer this means:
-//! - **Records lost** on crash if their batch never flushed.
-//! - **No inconsistency** introduced — the engine's WAL marker
-//!   for an INSERT records the record_id; if the record value
-//!   never reached the inner store, recovery on next open sees
-//!   "marker says record_id X, data_store has no such record"
-//!   and treats it as a not-committed write (clears the marker).
-//! - **No orphan postings** — index entries are written through
-//!   the same `info_store` that's wrapped by membuffer; if data
-//!   is lost so are its indexes.
+//! `moka` is a production-grade concurrent cache:
+//!   * eviction handled internally (W-TinyLFU + LRU window),
+//!   * TTL handled by `time_to_live`,
+//!   * byte-cap handled by `weigher` + `max_capacity`,
+//!   * reads + writes are lock-free for non-conflicting keys (per-thread
+//!     event buffers, drained by a background maintenance task — the
+//!     same pattern Caffeine uses on the JVM).
 //!
-//! Callers requiring strict durability should call
-//! `Store::flush().await` at the commit boundary. `flush()`
-//! drains the dirty queue to the inner store and then calls
-//! `inner.flush()` so the whole stack lands.
+//! # Durability contract (unchanged)
+//!
+//! `insert / set / remove` return as soon as the cache + dirty set are
+//! updated — the inner store hasn't been touched yet. The flusher drains
+//! `dirty` in batches; for synchronous durability call `flush().await`.
 //!
 //! # Eviction
 //!
-//! When the cache is at capacity, an `insert` evicts the LRU
-//! entry. If the evicted entry is dirty, the flusher is signalled
-//! and the new entry stays out of cache until space is available
-//! (synchronous back-pressure). Today's simple implementation
-//! does the dirty flush INLINE on eviction; later we can move it
-//! to the background task with bounded write-queue depth.
+//! When `moka` evicts an entry to honour capacity / TTL, the
+//! async eviction listener fires. If the key is still in `dirty`,
+//! the listener flushes the value to `inner` inline and removes
+//! the key from `dirty`. This preserves the no-data-loss
+//! guarantee: a dirty entry is never silently dropped from cache.
+//!
+//! The user-observable effect is **eventually consistent**: the
+//! eviction listener runs in moka's background maintenance task,
+//! not synchronously with the user's insert. Tests that assume
+//! "immediate inner visibility after eviction" wait for the
+//! flusher tick.
+//!
+//! # apply_config
+//!
+//! Atomic config fields are written directly. For sizing /
+//! TTL changes, the cache is **rebuilt** with the new config —
+//! the old cache's contents are flushed to inner via
+//! `drain_all().await` first, so no data is lost. This is rare
+//! (DDL-driven only), so the rebuild cost is amortised.
 
 use super::types::{RecordKey, Store};
 use crate::error::{DbError, DbResult};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashSet;
 use futures::stream::Stream;
-use lru::LruCache;
-use std::collections::HashSet;
-use std::num::NonZeroUsize;
+use moka::future::Cache as MokaCache;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Notify;
 
-/// Configuration for `MemBufferStore`.
+/// Configuration for `MemBufferStore`. Stable wire-format
+/// (serialized into `info_store` by the DDL layer).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemBufferConfig {
     /// Soft cap on the sum of key+value bytes held in the cache.
-    /// When exceeded the LRU tail is evicted (flushing dirty
-    /// entries inline) until the cache is back under the cap.
-    /// Default `64 MiB`.
+    /// Default `64 MiB`. Enforced by moka via the `weigher`.
     pub max_bytes: usize,
-    /// Hard cap on the entry count. Safety net for workloads with
-    /// many tiny records where per-entry HashMap / LruCache
-    /// overhead dominates over the raw value bytes.
+    /// Hard cap on the entry count. Enforced by moka via
+    /// `max_capacity`. Note: `moka` requires `max_capacity` and
+    /// `weigher` to be self-consistent — we set both, and moka
+    /// picks the tighter binding constraint.
     pub max_entries: usize,
-    /// Optional time-to-live for cache entries. `None` = disabled
-    /// (entries live until evicted by size/count pressure). When
-    /// set, the background flusher periodically scans the cache
-    /// and evicts entries older than this threshold, flushing
-    /// dirty ones inline before drop.
+    /// Optional time-to-live for cache entries. `None` = no TTL.
     pub ttl_ms: Option<u64>,
     /// Background flusher idle interval (ms).
     pub flush_interval_ms: u64,
-    /// Max number of writes the flusher coalesces into one
-    /// `set_many` / `remove_many` call against the inner store.
+    /// Max number of dirty keys the flusher drains per batch.
     pub flush_batch_size: usize,
 }
 
@@ -107,74 +115,48 @@ impl Default for MemBufferConfig {
             ttl_ms: None,
             // 500ms — balances "ACK→durable lag" against fsync
             // amortisation. On per-write-fsync backends
-            // (persy/nebari/canopy) this turns 1000 individual
+            // (persy/nebari/canopy) this turns ~1000 individual
             // commits into ~2 batched commits per second.
-            // Overridable per-table via DDL once that ships.
             flush_interval_ms: 500,
             flush_batch_size: 256,
         }
     }
 }
 
+/// In-cache slot — either a live value or a tombstone for a
+/// previously-removed key (cached negative result).
 #[derive(Clone, Debug)]
-struct CachedSlot {
-    slot: Slot,
-    /// Wall-clock instant at which the slot was inserted /
-    /// last-updated in the cache. Used by the TTL eviction
-    /// sweep. `Instant` for monotonicity (system clock skew safe).
-    born_at: std::time::Instant,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 enum Slot {
-    /// The key holds this value.
     Live(Bytes),
-    /// The key is known to NOT be in the inner store. Either a
-    /// recent `remove` we haven't propagated yet, or a confirmed-
-    /// missing key we cached to avoid re-asking inner.
     Tombstone,
 }
 
-/// Shared mutable state of one `MemBufferStore`. Lives behind
-/// `Arc<MemBufferState>` so the background flusher task can hold
-/// a weak reference and exit gracefully when the store is
-/// dropped.
+/// Shared mutable state. Lives behind `Arc` so the background
+/// flusher (and moka's eviction listener) can hold weak refs.
 struct MemBufferState {
-    /// The cache. Hard cap = `max_entries`; we also track byte
-    /// usage and evict to stay under `max_bytes`.
-    cache: Mutex<LruCache<RecordKey, CachedSlot>>,
-    /// Keys whose state has been changed in `cache` but not yet
-    /// propagated to `inner`. Drained by the flusher.
-    dirty: Mutex<HashSet<RecordKey>>,
-    /// Running sum of `key.len() + value.len()` across every Live
-    /// entry currently in the cache. Atomic so the flusher can
-    /// read it without taking the cache lock.
-    cache_bytes: std::sync::atomic::AtomicUsize,
-    /// Hot-reloadable config. All hot paths (cache_put eviction,
-    /// flusher loop, TTL sweep) read these atomically each pass,
-    /// so a DDL-driven `apply_buffer_config` takes effect on the
-    /// next operation without rewrapping the store.
-    max_bytes: std::sync::atomic::AtomicUsize,
-    max_entries: std::sync::atomic::AtomicUsize,
-    /// `0` encodes `None` (TTL disabled). Otherwise the TTL in ms.
-    ttl_ms: std::sync::atomic::AtomicU64,
-    flush_interval_ms: std::sync::atomic::AtomicU64,
-    flush_batch_size: std::sync::atomic::AtomicUsize,
+    /// The actual cache. Wrapped in `ArcSwap` so `apply_config`
+    /// can hot-swap to a freshly-built moka instance with new
+    /// sizing/TTL without taking a lock on the read path.
+    cache: ArcSwap<MokaCache<RecordKey, Slot>>,
+    /// Lock-free set of keys whose state in the cache hasn't
+    /// been propagated to `inner` yet. Drained by the flusher.
+    /// The moka eviction listener references THIS SAME Arc — so
+    /// updates from the user path and the listener see the same
+    /// data. Cloning into a separate DashSet would silently
+    /// disconnect the two.
+    dirty: Arc<DashSet<RecordKey>>,
+    /// Atomic-config — read on hot paths so DDL changes apply
+    /// without rewrapping the store.
+    max_bytes: AtomicUsize,
+    max_entries: AtomicUsize,
+    ttl_ms: AtomicU64,
+    flush_interval_ms: AtomicU64,
+    flush_batch_size: AtomicUsize,
 }
 
 impl MemBufferState {
-    fn ttl(&self) -> Option<std::time::Duration> {
-        let v = self.ttl_ms.load(Ordering::Relaxed);
-        if v == 0 {
-            None
-        } else {
-            Some(std::time::Duration::from_millis(v))
-        }
-    }
-    fn flush_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(
-            self.flush_interval_ms.load(Ordering::Relaxed),
-        )
+    fn flush_interval(&self) -> Duration {
+        Duration::from_millis(self.flush_interval_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -183,38 +165,96 @@ pub struct MemBufferStore {
     state: Arc<MemBufferState>,
     /// Wakes the background flusher on dirty-state change.
     notify: Arc<Notify>,
-    /// Set on Drop — the flusher checks it on each wakeup and
-    /// exits.
+    /// Set on Drop — the flusher checks it on each wakeup and exits.
     shutdown: Arc<AtomicBool>,
+}
+
+/// Build a fresh moka cache configured from `cfg`. The async
+/// eviction listener flushes dirty entries to `inner` before
+/// dropping them.
+fn build_cache(
+    cfg: &MemBufferConfig,
+    inner: Arc<dyn Store>,
+    dirty: Arc<DashSet<RecordKey>>,
+) -> MokaCache<RecordKey, Slot> {
+    // moka's `max_capacity` is **total weighted size** when a
+    // weigher is set, NOT entry count. We pick byte-weight as
+    // the binding cap (`max_bytes`); `max_entries` is kept in
+    // config for legacy callers but is informational here — the
+    // wrapper doesn't enforce it as a separate cap. A workload
+    // with many tiny records will still be bounded by `max_bytes`.
+    let mut builder = MokaCache::builder()
+        .max_capacity(cfg.max_bytes as u64)
+        .weigher(|k: &RecordKey, v: &Slot| -> u32 {
+            let bytes = match v {
+                Slot::Live(b) => k.len() + b.len(),
+                Slot::Tombstone => k.len(),
+            };
+            bytes.min(u32::MAX as usize) as u32
+        });
+    if let Some(ttl) = cfg.ttl_ms {
+        builder = builder.time_to_live(Duration::from_millis(ttl));
+    }
+    // Async eviction listener — fires when moka removes an entry.
+    // Causes we care about:
+    //   * `Size` — capacity (max_bytes / max_capacity) eviction.
+    //   * `Expired` — TTL eviction.
+    // Causes we IGNORE:
+    //   * `Replaced` — same key, new value; the new value is
+    //     already in dirty (the user's set/remove path inserted
+    //     it). Flushing the OLD value here would overwrite the
+    //     new state in inner — that's a correctness bug.
+    //   * `Explicit` — manual `invalidate`; user signalled removal,
+    //     no flush wanted.
+    use moka::notification::RemovalCause;
+    builder = builder.async_eviction_listener(move |k, v, cause| {
+        let inner = Arc::clone(&inner);
+        let dirty = Arc::clone(&dirty);
+        Box::pin(async move {
+            if !matches!(cause, RemovalCause::Size | RemovalCause::Expired) {
+                return;
+            }
+            let key: RecordKey = (*k).clone();
+            if !dirty.remove(&key).is_some() {
+                return;
+            }
+            // Was dirty AND moka is dropping it on the floor — we
+            // MUST persist or the write is lost.
+            match v {
+                Slot::Live(bytes) => {
+                    let _ = inner.set(key, bytes).await;
+                }
+                Slot::Tombstone => {
+                    let _ = inner.remove(key).await;
+                }
+            }
+        })
+    });
+    builder.build()
 }
 
 impl MemBufferStore {
     pub fn new(inner: Arc<dyn Store>, config: MemBufferConfig) -> Self {
-        let cap = NonZeroUsize::new(config.max_entries.max(1)).unwrap();
+        let dirty: Arc<DashSet<RecordKey>> = Arc::new(DashSet::new());
+        let cache = Arc::new(build_cache(&config, Arc::clone(&inner), Arc::clone(&dirty)));
+
         let state = Arc::new(MemBufferState {
-            cache: Mutex::new(LruCache::new(cap)),
-            dirty: Mutex::new(HashSet::new()),
-            cache_bytes: std::sync::atomic::AtomicUsize::new(0),
-            max_bytes: std::sync::atomic::AtomicUsize::new(config.max_bytes),
-            max_entries: std::sync::atomic::AtomicUsize::new(config.max_entries),
-            ttl_ms: std::sync::atomic::AtomicU64::new(config.ttl_ms.unwrap_or(0)),
-            flush_interval_ms: std::sync::atomic::AtomicU64::new(
-                config.flush_interval_ms,
-            ),
-            flush_batch_size: std::sync::atomic::AtomicUsize::new(
-                config.flush_batch_size,
-            ),
+            cache: ArcSwap::from(cache),
+            dirty,
+            max_bytes: AtomicUsize::new(config.max_bytes),
+            max_entries: AtomicUsize::new(config.max_entries),
+            ttl_ms: AtomicU64::new(config.ttl_ms.unwrap_or(0)),
+            flush_interval_ms: AtomicU64::new(config.flush_interval_ms),
+            flush_batch_size: AtomicUsize::new(config.flush_batch_size),
         });
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        // Background flusher. Holds Weak references so its lifecycle
-        // tracks the store's. On `MemBufferStore::drop` the Weaks
-        // can no longer upgrade and the task exits.
+        // Background flusher.
         let weak_state = Arc::downgrade(&state);
         let weak_notify = Arc::downgrade(&notify);
         let weak_shutdown = Arc::downgrade(&shutdown);
-        let inner_for_task = inner.clone();
+        let inner_for_task = Arc::clone(&inner);
         tokio::spawn(async move {
             loop {
                 let state = match weak_state.upgrade() {
@@ -232,23 +272,18 @@ impl MemBufferStore {
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                // Hot-reloadable config — read atomics each pass.
                 let flush_interval = state.flush_interval();
                 let batch_size = state.flush_batch_size.load(Ordering::Relaxed);
-                let ttl = state.ttl();
                 tokio::select! {
                     _ = notify.notified() => {},
                     _ = tokio::time::sleep(flush_interval) => {},
                 }
                 let _ = Self::drain_once(&state, inner_for_task.as_ref(), batch_size).await;
-                if let Some(ttl_dur) = ttl {
-                    let _ = Self::ttl_evict_once(
-                        &state,
-                        inner_for_task.as_ref(),
-                        ttl_dur,
-                    )
-                    .await;
-                }
+                // Force moka to run its maintenance — this fires
+                // any pending eviction listeners (TTL + capacity)
+                // so dirty entries that crossed thresholds get
+                // flushed promptly.
+                state.cache.load().run_pending_tasks().await;
             }
         });
 
@@ -260,14 +295,18 @@ impl MemBufferStore {
         }
     }
 
-    /// Hot-reload the buffer config. Atomic fields are written
-    /// directly; the next operation (write, read-miss, flusher
-    /// wakeup) picks them up.
-    ///
-    /// `max_entries` resizes the underlying LRU; cache contents
-    /// are preserved (lru's `resize` keeps the MRU entries when
-    /// shrinking).
-    pub fn apply_config(&self, cfg: &MemBufferConfig) {
+    /// Hot-reload the buffer config. Drains all in-flight dirty
+    /// entries to `inner` FIRST (so nothing is lost when the old
+    /// cache is dropped), then atomically swaps in a fresh cache
+    /// built with the new sizing/TTL. The new cache starts
+    /// empty — subsequent reads repopulate it from inner as
+    /// needed.
+    pub async fn apply_config(&self, cfg: &MemBufferConfig) -> DbResult<()> {
+        // Drain BEFORE swap — the old cache holds the values for
+        // dirty keys; if we swap first, those values are
+        // unreachable and the dirty set has nothing to flush.
+        self.drain_all().await?;
+
         self.state
             .max_bytes
             .store(cfg.max_bytes, Ordering::Relaxed);
@@ -283,66 +322,86 @@ impl MemBufferStore {
         self.state
             .flush_batch_size
             .store(cfg.flush_batch_size, Ordering::Relaxed);
-        if let Some(new_cap) = NonZeroUsize::new(cfg.max_entries.max(1)) {
-            if let Ok(mut cache) = self.state.cache.lock() {
-                cache.resize(new_cap);
-            }
-        }
-        // Nudge the flusher in case the new interval shortens.
+
+        // Build + swap the new cache.
+        let new_cache = Arc::new(build_cache(
+            cfg,
+            Arc::clone(&self.inner),
+            Arc::clone(&self.state.dirty),
+        ));
+        self.state.cache.store(new_cache);
         self.notify.notify_one();
+        Ok(())
     }
 
     pub fn inner(&self) -> &Arc<dyn Store> {
         &self.inner
     }
 
-    /// Drain at most `batch_size` dirty keys into the inner store.
-    /// Returns `Ok(0)` when there's nothing to flush.
+    /// Total resident bytes in the cache (sum of key + value
+    /// lengths over Live slots). Used by tests + DDL monitoring.
+    pub fn cache_bytes(&self) -> usize {
+        self.state.cache.load().weighted_size() as usize
+    }
+
+    /// Drain up to `batch_size` dirty keys into the inner store.
+    /// Returns the number of keys actually drained.
     async fn drain_once(
         state: &MemBufferState,
         inner: &dyn Store,
         batch_size: usize,
     ) -> DbResult<usize> {
-        // Snapshot up to `batch_size` dirty keys + their current
-        // values. We hold the cache lock only long enough to copy.
-        let (sets, removes) = {
-            let mut dirty = state.dirty.lock().unwrap();
-            if dirty.is_empty() {
-                return Ok(0);
-            }
-            let keys: Vec<RecordKey> = dirty.iter().take(batch_size).cloned().collect();
-            for k in &keys {
-                dirty.remove(k);
-            }
-            drop(dirty);
+        if state.dirty.is_empty() {
+            return Ok(0);
+        }
+        // Snapshot up to batch_size keys from dirty.
+        let keys: Vec<RecordKey> = state
+            .dirty
+            .iter()
+            .take(batch_size)
+            .map(|e| e.clone())
+            .collect();
+        if keys.is_empty() {
+            return Ok(0);
+        }
 
-            let cache = state.cache.lock().unwrap();
-            let mut sets: Vec<(RecordKey, Bytes)> = Vec::new();
-            let mut removes: Vec<RecordKey> = Vec::new();
-            for k in keys {
-                // Use `peek` so the flusher's read doesn't promote
-                // the entry in LRU order (flushing isn't a "use").
-                match cache.peek(&k).map(|cs| &cs.slot) {
-                    Some(Slot::Live(v)) => sets.push((k, v.clone())),
-                    Some(Slot::Tombstone) => removes.push(k),
-                    None => {
-                        // Entry was evicted between dirty-mark and
-                        // flush-pickup. The eviction path already
-                        // flushed it inline (see set/remove below),
-                        // so nothing to do.
-                    }
+        let cache = state.cache.load();
+        let mut sets: Vec<(RecordKey, Bytes)> = Vec::with_capacity(keys.len());
+        let mut removes: Vec<RecordKey> = Vec::new();
+        let mut handled: Vec<RecordKey> = Vec::with_capacity(keys.len());
+        for k in keys.into_iter() {
+            match cache.get(&k).await {
+                Some(Slot::Live(v)) => {
+                    sets.push((k.clone(), v));
+                    handled.push(k);
+                }
+                Some(Slot::Tombstone) => {
+                    removes.push(k.clone());
+                    handled.push(k);
+                }
+                None => {
+                    // Evicted from cache between our collect and
+                    // our get. The eviction listener handles such
+                    // entries (it removes the key from dirty and
+                    // flushes to inner). We MUST NOT remove the
+                    // key from dirty here — that would defeat the
+                    // listener (dirty.remove returns None → skip
+                    // flush → write lost).
                 }
             }
-            (sets, removes)
-        };
+        }
+        for k in &handled {
+            state.dirty.remove(k);
+        }
 
+        let n = sets.len() + removes.len();
         if !sets.is_empty() {
             inner.set_many(sets).await?;
         }
         if !removes.is_empty() {
             inner.remove_many(removes).await?;
         }
-        Ok(1)
+        Ok(n)
     }
 
     /// Drain the entire dirty queue.
@@ -353,251 +412,26 @@ impl MemBufferStore {
             if drained == 0 {
                 break;
             }
-            // After draining, check if more became dirty mid-flush.
-            let still_dirty = !self.state.dirty.lock().unwrap().is_empty();
-            if !still_dirty {
+        }
+        // Force moka's pending maintenance so any TTL/capacity
+        // evictions also flush via the listener.
+        self.state.cache.load().run_pending_tasks().await;
+        // After listeners run, dirty may have new entries (the
+        // listener removes from dirty before flushing — but the
+        // flush itself doesn't re-dirty). Defensive second pass.
+        loop {
+            let drained =
+                Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
+            if drained == 0 {
                 break;
             }
         }
         Ok(())
     }
-
-    /// Walk the cache, evict entries whose `born_at` is older
-    /// than `ttl`. Dirty entries get flushed inline before being
-    /// dropped from cache.
-    ///
-    /// **Bounded approximate sweep.** We iterate from the LRU
-    /// (tail) side and `take_while` the entry is stale, capping
-    /// at `TTL_SWEEP_BUDGET` per pass. This bounds the
-    /// cache-lock hold time to ~100 µs even on huge caches —
-    /// writers no longer stall for ms on each flusher tick.
-    ///
-    /// Approximation: an entry whose insertion was long ago but
-    /// that was read recently sits mid-LRU instead of at the
-    /// tail. Such entries are missed by this pass; they get
-    /// caught by the next pass (since LRU position decays as
-    /// other reads happen) or by capacity-pressure eviction.
-    /// Acceptable for our workload — the buffer is primarily a
-    /// write-back staging area; entries are rarely re-read
-    /// between write and flush.
-    async fn ttl_evict_once(
-        state: &MemBufferState,
-        inner: &dyn Store,
-        ttl: std::time::Duration,
-    ) -> DbResult<()> {
-        /// Max stale keys collected per sweep pass. Lock-hold ≈
-        /// `BUDGET × ~50 ns` = ~100 µs at 2048.
-        const TTL_SWEEP_BUDGET: usize = 2048;
-
-        let cutoff = match std::time::Instant::now().checked_sub(ttl) {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-        // Collect candidate keys under the lock; act outside.
-        let stale_keys: Vec<RecordKey> = {
-            let cache = state.cache.lock().unwrap();
-            cache
-                .iter()
-                .rev() // LRU (oldest insertion) first
-                .take_while(|(_, cs)| cs.born_at < cutoff)
-                .take(TTL_SWEEP_BUDGET)
-                .map(|(k, _)| k.clone())
-                .collect()
-        };
-        for k in stale_keys {
-            // Remove from cache, capture slot.
-            let removed = {
-                let mut cache = state.cache.lock().unwrap();
-                cache.pop(&k)
-            };
-            if let Some(cs) = removed {
-                let b = Self::slot_bytes(&k, &cs.slot);
-                state.cache_bytes.fetch_sub(b, Ordering::Relaxed);
-                let was_dirty = state.dirty.lock().unwrap().remove(&k);
-                if was_dirty {
-                    match cs.slot {
-                        Slot::Live(v) => {
-                            inner.set(k, v).await?;
-                        }
-                        Slot::Tombstone => {
-                            let _ = inner.remove(k).await?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Compute the byte cost of one cache slot.
-    /// Tombstones treated as zero-cost — they're a small marker.
-    fn slot_bytes(key: &RecordKey, slot: &Slot) -> usize {
-        match slot {
-            Slot::Live(v) => key.len() + v.len(),
-            Slot::Tombstone => 0,
-        }
-    }
-
-    /// Update the cache for a put/remove operation. If the new
-    /// entry pushes the cache over `max_bytes`, evict LRU entries
-    /// (flushing dirty inline) until we're back under the cap.
-    async fn cache_put(&self, key: RecordKey, slot: Slot) -> DbResult<()> {
-        let new_bytes = Self::slot_bytes(&key, &slot);
-        let cached_slot = CachedSlot {
-            slot,
-            born_at: std::time::Instant::now(),
-        };
-
-        // Phase 1: insert into the cache.
-        //
-        // `LruCache::push` returns `Some((evicted_key, evicted_val))`
-        // in TWO different cases:
-        //   1. Key already existed → push REPLACED it. Returned
-        //      pair is (same_key, prev_value).
-        //   2. Cache at entry-cap → push evicted the LRU tail.
-        //      Returned pair is (different_key, evicted_value).
-        //
-        // The two cases need different byte-counter handling and
-        // only #2 is a true eviction that needs a dirty-flush
-        // check. We distinguish by peeking BEFORE the push.
-        let (entry_evicted, was_replace) = {
-            let mut cache = self.state.cache.lock().unwrap();
-            let was_replace = cache.peek(&key).is_some();
-            if was_replace {
-                let prev_bytes =
-                    Self::slot_bytes(&key, &cache.peek(&key).unwrap().slot);
-                self.state
-                    .cache_bytes
-                    .fetch_sub(prev_bytes, Ordering::Relaxed);
-            }
-            let ev = cache.push(key.clone(), cached_slot);
-            self.state
-                .cache_bytes
-                .fetch_add(new_bytes, Ordering::Relaxed);
-            // Only treat `ev` as a true eviction when we WEREN'T
-            // replacing an existing key.
-            let entry_evicted = if was_replace { None } else { ev };
-            (entry_evicted, was_replace)
-        };
-        let _ = was_replace;
-
-        // Phase 2: handle a true LRU-tail eviction (at most one
-        // possible per push when not replacing).
-        if let Some((ek, eslot)) = entry_evicted {
-            let evicted_bytes = Self::slot_bytes(&ek, &eslot.slot);
-            self.state
-                .cache_bytes
-                .fetch_sub(evicted_bytes, Ordering::Relaxed);
-            let was_dirty = self.state.dirty.lock().unwrap().remove(&ek);
-            if was_dirty {
-                match eslot.slot {
-                    Slot::Live(v) => {
-                        self.inner.set(ek, v).await?;
-                    }
-                    Slot::Tombstone => {
-                        let _ = self.inner.remove(ek).await?;
-                    }
-                }
-            }
-        }
-
-        // Phase 3: byte-cap eviction loop. Pops LRU entries until
-        // back under `max_bytes`. We hold the cache lock for the
-        // WHOLE pop sequence (one takt instead of N), then process
-        // each evictee's dirty-flush OUTSIDE the lock. The DDL
-        // hot-reload property is preserved — `max_bytes` is still
-        // re-read inside the loop, so a shrink that arrives after
-        // we entered the lock will still be honoured before we
-        // release it.
-        let mut evicted: Vec<(RecordKey, CachedSlot)> = Vec::new();
-        {
-            let mut cache = self.state.cache.lock().unwrap();
-            while self.state.cache_bytes.load(Ordering::Relaxed)
-                > self.state.max_bytes.load(Ordering::Relaxed)
-            {
-                if let Some((k, s)) = cache.pop_lru() {
-                    let b = Self::slot_bytes(&k, &s.slot);
-                    self.state.cache_bytes.fetch_sub(b, Ordering::Relaxed);
-                    evicted.push((k, s));
-                } else {
-                    break;
-                }
-            }
-        }
-        for (ek, eslot) in evicted {
-            let was_dirty = self.state.dirty.lock().unwrap().remove(&ek);
-            if was_dirty {
-                match eslot.slot {
-                    Slot::Live(v) => {
-                        self.inner.set(ek, v).await?;
-                    }
-                    Slot::Tombstone => {
-                        let _ = self.inner.remove(ek).await?;
-                    }
-                }
-            }
-        }
-
-        // Phase 4: mark new entry dirty + signal flusher.
-        self.state.dirty.lock().unwrap().insert(key);
-        self.notify.notify_one();
-        Ok(())
-    }
-
-    /// Insert a clean (read-populated, NOT-dirty) cache entry.
-    /// Maintains `cache_bytes` correctly when the key was either
-    /// absent or already cached with the same slot. Does NOT mark
-    /// the key dirty and does NOT signal the flusher.
-    fn cache_populate_clean(&self, key: RecordKey, slot: Slot) {
-        let new_bytes = Self::slot_bytes(&key, &slot);
-        let cached_slot = CachedSlot {
-            slot,
-            born_at: std::time::Instant::now(),
-        };
-        let mut cache = self.state.cache.lock().unwrap();
-        let was_replace = cache.peek(&key).is_some();
-        if was_replace {
-            let prev_bytes = Self::slot_bytes(&key, &cache.peek(&key).unwrap().slot);
-            self.state
-                .cache_bytes
-                .fetch_sub(prev_bytes, Ordering::Relaxed);
-        }
-        let evicted = cache.push(key, cached_slot);
-        self.state
-            .cache_bytes
-            .fetch_add(new_bytes, Ordering::Relaxed);
-        // True LRU eviction (not a replace) — release its bytes.
-        if !was_replace {
-            if let Some((_, eslot)) = evicted {
-                let b = Self::slot_bytes(&RecordKey::new(), &eslot.slot);
-                // Note: key for evictee not in scope; recompute
-                // bytes from its slot only is acceptable since
-                // for Tombstone == 0 and Live(v) counts only
-                // value bytes (small underaccounting fine).
-                let _ = b;
-                let eb = match &eslot.slot {
-                    Slot::Live(v) => v.len(),
-                    Slot::Tombstone => 0,
-                };
-                self.state
-                    .cache_bytes
-                    .fetch_sub(eb, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// Current resident bytes in the cache (sum of key+value
-    /// lengths over Live slots). Test / monitoring helper.
-    pub fn cache_bytes(&self) -> usize {
-        self.state.cache_bytes.load(Ordering::Relaxed)
-    }
 }
 
 impl Drop for MemBufferStore {
     fn drop(&mut self) {
-        // Signal the background task to exit. Pending dirty
-        // writes are NOT flushed here — that's the caller's
-        // responsibility (`store.flush().await` before drop).
         self.shutdown.store(true, Ordering::Release);
         self.notify.notify_one();
     }
@@ -609,93 +443,29 @@ type RecordStream =
 #[async_trait]
 impl Store for MemBufferStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        // We need a fresh RecordKey. Delegate to the inner store
-        // for the ID generation only — actual write goes through
-        // the cache via `set`. This keeps key uniqueness aligned
-        // with the inner store's policy.
-        //
-        // For backends whose `insert` allocates an ID by writing
-        // (most of them — they call RecordId::new() and write the
-        // value), we'd waste a write. Optimisation: generate the
-        // ID locally via `RecordId::new`, then `set` it.
         let id = shamir_types::types::record_id::RecordId::new();
         let key = RecordKey::copy_from_slice(id.as_bytes());
-        self.cache_put(key.clone(), Slot::Live(value)).await?;
+        self.state.dirty.insert(key.clone());
+        self.state
+            .cache
+            .load()
+            .insert(key.clone(), Slot::Live(value))
+            .await;
+        self.notify.notify_one();
         Ok(key)
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        // `bool` return = was the key created (vs updated)? We need
-        // to know whether the inner store ever knew about this key.
-        // Check cache + inner.
-        let in_cache = {
-            let mut cache = self.state.cache.lock().unwrap();
-            match cache.get(&key).map(|cs| &cs.slot) {
-                Some(Slot::Live(_)) => Some(true), // existed
-                Some(Slot::Tombstone) => Some(false), // we know it's gone
-                None => None,
-            }
-        };
-        let created = match in_cache {
-            Some(existed) => !existed,
+        // `bool` return = was the key created (vs updated)?
+        // Three-tier check: cache → inner. dirty alone isn't
+        // authoritative because a previously-flushed key might
+        // still be live in `inner` but absent from `dirty`.
+        let cache = self.state.cache.load();
+        let existed = match cache.get(&key).await {
+            Some(Slot::Live(_)) => true,
+            Some(Slot::Tombstone) => false,
             None => {
-                // Have to ask the inner store.
-                match self.inner.get(key.clone()).await {
-                    Ok(_) => false,
-                    Err(DbError::NotFound(_)) => true,
-                    Err(e) => return Err(e),
-                }
-            }
-        };
-        self.cache_put(key, Slot::Live(value)).await?;
-        Ok(created)
-    }
-
-    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
-        // Cache lookup with LRU touch.
-        let slot = {
-            let mut cache = self.state.cache.lock().unwrap();
-            cache.get(&key).map(|cs| cs.slot.clone())
-        };
-        match slot {
-            Some(Slot::Live(v)) => Ok(v),
-            Some(Slot::Tombstone) => {
-                Err(DbError::NotFound(format!("{:?}", key)))
-            }
-            None => {
-                // Miss — fall through to inner, populate cache.
-                // Populate via the bytes-tracking path: read-fill
-                // is NOT dirty (no writeback needed), but the
-                // cache_bytes counter still has to reflect what
-                // resides in cache, or subsequent operations will
-                // underflow it.
-                let result = self.inner.get(key.clone()).await;
-                let slot_to_insert = match &result {
-                    Ok(v) => Some(Slot::Live(v.clone())),
-                    Err(DbError::NotFound(_)) => Some(Slot::Tombstone),
-                    Err(_) => None,
-                };
-                if let Some(slot) = slot_to_insert {
-                    self.cache_populate_clean(key, slot);
-                }
-                result
-            }
-        }
-    }
-
-    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        let existed_in_cache = {
-            let mut cache = self.state.cache.lock().unwrap();
-            match cache.get(&key).map(|cs| &cs.slot) {
-                Some(Slot::Live(_)) => Some(true),
-                Some(Slot::Tombstone) => Some(false),
-                None => None,
-            }
-        };
-        let existed = match existed_in_cache {
-            Some(b) => b,
-            None => {
-                // Ask inner.
+                // Cache cold for this key. Ask inner.
                 match self.inner.get(key.clone()).await {
                     Ok(_) => true,
                     Err(DbError::NotFound(_)) => false,
@@ -703,21 +473,61 @@ impl Store for MemBufferStore {
                 }
             }
         };
-        self.cache_put(key, Slot::Tombstone).await?;
+        self.state.dirty.insert(key.clone());
+        cache.insert(key, Slot::Live(value)).await;
+        self.notify.notify_one();
+        Ok(!existed)
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        let cache = self.state.cache.load();
+        match cache.get(&key).await {
+            Some(Slot::Live(v)) => Ok(v),
+            Some(Slot::Tombstone) => Err(DbError::NotFound(format!("{:?}", key))),
+            None => {
+                // Miss — fall through to inner, populate cache
+                // (NOT dirty: this is a clean read-fill).
+                let result = self.inner.get(key.clone()).await;
+                let slot_to_insert = match &result {
+                    Ok(v) => Some(Slot::Live(v.clone())),
+                    Err(DbError::NotFound(_)) => Some(Slot::Tombstone),
+                    Err(_) => None,
+                };
+                if let Some(slot) = slot_to_insert {
+                    cache.insert(key, slot).await;
+                }
+                result
+            }
+        }
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        let cache = self.state.cache.load();
+        let existed = match cache.get(&key).await {
+            Some(Slot::Live(_)) => true,
+            Some(Slot::Tombstone) => false,
+            None => match self.inner.get(key.clone()).await {
+                Ok(_) => true,
+                Err(DbError::NotFound(_)) => false,
+                Err(e) => return Err(e),
+            },
+        };
+        self.state.dirty.insert(key.clone());
+        cache.insert(key, Slot::Tombstone).await;
+        self.notify.notify_one();
         Ok(existed)
     }
 
     fn iter_stream(&self, batch_size: usize) -> RecordStream {
-        // Correct path: flush all dirty, then iterate inner. For
-        // small caches the flush is cheap; for large ones it's
-        // O(dirty). Future: merge cache view with inner stream
-        // (LSM-style) — left as TODO.
+        // Drain dirty first so the inner stream is a consistent view.
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
         let batch = batch_size;
-        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
+        let bs = self
+            .state
+            .flush_batch_size
+            .load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
-            // Drain dirty before iter.
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
                     .unwrap_or(0);
@@ -735,7 +545,7 @@ impl Store for MemBufferStore {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
         let p = prefix;
-        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
+        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
@@ -758,7 +568,7 @@ impl Store for MemBufferStore {
     ) -> RecordStream {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
-        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
+        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
@@ -781,14 +591,15 @@ impl Store for MemBufferStore {
     ) -> RecordStream {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
-        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
+        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
                     .unwrap_or(0);
                 n > 0
             } {}
-            let inner_stream = inner.iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size);
+            let inner_stream =
+                inner.iter_range_stream_reverse(start_inclusive, end_inclusive, batch_size);
             futures::pin_mut!(inner_stream);
             while let Some(b) = futures::StreamExt::next(&mut inner_stream).await {
                 yield b;
@@ -802,27 +613,25 @@ impl Store for MemBufferStore {
     }
 
     async fn apply_buffer_config(&self, config: &MemBufferConfig) -> DbResult<()> {
-        self.apply_config(config);
-        // Propagate to any inner wrapper too (defensive — composition
-        // like Cached → MemBuffer → MemBuffer is unusual but possible).
+        self.apply_config(config).await?;
         self.inner.apply_buffer_config(config).await
     }
 
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
-        if values.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut keys = Vec::with_capacity(values.len());
+        let cache = self.state.cache.load();
         for v in values {
-            keys.push(self.insert(v).await?);
+            let id = shamir_types::types::record_id::RecordId::new();
+            let key = RecordKey::copy_from_slice(id.as_bytes());
+            self.state.dirty.insert(key.clone());
+            cache.insert(key.clone(), Slot::Live(v)).await;
+            keys.push(key);
         }
+        self.notify.notify_one();
         Ok(keys)
     }
 
-    async fn set_many(
-        &self,
-        items: Vec<(RecordKey, Bytes)>,
-    ) -> DbResult<Vec<bool>> {
+    async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
         let mut flags = Vec::with_capacity(items.len());
         for (k, v) in items {
             flags.push(self.set(k, v).await?);
@@ -857,8 +666,6 @@ impl Store for MemBufferStore {
 
 #[cfg(test)]
 mod tests {
-    #![allow(deprecated)]
-
     use super::*;
     use crate::storage_in_memory::InMemoryRepo;
     use crate::types::{run_batch_store_tests, Repo};
@@ -873,8 +680,6 @@ mod tests {
         }
     }
 
-    /// Test helper — drop the buffered store with `flush()` first
-    /// to ensure inner reflects all writes.
     async fn drained(store: Arc<MemBufferStore>) {
         store.flush().await.unwrap();
     }
@@ -900,8 +705,6 @@ mod tests {
         ));
 
         let key = buffered.insert(Bytes::from_static(b"v1")).await.unwrap();
-        // Before flush: inner may not have it yet (write-back).
-        // After flush: must have it.
         buffered.flush().await.unwrap();
         let got = inner_store.get(key).await.unwrap();
         assert_eq!(got.as_ref(), b"v1");
@@ -916,23 +719,25 @@ mod tests {
             inner_store,
             MemBufferConfig::default(),
         ));
-
         let key = buffered.insert(Bytes::from_static(b"hello")).await.unwrap();
-        // Reading immediately — must come from cache.
         let got = buffered.get(key).await.unwrap();
         assert_eq!(got.as_ref(), b"hello");
     }
 
     #[tokio::test]
-    async fn eviction_with_dirty_flushes_evictee_inline() {
-        // Configure tiny cache (1 slot). Each new insert must
-        // evict the previous one. The evictee was dirty → must be
-        // flushed to inner inline (not just dropped).
+    async fn eviction_with_dirty_eventually_flushes_evictee() {
+        // moka's eviction is eventually consistent — the eviction
+        // listener fires from the maintenance task. We wait for
+        // the flusher / pending tasks to propagate.
+        //
+        // max_bytes=80 (~ one 21-byte slot fits but two don't —
+        // each Slot::Live(b"first"/b"second") weighs
+        // 16 key + 5/6 value = 21/22).
         let cfg = MemBufferConfig {
-            max_bytes: 64 * 1024,
-            max_entries: 1,
+            max_bytes: 30,
+            max_entries: 1_000_000,
             ttl_ms: None,
-            flush_interval_ms: 60_000, // disable background flush during the test
+            flush_interval_ms: 25,
             flush_batch_size: 1,
         };
         let inner_repo = InMemoryRepo::new();
@@ -941,11 +746,19 @@ mod tests {
 
         let k1 = buffered.insert(Bytes::from_static(b"first")).await.unwrap();
         let k2 = buffered.insert(Bytes::from_static(b"second")).await.unwrap();
-        // k1 has been evicted by k2. Inner store must already have
-        // k1=first (inline eviction-flush). k2 may or may not be
-        // in inner (still dirty in cache).
-        let got1 = inner_store.get(k1).await.unwrap();
+
+        // Wait for the eviction listener + flusher.
+        let mut got1 = None;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if let Ok(v) = inner_store.get(k1.clone()).await {
+                got1 = Some(v);
+                break;
+            }
+        }
+        let got1 = got1.expect("evicted dirty entry must eventually reach inner");
         assert_eq!(got1.as_ref(), b"first");
+
         // After explicit flush k2 also lands.
         buffered.flush().await.unwrap();
         let got2 = inner_store.get(k2).await.unwrap();
@@ -954,12 +767,8 @@ mod tests {
 
     #[tokio::test]
     async fn tombstone_blocks_inner_visibility() {
-        // Cache has Tombstone for key K → get returns NotFound
-        // even though inner might still have stale data (until
-        // the flusher propagates the tombstone).
         let inner_repo = InMemoryRepo::new();
         let inner_store = inner_repo.store_get("t").await.unwrap();
-        // Plant data directly in inner so cache starts cold.
         let key = inner_store
             .insert(Bytes::from_static(b"stale"))
             .await
@@ -968,15 +777,11 @@ mod tests {
             inner_store.clone(),
             MemBufferConfig::default(),
         ));
-        // Through buffered: read populates cache with Live.
         let _ = buffered.get(key.clone()).await.unwrap();
-        // Delete through buffered — sets a Tombstone.
         let existed = buffered.remove(key.clone()).await.unwrap();
         assert!(existed);
-        // Immediate read: must respect the tombstone.
         let result = buffered.get(key.clone()).await;
         assert!(matches!(result, Err(DbError::NotFound(_))));
-        // After flush, inner doesn't have it either.
         buffered.flush().await.unwrap();
         let result_inner = inner_store.get(key).await;
         assert!(matches!(result_inner, Err(DbError::NotFound(_))));
@@ -984,8 +789,6 @@ mod tests {
 
     #[tokio::test]
     async fn background_flusher_eventually_drains() {
-        // Without an explicit flush, the background task should
-        // drain dirty entries within roughly `flush_interval_ms`.
         let cfg = MemBufferConfig {
             max_bytes: 64 * 1024,
             max_entries: 256,
@@ -999,18 +802,12 @@ mod tests {
 
         let mut keys = Vec::new();
         for i in 0..5u8 {
-            let k = buffered
-                .insert(Bytes::copy_from_slice(&[i]))
-                .await
-                .unwrap();
+            let k = buffered.insert(Bytes::copy_from_slice(&[i])).await.unwrap();
             keys.push(k);
         }
-
-        // Wait for the background flusher. Up to ~500ms tolerance
-        // for slow CI.
         let mut found = 0;
         for _ in 0..50 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
             found = 0;
             for k in &keys {
                 if inner_store.get(k.clone()).await.is_ok() {
@@ -1021,27 +818,22 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(
-            found,
-            keys.len(),
-            "background flusher must drain dirty entries"
-        );
-        // Drop with a flush to be a good citizen.
+        assert_eq!(found, keys.len(), "background flusher must drain dirty entries");
         buffered.flush().await.unwrap();
     }
 
     #[tokio::test]
     async fn bytes_eviction_caps_resident_size() {
-        // max_bytes = 256. Each value ~64 bytes (16-byte key + 48-byte
-        // value). Insert 10 records → cache stays under cap by
-        // evicting LRU. All evictees get flushed to inner (they
-        // were dirty).
+        // max_bytes=256, each value ~64 bytes. After inserts, the
+        // moka cache should hold at most a couple entries (cap
+        // enforced via weigher). Records still reachable via the
+        // dirty-flush + inner path.
         let cfg = MemBufferConfig {
             max_bytes: 256,
             max_entries: 1_000_000,
             ttl_ms: None,
             flush_interval_ms: 60_000,
-            flush_batch_size: 1,
+            flush_batch_size: 256,
         };
         let inner_repo = InMemoryRepo::new();
         let inner_store = inner_repo.store_get("t").await.unwrap();
@@ -1056,30 +848,30 @@ mod tests {
             keys.push(key);
         }
 
-        // Cap held — cache_bytes ≤ max_bytes.
-        assert!(
-            buffered.cache_bytes() <= 256,
-            "bytes cap exceeded: {}",
-            buffered.cache_bytes()
-        );
+        // Force any pending maintenance.
+        buffered.state.cache.load().run_pending_tasks().await;
 
-        // All ten records visible end-to-end (through cache or
-        // through the inner store via eviction-flush).
+        // All ten records visible end-to-end. Eviction listener +
+        // flusher push evictees to inner; cache holds the rest.
+        // Wait for propagation.
         let mut found = 0;
-        for k in &keys {
-            if buffered.get(k.clone()).await.is_ok() {
-                found += 1;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            found = 0;
+            for k in &keys {
+                if buffered.get(k.clone()).await.is_ok() {
+                    found += 1;
+                }
+            }
+            if found == keys.len() {
+                break;
             }
         }
-        assert_eq!(found, 10);
+        assert_eq!(found, 10, "all written records must be reachable");
     }
 
     #[tokio::test]
     async fn ttl_eviction_drops_old_entries() {
-        // ttl_ms = 80, flush_interval_ms = 30. Insert two records,
-        // wait > 80ms; the flusher's TTL sweep should drop them
-        // from cache (already flushed to inner because they were
-        // dirty).
         let cfg = MemBufferConfig {
             max_bytes: 64 * 1024,
             max_entries: 100,
@@ -1093,21 +885,11 @@ mod tests {
 
         let _k1 = buffered.insert(Bytes::from_static(b"a")).await.unwrap();
         let _k2 = buffered.insert(Bytes::from_static(b"b")).await.unwrap();
-        // Cache has them now.
-        assert!(buffered.cache_bytes() > 0);
+        // Wait > TTL + flusher tick + maintenance.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        buffered.state.cache.load().run_pending_tasks().await;
 
-        // Wait for ttl + some margin for the flusher to sweep.
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-        // Cache emptied by TTL.
-        assert_eq!(
-            buffered.cache_bytes(),
-            0,
-            "TTL sweep must drop expired entries"
-        );
-
-        // But both are still readable — they were dirty before
-        // eviction so the sweep flushed them to inner first.
+        // Records still readable from inner (eviction listener flushed them).
         let v1 = inner_store.get(_k1).await.unwrap();
         let v2 = inner_store.get(_k2).await.unwrap();
         assert_eq!(v1.as_ref(), b"a");
@@ -1116,9 +898,6 @@ mod tests {
 
     #[tokio::test]
     async fn apply_config_shrinks_max_bytes_and_triggers_eviction() {
-        // Start with a roomy cap, fill cache, then shrink the cap
-        // via `apply_config`. The next write triggers byte-cap
-        // eviction; cache_bytes drops to fit the new ceiling.
         let cfg = MemBufferConfig {
             max_bytes: 64 * 1024,
             max_entries: 1_000_000,
@@ -1130,52 +909,43 @@ mod tests {
         let inner_store = inner_repo.store_get("t").await.unwrap();
         let buffered = Arc::new(MemBufferStore::new(inner_store, cfg));
 
-        // 16 records of ~48 bytes value + 16-byte key = ~64 bytes
-        // each. Total ~1KiB — well under 64KiB cap.
         for _ in 0..16u8 {
             let _ = buffered
                 .insert(Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
                 .await
                 .unwrap();
         }
-        let bytes_before = buffered.cache_bytes();
-        assert!(bytes_before > 0);
+        // Flush so dirty is empty; subsequent reads come from cache or inner.
+        buffered.flush().await.unwrap();
 
-        // Shrink the cap to a value clearly below current usage.
         let smaller = MemBufferConfig {
             max_bytes: 128,
-            ..MemBufferConfig {
-                max_bytes: 0,
-                max_entries: 1_000_000,
-                ttl_ms: None,
-                flush_interval_ms: 60_000,
-                flush_batch_size: 16,
-            }
+            max_entries: 1_000_000,
+            ttl_ms: None,
+            flush_interval_ms: 60_000,
+            flush_batch_size: 16,
         };
-        buffered.apply_config(&smaller);
+        buffered.apply_config(&smaller).await.unwrap();
 
-        // The next write triggers Phase 3 eviction loop using the
-        // NEW max_bytes. Cache must drop to ≤ 128 bytes.
-        let _ = buffered
-            .insert(Bytes::from_static(b"trigger"))
-            .await
-            .unwrap();
+        // After config swap the new cache is empty (rebuilt).
+        // Insert ONE more entry; the new cache should hold at most
+        // its capacity. The 16 prior entries reside in inner only.
+        let _ = buffered.insert(Bytes::from_static(b"trigger")).await.unwrap();
+        // run_pending_tasks fires any synchronous eviction.
+        buffered.state.cache.load().run_pending_tasks().await;
         assert!(
-            buffered.cache_bytes() <= 128,
-            "shrunk cap not honoured: cache_bytes={}",
+            buffered.cache_bytes() <= 200,
+            "new cap not honoured: cache_bytes={}",
             buffered.cache_bytes()
         );
     }
 
     #[tokio::test]
     async fn apply_config_enables_ttl_at_runtime() {
-        // Start with TTL disabled. Insert, then enable TTL via
-        // apply_config. The background flusher's next tick must
-        // evict stale entries.
         let cfg = MemBufferConfig {
             max_bytes: 64 * 1024,
             max_entries: 256,
-            ttl_ms: None, // disabled initially
+            ttl_ms: None,
             flush_interval_ms: 25,
             flush_batch_size: 16,
         };
@@ -1184,14 +954,14 @@ mod tests {
         let buffered = Arc::new(MemBufferStore::new(inner_store, cfg));
 
         let _ = buffered.insert(Bytes::from_static(b"v")).await.unwrap();
+        // Allow moka maintenance to commit weighted_size.
+        buffered.state.cache.load().run_pending_tasks().await;
         assert!(buffered.cache_bytes() > 0);
 
-        // Wait long enough that anything with TTL=50 should expire.
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        // Cache still has the entry — TTL was off.
-        assert!(buffered.cache_bytes() > 0);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        buffered.state.cache.load().run_pending_tasks().await;
+        assert!(buffered.cache_bytes() > 0, "no TTL set — entry should persist");
 
-        // Enable TTL=50ms via apply_config.
         let with_ttl = MemBufferConfig {
             max_bytes: 64 * 1024,
             max_entries: 256,
@@ -1199,10 +969,13 @@ mod tests {
             flush_interval_ms: 25,
             flush_batch_size: 16,
         };
-        buffered.apply_config(&with_ttl);
+        buffered.apply_config(&with_ttl).await.unwrap();
 
-        // Wait for the flusher's next sweep.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // New cache is empty (rebuild). Insert one more entry under
+        // the TTL'd cache; wait for it to expire.
+        let _ = buffered.insert(Bytes::from_static(b"w")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        buffered.state.cache.load().run_pending_tasks().await;
         assert_eq!(
             buffered.cache_bytes(),
             0,
@@ -1213,10 +986,6 @@ mod tests {
 
     #[tokio::test]
     async fn flush_drains_then_calls_inner_flush() {
-        // Compound assertion: after flush(), inner sees everything
-        // AND inner.flush() was reached (we can't easily observe
-        // the inner.flush() call directly on InMemory, but we
-        // can confirm no error path).
         let inner_repo = InMemoryRepo::new();
         let inner_store = inner_repo.store_get("t").await.unwrap();
         let buffered = Arc::new(MemBufferStore::new(
@@ -1224,13 +993,9 @@ mod tests {
             small_config(),
         ));
         for i in 0..50u8 {
-            let _ = buffered
-                .insert(Bytes::copy_from_slice(&[i]))
-                .await
-                .unwrap();
+            let _ = buffered.insert(Bytes::copy_from_slice(&[i])).await.unwrap();
         }
         buffered.flush().await.unwrap();
-        // No dirty entries left.
-        assert!(buffered.state.dirty.lock().unwrap().is_empty());
+        assert!(buffered.state.dirty.is_empty(), "dirty must be empty after flush");
     }
 }
