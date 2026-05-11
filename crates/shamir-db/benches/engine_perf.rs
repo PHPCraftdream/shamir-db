@@ -486,6 +486,39 @@ fn req_batch_independent_reads() -> BatchRequest {
 // Benchmark groups
 // --------------------------------------------------------------------------
 
+/// `BENCH_QUICK=1` switches every group to a fast-feedback regime:
+///   * sample_size = 10 (criterion minimum),
+///   * measurement_time = 1 s,
+///   * dataset sizes trimmed to a single representative point.
+///
+/// Cuts the full bench RUN from ~6 min to ~1.5 min. Acceptable for
+/// iterative perf work; for publishable numbers run without the
+/// env var.
+fn quick() -> bool {
+    std::env::var_os("BENCH_QUICK").is_some()
+}
+
+/// Dataset-size sweep — full when default, single point in quick mode.
+fn sweep_sizes() -> &'static [usize] {
+    if quick() {
+        &[1_000]
+    } else {
+        SIZES
+    }
+}
+
+/// Bulk-insert sweep for disk-backed bench groups. Each iter
+/// creates a fresh tempdir + opens the DB, so even the smaller
+/// sizes pay a ~1 s overhead per sample. In quick mode we drop
+/// to a single representative point.
+fn bulk_sweep() -> &'static [usize] {
+    if quick() {
+        &[100]
+    } else {
+        &[100, 1_000]
+    }
+}
+
 const SIZES: &[usize] = &[100, 1_000, 10_000];
 
 /// Bulk insert — measures pure write throughput (no scan). Each iter
@@ -494,7 +527,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("bulk_insert");
 
-    for &count in &[100usize, 1_000] {
+    for &count in bulk_sweep() {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.to_async(&rt).iter_custom(|iters| async move {
@@ -524,7 +557,7 @@ fn bench_set_existing_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("set_existing_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         let target = format!("u{:08}", n - 1);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
@@ -548,7 +581,7 @@ fn bench_set_existing_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("set_existing_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, true));
         let target = format!("u{:08}", n - 1);
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
@@ -571,7 +604,7 @@ fn bench_read_by_id_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("read_by_id_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -590,7 +623,7 @@ fn bench_read_by_id_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("read_by_id_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, true));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -611,7 +644,7 @@ fn bench_read_by_city_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("read_by_city_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -630,7 +663,7 @@ fn bench_read_by_city_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("read_by_city_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_city", "city", false).await;
@@ -655,7 +688,7 @@ fn bench_update_by_id_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("update_by_id_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -674,7 +707,7 @@ fn bench_update_by_id_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("update_by_id_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, true));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -695,7 +728,7 @@ fn bench_delete_by_id_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("delete_by_id_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.to_async(&rt).iter_custom(|iters| async move {
                 let mut total = Duration::ZERO;
@@ -717,7 +750,7 @@ fn bench_delete_by_id_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("delete_by_id_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.to_async(&rt).iter_custom(|iters| async move {
                 let mut total = Duration::ZERO;
@@ -741,7 +774,7 @@ fn bench_complex_filter(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("complex_filter");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -761,7 +794,7 @@ fn bench_order_limit(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("order_limit_top10");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -782,7 +815,7 @@ fn bench_count_all_no_filter(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("count_all_no_filter");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -801,7 +834,7 @@ fn bench_count_with_filter_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("count_with_filter_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -818,7 +851,7 @@ fn bench_count_with_filter_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("count_with_filter_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_city", "city", false).await;
@@ -841,7 +874,7 @@ fn bench_min_max_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("min_max_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -858,7 +891,7 @@ fn bench_min_max_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("min_max_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_score", "score", false).await;
@@ -881,7 +914,7 @@ fn bench_min_only_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("min_only_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -900,7 +933,7 @@ fn bench_min_only_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("min_only_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_sorted_index(&s, "users", "by_score", "score").await;
@@ -925,7 +958,7 @@ fn bench_order_limit_desc_with_sorted_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("order_limit_top10_desc_sorted_sled");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let shamir = rt.block_on(async {
             let s = fresh_db_sled(tempdir.path()).await;
@@ -956,7 +989,7 @@ fn bench_order_limit_desc_with_sorted_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("order_limit_top10_desc_sorted");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_sorted_index(&s, "users", "by_score", "score").await;
@@ -984,7 +1017,7 @@ fn bench_order_limit_asc_with_sorted_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("order_limit_top10_asc_sorted");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_sorted_index(&s, "users", "by_score", "score").await;
@@ -1009,7 +1042,7 @@ fn bench_order_limit_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("order_limit_top10_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             create_index(&s, "users", "by_score", "score", false).await;
@@ -1032,7 +1065,7 @@ fn bench_range_query_no_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_no_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(seeded(n, false));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.to_async(&rt).iter(|| {
@@ -1049,7 +1082,7 @@ fn bench_range_query_with_index(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_with_index");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let shamir = rt.block_on(async {
             let s = seeded(n, false).await;
             // Sorted index for range queries — equality (hash) index
@@ -1086,7 +1119,7 @@ fn bench_bulk_insert_sled(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(8));
 
-    for &count in &[100usize, 1_000] {
+    for &count in bulk_sweep() {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.to_async(&rt).iter_custom(|iters| async move {
@@ -1119,7 +1152,7 @@ macro_rules! bench_bulk_insert_for_backend {
             let mut group = c.benchmark_group($group);
             group.sample_size(10);
             group.measurement_time(Duration::from_secs(10));
-            for &count in &[100usize, 1_000] {
+            for &count in bulk_sweep() {
                 group.throughput(Throughput::Elements(count as u64));
                 group.bench_with_input(
                     BenchmarkId::from_parameter(count),
@@ -1181,7 +1214,7 @@ bench_bulk_insert_for_backend!(
 fn bench_bulk_insert_membuffer_in_memory(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("bulk_insert_membuffer_in_memory");
-    for &count in &[100usize, 1_000] {
+    for &count in bulk_sweep() {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.to_async(&rt).iter_custom(|iters| async move {
@@ -1209,7 +1242,7 @@ fn bench_bulk_insert_with_index_sled(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(10));
 
-    for &count in &[100usize, 1_000] {
+    for &count in bulk_sweep() {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.to_async(&rt).iter_custom(|iters| async move {
@@ -1236,7 +1269,7 @@ fn bench_range_query_no_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_no_index_sled");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let shamir = rt.block_on(async {
             let s = fresh_db_sled(tempdir.path()).await;
@@ -1261,7 +1294,7 @@ fn bench_range_query_with_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_with_index_sled");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let shamir = rt.block_on(async {
             let s = fresh_db_sled(tempdir.path()).await;
@@ -1288,7 +1321,7 @@ fn bench_range_query_narrow_no_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_narrow_no_index_sled");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let shamir = rt.block_on(async {
             let s = fresh_db_sled(tempdir.path()).await;
@@ -1312,7 +1345,7 @@ fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_narrow_with_index_sled");
 
-    for &n in SIZES {
+    for &n in sweep_sizes() {
         let tempdir = tempfile::TempDir::new().expect("tempdir");
         let shamir = rt.block_on(async {
             let s = fresh_db_sled(tempdir.path()).await;
@@ -1358,8 +1391,27 @@ fn bench_batch_multi_read(c: &mut Criterion) {
 // Driver
 // --------------------------------------------------------------------------
 
-criterion_group!(
-    benches,
+/// Construct a `Criterion` that respects `BENCH_QUICK`. In quick
+/// mode the global sample-size + measurement-time floors are
+/// dropped so every inline `group.sample_size(...)` /
+/// `group.measurement_time(...)` setter is overridden by the
+/// smaller defaults this returns. Without the env var, behaviour
+/// matches `Criterion::default()` exactly.
+fn quick_aware_criterion() -> Criterion {
+    let c = Criterion::default();
+    if quick() {
+        c.sample_size(10)
+            .measurement_time(Duration::from_secs(1))
+            .warm_up_time(Duration::from_millis(100))
+    } else {
+        c
+    }
+}
+
+criterion_group!{
+    name = benches;
+    config = quick_aware_criterion();
+    targets =
     bench_bulk_insert,
     bench_set_existing_no_index,
     bench_set_existing_with_index,
@@ -1404,6 +1456,6 @@ criterion_group!(
     bench_range_query_with_index_sled,
     bench_range_query_narrow_no_index_sled,
     bench_range_query_narrow_with_index_sled,
-    bench_batch_multi_read,
-);
+    bench_batch_multi_read
+}
 criterion_main!(benches);

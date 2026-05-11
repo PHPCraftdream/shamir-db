@@ -29,3 +29,22 @@ incremental = true
 debug = false
 strip = true
 panic = "abort"
+
+# `cargo bench` uses this profile by default. Inherits from release
+# but DROPS `lto = "fat"` — that single flag was 80%+ of the
+# 7-minute bench compile time in dev iteration. Without it the
+# bench binary compiles in ~1.5 minutes instead. The measurements
+# come out 5-15% pessimistic vs. fat-LTO numbers because
+# cross-crate inlining doesn't fire (planner/executor/storage
+# stay in separate codegen units), but for iterative perf work
+# the wall-clock saving wins.
+#
+# For "final" / publishable numbers run explicitly with the
+# release profile:
+#   cargo bench -p shamir-db --profile=release
+[profile.bench]
+inherits = "release"
+lto = false
+incremental = true
+# Keep `opt-level = 3` from release so hot inner loops still get
+# the same scalar/SIMD codegen — only cross-crate inlining is lost.
