@@ -327,6 +327,31 @@ impl Store for SledStore {
         })
     }
 
+    /// Vectored read: ONE `spawn_blocking`, N `tree.get` calls.
+    /// Saves N-1 tokio task hops vs the default loop on bulk index
+    /// lookups.
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tree = self.tree.clone();
+        spawn_blocking(move || -> DbResult<Vec<Option<Bytes>>> {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                match tree
+                    .get(&k[..])
+                    .map_err(|e| DbError::Storage(format!("SledDB get: {}", e)))?
+                {
+                    Some(val) => out.push(Some(Bytes::copy_from_slice(&val))),
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     /// Reverse range scan via sled's `Tree::range(...).rev()`.
     /// Cursor advances past the last yielded key on the upper side
     /// (`Bound::Excluded(cursor)` becomes the new upper).

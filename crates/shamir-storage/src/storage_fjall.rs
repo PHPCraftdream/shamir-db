@@ -147,6 +147,28 @@ impl Store for FjallStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keyspace = self.keyspace.clone();
+        task::spawn_blocking(move || -> DbResult<Vec<Option<Bytes>>> {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                match keyspace
+                    .get(&k[..])
+                    .map_err(|e| DbError::Storage(e.to_string()))?
+                {
+                    Some(slice) => out.push(Some(Bytes::copy_from_slice(&slice))),
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<bool> {

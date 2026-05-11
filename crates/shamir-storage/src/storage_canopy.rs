@@ -247,6 +247,36 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        spawn_blocking(move || -> DbResult<Vec<Option<Bytes>>> {
+            let tx = db
+                .begin_read()
+                .map_err(|e| DbError::Storage(format!("CanopyDB begin_read: {}", e)))?;
+            let tree = tx
+                .get_tree(table_name.as_bytes())
+                .map_err(|e| DbError::Storage(format!("CanopyDB get_tree: {}", e)))?
+                .ok_or_else(|| DbError::NotFound(table_name.clone()))?;
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                match tree
+                    .get(&k[..])
+                    .map_err(|e| DbError::Storage(format!("CanopyDB get: {}", e)))?
+                {
+                    Some(val) => out.push(Some(Bytes::copy_from_slice(&val))),
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();

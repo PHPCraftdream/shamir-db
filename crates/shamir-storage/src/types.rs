@@ -118,6 +118,31 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
         "data lost across flush"
     );
 
+    // ---- get_many -----------------------------------------------------
+    // Mix of hits (the just-set keys) and a missing key. Result must
+    // preserve input order: Some(bytes) per hit, None per miss.
+    let missing_id = shamir_types::types::record_id::RecordId::new();
+    let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
+    let probe_keys = vec![
+        keys[0].clone(),     // hit — was set to "updated-0"
+        missing_k.clone(),   // miss
+        new_k1.clone(),      // hit — set to "fresh-1"
+        new_k2.clone(),      // hit — set to "fresh-2"
+    ];
+    let got = store
+        .get_many(probe_keys.clone())
+        .await
+        .expect("get_many");
+    assert_eq!(got.len(), 4, "get_many length mismatch");
+    assert_eq!(got[0].as_deref(), Some(&b"updated-0"[..]));
+    assert_eq!(got[1], None, "missing key must be None");
+    assert_eq!(got[2].as_deref(), Some(&b"fresh-1"[..]));
+    assert_eq!(got[3].as_deref(), Some(&b"fresh-2"[..]));
+
+    // Empty input → empty output, no I/O.
+    let empty = store.get_many(Vec::new()).await.expect("get_many empty");
+    assert!(empty.is_empty());
+
     // ---- iter_range_stream_reverse ------------------------------------
     // Insert a small set of records with predictable keys, then walk
     // them via the reverse stream and assert order is high → low.
@@ -174,6 +199,28 @@ pub trait Store: Send + Sync {
 
     /// Retrieves a record's raw bytes by its `RecordKey`.
     async fn get(&self, key: RecordKey) -> DbResult<Bytes>;
+
+    /// Vectored read — fetch many records in one logical call.
+    ///
+    /// Returns a vector parallel to `keys`: `Some(bytes)` for hits,
+    /// `None` for keys that are not present (a missing key is NOT
+    /// a `DbError::NotFound` — the caller decides per-key). Other
+    /// storage-level errors fail the whole batch.
+    ///
+    /// Default impl loops over `self.get`, mapping NotFound to None.
+    /// Disk backends override with a single transactional read to
+    /// collapse N×`spawn_blocking` + N transaction setups into one.
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            match self.get(k).await {
+                Ok(b) => out.push(Some(b)),
+                Err(DbError::NotFound(_)) => out.push(None),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
 
     /// Removes a record by its `RecordKey`.
     async fn remove(&self, key: RecordKey) -> DbResult<bool>;

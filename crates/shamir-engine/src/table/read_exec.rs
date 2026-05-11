@@ -606,22 +606,23 @@ impl TableManager {
         let residual_cb: Option<Box<dyn FilterCallback>> =
             residual.map(|f| compile_filter(f, interner));
 
-        // 3. Fetch records and apply residual filter.
+        // 3. Vectored fetch + per-record residual filter. One round
+        //    trip to the data store via `Store::get_many`; stale
+        //    index entries materialise as `None` and are silently
+        //    skipped (same semantic as the previous NotFound branch).
+        let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
+        let records = self.table().get_many(&id_vec).await?;
         let mut matched: Vec<(RecordId, InnerValue)> =
-            Vec::with_capacity(record_ids.len());
-        for id in &record_ids {
-            match self.get(*id).await {
-                Ok(record) => {
-                    let passes = match &residual_cb {
-                        Some(cb) => cb.matches(&record, ctx),
-                        None => true,
-                    };
-                    if passes {
-                        matched.push((*id, record));
-                    }
+            Vec::with_capacity(id_vec.len());
+        for (id, opt) in id_vec.iter().zip(records) {
+            if let Some(record) = opt {
+                let passes = match &residual_cb {
+                    Some(cb) => cb.matches(&record, ctx),
+                    None => true,
+                };
+                if passes {
+                    matched.push((*id, record));
                 }
-                Err(shamir_storage::error::DbError::NotFound(_)) => continue,
-                Err(e) => return Err(e),
             }
         }
 
@@ -761,15 +762,18 @@ impl TableManager {
         };
 
         let records_scanned = ids.len() as u64;
+        // Vectored fetch of the ids we actually need (post-skip,
+        // pre-take). Stale ids → None; we collect Some until we hit
+        // `take`. One trip to the data store, regardless of K.
+        let needed: Vec<RecordId> = ids.into_iter().skip(skip).collect();
+        let fetched = self.table().get_many(&needed).await?;
         let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(take);
-        for id in ids.into_iter().skip(skip) {
+        for (id, opt) in needed.iter().zip(fetched) {
             if matched.len() == take {
                 break;
             }
-            match self.get(id).await {
-                Ok(record) => matched.push((id, record)),
-                Err(shamir_storage::error::DbError::NotFound(_)) => continue,
-                Err(e) => return Err(e),
+            if let Some(record) = opt {
+                matched.push((*id, record));
             }
         }
 
@@ -819,21 +823,20 @@ impl TableManager {
         let residual_cb: Option<Box<dyn FilterCallback>> =
             residual.map(|f| compile_filter(f, interner));
 
-        // 3. Fetch records by ID and apply residual filter
-        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(record_ids.len());
-        for id in &record_ids {
-            match self.get(*id).await {
-                Ok(record) => {
-                    let passes = match &residual_cb {
-                        Some(cb) => cb.matches(&record, ctx),
-                        None => true,
-                    };
-                    if passes {
-                        matched.push((*id, record));
-                    }
+        // 3. Vectored fetch + per-record residual filter. Stale
+        //    index entries materialise as None and are skipped.
+        let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
+        let records = self.table().get_many(&id_vec).await?;
+        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
+        for (id, opt) in id_vec.iter().zip(records) {
+            if let Some(record) = opt {
+                let passes = match &residual_cb {
+                    Some(cb) => cb.matches(&record, ctx),
+                    None => true,
+                };
+                if passes {
+                    matched.push((*id, record));
                 }
-                Err(shamir_storage::error::DbError::NotFound(_)) => continue, // stale index entry
-                Err(e) => return Err(e),
             }
         }
 
