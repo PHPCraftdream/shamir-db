@@ -1412,6 +1412,41 @@ fn bench_steady_state_insert(c: &mut Criterion) {
     group.finish();
 }
 
+/// High-QPS WAL: 1000 batches × 1 record each, against a fresh
+/// MemBuffer-wrapped DB. Each batch goes through
+/// `wal.begin` (info_store.set marker) -> data write -> counter
+/// update -> `wal.commit_async` (spawn task to remove marker).
+///
+/// Measures: per-batch overhead at high QPS, including spawn
+/// cost of commit_async. If `tokio::spawn` allocation dominates,
+/// switching to a long-lived drainer + channel would show here.
+fn bench_wal_high_qps(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("wal_high_qps");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(20));
+    group.throughput(Throughput::Elements(1_000));
+
+    group.bench_function("1000_single_record_batches", |b| {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let shamir = fresh_db_membuffer_in_memory().await;
+                let req = req_bulk_insert(0, 1);
+                let start = Instant::now();
+                for _ in 0..1_000 {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+                total += start.elapsed();
+                drop(shamir);
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
+
 /// Low-level micro: cost of one `MemBufferStore::get` on a warm
 /// cache (100 % hit, random key). Bypasses engine, planner,
 /// interner — measures pure cache-lookup path.
@@ -1565,6 +1600,7 @@ criterion_group!{
     bench_range_query_narrow_with_index_sled,
     bench_batch_multi_read,
     bench_cache_hit_get,
-    bench_steady_state_insert
+    bench_steady_state_insert,
+    bench_wal_high_qps
 }
 criterion_main!(benches);
