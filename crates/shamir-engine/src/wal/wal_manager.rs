@@ -97,6 +97,28 @@ impl WalManager {
         Ok(())
     }
 
+    /// Fire-and-forget version of `commit`. Spawns the marker
+    /// removal on the tokio runtime and returns the `JoinHandle`
+    /// without waiting. The caller can ACK its batch to the client
+    /// immediately; if the process dies before the spawned remove
+    /// lands, the next-open recovery sees the marker and runs the
+    /// idempotent targeted re-apply (records already there, hooks
+    /// rewrite the same posting entries).
+    ///
+    /// Cost saved per batch: one `info_store.remove` await. On
+    /// backends with eventual flush (sled / redb-Durability::None
+    /// / fjall) this is ~µs and not worth chasing. On per-commit-
+    /// fsync backends (persy / nebari / canopy) it's ~5-10 ms on
+    /// NTFS — meaningful.
+    pub fn commit_async(&self, txn_id: u64) -> tokio::task::JoinHandle<DbResult<()>> {
+        let info_store = self.info_store.clone();
+        let key = Self::marker_key(txn_id);
+        tokio::spawn(async move {
+            let _ = info_store.remove(key).await?;
+            Ok(())
+        })
+    }
+
     /// List every in-flight transaction found on disk. Empty on a
     /// cleanly-shut-down database. Called once on open / startup.
     pub async fn list_inflight(&self) -> DbResult<Vec<WalEntry>> {
@@ -209,6 +231,41 @@ mod tests {
         wal.commit(txn_id).await.unwrap();
         // Second commit on an already-removed marker — must not error.
         wal.commit(txn_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_async_eventually_removes_marker() {
+        let wal = fresh();
+        let txn_id = wal.fresh_txn_id();
+        wal.begin(txn_id, vec![]).await.unwrap();
+        assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
+
+        let handle = wal.commit_async(txn_id);
+        // Marker may or may not be gone yet — we don't block here
+        // (the point of commit_async). After awaiting the handle
+        // it MUST be gone.
+        handle.await.unwrap().unwrap();
+        let inflight = wal.list_inflight().await.unwrap();
+        assert!(
+            inflight.is_empty(),
+            "commit_async must remove the marker (got {} inflight)",
+            inflight.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_async_is_non_blocking_path() {
+        // Confirms commit_async returns a JoinHandle synchronously
+        // (i.e. it returns before the spawned task has a chance to
+        // do anything). The caller is therefore free to ACK its
+        // batch right after, without waiting on the marker remove.
+        let wal = fresh();
+        let txn_id = wal.fresh_txn_id();
+        wal.begin(txn_id, vec![]).await.unwrap();
+        let _handle: tokio::task::JoinHandle<DbResult<()>> = wal.commit_async(txn_id);
+        // We don't await — the test asserts the synchronous return
+        // shape only. The actual removal completes some time later;
+        // it's verified in commit_async_eventually_removes_marker.
     }
 
     #[tokio::test]

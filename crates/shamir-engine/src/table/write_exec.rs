@@ -190,6 +190,7 @@ impl TableManager {
         if let Some(id) = txn_id {
             self.wal().commit(id).await?;
         }
+        self.bump_write_counter(affected);
 
         // Persist any newly interned keys (set fields may have new keys)
         if affected > 0 {
@@ -270,6 +271,7 @@ impl TableManager {
         if let Some(id) = txn_id {
             self.wal().commit(id).await?;
         }
+        self.bump_write_counter(affected);
 
         // Flush the counter cache (delete decremented it).
         if affected > 0 {

@@ -28,7 +28,21 @@ pub struct TableManager {
     index_manager: IndexManager,
     sorted_indexes: SortedIndexManager,
     wal: Arc<WalManager>,
+    /// Monotonic counter of mutating operations since open. The
+    /// auto-verify background watchdog samples this; every
+    /// `AUTO_VERIFY_EVERY_N_WRITES` operations it spawns a verify
+    /// pass and logs anything unhealthy. See `bump_write_counter`.
+    write_counter: Arc<std::sync::atomic::AtomicU64>,
+    /// `true` when a background verify is in flight — prevents
+    /// multiple concurrent verifies piling up.
+    verify_running: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// How often the background watchdog runs a `verify` pass.
+/// Coarse — once per ~thousand mutating ops, regardless of batch
+/// size. Tuned to "noticeable problem within seconds" without
+/// noticeable overhead.
+const AUTO_VERIFY_EVERY_N_WRITES: u64 = 1024;
 
 impl Clone for TableManager {
     fn clone(&self) -> Self {
@@ -40,6 +54,8 @@ impl Clone for TableManager {
             index_manager: self.index_manager.clone(),
             sorted_indexes: self.sorted_indexes.clone(),
             wal: Arc::clone(&self.wal),
+            write_counter: Arc::clone(&self.write_counter),
+            verify_running: Arc::clone(&self.verify_running),
         }
     }
 }
@@ -70,6 +86,8 @@ impl TableManager {
             index_manager,
             sorted_indexes,
             wal,
+            write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         // Auto-recovery on open. Cheap on clean shutdown (one
@@ -126,7 +144,72 @@ impl TableManager {
             index_manager,
             sorted_indexes,
             wal,
+            write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Increment the watchdog counter for `n` writes. Every
+    /// `AUTO_VERIFY_EVERY_N_WRITES`-th increment spawns a
+    /// non-blocking background `verify()` and logs at WARN if it
+    /// reports inconsistency. Best-effort signal — does NOT block
+    /// the caller, does NOT auto-repair (user calls `repair()`
+    /// when ready).
+    pub fn bump_write_counter(&self, n: u64) {
+        use std::sync::atomic::Ordering;
+        if n == 0 {
+            return;
+        }
+        let prev = self.write_counter.fetch_add(n, Ordering::Relaxed);
+        let next = prev.saturating_add(n);
+        let crossed = prev / AUTO_VERIFY_EVERY_N_WRITES
+            != next / AUTO_VERIFY_EVERY_N_WRITES;
+        if !crossed {
+            return;
+        }
+        // Single-flight: skip if another verify is in flight.
+        if self
+            .verify_running
+            .compare_exchange(
+                false,
+                true,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        let self_clone = self.clone();
+        tokio::spawn(async move {
+            let result = self_clone.verify().await;
+            match result {
+                Ok(report) => {
+                    if !report.is_healthy() {
+                        log::warn!(
+                            "Background verify flagged inconsistency in '{}': {:?}",
+                            self_clone.name(),
+                            report,
+                        );
+                    }
+                }
+                Err(e) => log::warn!(
+                    "Background verify on '{}' failed: {}",
+                    self_clone.name(),
+                    e,
+                ),
+            }
+            self_clone
+                .verify_running
+                .store(false, Ordering::Release);
+        });
+    }
+
+    /// Whether a background verify is currently in flight. Test-
+    /// support accessor; users normally don't care.
+    pub fn is_background_verify_running(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.verify_running.load(Ordering::Acquire)
     }
 
     /// Public read-only access to the inner `Table` — used by
@@ -336,6 +419,12 @@ impl TableManager {
 
         // 5. Clear the WAL marker — durable batch from here on.
         self.wal.commit(txn_id).await?;
+
+        // 6. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES
+        //    operations a background verify fires and logs any
+        //    inconsistency. Non-blocking, single-flight, best-
+        //    effort signal.
+        self.bump_write_counter(ids.len() as u64);
 
         Ok(ids)
     }
