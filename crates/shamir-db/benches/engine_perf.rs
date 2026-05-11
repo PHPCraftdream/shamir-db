@@ -1366,6 +1366,52 @@ fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Steady-state throughput: 10 000 inserts in one batch into a
+/// fresh MemBuffer-wrapped DB. Long enough that the flusher
+/// engages and the LRU is well past its warmup. Contrast with
+/// `bulk_insert*/100` which captures startup latency.
+fn bench_steady_state_insert(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("steady_state_insert_10k");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(30));
+    group.throughput(Throughput::Elements(10_000));
+
+    group.bench_function("membuffer_in_memory", |b| {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let shamir = fresh_db_membuffer_in_memory().await;
+                let req = req_bulk_insert(0, 10_000);
+                let start = Instant::now();
+                shamir.execute("bench", &req).await.unwrap();
+                total += start.elapsed();
+                drop(shamir);
+            }
+            total
+        });
+    });
+
+    group.bench_function("membuffer_sled", |b| {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let tempdir = tempfile::TempDir::new().expect("tempdir");
+                let shamir = fresh_db_membuffer_sled(tempdir.path()).await;
+                let req = req_bulk_insert(0, 10_000);
+                let start = Instant::now();
+                shamir.execute("bench", &req).await.unwrap();
+                total += start.elapsed();
+                drop(shamir);
+                drop(tempdir);
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
+
 /// Low-level micro: cost of one `MemBufferStore::get` on a warm
 /// cache (100 % hit, random key). Bypasses engine, planner,
 /// interner — measures pure cache-lookup path.
@@ -1518,6 +1564,7 @@ criterion_group!{
     bench_range_query_narrow_no_index_sled,
     bench_range_query_narrow_with_index_sled,
     bench_batch_multi_read,
-    bench_cache_hit_get
+    bench_cache_hit_get,
+    bench_steady_state_insert
 }
 criterion_main!(benches);
