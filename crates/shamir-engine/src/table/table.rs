@@ -49,6 +49,36 @@ impl Table {
         Ok(RecordId(arr))
     }
 
+    /// Batched read — fetch N records by id in one trip to the
+    /// data store. Returns `Vec<Option<InnerValue>>` parallel to
+    /// the input ids: `Some(value)` for hits, `None` for missing
+    /// ids (stale index entries are a normal occurrence — caller
+    /// filters them).
+    ///
+    /// On native-`get_many` backends this collapses N×spawn_blocking
+    /// + N transaction setups into one — the main win for indexed
+    /// read paths.
+    pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let keys: Vec<bytes::Bytes> = ids.iter().map(|id| id.to_bytes()).collect();
+        let raw = self.data_store.get_many(keys).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for bytes_opt in raw {
+            match bytes_opt {
+                Some(b) => {
+                    let v = InnerValue::from_bytes(b).map_err(|e| {
+                        DbError::Codec(format!("Failed to deserialize InnerValue: {}", e))
+                    })?;
+                    out.push(Some(v));
+                }
+                None => out.push(None),
+            }
+        }
+        Ok(out)
+    }
+
     /// Batched insert — serialises N values and dispatches to the
     /// backend's `Store::insert_many`. When the backend overrides
     /// that (nebari / persy / redb / cached), all writes commit in

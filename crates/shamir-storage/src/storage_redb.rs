@@ -392,6 +392,33 @@ impl Store for RedbStore {
         })
     }
 
+    /// Vectored read: ONE read transaction, ONE spawn_blocking,
+    /// N `table.get` calls. Compared to N×`get` (each its own
+    /// begin_read + open_table + spawn_blocking) this collapses N
+    /// fixed-cost setups into one.
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        task::spawn_blocking(move || -> DbResult<Vec<Option<Bytes>>> {
+            let read_txn = db.begin_read()?;
+            let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
+            let table = read_txn.open_table(table_def)?;
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                match table.get(&k[..])? {
+                    Some(guard) => out.push(Some(Bytes::copy_from_slice(guard.value()))),
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
     /// Reverse range scan via redb's `Table::range(...).rev()`.
     /// Cursor advances downward (upper-side shrinks each batch).
     fn iter_range_stream_reverse(

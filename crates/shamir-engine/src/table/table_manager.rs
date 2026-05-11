@@ -105,7 +105,10 @@ impl TableManager {
         }
     }
 
-    #[cfg(test)]
+    /// Public read-only access to the inner `Table` — used by
+    /// `read_exec` for vectored `get_many` and by tests. Production
+    /// callers must not write to the table directly; go through
+    /// `TableManager::insert / set / delete` so index hooks fire.
     pub fn table(&self) -> &Table {
         &self.table
     }

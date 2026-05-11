@@ -252,6 +252,42 @@ impl Store for PersyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+        spawn_blocking(move || -> DbResult<Vec<Option<Bytes>>> {
+            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                let key_bytes = ByteVec::new(k.to_vec());
+                let mut iter = tx
+                    .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+                let val_opt = match iter.next() {
+                    Some(persy_id_str_bytes) => {
+                        let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
+                            .map_err(|e| DbError::Codec(e.to_string()))?;
+                        let persy_id: PersyId = persy_id_str
+                            .parse()
+                            .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                        tx.read(&table_name, &persy_id)
+                            .map_err(|e| DbError::Storage(e.to_string()))?
+                            .map(|v| Bytes::copy_from_slice(&v))
+                    }
+                    None => None,
+                };
+                out.push(val_opt);
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let db = self.db.clone();
         let table_name = self.table_name.clone();

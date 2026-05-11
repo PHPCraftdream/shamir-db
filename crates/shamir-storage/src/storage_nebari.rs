@@ -250,6 +250,29 @@ impl Store for NebariStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tree = self.tree.clone();
+        spawn_blocking(move || -> DbResult<Vec<Option<Bytes>>> {
+            let mut out = Vec::with_capacity(keys.len());
+            for k in keys {
+                let key_bytes = k.to_vec();
+                match tree
+                    .get(&key_bytes)
+                    .map_err(|e| DbError::Storage(format!("NebariDB get: {}", e)))?
+                {
+                    Some(val) => out.push(Some(Bytes::copy_from_slice(val.as_ref()))),
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     /// Batched insert via `Roots::transaction(&[root]) → modify →
     /// commit` — one fsync for the whole batch instead of one per
     /// record. nebari's `Modification::SetEach` requires keys in
