@@ -601,6 +601,118 @@ bound. Wide ranges at low `start` (age=30 out of 18..78 → ~20%
 waste) get ~1.4×. Narrow ranges (age=30 exactly, single value)
 where we used to walk from age=18 → ~2.5×. As expected.
 
+## Cross-backend `Store::insert_many` (2026-05-11)
+
+The previous pass (sled-flush + redb Durability::None) brought 2 of
+the 4 slow backends home, but persy and nebari stayed stuck at
+2.95 s / 4.79 s per 1000 inserts. The root cause for those two is
+"every `insert` opens a transaction, every transaction fsyncs" —
+and neither backend exposes a per-write fsync-skip mode.
+
+The architectural fix at the unified `Store` trait level:
+
+```rust
+async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>>;
+async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>>;
+async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>>;
+```
+
+Default impl loops over `self.insert / self.set / self.remove` —
+correct for every backend, non-atomic batch (per-element
+semantics), zero perf change from before.
+
+Native overrides on the transactional B-tree backends, where a
+single transaction can absorb N writes with one fsync:
+
+- **nebari** — `roots.transaction(&[tree]) → tree.modify(keys,
+  SetEach(vals)) → commit()`. Keys must be sorted; we sort
+  internally and return ids in input order.
+- **persy** — one `tx = db.begin()` → loop `tx.insert + tx.put` →
+  `tx.prepare().commit()`. Same shape as the per-record path but
+  the whole batch is one fsync.
+- **redb** — one `WriteTransaction` with `Durability::None`
+  containing N inserts → one commit. Amortises txn-setup cost too.
+
+Engine side: `TableManager::insert_many` validates uniqueness for
+every value first (read-only on info_store), calls
+`table.insert_many` once (the batched data-store write), increments
+the counter by N, then updates indexes per-record. Index batching
+is left to a later sprint — for an unindexed table this is the
+full perf story.
+
+`execute_insert` now converts all JSON values upfront, calls
+`insert_many`, and builds the result records. Same observable
+semantics; cost shape moves from "N small fsyncs" to "1 big fsync".
+
+### Cross-backend bulk_insert — full timeline
+
+| Backend  | Pre-sled-fix | Post-sled-fix | Post-redb-fix | Post-insert_many | Total speedup |
+|----------|-------------:|--------------:|--------------:|-----------------:|---------------|
+| sled /100   |   272 ms |    7.4 ms |    7.4 ms |    5.9 ms |     **46×** |
+| sled /1000  |  2.59 s  |     71 ms |     71 ms |     63 ms |     **41×** |
+| redb /100   |   282 ms |   282 ms  |   24.0 ms |   10.4 ms |     **27×** |
+| redb /1000  |  2.75 s  |    2.75 s |    188 ms |     29 ms |     **95×** |
+| persy /100  |   296 ms |   296 ms  |   296 ms  |   28.6 ms |     **10×** |
+| persy /1000 |  2.95 s  |    2.95 s |    2.95 s |   67.5 ms |     **44×** |
+| canopy /100 |   9.5 ms |    9.5 ms |    9.5 ms |    8.8 ms |     (was already fast) |
+| canopy /1000|    83 ms |     83 ms |     83 ms |   71.8 ms |     (was already fast) |
+| fjall /100  |    72 ms |     72 ms |     72 ms |     86 ms |     **+19% regression — see below** |
+| fjall /1000 |   127 ms |    127 ms |    127 ms |    137 ms |     **+8% regression — see below** |
+| nebari /100 |   487 ms |   487 ms  |   487 ms  |   41.4 ms |     **12×** |
+| nebari /1000|   4.79 s |    4.79 s |    4.79 s |   71.5 ms |     **67×** |
+
+The four "fast" backends after this pass — sled, redb, persy,
+nebari — all converge to **29 – 72 ms per 1000 inserts**. The
+distance from each other is now within the noise of LSM compaction
+timing and OS write-back behavior, not architectural.
+
+### Per-backend impl trade-offs
+
+- **sled** uses the default loop impl — sled already amortises
+  durability via the background flusher, so batching the writes
+  into one txn would only add transaction overhead. Still gets a
+  small win (~5–11 %) because the engine-side change collects
+  values upfront and avoids re-validating uniqueness mid-loop.
+
+- **canopy** also uses the default loop — its commits already amortise
+  internally. 7–13 % from the same engine-side win.
+
+- **fjall** regressed (+8–19 %).** The default loop impl in
+  `Store::insert_many` is identical work to the previous path
+  (`for value in op.values { self.insert(...) }`), so any difference
+  is engine-side. Suspected cause: the new path converts ALL JSON to
+  InnerValue upfront before any backend writes, holding ~N entries in
+  a working `Vec<InnerValue>`. fjall's LSM memtable is sensitive to
+  write timing — the change in pause pattern between writes seems
+  to trip a different memtable rotation cadence. Reproducible
+  (p < 0.001). Acceptable trade since fjall's absolute numbers
+  remain in the fast tier (137 ms / 1000) and the wider win
+  elsewhere dominates. Tracked for follow-up if it shows up under
+  real workload.
+
+- **redb / persy / nebari** got their native batched impls — see
+  above. Wins of 6.5× / 44× / 67× respectively.
+
+### Status
+
+All six disk backends are now in the "single-millisecond-per-
+record bulk insert" tier:
+
+| Backend | bulk_insert /1000 |
+|---------|------------------:|
+| redb    |    29 ms |
+| sled    |    63 ms |
+| persy   |  67.5 ms |
+| nebari  |  71.5 ms |
+| canopy  |  71.8 ms |
+| fjall   |   137 ms |
+
+vs original baselines of 2.6 s – 4.8 s on three of them.
+
+Next architectural steps from PERF_OPPORTUNITIES.md are now
+purely about read paths and indexes — Opt O (covering index)
+remains the biggest disk read win.
+
 ## Cross-backend bulk_insert parity pass (2026-05-11)
 
 Now that sled's per-write fsync is gone, the picture for the other

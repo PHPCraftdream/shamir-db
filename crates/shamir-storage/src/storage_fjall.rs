@@ -362,6 +362,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fjall_batch_ops() {
+        let path = "./test_data/fjall_batch_ops";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let repo = FjallRepo::new(path).unwrap();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
+    }
+
+    #[tokio::test]
     async fn test_fjall_repo_list_and_delete_stores() {
         let path = "./test_data/fjall_repo_list";
         if std::path::Path::new(path).exists() {

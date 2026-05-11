@@ -265,6 +265,13 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_inmemory_batch_ops() {
+        let repo = InMemoryRepo::new();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
+    }
+
+    #[tokio::test]
     async fn test_inmemory_repo_list_and_delete_stores() {
         let repo = InMemoryRepo::new();
 

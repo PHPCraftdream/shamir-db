@@ -29,6 +29,96 @@ pub async fn collect_stream(stream: RecordStream) -> DbResult<Vec<(RecordKey, By
     Ok(all_records)
 }
 
+/// Backend-agnostic test coverage for the `insert_many`, `set_many`,
+/// `remove_many`, and `flush` trait methods. Each backend test
+/// invokes this helper to verify both the default-loop impl and any
+/// native overrides behave identically.
+///
+/// WARNING: tests only.
+#[cfg(test)]
+pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
+    // ---- insert_many --------------------------------------------------
+    let values: Vec<Bytes> = (0..5u8)
+        .map(|i| Bytes::copy_from_slice(&[i, i + 1, i + 2]))
+        .collect();
+    let keys = store
+        .insert_many(values.clone())
+        .await
+        .expect("insert_many");
+    assert_eq!(keys.len(), 5);
+
+    // Every returned key is readable and round-trips to its value.
+    for (k, v) in keys.iter().zip(values.iter()) {
+        let got = store.get(k.clone()).await.expect("get after insert_many");
+        assert_eq!(got.as_ref(), v.as_ref());
+    }
+    // Keys are unique.
+    let mut sorted = keys.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 5, "insert_many returned duplicate keys");
+
+    // Empty input must return empty output (no transaction, no fsync).
+    let empty = store.insert_many(Vec::new()).await.expect("insert_many empty");
+    assert!(empty.is_empty());
+
+    // ---- set_many -----------------------------------------------------
+    // Mix: update existing 2, create new 2.
+    let new_id1 = shamir_types::types::record_id::RecordId::new();
+    let new_id2 = shamir_types::types::record_id::RecordId::new();
+    let new_k1 = Bytes::copy_from_slice(new_id1.as_bytes());
+    let new_k2 = Bytes::copy_from_slice(new_id2.as_bytes());
+
+    let items = vec![
+        (keys[0].clone(), Bytes::from_static(b"updated-0")),
+        (keys[1].clone(), Bytes::from_static(b"updated-1")),
+        (new_k1.clone(), Bytes::from_static(b"fresh-1")),
+        (new_k2.clone(), Bytes::from_static(b"fresh-2")),
+    ];
+    let flags = store.set_many(items).await.expect("set_many");
+    assert_eq!(flags, vec![false, false, true, true]);
+
+    // Values landed.
+    assert_eq!(
+        store.get(keys[0].clone()).await.unwrap().as_ref(),
+        b"updated-0"
+    );
+    assert_eq!(
+        store.get(new_k2.clone()).await.unwrap().as_ref(),
+        b"fresh-2"
+    );
+
+    // Empty input.
+    let empty_set = store.set_many(Vec::new()).await.expect("set_many empty");
+    assert!(empty_set.is_empty());
+
+    // ---- remove_many --------------------------------------------------
+    let missing_id = shamir_types::types::record_id::RecordId::new();
+    let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
+    let to_remove = vec![keys[2].clone(), keys[3].clone(), missing_k];
+    let remove_flags = store.remove_many(to_remove).await.expect("remove_many");
+    assert_eq!(remove_flags, vec![true, true, false]);
+    assert!(store.get(keys[2].clone()).await.is_err());
+    assert!(store.get(keys[3].clone()).await.is_err());
+
+    // Empty input.
+    let empty_rm = store
+        .remove_many(Vec::new())
+        .await
+        .expect("remove_many empty");
+    assert!(empty_rm.is_empty());
+
+    // ---- flush --------------------------------------------------------
+    // Must succeed on any backend. After flush, prior writes remain
+    // visible (consistency, not just durability).
+    store.flush().await.expect("flush");
+    assert_eq!(
+        store.get(keys[0].clone()).await.unwrap().as_ref(),
+        b"updated-0",
+        "data lost across flush"
+    );
+}
+
 /// An asynchronous, key-value store trait that operates on raw bytes.
 ///
 /// This trait provides a low-level storage abstraction. It is the responsibility
@@ -65,6 +155,50 @@ pub trait Store: Send + Sync {
     /// Backends that buffer (sled, fjall, cached) MUST override.
     async fn flush(&self) -> DbResult<()> {
         Ok(())
+    }
+
+    /// Insert many records in one logical batch — for backends that
+    /// expose a transactional write API, this collapses N×fsync into
+    /// one. For backends that already amortise durability per write
+    /// (sled with `flush()`, redb with `Durability::None`), the
+    /// win is smaller — and falling through to the default loop is
+    /// fine.
+    ///
+    /// **Atomicity.** When a backend overrides this with a
+    /// transactional impl, the batch is all-or-nothing. The default
+    /// loop impl is NOT atomic — it inherits per-element semantics.
+    /// Callers that need atomicity should not rely on the default.
+    ///
+    /// Returns one `RecordKey` per input value, in input order.
+    async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
+        let mut out = Vec::with_capacity(values.len());
+        for v in values {
+            out.push(self.insert(v).await?);
+        }
+        Ok(out)
+    }
+
+    /// Upsert many records in one logical batch. Same atomicity story
+    /// as `insert_many`. Returns one `bool` per input pair, in input
+    /// order — `true` if the record was created, `false` if it was
+    /// updated.
+    async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
+        let mut out = Vec::with_capacity(items.len());
+        for (k, v) in items {
+            out.push(self.set(k, v).await?);
+        }
+        Ok(out)
+    }
+
+    /// Remove many records in one logical batch. Same atomicity story
+    /// as `insert_many`. Returns one `bool` per input key, in input
+    /// order — `true` if the record existed and was removed.
+    async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            out.push(self.remove(k).await?);
+        }
+        Ok(out)
     }
 
     /// Returns an async stream that yields batches of records.

@@ -218,6 +218,44 @@ impl TableManager {
         Ok(id)
     }
 
+    /// Batched insert of N records. Validates unique indexes first
+    /// for all values, then issues one batched `Table::insert_many`
+    /// (which dispatches to `Store::insert_many` — on nebari / persy /
+    /// redb that's a single transaction = one fsync for the data
+    /// store). Counter increments by N once; index updates still
+    /// loop per-record (a follow-up sprint can batch the index
+    /// writes through `info_store.set_many`).
+    ///
+    /// Atomicity matches `Store::insert_many` for the chosen backend
+    /// (transactional all-or-nothing on nebari / persy / redb;
+    /// per-record on backends using the default loop impl).
+    pub async fn insert_many(&self, values: &[InnerValue]) -> DbResult<Vec<RecordId>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 1. Validate unique indexes for every value first (cheap reads).
+        for v in values {
+            self.index_manager.validate_unique_for_create(v).await?;
+        }
+
+        // 2. One batched data-store write.
+        let ids = self.table.insert_many(values).await?;
+        self.counter.increment(ids.len() as i64).await?;
+
+        // 3. Update indexes per-record (still N writes to info_store —
+        //    batching this is its own sprint).
+        for (id, value) in ids.iter().zip(values.iter()) {
+            self.index_manager.on_record_created(id, value).await?;
+            self.index_manager
+                .on_record_created_unique(id, value)
+                .await?;
+            self.sorted_indexes.on_record_created(id, value).await?;
+        }
+
+        Ok(ids)
+    }
+
     /// Delete a record by RecordId (with counter and index update)
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Get old value before deletion for index cleanup

@@ -49,6 +49,27 @@ impl Table {
         Ok(RecordId(arr))
     }
 
+    /// Batched insert — serialises N values and dispatches to the
+    /// backend's `Store::insert_many`. When the backend overrides
+    /// that (nebari / persy / redb / cached), all writes commit in
+    /// one transaction = one fsync. Default impl on other backends
+    /// falls through to N sequential inserts (same cost as the
+    /// per-record path).
+    pub async fn insert_many(&self, values: &[InnerValue]) -> DbResult<Vec<RecordId>> {
+        let value_bytes: Vec<bytes::Bytes> = values.iter().map(|v| v.to_bytes()).collect();
+        let keys = self.data_store.insert_many(value_bytes).await?;
+        keys.into_iter()
+            .map(|k| {
+                let arr: [u8; 16] = k.as_ref().try_into().map_err(|_| {
+                    DbError::Internal(
+                        "Failed to convert key bytes to RecordId".to_string(),
+                    )
+                })?;
+                Ok(RecordId(arr))
+            })
+            .collect()
+    }
+
     /// Get an InnerValue by RecordId
     ///
     /// No conversion - returns InnerValue directly

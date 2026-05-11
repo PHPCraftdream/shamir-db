@@ -73,6 +73,39 @@ async fn test_table_insert_and_get() {
 }
 
 #[tokio::test]
+async fn test_table_insert_many() {
+    let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
+
+    // Build 5 records with distinct values.
+    let mut inners = Vec::new();
+    for i in 0..5 {
+        let mut m = new_map();
+        m.insert("idx".to_string(), UserValue::Int(i));
+        m.insert("name".to_string(), UserValue::Str(format!("user-{}", i)));
+        let inner = intern_value(&UserValue::Map(m), &interner).await.unwrap();
+        inners.push(inner);
+    }
+
+    let ids = table.insert_many(&inners).await.unwrap();
+    assert_eq!(ids.len(), 5);
+    // Returned ids are unique.
+    let mut sorted = ids.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), 5, "insert_many returned duplicate ids");
+
+    // Order is preserved — id[i] holds inners[i] verbatim.
+    for (id, expected) in ids.iter().zip(inners.iter()) {
+        let got = table.get(*id).await.unwrap();
+        assert_eq!(&got, expected);
+    }
+
+    // Empty input is a no-op.
+    let empty = table.insert_many(&[]).await.unwrap();
+    assert!(empty.is_empty());
+}
+
+#[tokio::test]
 async fn test_table_interning_persistence() {
     let (table, interner, _counter, _dir) = create_test_table().await.unwrap();
 

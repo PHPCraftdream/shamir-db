@@ -290,6 +290,132 @@ impl Store for PersyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    /// Batched insert via ONE transaction containing N inserts +
+    /// index puts, committed once. One fsync per batch instead of
+    /// one per record — the entire reason persy's per-write cost
+    /// (~2.95 ms/record on NTFS) was bottlenecked.
+    async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+        spawn_blocking(move || -> DbResult<Vec<RecordKey>> {
+            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+            let mut ids = Vec::with_capacity(values.len());
+            for value in values {
+                let id = RecordId::new();
+                let key = RecordKey::copy_from_slice(id.as_bytes());
+
+                let persy_id = tx
+                    .insert(&table_name, &value)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+
+                let key_bytes_index = ByteVec::new(key.to_vec());
+                let val = ByteVec::new(persy_id.to_string().into_bytes());
+                tx.put(&index_name, key_bytes_index, val)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+                ids.push(key);
+            }
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
+            Ok(ids)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    /// Batched upsert. `bool` per item = created. Same one-fsync-
+    /// per-batch story.
+    async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+        spawn_blocking(move || -> DbResult<Vec<bool>> {
+            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+            let mut flags = Vec::with_capacity(items.len());
+            for (key, value) in items {
+                let key_bytes = ByteVec::new(key.to_vec());
+                let mut iter = tx
+                    .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+                let created = if let Some(persy_id_str_bytes) = iter.next() {
+                    let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
+                        .map_err(|e| DbError::Codec(e.to_string()))?;
+                    let persy_id: PersyId = persy_id_str
+                        .parse()
+                        .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                    tx.update(&table_name, &persy_id, &value)
+                        .map_err(|e| DbError::Storage(e.to_string()))?;
+                    false
+                } else {
+                    let persy_id = tx
+                        .insert(&table_name, &value)
+                        .map_err(|e| DbError::Storage(e.to_string()))?;
+                    let val = ByteVec::new(persy_id.to_string().into_bytes());
+                    tx.put(&index_name, key_bytes, val)
+                        .map_err(|e| DbError::Storage(e.to_string()))?;
+                    true
+                };
+                flags.push(created);
+            }
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
+            Ok(flags)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    /// Batched remove. `bool` per key = existed.
+    async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+        spawn_blocking(move || -> DbResult<Vec<bool>> {
+            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+            let mut flags = Vec::with_capacity(keys.len());
+            for key in keys {
+                let key_bytes = ByteVec::new(key.to_vec());
+                let mut iter = tx
+                    .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+                    .map_err(|e| DbError::Storage(e.to_string()))?;
+                if let Some(persy_id_str_bytes) = iter.next() {
+                    let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
+                        .map_err(|e| DbError::Codec(e.to_string()))?;
+                    let persy_id: PersyId = persy_id_str
+                        .parse()
+                        .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                    tx.delete(&table_name, &persy_id)
+                        .map_err(|e| DbError::Storage(e.to_string()))?;
+                    tx.remove(&index_name, key_bytes, None::<ByteVec>)
+                        .map_err(|e| DbError::Storage(e.to_string()))?;
+                    flags.push(true);
+                } else {
+                    flags.push(false);
+                }
+            }
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
+            Ok(flags)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -545,6 +671,17 @@ mod tests {
         run_store_tests(store).await;
 
         assert!(repo.store_delete("test_table").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_persy_batch_ops() {
+        let path = "./test_data/persy_batch_ops.persy";
+        if Path::new(path).exists() {
+            fs::remove_file(path).unwrap();
+        }
+        let repo = PersyRepo::new(path).unwrap();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
     }
 
     #[tokio::test]

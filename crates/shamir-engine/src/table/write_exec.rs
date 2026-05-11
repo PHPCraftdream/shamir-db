@@ -29,15 +29,27 @@ impl TableManager {
     pub async fn execute_insert(&self, op: &InsertOp) -> DbResult<WriteResult> {
         let start = Instant::now();
         let interner = self.interner().get().await?;
-        let mut records = Vec::with_capacity(op.values.len());
 
+        // 1. Convert all JSON values to InnerValue upfront. Any
+        //    codec error fails the whole insert with nothing written
+        //    (matches the previous per-record semantics — the first
+        //    bad value aborts).
+        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
         for value in &op.values {
             let inner = json_value_to_inner(value, interner)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+            inner_values.push(inner);
+        }
 
-            let id = self.insert(&inner).await?;
+        // 2. One batched write — dispatches to `Store::insert_many` at
+        //    the backend, collapsing N×fsync to 1×fsync on backends
+        //    that have a native batched-write API (nebari, persy,
+        //    redb). Index updates still loop per-record inside.
+        let ids = self.insert_many(&inner_values).await?;
 
-            // Build result record: original fields + _id
+        // 3. Build the result records in input order.
+        let mut records = Vec::with_capacity(op.values.len());
+        for (value, id) in op.values.iter().zip(ids.iter()) {
             let mut obj = match value {
                 json::Value::Object(map) => map.clone(),
                 _ => json::Map::new(),
@@ -46,7 +58,7 @@ impl TableManager {
             records.push(json::Value::Object(obj));
         }
 
-        // Persist any newly interned keys
+        // Persist any newly interned keys.
         self.interner().persist().await?;
         self.counter().persist().await?;
 
