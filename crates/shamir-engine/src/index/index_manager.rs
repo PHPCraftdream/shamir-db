@@ -469,6 +469,73 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Batched version of `on_record_created`. Accepts borrowed
+    /// (id, &value) pairs to avoid cloning N `InnerValue`s
+    /// (`InnerValue::Map` clones its full nested structure — costly
+    /// for wide records).
+    ///
+    /// All posting writes across all regular indexes are collected
+    /// into ONE `Store::set_many` call → one backend commit on
+    /// transactional backends, same number of individual writes on
+    /// default-loop backends but with reduced allocation overhead.
+    pub async fn on_records_created_batch<'a, I>(&self, items: I) -> DbResult<()>
+    where
+        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+    {
+        if !self.has_indexes() {
+            return Ok(());
+        }
+
+        let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
+        for def in self.indexes.iter() {
+            for (rid, value) in items.clone() {
+                if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                    let index_key =
+                        Self::build_index_key(false, def.name_interned, &values).to_bytes();
+                    let posting_key = Self::build_posting_key(&index_key, rid);
+                    posting_writes.push((posting_key, Bytes::new()));
+                    cache_keys.push((def.name_interned, values));
+                }
+            }
+        }
+
+        if posting_writes.is_empty() {
+            return Ok(());
+        }
+        self.info_store.set_many(posting_writes).await?;
+        for (name, vals) in cache_keys {
+            self.invalidate_posting_cache(name, &vals);
+        }
+        Ok(())
+    }
+
+    /// Batched version of `on_record_created_unique`. Same borrow
+    /// shape as `on_records_created_batch`.
+    pub async fn on_records_created_unique_batch<'a, I>(&self, items: I) -> DbResult<()>
+    where
+        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+    {
+        if !self.has_unique_indexes() {
+            return Ok(());
+        }
+        let mut writes: Vec<(Bytes, Bytes)> = Vec::new();
+        for def in self.indexes_unique.iter() {
+            for (rid, value) in items.clone() {
+                if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                    let index_key =
+                        Self::build_index_key(true, def.name_interned, &values).to_bytes();
+                    writes.push((index_key, Bytes::copy_from_slice(rid.as_bytes())));
+                }
+            }
+        }
+        if writes.is_empty() {
+            return Ok(());
+        }
+        self.info_store.set_many(writes).await?;
+        Ok(())
+    }
+
     /// Обработчик события обновления записи.
     ///
     /// Обновляет индексы при изменении записи:
@@ -627,6 +694,24 @@ impl IndexManager {
         if let Ok(mut cache) = self.posting_cache.lock() {
             cache.remove(&index_key);
         }
+    }
+
+    /// Count entries for one regular or unique index — used by the
+    /// doctor's verify pass.
+    pub async fn entry_count(
+        &self,
+        name_interned: u64,
+        unique: bool,
+    ) -> DbResult<u64> {
+        use futures::StreamExt;
+        let prefix = IndexRecordKey::new(unique, name_interned).to_prefix_bytes();
+        let mut count: u64 = 0;
+        let stream = self.info_store.scan_prefix_stream(prefix, 1024);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            count += batch?.len() as u64;
+        }
+        Ok(count)
     }
 
     /// Iterate over all regular index definitions.

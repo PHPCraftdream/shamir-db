@@ -204,6 +204,33 @@ impl SortedIndexManager {
         Ok(())
     }
 
+    /// Batched version of `on_record_created` — collects all entry
+    /// writes across all sorted indexes for N records into one
+    /// `Store::set_many` call. Borrow-only — no `InnerValue` clones.
+    pub async fn on_records_created_batch<'a, I>(&self, items: I) -> DbResult<()>
+    where
+        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+    {
+        if self.indexes.is_empty() {
+            return Ok(());
+        }
+        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let mut writes: Vec<(Bytes, Bytes)> = Vec::new();
+        for def in &defs {
+            for (rid, value) in items.clone() {
+                if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
+                    let key = self.build_entry_key(def.name_interned, &encoded, rid);
+                    writes.push((key, Bytes::new()));
+                }
+            }
+        }
+        if writes.is_empty() {
+            return Ok(());
+        }
+        self.info_store.set_many(writes).await?;
+        Ok(())
+    }
+
     /// Drop entries for a deleted record.
     pub async fn on_record_deleted(
         &self,
@@ -400,6 +427,30 @@ impl SortedIndexManager {
     }
 
     // ----- internals --------------------------------------------------------
+
+    /// Count of entries currently in the sorted index — used by the
+    /// doctor's verify pass. O(K) where K is the entry count.
+    pub async fn entry_count(&self, name_interned: u64) -> DbResult<u64> {
+        use futures::StreamExt;
+        let prefix = self.entry_prefix(name_interned);
+        let mut count: u64 = 0;
+        let stream = self.info_store.scan_prefix_stream(prefix, 1024);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            count += batch?.len() as u64;
+        }
+        Ok(count)
+    }
+
+    /// True iff `record` carries a value at `field_path` that the
+    /// sort codec can encode (i.e. an entry for this record *should*
+    /// exist in a sorted index keyed on this path).
+    pub fn has_indexable_value(record: &InnerValue, field_path: &[u64]) -> bool {
+        match extract_and_encode(record, field_path) {
+            Ok(Some(_)) => true,
+            _ => false,
+        }
+    }
 
     /// Prefix common to every entry of one sorted index.
     fn entry_prefix(&self, name_interned: u64) -> Bytes {
