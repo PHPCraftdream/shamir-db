@@ -155,6 +155,67 @@ impl Store for FjallStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
+    /// Reverse range scan using fjall's `keyspace.range(...)` which
+    /// implements `DoubleEndedIterator` — so `.rev()` walks the
+    /// LSM tree backwards natively, no in-memory collect.
+    /// Replaces the default `collect-forward + reverse` impl.
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let keyspace = self.keyspace.clone();
+        let start_bytes = start_inclusive.map(|b| b.to_vec());
+        let end_bytes = end_inclusive.map(|b| b.to_vec());
+
+        Box::pin(stream! {
+            // Cursor walks downward; upper bound shrinks each batch.
+            let mut cursor: Option<Vec<u8>> = None;
+
+            loop {
+                let keyspace_clone = keyspace.clone();
+                let cur = cursor.clone();
+                let lower_init = start_bytes.clone();
+                let upper_init = end_bytes.clone();
+
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = task::spawn_blocking(move || {
+                    use std::ops::Bound;
+                    let lower: Bound<Vec<u8>> = match &lower_init {
+                        Some(s) => Bound::Included(s.clone()),
+                        None => Bound::Unbounded,
+                    };
+                    let upper: Bound<Vec<u8>> = match (&cur, &upper_init) {
+                        (Some(c), _) => Bound::Excluded(c.clone()),
+                        (None, Some(e)) => Bound::Included(e.clone()),
+                        (None, None) => Bound::Unbounded,
+                    };
+
+                    let mut items = Vec::new();
+                    for guard in keyspace_clone.range((lower, upper)).rev().take(batch_size) {
+                        let (key, val) = guard
+                            .into_inner()
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+                        items.push((
+                            Bytes::copy_from_slice(&key),
+                            Bytes::copy_from_slice(&val),
+                        ));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+                let batch = batch?;
+                if batch.is_empty() {
+                    break;
+                }
+                cursor = batch.last().map(|(k, _)| k.to_vec());
+                yield Ok(batch);
+            }
+        })
+    }
+
     /// Force the WAL to fsync-on-disk. fjall buffers individual
     /// writes in the journal; `persist(SyncAll)` fsyncs the journal
     /// + writes any pending metadata. Reachable through

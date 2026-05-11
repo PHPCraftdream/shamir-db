@@ -273,6 +273,78 @@ impl Store for NebariStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    /// Reverse range scan using nebari's `tree.scan(.., forwards: false, ..)`
+    /// — the B-tree is walked backwards from the upper bound.
+    /// Compared to the default impl (full forward scan + collect +
+    /// in-memory reverse), this gives O(log N + K) for a top-K read.
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let tree = self.tree.clone();
+        let start_bytes = start_inclusive.map(|b| b.to_vec());
+        let end_bytes = end_inclusive.map(|b| b.to_vec());
+
+        Box::pin(stream! {
+            // Cursor moves downward; the upper bound shrinks each batch.
+            let mut cursor: Option<Vec<u8>> = None;
+
+            loop {
+                let tree_clone = tree.clone();
+                let cur = cursor.clone();
+                let lower_init = start_bytes.clone();
+                let upper_init = end_bytes.clone();
+
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
+                    use std::ops::Bound;
+                    let lower: Bound<&[u8]> = match &lower_init {
+                        Some(s) => Bound::Included(s.as_slice()),
+                        None => Bound::Unbounded,
+                    };
+                    let upper: Bound<&[u8]> = match (&cur, &upper_init) {
+                        (Some(c), _) => Bound::Excluded(c.as_slice()),
+                        (None, Some(e)) => Bound::Included(e.as_slice()),
+                        (None, None) => Bound::Unbounded,
+                    };
+
+                    let mut out: Vec<(Bytes, Bytes)> = Vec::new();
+                    let mut count = 0;
+                    tree_clone
+                        .scan::<nebari::Error, _, _, _, _>(
+                            &(lower, upper),
+                            false, // backwards
+                            |_, _, _| ScanEvaluation::ReadData,
+                            |_, _| ScanEvaluation::ReadData,
+                            |key, _, value| {
+                                if count >= batch_size {
+                                    return Ok(());
+                                }
+                                out.push((
+                                    Bytes::copy_from_slice(key.as_ref()),
+                                    Bytes::copy_from_slice(value.as_ref()),
+                                ));
+                                count += 1;
+                                Ok(())
+                            },
+                        )
+                        .map_err(|e| DbError::Storage(format!("NebariDB rev-scan: {}", e)))?;
+                    Ok(out)
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let batch = batch?;
+                if batch.is_empty() {
+                    break;
+                }
+                cursor = batch.last().map(|(k, _)| k.to_vec());
+                yield Ok(batch);
+            }
+        })
+    }
+
     /// Batched insert via `Roots::transaction(&[root]) → modify →
     /// commit` — one fsync for the whole batch instead of one per
     /// record. nebari's `Modification::SetEach` requires keys in
