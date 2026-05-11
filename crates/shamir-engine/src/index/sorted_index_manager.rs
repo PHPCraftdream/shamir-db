@@ -147,8 +147,8 @@ impl SortedIndexManager {
                 to_drop.push(k);
             }
         }
-        for k in to_drop {
-            self.info_store.remove(k).await?;
+        if !to_drop.is_empty() {
+            let _ = self.info_store.remove_many(to_drop).await?;
         }
         self.persist_defs().await?;
         Ok(true)

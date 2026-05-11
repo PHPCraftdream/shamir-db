@@ -263,19 +263,108 @@ impl TableManager {
 
     /// Crash-recovery entry point — call once on database open.
     ///
-    /// If the WAL has any in-flight markers from a previous crash,
-    /// runs the doctor (`repair`) and clears every marker. Cheap
-    /// on clean shutdown: one prefix scan returning zero entries.
+    /// Two strategies:
     ///
-    /// Future optimization: scope the recovery to only the
-    /// record_ids listed in WAL markers (targeted fix) instead of a
-    /// full table rebuild. For now we trade speed for simplicity
-    /// and guaranteed correctness.
+    /// 1. **Targeted recovery** — when every WAL op in the marker
+    ///    is `RecordCreated`, the recovery scope is the listed
+    ///    record_ids. Re-applies `on_records_created_batch` for the
+    ///    records that exist in `data_store`; idempotent (setting
+    ///    an already-present posting just rewrites it with the same
+    ///    empty value). Cost: O(batch_size), independent of table
+    ///    size.
+    ///
+    /// 2. **Full repair** — fall-back when the marker contains ops
+    ///    other than `RecordCreated` (Updated / Deleted / future
+    ///    variants). Slow but always correct.
+    ///
+    /// Cheap on clean shutdown: one prefix scan returning zero
+    /// entries.
     pub async fn recover_on_open(&self) -> DbResult<Option<RepairReport>> {
         let inflight = self.wal().list_inflight().await?;
         if inflight.is_empty() {
             return Ok(None);
         }
+
+        // Decide strategy: targeted iff every op is RecordCreated.
+        let can_target = inflight.iter().all(|entry| {
+            entry
+                .ops
+                .iter()
+                .all(|op| matches!(op, crate::wal::WalOp::RecordCreated { .. }))
+        });
+
+        if can_target {
+            let start = Instant::now();
+            let mut ids: Vec<shamir_types::types::record_id::RecordId> = Vec::new();
+            for entry in &inflight {
+                for op in &entry.ops {
+                    if let crate::wal::WalOp::RecordCreated { record_id } = op {
+                        ids.push(*record_id);
+                    }
+                }
+            }
+
+            // Pull current values for these ids in one vectored read.
+            let values = self.table().get_many(&ids).await?;
+            let pairs: Vec<(
+                shamir_types::types::record_id::RecordId,
+                shamir_types::types::value::InnerValue,
+            )> = ids
+                .iter()
+                .zip(values.into_iter())
+                .filter_map(|(id, opt)| opt.map(|v| (*id, v)))
+                .collect();
+            let pairs_iter = || pairs.iter().map(|(id, v)| (id, v));
+
+            // Re-apply the index hooks. They're idempotent: setting
+            // an already-present posting key just rewrites it; the
+            // unique index's value-equality check is fine on rewrite.
+            self.index_manager_ref()
+                .on_records_created_batch(pairs_iter())
+                .await?;
+            self.index_manager_ref()
+                .on_records_created_unique_batch(pairs_iter())
+                .await?;
+            self.sorted_indexes()
+                .on_records_created_batch(pairs_iter())
+                .await?;
+
+            // Reconcile counter: scan data_store for the truth. The
+            // WAL doesn't track counter changes separately, and a
+            // crash between counter.increment and wal.commit may
+            // have left it correct OR off by N. Cheapest correct
+            // path: count and set_to. O(table_size).
+            //
+            // Note: for very large tables this re-introduces the
+            // O(table_size) cost we wanted to avoid. Acceptable
+            // because counter recovery happens once per crash; the
+            // alternative (drifted counter) is silently wrong.
+            let mut count: u64 = 0;
+            use futures::StreamExt;
+            let stream = self.list_stream(1000);
+            futures::pin_mut!(stream);
+            while let Some(batch) = stream.next().await {
+                count += batch?.len() as u64;
+            }
+            self.counter().set_to(count).await?;
+
+            // Clear markers.
+            for entry in &inflight {
+                self.wal().commit(entry.txn_id).await?;
+            }
+
+            return Ok(Some(RepairReport {
+                records_scanned: pairs.len() as u64,
+                counter_before: 0,
+                counter_after: count,
+                regular_indexes_rebuilt: 0,
+                unique_indexes_rebuilt: 0,
+                sorted_indexes_rebuilt: 0,
+                elapsed_ms: start.elapsed().as_millis() as u64,
+            }));
+        }
+
+        // Fallback: full repair.
         let report = self.repair().await?;
         for entry in &inflight {
             self.wal().commit(entry.txn_id).await?;

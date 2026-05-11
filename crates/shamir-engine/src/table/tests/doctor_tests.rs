@@ -159,10 +159,12 @@ async fn repair_heals_drifted_counter() {
 }
 
 #[tokio::test]
-async fn recover_on_open_runs_repair_when_wal_marker_present() {
+async fn recover_on_open_with_phantom_id_clears_marker_and_reconciles_counter() {
+    // Marker references a record_id that doesn't exist in
+    // data_store. Targeted recovery: get_many returns None, the
+    // index hooks process zero pairs (nothing to add). But the
+    // counter MUST be reconciled and the WAL marker cleared.
     let table = seeded(10).await;
-
-    // Simulate a crashed batch: write a WAL marker by hand.
     let txn_id = table.wal().fresh_txn_id();
     table
         .wal()
@@ -174,19 +176,216 @@ async fn recover_on_open_runs_repair_when_wal_marker_present() {
         )
         .await
         .unwrap();
-
-    // Also nuke the counter so repair is observable.
     table.counter().set_to(777).await.unwrap();
 
-    let report = table.recover_on_open().await.unwrap();
-    let report = report.expect("recover_on_open must repair when marker exists");
-    assert_eq!(report.records_scanned, 10);
+    let report = table
+        .recover_on_open()
+        .await
+        .unwrap()
+        .expect("recover_on_open must produce a report when marker exists");
 
-    // Marker cleared.
+    // Targeted path picked up zero real records (the marker's id
+    // is fake), so records_scanned reflects that.
+    assert_eq!(report.records_scanned, 0);
+    // But the counter was reconciled from data_store.
+    assert_eq!(report.counter_after, 10);
+
     let inflight = table.wal().list_inflight().await.unwrap();
     assert!(inflight.is_empty(), "WAL must be empty after recovery");
 
-    // State consistent.
+    let v = table.verify().await.unwrap();
+    assert!(v.counter_consistent);
+}
+
+#[tokio::test]
+async fn recover_on_open_targeted_re_adds_missing_index_entries() {
+    // Realistic scenario: a batch crashed between WAL.begin and
+    // index writes. Data is in data_store; index postings are
+    // missing for some records. Targeted recovery should add them
+    // back.
+    let table = seeded(0).await;
+
+    // Insert 5 records via the BATCH API — they all land in
+    // data_store + indexes; WAL marker auto-clears.
+    let interner = table.interner().get().await.unwrap();
+    let mut values = Vec::new();
+    for i in 0..5 {
+        let mut m = new_map();
+        m.insert("id".to_string(), UserValue::Str(format!("u{}", i)));
+        m.insert("city".to_string(), UserValue::Str("NYC".into()));
+        m.insert("score".to_string(), UserValue::Int(i as i64));
+        let user = UserValue::Map(m);
+        let r = transform::user_to_inner(&user, interner);
+        if let Some(ref new_keys) = r.new_keys {
+            table.interner().save_new_keys(new_keys).await.unwrap();
+        }
+        values.push(r.inner_value);
+    }
+    let ids = table.insert_many(&values).await.unwrap();
+    assert!(table.verify().await.unwrap().is_healthy());
+
+    // Now CORRUPT the state: nuke ALL postings for one record_id
+    // across every index. We don't know the exact value-hashes, so
+    // sweep `info_store` prefix-scan for the index and remove any
+    // key that ends with our target record_id (16 bytes).
+    let defs: Vec<_> = table.index_manager_ref().iter_indexes().collect();
+    let def = &defs[0];
+    use crate::index::index_record_key::IndexRecordKey;
+    use futures::StreamExt;
+    let info_store = info_store_of(&table);
+    let target = ids[2];
+    let prefix_scan_key =
+        IndexRecordKey::new(false, def.name_interned).to_prefix_bytes();
+    let stream = info_store.scan_prefix_stream(prefix_scan_key, 1024);
+    futures::pin_mut!(stream);
+    let mut found_and_removed: u32 = 0;
+    while let Some(batch) = stream.next().await {
+        for (key, _) in batch.unwrap() {
+            // Posting key shape: index_key (25b) || record_id (16b).
+            if key.as_ref().ends_with(target.as_bytes()) {
+                info_store.remove(key).await.unwrap();
+                found_and_removed += 1;
+            }
+        }
+    }
+    assert!(found_and_removed >= 1, "expected to plant corruption");
+
+    // verify now reports mismatch.
+    let pre = table.verify().await.unwrap();
+    assert!(!pre.is_healthy(), "verify must spot the missing posting");
+
+    // Plant marker for the missing record.
+    let txn_id = table.wal().fresh_txn_id();
+    table
+        .wal()
+        .begin(
+            txn_id,
+            vec![WalOp::RecordCreated {
+                record_id: ids[2],
+            }],
+        )
+        .await
+        .unwrap();
+
+    let report = table.recover_on_open().await.unwrap().unwrap();
+    assert_eq!(report.records_scanned, 1, "exactly 1 record re-applied");
+
+    // After targeted recovery, state is consistent.
+    assert!(table.verify().await.unwrap().is_healthy());
+
+    let inflight = table.wal().list_inflight().await.unwrap();
+    assert!(inflight.is_empty());
+}
+
+#[tokio::test]
+async fn auto_recovery_fires_when_table_manager_is_reopened() {
+    // Build a TableManager backed by a shared in-memory pair of
+    // stores. Insert records normally (clean), then corrupt the
+    // state (drop a posting + plant a WAL marker for that record).
+    // Build a SECOND TableManager pointing at the same stores —
+    // `TableManager::create` should auto-recover on construction.
+    use crate::index::index_record_key::IndexRecordKey;
+    use crate::table::TableManager;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // First TableManager — populate.
+    let mgr1 = TableManager::create(
+        "users".to_string(),
+        Arc::clone(&data_store),
+        Arc::clone(&info_store),
+    )
+    .await
+    .unwrap();
+    mgr1.create_index("by_city", &["city"]).await.unwrap();
+
+    let interner = mgr1.interner().get().await.unwrap();
+    let mut values = Vec::new();
+    for i in 0..4 {
+        let mut m = new_map();
+        m.insert("id".to_string(), UserValue::Str(format!("u{}", i)));
+        m.insert("city".to_string(), UserValue::Str("NYC".into()));
+        let user = UserValue::Map(m);
+        let r = transform::user_to_inner(&user, interner);
+        if let Some(ref new_keys) = r.new_keys {
+            mgr1.interner().save_new_keys(new_keys).await.unwrap();
+        }
+        values.push(r.inner_value);
+    }
+    let ids = mgr1.insert_many(&values).await.unwrap();
+
+    // Corrupt: nuke postings for record 1; plant a marker that
+    // names it. Emulates a crash mid-batch.
+    let defs: Vec<_> = mgr1.index_manager_ref().iter_indexes().collect();
+    let def = &defs[0];
+    let prefix_scan = IndexRecordKey::new(false, def.name_interned).to_prefix_bytes();
+    use futures::StreamExt;
+    let target = ids[1];
+    let stream = info_store.scan_prefix_stream(prefix_scan, 1024);
+    futures::pin_mut!(stream);
+    while let Some(batch) = stream.next().await {
+        for (key, _) in batch.unwrap() {
+            if key.as_ref().ends_with(target.as_bytes()) {
+                info_store.remove(key).await.unwrap();
+            }
+        }
+    }
+    let txn_id = mgr1.wal().fresh_txn_id();
+    mgr1.wal()
+        .begin(
+            txn_id,
+            vec![WalOp::RecordCreated { record_id: target }],
+        )
+        .await
+        .unwrap();
+    drop(mgr1);
+
+    // Re-open the table. Auto-recovery should run during `create`.
+    let mgr2 = TableManager::create(
+        "users".to_string(),
+        Arc::clone(&data_store),
+        Arc::clone(&info_store),
+    )
+    .await
+    .unwrap();
+
+    // No WAL markers remain.
+    assert!(mgr2.wal().list_inflight().await.unwrap().is_empty());
+    // Index state is consistent with data.
+    let v = mgr2.verify().await.unwrap();
+    assert!(
+        v.is_healthy(),
+        "auto-recovery on TableManager::create did not restore consistency: {:?}",
+        v
+    );
+}
+
+#[tokio::test]
+async fn recover_on_open_falls_back_to_repair_for_non_created_ops() {
+    // A marker with `RecordUpdated` can't be targeted (we don't
+    // have the old value). Recovery should fall back to full
+    // repair.
+    let table = seeded(8).await;
+    let txn_id = table.wal().fresh_txn_id();
+    table
+        .wal()
+        .begin(
+            txn_id,
+            vec![WalOp::RecordUpdated {
+                record_id: shamir_types::types::record_id::RecordId::new(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let report = table.recover_on_open().await.unwrap().unwrap();
+    // Full repair → records_scanned reflects the full data store.
+    assert_eq!(report.records_scanned, 8);
+
+    let inflight = table.wal().list_inflight().await.unwrap();
+    assert!(inflight.is_empty());
     assert!(table.verify().await.unwrap().is_healthy());
 }
 

@@ -344,33 +344,45 @@ impl IndexManager {
 
         let name_interned = index_def.name_interned;
 
-        // Читаем данные таблицы потоком
+        // Backfill in one batched info_store.set_many per page —
+        // 1000 records → 1 transactional commit on backends that
+        // support it. Compared to the previous per-record
+        // add_index_entry it amortises N spawn_blocking calls
+        // (and N transaction setups on redb/persy/nebari) down to
+        // ~one per page.
         let mut stream = self.data_store.iter_stream(1000);
-
         let mut count = 0usize;
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
 
+            let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
+            let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
             for (key_bytes, value_bytes) in batch {
-                // Пропускаем ключи, которые не являются RecordId (16 байт)
                 let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
                     Ok(a) => a,
                     Err(_) => continue,
                 };
                 let record_id = RecordId(arr);
-
-                // Десериализуем значение записи
                 let value = match InnerValue::from_bytes(value_bytes) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-
-                // Если все поля индекса присутствуют — добавляем запись в индекс
-                if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
-                    self.add_index_entry(name_interned, &values, &record_id)
-                        .await?;
+                if let Some(values) =
+                    Self::extract_index_values(&value, &index_def.paths)
+                {
+                    let index_key =
+                        Self::build_index_key(false, name_interned, &values).to_bytes();
+                    let posting_key = Self::build_posting_key(&index_key, &record_id);
+                    posting_writes.push((posting_key, Bytes::new()));
+                    cache_keys.push((name_interned, values));
                     count += 1;
                 }
+            }
+            if !posting_writes.is_empty() {
+                self.info_store.set_many(posting_writes).await?;
+            }
+            for (name, vals) in cache_keys {
+                self.invalidate_posting_cache(name, &vals);
             }
         }
 
@@ -401,17 +413,28 @@ impl IndexManager {
             return Ok(false);
         }
 
-        // Формируем префикс для сканирования всех записей данного индекса
+        // Формируем префикс и собираем все ключи постингов за один
+        // prefix-scan, удаляем их одним вызовом `remove_many`. На
+        // транзакционных backends (redb/persy/nebari) это одна
+        // commit'нутая транзакция вместо N×fsync.
         let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
-
-        // Потоковое удаление записей индекса (избегаем загрузки в память)
         use futures::StreamExt;
-        let mut stream = self.info_store.scan_prefix_stream(prefix, 1000);
+        let mut to_remove: Vec<Bytes> = Vec::new();
+        let mut stream = self.info_store.scan_prefix_stream(prefix.clone(), 1000);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            for (key, _) in batch {
-                self.info_store.remove(key).await?;
+            for (key, _) in batch_result? {
+                to_remove.push(key);
             }
+        }
+        if !to_remove.is_empty() {
+            let _ = self.info_store.remove_many(to_remove).await?;
+        }
+
+        // Posting cache: blow away every entry whose key starts
+        // with the index's prefix. Cheap — typical hotsets are
+        // small and the cache is bounded.
+        if let Ok(mut cache) = self.posting_cache.lock() {
+            cache.retain(|k, _| !k.starts_with(&prefix));
         }
 
         // Удаляем определение индекса из метаданных
@@ -1053,12 +1076,18 @@ impl IndexManager {
             ));
         }
 
-        // Дубликатов нет — добавляем записи в индекс
-        let mut count = 0usize;
+        // Дубликатов нет — добавляем записи в индекс одним
+        // батчем (один set_many == один backend commit на
+        // транзакционных store'ах).
+        let count = entries.len();
+        let mut writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(count);
         for (record_id, _values_key, values) in entries {
-            self.add_unique_entry(name_interned, &values, &record_id)
-                .await?;
-            count += 1;
+            let index_key =
+                Self::build_index_key(true, name_interned, &values).to_bytes();
+            writes.push((index_key, Bytes::copy_from_slice(record_id.as_bytes())));
+        }
+        if !writes.is_empty() {
+            self.info_store.set_many(writes).await?;
         }
 
         // Добавляем определение индекса в метаданные и сохраняем
@@ -1112,17 +1141,20 @@ impl IndexManager {
             return Ok(false);
         }
 
-        // Формируем префикс для сканирования всех записей данного индекса
+        // Формируем префикс и удаляем все posting-ключи одним
+        // вызовом `remove_many` — на disk backends это один
+        // транзакционный коммит вместо N×fsync.
         let prefix = IndexRecordKey::new(true, name_interned).to_prefix_bytes();
-
-        // Потоковое удаление записей индекса
         use futures::StreamExt;
+        let mut to_remove: Vec<Bytes> = Vec::new();
         let mut stream = self.info_store.scan_prefix_stream(prefix, 1000);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            for (key, _) in batch {
-                self.info_store.remove(key).await?;
+            for (key, _) in batch_result? {
+                to_remove.push(key);
             }
+        }
+        if !to_remove.is_empty() {
+            let _ = self.info_store.remove_many(to_remove).await?;
         }
 
         // Удаляем определение индекса из метаданных

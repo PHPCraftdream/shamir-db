@@ -62,7 +62,7 @@ impl TableManager {
         let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
         let table = Table::new(data_store);
 
-        Ok(Self {
+        let mgr = Self {
             name,
             table: Arc::new(table),
             interner,
@@ -70,7 +70,24 @@ impl TableManager {
             index_manager,
             sorted_indexes,
             wal,
-        })
+        };
+
+        // Auto-recovery on open. Cheap on clean shutdown (one
+        // prefix scan returning zero entries); targeted recovery
+        // (O(batch_size)) or full repair (O(table_size)) when a
+        // crash left WAL markers behind. Surfaces silently in the
+        // log; the caller can also call `recover_on_open()`
+        // explicitly later to receive the report.
+        if let Some(report) = mgr.recover_on_open().await? {
+            log::warn!(
+                "Table '{}' opened with WAL markers — recovered {} record(s) in {} ms",
+                mgr.name(),
+                report.records_scanned,
+                report.elapsed_ms,
+            );
+        }
+
+        Ok(mgr)
     }
 
     /// Create a TableManager from existing components.
