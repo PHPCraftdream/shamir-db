@@ -327,6 +327,70 @@ impl Store for SledStore {
         })
     }
 
+    /// Reverse range scan via sled's `Tree::range(...).rev()`.
+    /// Cursor advances past the last yielded key on the upper side
+    /// (`Bound::Excluded(cursor)` becomes the new upper).
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let tree = self.tree.clone();
+        let start_bytes = start_inclusive.map(|b| b.to_vec());
+        let end_bytes = end_inclusive.map(|b| b.to_vec());
+
+        Box::pin(stream! {
+            // Cursor walks downward: the upper bound shrinks each batch.
+            let mut cursor: Option<Vec<u8>> = None;
+
+            loop {
+                let tree_clone = tree.clone();
+                let cur = cursor.clone();
+                let lower_init = start_bytes.clone();
+                let upper_init = end_bytes.clone();
+
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
+                    use std::ops::Bound;
+                    let lower: Bound<&[u8]> = match &lower_init {
+                        Some(s) => Bound::Included(s.as_slice()),
+                        None => Bound::Unbounded,
+                    };
+                    let upper: Bound<&[u8]> = match (&cur, &upper_init) {
+                        (Some(c), _) => Bound::Excluded(c.as_slice()),
+                        (None, Some(e)) => Bound::Included(e.as_slice()),
+                        (None, None) => Bound::Unbounded,
+                    };
+
+                    let mut items = Vec::new();
+                    for kv in tree_clone
+                        .range::<&[u8], _>((lower, upper))
+                        .rev()
+                        .take(batch_size)
+                    {
+                        let (key, val) = kv.map_err(|e| {
+                            DbError::Storage(format!("SledDB rev-range item: {}", e))
+                        })?;
+                        items.push((
+                            Bytes::copy_from_slice(&key),
+                            Bytes::copy_from_slice(&val),
+                        ));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?;
+
+                let batch = batch?;
+                if batch.is_empty() {
+                    break;
+                }
+                cursor = batch.last().map(|(k, _)| k.to_vec());
+                yield Ok(batch);
+            }
+        })
+    }
+
     /// Explicit fsync. Individual writes are buffered and made durable
     /// by sled's background flusher (default: every 500 ms). Call this
     /// when an external durability boundary is needed (end of batch

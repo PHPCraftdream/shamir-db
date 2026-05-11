@@ -117,6 +117,45 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
         b"updated-0",
         "data lost across flush"
     );
+
+    // ---- iter_range_stream_reverse ------------------------------------
+    // Insert a small set of records with predictable keys, then walk
+    // them via the reverse stream and assert order is high → low.
+    // Must work both for the default impl (in-memory / cached /
+    // fjall / persy / canopy / nebari) and the native overrides on
+    // sled / redb.
+    let mut rev_keys: Vec<RecordKey> = (0u8..8)
+        .map(|i| RecordKey::copy_from_slice(&[0xCC, i]))
+        .collect();
+    for (i, k) in rev_keys.iter().enumerate() {
+        store
+            .set(k.clone(), Bytes::copy_from_slice(&[i as u8]))
+            .await
+            .expect("seed reverse");
+    }
+    // Build range bounds covering exactly the seeded prefix.
+    let lower = Bytes::copy_from_slice(&[0xCC, 0x00]);
+    let upper = Bytes::copy_from_slice(&[0xCC, 0xFF]);
+    let stream = store.iter_range_stream_reverse(Some(lower), Some(upper), 3);
+    futures::pin_mut!(stream);
+    let mut collected: Vec<RecordKey> = Vec::new();
+    while let Some(batch) = stream.next().await {
+        for (k, _) in batch.expect("reverse batch") {
+            collected.push(k);
+        }
+    }
+    assert_eq!(
+        collected.len(),
+        8,
+        "iter_range_stream_reverse returned {} entries, expected 8",
+        collected.len()
+    );
+    rev_keys.sort();
+    rev_keys.reverse();
+    assert_eq!(
+        collected, rev_keys,
+        "iter_range_stream_reverse did not yield keys in high→low order"
+    );
 }
 
 /// An asynchronous, key-value store trait that operates on raw bytes.
@@ -252,6 +291,52 @@ pub trait Store: Send + Sync {
         // make it O(log N + K) by seeking into the B-tree.
         let inner = self.iter_stream(batch_size);
         Box::pin(default_range_filter(inner, start_inclusive, end_inclusive))
+    }
+
+    /// Same as `iter_range_stream`, but walks the range in
+    /// REVERSE byte order — high → low. Used by reverse-iter
+    /// sorted-index reads: `lookup_last_k`, `lookup_max`, and
+    /// `ORDER BY field DESC LIMIT K`.
+    ///
+    /// Default impl: collect the forward-range stream and reverse
+    /// it in memory. Correct for any backend, but O(N) memory.
+    /// Disk B-tree backends (sled, redb, …) override with a true
+    /// native reverse cursor.
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> RecordStream {
+        let inner = self.iter_range_stream(start_inclusive, end_inclusive, batch_size);
+        Box::pin(default_reverse(inner, batch_size))
+    }
+}
+
+/// Default reverse wrapper: drains the inner stream into memory,
+/// reverses, and re-emits in `batch_size` chunks. Memory ≈ N items
+/// — fine for in-memory backend (small datasets, no I/O latency
+/// pressure); disk backends override with a native reverse cursor.
+fn default_reverse(
+    mut inner: RecordStream,
+    batch_size: usize,
+) -> impl Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send {
+    use futures::StreamExt;
+    async_stream::stream! {
+        let mut all: Vec<(RecordKey, Bytes)> = Vec::new();
+        while let Some(batch) = inner.next().await {
+            let batch = batch?;
+            all.extend(batch);
+        }
+        all.reverse();
+        while !all.is_empty() {
+            let take = batch_size.min(all.len());
+            // `drain(0..take)` after a reverse drains the rear of the
+            // pre-reversed vec, but we want high→low order from the
+            // reversed front. So drain prefix.
+            let batch: Vec<_> = all.drain(..take).collect();
+            yield Ok(batch);
+        }
     }
 }
 

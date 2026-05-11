@@ -377,6 +377,67 @@ impl TableManager {
             }
         }
 
+        // Q1b: SELECT max(field) mirror of MIN — sorted-index walk
+        // to the LAST key under the prefix. Requires reverse-iter
+        // on Store (now in the trait via
+        // `iter_range_stream_reverse`).
+        if query.r#where.is_none()
+            && query.group_by.is_none()
+            && query.order_by.is_none()
+            && !query.select.distinct
+            && !query.count_total
+            && query.pagination.is_none()
+            && query.select.items.len() == 1
+        {
+            if let SelectItem::Aggregate {
+                func: shamir_query_types::read::AggFunc::Max,
+                field: shamir_query_types::read::AggregateField::Field(path),
+                alias,
+                ..
+            } = &query.select.items[0]
+            {
+                if let Some(field_path) = intern_field_path(path, interner) {
+                    if let Some(def) = self.sorted_indexes().find_by_field(&field_path) {
+                        if let Some(id) =
+                            self.sorted_indexes().lookup_max(def.name_interned).await?
+                        {
+                            let record = self.get(id).await?;
+                            let val = crate::query::filter::eval::resolve_field(
+                                &record, &field_path,
+                            );
+                            let json_val = match val {
+                                Some(v) => shamir_types::codecs::interned::inner_to_json_value(
+                                    &v, interner,
+                                ),
+                                None => serde_json::Value::Null,
+                            };
+                            let key = alias
+                                .as_deref()
+                                .unwrap_or_else(|| {
+                                    path.last().map(|s| s.as_str()).unwrap_or("max")
+                                })
+                                .to_string();
+                            let mut obj = serde_json::Map::new();
+                            obj.insert(key, json_val);
+                            return Ok(QueryResult {
+                                records: vec![serde_json::Value::Object(obj)],
+                                stats: Some(QueryStats {
+                                    index_used: Some(format!(
+                                        "sorted_idx_{}_max",
+                                        def.name_interned
+                                    )),
+                                    records_scanned: 1,
+                                    records_returned: 1,
+                                    execution_time_us: start.elapsed().as_micros() as u64,
+                                }),
+                                pagination: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         // Opt #6 — sorted-index ORDER BY field ASC LIMIT K fast path.
         //
         // When the query is exactly `ORDER BY field ASC LIMIT K` (or
@@ -394,11 +455,13 @@ impl TableManager {
         //
         // Falls through to the existing paths when the shape doesn't
         // match (DESC, multi-field order_by, residual filter, etc.).
-        if let Some((idx_name, take, skip)) =
+        if let Some((idx_name, take, skip, direction)) =
             self.try_plan_order_limit_fast_path(query, interner)
         {
             return self
-                .read_order_limit_fast(query, ctx, interner, idx_name, take, skip, start)
+                .read_order_limit_fast(
+                    query, ctx, interner, idx_name, take, skip, direction, start,
+                )
                 .await;
         }
 
@@ -599,28 +662,32 @@ impl TableManager {
         })
     }
 
-    /// Eligibility check for the ORDER BY ASC + LIMIT K fast path.
+    /// Eligibility check for the ORDER BY + LIMIT K fast path
+    /// (both ASC and DESC).
     ///
-    /// Returns `Some((sorted_index_name, take, skip))` when the
-    /// query is exactly:
+    /// Returns `Some((sorted_index_name, take, skip, direction))`
+    /// when the query is:
     ///
-    /// - `order_by: { items: [single_item { direction: Asc }] }`
+    /// - `order_by: { items: [single_item] }` (either direction)
     /// - `pagination: LimitOffset` with a finite `limit` (paged form
     ///   normalised through `pagination.resolve()`)
     /// - no `where`, `group_by`, `select.distinct`, `count_total`,
     ///   no aggregate items in `select`
     /// - a sorted index covers the order_by field
     ///
-    /// The fast path then needs to materialise only the first
-    /// `skip + take` index entries (in value-ascending order) and
-    /// project them — no full collect, no in-memory sort.
+    /// The fast path materialises only `skip + take` index entries
+    /// in the requested order (asc via `lookup_first_k`, desc via
+    /// `lookup_last_k`), then projects.
     pub fn try_plan_order_limit_fast_path(
         &self,
         query: &ReadQuery,
         interner: &Interner,
-    ) -> Option<(u64, usize, usize)> {
-        use shamir_query_types::read::OrderDirection;
-
+    ) -> Option<(
+        u64,
+        usize,
+        usize,
+        shamir_query_types::read::OrderDirection,
+    )> {
         // Shape guards.
         if query.r#where.is_some()
             || query.group_by.is_some()
@@ -635,9 +702,6 @@ impl TableManager {
             return None;
         }
         let item = &order_by.items[0];
-        if !matches!(item.direction, OrderDirection::Asc) {
-            return None;
-        }
         // Pagination must yield a finite take.
         let (skip, take_opt) = query.pagination.resolve();
         let take = take_opt? as usize;
@@ -654,12 +718,12 @@ impl TableManager {
         let field_path = intern_field_path(&item.field, interner)?;
         let def = mgr.find_by_field(&field_path)?;
 
-        Some((def.name_interned, take, skip))
+        Some((def.name_interned, take, skip, item.direction))
     }
 
-    /// Execute the ORDER BY ASC LIMIT K fast path: pull the first
-    /// `skip + take` record ids from the sorted index (already in
-    /// value-asc order), skip the first `skip`, load + project.
+    /// Execute the ORDER BY LIMIT K fast path: pull `skip + take`
+    /// record ids from the sorted index in the requested direction,
+    /// skip the offset, load + project.
     async fn read_order_limit_fast(
         &self,
         query: &ReadQuery,
@@ -668,9 +732,11 @@ impl TableManager {
         index_name: u64,
         take: usize,
         skip: usize,
+        direction: shamir_query_types::read::OrderDirection,
         start: Instant,
     ) -> DbResult<QueryResult> {
-        // 1. Pull first (skip + take) record_ids from the sorted index.
+        use shamir_query_types::read::OrderDirection;
+
         let want = skip
             .checked_add(take)
             .ok_or_else(|| {
@@ -678,14 +744,22 @@ impl TableManager {
                     "LIMIT + OFFSET overflow".to_string(),
                 )
             })?;
-        let ids = self
-            .sorted_indexes()
-            .lookup_first_k(index_name, want)
-            .await?;
 
-        // 2. Skip the offset, load the rest. Records may have been
-        //    deleted between index write and the lookup — silently
-        //    skip those (matches `read_sorted_index_scan` behaviour).
+        let (ids, label) = match direction {
+            OrderDirection::Asc => (
+                self.sorted_indexes()
+                    .lookup_first_k(index_name, want)
+                    .await?,
+                format!("sorted_idx_{index_name}_first_k"),
+            ),
+            OrderDirection::Desc => (
+                self.sorted_indexes()
+                    .lookup_last_k(index_name, want)
+                    .await?,
+                format!("sorted_idx_{index_name}_last_k"),
+            ),
+        };
+
         let records_scanned = ids.len() as u64;
         let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(take);
         for id in ids.into_iter().skip(skip) {
@@ -699,16 +773,13 @@ impl TableManager {
             }
         }
 
-        // 3. Project. No re-sort — the index already gave us value-asc
-        //    order. No pagination either — `take` already capped at
-        //    `skip + take` materialised entries.
         let result = exec::apply_select(&matched, &query.select, interner);
         let records_returned = result.len() as u64;
 
         Ok(QueryResult {
             records: result,
             stats: Some(QueryStats {
-                index_used: Some(format!("sorted_idx_{index_name}_first_k")),
+                index_used: Some(label),
                 records_scanned,
                 records_returned,
                 execution_time_us: start.elapsed().as_micros() as u64,

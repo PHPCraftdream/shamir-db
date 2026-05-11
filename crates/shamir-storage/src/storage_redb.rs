@@ -392,6 +392,68 @@ impl Store for RedbStore {
         })
     }
 
+    /// Reverse range scan via redb's `Table::range(...).rev()`.
+    /// Cursor advances downward (upper-side shrinks each batch).
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let start_bytes = start_inclusive.map(|b| b.to_vec());
+        let end_bytes = end_inclusive.map(|b| b.to_vec());
+
+        Box::pin(stream! {
+            let mut cursor: Option<Vec<u8>> = None;
+
+            loop {
+                let db_clone = db.clone();
+                let table_name_clone = table_name.clone();
+                let cur = cursor.clone();
+                let lower_init = start_bytes.clone();
+                let upper_init = end_bytes.clone();
+
+                let batch: DbResult<Vec<(Bytes, Bytes)>> = task::spawn_blocking(move || {
+                    let read_txn = db_clone.begin_read()?;
+                    let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name_clone);
+                    let table = read_txn.open_table(table_def)?;
+
+                    let lower = match &lower_init {
+                        Some(s) => Bound::Included(s.as_slice()),
+                        None => Bound::Unbounded,
+                    };
+                    let upper = match (&cur, &upper_init) {
+                        (Some(c), _) => Bound::Excluded(c.as_slice()),
+                        (None, Some(e)) => Bound::Included(e.as_slice()),
+                        (None, None) => Bound::Unbounded,
+                    };
+
+                    let range: (Bound<&[u8]>, Bound<&[u8]>) = (lower, upper);
+                    let mut items = Vec::new();
+                    for item in table.range::<&[u8]>(range)?.rev().take(batch_size) {
+                        let (key, val) = item?;
+                        items.push((
+                            Bytes::copy_from_slice(key.value()),
+                            Bytes::copy_from_slice(val.value()),
+                        ));
+                    }
+                    Ok(items)
+                })
+                .await
+                .map_err(|e| DbError::Internal(e.to_string()))?;
+
+                let batch = batch?;
+                if batch.is_empty() {
+                    break;
+                }
+                cursor = batch.last().map(|(k, _)| k.to_vec());
+                yield Ok(batch);
+            }
+        })
+    }
+
     /// Batched insert via one WriteTransaction. Even with the
     /// per-write Durability::None path the txn-setup cost amortises
     /// down to ~zero per record when batched.

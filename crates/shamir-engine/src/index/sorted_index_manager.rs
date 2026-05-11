@@ -277,6 +277,54 @@ impl SortedIndexManager {
         Ok(None)
     }
 
+    /// Max lookup — the last record under the sorted prefix.
+    /// Uses `iter_range_stream_reverse` so disk backends seek
+    /// straight to the upper bound and walk one entry backwards.
+    pub async fn lookup_max(&self, name_interned: u64) -> DbResult<Option<RecordId>> {
+        let prefix = self.entry_prefix(name_interned);
+        let (lower, upper) = self.range_bounds(&prefix, None, None);
+        let stream = self
+            .info_store
+            .iter_range_stream_reverse(Some(lower), Some(upper), 1);
+        futures::pin_mut!(stream);
+        if let Some(batch) = stream.next().await {
+            for (k, _) in batch? {
+                return Ok(decode_record_id_suffix(k.as_ref()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Last K record ids under the sorted prefix, in value-DESC order.
+    /// Mirror of `lookup_first_k` using `iter_range_stream_reverse`.
+    pub async fn lookup_last_k(
+        &self,
+        name_interned: u64,
+        k: usize,
+    ) -> DbResult<Vec<RecordId>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = self.entry_prefix(name_interned);
+        let (lower, upper) = self.range_bounds(&prefix, None, None);
+        let stream = self
+            .info_store
+            .iter_range_stream_reverse(Some(lower), Some(upper), k.min(256));
+        futures::pin_mut!(stream);
+        let mut out = Vec::with_capacity(k);
+        while let Some(batch) = stream.next().await {
+            for (key, _) in batch? {
+                if out.len() == k {
+                    return Ok(out);
+                }
+                if let Some(id) = decode_record_id_suffix(key.as_ref()) {
+                    out.push(id);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// First K record ids under the sorted prefix, in value-asc order.
     pub async fn lookup_first_k(
         &self,

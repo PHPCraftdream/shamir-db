@@ -501,6 +501,98 @@ async fn setup_sorted_score(n: usize) -> (crate::table::TableManager, Vec<i64>) 
     (table, expected)
 }
 
+/// Regression / opt: ORDER BY field DESC LIMIT K with a sorted index
+/// on `field` must skip the "collect + sort" pipeline and use
+/// reverse iteration over the sorted-index → `lookup_last_k`.
+/// Mirror of the ASC test below.
+#[tokio::test]
+async fn test_order_by_desc_limit_uses_sorted_index_fast_path() {
+    let (table, mut expected) = setup_sorted_score(200).await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "order_by": {"items": [{"field": ["score"], "direction": "desc"}]},
+        "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 0}
+    })).unwrap();
+
+    let result = table.read(&query, &ctx).await.unwrap();
+
+    // Expect top-5 highest scores in DESC order.
+    expected.reverse(); // desc
+    assert_eq!(result.records.len(), 5);
+    let got_scores: Vec<i64> = result
+        .records
+        .iter()
+        .map(|r| r.get("score").and_then(|v| v.as_i64()).expect("score field"))
+        .collect();
+    assert_eq!(got_scores, expected[..5], "wrong records for DESC LIMIT 5");
+
+    // Fast path marker.
+    let used = result
+        .stats
+        .as_ref()
+        .expect("stats")
+        .index_used
+        .as_deref()
+        .unwrap_or("");
+    assert!(
+        used.starts_with("sorted_idx_") && used.contains("last_k"),
+        "ORDER BY DESC LIMIT K did not take the sorted-index reverse fast path \
+         (index_used = {:?})",
+        used
+    );
+}
+
+/// Regression / opt: SELECT max(field) with a sorted index on
+/// `field` must go through reverse-iter `lookup_max`, NOT a full
+/// scan. Mirror of the MIN fast path already in place.
+#[tokio::test]
+async fn test_max_aggregate_uses_sorted_index() {
+    let (table, expected) = setup_sorted_score(200).await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "select": {
+            "items": [{
+                "type": "aggregate",
+                "func": "max",
+                "field": ["score"],
+                "alias": "max_score"
+            }],
+            "distinct": false
+        }
+    })).unwrap();
+
+    let result = table.read(&query, &ctx).await.unwrap();
+
+    let max_expected = *expected.last().unwrap();
+    assert_eq!(result.records.len(), 1);
+    let got = result.records[0]
+        .get("max_score")
+        .and_then(|v| v.as_i64())
+        .expect("max_score in result");
+    assert_eq!(got, max_expected);
+
+    let used = result
+        .stats
+        .as_ref()
+        .expect("stats")
+        .index_used
+        .as_deref()
+        .unwrap_or("");
+    assert!(
+        used.starts_with("sorted_idx_") && used.contains("_max"),
+        "MAX did not take sorted-index fast path (index_used = {:?})",
+        used
+    );
+}
+
 /// Regression / opt: ORDER BY field ASC LIMIT K with a sorted index
 /// on `field` must skip the "collect all + sort + truncate" pipeline
 /// and go straight through `lookup_first_k`. The signal: stats
