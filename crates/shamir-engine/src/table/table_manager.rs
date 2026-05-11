@@ -234,9 +234,40 @@ impl TableManager {
             return Ok(Vec::new());
         }
 
-        // 1. Validate unique indexes for every value first (cheap reads).
-        for v in values {
-            self.index_manager.validate_unique_for_create(v).await?;
+        // 1. Validate unique indexes for every value first. Two
+        //    layers of check: persisted state (via
+        //    `validate_unique_for_create`) AND batch-local seen
+        //    map, because two rows within ONE batch with the same
+        //    unique value would otherwise both pass the persisted
+        //    check and silently overwrite each other in step 3.
+        if self.index_manager.has_unique_indexes() {
+            // Map: (unique_index_name_interned, encoded_values_key)
+            // → first index in the batch that claimed it. Cheap
+            // bincode-based key avoids fighting `InnerValue` hash
+            // requirements (Map keyed by interner ids isn't `Hash`).
+            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>)> =
+                std::collections::HashSet::new();
+            for (i, v) in values.iter().enumerate() {
+                self.index_manager.validate_unique_for_create(v).await?;
+                // Now record this row's unique-index claims so the
+                // next iteration sees them.
+                for def in self.index_manager.iter_unique_indexes() {
+                    if let Some(vs) =
+                        crate::index::index_manager::IndexManager::extract_index_values(
+                            v, &def.paths,
+                        )
+                    {
+                        let key = bincode::serialize(&vs)
+                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                        if !batch_seen.insert((def.name_interned, key)) {
+                            return Err(shamir_storage::error::DbError::DuplicateKey(format!(
+                                "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
+                                def.name_interned, i
+                            )));
+                        }
+                    }
+                }
+            }
         }
 
         // 2. One batched data-store write.

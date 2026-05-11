@@ -146,6 +146,48 @@ async fn test_table_manager_insert_many_with_unique_index() {
     assert_eq!(ctx.count().await.unwrap(), 3);
 }
 
+#[tokio::test]
+async fn test_insert_many_rejects_within_batch_duplicate_unique() {
+    // Regression test: two records in the SAME batch carrying the
+    // same value for a unique index must reject the batch. Per-row
+    // `validate_unique_for_create` only checks already-persisted
+    // state and cannot see the prior element of the same batch on
+    // its own.
+    use shamir_types::types::common::new_map;
+
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: configs,
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let ctx = db.get_table("default", "users").await.unwrap();
+    ctx.create_unique_index("by_id", &["id"]).await.unwrap();
+
+    let interner = ctx.interner().get().await.unwrap();
+    let id_key = interner.touch_ind("id").unwrap().key().clone();
+    let mk = |id: &str| -> InnerValue {
+        let mut m = new_map();
+        m.insert(id_key.clone(), InnerValue::Str(id.to_string()));
+        InnerValue::Map(m)
+    };
+
+    // Two distinct records with the SAME unique value in one batch.
+    let batch = vec![mk("dup"), mk("dup")];
+    let res = ctx.insert_many(&batch).await;
+    assert!(
+        res.is_err(),
+        "duplicate unique key within one batch must reject the batch"
+    );
+    // Neither record landed — counter still zero, no orphans.
+    assert_eq!(
+        ctx.count().await.unwrap(),
+        0,
+        "counter must not have advanced when within-batch unique check rejected the batch"
+    );
+}
+
 // ============================================================================
 // Index API tests (string paths)
 // ============================================================================

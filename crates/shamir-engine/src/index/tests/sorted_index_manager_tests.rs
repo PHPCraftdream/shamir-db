@@ -413,3 +413,48 @@ async fn empty_manager_lookup_range_is_empty() {
     let r = mgr.lookup_range(101, None, None).await.unwrap();
     assert!(r.is_empty());
 }
+
+/// Regression: an `Eq` query against a string column whose value is
+/// a prefix of another column's value must not match the longer one.
+/// Pre-fix the encoder appended raw UTF-8 with no terminator, so
+/// `prefix||"a"||rid_X` could sort within the bounds we built for
+/// `"aa"` and vice versa — the range scan returned wrong records.
+#[tokio::test]
+async fn string_prefix_does_not_match_longer_value() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+
+    // Insert two records: one with value "a", one with value "aa".
+    let rid_a = RecordId::new();
+    let rid_aa = RecordId::new();
+    mgr.on_record_created(&rid_a, &record_with_str(201, "a"))
+        .await
+        .unwrap();
+    mgr.on_record_created(&rid_aa, &record_with_str(201, "aa"))
+        .await
+        .unwrap();
+
+    // Range "a"..="a" (i.e. Eq("a")) must return only rid_a, NOT rid_aa.
+    let bound_a = enc_str("a");
+    let r = mgr
+        .lookup_range(101, Some(&bound_a), Some(&bound_a))
+        .await
+        .unwrap();
+    assert!(r.contains(&rid_a), "Eq(\"a\") missed rid_a");
+    assert!(
+        !r.contains(&rid_aa),
+        "Eq(\"a\") incorrectly matched rid_aa — sorted index leaked across string boundary"
+    );
+    assert_eq!(r.len(), 1, "Eq(\"a\") returned {} records, expected 1", r.len());
+
+    // Range "aa"..="aa" must return only rid_aa.
+    let bound_aa = enc_str("aa");
+    let r = mgr
+        .lookup_range(101, Some(&bound_aa), Some(&bound_aa))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1);
+    assert!(r.contains(&rid_aa));
+}
