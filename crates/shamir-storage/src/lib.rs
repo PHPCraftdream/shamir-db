@@ -16,6 +16,7 @@
 pub mod error;
 pub mod storage_cached;
 pub mod storage_in_memory;
+pub mod storage_membuffer;
 pub mod types;
 
 #[cfg(feature = "canopy")]

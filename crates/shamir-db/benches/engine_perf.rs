@@ -118,6 +118,72 @@ async fn fresh_db_with(factory: BoxRepoFactory) -> Arc<ShamirDb> {
     shamir
 }
 
+// MemBuffer-wrapped variants — measure the wrapper overhead.
+// Today MemBufferStore is a passthrough proxy, so these should
+// produce numbers indistinguishable from the raw backend.
+async fn fresh_db_membuffer_in_memory() -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::in_memory(),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
+async fn fresh_db_membuffer_sled(path: &std::path::Path) -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::sled(path.to_path_buf()),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
+async fn fresh_db_membuffer_redb(path: &std::path::Path) -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::redb(path.join("db.redb")),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
+async fn fresh_db_membuffer_persy(path: &std::path::Path) -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::persy(path.join("db.persy")),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
+async fn fresh_db_membuffer_canopy(path: &std::path::Path) -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::canopy(path.to_path_buf()),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
+async fn fresh_db_membuffer_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::fjall(path.to_path_buf()),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
+async fn fresh_db_membuffer_nebari(path: &std::path::Path) -> Arc<ShamirDb> {
+    use shamir_storage::storage_membuffer::MemBufferConfig;
+    fresh_db_with(BoxRepoFactory::membuffer(
+        BoxRepoFactory::nebari(path.to_path_buf()),
+        MemBufferConfig::default(),
+    ))
+    .await
+}
+
 /// Seed `n` records via a single `insert_into` op (does NOT scan).
 async fn seed_users(shamir: &ShamirDb, n: usize) {
     let values: Vec<JsonValue> = (0..n).map(gen_user).collect();
@@ -1087,6 +1153,53 @@ bench_bulk_insert_for_backend!(bench_bulk_insert_canopy, "bulk_insert_canopy", f
 bench_bulk_insert_for_backend!(bench_bulk_insert_fjall,  "bulk_insert_fjall",  fresh_db_fjall);
 bench_bulk_insert_for_backend!(bench_bulk_insert_nebari, "bulk_insert_nebari", fresh_db_nebari);
 
+// MemBuffer-wrapped variants. Same backends, same numbers as raw
+// for the passthrough proxy phase. Once the LRU + flusher ship,
+// expect: persy/nebari/canopy biggest win; sled/redb/fjall
+// near-noise.
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_membuffer_sled,   "bulk_insert_membuffer_sled",   fresh_db_membuffer_sled
+);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_membuffer_redb,   "bulk_insert_membuffer_redb",   fresh_db_membuffer_redb
+);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_membuffer_persy,  "bulk_insert_membuffer_persy",  fresh_db_membuffer_persy
+);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_membuffer_canopy, "bulk_insert_membuffer_canopy", fresh_db_membuffer_canopy
+);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_membuffer_fjall,  "bulk_insert_membuffer_fjall",  fresh_db_membuffer_fjall
+);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_membuffer_nebari, "bulk_insert_membuffer_nebari", fresh_db_membuffer_nebari
+);
+
+// Membuffer-only bench using the macro shape: in-memory backend
+// wrapped — measures pure wrapper overhead (no I/O).
+fn bench_bulk_insert_membuffer_in_memory(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("bulk_insert_membuffer_in_memory");
+    for &count in &[100usize, 1_000] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.to_async(&rt).iter_custom(|iters| async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let shamir = fresh_db_membuffer_in_memory().await;
+                    let req = req_bulk_insert(0, count);
+                    let start = Instant::now();
+                    shamir.execute("bench", &req).await.unwrap();
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Same as `bulk_insert_sled` but with a regular index on the
 /// `city` field (cardinality 8 → high-fanout posting lists).
 /// Exposes the cost of index posting-list updates per insert.
@@ -1279,6 +1392,13 @@ criterion_group!(
     bench_bulk_insert_canopy,
     bench_bulk_insert_fjall,
     bench_bulk_insert_nebari,
+    bench_bulk_insert_membuffer_in_memory,
+    bench_bulk_insert_membuffer_sled,
+    bench_bulk_insert_membuffer_redb,
+    bench_bulk_insert_membuffer_persy,
+    bench_bulk_insert_membuffer_canopy,
+    bench_bulk_insert_membuffer_fjall,
+    bench_bulk_insert_membuffer_nebari,
     bench_bulk_insert_with_index_sled,
     bench_range_query_no_index_sled,
     bench_range_query_with_index_sled,

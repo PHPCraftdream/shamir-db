@@ -196,6 +196,10 @@ impl ShamirDb {
             BoxRepoFactory::Persy(_) => "persy",
             #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(_) => "canopy",
+            // The buffer layer doesn't have an identity of its own
+            // — recurse to the underlying backend so reflection
+            // sees the real engine.
+            BoxRepoFactory::MemBuffer(f) => return Self::extract_storage_type(&f.inner),
         }
         .to_string()
     }
@@ -215,6 +219,7 @@ impl ShamirDb {
             BoxRepoFactory::Persy(f) => Some(f.path.to_string_lossy().to_string()),
             #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => Some(f.path.to_string_lossy().to_string()),
+            BoxRepoFactory::MemBuffer(f) => Self::extract_path(&f.inner),
         }
     }
 
