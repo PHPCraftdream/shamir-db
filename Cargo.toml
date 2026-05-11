@@ -18,7 +18,12 @@ incremental = true
 
 [profile.release]
 lto = "fat"
-opt-level = "z"
+# `opt-level = 3` (speed) instead of `"z"` (size). This is a server-
+# side database — binary size barely matters, throughput on hot
+# loops (filter eval, projection, codec) does. shamir-client-node
+# has its own `[profile.release] opt-level = "z"` because it ships
+# as a JS-bundled native module.
+opt-level = 3
 codegen-units = 14
 incremental = true
 debug = false
