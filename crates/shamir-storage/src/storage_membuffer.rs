@@ -481,23 +481,30 @@ impl MemBufferStore {
             }
         }
 
-        // Phase 3: byte-cap eviction loop. While we're over the
-        // cap, pop LRU until we're back under. Each evicted entry
-        // is flushed inline if dirty. Reads `max_bytes` atomically
-        // each iteration so a DDL change takes effect immediately.
-        while self.state.cache_bytes.load(Ordering::Relaxed)
-            > self.state.max_bytes.load(Ordering::Relaxed)
+        // Phase 3: byte-cap eviction loop. Pops LRU entries until
+        // back under `max_bytes`. We hold the cache lock for the
+        // WHOLE pop sequence (one takt instead of N), then process
+        // each evictee's dirty-flush OUTSIDE the lock. The DDL
+        // hot-reload property is preserved — `max_bytes` is still
+        // re-read inside the loop, so a shrink that arrives after
+        // we entered the lock will still be honoured before we
+        // release it.
+        let mut evicted: Vec<(RecordKey, CachedSlot)> = Vec::new();
         {
-            let (ek, eslot) = {
-                let mut cache = self.state.cache.lock().unwrap();
+            let mut cache = self.state.cache.lock().unwrap();
+            while self.state.cache_bytes.load(Ordering::Relaxed)
+                > self.state.max_bytes.load(Ordering::Relaxed)
+            {
                 if let Some((k, s)) = cache.pop_lru() {
                     let b = Self::slot_bytes(&k, &s.slot);
                     self.state.cache_bytes.fetch_sub(b, Ordering::Relaxed);
-                    (k, s)
+                    evicted.push((k, s));
                 } else {
-                    break; // empty cache yet still over cap? Impossible.
+                    break;
                 }
-            };
+            }
+        }
+        for (ek, eslot) in evicted {
             let was_dirty = self.state.dirty.lock().unwrap().remove(&ek);
             if was_dirty {
                 match eslot.slot {

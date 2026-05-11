@@ -1412,6 +1412,66 @@ fn bench_steady_state_insert(c: &mut Criterion) {
     group.finish();
 }
 
+/// Eviction under byte-pressure: cache is intentionally held
+/// near its `max_bytes` cap so every new insert triggers the
+/// byte-cap eviction loop in `cache_put`. Each iter does 1000
+/// writes; the byte-cap loop pops + (maybe-)flushes one LRU
+/// entry per write.
+///
+/// Inner store = InMemoryStore to isolate the eviction-loop
+/// cost from disk I/O.
+fn bench_eviction_byte_pressure(c: &mut Criterion) {
+    use shamir_db::storage::storage_in_memory::InMemoryStore;
+    use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+    use shamir_db::storage::types::{RecordKey, Store};
+    use shamir_types::types::record_id::RecordId;
+
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("eviction_byte_pressure");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements(1_000));
+
+    group.bench_function("seed_8k_then_insert_1k", |b| {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+                // ~100 bytes/value × 8000 = ~800k cache footprint.
+                // max_bytes 1_000_000 leaves ~200k headroom — first
+                // new insert puts us over; eviction kicks in.
+                let cfg = MemBufferConfig {
+                    max_bytes: 1_000_000,
+                    max_entries: 100_000,
+                    ttl_ms: None,
+                    flush_interval_ms: 60_000, // effectively no auto-flush
+                    flush_batch_size: 256,
+                };
+                let store: Arc<dyn Store> =
+                    Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let v: shamir_db::storage::types::RecordKey =
+                    shamir_db::storage::types::RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
+                for _ in 0..8_000 {
+                    let id = RecordId::new();
+                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    store.set(k, v.clone()).await.unwrap();
+                }
+                // Now seeded near cap. Time the next 1000 writes.
+                let start = Instant::now();
+                for _ in 0..1_000 {
+                    let id = RecordId::new();
+                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    store.set(k, v.clone()).await.unwrap();
+                }
+                total += start.elapsed();
+                drop(store);
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
+
 /// High-QPS WAL: 1000 batches × 1 record each, against a fresh
 /// MemBuffer-wrapped DB. Each batch goes through
 /// `wal.begin` (info_store.set marker) -> data write -> counter
@@ -1601,6 +1661,7 @@ criterion_group!{
     bench_batch_multi_read,
     bench_cache_hit_get,
     bench_steady_state_insert,
-    bench_wal_high_qps
+    bench_wal_high_qps,
+    bench_eviction_byte_pressure
 }
 criterion_main!(benches);
