@@ -364,13 +364,31 @@ impl MemBufferStore {
 
     /// Walk the cache, evict entries whose `born_at` is older
     /// than `ttl`. Dirty entries get flushed inline before being
-    /// dropped from cache. Runs on every flusher tick when TTL is
-    /// configured; cost is O(cache_size).
+    /// dropped from cache.
+    ///
+    /// **Bounded approximate sweep.** We iterate from the LRU
+    /// (tail) side and `take_while` the entry is stale, capping
+    /// at `TTL_SWEEP_BUDGET` per pass. This bounds the
+    /// cache-lock hold time to ~100 µs even on huge caches —
+    /// writers no longer stall for ms on each flusher tick.
+    ///
+    /// Approximation: an entry whose insertion was long ago but
+    /// that was read recently sits mid-LRU instead of at the
+    /// tail. Such entries are missed by this pass; they get
+    /// caught by the next pass (since LRU position decays as
+    /// other reads happen) or by capacity-pressure eviction.
+    /// Acceptable for our workload — the buffer is primarily a
+    /// write-back staging area; entries are rarely re-read
+    /// between write and flush.
     async fn ttl_evict_once(
         state: &MemBufferState,
         inner: &dyn Store,
         ttl: std::time::Duration,
     ) -> DbResult<()> {
+        /// Max stale keys collected per sweep pass. Lock-hold ≈
+        /// `BUDGET × ~50 ns` = ~100 µs at 2048.
+        const TTL_SWEEP_BUDGET: usize = 2048;
+
         let cutoff = match std::time::Instant::now().checked_sub(ttl) {
             Some(c) => c,
             None => return Ok(()),
@@ -380,7 +398,9 @@ impl MemBufferStore {
             let cache = state.cache.lock().unwrap();
             cache
                 .iter()
-                .filter(|(_, cs)| cs.born_at < cutoff)
+                .rev() // LRU (oldest insertion) first
+                .take_while(|(_, cs)| cs.born_at < cutoff)
+                .take(TTL_SWEEP_BUDGET)
                 .map(|(k, _)| k.clone())
                 .collect()
         };
