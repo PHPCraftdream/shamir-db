@@ -46,8 +46,16 @@ async-stream = "0.3"
 futures = "0.3"
 bytes = "1.11.0"
 dashmap = "6.1.0"
-# Bounded LRU for MemBufferStore. Zero transitive deps.
-lru = "0.12"
+# Concurrent W-TinyLFU + LRU cache for `MemBufferStore`. Lock-free
+# reads via internal per-thread write buffer (Caffeine-style),
+# scales linearly to physical cores. Replaces the previous
+# `lru` + `Mutex<LruCache>` implementation. Built-in TTL +
+# weigher-based byte capacity make our eviction/TTL/byte-cap
+# loops unnecessary.
+moka = { version = "0.12", features = ["future"] }
+# `apply_config` hot-swaps the moka cache (rebuild on DDL); reads
+# do `arc_swap.load()` (atomic load) instead of an Mutex/RwLock.
+arc-swap = "1.7"
 # `MemBufferConfig` serializes into the engine's info_store via
 # bincode at the DDL boundary.
 serde = { version = "1", features = ["derive"] }
