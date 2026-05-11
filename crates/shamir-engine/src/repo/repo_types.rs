@@ -10,6 +10,7 @@
 use shamir_storage::storage_canopy::CanopyRepo;
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_fjall::FjallRepo;
+use shamir_storage::storage_cached::{CachedStore, WriteMode};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 #[cfg(feature = "nebari")]
@@ -41,18 +42,25 @@ pub enum BoxRepo {
     Persy(Arc<PersyRepo>),
     #[cfg(feature = "canopy")]
     Canopy(Arc<CanopyRepo>),
-    /// Recursive wrapper — buffers reads/writes in memory in front
-    /// of any other backend. Today a passthrough; gains a bounded
-    /// LRU cache + background flusher in a follow-up.
+    /// Bounded LRU + write-back wrapper. See `MemBufferStore`.
     MemBuffer(Arc<MemBufferRepoComposite>),
+    /// Full-mirror cache wrapper. Loads every record from inner on
+    /// open; subsequent reads are pure-memory; writes go to cache
+    /// + inner (Sync or Async per `WriteMode`). Useful for small
+    /// hot datasets where the working set fits in RAM and every
+    /// read should be free of disk latency. Stacks on top of
+    /// MemBuffer or any other backend.
+    Cached(Arc<CachedRepoComposite>),
 }
 
-/// Holds the inner backend Repo (as another `BoxRepo`) plus the
-/// buffer config. Public so `MemBuffer` variants can be matched
-/// from other modules.
 pub struct MemBufferRepoComposite {
     pub inner: BoxRepo,
     pub config: MemBufferConfig,
+}
+
+pub struct CachedRepoComposite {
+    pub inner: BoxRepo,
+    pub mode: WriteMode,
 }
 
 #[async_trait::async_trait]
@@ -82,6 +90,14 @@ impl Repo for BoxRepo {
                     c.config.clone(),
                 )))
             }
+            BoxRepo::Cached(c) => {
+                let inner_store = c.inner.store_get(name).await?;
+                let cached = match c.mode {
+                    WriteMode::Sync => CachedStore::new_sync(inner_store).await?,
+                    WriteMode::Async => CachedStore::new_async(inner_store).await?,
+                };
+                Ok(Arc::new(cached))
+            }
         }
     }
 
@@ -101,6 +117,7 @@ impl Repo for BoxRepo {
             #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.store_delete(name).await,
             BoxRepo::MemBuffer(c) => c.inner.store_delete(name).await,
+            BoxRepo::Cached(c) => c.inner.store_delete(name).await,
         }
     }
 
@@ -120,6 +137,7 @@ impl Repo for BoxRepo {
             #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.stores_list().await,
             BoxRepo::MemBuffer(c) => c.inner.stores_list().await,
+            BoxRepo::Cached(c) => c.inner.stores_list().await,
         }
     }
 }
@@ -319,9 +337,11 @@ pub enum BoxRepoFactory {
     Persy(PersyRepoFactory),
     #[cfg(feature = "canopy")]
     Canopy(CanopyRepoFactory),
-    /// Recursive wrapper — buffer (LRU cache + background flusher,
-    /// today passthrough) on top of any other factory.
+    /// MemBuffer wrapper factory.
     MemBuffer(Box<MemBufferRepoFactory>),
+    /// Full-mirror cache wrapper factory. Stacks on top of any
+    /// other factory.
+    Cached(Box<CachedRepoFactory>),
 }
 
 pub struct MemBufferRepoFactory {
@@ -329,47 +349,145 @@ pub struct MemBufferRepoFactory {
     pub config: MemBufferConfig,
 }
 
+pub struct CachedRepoFactory {
+    pub inner: BoxRepoFactory,
+    pub mode: WriteMode,
+}
+
 impl BoxRepoFactory {
+    /// The default `MemBufferConfig` we wrap every disk factory in.
+    ///
+    /// Conservative — small enough that memory is never a surprise,
+    /// flush window short enough that "kill -9 = data loss" stays
+    /// at sub-second scope. Matches industry default (Postgres
+    /// `synchronous_commit=off`, SQLite `PRAGMA synchronous=NORMAL`).
+    ///
+    /// Users tuning for either side (more cache or stricter
+    /// durability) construct their own `MemBufferConfig` and call
+    /// `BoxRepoFactory::membuffer(inner, custom)` explicitly.
+    fn default_membuffer_config() -> MemBufferConfig {
+        MemBufferConfig {
+            max_entries: 1024,
+            flush_interval_ms: 50,
+            flush_batch_size: 256,
+        }
+    }
+
+    /// Wrap a raw factory in the default `MemBufferConfig`. Used
+    /// internally by every disk-backend constructor — they all
+    /// return a MemBuffer-wrapped factory by default.
+    fn wrapped(raw: BoxRepoFactory) -> Self {
+        BoxRepoFactory::MemBuffer(Box::new(MemBufferRepoFactory {
+            inner: raw,
+            config: Self::default_membuffer_config(),
+        }))
+    }
+
+    /// In-memory factory. NOT wrapped in MemBuffer — the underlying
+    /// `InMemoryStore` is already memory-resident, the wrapper
+    /// would just add a second cache layer with no perf gain and
+    /// real read-after-write semantics confusion.
     pub fn in_memory() -> Self {
         BoxRepoFactory::InMemory(InMemoryRepoFactory)
     }
 
+    /// Sled, MemBuffer-wrapped by default.
     #[cfg(feature = "sled")]
     pub fn sled(path: impl Into<PathBuf>) -> Self {
+        Self::wrapped(BoxRepoFactory::Sled(SledRepoFactory { path: path.into() }))
+    }
+
+    /// Redb, MemBuffer-wrapped by default.
+    #[cfg(feature = "redb")]
+    pub fn redb(path: impl Into<PathBuf>) -> Self {
+        Self::wrapped(BoxRepoFactory::Redb(RedbRepoFactory { path: path.into() }))
+    }
+
+    /// Fjall, MemBuffer-wrapped by default.
+    #[cfg(feature = "fjall")]
+    pub fn fjall(path: impl Into<PathBuf>) -> Self {
+        Self::wrapped(BoxRepoFactory::Fjall(FjallRepoFactory { path: path.into() }))
+    }
+
+    /// Nebari, MemBuffer-wrapped by default.
+    #[cfg(feature = "nebari")]
+    pub fn nebari(path: impl Into<PathBuf>) -> Self {
+        Self::wrapped(BoxRepoFactory::Nebari(NebariRepoFactory {
+            path: path.into(),
+        }))
+    }
+
+    /// Persy, MemBuffer-wrapped by default.
+    #[cfg(feature = "persy")]
+    pub fn persy(path: impl Into<PathBuf>) -> Self {
+        Self::wrapped(BoxRepoFactory::Persy(PersyRepoFactory { path: path.into() }))
+    }
+
+    /// Canopy, MemBuffer-wrapped by default.
+    #[cfg(feature = "canopy")]
+    pub fn canopy(path: impl Into<PathBuf>) -> Self {
+        Self::wrapped(BoxRepoFactory::Canopy(CanopyRepoFactory {
+            path: path.into(),
+        }))
+    }
+
+    // ---------------------- raw (unwrapped) factories ----------------------
+    //
+    // For tooling and tests that need bit-for-bit on-disk semantics
+    // (no buffering window). NOT recommended for application code.
+
+    /// Raw sled, no MemBuffer. Every write is durable on return.
+    #[cfg(feature = "sled")]
+    pub fn sled_raw(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Sled(SledRepoFactory { path: path.into() })
     }
 
+    /// Raw redb, no MemBuffer.
     #[cfg(feature = "redb")]
-    pub fn redb(path: impl Into<PathBuf>) -> Self {
+    pub fn redb_raw(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Redb(RedbRepoFactory { path: path.into() })
     }
 
+    /// Raw fjall, no MemBuffer.
     #[cfg(feature = "fjall")]
-    pub fn fjall(path: impl Into<PathBuf>) -> Self {
+    pub fn fjall_raw(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Fjall(FjallRepoFactory { path: path.into() })
     }
 
+    /// Raw nebari, no MemBuffer.
     #[cfg(feature = "nebari")]
-    pub fn nebari(path: impl Into<PathBuf>) -> Self {
+    pub fn nebari_raw(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Nebari(NebariRepoFactory { path: path.into() })
     }
 
+    /// Raw persy, no MemBuffer.
     #[cfg(feature = "persy")]
-    pub fn persy(path: impl Into<PathBuf>) -> Self {
+    pub fn persy_raw(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Persy(PersyRepoFactory { path: path.into() })
     }
 
+    /// Raw canopy, no MemBuffer.
     #[cfg(feature = "canopy")]
-    pub fn canopy(path: impl Into<PathBuf>) -> Self {
+    pub fn canopy_raw(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Canopy(CanopyRepoFactory { path: path.into() })
     }
 
-    /// Wrap an existing factory in the membuffer layer. Resulting
-    /// repo stays the same shape as `inner` but every `store_get`
-    /// returns a `MemBufferStore` wrapping the inner backend's
-    /// store.
+    /// Wrap a factory in a custom-config MemBuffer layer. Use this
+    /// when the conservative default config doesn't fit your
+    /// workload (very hot dataset, very strict latency window, etc).
     pub fn membuffer(inner: BoxRepoFactory, config: MemBufferConfig) -> Self {
         BoxRepoFactory::MemBuffer(Box::new(MemBufferRepoFactory { inner, config }))
+    }
+
+    /// Stack a full-mirror cache on top of `inner`. Sync mode
+    /// writes through synchronously; Async mode write-behind via
+    /// background tasks. Best for small hot datasets where the
+    /// working set fits in RAM.
+    ///
+    /// Composable with `membuffer`: `cached(sled(path))` gives
+    /// `Cached → MemBuffer → sled`.
+    pub fn cached(inner: BoxRepoFactory, mode: WriteMode) -> Self {
+        BoxRepoFactory::Cached(Box::new(CachedRepoFactory { inner, mode }))
     }
 }
 
@@ -397,6 +515,13 @@ impl RepoFactory for BoxRepoFactory {
                     config: f.config.clone(),
                 })))
             }
+            BoxRepoFactory::Cached(f) => {
+                let inner_repo = f.inner.create().await?;
+                Ok(BoxRepo::Cached(Arc::new(CachedRepoComposite {
+                    inner: inner_repo,
+                    mode: f.mode,
+                })))
+            }
         }
     }
 }
@@ -421,6 +546,7 @@ impl Clone for BoxRepoFactory {
                 f.inner.clone(),
                 f.config.clone(),
             ),
+            BoxRepoFactory::Cached(f) => BoxRepoFactory::cached(f.inner.clone(), f.mode),
         }
     }
 }

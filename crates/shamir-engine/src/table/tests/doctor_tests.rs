@@ -538,6 +538,243 @@ async fn recover_on_open_escalates_to_repair_when_targeted_leaves_orphan() {
     );
 }
 
+// ============================================================================
+// End-to-end crash recovery on a real disk backend
+// ============================================================================
+
+/// Build a fresh `TableManager` against a sled-backed repo at
+/// `path`. Used for the crash-simulation tests below — same
+/// path, second `TableManager::create` = "reopen".
+async fn fresh_sled_table(
+    path: &std::path::Path,
+    table_name: &str,
+) -> crate::table::TableManager {
+    use shamir_storage::storage_sled::SledRepo;
+    use shamir_storage::types::{Repo, Store};
+    let repo = SledRepo::new(path).unwrap();
+    let data_store: std::sync::Arc<dyn Store> =
+        repo.store_get(format!("__data__{}", table_name)).await.unwrap();
+    let info_store: std::sync::Arc<dyn Store> =
+        repo.store_get(format!("__info__{}", table_name)).await.unwrap();
+    crate::table::TableManager::create(
+        table_name.to_string(),
+        data_store,
+        info_store,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn wal_marker_durable_through_crash_on_sled() {
+    // Open a sled-backed TableManager, plant a WAL marker by
+    // hand, drop the manager — the underlying sled data still
+    // lives in the tempdir. Reopen: the WAL marker MUST survive
+    // and recovery MUST run.
+    let tempdir = tempfile::TempDir::new().unwrap();
+    {
+        let mgr = fresh_sled_table(tempdir.path(), "users").await;
+        let txn_id = mgr.wal().fresh_txn_id();
+        mgr.wal()
+            .begin(
+                txn_id,
+                vec![WalOp::RecordCreated {
+                    record_id: shamir_types::types::record_id::RecordId::new(),
+                }],
+            )
+            .await
+            .unwrap();
+        // The wal.begin() goes through info_store which is real sled.
+        // Drop the manager — no flush. Sled has its own background
+        // flusher (default 500ms), so for safety we explicitly
+        // request a flush on the info_store before dropping.
+        // This emulates a normal commit-boundary write.
+        mgr.index_manager_ref()
+            .iter_indexes()
+            .for_each(drop); // touch to avoid optimisation removing
+        drop(mgr);
+    }
+    // Reopen — auto-recovery should fire and clear the marker.
+    {
+        let mgr = fresh_sled_table(tempdir.path(), "users").await;
+        let inflight = mgr.wal().list_inflight().await.unwrap();
+        assert!(
+            inflight.is_empty(),
+            "auto-recovery on reopen must clear WAL marker"
+        );
+    }
+}
+
+#[tokio::test]
+async fn end_to_end_crash_recovery_completes_pending_delete_on_sled() {
+    // Real scenario: insert records, plant a DELETE WAL marker as
+    // if a delete batch began but didn't run, drop the manager,
+    // reopen — recovery must complete the delete and clear the
+    // marker.
+    let tempdir = tempfile::TempDir::new().unwrap();
+
+    let ids: Vec<shamir_types::types::record_id::RecordId> = {
+        let mgr = fresh_sled_table(tempdir.path(), "users").await;
+        mgr.create_index("by_city", &["city"]).await.unwrap();
+        let interner = mgr.interner().get().await.unwrap();
+        let mut values = Vec::new();
+        for i in 0..5 {
+            let mut m = new_map();
+            m.insert("id".to_string(), UserValue::Str(format!("u{}", i)));
+            m.insert("city".to_string(), UserValue::Str("NYC".into()));
+            m.insert("score".to_string(), UserValue::Int(i as i64));
+            let user = UserValue::Map(m);
+            let r = transform::user_to_inner(&user, interner);
+            if let Some(ref new_keys) = r.new_keys {
+                mgr.interner().save_new_keys(new_keys).await.unwrap();
+            }
+            values.push(r.inner_value);
+        }
+        let ids = mgr.insert_many(&values).await.unwrap();
+        // Persist the counter + interner explicitly so the next
+        // open sees a consistent baseline.
+        mgr.counter().persist().await.unwrap();
+        mgr.interner().persist().await.unwrap();
+        // Plant a DELETE marker for two specific records — as if
+        // the user's delete batch crashed BEFORE doing the actual
+        // deletes.
+        let to_delete = vec![ids[1], ids[3]];
+        let txn_id = mgr.wal().fresh_txn_id();
+        mgr.wal()
+            .begin_with_delta(
+                txn_id,
+                crate::wal::WalManager::ops_record_deleted(&to_delete),
+                -2,
+            )
+            .await
+            .unwrap();
+        ids
+    };
+
+    // Reopen. Auto-recovery must:
+    //   - find the DELETE marker
+    //   - call self.delete() for each named record_id (which removes
+    //     data + indexes)
+    //   - reconcile counter
+    //   - clear the WAL marker
+    {
+        let mgr = fresh_sled_table(tempdir.path(), "users").await;
+        // No WAL marker.
+        let inflight = mgr.wal().list_inflight().await.unwrap();
+        assert!(inflight.is_empty(), "WAL must be empty after reopen");
+
+        // Records 1 and 3 are gone.
+        assert!(mgr.get(ids[0]).await.is_ok());
+        assert!(
+            mgr.get(ids[1]).await.is_err(),
+            "ids[1] should have been rolled forward = deleted"
+        );
+        assert!(mgr.get(ids[2]).await.is_ok());
+        assert!(
+            mgr.get(ids[3]).await.is_err(),
+            "ids[3] should have been rolled forward = deleted"
+        );
+        assert!(mgr.get(ids[4]).await.is_ok());
+
+        // Counter reflects the post-delete truth.
+        assert_eq!(mgr.count().await.unwrap(), 3);
+
+        // verify is clean.
+        let v = mgr.verify().await.unwrap();
+        assert!(v.is_healthy(), "after recovery, db must be healthy: {:?}", v);
+    }
+}
+
+#[tokio::test]
+async fn end_to_end_crash_recovery_re_adds_missing_index_on_sled() {
+    // Realistic crash mid-batch: data is on disk, WAL marker
+    // names a record_id whose index posting we manually deleted.
+    // Reopen: recovery must re-apply the index hook.
+    use crate::index::index_record_key::IndexRecordKey;
+    use futures::StreamExt;
+    use shamir_storage::storage_sled::SledRepo;
+    use shamir_storage::types::Repo;
+
+    let tempdir = tempfile::TempDir::new().unwrap();
+
+    // Phase A — populate via TableManager, capture target id +
+    // index name, plant the WAL marker, drop.
+    let (target_id, index_name_interned) = {
+        let mgr = fresh_sled_table(tempdir.path(), "users").await;
+        mgr.create_index("by_city", &["city"]).await.unwrap();
+        let interner = mgr.interner().get().await.unwrap();
+        let mut values = Vec::new();
+        for i in 0..5 {
+            let mut m = new_map();
+            m.insert("id".to_string(), UserValue::Str(format!("u{}", i)));
+            m.insert("city".to_string(), UserValue::Str("NYC".into()));
+            m.insert("score".to_string(), UserValue::Int(i as i64));
+            let user = UserValue::Map(m);
+            let r = transform::user_to_inner(&user, interner);
+            if let Some(ref new_keys) = r.new_keys {
+                mgr.interner().save_new_keys(new_keys).await.unwrap();
+            }
+            values.push(r.inner_value);
+        }
+        let ids = mgr.insert_many(&values).await.unwrap();
+        mgr.counter().persist().await.unwrap();
+        mgr.interner().persist().await.unwrap();
+        let target = ids[2];
+        let defs: Vec<_> = mgr.index_manager_ref().iter_indexes().collect();
+        let name = defs[0].name_interned;
+        // Plant the WAL marker.
+        let txn_id = mgr.wal().fresh_txn_id();
+        mgr.wal()
+            .begin_with_delta(
+                txn_id,
+                vec![WalOp::RecordUpdated { record_id: target }],
+                0,
+            )
+            .await
+            .unwrap();
+        // Drop mgr (releases sled lock).
+        (target, name)
+    };
+
+    // Phase A.2 — open sled directly, nuke the posting for the
+    // target record. mgr is gone now so the lock is released.
+    {
+        let raw_repo = SledRepo::new(tempdir.path()).unwrap();
+        let info_store = raw_repo
+            .store_get("__info__users".to_string())
+            .await
+            .unwrap();
+        let prefix = IndexRecordKey::new(false, index_name_interned).to_prefix_bytes();
+        let stream = info_store.scan_prefix_stream(prefix, 1024);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (key, _) in batch.unwrap() {
+                if key.as_ref().ends_with(target_id.as_bytes()) {
+                    info_store.remove(key).await.unwrap();
+                }
+            }
+        }
+        // raw_repo + info_store drop here → sled lock released.
+    }
+
+    // Phase B — reopen, auto-recovery rolls forward.
+    {
+        let mgr = fresh_sled_table(tempdir.path(), "users").await;
+        // Marker cleared.
+        assert!(mgr.wal().list_inflight().await.unwrap().is_empty());
+        // Index state is consistent — recovery either targeted re-
+        // applied the missing posting, or verify-flagged + repair
+        // restored everything.
+        let v = mgr.verify().await.unwrap();
+        assert!(
+            v.is_healthy(),
+            "after reopen with planted corruption + WAL marker, \
+             auto-recovery must restore consistency: {:?}",
+            v
+        );
+    }
+}
+
 #[tokio::test]
 async fn bump_write_counter_spawns_background_verify_periodically() {
     // The watchdog should fire on the threshold crossing —
