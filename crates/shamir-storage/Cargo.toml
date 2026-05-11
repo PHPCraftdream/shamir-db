@@ -46,6 +46,8 @@ async-stream = "0.3"
 futures = "0.3"
 bytes = "1.11.0"
 dashmap = "6.1.0"
+# Bounded LRU for MemBufferStore. Zero transitive deps.
+lru = "0.12"
 
 # Errors / logging
 thiserror = "2.0.18"
