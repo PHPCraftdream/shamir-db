@@ -286,6 +286,20 @@ fn req_read_with_order_limit() -> BatchRequest {
     .unwrap()
 }
 
+fn req_read_with_order_limit_asc() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "r",
+        "queries": {
+            "r": {
+                "from": "users",
+                "order_by": { "items": [{ "field": ["score"], "direction": "asc" }] },
+                "pagination": { "mode": "LimitOffset", "limit": 10, "offset": 0 }
+            }
+        }
+    }))
+    .unwrap()
+}
+
 fn req_count_all() -> BatchRequest {
     serde_json::from_value(json!({
         "id": "c",
@@ -837,6 +851,34 @@ fn bench_min_only_with_index(c: &mut Criterion) {
     group.finish();
 }
 
+/// `order_by score ASC + LIMIT 10` with a SORTED index on `score`.
+/// Hits the Opt #6 fast path — `lookup_first_k(index, 10)` instead
+/// of full scan + sort. Companion to the existing
+/// `order_limit_top10` (which is DESC and falls through to full
+/// scan + sort by design).
+fn bench_order_limit_asc_with_sorted_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("order_limit_top10_asc_sorted");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_sorted_index(&s, "users", "by_score", "score").await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_read_with_order_limit_asc();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 /// `order_by score desc + LIMIT 10` on indexed score field — Opt #1
 /// can read the index in order and stop after K matches.
 fn bench_order_limit_with_index(c: &mut Criterion) {
@@ -1168,6 +1210,7 @@ criterion_group!(
     bench_min_only_no_index,
     bench_min_only_with_index,
     bench_order_limit_with_index,
+    bench_order_limit_asc_with_sorted_index,
     bench_range_query_no_index,
     bench_range_query_with_index,
     bench_bulk_insert_sled,

@@ -377,6 +377,31 @@ impl TableManager {
             }
         }
 
+        // Opt #6 — sorted-index ORDER BY field ASC LIMIT K fast path.
+        //
+        // When the query is exactly `ORDER BY field ASC LIMIT K` (or
+        // `LIMIT K OFFSET m`) with no WHERE / GROUP BY / DISTINCT /
+        // count_total / aggregates and a sorted index covers `field`,
+        // skip the "collect all matching rows + sort + truncate"
+        // pipeline. The sorted index already stores record_ids in
+        // value-ascending order — `lookup_first_k(K+m)` walks the
+        // first K+m entries in O(log N + K + m) and we just project
+        // them.
+        //
+        // O(N log N) → O(log N + K + m). At N=10K, K=10 it's a ~1000×
+        // asymptotic improvement; even at K=1000 the win is large
+        // because the sort step disappears.
+        //
+        // Falls through to the existing paths when the shape doesn't
+        // match (DESC, multi-field order_by, residual filter, etc.).
+        if let Some((idx_name, take, skip)) =
+            self.try_plan_order_limit_fast_path(query, interner)
+        {
+            return self
+                .read_order_limit_fast(query, ctx, interner, idx_name, take, skip, start)
+                .await;
+        }
+
         // Sorted-index plan (range / Gte / Lte / Between). Only kicks
         // in for the supported filter shapes — falls through to scan
         // otherwise.
@@ -571,6 +596,124 @@ impl TableManager {
                 execution_time_us: start.elapsed().as_micros() as u64,
             }),
             pagination,
+        })
+    }
+
+    /// Eligibility check for the ORDER BY ASC + LIMIT K fast path.
+    ///
+    /// Returns `Some((sorted_index_name, take, skip))` when the
+    /// query is exactly:
+    ///
+    /// - `order_by: { items: [single_item { direction: Asc }] }`
+    /// - `pagination: LimitOffset` with a finite `limit` (paged form
+    ///   normalised through `pagination.resolve()`)
+    /// - no `where`, `group_by`, `select.distinct`, `count_total`,
+    ///   no aggregate items in `select`
+    /// - a sorted index covers the order_by field
+    ///
+    /// The fast path then needs to materialise only the first
+    /// `skip + take` index entries (in value-ascending order) and
+    /// project them — no full collect, no in-memory sort.
+    pub fn try_plan_order_limit_fast_path(
+        &self,
+        query: &ReadQuery,
+        interner: &Interner,
+    ) -> Option<(u64, usize, usize)> {
+        use shamir_query_types::read::OrderDirection;
+
+        // Shape guards.
+        if query.r#where.is_some()
+            || query.group_by.is_some()
+            || query.select.distinct
+            || query.count_total
+            || exec::has_aggregates(&query.select)
+        {
+            return None;
+        }
+        let order_by = query.order_by.as_ref()?;
+        if order_by.items.len() != 1 {
+            return None;
+        }
+        let item = &order_by.items[0];
+        if !matches!(item.direction, OrderDirection::Asc) {
+            return None;
+        }
+        // Pagination must yield a finite take.
+        let (skip, take_opt) = query.pagination.resolve();
+        let take = take_opt? as usize;
+        if take == 0 {
+            return None;
+        }
+        let skip = skip as usize;
+
+        // Sorted index must cover the order_by field.
+        let mgr = self.sorted_indexes();
+        if !mgr.has_indexes() {
+            return None;
+        }
+        let field_path = intern_field_path(&item.field, interner)?;
+        let def = mgr.find_by_field(&field_path)?;
+
+        Some((def.name_interned, take, skip))
+    }
+
+    /// Execute the ORDER BY ASC LIMIT K fast path: pull the first
+    /// `skip + take` record ids from the sorted index (already in
+    /// value-asc order), skip the first `skip`, load + project.
+    async fn read_order_limit_fast(
+        &self,
+        query: &ReadQuery,
+        _ctx: &FilterContext<'_>,
+        interner: &Interner,
+        index_name: u64,
+        take: usize,
+        skip: usize,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        // 1. Pull first (skip + take) record_ids from the sorted index.
+        let want = skip
+            .checked_add(take)
+            .ok_or_else(|| {
+                shamir_storage::error::DbError::Validation(
+                    "LIMIT + OFFSET overflow".to_string(),
+                )
+            })?;
+        let ids = self
+            .sorted_indexes()
+            .lookup_first_k(index_name, want)
+            .await?;
+
+        // 2. Skip the offset, load the rest. Records may have been
+        //    deleted between index write and the lookup — silently
+        //    skip those (matches `read_sorted_index_scan` behaviour).
+        let records_scanned = ids.len() as u64;
+        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(take);
+        for id in ids.into_iter().skip(skip) {
+            if matched.len() == take {
+                break;
+            }
+            match self.get(id).await {
+                Ok(record) => matched.push((id, record)),
+                Err(shamir_storage::error::DbError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        // 3. Project. No re-sort — the index already gave us value-asc
+        //    order. No pagination either — `take` already capped at
+        //    `skip + take` materialised entries.
+        let result = exec::apply_select(&matched, &query.select, interner);
+        let records_returned = result.len() as u64;
+
+        Ok(QueryResult {
+            records: result,
+            stats: Some(QueryStats {
+                index_used: Some(format!("sorted_idx_{index_name}_first_k")),
+                records_scanned,
+                records_returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            }),
+            pagination: None,
         })
     }
 
