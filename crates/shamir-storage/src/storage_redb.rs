@@ -5,7 +5,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use std::ops::Bound;
 use std::path::Path;
 use std::pin::Pin;
@@ -137,7 +137,12 @@ impl Store for RedbStore {
             let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
 
-            let write_txn = db.begin_write()?;
+            let mut write_txn = db.begin_write()?;
+            // Default durability skips fsync; explicit `Store::flush()`
+            // forces the sync point. Matches sled's amortised model.
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
             {
                 let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
                 let mut table = write_txn.open_table(table_def)?;
@@ -160,7 +165,10 @@ impl Store for RedbStore {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
-            let write_txn = db.begin_write()?;
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
             let created;
             {
                 let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
@@ -195,7 +203,10 @@ impl Store for RedbStore {
         let db = self.db.clone();
         let table_name = self.table_name.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
-            let write_txn = db.begin_write()?;
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
             let removed;
             {
                 let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
@@ -379,6 +390,24 @@ impl Store for RedbStore {
                 yield Ok(batch);
             }
         })
+    }
+
+    /// Explicit fsync. Per-write commits run with `Durability::None`
+    /// (skips fsync, data goes to the OS page cache, visible to
+    /// subsequent reads). `flush()` runs an empty commit with
+    /// `Durability::Immediate`, forcing pending writes to disk.
+    async fn flush(&self) -> DbResult<()> {
+        let db = self.db.clone();
+        task::spawn_blocking(move || -> DbResult<()> {
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::Immediate)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
+            write_txn.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
     }
 }
 

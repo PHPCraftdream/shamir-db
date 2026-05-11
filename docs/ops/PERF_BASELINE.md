@@ -601,6 +601,93 @@ bound. Wide ranges at low `start` (age=30 out of 18..78 → ~20%
 waste) get ~1.4×. Narrow ranges (age=30 exactly, single value)
 where we used to walk from age=18 → ~2.5×. As expected.
 
+## Cross-backend bulk_insert parity pass (2026-05-11)
+
+Now that sled's per-write fsync is gone, the picture for the other
+disk backends sharpens. Baseline (before this pass, with sled
+already on the new path):
+
+| Backend  | bulk_insert/100 | bulk_insert/1000 | Cost  |
+|----------|----------------:|-----------------:|-------|
+| sled     |          7.4 ms |           71 ms  | ~70 µs/rec |
+| **redb** |        **282 ms** |       **2.75 s** | ~2.75 ms/rec |
+| **persy** |       **296 ms** |       **2.95 s** | ~2.95 ms/rec |
+| canopy   |          9.5 ms |           83 ms  | ~83 µs/rec |
+| fjall    |           72 ms |          127 ms  | ~127 µs/rec (n.b. /100 overhead is fixed) |
+| **nebari** |      **487 ms** |       **4.79 s** | ~4.79 ms/rec |
+
+Three slow backends — redb, persy, nebari — all share the same
+underlying cost: every `Store::insert/set/remove` opens a write
+transaction and `commit()`s it, and each commit fsyncs.
+
+### redb — Durability::None on writes + immediate on flush ✅
+
+Per-write `WriteTransaction` now calls
+`set_durability(Durability::None)` before commit. redb's
+`Durability::None` keeps the in-memory state consistent (subsequent
+reads see the writes) but skips fsync. `Store::flush()` issues an
+empty commit with `Durability::Immediate`, forcing all pending
+in-memory state to disk.
+
+Same semantic model as sled's amortised durability — and same kind
+of win:
+
+| Bench                | Pre   | Post  | Speedup |
+|----------------------|-------|-------|---------|
+| bulk_insert_redb/100  | 282 ms | 24.0 ms | **11.7×** |
+| bulk_insert_redb/1000 | 2.75 s | 188 ms  | **14.6×** |
+
+### persy — tried `set_background_sync(true)`, got SLOWER, reverted ❌
+
+persy exposes `TransactionConfig::set_background_sync(true)`
+(behind the `background_ops` cargo feature) — supposedly moves the
+fsync to a background thread so `commit()` returns immediately.
+
+Measured: bulk_insert_persy/1000 went 2.95 s → 5.23 s (**+77 %
+regression**). The background thread bottlenecks worse than the
+direct fsync on Windows, presumably from queue contention. Or the
+"background" path still synchronises before commit returns.
+Reverted; persy stays at 2.95 s for now.
+
+The real fix for persy is a batched-write Store API
+(`Store::insert_many` etc.), which lets a single transaction
+absorb the whole batch. That's a wider refactor — deferred.
+
+### nebari — no fsync-skip mode in API ❌
+
+`nebari::Config` exposes no equivalent of `Durability::None`. Every
+`Tree::set()` is a transactional commit with mandatory fsync.
+
+Path forward: same as persy — batched `Tree::modify(Modification)`
+through a `Store::insert_many` extension. Deferred.
+
+### fjall — already on LSM, journal-buffered ✅ (no change)
+
+fjall's `keyspace.insert()` writes to the WAL journal buffer (no
+fsync per write) — durability comes from journal rotation +
+flush thread. Already fast (72 ms / 127 ms). No code change.
+
+### canopy — already fast ✅ (no change)
+
+canopydb appears to amortise commits internally; matches sled's
+post-fix shape (9.5 ms / 83 ms). No code change.
+
+### Status
+
+| Backend  | Status                                          |
+|----------|-------------------------------------------------|
+| sled     | ✅ Fast (this PR series) |
+| redb     | ✅ Fast (this PR — **14.6×**) |
+| canopy   | ✅ Fast (always was) |
+| fjall    | ✅ Fast (LSM, journal-buffered) |
+| persy    | ⏳ Awaits `Store::insert_many` batch API |
+| nebari   | ⏳ Awaits `Store::insert_many` batch API |
+
+The remaining persy / nebari work needs an architectural extension
+to the `Store` trait (a `insert_many` / `set_many` API that lets
+each backend coalesce N writes into one transaction). Deferred to
+its own sprint.
+
 ## After hash-index posting layout: blob → key-per-record (2026-05-11)
 
 Before: each regular (non-unique) index value held its entire posting
