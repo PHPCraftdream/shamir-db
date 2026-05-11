@@ -105,7 +105,12 @@ impl Default for MemBufferConfig {
             max_bytes: 64 * 1024 * 1024,
             max_entries: 100_000,
             ttl_ms: None,
-            flush_interval_ms: 100,
+            // 500ms — balances "ACK→durable lag" against fsync
+            // amortisation. On per-write-fsync backends
+            // (persy/nebari/canopy) this turns 1000 individual
+            // commits into ~2 batched commits per second.
+            // Overridable per-table via DDL once that ships.
+            flush_interval_ms: 500,
             flush_batch_size: 256,
         }
     }
