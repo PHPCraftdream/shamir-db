@@ -11,6 +11,7 @@ use shamir_storage::storage_canopy::CanopyRepo;
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_fjall::FjallRepo;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 #[cfg(feature = "nebari")]
 use shamir_storage::storage_nebari::NebariRepo;
 #[cfg(feature = "persy")]
@@ -40,6 +41,18 @@ pub enum BoxRepo {
     Persy(Arc<PersyRepo>),
     #[cfg(feature = "canopy")]
     Canopy(Arc<CanopyRepo>),
+    /// Recursive wrapper — buffers reads/writes in memory in front
+    /// of any other backend. Today a passthrough; gains a bounded
+    /// LRU cache + background flusher in a follow-up.
+    MemBuffer(Arc<MemBufferRepoComposite>),
+}
+
+/// Holds the inner backend Repo (as another `BoxRepo`) plus the
+/// buffer config. Public so `MemBuffer` variants can be matched
+/// from other modules.
+pub struct MemBufferRepoComposite {
+    pub inner: BoxRepo,
+    pub config: MemBufferConfig,
 }
 
 #[async_trait::async_trait]
@@ -62,6 +75,13 @@ impl Repo for BoxRepo {
             BoxRepo::Persy(repo) => repo.store_get(name).await,
             #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.store_get(name).await,
+            BoxRepo::MemBuffer(c) => {
+                let inner_store = c.inner.store_get(name).await?;
+                Ok(Arc::new(MemBufferStore::new(
+                    inner_store,
+                    c.config.clone(),
+                )))
+            }
         }
     }
 
@@ -80,6 +100,7 @@ impl Repo for BoxRepo {
             BoxRepo::Persy(repo) => repo.store_delete(name).await,
             #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.store_delete(name).await,
+            BoxRepo::MemBuffer(c) => c.inner.store_delete(name).await,
         }
     }
 
@@ -98,6 +119,7 @@ impl Repo for BoxRepo {
             BoxRepo::Persy(repo) => repo.stores_list().await,
             #[cfg(feature = "canopy")]
             BoxRepo::Canopy(repo) => repo.stores_list().await,
+            BoxRepo::MemBuffer(c) => c.inner.stores_list().await,
         }
     }
 }
@@ -297,6 +319,14 @@ pub enum BoxRepoFactory {
     Persy(PersyRepoFactory),
     #[cfg(feature = "canopy")]
     Canopy(CanopyRepoFactory),
+    /// Recursive wrapper — buffer (LRU cache + background flusher,
+    /// today passthrough) on top of any other factory.
+    MemBuffer(Box<MemBufferRepoFactory>),
+}
+
+pub struct MemBufferRepoFactory {
+    pub inner: BoxRepoFactory,
+    pub config: MemBufferConfig,
 }
 
 impl BoxRepoFactory {
@@ -333,6 +363,14 @@ impl BoxRepoFactory {
     pub fn canopy(path: impl Into<PathBuf>) -> Self {
         BoxRepoFactory::Canopy(CanopyRepoFactory { path: path.into() })
     }
+
+    /// Wrap an existing factory in the membuffer layer. Resulting
+    /// repo stays the same shape as `inner` but every `store_get`
+    /// returns a `MemBufferStore` wrapping the inner backend's
+    /// store.
+    pub fn membuffer(inner: BoxRepoFactory, config: MemBufferConfig) -> Self {
+        BoxRepoFactory::MemBuffer(Box::new(MemBufferRepoFactory { inner, config }))
+    }
 }
 
 #[async_trait::async_trait]
@@ -352,6 +390,13 @@ impl RepoFactory for BoxRepoFactory {
             BoxRepoFactory::Persy(f) => f.create().await,
             #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => f.create().await,
+            BoxRepoFactory::MemBuffer(f) => {
+                let inner_repo = f.inner.create().await?;
+                Ok(BoxRepo::MemBuffer(Arc::new(MemBufferRepoComposite {
+                    inner: inner_repo,
+                    config: f.config.clone(),
+                })))
+            }
         }
     }
 }
@@ -372,6 +417,10 @@ impl Clone for BoxRepoFactory {
             BoxRepoFactory::Persy(f) => BoxRepoFactory::persy(f.path.clone()),
             #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => BoxRepoFactory::canopy(f.path.clone()),
+            BoxRepoFactory::MemBuffer(f) => BoxRepoFactory::membuffer(
+                f.inner.clone(),
+                f.config.clone(),
+            ),
         }
     }
 }
