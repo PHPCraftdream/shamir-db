@@ -31,6 +31,13 @@ impl Table {
         Self { data_store }
     }
 
+    /// Borrow the underlying data store. Needed by the DDL layer
+    /// to push hot-reload knobs (e.g. buffer config) all the way
+    /// down through any wrapping layers.
+    pub fn data_store(&self) -> &Arc<dyn Store> {
+        &self.data_store
+    }
+
     /// Insert an InnerValue, returns RecordId
     ///
     /// No interning or conversion - expects already-interned InnerValue

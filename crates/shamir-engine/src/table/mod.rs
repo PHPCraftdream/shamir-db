@@ -1,3 +1,4 @@
+pub mod buffer_config;
 pub mod doctor;
 pub mod interner_manager;
 pub mod record_counter;

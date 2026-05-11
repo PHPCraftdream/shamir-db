@@ -243,6 +243,21 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
+    /// Apply a hot-reload of MemBuffer config. Default no-op
+    /// (raw backends don't have a buffer layer). `MemBufferStore`
+    /// overrides this to update its atomic config fields; wrappers
+    /// like `CachedStore` should override to propagate to inner.
+    ///
+    /// Lives on the `Store` trait so the engine can call it on
+    /// `Arc<dyn Store>` without downcasting — most backends ignore
+    /// the call, the MemBuffer in the stack picks it up.
+    async fn apply_buffer_config(
+        &self,
+        _config: &crate::storage_membuffer::MemBufferConfig,
+    ) -> DbResult<()> {
+        Ok(())
+    }
+
     /// Insert many records in one logical batch — for backends that
     /// expose a transactional write API, this collapses N×fsync into
     /// one. For backends that already amortise durability per write

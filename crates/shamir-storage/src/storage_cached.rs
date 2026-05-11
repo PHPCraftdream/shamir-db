@@ -272,6 +272,16 @@ impl Store for CachedStore {
         })
     }
 
+    /// Pass-through for buffer config: a CachedStore doesn't have
+    /// its own buffer knobs but the underlying store likely does
+    /// (especially when stacked Cached → MemBuffer → raw).
+    async fn apply_buffer_config(
+        &self,
+        config: &crate::storage_membuffer::MemBufferConfig,
+    ) -> DbResult<()> {
+        self.inner.apply_buffer_config(config).await
+    }
+
     /// Drain pending async writes and propagate the flush down to
     /// the inner store. Reachable through `Arc<dyn Store>` —
     /// without this override the trait dispatcher would land on

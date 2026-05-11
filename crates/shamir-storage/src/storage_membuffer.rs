@@ -75,7 +75,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 /// Configuration for `MemBufferStore`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemBufferConfig {
     /// Soft cap on the sum of key+value bytes held in the cache.
     /// When exceeded the LRU tail is evicted (flushing dirty
@@ -316,7 +316,7 @@ impl MemBufferStore {
             }
             drop(dirty);
 
-            let mut cache = state.cache.lock().unwrap();
+            let cache = state.cache.lock().unwrap();
             let mut sets: Vec<(RecordKey, Bytes)> = Vec::new();
             let mut removes: Vec<RecordKey> = Vec::new();
             for k in keys {
@@ -772,6 +772,13 @@ impl Store for MemBufferStore {
     async fn flush(&self) -> DbResult<()> {
         self.drain_all().await?;
         self.inner.flush().await
+    }
+
+    async fn apply_buffer_config(&self, config: &MemBufferConfig) -> DbResult<()> {
+        self.apply_config(config);
+        // Propagate to any inner wrapper too (defensive — composition
+        // like Cached → MemBuffer → MemBuffer is unusual but possible).
+        self.inner.apply_buffer_config(config).await
     }
 
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
