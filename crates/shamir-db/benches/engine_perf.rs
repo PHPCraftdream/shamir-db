@@ -85,10 +85,35 @@ async fn fresh_db() -> Arc<ShamirDb> {
 /// alive at least as long as the returned `ShamirDb` (sled holds
 /// the directory open).
 async fn fresh_db_sled(path: &std::path::Path) -> Arc<ShamirDb> {
+    fresh_db_with(BoxRepoFactory::sled(path.to_path_buf())).await
+}
+
+async fn fresh_db_redb(path: &std::path::Path) -> Arc<ShamirDb> {
+    // redb expects a single-file path; tempdir gives us a directory.
+    fresh_db_with(BoxRepoFactory::redb(path.join("db.redb"))).await
+}
+
+async fn fresh_db_persy(path: &std::path::Path) -> Arc<ShamirDb> {
+    // Same for persy.
+    fresh_db_with(BoxRepoFactory::persy(path.join("db.persy"))).await
+}
+
+async fn fresh_db_canopy(path: &std::path::Path) -> Arc<ShamirDb> {
+    fresh_db_with(BoxRepoFactory::canopy(path.to_path_buf())).await
+}
+
+async fn fresh_db_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
+    fresh_db_with(BoxRepoFactory::fjall(path.to_path_buf())).await
+}
+
+async fn fresh_db_nebari(path: &std::path::Path) -> Arc<ShamirDb> {
+    fresh_db_with(BoxRepoFactory::nebari(path.to_path_buf())).await
+}
+
+async fn fresh_db_with(factory: BoxRepoFactory) -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
     shamir.create_db("bench").await;
-    let cfg = RepoConfig::new("main", BoxRepoFactory::sled(path.to_path_buf()))
-        .add_table(TableConfig::new("users"));
+    let cfg = RepoConfig::new("main", factory).add_table(TableConfig::new("users"));
     shamir.add_repo("bench", cfg).await.expect("add_repo");
     shamir
 }
@@ -917,6 +942,51 @@ fn bench_bulk_insert_sled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same `bulk_insert` for every disk backend. Used as a parity
+/// check — each backend should converge to a similar
+/// "amortised-fsync, no per-write commit" cost. Sample counts kept
+/// low (each iter spawns a fresh tempdir + DB).
+macro_rules! bench_bulk_insert_for_backend {
+    ($fn_name:ident, $group:literal, $fresh:ident) => {
+        fn $fn_name(c: &mut Criterion) {
+            let rt = Runtime::new().unwrap();
+            let mut group = c.benchmark_group($group);
+            group.sample_size(10);
+            group.measurement_time(Duration::from_secs(10));
+            for &count in &[100usize, 1_000] {
+                group.throughput(Throughput::Elements(count as u64));
+                group.bench_with_input(
+                    BenchmarkId::from_parameter(count),
+                    &count,
+                    |b, &count| {
+                        b.to_async(&rt).iter_custom(|iters| async move {
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iters {
+                                let tempdir = tempfile::TempDir::new().expect("tempdir");
+                                let shamir = $fresh(tempdir.path()).await;
+                                let req = req_bulk_insert(0, count);
+                                let start = Instant::now();
+                                shamir.execute("bench", &req).await.unwrap();
+                                total += start.elapsed();
+                                drop(shamir);
+                                drop(tempdir);
+                            }
+                            total
+                        });
+                    },
+                );
+            }
+            group.finish();
+        }
+    };
+}
+
+bench_bulk_insert_for_backend!(bench_bulk_insert_redb,   "bulk_insert_redb",   fresh_db_redb);
+bench_bulk_insert_for_backend!(bench_bulk_insert_persy,  "bulk_insert_persy",  fresh_db_persy);
+bench_bulk_insert_for_backend!(bench_bulk_insert_canopy, "bulk_insert_canopy", fresh_db_canopy);
+bench_bulk_insert_for_backend!(bench_bulk_insert_fjall,  "bulk_insert_fjall",  fresh_db_fjall);
+bench_bulk_insert_for_backend!(bench_bulk_insert_nebari, "bulk_insert_nebari", fresh_db_nebari);
+
 /// Same as `bulk_insert_sled` but with a regular index on the
 /// `city` field (cardinality 8 → high-fanout posting lists).
 /// Exposes the cost of index posting-list updates per insert.
@@ -1101,6 +1171,11 @@ criterion_group!(
     bench_range_query_no_index,
     bench_range_query_with_index,
     bench_bulk_insert_sled,
+    bench_bulk_insert_redb,
+    bench_bulk_insert_persy,
+    bench_bulk_insert_canopy,
+    bench_bulk_insert_fjall,
+    bench_bulk_insert_nebari,
     bench_bulk_insert_with_index_sled,
     bench_range_query_no_index_sled,
     bench_range_query_with_index_sled,
