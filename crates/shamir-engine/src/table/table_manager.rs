@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 
+use super::buffer_config;
 use super::interner_manager::InternerManager;
 use super::record_counter::RecordCounter;
 use super::table::Table;
+use shamir_storage::storage_membuffer::MemBufferConfig;
 use shamir_types::core::interner::TouchInd;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
@@ -23,6 +25,11 @@ use shamir_types::types::value::InnerValue;
 pub struct TableManager {
     name: String,
     table: Arc<Table>,
+    /// Direct handle to the info_store the sub-managers were
+    /// built on. Kept so DDL (buffer-config get/set, future
+    /// per-table settings) can hit the same store without going
+    /// through any sub-manager's surface.
+    info_store: Arc<dyn Store>,
     interner: InternerManager,
     counter: Arc<RecordCounter>,
     index_manager: IndexManager,
@@ -49,6 +56,7 @@ impl Clone for TableManager {
         Self {
             name: self.name.clone(),
             table: Arc::clone(&self.table),
+            info_store: Arc::clone(&self.info_store),
             interner: self.interner.clone(),
             counter: Arc::clone(&self.counter),
             index_manager: self.index_manager.clone(),
@@ -81,6 +89,7 @@ impl TableManager {
         let mgr = Self {
             name,
             table: Arc::new(table),
+            info_store: Arc::clone(&info_store),
             interner,
             counter,
             index_manager,
@@ -89,6 +98,14 @@ impl TableManager {
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
+
+        // Hot-load persisted buffer config (if any) and apply
+        // it to both stores. If no DDL has set one, the stores
+        // keep whatever default the factory wrapped them with.
+        if let Some(cfg) = buffer_config::load(&mgr.info_store).await? {
+            mgr.table.data_store().apply_buffer_config(&cfg).await?;
+            mgr.info_store.apply_buffer_config(&cfg).await?;
+        }
 
         // Auto-recovery on open. Cheap on clean shutdown (one
         // prefix scan returning zero entries); targeted recovery
@@ -135,10 +152,11 @@ impl TableManager {
             SortedIndexManager::new(info_store.clone()),
         )
         .expect("sorted index manager init for test");
-        let wal = Arc::new(WalManager::new(info_store));
+        let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
         Self {
             name,
             table: Arc::new(table),
+            info_store,
             interner,
             counter,
             index_manager,
@@ -218,6 +236,50 @@ impl TableManager {
     /// `TableManager::insert / set / delete` so index hooks fire.
     pub fn table(&self) -> &Table {
         &self.table
+    }
+
+    /// Borrow the info_store this table writes its sidecar
+    /// metadata into (counter, interner dictionary, sorted-index
+    /// blob, WAL, buffer config, ...). DDL uses this directly.
+    pub fn info_store(&self) -> &Arc<dyn Store> {
+        &self.info_store
+    }
+
+    // ---- Per-table buffer config (DDL surface) ----
+
+    /// Read the persisted buffer config, if any. Returns `None`
+    /// when no DDL has set one — the store still uses whatever
+    /// default the factory wrapped it with.
+    pub async fn get_buffer_config(&self) -> DbResult<Option<MemBufferConfig>> {
+        buffer_config::load(&self.info_store).await
+    }
+
+    /// Persist a buffer config and hot-apply it to both stores.
+    /// Idempotent — replays cleanly across restarts because the
+    /// persisted value is reloaded on `TableManager::create`.
+    pub async fn set_buffer_config(&self, cfg: &MemBufferConfig) -> DbResult<()> {
+        buffer_config::save(&self.info_store, cfg).await?;
+        self.table.data_store().apply_buffer_config(cfg).await?;
+        self.info_store.apply_buffer_config(cfg).await?;
+        Ok(())
+    }
+
+    /// Partial-update flavour: read the current persisted config
+    /// (falling back to `MemBufferConfig::default()` if none was
+    /// set), apply the closure to produce the new value, then
+    /// persist and hot-apply. Convenient for "bump just one
+    /// knob" DDL like `ALTER TABLE ... SET buffer.ttl_ms = ...`.
+    pub async fn alter_buffer_config<F>(&self, mutate: F) -> DbResult<MemBufferConfig>
+    where
+        F: FnOnce(&mut MemBufferConfig),
+    {
+        let mut cfg = self
+            .get_buffer_config()
+            .await?
+            .unwrap_or_default();
+        mutate(&mut cfg);
+        self.set_buffer_config(&cfg).await?;
+        Ok(cfg)
     }
 
     pub fn interner(&self) -> &InternerManager {

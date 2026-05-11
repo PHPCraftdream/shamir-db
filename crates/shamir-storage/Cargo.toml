@@ -48,6 +48,9 @@ bytes = "1.11.0"
 dashmap = "6.1.0"
 # Bounded LRU for MemBufferStore. Zero transitive deps.
 lru = "0.12"
+# `MemBufferConfig` serializes into the engine's info_store via
+# bincode at the DDL boundary.
+serde = { version = "1", features = ["derive"] }
 
 # Errors / logging
 thiserror = "2.0.18"

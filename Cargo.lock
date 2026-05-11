@@ -3028,6 +3028,7 @@ dependencies = [
  "nebari",
  "persy",
  "redb",
+ "serde",
  "serial_test",
  "shamir-types",
  "sled",
