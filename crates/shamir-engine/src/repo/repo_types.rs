@@ -367,7 +367,12 @@ impl BoxRepoFactory {
     /// `BoxRepoFactory::membuffer(inner, custom)` explicitly.
     fn default_membuffer_config() -> MemBufferConfig {
         MemBufferConfig {
-            max_entries: 1024,
+            // 64 MiB resident cap — comfortable for embedded /
+            // small server. Tune via explicit membuffer() composer
+            // for hot-set workloads.
+            max_bytes: 64 * 1024 * 1024,
+            max_entries: 100_000,
+            ttl_ms: None,
             flush_interval_ms: 50,
             flush_batch_size: 256,
         }
