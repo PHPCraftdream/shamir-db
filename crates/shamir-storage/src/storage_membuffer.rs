@@ -140,17 +140,42 @@ enum Slot {
 /// a weak reference and exit gracefully when the store is
 /// dropped.
 struct MemBufferState {
-    /// The cache. Hard cap = `config.max_entries`; we also track
-    /// byte usage and evict to stay under `config.max_bytes`.
+    /// The cache. Hard cap = `max_entries`; we also track byte
+    /// usage and evict to stay under `max_bytes`.
     cache: Mutex<LruCache<RecordKey, CachedSlot>>,
     /// Keys whose state has been changed in `cache` but not yet
     /// propagated to `inner`. Drained by the flusher.
     dirty: Mutex<HashSet<RecordKey>>,
     /// Running sum of `key.len() + value.len()` across every Live
-    /// entry currently in the cache. Tombstones don't count toward
-    /// this (they're a few bytes of marker each). Atomic so the
-    /// flusher can read it without taking the cache lock.
+    /// entry currently in the cache. Atomic so the flusher can
+    /// read it without taking the cache lock.
     cache_bytes: std::sync::atomic::AtomicUsize,
+    /// Hot-reloadable config. All hot paths (cache_put eviction,
+    /// flusher loop, TTL sweep) read these atomically each pass,
+    /// so a DDL-driven `apply_buffer_config` takes effect on the
+    /// next operation without rewrapping the store.
+    max_bytes: std::sync::atomic::AtomicUsize,
+    max_entries: std::sync::atomic::AtomicUsize,
+    /// `0` encodes `None` (TTL disabled). Otherwise the TTL in ms.
+    ttl_ms: std::sync::atomic::AtomicU64,
+    flush_interval_ms: std::sync::atomic::AtomicU64,
+    flush_batch_size: std::sync::atomic::AtomicUsize,
+}
+
+impl MemBufferState {
+    fn ttl(&self) -> Option<std::time::Duration> {
+        let v = self.ttl_ms.load(Ordering::Relaxed);
+        if v == 0 {
+            None
+        } else {
+            Some(std::time::Duration::from_millis(v))
+        }
+    }
+    fn flush_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.flush_interval_ms.load(Ordering::Relaxed),
+        )
+    }
 }
 
 pub struct MemBufferStore {
@@ -161,8 +186,6 @@ pub struct MemBufferStore {
     /// Set on Drop — the flusher checks it on each wakeup and
     /// exits.
     shutdown: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    config: MemBufferConfig,
 }
 
 impl MemBufferStore {
@@ -172,6 +195,15 @@ impl MemBufferStore {
             cache: Mutex::new(LruCache::new(cap)),
             dirty: Mutex::new(HashSet::new()),
             cache_bytes: std::sync::atomic::AtomicUsize::new(0),
+            max_bytes: std::sync::atomic::AtomicUsize::new(config.max_bytes),
+            max_entries: std::sync::atomic::AtomicUsize::new(config.max_entries),
+            ttl_ms: std::sync::atomic::AtomicU64::new(config.ttl_ms.unwrap_or(0)),
+            flush_interval_ms: std::sync::atomic::AtomicU64::new(
+                config.flush_interval_ms,
+            ),
+            flush_batch_size: std::sync::atomic::AtomicUsize::new(
+                config.flush_batch_size,
+            ),
         });
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -183,9 +215,6 @@ impl MemBufferStore {
         let weak_notify = Arc::downgrade(&notify);
         let weak_shutdown = Arc::downgrade(&shutdown);
         let inner_for_task = inner.clone();
-        let flush_interval = std::time::Duration::from_millis(config.flush_interval_ms);
-        let batch_size = config.flush_batch_size;
-        let ttl = config.ttl_ms.map(std::time::Duration::from_millis);
         tokio::spawn(async move {
             loop {
                 let state = match weak_state.upgrade() {
@@ -203,6 +232,10 @@ impl MemBufferStore {
                 if shutdown.load(Ordering::Acquire) {
                     break;
                 }
+                // Hot-reloadable config — read atomics each pass.
+                let flush_interval = state.flush_interval();
+                let batch_size = state.flush_batch_size.load(Ordering::Relaxed);
+                let ttl = state.ttl();
                 tokio::select! {
                     _ = notify.notified() => {},
                     _ = tokio::time::sleep(flush_interval) => {},
@@ -224,8 +257,39 @@ impl MemBufferStore {
             state,
             notify,
             shutdown,
-            config,
         }
+    }
+
+    /// Hot-reload the buffer config. Atomic fields are written
+    /// directly; the next operation (write, read-miss, flusher
+    /// wakeup) picks them up.
+    ///
+    /// `max_entries` resizes the underlying LRU; cache contents
+    /// are preserved (lru's `resize` keeps the MRU entries when
+    /// shrinking).
+    pub fn apply_config(&self, cfg: &MemBufferConfig) {
+        self.state
+            .max_bytes
+            .store(cfg.max_bytes, Ordering::Relaxed);
+        self.state
+            .max_entries
+            .store(cfg.max_entries, Ordering::Relaxed);
+        self.state
+            .ttl_ms
+            .store(cfg.ttl_ms.unwrap_or(0), Ordering::Relaxed);
+        self.state
+            .flush_interval_ms
+            .store(cfg.flush_interval_ms, Ordering::Relaxed);
+        self.state
+            .flush_batch_size
+            .store(cfg.flush_batch_size, Ordering::Relaxed);
+        if let Some(new_cap) = NonZeroUsize::new(cfg.max_entries.max(1)) {
+            if let Ok(mut cache) = self.state.cache.lock() {
+                cache.resize(new_cap);
+            }
+        }
+        // Nudge the flusher in case the new interval shortens.
+        self.notify.notify_one();
     }
 
     pub fn inner(&self) -> &Arc<dyn Store> {
@@ -419,9 +483,10 @@ impl MemBufferStore {
 
         // Phase 3: byte-cap eviction loop. While we're over the
         // cap, pop LRU until we're back under. Each evicted entry
-        // is flushed inline if dirty.
+        // is flushed inline if dirty. Reads `max_bytes` atomically
+        // each iteration so a DDL change takes effect immediately.
         while self.state.cache_bytes.load(Ordering::Relaxed)
-            > self.config.max_bytes
+            > self.state.max_bytes.load(Ordering::Relaxed)
         {
             let (ek, eslot) = {
                 let mut cache = self.state.cache.lock().unwrap();
@@ -623,7 +688,7 @@ impl Store for MemBufferStore {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
         let batch = batch_size;
-        let bs = self.config.flush_batch_size;
+        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             // Drain dirty before iter.
             while {
@@ -643,7 +708,7 @@ impl Store for MemBufferStore {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
         let p = prefix;
-        let bs = self.config.flush_batch_size;
+        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
@@ -666,7 +731,7 @@ impl Store for MemBufferStore {
     ) -> RecordStream {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
-        let bs = self.config.flush_batch_size;
+        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
@@ -689,7 +754,7 @@ impl Store for MemBufferStore {
     ) -> RecordStream {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
-        let bs = self.config.flush_batch_size;
+        let bs = self.state.flush_batch_size.load(std::sync::atomic::Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
@@ -1013,6 +1078,103 @@ mod tests {
         let v2 = inner_store.get(_k2).await.unwrap();
         assert_eq!(v1.as_ref(), b"a");
         assert_eq!(v2.as_ref(), b"b");
+    }
+
+    #[tokio::test]
+    async fn apply_config_shrinks_max_bytes_and_triggers_eviction() {
+        // Start with a roomy cap, fill cache, then shrink the cap
+        // via `apply_config`. The next write triggers byte-cap
+        // eviction; cache_bytes drops to fit the new ceiling.
+        let cfg = MemBufferConfig {
+            max_bytes: 64 * 1024,
+            max_entries: 1_000_000,
+            ttl_ms: None,
+            flush_interval_ms: 60_000,
+            flush_batch_size: 16,
+        };
+        let inner_repo = InMemoryRepo::new();
+        let inner_store = inner_repo.store_get("t").await.unwrap();
+        let buffered = Arc::new(MemBufferStore::new(inner_store, cfg));
+
+        // 16 records of ~48 bytes value + 16-byte key = ~64 bytes
+        // each. Total ~1KiB — well under 64KiB cap.
+        for _ in 0..16u8 {
+            let _ = buffered
+                .insert(Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+                .await
+                .unwrap();
+        }
+        let bytes_before = buffered.cache_bytes();
+        assert!(bytes_before > 0);
+
+        // Shrink the cap to a value clearly below current usage.
+        let smaller = MemBufferConfig {
+            max_bytes: 128,
+            ..MemBufferConfig {
+                max_bytes: 0,
+                max_entries: 1_000_000,
+                ttl_ms: None,
+                flush_interval_ms: 60_000,
+                flush_batch_size: 16,
+            }
+        };
+        buffered.apply_config(&smaller);
+
+        // The next write triggers Phase 3 eviction loop using the
+        // NEW max_bytes. Cache must drop to ≤ 128 bytes.
+        let _ = buffered
+            .insert(Bytes::from_static(b"trigger"))
+            .await
+            .unwrap();
+        assert!(
+            buffered.cache_bytes() <= 128,
+            "shrunk cap not honoured: cache_bytes={}",
+            buffered.cache_bytes()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_config_enables_ttl_at_runtime() {
+        // Start with TTL disabled. Insert, then enable TTL via
+        // apply_config. The background flusher's next tick must
+        // evict stale entries.
+        let cfg = MemBufferConfig {
+            max_bytes: 64 * 1024,
+            max_entries: 256,
+            ttl_ms: None, // disabled initially
+            flush_interval_ms: 25,
+            flush_batch_size: 16,
+        };
+        let inner_repo = InMemoryRepo::new();
+        let inner_store = inner_repo.store_get("t").await.unwrap();
+        let buffered = Arc::new(MemBufferStore::new(inner_store, cfg));
+
+        let _ = buffered.insert(Bytes::from_static(b"v")).await.unwrap();
+        assert!(buffered.cache_bytes() > 0);
+
+        // Wait long enough that anything with TTL=50 should expire.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // Cache still has the entry — TTL was off.
+        assert!(buffered.cache_bytes() > 0);
+
+        // Enable TTL=50ms via apply_config.
+        let with_ttl = MemBufferConfig {
+            max_bytes: 64 * 1024,
+            max_entries: 256,
+            ttl_ms: Some(50),
+            flush_interval_ms: 25,
+            flush_batch_size: 16,
+        };
+        buffered.apply_config(&with_ttl);
+
+        // Wait for the flusher's next sweep.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            buffered.cache_bytes(),
+            0,
+            "TTL not applied at runtime: cache_bytes={}",
+            buffered.cache_bytes()
+        );
     }
 
     #[tokio::test]
