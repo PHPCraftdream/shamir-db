@@ -1366,6 +1366,67 @@ fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Low-level micro: cost of one `MemBufferStore::get` on a warm
+/// cache (100 % hit, random key). Bypasses engine, planner,
+/// interner — measures pure cache-lookup path.
+///
+/// Used as a stable signal for LRU-lookup optimisations
+/// (sharded cache, lockless dirty queue, etc).
+fn bench_cache_hit_get(c: &mut Criterion) {
+    use rand::seq::SliceRandom;
+    use shamir_db::storage::storage_in_memory::InMemoryStore;
+    use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+    use shamir_db::storage::types::Store;
+    use shamir_types::types::record_id::RecordId;
+
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("cache_hit_get");
+
+    for &n in &[1_000usize, 10_000] {
+        // Build a warmed MemBuffer cache holding `n` keys, all
+        // resident (cache size = n, large max_bytes).
+        let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt.block_on(async {
+            let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+            let cfg = MemBufferConfig {
+                max_bytes: 64 * 1024 * 1024,
+                max_entries: n * 2,
+                ttl_ms: None,
+                flush_interval_ms: 500,
+                flush_batch_size: 256,
+            };
+            let store: Arc<dyn Store> =
+                Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+            let mut keys = Vec::with_capacity(n);
+            for i in 0..n {
+                let id = RecordId::new();
+                let key = shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
+                let value = shamir_db::storage::types::RecordKey::from(format!("v{i}"));
+                store.set(key.clone(), value).await.unwrap();
+                keys.push(key);
+            }
+            (store, keys)
+        });
+
+        // Shuffle keys for uniform-random access pattern.
+        let mut rng = rand::thread_rng();
+        let mut shuffled = keys.clone();
+        shuffled.shuffle(&mut rng);
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            let mut cursor = 0usize;
+            b.to_async(&rt).iter(|| {
+                let store = Arc::clone(&store);
+                let key = shuffled[cursor % shuffled.len()].clone();
+                cursor = cursor.wrapping_add(1);
+                async move {
+                    let _ = store.get(key).await.unwrap();
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 /// 8 independent reads in a single batch — exercises the parallel
 /// stage planner.
 fn bench_batch_multi_read(c: &mut Criterion) {
@@ -1456,6 +1517,7 @@ criterion_group!{
     bench_range_query_with_index_sled,
     bench_range_query_narrow_no_index_sled,
     bench_range_query_narrow_with_index_sled,
-    bench_batch_multi_read
+    bench_batch_multi_read,
+    bench_cache_hit_get
 }
 criterion_main!(benches);
