@@ -15,3 +15,10 @@ serde_json = "1.0.149"
 serde_bytes = "0.11"
 indexmap   = { version = "2.7", features = ["serde"] }
 fxhash     = "0.2.1"
+
+# Pure-data helpers for HMAC-confirmed destructive ops. `hmac` +
+# `sha2` are stable, no-std-capable, already used elsewhere in the
+# workspace (shamir-connect). Keeping the helpers in this crate
+# lets both client and server share one canonical implementation.
+hmac       = "0.12"
+sha2       = "0.10"

@@ -80,6 +80,13 @@ impl core::fmt::Debug for Session {
 /// Custom [`Debug`] impl redacts `channel_binding_at_auth` (TLS exporter
 /// derivative — would link logs to a TLS session secret per IMPL §4).
 pub struct Session {
+    /// Bearer session identifier (same value used as the key in
+    /// [`SessionStore`]). Stamped by the store at `insert` time —
+    /// `Session::new` initialises it to zeros. Available on the
+    /// `&Session` reference passed to request handlers so they
+    /// can derive the per-session HMAC key for destructive-op
+    /// validation without consulting the store.
+    pub session_id: [u8; limits::SESSION_ID_BYTES],
     /// Stable user identifier.
     pub user_id: [u8; 16],
     /// Username (post-NFC, UsernameCaseMapped).
@@ -114,6 +121,7 @@ impl Session {
         now_ns: u64,
     ) -> Self {
         Self {
+            session_id: [0u8; limits::SESSION_ID_BYTES],
             user_id,
             username,
             permissions: parking_lot::RwLock::new(permissions),
@@ -124,6 +132,30 @@ impl Session {
             channel_binding_at_auth,
             pending_changepw_challenge: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Per-session HMAC key for destructive-op confirmation.
+    ///
+    /// Derived purely from `session_id` via a domain-separated
+    /// SHA-256, so a JS / native client that has the bearer token
+    /// can compute the same key without any extra wire field.
+    ///
+    /// This is NOT a TLS or auth secret — anyone holding the
+    /// bearer token can already act on the session, so deriving
+    /// the HMAC key from it adds zero authentication strength.
+    /// What it DOES provide is a "deliberate construction" proof:
+    /// the client could not have produced the tag without thinking
+    /// about each specific drop/clear op. That's the formal
+    /// guardrail we want on destructive DDL.
+    pub fn hmac_key(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"shamir-db hmac key v1\0");
+        h.update(self.session_id);
+        let out = h.finalize();
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&out);
+        k
     }
 
     /// Update `last_activity_ns` to current wall-clock.
@@ -194,8 +226,9 @@ impl SessionStore {
     pub fn insert(
         &self,
         session_id: [u8; limits::SESSION_ID_BYTES],
-        session: Session,
+        mut session: Session,
     ) -> Arc<Session> {
+        session.session_id = session_id;
         let arc = Arc::new(session);
         self.by_sid.insert(session_id, arc.clone());
         arc
@@ -212,12 +245,13 @@ impl SessionStore {
     pub fn insert_with_per_user_cap(
         &self,
         session_id: [u8; limits::SESSION_ID_BYTES],
-        session: Session,
+        mut session: Session,
         max_sessions_per_user: usize,
     ) -> (
         Arc<Session>,
         Option<[u8; limits::SESSION_ID_BYTES]>,
     ) {
+        session.session_id = session_id;
         let user_id = session.user_id;
 
         // Atomically: collect snapshot of all current sids for this user

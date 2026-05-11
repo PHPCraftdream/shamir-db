@@ -4,6 +4,8 @@
 
 'use strict';
 
+const hmac = require('../helpers/hmac');
+
 module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
   let dbA;
   let dbB;
@@ -50,7 +52,7 @@ module.exports = async function ({ client, fixtures, test, assertEq, assert }) {
   test('drop A leaves B intact', async () => {
     await client.execute('default', {
       id: 'rm-a',
-      queries: { d: { drop_db: dbA } },
+      queries: { d: hmac.drop_db_op(client, dbA) },
     });
     const resp = await client.execute(dbB, {
       id: 'b-still',

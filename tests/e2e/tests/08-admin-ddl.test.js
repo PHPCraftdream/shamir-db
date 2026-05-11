@@ -19,6 +19,8 @@
 
 'use strict';
 
+const hmac = require('../helpers/hmac');
+
 module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   test('list databases includes default', async () => {
     const resp = await client.execute('default', {
@@ -48,7 +50,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     await client.execute('default', {
       id: 'rm',
-      queries: { d: { drop_db: dbName } },
+      queries: { d: hmac.drop_db_op(client, dbName) },
     });
 
     resp = await client.execute('default', {
@@ -133,7 +135,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
 
     await client.execute(dbName, {
       id: 'rm-idx',
-      queries: { d: { drop_index: 'by_email', table: 't' } },
+      queries: { d: hmac.drop_index_op(client, dbName, 'main', 't', 'by_email') },
     });
 
     const ls2 = await client.execute(dbName, {

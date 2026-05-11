@@ -36,6 +36,7 @@ pub mod admin;
 pub mod auth;
 pub mod batch;
 pub mod filter;
+pub mod hmac;
 pub mod read;
 pub mod table_ref;
 pub mod wire;
