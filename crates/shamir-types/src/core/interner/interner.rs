@@ -1,28 +1,29 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
-use std::sync::{Mutex, RwLock};
+use arc_swap::ArcSwap;
+use std::sync::{Arc, Mutex};
 
 use super::{InternerKey, TouchInd, UserKey};
 
 /// A thread-safe, two-way map for interning strings into compact binary IDs.
 ///
-/// **Reverse-lookup layout (Opt F):** the `id → UserKey` direction is
-/// stored as a `RwLock<Vec<Option<UserKey>>>` indexed by `id as usize`.
-/// `get_str` becomes a single bounds-check + clone instead of a
-/// `DashMap` shard lookup + key hash + Arc-style clone, which is ~3-5×
-/// cheaper per call. The interner is monotonic (entries are never
-/// removed), so the vec only grows — no holes to compact, and the
-/// `Option<UserKey>` only carries `None` at positions never allocated
-/// (e.g. id=0, reserved as a sentinel).
+/// **Reverse-lookup layout (Opt G):** the `id → UserKey` direction is
+/// an `ArcSwap<Vec<Option<UserKey>>>`. Readers do a single atomic
+/// load (no shared-lock acquire/release atomic-counter bouncing
+/// across cores). The growing-vec semantics are preserved: on
+/// insert we clone the current vec, append, and `store` the new
+/// Arc. Writes are rare relative to reads (one insert per first
+/// touch of a fresh string vs. many reads from filter/projection
+/// hot paths), so the clone-and-swap cost is amortised heavily.
 ///
-/// The forward direction (`UserKey → id`) stays a `TDashMap` because
-/// it's hit only on the write path, where lock-free is the bigger
-/// win.
+/// The forward direction (`UserKey → id`) stays a `TDashMap` —
+/// it's sharded and already scales nearly linearly with thread
+/// count.
 #[derive(Debug)]
 pub struct Interner {
     map_user_to_interned: TDashMap<UserKey, InternerKey>,
     /// Reverse direction — `vec[id as usize] = Some(UserKey)`. Indexed
     /// by raw `id`; entry `0` is always `None` (sentinel, ids start at 1).
-    reverse: RwLock<Vec<Option<UserKey>>>,
+    reverse: ArcSwap<Vec<Option<UserKey>>>,
     current_id: Mutex<u64>,
 }
 
@@ -37,7 +38,7 @@ impl Interner {
     pub fn new() -> Interner {
         Interner {
             map_user_to_interned: new_dash_map_wc(64),
-            reverse: RwLock::new(vec![None]), // index 0 reserved
+            reverse: ArcSwap::from_pointee(vec![None]), // index 0 reserved
             current_id: Mutex::new(0),
         }
     }
@@ -69,7 +70,7 @@ impl Interner {
 
         Interner {
             map_user_to_interned,
-            reverse: RwLock::new(reverse),
+            reverse: ArcSwap::from_pointee(reverse),
             current_id: Mutex::new(max_id),
         }
     }
@@ -83,12 +84,15 @@ impl Interner {
             return Ok(TouchInd::Exists(existing.clone()));
         }
 
-        // Reserve a new ID under the current_id mutex.
-        let new_key: InternerKey = {
-            let mut current_id = self.current_id.lock().unwrap();
-            *current_id += 1;
-            InternerKey::new(*current_id)
-        };
+        // Reserve a new ID + serialize the reverse update under
+        // the same mutex. Concurrent writers each clone the
+        // current reverse Vec and swap; without serialization a
+        // later writer's store would clobber an earlier writer's
+        // append (lost update). Reads are unaffected — they
+        // never take this lock.
+        let mut current_id = self.current_id.lock().unwrap();
+        *current_id += 1;
+        let new_key = InternerKey::new(*current_id);
         let new_id = new_key.id();
 
         // CAS into forward map — another thread may have raced us.
@@ -102,13 +106,17 @@ impl Interner {
             }
             Entry::Vacant(vacant) => {
                 vacant.insert(new_key.clone());
-                // Append to reverse: grow vec if needed, then place
-                // the key at its id index.
-                let mut rev = self.reverse.write().unwrap();
-                if (new_id as usize) >= rev.len() {
-                    rev.resize((new_id as usize) + 1, None);
+                // Clone the current reverse vec, grow if needed,
+                // place the key, swap atomically. The current_id
+                // mutex is still held — so this is the only
+                // writer in flight and the swap is unambiguous.
+                let mut new_rev = (**self.reverse.load()).clone();
+                if (new_id as usize) >= new_rev.len() {
+                    new_rev.resize((new_id as usize) + 1, None);
                 }
-                rev[new_id as usize] = Some(key);
+                new_rev[new_id as usize] = Some(key);
+                self.reverse.store(Arc::new(new_rev));
+                drop(current_id);
                 Ok(TouchInd::New(new_key))
             }
         }
@@ -116,9 +124,11 @@ impl Interner {
 
     /// Gets the user key corresponding to an interned key.
     ///
-    /// **Hot path (Opt F):** single read-lock + bounds-check + clone.
+    /// **Hot path (Opt G):** one `ArcSwap::load` (single atomic
+    /// load, no read-lock acquire/release) + bounds-check + clone.
+    /// Scales linearly across cores under read-heavy load.
     pub fn get_str(&self, id: &InternerKey) -> Option<UserKey> {
-        let rev = self.reverse.read().unwrap();
+        let rev = self.reverse.load();
         let idx = id.id() as usize;
         rev.get(idx).and_then(|slot| slot.clone())
     }
@@ -146,7 +156,7 @@ impl Interner {
 
     /// Returns all interned entries as (InternerKey, UserKey) pairs.
     pub fn all_entries(&self) -> Vec<(InternerKey, UserKey)> {
-        let rev = self.reverse.read().unwrap();
+        let rev = self.reverse.load();
         rev.iter()
             .enumerate()
             .filter_map(|(idx, slot)| {
