@@ -363,6 +363,100 @@ async fn auto_recovery_fires_when_table_manager_is_reopened() {
 }
 
 #[tokio::test]
+async fn execute_update_clears_its_own_wal_marker_on_success() {
+    use crate::query::filter::eval_context::FilterContext;
+    use crate::query::write::UpdateOp;
+
+    let table = seeded(8).await;
+    let interner = table.interner().get().await.unwrap();
+
+    let op: UpdateOp = serde_json::from_value(json!({
+        "update": "users",
+        "where": {"op": "eq", "field": ["city"], "value": "city_0"},
+        "set": {"score": 999}
+    }))
+    .unwrap();
+
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let result = table.execute_update(&op, &ctx).await.unwrap();
+    assert!(result.affected > 0, "expected at least one update");
+
+    // No WAL marker after successful UPDATE.
+    let inflight = table.wal().list_inflight().await.unwrap();
+    assert!(
+        inflight.is_empty(),
+        "successful execute_update must clear its WAL marker, got {} inflight",
+        inflight.len()
+    );
+    assert!(table.verify().await.unwrap().is_healthy());
+}
+
+#[tokio::test]
+async fn execute_delete_clears_its_own_wal_marker_on_success() {
+    use crate::query::filter::eval_context::FilterContext;
+    use crate::query::write::DeleteOp;
+
+    let table = seeded(12).await;
+    let interner = table.interner().get().await.unwrap();
+
+    let op: DeleteOp = serde_json::from_value(json!({
+        "delete_from": "users",
+        "where": {"op": "eq", "field": ["city"], "value": "city_1"},
+    }))
+    .unwrap();
+
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let result = table.execute_delete(&op, &ctx).await.unwrap();
+    assert!(result.affected > 0);
+
+    let inflight = table.wal().list_inflight().await.unwrap();
+    assert!(
+        inflight.is_empty(),
+        "successful execute_delete must clear its WAL marker"
+    );
+    assert!(table.verify().await.unwrap().is_healthy());
+}
+
+#[tokio::test]
+async fn execute_delete_wal_marker_carries_negative_counter_delta() {
+    // Plant a marker manually for an in-flight DELETE: assert that
+    // counter_delta in the serialized entry equals -N.
+    let table = seeded(3).await;
+    let ids: Vec<shamir_types::types::record_id::RecordId> = {
+        use futures::StreamExt;
+        let stream = table.list_stream(1000);
+        futures::pin_mut!(stream);
+        let mut out = Vec::new();
+        while let Some(batch) = stream.next().await {
+            for (id, _) in batch.unwrap() {
+                out.push(id);
+            }
+        }
+        out
+    };
+    let txn_id = table.wal().fresh_txn_id();
+    table
+        .wal()
+        .begin_with_delta(
+            txn_id,
+            crate::wal::WalManager::ops_record_deleted(&ids),
+            -(ids.len() as i64),
+        )
+        .await
+        .unwrap();
+
+    let inflight = table.wal().list_inflight().await.unwrap();
+    assert_eq!(inflight.len(), 1);
+    assert_eq!(inflight[0].counter_delta, -3);
+    assert_eq!(inflight[0].ops.len(), 3);
+    for op in &inflight[0].ops {
+        assert!(matches!(op, WalOp::RecordDeleted { .. }));
+    }
+}
+
+#[tokio::test]
 async fn recover_on_open_falls_back_to_repair_for_non_created_ops() {
     // A marker with `RecordUpdated` can't be targeted (we don't
     // have the old value). Recovery should fall back to full

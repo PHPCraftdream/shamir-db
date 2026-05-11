@@ -67,7 +67,20 @@ impl WalManager {
     /// `ops` lists all record-level operations the transaction
     /// intends to perform — recovery uses this to scope its checks.
     pub async fn begin(&self, txn_id: u64, ops: Vec<WalOp>) -> DbResult<()> {
-        let entry = WalEntry::new(txn_id, ops);
+        self.begin_with_delta(txn_id, ops, 0).await
+    }
+
+    /// Same as `begin`, but records the net counter delta the
+    /// transaction was about to apply. Used by `insert_many`
+    /// (delta = +N), `delete_many` (delta = -N), and any future
+    /// op that changes the row count.
+    pub async fn begin_with_delta(
+        &self,
+        txn_id: u64,
+        ops: Vec<WalOp>,
+        counter_delta: i64,
+    ) -> DbResult<()> {
+        let entry = WalEntry::new_with_delta(txn_id, ops, counter_delta);
         let bytes = bincode::serialize(&entry)
             .map_err(|e| DbError::Codec(format!("WAL serialize: {e}")))?;
         self.info_store

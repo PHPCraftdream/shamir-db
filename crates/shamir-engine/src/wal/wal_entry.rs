@@ -11,18 +11,27 @@ use shamir_types::types::record_id::RecordId;
 /// AFTER the marker is durable. On crash, `ops` tells recovery
 /// exactly which record_ids to verify.
 ///
-/// `entry_id` and `timestamp_ns` are for ordering, debugging, and
-/// eventual log-replay-style recovery (not used in the simple
-/// marker-and-fix model).
+/// `counter_delta` is the net change to the record counter that
+/// this transaction was about to apply. Targeted recovery uses
+/// it to reconcile the counter in O(1) without a full data-store
+/// scan: e.g. an `insert_many` of N records sets `counter_delta =
+/// +N`; a `delete_many` of K records sets `counter_delta = -K`;
+/// an UPDATE that doesn't change row count sets `counter_delta =
+/// 0`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalEntry {
     pub txn_id: u64,
     pub started_at_ns: u64,
+    pub counter_delta: i64,
     pub ops: Vec<WalOp>,
 }
 
 impl WalEntry {
     pub fn new(txn_id: u64, ops: Vec<WalOp>) -> Self {
+        Self::new_with_delta(txn_id, ops, 0)
+    }
+
+    pub fn new_with_delta(txn_id: u64, ops: Vec<WalOp>, counter_delta: i64) -> Self {
         let started_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -30,6 +39,7 @@ impl WalEntry {
         Self {
             txn_id,
             started_at_ns,
+            counter_delta,
             ops,
         }
     }
@@ -113,6 +123,32 @@ mod tests {
         let back: WalEntry = bincode::deserialize(&bytes).unwrap();
         assert_eq!(back.txn_id, entry.txn_id);
         assert_eq!(back.ops.len(), 2);
+        assert_eq!(back.counter_delta, 0, "default counter_delta must be 0");
+    }
+
+    #[test]
+    fn wal_entry_carries_counter_delta() {
+        let entry = WalEntry::new_with_delta(
+            7,
+            vec![WalOp::RecordCreated {
+                record_id: RecordId::new(),
+            }],
+            42,
+        );
+        let bytes = bincode::serialize(&entry).unwrap();
+        let back: WalEntry = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.counter_delta, 42);
+
+        let entry_neg = WalEntry::new_with_delta(
+            8,
+            vec![WalOp::RecordDeleted {
+                record_id: RecordId::new(),
+            }],
+            -13,
+        );
+        let bytes = bincode::serialize(&entry_neg).unwrap();
+        let back: WalEntry = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back.counter_delta, -13);
     }
 
     #[test]
