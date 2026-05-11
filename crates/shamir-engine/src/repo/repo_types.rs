@@ -373,7 +373,10 @@ impl BoxRepoFactory {
             max_bytes: 64 * 1024 * 1024,
             max_entries: 100_000,
             ttl_ms: None,
-            flush_interval_ms: 50,
+            // 500 ms idle flush — matches `MemBufferConfig::default()`
+            // and the eventual DDL default. Per-table override via
+            // DDL (next task).
+            flush_interval_ms: 500,
             flush_batch_size: 256,
         }
     }
