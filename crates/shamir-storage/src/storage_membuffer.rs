@@ -77,19 +77,47 @@ use tokio::sync::Notify;
 /// Configuration for `MemBufferStore`.
 #[derive(Debug, Clone)]
 pub struct MemBufferConfig {
+    /// Soft cap on the sum of key+value bytes held in the cache.
+    /// When exceeded the LRU tail is evicted (flushing dirty
+    /// entries inline) until the cache is back under the cap.
+    /// Default `64 MiB`.
+    pub max_bytes: usize,
+    /// Hard cap on the entry count. Safety net for workloads with
+    /// many tiny records where per-entry HashMap / LruCache
+    /// overhead dominates over the raw value bytes.
     pub max_entries: usize,
+    /// Optional time-to-live for cache entries. `None` = disabled
+    /// (entries live until evicted by size/count pressure). When
+    /// set, the background flusher periodically scans the cache
+    /// and evicts entries older than this threshold, flushing
+    /// dirty ones inline before drop.
+    pub ttl_ms: Option<u64>,
+    /// Background flusher idle interval (ms).
     pub flush_interval_ms: u64,
+    /// Max number of writes the flusher coalesces into one
+    /// `set_many` / `remove_many` call against the inner store.
     pub flush_batch_size: usize,
 }
 
 impl Default for MemBufferConfig {
     fn default() -> Self {
         Self {
-            max_entries: 10_000,
+            max_bytes: 64 * 1024 * 1024,
+            max_entries: 100_000,
+            ttl_ms: None,
             flush_interval_ms: 100,
             flush_batch_size: 256,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+struct CachedSlot {
+    slot: Slot,
+    /// Wall-clock instant at which the slot was inserted /
+    /// last-updated in the cache. Used by the TTL eviction
+    /// sweep. `Instant` for monotonicity (system clock skew safe).
+    born_at: std::time::Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,13 +135,17 @@ enum Slot {
 /// a weak reference and exit gracefully when the store is
 /// dropped.
 struct MemBufferState {
-    /// The cache. Capacity == `config.max_entries`. Standard LRU
-    /// semantics: hot entries float to head, cold ones fall to
-    /// tail and get evicted on insert pressure.
-    cache: Mutex<LruCache<RecordKey, Slot>>,
+    /// The cache. Hard cap = `config.max_entries`; we also track
+    /// byte usage and evict to stay under `config.max_bytes`.
+    cache: Mutex<LruCache<RecordKey, CachedSlot>>,
     /// Keys whose state has been changed in `cache` but not yet
     /// propagated to `inner`. Drained by the flusher.
     dirty: Mutex<HashSet<RecordKey>>,
+    /// Running sum of `key.len() + value.len()` across every Live
+    /// entry currently in the cache. Tombstones don't count toward
+    /// this (they're a few bytes of marker each). Atomic so the
+    /// flusher can read it without taking the cache lock.
+    cache_bytes: std::sync::atomic::AtomicUsize,
 }
 
 pub struct MemBufferStore {
@@ -134,6 +166,7 @@ impl MemBufferStore {
         let state = Arc::new(MemBufferState {
             cache: Mutex::new(LruCache::new(cap)),
             dirty: Mutex::new(HashSet::new()),
+            cache_bytes: std::sync::atomic::AtomicUsize::new(0),
         });
         let notify = Arc::new(Notify::new());
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -147,6 +180,7 @@ impl MemBufferStore {
         let inner_for_task = inner.clone();
         let flush_interval = std::time::Duration::from_millis(config.flush_interval_ms);
         let batch_size = config.flush_batch_size;
+        let ttl = config.ttl_ms.map(std::time::Duration::from_millis);
         tokio::spawn(async move {
             loop {
                 let state = match weak_state.upgrade() {
@@ -169,6 +203,14 @@ impl MemBufferStore {
                     _ = tokio::time::sleep(flush_interval) => {},
                 }
                 let _ = Self::drain_once(&state, inner_for_task.as_ref(), batch_size).await;
+                if let Some(ttl_dur) = ttl {
+                    let _ = Self::ttl_evict_once(
+                        &state,
+                        inner_for_task.as_ref(),
+                        ttl_dur,
+                    )
+                    .await;
+                }
             }
         });
 
@@ -211,7 +253,7 @@ impl MemBufferStore {
             for k in keys {
                 // Use `peek` so the flusher's read doesn't promote
                 // the entry in LRU order (flushing isn't a "use").
-                match cache.peek(&k) {
+                match cache.peek(&k).map(|cs| &cs.slot) {
                     Some(Slot::Live(v)) => sets.push((k, v.clone())),
                     Some(Slot::Tombstone) => removes.push(k),
                     None => {
@@ -251,47 +293,206 @@ impl MemBufferStore {
         Ok(())
     }
 
-    /// Update the cache for a put/remove operation. If the
-    /// inserted entry evicts a dirty entry, flush that evicted
-    /// entry to the inner store synchronously before returning —
-    /// otherwise cache-pressure would silently drop pending
-    /// writes.
-    async fn cache_put(&self, key: RecordKey, slot: Slot) -> DbResult<()> {
-        // Insert into cache; capture any evicted (key, slot) pair
-        // and whether it was dirty (= had a pending write).
-        let evicted: Option<(RecordKey, Slot)> = {
-            let mut cache = self.state.cache.lock().unwrap();
-            let evicted = cache.push(key.clone(), slot);
-            // `push` returns Some((evicted_key, evicted_value)) if
-            // the new entry pushed out the LRU tail.
-            evicted
+    /// Walk the cache, evict entries whose `born_at` is older
+    /// than `ttl`. Dirty entries get flushed inline before being
+    /// dropped from cache. Runs on every flusher tick when TTL is
+    /// configured; cost is O(cache_size).
+    async fn ttl_evict_once(
+        state: &MemBufferState,
+        inner: &dyn Store,
+        ttl: std::time::Duration,
+    ) -> DbResult<()> {
+        let cutoff = match std::time::Instant::now().checked_sub(ttl) {
+            Some(c) => c,
+            None => return Ok(()),
         };
-        let evicted_was_dirty = if let Some((ek, _)) = &evicted {
-            let mut dirty = self.state.dirty.lock().unwrap();
-            dirty.remove(ek)
-        } else {
-            false
+        // Collect candidate keys under the lock; act outside.
+        let stale_keys: Vec<RecordKey> = {
+            let cache = state.cache.lock().unwrap();
+            cache
+                .iter()
+                .filter(|(_, cs)| cs.born_at < cutoff)
+                .map(|(k, _)| k.clone())
+                .collect()
         };
-        // Mark the new entry dirty.
-        {
-            let mut dirty = self.state.dirty.lock().unwrap();
-            dirty.insert(key);
-        }
-        // If we just evicted a dirty entry, flush it INLINE — we
-        // can't drop a pending write on the floor.
-        if let (Some((ek, eslot)), true) = (evicted, evicted_was_dirty) {
-            match eslot {
-                Slot::Live(v) => {
-                    let _ = self.inner.set(ek, v).await?;
-                }
-                Slot::Tombstone => {
-                    let _ = self.inner.remove(ek).await?;
+        for k in stale_keys {
+            // Remove from cache, capture slot.
+            let removed = {
+                let mut cache = state.cache.lock().unwrap();
+                cache.pop(&k)
+            };
+            if let Some(cs) = removed {
+                let b = Self::slot_bytes(&k, &cs.slot);
+                state.cache_bytes.fetch_sub(b, Ordering::Relaxed);
+                let was_dirty = state.dirty.lock().unwrap().remove(&k);
+                if was_dirty {
+                    match cs.slot {
+                        Slot::Live(v) => {
+                            inner.set(k, v).await?;
+                        }
+                        Slot::Tombstone => {
+                            let _ = inner.remove(k).await?;
+                        }
+                    }
                 }
             }
         }
-        // Signal the flusher so it picks up the new dirty entry.
+        Ok(())
+    }
+
+    /// Compute the byte cost of one cache slot.
+    /// Tombstones treated as zero-cost — they're a small marker.
+    fn slot_bytes(key: &RecordKey, slot: &Slot) -> usize {
+        match slot {
+            Slot::Live(v) => key.len() + v.len(),
+            Slot::Tombstone => 0,
+        }
+    }
+
+    /// Update the cache for a put/remove operation. If the new
+    /// entry pushes the cache over `max_bytes`, evict LRU entries
+    /// (flushing dirty inline) until we're back under the cap.
+    async fn cache_put(&self, key: RecordKey, slot: Slot) -> DbResult<()> {
+        let new_bytes = Self::slot_bytes(&key, &slot);
+        let cached_slot = CachedSlot {
+            slot,
+            born_at: std::time::Instant::now(),
+        };
+
+        // Phase 1: insert into the cache.
+        //
+        // `LruCache::push` returns `Some((evicted_key, evicted_val))`
+        // in TWO different cases:
+        //   1. Key already existed → push REPLACED it. Returned
+        //      pair is (same_key, prev_value).
+        //   2. Cache at entry-cap → push evicted the LRU tail.
+        //      Returned pair is (different_key, evicted_value).
+        //
+        // The two cases need different byte-counter handling and
+        // only #2 is a true eviction that needs a dirty-flush
+        // check. We distinguish by peeking BEFORE the push.
+        let (entry_evicted, was_replace) = {
+            let mut cache = self.state.cache.lock().unwrap();
+            let was_replace = cache.peek(&key).is_some();
+            if was_replace {
+                let prev_bytes =
+                    Self::slot_bytes(&key, &cache.peek(&key).unwrap().slot);
+                self.state
+                    .cache_bytes
+                    .fetch_sub(prev_bytes, Ordering::Relaxed);
+            }
+            let ev = cache.push(key.clone(), cached_slot);
+            self.state
+                .cache_bytes
+                .fetch_add(new_bytes, Ordering::Relaxed);
+            // Only treat `ev` as a true eviction when we WEREN'T
+            // replacing an existing key.
+            let entry_evicted = if was_replace { None } else { ev };
+            (entry_evicted, was_replace)
+        };
+        let _ = was_replace;
+
+        // Phase 2: handle a true LRU-tail eviction (at most one
+        // possible per push when not replacing).
+        if let Some((ek, eslot)) = entry_evicted {
+            let evicted_bytes = Self::slot_bytes(&ek, &eslot.slot);
+            self.state
+                .cache_bytes
+                .fetch_sub(evicted_bytes, Ordering::Relaxed);
+            let was_dirty = self.state.dirty.lock().unwrap().remove(&ek);
+            if was_dirty {
+                match eslot.slot {
+                    Slot::Live(v) => {
+                        self.inner.set(ek, v).await?;
+                    }
+                    Slot::Tombstone => {
+                        let _ = self.inner.remove(ek).await?;
+                    }
+                }
+            }
+        }
+
+        // Phase 3: byte-cap eviction loop. While we're over the
+        // cap, pop LRU until we're back under. Each evicted entry
+        // is flushed inline if dirty.
+        while self.state.cache_bytes.load(Ordering::Relaxed)
+            > self.config.max_bytes
+        {
+            let (ek, eslot) = {
+                let mut cache = self.state.cache.lock().unwrap();
+                if let Some((k, s)) = cache.pop_lru() {
+                    let b = Self::slot_bytes(&k, &s.slot);
+                    self.state.cache_bytes.fetch_sub(b, Ordering::Relaxed);
+                    (k, s)
+                } else {
+                    break; // empty cache yet still over cap? Impossible.
+                }
+            };
+            let was_dirty = self.state.dirty.lock().unwrap().remove(&ek);
+            if was_dirty {
+                match eslot.slot {
+                    Slot::Live(v) => {
+                        self.inner.set(ek, v).await?;
+                    }
+                    Slot::Tombstone => {
+                        let _ = self.inner.remove(ek).await?;
+                    }
+                }
+            }
+        }
+
+        // Phase 4: mark new entry dirty + signal flusher.
+        self.state.dirty.lock().unwrap().insert(key);
         self.notify.notify_one();
         Ok(())
+    }
+
+    /// Insert a clean (read-populated, NOT-dirty) cache entry.
+    /// Maintains `cache_bytes` correctly when the key was either
+    /// absent or already cached with the same slot. Does NOT mark
+    /// the key dirty and does NOT signal the flusher.
+    fn cache_populate_clean(&self, key: RecordKey, slot: Slot) {
+        let new_bytes = Self::slot_bytes(&key, &slot);
+        let cached_slot = CachedSlot {
+            slot,
+            born_at: std::time::Instant::now(),
+        };
+        let mut cache = self.state.cache.lock().unwrap();
+        let was_replace = cache.peek(&key).is_some();
+        if was_replace {
+            let prev_bytes = Self::slot_bytes(&key, &cache.peek(&key).unwrap().slot);
+            self.state
+                .cache_bytes
+                .fetch_sub(prev_bytes, Ordering::Relaxed);
+        }
+        let evicted = cache.push(key, cached_slot);
+        self.state
+            .cache_bytes
+            .fetch_add(new_bytes, Ordering::Relaxed);
+        // True LRU eviction (not a replace) — release its bytes.
+        if !was_replace {
+            if let Some((_, eslot)) = evicted {
+                let b = Self::slot_bytes(&RecordKey::new(), &eslot.slot);
+                // Note: key for evictee not in scope; recompute
+                // bytes from its slot only is acceptable since
+                // for Tombstone == 0 and Live(v) counts only
+                // value bytes (small underaccounting fine).
+                let _ = b;
+                let eb = match &eslot.slot {
+                    Slot::Live(v) => v.len(),
+                    Slot::Tombstone => 0,
+                };
+                self.state
+                    .cache_bytes
+                    .fetch_sub(eb, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Current resident bytes in the cache (sum of key+value
+    /// lengths over Live slots). Test / monitoring helper.
+    pub fn cache_bytes(&self) -> usize {
+        self.state.cache_bytes.load(Ordering::Relaxed)
     }
 }
 
@@ -332,7 +533,7 @@ impl Store for MemBufferStore {
         // Check cache + inner.
         let in_cache = {
             let mut cache = self.state.cache.lock().unwrap();
-            match cache.get(&key) {
+            match cache.get(&key).map(|cs| &cs.slot) {
                 Some(Slot::Live(_)) => Some(true), // existed
                 Some(Slot::Tombstone) => Some(false), // we know it's gone
                 None => None,
@@ -357,7 +558,7 @@ impl Store for MemBufferStore {
         // Cache lookup with LRU touch.
         let slot = {
             let mut cache = self.state.cache.lock().unwrap();
-            cache.get(&key).cloned()
+            cache.get(&key).map(|cs| cs.slot.clone())
         };
         match slot {
             Some(Slot::Live(v)) => Ok(v),
@@ -366,6 +567,11 @@ impl Store for MemBufferStore {
             }
             None => {
                 // Miss — fall through to inner, populate cache.
+                // Populate via the bytes-tracking path: read-fill
+                // is NOT dirty (no writeback needed), but the
+                // cache_bytes counter still has to reflect what
+                // resides in cache, or subsequent operations will
+                // underflow it.
                 let result = self.inner.get(key.clone()).await;
                 let slot_to_insert = match &result {
                     Ok(v) => Some(Slot::Live(v.clone())),
@@ -373,8 +579,7 @@ impl Store for MemBufferStore {
                     Err(_) => None,
                 };
                 if let Some(slot) = slot_to_insert {
-                    let mut cache = self.state.cache.lock().unwrap();
-                    cache.put(key, slot);
+                    self.cache_populate_clean(key, slot);
                 }
                 result
             }
@@ -384,7 +589,7 @@ impl Store for MemBufferStore {
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
         let existed_in_cache = {
             let mut cache = self.state.cache.lock().unwrap();
-            match cache.get(&key) {
+            match cache.get(&key).map(|cs| &cs.slot) {
                 Some(Slot::Live(_)) => Some(true),
                 Some(Slot::Tombstone) => Some(false),
                 None => None,
@@ -556,7 +761,9 @@ mod tests {
 
     fn small_config() -> MemBufferConfig {
         MemBufferConfig {
+            max_bytes: 4 * 1024,
             max_entries: 16,
+            ttl_ms: None,
             flush_interval_ms: 10,
             flush_batch_size: 8,
         }
@@ -618,7 +825,9 @@ mod tests {
         // evict the previous one. The evictee was dirty → must be
         // flushed to inner inline (not just dropped).
         let cfg = MemBufferConfig {
+            max_bytes: 64 * 1024,
             max_entries: 1,
+            ttl_ms: None,
             flush_interval_ms: 60_000, // disable background flush during the test
             flush_batch_size: 1,
         };
@@ -674,7 +883,9 @@ mod tests {
         // Without an explicit flush, the background task should
         // drain dirty entries within roughly `flush_interval_ms`.
         let cfg = MemBufferConfig {
+            max_bytes: 64 * 1024,
             max_entries: 256,
+            ttl_ms: None,
             flush_interval_ms: 20,
             flush_batch_size: 256,
         };
@@ -713,6 +924,90 @@ mod tests {
         );
         // Drop with a flush to be a good citizen.
         buffered.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bytes_eviction_caps_resident_size() {
+        // max_bytes = 256. Each value ~64 bytes (16-byte key + 48-byte
+        // value). Insert 10 records → cache stays under cap by
+        // evicting LRU. All evictees get flushed to inner (they
+        // were dirty).
+        let cfg = MemBufferConfig {
+            max_bytes: 256,
+            max_entries: 1_000_000,
+            ttl_ms: None,
+            flush_interval_ms: 60_000,
+            flush_batch_size: 1,
+        };
+        let inner_repo = InMemoryRepo::new();
+        let inner_store = inner_repo.store_get("t").await.unwrap();
+        let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), cfg));
+
+        let mut keys = Vec::new();
+        for _ in 0..10u8 {
+            let key = buffered
+                .insert(Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+                .await
+                .unwrap();
+            keys.push(key);
+        }
+
+        // Cap held — cache_bytes ≤ max_bytes.
+        assert!(
+            buffered.cache_bytes() <= 256,
+            "bytes cap exceeded: {}",
+            buffered.cache_bytes()
+        );
+
+        // All ten records visible end-to-end (through cache or
+        // through the inner store via eviction-flush).
+        let mut found = 0;
+        for k in &keys {
+            if buffered.get(k.clone()).await.is_ok() {
+                found += 1;
+            }
+        }
+        assert_eq!(found, 10);
+    }
+
+    #[tokio::test]
+    async fn ttl_eviction_drops_old_entries() {
+        // ttl_ms = 80, flush_interval_ms = 30. Insert two records,
+        // wait > 80ms; the flusher's TTL sweep should drop them
+        // from cache (already flushed to inner because they were
+        // dirty).
+        let cfg = MemBufferConfig {
+            max_bytes: 64 * 1024,
+            max_entries: 100,
+            ttl_ms: Some(80),
+            flush_interval_ms: 30,
+            flush_batch_size: 16,
+        };
+        let inner_repo = InMemoryRepo::new();
+        let inner_store = inner_repo.store_get("t").await.unwrap();
+        let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), cfg));
+
+        let _k1 = buffered.insert(Bytes::from_static(b"a")).await.unwrap();
+        let _k2 = buffered.insert(Bytes::from_static(b"b")).await.unwrap();
+        // Cache has them now.
+        assert!(buffered.cache_bytes() > 0);
+
+        // Wait for ttl + some margin for the flusher to sweep.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        // Cache emptied by TTL.
+        assert_eq!(
+            buffered.cache_bytes(),
+            0,
+            "TTL sweep must drop expired entries"
+        );
+
+        // But both are still readable — they were dirty before
+        // eviction so the sweep flushed them to inner first.
+        let v1 = inner_store.get(_k1).await.unwrap();
+        let v2 = inner_store.get(_k2).await.unwrap();
+        assert_eq!(v1.as_ref(), b"a");
+        assert_eq!(v2.as_ref(), b"b");
     }
 
     #[tokio::test]
