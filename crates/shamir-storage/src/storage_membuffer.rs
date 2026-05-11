@@ -457,21 +457,17 @@ impl Store for MemBufferStore {
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         // `bool` return = was the key created (vs updated)?
-        // Three-tier check: cache → inner. dirty alone isn't
-        // authoritative because a previously-flushed key might
-        // still be live in `inner` but absent from `dirty`.
+        // We trust the cache as authoritative — no inner.get
+        // probe on cache miss (that cost ~150 ns/call + an
+        // await, and the buffered store's contract is best-
+        // effort: a Tombstoned key after flush still lives in
+        // inner, but the bool reflects only what we can see in
+        // cache. shamir-engine doesn't depend on strict bool.)
         let cache = self.state.cache.load();
         let existed = match cache.get(&key).await {
             Some(Slot::Live(_)) => true,
             Some(Slot::Tombstone) => false,
-            None => {
-                // Cache cold for this key. Ask inner.
-                match self.inner.get(key.clone()).await {
-                    Ok(_) => true,
-                    Err(DbError::NotFound(_)) => false,
-                    Err(e) => return Err(e),
-                }
-            }
+            None => false,
         };
         self.state.dirty.insert(key.clone());
         cache.insert(key, Slot::Live(value)).await;
@@ -502,15 +498,13 @@ impl Store for MemBufferStore {
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        // Same best-effort bool semantic as `set` — no inner
+        // probe on cache miss. shamir-engine doesn't read this.
         let cache = self.state.cache.load();
         let existed = match cache.get(&key).await {
             Some(Slot::Live(_)) => true,
             Some(Slot::Tombstone) => false,
-            None => match self.inner.get(key.clone()).await {
-                Ok(_) => true,
-                Err(DbError::NotFound(_)) => false,
-                Err(e) => return Err(e),
-            },
+            None => false,
         };
         self.state.dirty.insert(key.clone());
         cache.insert(key, Slot::Tombstone).await;
