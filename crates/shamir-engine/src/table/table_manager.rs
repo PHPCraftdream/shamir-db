@@ -14,6 +14,7 @@ use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::query::filter::eval::{compile_filter, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
+use crate::wal::WalManager;
 use shamir_storage::types::Store;
 use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
@@ -26,6 +27,7 @@ pub struct TableManager {
     counter: Arc<RecordCounter>,
     index_manager: IndexManager,
     sorted_indexes: SortedIndexManager,
+    wal: Arc<WalManager>,
 }
 
 impl Clone for TableManager {
@@ -37,6 +39,7 @@ impl Clone for TableManager {
             counter: Arc::clone(&self.counter),
             index_manager: self.index_manager.clone(),
             sorted_indexes: self.sorted_indexes.clone(),
+            wal: Arc::clone(&self.wal),
         }
     }
 }
@@ -56,6 +59,7 @@ impl TableManager {
         let index_manager =
             IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
         let sorted_indexes = SortedIndexManager::new(Arc::clone(&info_store)).await?;
+        let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
         let table = Table::new(data_store);
 
         Ok(Self {
@@ -65,6 +69,7 @@ impl TableManager {
             counter,
             index_manager,
             sorted_indexes,
+            wal,
         })
     }
 
@@ -92,9 +97,10 @@ impl TableManager {
         // Construct synchronously: SortedIndexManager::new() is async
         // but the empty-state path doesn't await any real work.
         let sorted_indexes = futures::executor::block_on(
-            SortedIndexManager::new(info_store),
+            SortedIndexManager::new(info_store.clone()),
         )
         .expect("sorted index manager init for test");
+        let wal = Arc::new(WalManager::new(info_store));
         Self {
             name,
             table: Arc::new(table),
@@ -102,6 +108,7 @@ impl TableManager {
             counter,
             index_manager,
             sorted_indexes,
+            wal,
         }
     }
 
@@ -275,19 +282,47 @@ impl TableManager {
 
         // 2. One batched data-store write.
         let ids = self.table.insert_many(values).await?;
-        self.counter.increment(ids.len() as i64).await?;
 
-        // 3. Update indexes per-record (still N writes to info_store —
-        //    batching this is its own sprint).
-        for (id, value) in ids.iter().zip(values.iter()) {
-            self.index_manager.on_record_created(id, value).await?;
-            self.index_manager
-                .on_record_created_unique(id, value)
-                .await?;
-            self.sorted_indexes.on_record_created(id, value).await?;
-        }
+        // 3. Open a WAL marker — records the record_ids we just
+        //    inserted so that crash recovery can scope its check
+        //    to exactly these records. The marker write is one
+        //    info_store.set call; on backends with eventual flush
+        //    (sled / redb-Durability::None) it amortises through
+        //    the same flush window as the rest of the batch — no
+        //    extra fsync on the happy path.
+        //
+        //    Gap: a crash between step 2 and step 3 leaves orphan
+        //    records in data_store with no WAL marker; doctor's
+        //    full-rebuild (`TableManager::repair()`) handles that
+        //    fallback case.
+        let txn_id = self.wal.fresh_txn_id();
+        self.wal
+            .begin(txn_id, crate::wal::WalManager::ops_record_created(&ids))
+            .await?;
+
+        // 4. counter + indexes (all in info_store).
+        self.counter.increment(ids.len() as i64).await?;
+        let pairs_iter = || ids.iter().zip(values.iter());
+        self.index_manager
+            .on_records_created_batch(pairs_iter())
+            .await?;
+        self.index_manager
+            .on_records_created_unique_batch(pairs_iter())
+            .await?;
+        self.sorted_indexes
+            .on_records_created_batch(pairs_iter())
+            .await?;
+
+        // 5. Clear the WAL marker — durable batch from here on.
+        self.wal.commit(txn_id).await?;
 
         Ok(ids)
+    }
+
+    /// Read-only access to the WAL — for recovery callsites and
+    /// integration tests.
+    pub fn wal(&self) -> &Arc<WalManager> {
+        &self.wal
     }
 
     /// Delete a record by RecordId (with counter and index update)

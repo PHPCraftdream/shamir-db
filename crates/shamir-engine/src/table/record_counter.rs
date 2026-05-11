@@ -124,6 +124,16 @@ impl RecordCounter {
         Ok(())
     }
 
+    /// Set the counter to an absolute value. Used by the doctor to
+    /// reconcile the cached counter with a fresh count of records
+    /// in the data store.
+    pub async fn set_to(&self, n: u64) -> DbResult<()> {
+        let cache = self.ensure_cache().await?;
+        cache.store(n, Ordering::Release);
+        self.dirty.store(true, Ordering::Release);
+        self.persist().await
+    }
+
     /// Flush the in-memory counter to the info_store if it differs
     /// from the last persisted value. No-op otherwise.
     pub async fn persist(&self) -> DbResult<()> {

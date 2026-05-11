@@ -13,3 +13,4 @@ pub mod index;
 pub mod query;
 pub mod repo;
 pub mod table;
+pub mod wal;

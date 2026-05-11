@@ -1,4 +1,5 @@
 pub mod concurrent_tests;
+pub mod doctor_tests;
 pub mod filter_stream_tests;
 pub mod index_scan_tests;
 pub mod write_exec_tests;
