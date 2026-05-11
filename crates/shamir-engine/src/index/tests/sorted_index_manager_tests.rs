@@ -274,6 +274,91 @@ async fn lookup_first_k_zero_returns_empty() {
 }
 
 #[tokio::test]
+async fn lookup_max_returns_largest() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let mut max_id_for_score = None;
+    for score in [50, 10, 30, 5, 20] {
+        let id = RecordId::new();
+        let rec = record_with_int(201, score);
+        mgr.on_record_created(&id, &rec).await.unwrap();
+        if score == 50 {
+            max_id_for_score = Some(id);
+        }
+    }
+    let got = mgr.lookup_max(101).await.unwrap();
+    assert_eq!(got, max_id_for_score);
+}
+
+#[tokio::test]
+async fn lookup_max_empty_index_returns_none() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let got = mgr.lookup_max(101).await.unwrap();
+    assert!(got.is_none());
+}
+
+#[tokio::test]
+async fn lookup_last_k_in_value_desc_order() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let mut score_to_id = Vec::new();
+    for score in [50, 10, 30, 5, 20, 40] {
+        let id = RecordId::new();
+        let rec = record_with_int(201, score);
+        mgr.on_record_created(&id, &rec).await.unwrap();
+        score_to_id.push((score, id));
+    }
+    let got = mgr.lookup_last_k(101, 3).await.unwrap();
+    assert_eq!(got.len(), 3);
+    // Expect the three records with scores 50, 40, 30 — in that order.
+    let mut expected = score_to_id.clone();
+    expected.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    let expected_ids: Vec<RecordId> = expected.iter().take(3).map(|(_, id)| *id).collect();
+    assert_eq!(got, expected_ids);
+}
+
+#[tokio::test]
+async fn lookup_last_k_zero_returns_empty() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let id = RecordId::new();
+    let rec = record_with_int(201, 42);
+    mgr.on_record_created(&id, &rec).await.unwrap();
+    let got = mgr.lookup_last_k(101, 0).await.unwrap();
+    assert!(got.is_empty());
+}
+
+#[tokio::test]
+async fn lookup_last_k_more_than_present_returns_all_in_desc() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let mut ids_by_score = Vec::new();
+    for score in [3, 1, 2] {
+        let id = RecordId::new();
+        let rec = record_with_int(201, score);
+        mgr.on_record_created(&id, &rec).await.unwrap();
+        ids_by_score.push((score, id));
+    }
+    let got = mgr.lookup_last_k(101, 100).await.unwrap();
+    assert_eq!(got.len(), 3);
+    let mut expected = ids_by_score.clone();
+    expected.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    let expected_ids: Vec<RecordId> = expected.iter().map(|(_, id)| *id).collect();
+    assert_eq!(got, expected_ids);
+}
+
+#[tokio::test]
 async fn on_record_updated_moves_the_entry() {
     let (_, mgr) = fresh_mgr().await;
     mgr.register(SortedIndexDefinition::new(101, vec![201]))

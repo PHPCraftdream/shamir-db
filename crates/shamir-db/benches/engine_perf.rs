@@ -851,6 +851,64 @@ fn bench_min_only_with_index(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same DESC ORDER BY LIMIT 10 path, but on a SLED-backed repo.
+/// Exercises sled's native `iter_range_stream_reverse` cursor —
+/// O(log N + K) — vs the default in-memory impl which collects
+/// forward and reverses in memory (O(N)).
+fn bench_order_limit_desc_with_sorted_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("order_limit_top10_desc_sorted_sled");
+
+    for &n in SIZES {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users(&s, n).await;
+            create_sorted_index(&s, "users", "by_score", "score").await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_read_with_order_limit();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+/// `order_by score DESC + LIMIT 10` with a SORTED index on `score`.
+/// Hits the reverse-iter fast path — `lookup_last_k(index, 10)`
+/// using `Store::iter_range_stream_reverse` instead of full scan
+/// + sort.
+fn bench_order_limit_desc_with_sorted_index(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("order_limit_top10_desc_sorted");
+
+    for &n in SIZES {
+        let shamir = rt.block_on(async {
+            let s = seeded(n, false).await;
+            create_sorted_index(&s, "users", "by_score", "score").await;
+            s
+        });
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_read_with_order_limit();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+    }
+    group.finish();
+}
+
 /// `order_by score ASC + LIMIT 10` with a SORTED index on `score`.
 /// Hits the Opt #6 fast path — `lookup_first_k(index, 10)` instead
 /// of full scan + sort. Companion to the existing
@@ -1211,6 +1269,8 @@ criterion_group!(
     bench_min_only_with_index,
     bench_order_limit_with_index,
     bench_order_limit_asc_with_sorted_index,
+    bench_order_limit_desc_with_sorted_index,
+    bench_order_limit_desc_with_sorted_index_sled,
     bench_range_query_no_index,
     bench_range_query_with_index,
     bench_bulk_insert_sled,
