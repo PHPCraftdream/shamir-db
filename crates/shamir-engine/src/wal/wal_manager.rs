@@ -121,11 +121,15 @@ impl WalManager {
 
     /// List every in-flight transaction found on disk. Empty on a
     /// cleanly-shut-down database. Called once on open / startup.
+    ///
+    /// Scan batch size = 1024 — recovery is one-shot; bigger
+    /// batches amortise the stream-driver overhead (one Vec
+    /// allocation per batch, one await point per batch).
     pub async fn list_inflight(&self) -> DbResult<Vec<WalEntry>> {
         use futures::StreamExt;
         let mut out: Vec<WalEntry> = Vec::new();
         let prefix = Bytes::copy_from_slice(ACTIVE_PREFIX);
-        let stream = self.info_store.scan_prefix_stream(prefix, 64);
+        let stream = self.info_store.scan_prefix_stream(prefix, 1024);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             for (k, v) in batch? {

@@ -57,8 +57,13 @@ canopy = ["shamir-storage/canopy"]
 [dev-dependencies]
 tempfile = "3.10.1"
 serial_test = "3.3.1"
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to
 # `crates/shamir-db/tests/` as integration tests instead. Keeping the
 # cycle would have made cargo compile shamir-engine twice and the
 # `BatchError` types from the two copies wouldn't match.)
+
+[[bench]]
+name = "wal_recovery"
+harness = false
