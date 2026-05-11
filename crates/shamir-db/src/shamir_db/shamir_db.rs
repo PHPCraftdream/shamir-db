@@ -200,6 +200,7 @@ impl ShamirDb {
             // — recurse to the underlying backend so reflection
             // sees the real engine.
             BoxRepoFactory::MemBuffer(f) => return Self::extract_storage_type(&f.inner),
+            BoxRepoFactory::Cached(f) => return Self::extract_storage_type(&f.inner),
         }
         .to_string()
     }
@@ -220,6 +221,7 @@ impl ShamirDb {
             #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => Some(f.path.to_string_lossy().to_string()),
             BoxRepoFactory::MemBuffer(f) => Self::extract_path(&f.inner),
+            BoxRepoFactory::Cached(f) => Self::extract_path(&f.inner),
         }
     }
 
