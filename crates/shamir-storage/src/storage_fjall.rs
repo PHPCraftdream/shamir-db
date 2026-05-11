@@ -4,7 +4,7 @@ use shamir_types::types::record_id::RecordId;
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use futures::stream::Stream;
 use std::path::Path;
 use std::pin::Pin;
@@ -41,7 +41,10 @@ impl Repo for FjallRepo {
         .await
         .map_err(|e| DbError::Internal(e.to_string()))??;
 
-        Ok(Arc::new(FjallStore { keyspace }))
+        Ok(Arc::new(FjallStore {
+            keyspace,
+            db: self.db.clone(),
+        }))
     }
 
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
@@ -82,6 +85,11 @@ impl Repo for FjallRepo {
 
 pub struct FjallStore {
     keyspace: Keyspace,
+    /// Kept alongside the keyspace so `Store::flush()` can call
+    /// `Database::persist(PersistMode::SyncAll)` — fjall journals
+    /// to a per-database WAL, not per-keyspace, so durability is
+    /// the database's concern.
+    db: Arc<Database>,
 }
 
 #[async_trait]
@@ -142,6 +150,23 @@ impl Store for FjallStore {
                 Some(slice) => Ok(Bytes::copy_from_slice(&slice)),
                 None => Err(DbError::NotFound(format!("record not found: {:?}", key))),
             }
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    /// Force the WAL to fsync-on-disk. fjall buffers individual
+    /// writes in the journal; `persist(SyncAll)` fsyncs the journal
+    /// + writes any pending metadata. Reachable through
+    /// `Arc<dyn Store>` — without this override callers hitting
+    /// the default no-op would silently get "eventually durable"
+    /// even after an explicit `flush()`.
+    async fn flush(&self) -> DbResult<()> {
+        let db = self.db.clone();
+        task::spawn_blocking(move || -> DbResult<()> {
+            db.persist(PersistMode::SyncAll)
+                .map_err(|e| DbError::Storage(format!("Fjall persist: {}", e)))?;
+            Ok(())
         })
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?
