@@ -601,6 +601,43 @@ bound. Wide ranges at low `start` (age=30 out of 18..78 → ~20%
 waste) get ~1.4×. Narrow ranges (age=30 exactly, single value)
 where we used to walk from age=18 → ~2.5×. As expected.
 
+## Release profile: `opt-level = "z"` → `3` (2026-05-11)
+
+The workspace `[profile.release]` had inherited `opt-level = "z"`
+from the shamir-client-node crate (which ships as a bundled native
+JS module, where binary size matters). Server-side database does
+not care about binary size — `opt-level = 3` is the right setting
+because filter eval, projection, codec, and sort comparators are
+the hot loops.
+
+shamir-client-node keeps its own `opt-level = "z"` override in its
+own Cargo.toml (the workspace excludes it from `[workspace]
+members`).
+
+### Bench impact
+
+CPU-bound hot paths win 20–42 %:
+
+| Bench                                  | Pre (`z`) | Post (`3`) | Speedup |
+|----------------------------------------|----------:|-----------:|---------|
+| complex_filter/10000                   |    95 ms  |    55 ms   | **1.73×** |
+| order_limit_top10/10000                |   184 ms  |   106 ms   | **1.74×** |
+| order_limit_top10/1000                 |   13.6 ms |    8.7 ms  | **1.56×** |
+| complex_filter/1000                    |   9.0 ms  |    6.3 ms  | **1.42×** |
+| order_limit_top10/100                  |   1.36 ms |   861 µs   | **1.58×** |
+| read_by_city_with_index/10000          |   152 ms  |   106 ms   | **1.43×** |
+| bulk_insert/1000 (in-memory)           |   20.9 ms |   15.3 ms  | **1.37×** |
+| bulk_insert/100  (in-memory)           |   1.74 ms |   1.37 ms  | **1.27×** |
+| count_with_filter_with_index/10000     |   104 µs  |    81 µs   | **1.28×** |
+
+Five-minute Cargo.toml change → 20–42 % across the entire
+filtering / ordering / scan surface. The largest single perf
+return-on-investment of the project so far.
+
+I/O-bound paths (sled / redb bulk_insert with fsync, fixed-cost
+spawn_blocking) are unchanged — those are dominated by OS-level
+costs that compiler optimisation doesn't touch.
+
 ## Cross-backend `Store::insert_many` (2026-05-11)
 
 The previous pass (sled-flush + redb Durability::None) brought 2 of
