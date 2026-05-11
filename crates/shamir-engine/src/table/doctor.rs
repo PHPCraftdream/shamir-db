@@ -263,19 +263,31 @@ impl TableManager {
 
     /// Crash-recovery entry point — call once on database open.
     ///
-    /// Two strategies:
+    /// Three-stage strategy ("roll forward by default, escalate if
+    /// inconsistency persists"):
     ///
-    /// 1. **Targeted recovery** — when every WAL op in the marker
-    ///    is `RecordCreated`, the recovery scope is the listed
-    ///    record_ids. Re-applies `on_records_created_batch` for the
-    ///    records that exist in `data_store`; idempotent (setting
-    ///    an already-present posting just rewrites it with the same
-    ///    empty value). Cost: O(batch_size), independent of table
-    ///    size.
+    /// 1. **Categorise WAL ops** into Created / Updated / Deleted
+    ///    record_ids. Unknown / future variants → straight to
+    ///    full repair.
     ///
-    /// 2. **Full repair** — fall-back when the marker contains ops
-    ///    other than `RecordCreated` (Updated / Deleted / future
-    ///    variants). Slow but always correct.
+    /// 2. **Targeted roll-forward**:
+    ///    - **Created**: re-apply `on_records_created_batch` for
+    ///      the records that DO exist in `data_store`. Idempotent
+    ///      — adds missing posting entries; rewrites identical ones.
+    ///    - **Updated**: same as Created (re-apply current value's
+    ///      index entries). May leave OLD-value orphan entries —
+    ///      caught by step 3.
+    ///    - **Deleted**: for any record still present in data,
+    ///      complete the delete (`self.delete(id)`). Removes both
+    ///      data and index entries via the existing hook. If the
+    ///      record is already absent, leaves any pre-existing
+    ///      orphan index entries — caught by step 3.
+    ///
+    /// 3. **Verify + escalate**. After targeted roll-forward,
+    ///    `verify()` reports any inconsistency. If unhealthy →
+    ///    fall through to `repair()` (full rebuild). The user
+    ///    sees a single `RepairReport` regardless of which path
+    ///    ran.
     ///
     /// Cheap on clean shutdown: one prefix scan returning zero
     /// entries.
@@ -285,40 +297,57 @@ impl TableManager {
             return Ok(None);
         }
 
-        // Decide strategy: targeted iff every op is RecordCreated.
-        let can_target = inflight.iter().all(|entry| {
-            entry
-                .ops
-                .iter()
-                .all(|op| matches!(op, crate::wal::WalOp::RecordCreated { .. }))
-        });
-
-        if can_target {
-            let start = Instant::now();
-            let mut ids: Vec<shamir_types::types::record_id::RecordId> = Vec::new();
-            for entry in &inflight {
-                for op in &entry.ops {
-                    if let crate::wal::WalOp::RecordCreated { record_id } = op {
-                        ids.push(*record_id);
+        // 1. Categorise — collect record_ids per op kind. Unknown
+        //    variants short-circuit to full repair.
+        let mut created_ids: Vec<shamir_types::types::record_id::RecordId> = Vec::new();
+        let mut updated_ids: Vec<shamir_types::types::record_id::RecordId> = Vec::new();
+        let mut deleted_ids: Vec<shamir_types::types::record_id::RecordId> = Vec::new();
+        let mut has_unknown_op = false;
+        for entry in &inflight {
+            for op in &entry.ops {
+                match op {
+                    crate::wal::WalOp::RecordCreated { record_id } => {
+                        created_ids.push(*record_id);
                     }
+                    crate::wal::WalOp::RecordUpdated { record_id } => {
+                        updated_ids.push(*record_id);
+                    }
+                    crate::wal::WalOp::RecordDeleted { record_id } => {
+                        deleted_ids.push(*record_id);
+                    }
+                    // Future variants (TxnBegin/Commit/Rollback,
+                    // FtsTerm*, IndexCreated/Dropped, ...) — we
+                    // don't know how to roll them forward, so we
+                    // bail to full repair.
+                    _ => has_unknown_op = true,
                 }
             }
+        }
+        if has_unknown_op {
+            let report = self.repair().await?;
+            for entry in &inflight {
+                self.wal().commit(entry.txn_id).await?;
+            }
+            return Ok(Some(report));
+        }
 
-            // Pull current values for these ids in one vectored read.
-            let values = self.table().get_many(&ids).await?;
+        let start = Instant::now();
+
+        // 2a. Created roll-forward — re-apply index hooks for
+        //     records that exist in data.
+        let mut records_processed: u64 = 0;
+        if !created_ids.is_empty() {
+            let values = self.table().get_many(&created_ids).await?;
             let pairs: Vec<(
                 shamir_types::types::record_id::RecordId,
                 shamir_types::types::value::InnerValue,
-            )> = ids
+            )> = created_ids
                 .iter()
                 .zip(values.into_iter())
                 .filter_map(|(id, opt)| opt.map(|v| (*id, v)))
                 .collect();
+            records_processed += pairs.len() as u64;
             let pairs_iter = || pairs.iter().map(|(id, v)| (id, v));
-
-            // Re-apply the index hooks. They're idempotent: setting
-            // an already-present posting key just rewrites it; the
-            // unique index's value-equality check is fine on rewrite.
             self.index_manager_ref()
                 .on_records_created_batch(pairs_iter())
                 .await?;
@@ -328,47 +357,87 @@ impl TableManager {
             self.sorted_indexes()
                 .on_records_created_batch(pairs_iter())
                 .await?;
+        }
 
-            // Reconcile counter: scan data_store for the truth. The
-            // WAL doesn't track counter changes separately, and a
-            // crash between counter.increment and wal.commit may
-            // have left it correct OR off by N. Cheapest correct
-            // path: count and set_to. O(table_size).
-            //
-            // Note: for very large tables this re-introduces the
-            // O(table_size) cost we wanted to avoid. Acceptable
-            // because counter recovery happens once per crash; the
-            // alternative (drifted counter) is silently wrong.
-            let mut count: u64 = 0;
-            use futures::StreamExt;
-            let stream = self.list_stream(1000);
-            futures::pin_mut!(stream);
-            while let Some(batch) = stream.next().await {
-                count += batch?.len() as u64;
-            }
-            self.counter().set_to(count).await?;
+        // 2b. Updated roll-forward — same shape as Created. Leaves
+        //     OLD-value orphans if the indexed field changed; step
+        //     3 catches them.
+        if !updated_ids.is_empty() {
+            let values = self.table().get_many(&updated_ids).await?;
+            let pairs: Vec<(
+                shamir_types::types::record_id::RecordId,
+                shamir_types::types::value::InnerValue,
+            )> = updated_ids
+                .iter()
+                .zip(values.into_iter())
+                .filter_map(|(id, opt)| opt.map(|v| (*id, v)))
+                .collect();
+            records_processed += pairs.len() as u64;
+            let pairs_iter = || pairs.iter().map(|(id, v)| (id, v));
+            self.index_manager_ref()
+                .on_records_created_batch(pairs_iter())
+                .await?;
+            self.index_manager_ref()
+                .on_records_created_unique_batch(pairs_iter())
+                .await?;
+            self.sorted_indexes()
+                .on_records_created_batch(pairs_iter())
+                .await?;
+        }
 
-            // Clear markers.
+        // 2c. Deleted roll-forward — complete the delete for any
+        //     record still in data_store. `self.delete` invokes
+        //     on_record_deleted which removes both data and the
+        //     index entries.
+        for id in &deleted_ids {
+            // Returns false if record was already absent; that's
+            // fine — orphan postings (if any) are caught by step 3.
+            let _ = self.delete(*id).await?;
+        }
+        records_processed += deleted_ids.len() as u64;
+
+        // Reconcile counter from data_store. Required because the
+        // WAL doesn't track exactly where the crash hit relative
+        // to `counter.increment`.
+        let mut count: u64 = 0;
+        use futures::StreamExt;
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            count += batch?.len() as u64;
+        }
+        self.counter().set_to(count).await?;
+
+        // 3. Verify + escalate. `verify` is read-only, much cheaper
+        //    than `repair` (no writes). If targeted roll-forward
+        //    left orphans, escalate.
+        let v = self.verify().await?;
+        if !v.is_healthy() {
+            log::warn!(
+                "Targeted roll-forward left inconsistency in table '{}'; escalating to full repair. {:?}",
+                self.name(),
+                v,
+            );
+            let report = self.repair().await?;
             for entry in &inflight {
                 self.wal().commit(entry.txn_id).await?;
             }
-
-            return Ok(Some(RepairReport {
-                records_scanned: pairs.len() as u64,
-                counter_before: 0,
-                counter_after: count,
-                regular_indexes_rebuilt: 0,
-                unique_indexes_rebuilt: 0,
-                sorted_indexes_rebuilt: 0,
-                elapsed_ms: start.elapsed().as_millis() as u64,
-            }));
+            return Ok(Some(report));
         }
 
-        // Fallback: full repair.
-        let report = self.repair().await?;
+        // Targeted roll-forward succeeded. Clear markers.
         for entry in &inflight {
             self.wal().commit(entry.txn_id).await?;
         }
-        Ok(Some(report))
+
+        Ok(Some(RepairReport {
+            records_scanned: records_processed,
+            counter_before: 0,
+            counter_after: count,
+            regular_indexes_rebuilt: 0,
+            unique_indexes_rebuilt: 0,
+            sorted_indexes_rebuilt: 0,
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        }))
     }
 }
