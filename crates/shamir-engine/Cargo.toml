@@ -71,3 +71,7 @@ harness = false
 [[bench]]
 name = "interner_concurrent"
 harness = false
+
+[[bench]]
+name = "membuffer_concurrent"
+harness = false
