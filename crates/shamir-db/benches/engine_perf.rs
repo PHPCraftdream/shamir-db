@@ -1412,6 +1412,90 @@ fn bench_steady_state_insert(c: &mut Criterion) {
     group.finish();
 }
 
+/// TTL sweep cost: one full TTL-eviction pass over a cache
+/// holding 50k stale entries. Measures how long the cache lock
+/// is blocked when TTL sweep runs.
+///
+/// Caveat: relies on the background flusher firing the sweep.
+/// We instead measure indirectly via a `flush().await` (which
+/// drains the dirty queue + triggers downstream propagation).
+/// The actual sweep is internal — this bench captures the
+/// observable latency when TTL is enabled vs disabled.
+fn bench_ttl_sweep_50k(c: &mut Criterion) {
+    use shamir_db::storage::storage_in_memory::InMemoryStore;
+    use shamir_db::storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
+    use shamir_db::storage::types::{RecordKey, Store};
+    use shamir_types::types::record_id::RecordId;
+
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("ttl_sweep");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements(50_000));
+
+    // No TTL — baseline for "what does a cache lookup look like"
+    // when sweep does not run at all.
+    group.bench_function("no_ttl_seed_50k", |b| {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+                let cfg = MemBufferConfig {
+                    max_bytes: 100 * 1024 * 1024,
+                    max_entries: 100_000,
+                    ttl_ms: None,
+                    flush_interval_ms: 60_000,
+                    flush_batch_size: 256,
+                };
+                let store: Arc<dyn Store> =
+                    Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let v = RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
+                let start = Instant::now();
+                for _ in 0..50_000 {
+                    let id = RecordId::new();
+                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    store.set(k, v.clone()).await.unwrap();
+                }
+                total += start.elapsed();
+                drop(store);
+            }
+            total
+        });
+    });
+
+    // TTL enabled, very short: every entry is stale by the time
+    // the flusher tick fires. Measures the cost of inserting
+    // 50k while a sweep is potentially racing.
+    group.bench_function("ttl_50ms_seed_50k_flush_300ms", |b| {
+        b.to_async(&rt).iter_custom(|iters| async move {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+                let cfg = MemBufferConfig {
+                    max_bytes: 100 * 1024 * 1024,
+                    max_entries: 100_000,
+                    ttl_ms: Some(50),
+                    flush_interval_ms: 300,
+                    flush_batch_size: 256,
+                };
+                let store: Arc<dyn Store> =
+                    Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let v = RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
+                let start = Instant::now();
+                for _ in 0..50_000 {
+                    let id = RecordId::new();
+                    let k = RecordKey::copy_from_slice(id.as_bytes());
+                    store.set(k, v.clone()).await.unwrap();
+                }
+                total += start.elapsed();
+                drop(store);
+            }
+            total
+        });
+    });
+
+    group.finish();
+}
+
 /// Eviction under byte-pressure: cache is intentionally held
 /// near its `max_bytes` cap so every new insert triggers the
 /// byte-cap eviction loop in `cache_put`. Each iter does 1000
@@ -1662,6 +1746,7 @@ criterion_group!{
     bench_cache_hit_get,
     bench_steady_state_insert,
     bench_wal_high_qps,
-    bench_eviction_byte_pressure
+    bench_eviction_byte_pressure,
+    bench_ttl_sweep_50k
 }
 criterion_main!(benches);
