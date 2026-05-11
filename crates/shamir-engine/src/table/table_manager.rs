@@ -314,7 +314,11 @@ impl TableManager {
         //    fallback case.
         let txn_id = self.wal.fresh_txn_id();
         self.wal
-            .begin(txn_id, crate::wal::WalManager::ops_record_created(&ids))
+            .begin_with_delta(
+                txn_id,
+                crate::wal::WalManager::ops_record_created(&ids),
+                ids.len() as i64,
+            )
             .await?;
 
         // 4. counter + indexes (all in info_store).

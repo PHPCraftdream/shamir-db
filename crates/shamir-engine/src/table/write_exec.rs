@@ -139,6 +139,31 @@ impl TableManager {
             .unwrap_or(UpdateReturnMode::Changed);
         let wants_records = op.select.is_some();
 
+        // Open a WAL marker for the whole UPDATE batch. counter_delta
+        // is 0 because UPDATE doesn't change row count. Recovery for
+        // RecordUpdated reapplies index hooks idempotently against
+        // the current record value (post-restart it sees either the
+        // pre- or post-update value, depending on where the crash
+        // hit, but either is consistent with itself).
+        //
+        // Marker covers EVERY matched id, even ones whose merge
+        // turned out to be a no-op (`changed == false`) — keeps the
+        // recovery scope correct if a crash hit mid-merge.
+        let candidate_ids: Vec<RecordId> = matched.iter().map(|(id, _)| *id).collect();
+        let txn_id = if !candidate_ids.is_empty() {
+            let id = self.wal().fresh_txn_id();
+            self.wal()
+                .begin_with_delta(
+                    id,
+                    crate::wal::WalManager::ops_record_updated(&candidate_ids),
+                    0,
+                )
+                .await?;
+            Some(id)
+        } else {
+            None
+        };
+
         for (id, old_record) in &matched {
             // Merge: overlay set_map onto existing record
             let new_record = merge_inner_maps(old_record, set_map);
@@ -159,6 +184,11 @@ impl TableManager {
                     result_records.push(inner_to_json_value(&new_record, interner));
                 }
             }
+        }
+
+        // Clear the WAL marker — the UPDATE batch is durable.
+        if let Some(id) = txn_id {
+            self.wal().commit(id).await?;
         }
 
         // Persist any newly interned keys (set fields may have new keys)
@@ -209,11 +239,36 @@ impl TableManager {
             result
         };
 
+        // Open a WAL marker spanning the whole DELETE batch.
+        // counter_delta is set pessimistically to -|to_delete| (the
+        // ids we INTEND to delete). If some ids turn out not to
+        // exist, recovery still works — the doctor's verify pass
+        // would reconcile. Most realistic case: every id was just
+        // looked up via index, so they all exist.
+        let txn_id = if !to_delete.is_empty() {
+            let id = self.wal().fresh_txn_id();
+            self.wal()
+                .begin_with_delta(
+                    id,
+                    crate::wal::WalManager::ops_record_deleted(&to_delete),
+                    -(to_delete.len() as i64),
+                )
+                .await?;
+            Some(id)
+        } else {
+            None
+        };
+
         let mut affected: u64 = 0;
         for id in to_delete {
             if self.delete(id).await? {
                 affected += 1;
             }
+        }
+
+        // Clear the WAL marker — DELETE batch durable.
+        if let Some(id) = txn_id {
+            self.wal().commit(id).await?;
         }
 
         // Flush the counter cache (delete decremented it).
