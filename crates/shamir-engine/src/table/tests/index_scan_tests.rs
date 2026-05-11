@@ -454,3 +454,95 @@ async fn test_read_uses_index_for_and_with_in() {
         Some("status_idx".to_string())
     );
 }
+
+// ============================================================================
+// Sorted-index ORDER BY ASC + LIMIT K fast path
+// ============================================================================
+
+/// Build a fresh table with sorted index on `score` and N records of
+/// varying scores. Returns (table, expected_sorted_scores_asc).
+async fn setup_sorted_score(n: usize) -> (crate::table::TableManager, Vec<i64>) {
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("users")],
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
+
+    // Insert N records with score = (i * 7919) % 1000 — same pseudo-
+    // random pattern as the bench, so this exercises the realistic
+    // distribution where order_by ≠ insert_order.
+    let interner = table.interner().get().await.unwrap();
+    let mut scores: Vec<i64> = Vec::with_capacity(n);
+    for i in 0..n {
+        let s = ((i * 7919) % 1000) as i64;
+        scores.push(s);
+        let mut map = new_map();
+        map.insert("idx".to_string(), UserValue::Int(i as i64));
+        map.insert("score".to_string(), UserValue::Int(s));
+        let user = UserValue::Map(map);
+        let result = transform::user_to_inner(&user, interner);
+        if let Some(ref new_keys) = result.new_keys {
+            table.interner().save_new_keys(new_keys).await.unwrap();
+        }
+        table.insert(&result.inner_value).await.unwrap();
+    }
+
+    // Sorted index on `score`. `create_sorted_index` registers the
+    // definition AND backfills entries from existing records.
+    table
+        .create_sorted_index("by_score", &["score"])
+        .await
+        .unwrap();
+
+    let mut expected = scores.clone();
+    expected.sort();
+    (table, expected)
+}
+
+/// Regression / opt: ORDER BY field ASC LIMIT K with a sorted index
+/// on `field` must skip the "collect all + sort + truncate" pipeline
+/// and go straight through `lookup_first_k`. The signal: stats
+/// `index_used` carries the sorted-index marker.
+#[tokio::test]
+async fn test_order_by_asc_limit_uses_sorted_index_fast_path() {
+    let (table, expected) = setup_sorted_score(200).await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let query: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "order_by": {"items": [{"field": ["score"], "direction": "asc"}]},
+        "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 0}
+    })).unwrap();
+
+    let result = table.read(&query, &ctx).await.unwrap();
+
+    // Returned exactly 5 records in ascending score order.
+    assert_eq!(result.records.len(), 5, "expected 5 records, got {}", result.records.len());
+    let got_scores: Vec<i64> = result
+        .records
+        .iter()
+        .map(|r| r.get("score").and_then(|v| v.as_i64()).expect("score field"))
+        .collect();
+    assert_eq!(got_scores, expected[..5], "wrong records returned for ORDER BY score ASC LIMIT 5");
+
+    // Fast path marker. Without the fast path, `index_used` is None
+    // because the fall-back full-scan path doesn't set it for an
+    // order-by-only query.
+    let used = result
+        .stats
+        .as_ref()
+        .expect("stats")
+        .index_used
+        .as_deref()
+        .unwrap_or("");
+    assert!(
+        used.starts_with("sorted_idx_") && used.contains("first_k"),
+        "ORDER BY ASC LIMIT K did not take the sorted-index fast path \
+         (index_used = {:?})",
+        used
+    );
+}
