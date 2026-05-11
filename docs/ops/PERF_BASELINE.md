@@ -601,6 +601,57 @@ bound. Wide ranges at low `start` (age=30 out of 18..78 → ~20%
 waste) get ~1.4×. Narrow ranges (age=30 exactly, single value)
 where we used to walk from age=18 → ~2.5×. As expected.
 
+## MemBufferStore — write-back buffer for per-write-fsync backends (2026-05-11)
+
+`MemBufferStore` is a bounded LRU cache + background flusher that
+wraps any other `Store`. Writes land in the cache and return
+immediately; a tokio task drains the dirty queue to the inner
+store via `set_many` / `remove_many` either on idle or on signal.
+Reads check the cache first.
+
+Composition is opt-in via `BoxRepoFactory::membuffer(inner, config)`.
+Default `MemBufferConfig`: 10 000 entries, 100 ms flush interval,
+256-item batches.
+
+### Bench impact
+
+Focused bench at N=1000, comparing the wrapped backend to the
+raw one:
+
+| Backend | Raw bulk_insert/1000 | + MemBuffer | Speedup |
+|---------|---------------------:|------------:|--------:|
+| **persy**  | 69.6 ms | **30.9 ms** | **2.25×** |
+| **canopy** | 67.3 ms | **18.6 ms** | **3.62×** |
+| **nebari** | 62.3 ms | **34.2 ms** | **1.82×** |
+
+All three are per-write-fsync backends — every `set` / `remove`
+on their raw API does a commit + fsync. MemBuffer batches N writes
+into one inner `set_many`, which on these backends is one
+transactional commit instead of N.
+
+For backends that ALREADY amortise durability (sled + redb with
+Durability::None, fjall via LSM journal), MemBuffer doesn't move
+the dial — its cost is its benefit (memory + indirection). Those
+keep using the raw backend directly.
+
+### Durability contract change
+
+`MemBufferStore::insert / set / remove` return as soon as the
+in-memory cache is updated. The inner store is touched
+asynchronously by the flusher task. A process crash before the
+flusher drains loses those records from the inner store's view.
+
+The engine layer remains consistent under this model:
+- the WAL marker records the `record_id` of in-flight writes;
+- if the value never reached the inner store on crash, recovery
+  on next open sees "marker says X, data_store has no X" and
+  treats it as not-committed (clears the marker);
+- index entries flow through the same `info_store` membuffer, so
+  data and indexes are lost together — no orphans.
+
+Callers needing strict durability call `Store::flush().await` at
+commit boundaries — the flusher drains and inner.flush() lands.
+
 ## Release profile: `opt-level = "z"` → `3` (2026-05-11)
 
 The workspace `[profile.release]` had inherited `opt-level = "z"`
