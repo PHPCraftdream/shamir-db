@@ -271,6 +271,22 @@ impl Store for CachedStore {
             }
         })
     }
+
+    /// Drain pending async writes and propagate the flush down to
+    /// the inner store. Reachable through `Arc<dyn Store>` —
+    /// without this override the trait dispatcher would land on
+    /// the default no-op and async-mode writes would not become
+    /// durable on a `flush()` callsite.
+    async fn flush(&self) -> DbResult<()> {
+        // Wait for the in-flight background `set`/`remove` tasks
+        // (only present in `WriteMode::Async`). For `Sync` mode
+        // pending_writes is always 0 and the loop body never runs.
+        while self.pending_writes.load(Ordering::Relaxed) > 0 {
+            tokio::task::yield_now().await;
+        }
+        // Now ensure the inner store's own buffered state lands.
+        self.inner.flush().await
+    }
 }
 
 // ============================================================================
@@ -287,6 +303,51 @@ mod tests {
     use shamir_types::types::value::InnerValue;
     use futures::StreamExt;
     use tokio::time::{sleep, Duration};
+
+    /// Regression: `flush` must work through `Arc<dyn Store>`. The
+    /// inherent `CachedStore::flush` was reachable on a concrete
+    /// `CachedStore`, but the trait dispatch went to the default
+    /// no-op — async-mode pending writes were never drained when
+    /// callers held `Arc<dyn Store>` (which is how every engine
+    /// path holds it).
+    #[tokio::test]
+    async fn test_cached_store_flush_via_dyn_store() {
+        let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+        let cached_concrete = Arc::new(CachedStore::new_async(inner.clone()).await.unwrap());
+        let cached_dyn: Arc<dyn Store> = cached_concrete.clone();
+
+        // Pump enough async writes that at least one is still pending
+        // when the spawn_blocking returns. With a tiny in-memory inner
+        // store the spawned set tasks complete almost instantly, so
+        // we issue many in a tight loop to widen the window.
+        let mut keys = Vec::new();
+        for _ in 0..200 {
+            let k = RecordKey::copy_from_slice(
+                shamir_types::types::record_id::RecordId::new().as_bytes(),
+            );
+            cached_dyn
+                .set(k.clone(), Bytes::from_static(b"async-write"))
+                .await
+                .unwrap();
+            keys.push(k);
+        }
+
+        // Call flush through the trait. AFTER this returns,
+        // pending_writes must be 0.
+        cached_dyn.flush().await.unwrap();
+        assert_eq!(
+            cached_concrete.pending_writes(),
+            0,
+            "Store::flush via dyn dispatch must drain CachedStore pending writes"
+        );
+
+        // Every value must be visible through the inner store —
+        // proof that the background sets landed.
+        for k in &keys {
+            let got = inner.get(k.clone()).await.expect("inner has the value");
+            assert_eq!(got.as_ref(), b"async-write");
+        }
+    }
 
     #[tokio::test]
     async fn test_cached_store_sync_mode() {

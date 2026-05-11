@@ -94,16 +94,50 @@ pub fn encode_f64(buf: &mut Vec<u8>, v: f64) -> Result<(), SortCodecError> {
     Ok(())
 }
 
-/// Encode a string. Raw UTF-8 bytes already sort lexicographically.
+/// Encode a string with a self-delimiting, order-preserving wrapping.
+///
+/// Raw UTF-8 already sorts lexicographically, but in a sorted-index
+/// physical key the encoded value is followed by a record_id suffix:
+/// `prefix || encode_str(s) || record_id`. Without a terminator,
+/// `"a"||rid_X` and `"aa"||rid_Y` collide on byte ordering whenever
+/// rid_X[0] > 'a' = 0x61, because raw UTF-8 has no marker for "the
+/// value ended here".
+///
+/// Encoding shape: escape every literal `0x00` in the UTF-8 bytes as
+/// `0x00 0x01`, then append a `0x00 0x00` terminator. The escape
+/// sequence is strictly greater than the terminator byte-wise, so the
+/// terminator is unique and the original lexicographic order is
+/// preserved. Subsequent bytes (e.g. a record_id suffix) compare AFTER
+/// the terminator, so two distinct values can never have their order
+/// flipped by their suffix.
 pub fn encode_str(buf: &mut Vec<u8>, s: &str) {
     buf.push(TAG_STR);
-    buf.extend_from_slice(s.as_bytes());
+    for &b in s.as_bytes() {
+        if b == 0x00 {
+            buf.push(0x00);
+            buf.push(0x01);
+        } else {
+            buf.push(b);
+        }
+    }
+    buf.push(0x00);
+    buf.push(0x00);
 }
 
-/// Encode raw bytes.
+/// Encode raw bytes. Same self-delimiting wrap as `encode_str` — see
+/// the doc-comment there for the reason and the encoding shape.
 pub fn encode_bytes(buf: &mut Vec<u8>, b: &[u8]) {
     buf.push(TAG_BYTES);
-    buf.extend_from_slice(b);
+    for &byte in b {
+        if byte == 0x00 {
+            buf.push(0x00);
+            buf.push(0x01);
+        } else {
+            buf.push(byte);
+        }
+    }
+    buf.push(0x00);
+    buf.push(0x00);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +237,56 @@ mod tests {
         let mut expected = vals.to_vec();
         expected.sort();
         assert_eq!(sorted_vals, expected);
+    }
+
+    /// Regression: the sorted-index physical key is
+    /// `prefix || encode_str(s) || record_id_suffix`. If `encode_str`
+    /// is not self-delimiting, two values where one is a prefix of
+    /// the other can have their order inverted depending on the
+    /// suffix bytes — i.e. `"a" || [0xFF; 16]` sorts AFTER
+    /// `"aa" || [0x00; 16]` even though `"a" < "aa"` semantically.
+    ///
+    /// Range bounds break the same way: an inclusive upper of
+    /// `enc("a") || [0xFF; 16]` would match `enc("aa") || ...` keys.
+    #[test]
+    fn str_with_suffix_preserves_order() {
+        // Encoded values for two strings where one is a prefix of
+        // the other. Append a worst-case suffix:
+        //   "a"  + 16 bytes of 0xFF (maximum possible suffix)
+        //   "aa" + 16 bytes of 0x00 (minimum possible suffix)
+        // Lexicographically "a" < "aa", so the FIRST composite key
+        // must sort BEFORE the second regardless of the suffix.
+        let mut a_key = enc_str("a");
+        a_key.extend_from_slice(&[0xFFu8; 16]);
+        let mut aa_key = enc_str("aa");
+        aa_key.extend_from_slice(&[0x00u8; 16]);
+        assert!(
+            a_key < aa_key,
+            "enc(\"a\")||0xFF*16 must sort before enc(\"aa\")||0x00*16, \
+             else sorted-index range queries on strings return wrong results"
+        );
+
+        // Same shape but with an extra distractor in the middle.
+        let mut a_pad = enc_str("a");
+        a_pad.extend_from_slice(b"zzzzzzzzzzzzzzzz"); // 16 'z' bytes
+        let mut ab_key = enc_str("ab");
+        ab_key.extend_from_slice(b"aaaaaaaaaaaaaaaa");
+        assert!(
+            a_pad < ab_key,
+            "enc(\"a\")||'z'*16 must sort before enc(\"ab\")||'a'*16"
+        );
+
+        // Bytes encoding has the same flaw — cover it too.
+        let mut buf_a = Vec::new();
+        encode_bytes(&mut buf_a, b"\x01");
+        buf_a.extend_from_slice(&[0xFFu8; 16]);
+        let mut buf_aa = Vec::new();
+        encode_bytes(&mut buf_aa, b"\x01\x01");
+        buf_aa.extend_from_slice(&[0x00u8; 16]);
+        assert!(
+            buf_a < buf_aa,
+            "encode_bytes must be self-delimiting for sorted-index keys"
+        );
     }
 
     #[test]

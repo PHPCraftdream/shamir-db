@@ -226,7 +226,7 @@ impl IndexManager {
     ///
     /// - `Some(Vec<InnerValue>)` — все поля успешно извлечены
     /// - `None` — хотя бы одно поле отсутствует
-    fn extract_index_values(
+    pub fn extract_index_values(
         value: &InnerValue,
         paths: &[IndexInfoItem],
     ) -> Option<Vec<InnerValue>> {
