@@ -67,3 +67,7 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 [[bench]]
 name = "wal_recovery"
 harness = false
+
+[[bench]]
+name = "interner_concurrent"
+harness = false

@@ -14,6 +14,11 @@ indexmap = { version = "2.7", features = ["serde"] }
 fxhash = "0.2.1"
 once_cell = "1.20.2"
 dashmap = "6.1.0"
+# Lock-free read snapshots for the interner's reverse map.
+# Forward direction uses DashMap (sharded, fine for write+read);
+# reverse is a growing Vec read-heavy from many threads, where
+# RwLock's atomic-counter bouncing was a real contention point.
+arc-swap = "1.7"
 
 # Numeric / temporal value types
 rust_decimal = { version = "1.40.0", features = ["serde"] }
