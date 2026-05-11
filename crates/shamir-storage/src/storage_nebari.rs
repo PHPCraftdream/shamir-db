@@ -7,8 +7,8 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use nebari::{
     io::fs::StdFile,
-    tree::{Root, ScanEvaluation, Unversioned, UnversionedTreeRoot},
-    Config, Roots, Tree,
+    tree::{Operation, Root, ScanEvaluation, Unversioned, UnversionedTreeRoot},
+    ArcBytes, Config, Roots, Tree,
 };
 use std::path::Path;
 use std::pin::Pin;
@@ -59,6 +59,8 @@ impl Repo for NebariRepo {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))??;
 
         // Открываем дерево пользователя
+        let roots_for_store = roots.clone();
+        let name_for_store = name.as_ref().to_string();
         let tree = spawn_blocking(
             move || -> DbResult<Tree<UnversionedTreeRoot<()>, StdFile>> {
                 roots
@@ -71,6 +73,8 @@ impl Repo for NebariRepo {
 
         let store = NebariStore {
             tree: Arc::new(tree),
+            roots: roots_for_store,
+            name: name_for_store,
         };
         Ok(Arc::new(store))
     }
@@ -164,6 +168,13 @@ impl Repo for NebariRepo {
 
 pub struct NebariStore {
     tree: Arc<Tree<UnversionedTreeRoot<()>, StdFile>>,
+    /// Kept alongside `tree` so batched-write paths can open a
+    /// transactional handle (`roots.transaction(&[root])`) which
+    /// commits all N writes with one fsync.
+    roots: Arc<Roots<StdFile>>,
+    /// The tree's name — needed to identify it when building the
+    /// transactional handle for batched writes.
+    name: String,
 }
 
 unsafe impl Send for NebariStore {}
@@ -233,6 +244,145 @@ impl Store for NebariStore {
                 .map_err(|e| DbError::Storage(format!("NebariDB remove: {}", e)))?
                 .is_some();
 
+            Ok(existed)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    /// Batched insert via `Roots::transaction(&[root]) → modify →
+    /// commit` — one fsync for the whole batch instead of one per
+    /// record. nebari's `Modification::SetEach` requires keys in
+    /// strictly-ascending order, so we sort internally and return
+    /// record_ids in the original input order.
+    async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let roots = self.roots.clone();
+        let name = self.name.clone();
+        spawn_blocking(move || -> DbResult<Vec<RecordKey>> {
+            // Generate ids in input order; the caller sees this order.
+            let ids: Vec<RecordKey> = (0..values.len())
+                .map(|_| RecordKey::copy_from_slice(RecordId::new().as_bytes()))
+                .collect();
+            // Sort (key, value) pairs by key for nebari.
+            let mut pairs: Vec<(RecordKey, Bytes)> =
+                ids.iter().cloned().zip(values).collect();
+            pairs.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
+
+            let keys: Vec<ArcBytes<'static>> = pairs
+                .iter()
+                .map(|(k, _)| ArcBytes::from(k.to_vec()))
+                .collect();
+            let vals: Vec<ArcBytes<'static>> = pairs
+                .into_iter()
+                .map(|(_, v)| ArcBytes::from(v.to_vec()))
+                .collect();
+
+            let transaction = roots
+                .transaction::<_, _>(&[Unversioned::tree(name.clone())])
+                .map_err(|e| DbError::Storage(format!("NebariDB transaction: {}", e)))?;
+            transaction
+                .tree::<UnversionedTreeRoot<()>>(0)
+                .ok_or_else(|| DbError::Storage("NebariDB tree handle".to_string()))?
+                .modify(keys, Operation::SetEach(vals))
+                .map_err(|e| DbError::Storage(format!("NebariDB modify: {}", e)))?;
+            transaction
+                .commit()
+                .map_err(|e| DbError::Storage(format!("NebariDB commit: {}", e)))?;
+            Ok(ids)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    /// Batched upsert. `bool` per item = created (not present before).
+    /// Same one-fsync-per-batch story as `insert_many`.
+    async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tree = self.tree.clone();
+        let roots = self.roots.clone();
+        let name = self.name.clone();
+        spawn_blocking(move || -> DbResult<Vec<bool>> {
+            // Probe existence per key (read path is independent of
+            // the batched commit transaction).
+            let created_flags: Vec<bool> = items
+                .iter()
+                .map(|(k, _)| {
+                    tree.get(k.as_ref())
+                        .map(|opt| opt.is_none())
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let mut indexed: Vec<(usize, RecordKey, Bytes)> = items
+                .into_iter()
+                .enumerate()
+                .map(|(i, (k, v))| (i, k, v))
+                .collect();
+            indexed.sort_by(|a, b| a.1.as_ref().cmp(b.1.as_ref()));
+
+            let keys: Vec<ArcBytes<'static>> = indexed
+                .iter()
+                .map(|(_, k, _)| ArcBytes::from(k.to_vec()))
+                .collect();
+            let vals: Vec<ArcBytes<'static>> = indexed
+                .into_iter()
+                .map(|(_, _, v)| ArcBytes::from(v.to_vec()))
+                .collect();
+
+            let transaction = roots
+                .transaction::<_, _>(&[Unversioned::tree(name.clone())])
+                .map_err(|e| DbError::Storage(format!("NebariDB transaction: {}", e)))?;
+            transaction
+                .tree::<UnversionedTreeRoot<()>>(0)
+                .ok_or_else(|| DbError::Storage("NebariDB tree handle".to_string()))?
+                .modify(keys, Operation::SetEach(vals))
+                .map_err(|e| DbError::Storage(format!("NebariDB modify: {}", e)))?;
+            transaction
+                .commit()
+                .map_err(|e| DbError::Storage(format!("NebariDB commit: {}", e)))?;
+            Ok(created_flags)
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
+    /// Batched remove. `bool` per key = existed-before-remove.
+    async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tree = self.tree.clone();
+        let roots = self.roots.clone();
+        let name = self.name.clone();
+        spawn_blocking(move || -> DbResult<Vec<bool>> {
+            // Existed-flags in input order (probe + sort + bulk remove).
+            let existed: Vec<bool> = keys
+                .iter()
+                .map(|k| tree.get(k.as_ref()).map(|o| o.is_some()).unwrap_or(false))
+                .collect();
+            let mut sorted: Vec<RecordKey> = keys.clone();
+            sorted.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+            sorted.dedup();
+            let arc_keys: Vec<ArcBytes<'static>> = sorted
+                .into_iter()
+                .map(|k| ArcBytes::from(k.to_vec()))
+                .collect();
+            let transaction = roots
+                .transaction::<_, _>(&[Unversioned::tree(name.clone())])
+                .map_err(|e| DbError::Storage(format!("NebariDB transaction: {}", e)))?;
+            transaction
+                .tree::<UnversionedTreeRoot<()>>(0)
+                .ok_or_else(|| DbError::Storage("NebariDB tree handle".to_string()))?
+                .modify(arc_keys, Operation::Remove)
+                .map_err(|e| DbError::Storage(format!("NebariDB modify remove: {}", e)))?;
+            transaction
+                .commit()
+                .map_err(|e| DbError::Storage(format!("NebariDB commit: {}", e)))?;
             Ok(existed)
         })
         .await
@@ -457,6 +607,17 @@ mod tests {
         run_store_tests(store).await;
 
         assert!(repo.store_delete("test_table").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_nebari_batch_ops() {
+        let path = "./test_data/nebari_batch_ops.nebari";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let repo = NebariRepo::new(path).unwrap();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
     }
 
     #[tokio::test]

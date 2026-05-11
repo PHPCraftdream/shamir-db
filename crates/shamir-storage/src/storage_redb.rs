@@ -392,6 +392,97 @@ impl Store for RedbStore {
         })
     }
 
+    /// Batched insert via one WriteTransaction. Even with the
+    /// per-write Durability::None path the txn-setup cost amortises
+    /// down to ~zero per record when batched.
+    async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        task::spawn_blocking(move || -> DbResult<Vec<RecordKey>> {
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
+            let mut ids = Vec::with_capacity(values.len());
+            {
+                let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
+                let mut table = write_txn.open_table(table_def)?;
+                for value in values {
+                    let id = RecordId::new();
+                    let key = RecordKey::copy_from_slice(id.as_bytes());
+                    if table.get(&key[..])?.is_some() {
+                        return Err(DbError::KeyExists(format!(
+                            "Key already exists: {:?}",
+                            key
+                        )));
+                    }
+                    table.insert(&key[..], &value[..])?;
+                    ids.push(key);
+                }
+            }
+            write_txn.commit()?;
+            Ok(ids)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        task::spawn_blocking(move || -> DbResult<Vec<bool>> {
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
+            let mut flags = Vec::with_capacity(items.len());
+            {
+                let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
+                let mut table = write_txn.open_table(table_def)?;
+                for (key, value) in items {
+                    let old = table.insert(&key[..], &value[..])?;
+                    flags.push(old.is_none());
+                }
+            }
+            write_txn.commit()?;
+            Ok(flags)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
+    async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        task::spawn_blocking(move || -> DbResult<Vec<bool>> {
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
+            let mut flags = Vec::with_capacity(keys.len());
+            {
+                let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
+                let mut table = write_txn.open_table(table_def)?;
+                for key in keys {
+                    flags.push(table.remove(&key[..])?.is_some());
+                }
+            }
+            write_txn.commit()?;
+            Ok(flags)
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
     /// Explicit fsync. Per-write commits run with `Durability::None`
     /// (skips fsync, data goes to the OS page cache, visible to
     /// subsequent reads). `flush()` runs an empty commit with
@@ -485,6 +576,20 @@ mod tests {
         run_store_tests(store.as_ref()).await;
 
         assert!(repo.store_delete("test_table").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_redb_batch_ops() {
+        let path = "./test_data/redb_batch_ops/db.redb";
+        if let Some(parent) = Path::new(path).parent() {
+            if parent.exists() {
+                fs::remove_dir_all(parent).unwrap();
+            }
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let repo = RedbRepo::new(path).unwrap();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
     }
 
     #[tokio::test]

@@ -73,6 +73,79 @@ async fn test_table_manager_components() {
     assert_eq!(retrieved, value);
 }
 
+#[tokio::test]
+async fn test_table_manager_insert_many_no_index() {
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: configs,
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let ctx = db.get_table("default", "users").await.unwrap();
+
+    let values: Vec<InnerValue> = (0..7)
+        .map(|i| InnerValue::Str(format!("rec-{}", i)))
+        .collect();
+    let ids = ctx.insert_many(&values).await.unwrap();
+    assert_eq!(ids.len(), 7);
+
+    // Counter reflects the batch as a whole.
+    assert_eq!(ctx.count().await.unwrap(), 7);
+
+    // Each id resolves to its corresponding value in input order.
+    for (id, expected) in ids.iter().zip(values.iter()) {
+        let got = ctx.table().get(*id).await.unwrap();
+        assert_eq!(&got, expected);
+    }
+
+    // Empty input does not touch the counter and returns empty.
+    let empty = ctx.insert_many(&[]).await.unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(ctx.count().await.unwrap(), 7);
+}
+
+#[tokio::test]
+async fn test_table_manager_insert_many_with_unique_index() {
+    use shamir_types::types::common::new_map;
+
+    let configs = vec![TableConfig::new("users")];
+    let repo_config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: configs,
+    };
+    let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
+    let ctx = db.get_table("default", "users").await.unwrap();
+
+    // Set up a UNIQUE index on `id` via the string-paths API.
+    ctx.create_unique_index("by_id", &["id"]).await.unwrap();
+
+    // Build records using the interner so the index path resolves.
+    let interner = ctx.interner().get().await.unwrap();
+    let id_key = interner.touch_ind("id").unwrap().key().clone();
+    let mk = |id: &str| -> InnerValue {
+        let mut m = new_map();
+        m.insert(id_key.clone(), InnerValue::Str(id.to_string()));
+        InnerValue::Map(m)
+    };
+
+    // Happy path — three distinct ids.
+    let ok = vec![mk("u1"), mk("u2"), mk("u3")];
+    let ids = ctx.insert_many(&ok).await.unwrap();
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ctx.count().await.unwrap(), 3);
+
+    // Duplicate id in the second slot — the second
+    // `validate_unique_for_create` call sees the prior write and
+    // rejects the whole batch.
+    let bad = vec![mk("u4"), mk("u1")];
+    let res = ctx.insert_many(&bad).await;
+    assert!(res.is_err(), "duplicate unique key must reject the batch");
+    // Counter must not have advanced past the rejected batch.
+    assert_eq!(ctx.count().await.unwrap(), 3);
+}
+
 // ============================================================================
 // Index API tests (string paths)
 // ============================================================================

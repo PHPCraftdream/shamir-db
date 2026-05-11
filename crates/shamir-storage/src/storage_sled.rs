@@ -418,6 +418,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_sled_batch_ops() {
+        let path = "./test_data/sled_batch_ops";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let repo = SledRepo::new(path).unwrap();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
+    }
+
+    #[tokio::test]
     async fn test_sled_repo_list_stores() {
         let path = "./test_data/sled_repo_list";
         if std::path::Path::new(path).exists() {

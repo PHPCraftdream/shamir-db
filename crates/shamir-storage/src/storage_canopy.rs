@@ -519,6 +519,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_canopy_batch_ops() {
+        let path = "./test_data/canopy_batch_ops";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        fs::create_dir_all(path).unwrap();
+        let repo = CanopyRepo::new(path).unwrap();
+        let store = repo.store_get("batch").await.unwrap();
+        super::super::types::run_batch_store_tests(store).await;
+    }
+
+    #[tokio::test]
     async fn test_canopy_repo_list_stores() {
         let path = "./test_data/canopy_repo_list";
         if Path::new(path).exists() {
