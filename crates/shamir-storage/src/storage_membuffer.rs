@@ -78,7 +78,7 @@ use crate::error::{DbError, DbResult};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::DashSet;
+use dashmap::DashMap;
 use futures::stream::Stream;
 use moka::future::Cache as MokaCache;
 use std::pin::Pin;
@@ -125,7 +125,7 @@ impl Default for MemBufferConfig {
 
 /// In-cache slot — either a live value or a tombstone for a
 /// previously-removed key (cached negative result).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum Slot {
     Live(Bytes),
     Tombstone,
@@ -138,13 +138,18 @@ struct MemBufferState {
     /// can hot-swap to a freshly-built moka instance with new
     /// sizing/TTL without taking a lock on the read path.
     cache: ArcSwap<MokaCache<RecordKey, Slot>>,
-    /// Lock-free set of keys whose state in the cache hasn't
-    /// been propagated to `inner` yet. Drained by the flusher.
-    /// The moka eviction listener references THIS SAME Arc — so
-    /// updates from the user path and the listener see the same
-    /// data. Cloning into a separate DashSet would silently
-    /// disconnect the two.
-    dirty: Arc<DashSet<RecordKey>>,
+    /// Pending writes (write-back buffer). Holds VALUES — not
+    /// just keys — so that a moka cache eviction never loses
+    /// data: even if the cache silently drops an entry, dirty
+    /// still has the value. The flusher drains via a
+    /// snapshot-then-`remove_if` pattern so concurrent
+    /// overwrites aren't lost.
+    ///
+    /// This replaces an earlier design that used `DashSet<Key>`
+    /// + a moka async eviction listener to flush. The listener
+    /// was firing per evicted entry (TTL/Size cause); on tight
+    /// loops with frequent eviction it dominated the cost.
+    dirty: Arc<DashMap<RecordKey, Slot>>,
     /// Atomic-config — read on hot paths so DDL changes apply
     /// without rewrapping the store.
     max_bytes: AtomicUsize,
@@ -172,17 +177,16 @@ pub struct MemBufferStore {
 /// Build a fresh moka cache configured from `cfg`. The async
 /// eviction listener flushes dirty entries to `inner` before
 /// dropping them.
-fn build_cache(
-    cfg: &MemBufferConfig,
-    inner: Arc<dyn Store>,
-    dirty: Arc<DashSet<RecordKey>>,
-) -> MokaCache<RecordKey, Slot> {
+fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, Slot> {
     // moka's `max_capacity` is **total weighted size** when a
     // weigher is set, NOT entry count. We pick byte-weight as
     // the binding cap (`max_bytes`); `max_entries` is kept in
-    // config for legacy callers but is informational here — the
-    // wrapper doesn't enforce it as a separate cap. A workload
-    // with many tiny records will still be bounded by `max_bytes`.
+    // config for legacy callers but is informational here.
+    //
+    // NO eviction listener — the cache is purely a read
+    // accelerator. Dirty is the authoritative write-back buffer
+    // (holds values, survives cache eviction). moka can evict
+    // freely without risking data loss.
     let mut builder = MokaCache::builder()
         .max_capacity(cfg.max_bytes as u64)
         .weigher(|k: &RecordKey, v: &Slot| -> u32 {
@@ -195,48 +199,13 @@ fn build_cache(
     if let Some(ttl) = cfg.ttl_ms {
         builder = builder.time_to_live(Duration::from_millis(ttl));
     }
-    // Async eviction listener — fires when moka removes an entry.
-    // Causes we care about:
-    //   * `Size` — capacity (max_bytes / max_capacity) eviction.
-    //   * `Expired` — TTL eviction.
-    // Causes we IGNORE:
-    //   * `Replaced` — same key, new value; the new value is
-    //     already in dirty (the user's set/remove path inserted
-    //     it). Flushing the OLD value here would overwrite the
-    //     new state in inner — that's a correctness bug.
-    //   * `Explicit` — manual `invalidate`; user signalled removal,
-    //     no flush wanted.
-    use moka::notification::RemovalCause;
-    builder = builder.async_eviction_listener(move |k, v, cause| {
-        let inner = Arc::clone(&inner);
-        let dirty = Arc::clone(&dirty);
-        Box::pin(async move {
-            if !matches!(cause, RemovalCause::Size | RemovalCause::Expired) {
-                return;
-            }
-            let key: RecordKey = (*k).clone();
-            if !dirty.remove(&key).is_some() {
-                return;
-            }
-            // Was dirty AND moka is dropping it on the floor — we
-            // MUST persist or the write is lost.
-            match v {
-                Slot::Live(bytes) => {
-                    let _ = inner.set(key, bytes).await;
-                }
-                Slot::Tombstone => {
-                    let _ = inner.remove(key).await;
-                }
-            }
-        })
-    });
     builder.build()
 }
 
 impl MemBufferStore {
     pub fn new(inner: Arc<dyn Store>, config: MemBufferConfig) -> Self {
-        let dirty: Arc<DashSet<RecordKey>> = Arc::new(DashSet::new());
-        let cache = Arc::new(build_cache(&config, Arc::clone(&inner), Arc::clone(&dirty)));
+        let dirty: Arc<DashMap<RecordKey, Slot>> = Arc::new(DashMap::new());
+        let cache = Arc::new(build_cache(&config));
 
         let state = Arc::new(MemBufferState {
             cache: ArcSwap::from(cache),
@@ -324,11 +293,7 @@ impl MemBufferStore {
             .store(cfg.flush_batch_size, Ordering::Relaxed);
 
         // Build + swap the new cache.
-        let new_cache = Arc::new(build_cache(
-            cfg,
-            Arc::clone(&self.inner),
-            Arc::clone(&self.state.dirty),
-        ));
+        let new_cache = Arc::new(build_cache(cfg));
         self.state.cache.store(new_cache);
         self.notify.notify_one();
         Ok(())
@@ -344,8 +309,10 @@ impl MemBufferStore {
         self.state.cache.load().weighted_size() as usize
     }
 
-    /// Drain up to `batch_size` dirty keys into the inner store.
-    /// Returns the number of keys actually drained.
+    /// Drain up to `batch_size` dirty entries into the inner
+    /// store. Snapshot-then-`remove_if` pattern protects against
+    /// races where a concurrent write to the same key shouldn't
+    /// be lost.
     async fn drain_once(
         state: &MemBufferState,
         inner: &dyn Store,
@@ -354,44 +321,24 @@ impl MemBufferStore {
         if state.dirty.is_empty() {
             return Ok(0);
         }
-        // Snapshot up to batch_size keys from dirty.
-        let keys: Vec<RecordKey> = state
+        // Snapshot keys + their current slot values.
+        let snapshots: Vec<(RecordKey, Slot)> = state
             .dirty
             .iter()
             .take(batch_size)
-            .map(|e| e.clone())
+            .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
-        if keys.is_empty() {
+        if snapshots.is_empty() {
             return Ok(0);
         }
 
-        let cache = state.cache.load();
-        let mut sets: Vec<(RecordKey, Bytes)> = Vec::with_capacity(keys.len());
+        let mut sets: Vec<(RecordKey, Bytes)> = Vec::with_capacity(snapshots.len());
         let mut removes: Vec<RecordKey> = Vec::new();
-        let mut handled: Vec<RecordKey> = Vec::with_capacity(keys.len());
-        for k in keys.into_iter() {
-            match cache.get(&k).await {
-                Some(Slot::Live(v)) => {
-                    sets.push((k.clone(), v));
-                    handled.push(k);
-                }
-                Some(Slot::Tombstone) => {
-                    removes.push(k.clone());
-                    handled.push(k);
-                }
-                None => {
-                    // Evicted from cache between our collect and
-                    // our get. The eviction listener handles such
-                    // entries (it removes the key from dirty and
-                    // flushes to inner). We MUST NOT remove the
-                    // key from dirty here — that would defeat the
-                    // listener (dirty.remove returns None → skip
-                    // flush → write lost).
-                }
+        for (k, slot) in &snapshots {
+            match slot {
+                Slot::Live(v) => sets.push((k.clone(), v.clone())),
+                Slot::Tombstone => removes.push(k.clone()),
             }
-        }
-        for k in &handled {
-            state.dirty.remove(k);
         }
 
         let n = sets.len() + removes.len();
@@ -400,6 +347,13 @@ impl MemBufferStore {
         }
         if !removes.is_empty() {
             inner.remove_many(removes).await?;
+        }
+
+        // CAS-style cleanup: remove from dirty ONLY if the value
+        // is still what we just flushed. If a concurrent writer
+        // overwrote the slot, leave it for the next drain.
+        for (k, snapshot) in snapshots {
+            state.dirty.remove_if(&k, |_, current| *current == snapshot);
         }
         Ok(n)
     }
@@ -445,11 +399,12 @@ impl Store for MemBufferStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
         let id = shamir_types::types::record_id::RecordId::new();
         let key = RecordKey::copy_from_slice(id.as_bytes());
-        self.state.dirty.insert(key.clone());
+        let slot = Slot::Live(value);
+        self.state.dirty.insert(key.clone(), slot.clone());
         self.state
             .cache
             .load()
-            .insert(key.clone(), Slot::Live(value))
+            .insert(key.clone(), slot)
             .await;
         self.notify.notify_one();
         Ok(key)
@@ -457,57 +412,75 @@ impl Store for MemBufferStore {
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         // `bool` return = was the key created (vs updated)?
-        // We trust the cache as authoritative — no inner.get
-        // probe on cache miss (that cost ~150 ns/call + an
-        // await, and the buffered store's contract is best-
-        // effort: a Tombstoned key after flush still lives in
-        // inner, but the bool reflects only what we can see in
-        // cache. shamir-engine doesn't depend on strict bool.)
-        let cache = self.state.cache.load();
-        let existed = match cache.get(&key).await {
+        // Authoritative source is dirty + cache (consistent by
+        // construction — we dual-write). Falling through to
+        // inner.get on miss is best-effort: `false` (presumed new).
+        // shamir-engine doesn't depend on strict bool.
+        let existed = match self.state.dirty.get(&key).map(|e| e.value().clone()) {
             Some(Slot::Live(_)) => true,
             Some(Slot::Tombstone) => false,
-            None => false,
+            None => match self.state.cache.load().get(&key).await {
+                Some(Slot::Live(_)) => true,
+                Some(Slot::Tombstone) => false,
+                None => false,
+            },
         };
-        self.state.dirty.insert(key.clone());
-        cache.insert(key, Slot::Live(value)).await;
+        let slot = Slot::Live(value);
+        self.state.dirty.insert(key.clone(), slot.clone());
+        self.state.cache.load().insert(key, slot).await;
         self.notify.notify_one();
         Ok(!existed)
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        // Read order: cache (lock-free) → dirty (covers cases
+        // where moka evicted but value still pending) → inner.
         let cache = self.state.cache.load();
-        match cache.get(&key).await {
-            Some(Slot::Live(v)) => Ok(v),
-            Some(Slot::Tombstone) => Err(DbError::NotFound(format!("{:?}", key))),
-            None => {
-                // Miss — fall through to inner, populate cache
-                // (NOT dirty: this is a clean read-fill).
-                let result = self.inner.get(key.clone()).await;
-                let slot_to_insert = match &result {
-                    Ok(v) => Some(Slot::Live(v.clone())),
-                    Err(DbError::NotFound(_)) => Some(Slot::Tombstone),
-                    Err(_) => None,
-                };
-                if let Some(slot) = slot_to_insert {
-                    cache.insert(key, slot).await;
-                }
-                result
-            }
+        if let Some(slot) = cache.get(&key).await {
+            return match slot {
+                Slot::Live(v) => Ok(v),
+                Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
+            };
         }
+        // Cache miss — check dirty before going to inner. Dirty
+        // may hold a value that moka silently evicted from cache.
+        if let Some(entry) = self.state.dirty.get(&key) {
+            return match entry.value() {
+                Slot::Live(v) => Ok(v.clone()),
+                Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
+            };
+        }
+        // Fall through to inner; populate cache only (NOT dirty —
+        // this is a clean read-fill).
+        let result = self.inner.get(key.clone()).await;
+        let slot_to_insert = match &result {
+            Ok(v) => Some(Slot::Live(v.clone())),
+            Err(DbError::NotFound(_)) => Some(Slot::Tombstone),
+            Err(_) => None,
+        };
+        if let Some(slot) = slot_to_insert {
+            cache.insert(key, slot).await;
+        }
+        result
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        // Same best-effort bool semantic as `set` — no inner
-        // probe on cache miss. shamir-engine doesn't read this.
-        let cache = self.state.cache.load();
-        let existed = match cache.get(&key).await {
+        // Best-effort bool — see `set` for rationale.
+        let existed = match self.state.dirty.get(&key).map(|e| e.value().clone()) {
             Some(Slot::Live(_)) => true,
             Some(Slot::Tombstone) => false,
-            None => false,
+            None => match self.state.cache.load().get(&key).await {
+                Some(Slot::Live(_)) => true,
+                Some(Slot::Tombstone) => false,
+                None => false,
+            },
         };
-        self.state.dirty.insert(key.clone());
-        cache.insert(key, Slot::Tombstone).await;
+        self.state.dirty.insert(key.clone(), Slot::Tombstone);
+        self.state
+            .cache
+            .load()
+            .insert(key, Slot::Tombstone)
+            .await;
         self.notify.notify_one();
         Ok(existed)
     }
@@ -617,8 +590,9 @@ impl Store for MemBufferStore {
         for v in values {
             let id = shamir_types::types::record_id::RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
-            self.state.dirty.insert(key.clone());
-            cache.insert(key.clone(), Slot::Live(v)).await;
+            let slot = Slot::Live(v);
+            self.state.dirty.insert(key.clone(), slot.clone());
+            cache.insert(key.clone(), slot).await;
             keys.push(key);
         }
         self.notify.notify_one();
