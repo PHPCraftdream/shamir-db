@@ -208,6 +208,13 @@ fn json_to_inner_value(v: &serde_json::Value) -> Option<InnerValue> {
 struct CompareCallback {
     field_path: Vec<u64>,
     value: FilterValue,
+    /// Pre-resolved at compile time when `value` is a literal
+    /// (Null/Bool/Int/Float/String/Binary). Allocations for the RHS
+    /// were the second source of per-record cost on the filter hot
+    /// loop (the first being the leaf clone closed in 655ba4c).
+    /// FieldRef/QueryRef leave this `None` — those still need
+    /// per-record resolution against the record/ctx.
+    pre_resolved: Option<InnerValue>,
     op: CompareOp,
 }
 
@@ -224,20 +231,26 @@ enum CompareOp {
 impl FilterCallback for CompareCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
         let field_val = resolve_field_ref(record, &self.field_path);
-        let filter_val = resolve_filter_value(&self.value, record, ctx);
+        let owned_rhs;
+        let filter_val: Option<&InnerValue> = if let Some(pre) = &self.pre_resolved {
+            Some(pre)
+        } else {
+            owned_rhs = resolve_filter_value(&self.value, record, ctx);
+            owned_rhs.as_ref()
+        };
 
         match (field_val, filter_val) {
             (Some(a), Some(b)) => match self.op {
-                CompareOp::Eq => compare_values(a, &b) == Some(Ordering::Equal),
-                CompareOp::Ne => compare_values(a, &b) != Some(Ordering::Equal),
-                CompareOp::Gt => compare_values(a, &b) == Some(Ordering::Greater),
+                CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
+                CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
+                CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
                 CompareOp::Gte => matches!(
-                    compare_values(a, &b),
+                    compare_values(a, b),
                     Some(Ordering::Greater | Ordering::Equal)
                 ),
-                CompareOp::Lt => compare_values(a, &b) == Some(Ordering::Less),
+                CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
                 CompareOp::Lte => matches!(
-                    compare_values(a, &b),
+                    compare_values(a, b),
                     Some(Ordering::Less | Ordering::Equal)
                 ),
             },
@@ -401,6 +414,7 @@ impl FilterCallback for RegexCallback {
 struct ContainsCallback {
     field_path: Vec<u64>,
     value: FilterValue,
+    pre_resolved: Option<InnerValue>,
 }
 
 impl FilterCallback for ContainsCallback {
@@ -409,13 +423,19 @@ impl FilterCallback for ContainsCallback {
             Some(v) => v,
             None => return false,
         };
-        let filter_val = match resolve_filter_value(&self.value, record, ctx) {
-            Some(v) => v,
-            None => return false,
+        let owned_rhs;
+        let filter_val: &InnerValue = if let Some(pre) = &self.pre_resolved {
+            pre
+        } else {
+            owned_rhs = match resolve_filter_value(&self.value, record, ctx) {
+                Some(v) => v,
+                None => return false,
+            };
+            &owned_rhs
         };
         match field_val {
             InnerValue::Str(s) => {
-                if let InnerValue::Str(sub) = &filter_val {
+                if let InnerValue::Str(sub) = filter_val {
                     s.contains(sub.as_str())
                 } else {
                     false
@@ -423,10 +443,10 @@ impl FilterCallback for ContainsCallback {
             }
             InnerValue::List(list) => list
                 .iter()
-                .any(|item| compare_values(item, &filter_val) == Some(Ordering::Equal)),
+                .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
             InnerValue::Set(set) => set
                 .iter()
-                .any(|item| compare_values(item, &filter_val) == Some(Ordering::Equal)),
+                .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
             _ => false,
         }
     }
@@ -497,6 +517,8 @@ struct BetweenCallback {
     field_path: Vec<u64>,
     from: FilterValue,
     to: FilterValue,
+    pre_from: Option<InnerValue>,
+    pre_to: Option<InnerValue>,
 }
 
 impl FilterCallback for BetweenCallback {
@@ -505,19 +527,31 @@ impl FilterCallback for BetweenCallback {
             Some(v) => v,
             None => return false,
         };
-        let from_val = match resolve_filter_value(&self.from, record, ctx) {
-            Some(v) => v,
-            None => return false,
+        let owned_from;
+        let from_val: &InnerValue = if let Some(pre) = &self.pre_from {
+            pre
+        } else {
+            owned_from = match resolve_filter_value(&self.from, record, ctx) {
+                Some(v) => v,
+                None => return false,
+            };
+            &owned_from
         };
-        let to_val = match resolve_filter_value(&self.to, record, ctx) {
-            Some(v) => v,
-            None => return false,
+        let owned_to;
+        let to_val: &InnerValue = if let Some(pre) = &self.pre_to {
+            pre
+        } else {
+            owned_to = match resolve_filter_value(&self.to, record, ctx) {
+                Some(v) => v,
+                None => return false,
+            };
+            &owned_to
         };
         matches!(
-            compare_values(field_val, &from_val),
+            compare_values(field_val, from_val),
             Some(Ordering::Greater | Ordering::Equal)
         ) && matches!(
-            compare_values(field_val, &to_val),
+            compare_values(field_val, to_val),
             Some(Ordering::Less | Ordering::Equal)
         )
     }
@@ -671,6 +705,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCal
         Filter::Contains { field, value } => match intern_field_path(field, interner) {
             Some(path) => Box::new(ContainsCallback {
                 field_path: path,
+                pre_resolved: filter_value_to_inner(value),
                 value: value.clone(),
             }),
             None => Box::new(FalseCallback),
@@ -692,6 +727,8 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCal
         Filter::Between { field, from, to } => match intern_field_path(field, interner) {
             Some(path) => Box::new(BetweenCallback {
                 field_path: path,
+                pre_from: filter_value_to_inner(from),
+                pre_to: filter_value_to_inner(to),
                 from: from.clone(),
                 to: to.clone(),
             }),
@@ -719,6 +756,7 @@ fn compile_compare(
     match intern_field_path(field, interner) {
         Some(path) => Box::new(CompareCallback {
             field_path: path,
+            pre_resolved: filter_value_to_inner(value),
             value: value.clone(),
             op,
         }),
