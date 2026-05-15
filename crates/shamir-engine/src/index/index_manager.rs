@@ -200,28 +200,26 @@ impl IndexManager {
     ///
     /// Для JSON `{"user": {"name": "John"}}` путь к имени будет `[key_user, key_name]`.
     fn extract_value_by_path(value: &InnerValue, path: &[u64]) -> Option<InnerValue> {
-        // Пустой путь означает "вернуть само значение"
-        if path.is_empty() {
-            return Some(value.clone());
-        }
+        Self::extract_value_by_path_ref(value, path).cloned()
+    }
 
-        match value {
-            InnerValue::Map(map) => {
-                // Получаем ключ для текущего уровня вложенности
-                let key = InternerKey::new(path[0]);
-                let next_value = map.get(&key)?;
-
-                // Если это последний ключ в пути — возвращаем значение
-                // Иначе рекурсивно углубляемся
-                if path.len() == 1 {
-                    Some(next_value.clone())
-                } else {
-                    Self::extract_value_by_path(next_value, &path[1..])
+    /// Borrowing variant of `extract_value_by_path` — walks the
+    /// record in-place without cloning the leaf. Hot batch write
+    /// paths (build_index_key needs only `&InnerValue` to feed into
+    /// FxHash) use this; the owned variant survives for the few
+    /// callers that genuinely consume the value.
+    fn extract_value_by_path_ref<'a>(value: &'a InnerValue, path: &[u64]) -> Option<&'a InnerValue> {
+        let mut cur = value;
+        for &id in path {
+            match cur {
+                InnerValue::Map(map) => {
+                    let key = InternerKey::new(id);
+                    cur = map.get(&key)?;
                 }
+                _ => return None,
             }
-            // Если значение не Map, а путь не пуст — навигация невозможна
-            _ => None,
         }
+        Some(cur)
     }
 
     /// Извлекает значения для составного индекса из записи.
@@ -247,6 +245,36 @@ impl IndexManager {
             }
         }
         Some(values)
+    }
+
+    /// Borrowing variant of `extract_index_values` — returns
+    /// `Vec<&InnerValue>` (no per-leaf clone). Used by batch write
+    /// hot paths that immediately feed the values into
+    /// `IndexRecordKey::with_values` (which takes `&[&InnerValue]`
+    /// already) and into `build_posting_key`.
+    pub fn extract_index_values_ref<'a>(
+        value: &'a InnerValue,
+        paths: &[IndexInfoItem],
+    ) -> Option<Vec<&'a InnerValue>> {
+        let mut values = Vec::with_capacity(paths.len());
+        for item in paths {
+            match Self::extract_value_by_path_ref(value, &item.path) {
+                Some(v) => values.push(v),
+                None => return None,
+            }
+        }
+        Some(values)
+    }
+
+    /// Build the 25-byte index key from already-borrowed value refs.
+    /// Used by the batch write paths so they don't allocate an owned
+    /// `Vec<InnerValue>` just to feed the hash function.
+    fn build_index_key_from_refs(
+        is_unique: bool,
+        name_interned: u64,
+        value_refs: &[&InnerValue],
+    ) -> IndexRecordKey {
+        IndexRecordKey::new(is_unique, name_interned).with_values(value_refs)
     }
 
     /// Строит ключ записи индекса.
@@ -515,16 +543,23 @@ impl IndexManager {
             return Ok(());
         }
 
+        // Pre-compute the 25-byte index key once per (index, record)
+        // and reuse it for the cache invalidation step — the old path
+        // rebuilt it from `Vec<InnerValue>` after the durable write,
+        // paying the FxHash + clone twice per row. Now we own `Bytes`
+        // (cheap clone via Arc-backed shared buffer) and let the
+        // invalidation walk de-dup them.
         let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
-        let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
+        let mut cache_invalidations: Vec<Bytes> = Vec::new();
         for def in self.indexes.iter() {
             for (rid, value) in items.clone() {
-                if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                if let Some(value_refs) = Self::extract_index_values_ref(value, &def.paths) {
                     let index_key =
-                        Self::build_index_key(false, def.name_interned, &values).to_bytes();
+                        Self::build_index_key_from_refs(false, def.name_interned, &value_refs)
+                            .to_bytes();
                     let posting_key = Self::build_posting_key(&index_key, rid);
                     posting_writes.push((posting_key, Bytes::new()));
-                    cache_keys.push((def.name_interned, values));
+                    cache_invalidations.push(index_key);
                 }
             }
         }
@@ -533,8 +568,8 @@ impl IndexManager {
             return Ok(());
         }
         self.info_store.set_many(posting_writes).await?;
-        for (name, vals) in cache_keys {
-            self.invalidate_posting_cache(name, &vals);
+        for index_key in cache_invalidations {
+            self.posting_cache.remove(&index_key);
         }
         Ok(())
     }
@@ -551,9 +586,10 @@ impl IndexManager {
         let mut writes: Vec<(Bytes, Bytes)> = Vec::new();
         for def in self.indexes_unique.iter() {
             for (rid, value) in items.clone() {
-                if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                if let Some(value_refs) = Self::extract_index_values_ref(value, &def.paths) {
                     let index_key =
-                        Self::build_index_key(true, def.name_interned, &values).to_bytes();
+                        Self::build_index_key_from_refs(true, def.name_interned, &value_refs)
+                            .to_bytes();
                     writes.push((index_key, Bytes::copy_from_slice(rid.as_bytes())));
                 }
             }
