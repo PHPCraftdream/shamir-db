@@ -29,24 +29,28 @@ pub trait FilterCallback: Send + Sync {
 
 /// Extract a value from an InnerValue by a path of interned keys.
 ///
-/// Similar to `IndexManager::extract_value_by_path` but standalone.
-pub fn resolve_field(record: &InnerValue, path: &[u64]) -> Option<InnerValue> {
-    if path.is_empty() {
-        return Some(record.clone());
-    }
-
-    match record {
-        InnerValue::Map(map) => {
-            let key = InternerKey::new(path[0]);
-            let next_value = map.get(&key)?;
-            if path.len() == 1 {
-                Some(next_value.clone())
-            } else {
-                resolve_field(next_value, &path[1..])
+/// Borrowing variant: walks the record in-place without cloning the
+/// resolved leaf. All filter callbacks below use this — the old
+/// owned variant survives only for callers outside the eval module
+/// that still rely on `Option<InnerValue>`.
+pub fn resolve_field_ref<'a>(record: &'a InnerValue, path: &[u64]) -> Option<&'a InnerValue> {
+    let mut cur = record;
+    for &id in path {
+        match cur {
+            InnerValue::Map(map) => {
+                let key = InternerKey::new(id);
+                cur = map.get(&key)?;
             }
+            _ => return None,
         }
-        _ => None,
     }
+    Some(cur)
+}
+
+/// Owned variant — kept for external callers (tests, query/read/exec.rs).
+/// Hot filter paths use `resolve_field_ref` and never call this.
+pub fn resolve_field(record: &InnerValue, path: &[u64]) -> Option<InnerValue> {
+    resolve_field_ref(record, path).cloned()
 }
 
 /// Resolve a field path (segments) into interned u64 keys.
@@ -219,21 +223,21 @@ enum CompareOp {
 
 impl FilterCallback for CompareCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = resolve_field(record, &self.field_path);
+        let field_val = resolve_field_ref(record, &self.field_path);
         let filter_val = resolve_filter_value(&self.value, record, ctx);
 
         match (field_val, filter_val) {
             (Some(a), Some(b)) => match self.op {
-                CompareOp::Eq => compare_values(&a, &b) == Some(Ordering::Equal),
-                CompareOp::Ne => compare_values(&a, &b) != Some(Ordering::Equal),
-                CompareOp::Gt => compare_values(&a, &b) == Some(Ordering::Greater),
+                CompareOp::Eq => compare_values(a, &b) == Some(Ordering::Equal),
+                CompareOp::Ne => compare_values(a, &b) != Some(Ordering::Equal),
+                CompareOp::Gt => compare_values(a, &b) == Some(Ordering::Greater),
                 CompareOp::Gte => matches!(
-                    compare_values(&a, &b),
+                    compare_values(a, &b),
                     Some(Ordering::Greater | Ordering::Equal)
                 ),
-                CompareOp::Lt => compare_values(&a, &b) == Some(Ordering::Less),
+                CompareOp::Lt => compare_values(a, &b) == Some(Ordering::Less),
                 CompareOp::Lte => matches!(
-                    compare_values(&a, &b),
+                    compare_values(a, &b),
                     Some(Ordering::Less | Ordering::Equal)
                 ),
             },
@@ -284,7 +288,7 @@ struct IsNullCallback {
 impl FilterCallback for IsNullCallback {
     fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
         matches!(
-            resolve_field(record, &self.field_path),
+            resolve_field_ref(record, &self.field_path),
             None | Some(InnerValue::Null)
         )
     }
@@ -298,7 +302,7 @@ struct IsNotNullCallback {
 impl FilterCallback for IsNotNullCallback {
     fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
         !matches!(
-            resolve_field(record, &self.field_path),
+            resolve_field_ref(record, &self.field_path),
             None | Some(InnerValue::Null)
         )
     }
@@ -313,7 +317,7 @@ struct InCallback {
 
 impl FilterCallback for InCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field(record, &self.field_path) {
+        let field_val = match resolve_field_ref(record, &self.field_path) {
             Some(v) => v,
             None => return self.negate, // missing field: not in any set
         };
@@ -328,14 +332,14 @@ impl FilterCallback for InCallback {
                         let column = resolve_query_ref_column(qr, path.as_deref());
                         return column
                             .iter()
-                            .any(|cv| compare_values(&field_val, cv) == Some(Ordering::Equal));
+                            .any(|cv| compare_values(field_val, cv) == Some(Ordering::Equal));
                     }
                 }
                 return false;
             }
             // Single value
             match resolve_filter_value(fv, record, ctx) {
-                Some(resolved) => compare_values(&field_val, &resolved) == Some(Ordering::Equal),
+                Some(resolved) => compare_values(field_val, &resolved) == Some(Ordering::Equal),
                 None => false,
             }
         });
@@ -370,8 +374,8 @@ struct LikeCallback {
 
 impl FilterCallback for LikeCallback {
     fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        match resolve_field(record, &self.field_path) {
-            Some(InnerValue::Str(s)) => self.regex.is_match(&s),
+        match resolve_field_ref(record, &self.field_path) {
+            Some(InnerValue::Str(s)) => self.regex.is_match(s),
             _ => false,
         }
     }
@@ -385,8 +389,8 @@ struct RegexCallback {
 
 impl FilterCallback for RegexCallback {
     fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        match resolve_field(record, &self.field_path) {
-            Some(InnerValue::Str(s)) => self.regex.is_match(&s),
+        match resolve_field_ref(record, &self.field_path) {
+            Some(InnerValue::Str(s)) => self.regex.is_match(s),
             _ => false,
         }
     }
@@ -401,7 +405,7 @@ struct ContainsCallback {
 
 impl FilterCallback for ContainsCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field(record, &self.field_path) {
+        let field_val = match resolve_field_ref(record, &self.field_path) {
             Some(v) => v,
             None => return false,
         };
@@ -409,7 +413,7 @@ impl FilterCallback for ContainsCallback {
             Some(v) => v,
             None => return false,
         };
-        match &field_val {
+        match field_val {
             InnerValue::Str(s) => {
                 if let InnerValue::Str(sub) = &filter_val {
                     s.contains(sub.as_str())
@@ -436,7 +440,7 @@ struct ContainsAnyCallback {
 
 impl FilterCallback for ContainsAnyCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field(record, &self.field_path) {
+        let field_val = match resolve_field_ref(record, &self.field_path) {
             Some(v) => v,
             None => return false,
         };
@@ -445,7 +449,7 @@ impl FilterCallback for ContainsAnyCallback {
                 Some(v) => v,
                 None => return false,
             };
-            match &field_val {
+            match field_val {
                 InnerValue::List(list) => list
                     .iter()
                     .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
@@ -466,7 +470,7 @@ struct ContainsAllCallback {
 
 impl FilterCallback for ContainsAllCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field(record, &self.field_path) {
+        let field_val = match resolve_field_ref(record, &self.field_path) {
             Some(v) => v,
             None => return false,
         };
@@ -475,7 +479,7 @@ impl FilterCallback for ContainsAllCallback {
                 Some(v) => v,
                 None => return false,
             };
-            match &field_val {
+            match field_val {
                 InnerValue::List(list) => list
                     .iter()
                     .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
@@ -497,7 +501,7 @@ struct BetweenCallback {
 
 impl FilterCallback for BetweenCallback {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field(record, &self.field_path) {
+        let field_val = match resolve_field_ref(record, &self.field_path) {
             Some(v) => v,
             None => return false,
         };
@@ -510,10 +514,10 @@ impl FilterCallback for BetweenCallback {
             None => return false,
         };
         matches!(
-            compare_values(&field_val, &from_val),
+            compare_values(field_val, &from_val),
             Some(Ordering::Greater | Ordering::Equal)
         ) && matches!(
-            compare_values(&field_val, &to_val),
+            compare_values(field_val, &to_val),
             Some(Ordering::Less | Ordering::Equal)
         )
     }
@@ -526,7 +530,7 @@ struct ExistsCallback {
 
 impl FilterCallback for ExistsCallback {
     fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        resolve_field(record, &self.field_path).is_some()
+        resolve_field_ref(record, &self.field_path).is_some()
     }
 }
 
@@ -537,7 +541,7 @@ struct NotExistsCallback {
 
 impl FilterCallback for NotExistsCallback {
     fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        resolve_field(record, &self.field_path).is_none()
+        resolve_field_ref(record, &self.field_path).is_none()
     }
 }
 
