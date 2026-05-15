@@ -68,8 +68,13 @@ pub trait RateLimiter: Send + Sync {
 ///
 /// State per subnet: `(tokens_remaining, last_refill_at_ns)`. Refill rate
 /// is `RATE_LIMIT_AUTH_INIT_PER_SECOND` (or `/4` during warmup).
+/// `FxHasher` for small fixed-size Subnet keys ([u8;3] for IPv4 /24,
+/// [u8;8] for IPv6 /64). DoS resistance for this map is moot — the
+/// limiter itself is what protects against DoS.
+type SubnetHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
+
 pub struct InMemoryRateLimiter {
-    buckets: DashMap<Subnet, BucketState>,
+    buckets: DashMap<Subnet, BucketState, SubnetHasher>,
     /// Wall-clock at server-process start. Used to detect warmup window.
     startup_at_ns: u64,
 }
@@ -96,7 +101,7 @@ impl InMemoryRateLimiter {
     /// boot.
     pub fn new(startup_at_ns: u64) -> Self {
         Self {
-            buckets: DashMap::new(),
+            buckets: DashMap::with_hasher(SubnetHasher::default()),
             startup_at_ns,
         }
     }

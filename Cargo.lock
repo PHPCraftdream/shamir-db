@@ -2969,6 +2969,7 @@ dependencies = [
  "criterion",
  "dashmap 6.1.0",
  "ed25519-dalek",
+ "fxhash",
  "hex",
  "hkdf",
  "hmac",
