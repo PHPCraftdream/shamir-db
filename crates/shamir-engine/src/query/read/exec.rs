@@ -387,13 +387,12 @@ pub fn apply_group_by(
 
         let having_cb = compile_filter(having_filter, interner);
         result.retain(|json_obj| {
-            // Convert JSON back to InnerValue for filter evaluation
-            if let Ok(bytes) = serde_json::to_vec(json_obj) {
-                if let Ok(inner) = shamir_types::codecs::interned::json_to_inner(interner, &bytes) {
-                    return having_cb.matches(&inner, ctx);
-                }
-            }
-            false
+            // Walk `json::Value` straight into InnerValue — the old path
+            // went through `serde_json::to_vec` + `json_to_inner` (parse
+            // bytes back), which is a needless round-trip.
+            shamir_types::codecs::interned::json_value_to_inner(json_obj, interner)
+                .map(|inner| having_cb.matches(&inner, ctx))
+                .unwrap_or(false)
         });
     }
 
