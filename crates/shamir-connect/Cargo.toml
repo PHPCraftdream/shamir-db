@@ -13,7 +13,7 @@ path = "src/lib.rs"
 [features]
 default = ["client", "server"]
 client = []
-server = ["dashmap", "parking_lot"]
+server = ["dashmap", "parking_lot", "fxhash"]
 durable-redb = ["server", "redb"]
 
 [dependencies]
@@ -43,6 +43,11 @@ thiserror = "2.0"
 # Server-only (concurrent state)
 dashmap = { version = "6.1", optional = true }
 parking_lot = { version = "0.12", optional = true }
+# Fast non-cryptographic hasher for the DashMaps that key by fixed-size
+# byte arrays (session_id [u8;32], Subnet [u8;3..8]). DashMap's default
+# SipHash is overkill for hash-tables where DoS resistance is already
+# enforced upstream (rate limiter, auth).
+fxhash = { version = "0.2", optional = true }
 # Durable counter store (optional: durable-redb feature)
 redb = { version = "3.1", optional = true }
 

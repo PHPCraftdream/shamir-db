@@ -209,16 +209,21 @@ pub const DISCONNECT_GRACE_NS: u64 = 5 * crate::common::time::ns::SECOND;
 /// `Arc<Session>` so handlers can hold a session reference while admin
 /// `kickSession` removes the entry from the map without breaking in-flight
 /// processing. Per spec §7: not persistent (server restart drops all sessions).
+/// `FxHasher` over the 32-byte session_id is enough — the keys are random
+/// bytes from a CSPRNG, DoS resistance comes from rate limiting upstream,
+/// not from the hash function. SipHash's per-byte cost is wasted here.
+type SessionIdHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
+
 #[derive(Debug, Default)]
 pub struct SessionStore {
-    by_sid: DashMap<[u8; limits::SESSION_ID_BYTES], Arc<Session>>,
+    by_sid: DashMap<[u8; limits::SESSION_ID_BYTES], Arc<Session>, SessionIdHasher>,
 }
 
 impl SessionStore {
     /// Empty store.
     pub fn new() -> Self {
         Self {
-            by_sid: DashMap::new(),
+            by_sid: DashMap::with_hasher(SessionIdHasher::default()),
         }
     }
 
