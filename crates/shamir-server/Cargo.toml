@@ -75,6 +75,11 @@ hex = "0.4"
 # E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM —
 # brought in here too so dev-only test paths see the same crate version.
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "db_handler_rps"
+harness = false
 
 [lints.clippy]
 all = "warn"
