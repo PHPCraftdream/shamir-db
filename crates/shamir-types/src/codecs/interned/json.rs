@@ -8,6 +8,7 @@ use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::new_map;
 use crate::types::value::{InnerValue, Value};
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json as json;
 
 /// Decodes JSON bytes to InnerValue, interning string keys
@@ -23,18 +24,91 @@ pub fn json_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue, Co
     json_value_to_inner(&json_value, interner)
 }
 
-/// Encodes InnerValue to JSON bytes, de-interning keys
+/// Encodes InnerValue to JSON bytes, de-interning keys.
 ///
-/// This function:
-/// 1. Converts InnerValue (InternedKey keys) to serde_json::Value
-/// 2. Encodes serde_json::Value to JSON bytes
+/// Streams the JSON straight into the output buffer via
+/// `serde_json::to_vec` over an `InternedRef` wrapper — no
+/// intermediate `json::Value` tree. Map keys are de-interned to
+/// `&str` and written in place when each entry is serialised.
 pub fn inner_to_json(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>, CodecError> {
-    let json_value = inner_to_json_value(value, interner);
+    json::to_vec(&InternedRef { value, interner })
+        .map_err(|e| CodecError::Encode(format!("JSON encode error: {}", e)))
+}
 
-    let bytes = json::to_vec(&json_value)
-        .map_err(|e| CodecError::Encode(format!("JSON encode error: {}", e)))?;
+/// Borrowed view of an `InnerValue` paired with the `Interner` used to
+/// resolve its map keys. Implements `Serialize` so any serde format
+/// (here `serde_json`) can write it without an intermediate value tree.
+struct InternedRef<'a> {
+    value: &'a InnerValue,
+    interner: &'a Interner,
+}
 
-    Ok(bytes)
+impl Serialize for InternedRef<'_> {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self.value {
+            Value::Null => ser.serialize_unit(),
+            Value::Bool(b) => ser.serialize_bool(*b),
+            Value::Int(i) => ser.serialize_i64(*i),
+            Value::F64(f) => {
+                if f.is_finite() {
+                    ser.serialize_f64(*f)
+                } else {
+                    // serde_json refuses non-finite floats; the old
+                    // path converted them via `f.to_string()`.
+                    ser.serialize_str(&f.to_string())
+                }
+            }
+            Value::Dec(d) => ser.serialize_str(&d.to_string()),
+            Value::Big(b) => ser.serialize_str(&b.to_string()),
+            Value::Str(s) => ser.serialize_str(s),
+            Value::Bin(b) => {
+                // JSON has no binary type — the old path emitted an
+                // array of byte numbers. Preserve that shape.
+                let mut seq = ser.serialize_seq(Some(b.len()))?;
+                for byte in b {
+                    seq.serialize_element(byte)?;
+                }
+                seq.end()
+            }
+            Value::List(l) => {
+                let mut seq = ser.serialize_seq(Some(l.len()))?;
+                for el in l {
+                    seq.serialize_element(&InternedRef {
+                        value: el,
+                        interner: self.interner,
+                    })?;
+                }
+                seq.end()
+            }
+            Value::Set(s) => {
+                let mut seq = ser.serialize_seq(Some(s.len()))?;
+                for el in s {
+                    seq.serialize_element(&InternedRef {
+                        value: el,
+                        interner: self.interner,
+                    })?;
+                }
+                seq.end()
+            }
+            Value::Map(m) => {
+                let mut map = ser.serialize_map(Some(m.len()))?;
+                for (interned_key, val) in m {
+                    let user_key = self
+                        .interner
+                        .get_str(interned_key)
+                        .expect("Interned key not found in interner");
+                    map.serialize_entry(
+                        user_key.as_ref(),
+                        &InternedRef {
+                            value: val,
+                            interner: self.interner,
+                        },
+                    )?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 /// Converts serde_json::Value to InnerValue, interning all string keys
