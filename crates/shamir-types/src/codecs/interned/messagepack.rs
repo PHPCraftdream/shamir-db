@@ -3,12 +3,13 @@
 //! This module provides MessagePack encoding/decoding directly to/from InnerValue
 //! without using UserValue (which is deprecated and for tests only).
 
-use crate::codecs::interned::common::{deintern_key, intern_string_key};
+use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::common::new_map;
 use crate::types::value::{InnerValue, Value};
 use rmpv::Value as RmpvValue;
+use serde::ser::{SerializeMap, SerializeSeq, Serialize, Serializer};
 
 /// Decodes MessagePack bytes to InnerValue, interning string keys
 ///
@@ -23,19 +24,76 @@ pub fn msgpack_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue,
     rmpv_value_to_inner(&rmpv_value, interner)
 }
 
-/// Encodes InnerValue to MessagePack bytes, de-interning keys
+/// Encodes InnerValue to MessagePack bytes, de-interning keys.
 ///
-/// This function:
-/// 1. Converts InnerValue (InternedKey keys) to rmpv::Value
-/// 2. Encodes rmpv::Value to MessagePack bytes
+/// Streams directly into the output buffer via `rmp_serde::to_vec`
+/// over an `InternedRef` wrapper. No intermediate `rmpv::Value`
+/// tree is built — map keys are de-interned to `&str` and written
+/// in-place when each Map entry is serialised.
 pub fn inner_to_msgpack(interner: &Interner, value: &InnerValue) -> Result<Vec<u8>, CodecError> {
-    let rmpv_value = inner_to_rmpv_value(value, interner);
+    rmp_serde::to_vec(&InternedRef { value, interner })
+        .map_err(|e| CodecError::Encode(format!("MessagePack encode error: {}", e)))
+}
 
-    let mut buf = Vec::new();
-    rmpv::encode::write_value(&mut buf, &rmpv_value)
-        .map_err(|e| CodecError::Encode(format!("MessagePack encode error: {}", e)))?;
+/// Borrowed view of an `InnerValue` paired with the `Interner` used
+/// to resolve its map keys. Implements `Serialize` so `rmp_serde` (or
+/// any other serde format) can write it without an intermediate value
+/// tree.
+struct InternedRef<'a> {
+    value: &'a InnerValue,
+    interner: &'a Interner,
+}
 
-    Ok(buf)
+impl Serialize for InternedRef<'_> {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        match self.value {
+            Value::Null => ser.serialize_unit(),
+            Value::Bool(b) => ser.serialize_bool(*b),
+            Value::Int(i) => ser.serialize_i64(*i),
+            Value::F64(f) => ser.serialize_f64(*f),
+            Value::Dec(d) => ser.serialize_str(&d.to_string()),
+            Value::Big(b) => ser.serialize_str(&b.to_string()),
+            Value::Str(s) => ser.serialize_str(s),
+            Value::Bin(b) => ser.serialize_bytes(b),
+            Value::List(l) => {
+                let mut seq = ser.serialize_seq(Some(l.len()))?;
+                for el in l {
+                    seq.serialize_element(&InternedRef {
+                        value: el,
+                        interner: self.interner,
+                    })?;
+                }
+                seq.end()
+            }
+            Value::Set(s) => {
+                let mut seq = ser.serialize_seq(Some(s.len()))?;
+                for el in s {
+                    seq.serialize_element(&InternedRef {
+                        value: el,
+                        interner: self.interner,
+                    })?;
+                }
+                seq.end()
+            }
+            Value::Map(m) => {
+                let mut map = ser.serialize_map(Some(m.len()))?;
+                for (k, v) in m {
+                    let user_key = self
+                        .interner
+                        .get_str(k)
+                        .expect("Interned key not found in interner");
+                    map.serialize_entry(
+                        user_key.as_ref(),
+                        &InternedRef {
+                            value: v,
+                            interner: self.interner,
+                        },
+                    )?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 /// Converts rmpv::Value to InnerValue, interning all string keys
@@ -102,33 +160,3 @@ fn rmpv_value_to_inner(
     }
 }
 
-/// Converts InnerValue to rmpv::Value, de-interning all keys
-fn inner_to_rmpv_value(value: &InnerValue, interner: &Interner) -> RmpvValue {
-    match value {
-        Value::Null => RmpvValue::Nil,
-        Value::Bool(b) => RmpvValue::Boolean(*b),
-        Value::Int(i) => RmpvValue::Integer((*i).into()),
-        Value::F64(f) => RmpvValue::F64(*f),
-        Value::Dec(d) => RmpvValue::String(d.to_string().into()),
-        Value::Big(b) => RmpvValue::String(b.to_string().into()),
-        Value::Str(s) => RmpvValue::String(s.clone().into()),
-        Value::Bin(b) => RmpvValue::Binary(b.clone()),
-        Value::List(l) => {
-            RmpvValue::Array(l.iter().map(|v| inner_to_rmpv_value(v, interner)).collect())
-        }
-        Value::Set(s) => {
-            // Sets become arrays in MessagePack (similar to JSON)
-            RmpvValue::Array(s.iter().map(|v| inner_to_rmpv_value(v, interner)).collect())
-        }
-        Value::Map(m) => {
-            let mut map = Vec::new();
-            for (interned_key, val) in m {
-                let key_str = deintern_key(interner, interned_key);
-                let key = RmpvValue::String(key_str.into());
-                let rmpv_val = inner_to_rmpv_value(val, interner);
-                map.push((key, rmpv_val));
-            }
-            RmpvValue::Map(map)
-        }
-    }
-}
