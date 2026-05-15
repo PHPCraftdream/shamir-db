@@ -79,3 +79,7 @@ harness = false
 [[bench]]
 name = "filter_eval"
 harness = false
+
+[[bench]]
+name = "group_by_keys"
+harness = false

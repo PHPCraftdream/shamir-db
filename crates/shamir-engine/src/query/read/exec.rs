@@ -6,20 +6,60 @@
 //! Pipeline with GROUP BY:
 //!   WHERE (filter_stream) → GROUP BY → AGG per group → HAVING → SELECT → DISTINCT → ORDER BY → PAGINATION → QueryResult
 
-use std::collections::BTreeMap;
-
 use serde_json as json;
 
 use shamir_types::codecs::interned::inner_to_json_value;
 use shamir_types::core::interner::Interner;
-use crate::query::filter::eval::{compare_values, intern_field_path, resolve_field};
+use crate::query::filter::eval::{compare_values, intern_field_path, resolve_field, resolve_field_ref};
 use crate::query::filter::{compile_filter, FilterContext};
 use crate::query::read::{
     AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderDirection, Pagination,
     PaginationInfo, Select, SelectItem,
 };
+use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+
+/// Typed hashable key fragment used to bucket records under GROUP BY.
+///
+/// The old keying serialised each group-field through
+/// `inner_to_json_value -> json::Value::to_string -> Vec::join("|")`,
+/// allocating a fresh `String` per record. For scalar group fields
+/// (Int / Bool / Str / etc.) that's pointless — they're already
+/// hashable. `GroupKeyItem` carries them through to a `TMap`
+/// (`IndexMap<_, _, FxHasher>`) directly. Composite (Map / List /
+/// Set / Dec / Big) group fields stay rare; they fall back to a
+/// `Box<str>` JSON canonical form.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+enum GroupKeyItem {
+    Missing,
+    Null,
+    Bool(bool),
+    Int(i64),
+    F64Bits(u64),
+    Str(Box<str>),
+    Bin(Box<[u8]>),
+    Complex(Box<str>),
+}
+
+fn group_key_item(val: Option<&InnerValue>, interner: &Interner) -> GroupKeyItem {
+    match val {
+        None => GroupKeyItem::Missing,
+        Some(InnerValue::Null) => GroupKeyItem::Null,
+        Some(InnerValue::Bool(b)) => GroupKeyItem::Bool(*b),
+        Some(InnerValue::Int(i)) => GroupKeyItem::Int(*i),
+        Some(InnerValue::F64(f)) => GroupKeyItem::F64Bits(f.to_bits()),
+        Some(InnerValue::Str(s)) => GroupKeyItem::Str(s.as_str().into()),
+        Some(InnerValue::Bin(b)) => GroupKeyItem::Bin(b.as_slice().into()),
+        Some(other) => {
+            // Fall back to JSON canonical form for non-scalar leaves.
+            // Rare in practice — GROUP BY on a Map/List/Set field is
+            // unusual — but kept for parity with the previous code path.
+            let jv = inner_to_json_value(other, interner);
+            GroupKeyItem::Complex(jv.to_string().into_boxed_str())
+        }
+    }
+}
 
 // ============================================================================
 // Select projection
@@ -340,42 +380,53 @@ pub fn apply_group_by(
         })
         .collect();
 
-    // Build groups: key = serialized group values, value = vec of record refs
-    let mut groups: BTreeMap<String, Vec<&InnerValue>> = BTreeMap::new();
-    // Also store the JSON key values per group for output
-    let mut group_keys_map: BTreeMap<String, Vec<(String, json::Value)>> = BTreeMap::new();
+    // Build groups: typed `Vec<GroupKeyItem>` key drives an `IndexMap`
+    // hashed via FxHash. Each group's JSON-shaped key values stay
+    // alongside the record list so the output projection can read them
+    // without re-hitting the records. The JSON key values are computed
+    // only on first insertion (Vacant branch) — repeated records into
+    // an existing group skip the rebuild.
+    use indexmap::map::Entry;
+    let mut groups: TMap<Vec<GroupKeyItem>, (Vec<&InnerValue>, Vec<(String, json::Value)>)> =
+        new_map_wc(0);
 
     for (_, record) in records {
-        let mut key_parts = Vec::with_capacity(group_paths.len());
-        let mut key_json_values = Vec::with_capacity(group_paths.len());
-
-        for (field_name, interned_path) in &group_paths {
-            let val = interned_path
+        let mut group_key = Vec::with_capacity(group_paths.len());
+        for (_, interned_path) in &group_paths {
+            let val_ref = interned_path
                 .as_ref()
-                .and_then(|p| resolve_field(record, p));
-            let json_val = val
-                .as_ref()
-                .map(|v| inner_to_json_value(v, interner))
-                .unwrap_or(json::Value::Null);
-            // Use canonical JSON for grouping key
-            key_parts.push(json_val.to_string());
-            key_json_values.push((field_name.clone(), json_val));
+                .and_then(|p| resolve_field_ref(record, p));
+            group_key.push(group_key_item(val_ref, interner));
         }
 
-        let group_key = key_parts.join("|");
-        groups.entry(group_key.clone()).or_default().push(record);
-        group_keys_map
-            .entry(group_key)
-            .or_insert(key_json_values);
+        match groups.entry(group_key) {
+            Entry::Occupied(mut e) => {
+                e.get_mut().0.push(record);
+            }
+            Entry::Vacant(v) => {
+                let mut key_json_values = Vec::with_capacity(group_paths.len());
+                for (field_name, interned_path) in &group_paths {
+                    let val_ref = interned_path
+                        .as_ref()
+                        .and_then(|p| resolve_field_ref(record, p));
+                    let json_val = val_ref
+                        .map(|vv| inner_to_json_value(vv, interner))
+                        .unwrap_or(json::Value::Null);
+                    key_json_values.push((field_name.clone(), json_val));
+                }
+                v.insert((vec![record], key_json_values));
+            }
+        }
     }
 
-    // Build result for each group
-    let mut result: Vec<json::Value> = Vec::with_capacity(groups.len());
+    // The previous `BTreeMap<String, _>` ordering produced alphabetical
+    // group output; tests depend on that. IndexMap::sort_keys does the
+    // same in-place — no second `paired` Vec, no extra collect/move.
+    groups.sort_keys();
 
-    for (key, group_records) in &groups {
-        let key_values = group_keys_map.get(key).map(|v| v.as_slice());
-        let obj = build_aggregate_object(group_records, select, key_values, interner);
-        result.push(obj);
+    let mut result: Vec<json::Value> = Vec::with_capacity(groups.len());
+    for (_k, (recs, key_vals)) in &groups {
+        result.push(build_aggregate_object(recs, select, Some(key_vals), interner));
     }
 
     // Apply HAVING filter
