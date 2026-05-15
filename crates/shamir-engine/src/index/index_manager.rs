@@ -24,9 +24,10 @@ use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use bytes::Bytes;
-use std::collections::{BTreeSet, HashMap};
+use dashmap::DashMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Maximum number of posting-list entries cached in memory per
 /// `IndexManager`. Hit on a cached entry is a single `HashMap::get`
@@ -76,7 +77,13 @@ pub struct IndexManager {
     /// `(index_name, value)` key. Bounded — when full we evict an
     /// arbitrary entry (exact LRU not worth the dep here; index
     /// hotsets are typically small).
-    posting_cache: Arc<Mutex<HashMap<Bytes, Arc<BTreeSet<RecordId>>>>>,
+    ///
+    /// `DashMap` replaces the previous `Mutex<HashMap>` so concurrent
+    /// readers never serialise through a single lock — each shard
+    /// is independently lockable and the read path on a cache hit is
+    /// fully lock-free against unrelated index keys. Cache hits on
+    /// the same shard still take the per-shard read lock.
+    posting_cache: Arc<DashMap<Bytes, Arc<BTreeSet<RecordId>>>>,
 }
 
 impl Clone for IndexManager {
@@ -146,7 +153,7 @@ impl IndexManager {
             indexes_unique: Arc::new(indexes_unique),
             has_indexes: Arc::new(AtomicBool::new(has_indexes_flag)),
             has_indexes_unique: Arc::new(AtomicBool::new(has_indexes_unique_flag)),
-            posting_cache: Arc::new(Mutex::new(HashMap::with_capacity(POSTING_CACHE_CAP))),
+            posting_cache: Arc::new(DashMap::with_capacity(POSTING_CACHE_CAP)),
         };
 
         // Синхронизируем флаги с состоянием IndexInfo
@@ -433,9 +440,8 @@ impl IndexManager {
         // Posting cache: blow away every entry whose key starts
         // with the index's prefix. Cheap — typical hotsets are
         // small and the cache is bounded.
-        if let Ok(mut cache) = self.posting_cache.lock() {
-            cache.retain(|k, _| !k.starts_with(&prefix));
-        }
+        self.posting_cache
+            .retain(|k, _| !k.starts_with(&prefix));
 
         // Удаляем определение индекса из метаданных
         let was_removed = self.indexes.remove_index(name_interned);
@@ -668,14 +674,11 @@ impl IndexManager {
 
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
 
-        // Opt G: try the in-memory posting cache first.
-        if let Some(cached) = self
-            .posting_cache
-            .lock()
-            .ok()
-            .and_then(|c| c.get(&index_key).cloned())
-        {
-            return Ok((*cached).clone());
+        // Opt G: try the in-memory posting cache first. DashMap's
+        // sharded RwLock lets unrelated concurrent lookups proceed
+        // without serialising on a single mutex.
+        if let Some(cached) = self.posting_cache.get(&index_key) {
+            return Ok((**cached).clone());
         }
 
         // Scan the 25-byte index prefix; every match is a posting
@@ -697,14 +700,18 @@ impl IndexManager {
         // overflow; exact LRU isn't worth the dep, index hotsets are
         // small). Empty results are cached too — the next identical
         // lookup short-circuits without re-scanning.
-        if let Ok(mut cache) = self.posting_cache.lock() {
-            if cache.len() >= POSTING_CACHE_CAP {
-                if let Some(k) = cache.keys().next().cloned() {
-                    cache.remove(&k);
-                }
+        if self.posting_cache.len() >= POSTING_CACHE_CAP {
+            // `iter().next()` on DashMap acquires a single shard's
+            // read lock — bounded; evicting an arbitrary entry is
+            // explicitly allowed by the cache contract.
+            if let Some(victim) = self.posting_cache.iter().next() {
+                let k = victim.key().clone();
+                drop(victim);
+                self.posting_cache.remove(&k);
             }
-            cache.insert(index_key, Arc::new(record_ids.clone()));
         }
+        self.posting_cache
+            .insert(index_key, Arc::new(record_ids.clone()));
 
         Ok(record_ids)
     }
@@ -714,9 +721,7 @@ impl IndexManager {
     /// landed, so the next `lookup_by_index` re-fetches.
     fn invalidate_posting_cache(&self, name_interned: u64, values: &[InnerValue]) {
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
-        if let Ok(mut cache) = self.posting_cache.lock() {
-            cache.remove(&index_key);
-        }
+        self.posting_cache.remove(&index_key);
     }
 
     /// Count entries for one regular or unique index — used by the
