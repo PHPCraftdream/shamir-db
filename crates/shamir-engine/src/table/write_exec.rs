@@ -10,7 +10,7 @@ use serde_json as json;
 
 use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
 use shamir_types::core::interner::InternerKey;
-use crate::query::filter::eval::{compile_filter, FilterCallback};
+use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::eval::resolve_field;
 use crate::query::filter::Filter;
@@ -416,7 +416,7 @@ impl TableManager {
 
         // Compile the residual filter once (if any) so we evaluate it
         // per-record without re-compilation.
-        let residual_cb: Option<Box<dyn FilterCallback>> =
+        let residual_cb: Option<FilterNode> =
             residual.as_ref().map(|f| compile_filter(f, interner));
 
         let mut result = Vec::with_capacity(record_ids.len());

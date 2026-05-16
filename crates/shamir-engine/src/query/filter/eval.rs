@@ -1,7 +1,9 @@
-//! Filter evaluation — compile Filter AST into a callback network.
+//! Filter evaluation — compile Filter AST into an enum-dispatched tree.
 //!
-//! Each node in the compiled tree implements `FilterCallback::matches()`,
-//! which takes a record and context and returns a boolean.
+//! The compiled tree is a `FilterNode` enum (static dispatch via `match`)
+//! rather than `Box<dyn FilterCallback>` (virtual call per node). Each
+//! `matches()` call walks the tree with monomorphic compares; the
+//! compiler can inline the dispatch arms.
 
 use std::cmp::Ordering;
 
@@ -15,10 +17,11 @@ use shamir_types::types::value::InnerValue;
 use super::eval_context::FilterContext;
 
 // ============================================================================
-// Trait
+// Trait — kept as a thin compat shim. `FilterNode` implements it so callers
+// that still ask for `&dyn FilterCallback` keep working; new code uses
+// `&FilterNode` directly.
 // ============================================================================
 
-/// Trait for compiled filter nodes. Each node evaluates a record against its predicate.
 pub trait FilterCallback: Send + Sync {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool;
 }
@@ -30,9 +33,9 @@ pub trait FilterCallback: Send + Sync {
 /// Extract a value from an InnerValue by a path of interned keys.
 ///
 /// Borrowing variant: walks the record in-place without cloning the
-/// resolved leaf. All filter callbacks below use this — the old
-/// owned variant survives only for callers outside the eval module
-/// that still rely on `Option<InnerValue>`.
+/// resolved leaf. All filter nodes below use this — the old owned
+/// variant survives only for callers outside the eval module that
+/// still rely on `Option<InnerValue>`.
 pub fn resolve_field_ref<'a>(record: &'a InnerValue, path: &[u64]) -> Option<&'a InnerValue> {
     let mut cur = record;
     for &id in path {
@@ -110,25 +113,17 @@ fn resolve_filter_value(
             resolve_field(record, &keys)
         }
         FilterValue::QueryRef { alias, path } => {
-            // Strip the optional `@` prefix — the spec/diagrams show
-            // `{ "$query": "@user", "path": "[0].id" }` while queries
-            // map keys are bare (`{ user: ... }`).
             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
             let qr = ctx.resolved_refs.get(key)?;
             resolve_query_ref_value(qr, path.as_deref())
         }
-        // FnCall, Expr, Cond — not yet supported in eval
         _ => None,
     }
 }
 
 /// Extract a value from a QueryResult by a simple path like "[0].id".
-fn resolve_query_ref_value(
-    qr: &QueryResult,
-    path: Option<&str>,
-) -> Option<InnerValue> {
+fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> Option<InnerValue> {
     let path = path?;
-    // Parse "[N].field" pattern
     if !path.starts_with('[') {
         return None;
     }
@@ -140,10 +135,7 @@ fn resolve_query_ref_value(
     if rest.is_empty() {
         return json_to_inner_value(record);
     }
-
-    // Strip leading dot
     let rest = rest.strip_prefix('.')?;
-    // Navigate into the JSON value
     let field_val = record.get(rest)?;
     json_to_inner_value(field_val)
 }
@@ -151,15 +143,11 @@ fn resolve_query_ref_value(
 /// Extract a column of values from all records in a QueryResult.
 ///
 /// Supports `[].field` pattern — iterates all records, extracts `field` from each.
-fn resolve_query_ref_column(
-    qr: &QueryResult,
-    path: Option<&str>,
-) -> Vec<InnerValue> {
+fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<InnerValue> {
     let path = match path {
         Some(p) => p,
         None => return Vec::new(),
     };
-    // Parse "[].field" pattern
     if !path.starts_with("[]") {
         return Vec::new();
     }
@@ -178,12 +166,10 @@ fn resolve_query_ref_column(
         .collect()
 }
 
-/// Check if a QueryRef path uses the column selector pattern `[]`.
 fn is_column_query_ref(fv: &FilterValue) -> bool {
     matches!(fv, FilterValue::QueryRef { path: Some(p), .. } if p.starts_with("[]"))
 }
 
-/// Convert a serde_json::Value into an InnerValue (simple scalar conversion).
 fn json_to_inner_value(v: &serde_json::Value) -> Option<InnerValue> {
     match v {
         serde_json::Value::Null => Some(InnerValue::Null),
@@ -201,25 +187,11 @@ fn json_to_inner_value(v: &serde_json::Value) -> Option<InnerValue> {
 }
 
 // ============================================================================
-// Callback structs
+// FilterNode — enum-dispatched compiled filter
 // ============================================================================
 
-/// Comparison callback (Eq, Ne, Gt, Gte, Lt, Lte)
-struct CompareCallback {
-    field_path: Vec<u64>,
-    value: FilterValue,
-    /// Pre-resolved at compile time when `value` is a literal
-    /// (Null/Bool/Int/Float/String/Binary). Allocations for the RHS
-    /// were the second source of per-record cost on the filter hot
-    /// loop (the first being the leaf clone closed in 655ba4c).
-    /// FieldRef/QueryRef leave this `None` — those still need
-    /// per-record resolution against the record/ctx.
-    pre_resolved: Option<InnerValue>,
-    op: CompareOp,
-}
-
 #[derive(Debug, Clone, Copy)]
-enum CompareOp {
+pub enum CompareOp {
     Eq,
     Ne,
     Gt,
@@ -228,354 +200,297 @@ enum CompareOp {
     Lte,
 }
 
-impl FilterCallback for CompareCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = resolve_field_ref(record, &self.field_path);
-        let owned_rhs;
-        let filter_val: Option<&InnerValue> = if let Some(pre) = &self.pre_resolved {
-            Some(pre)
-        } else {
-            owned_rhs = resolve_filter_value(&self.value, record, ctx);
-            owned_rhs.as_ref()
-        };
-
-        match (field_val, filter_val) {
-            (Some(a), Some(b)) => match self.op {
-                CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
-                CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
-                CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
-                CompareOp::Gte => matches!(
-                    compare_values(a, b),
-                    Some(Ordering::Greater | Ordering::Equal)
-                ),
-                CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
-                CompareOp::Lte => matches!(
-                    compare_values(a, b),
-                    Some(Ordering::Less | Ordering::Equal)
-                ),
-            },
-            // If either side is None, comparison fails (except Ne — missing != something is true)
-            (None, _) | (_, None) => matches!(self.op, CompareOp::Ne),
-        }
-    }
+/// Compiled filter tree node. One enum variant per filter shape;
+/// `matches()` is a single `match` so the compiler can inline each
+/// arm. Previously this was `Box<dyn FilterCallback>` per node —
+/// every internal recursive call paid a virtual dispatch (vtable
+/// indirect call + cache miss potential).
+pub enum FilterNode {
+    /// Always true. Produced when a clause cancels out (e.g.
+    /// `NotIn` on a non-existent field).
+    True,
+    /// Always false. Produced when a field path cannot be interned.
+    False,
+    Compare {
+        field_path: Vec<u64>,
+        value: FilterValue,
+        /// Pre-resolved at compile time when `value` is a literal.
+        pre_resolved: Option<InnerValue>,
+        op: CompareOp,
+    },
+    And(Vec<FilterNode>),
+    Or(Vec<FilterNode>),
+    Not(Box<FilterNode>),
+    IsNull {
+        field_path: Vec<u64>,
+    },
+    IsNotNull {
+        field_path: Vec<u64>,
+    },
+    In {
+        field_path: Vec<u64>,
+        values: Vec<FilterValue>,
+        negate: bool,
+    },
+    Like {
+        field_path: Vec<u64>,
+        regex: Regex,
+    },
+    Regex {
+        field_path: Vec<u64>,
+        regex: Regex,
+    },
+    Contains {
+        field_path: Vec<u64>,
+        value: FilterValue,
+        pre_resolved: Option<InnerValue>,
+    },
+    ContainsAny {
+        field_path: Vec<u64>,
+        values: Vec<FilterValue>,
+    },
+    ContainsAll {
+        field_path: Vec<u64>,
+        values: Vec<FilterValue>,
+    },
+    Between {
+        field_path: Vec<u64>,
+        from: FilterValue,
+        to: FilterValue,
+        pre_from: Option<InnerValue>,
+        pre_to: Option<InnerValue>,
+    },
+    Exists {
+        field_path: Vec<u64>,
+    },
+    NotExists {
+        field_path: Vec<u64>,
+    },
 }
 
-/// And — all children must match
-struct AndCallback {
-    children: Vec<Box<dyn FilterCallback>>,
-}
+impl FilterNode {
+    pub fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
+        match self {
+            FilterNode::True => true,
+            FilterNode::False => false,
 
-impl FilterCallback for AndCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        self.children.iter().all(|c| c.matches(record, ctx))
-    }
-}
-
-/// Or — at least one child must match
-struct OrCallback {
-    children: Vec<Box<dyn FilterCallback>>,
-}
-
-impl FilterCallback for OrCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        self.children.iter().any(|c| c.matches(record, ctx))
-    }
-}
-
-/// Not — invert inner
-struct NotCallback {
-    inner: Box<dyn FilterCallback>,
-}
-
-impl FilterCallback for NotCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        !self.inner.matches(record, ctx)
-    }
-}
-
-/// IsNull — field is missing or Null
-struct IsNullCallback {
-    field_path: Vec<u64>,
-}
-
-impl FilterCallback for IsNullCallback {
-    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        matches!(
-            resolve_field_ref(record, &self.field_path),
-            None | Some(InnerValue::Null)
-        )
-    }
-}
-
-/// IsNotNull — field exists and is not Null
-struct IsNotNullCallback {
-    field_path: Vec<u64>,
-}
-
-impl FilterCallback for IsNotNullCallback {
-    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        !matches!(
-            resolve_field_ref(record, &self.field_path),
-            None | Some(InnerValue::Null)
-        )
-    }
-}
-
-/// In — field value must be in the resolved values list
-struct InCallback {
-    field_path: Vec<u64>,
-    values: Vec<FilterValue>,
-    negate: bool,
-}
-
-impl FilterCallback for InCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field_ref(record, &self.field_path) {
-            Some(v) => v,
-            None => return self.negate, // missing field: not in any set
-        };
-
-        let found = self.values.iter().any(|fv| {
-            // Column QueryRef: expand to all values from the query result
-            if is_column_query_ref(fv) {
-                if let FilterValue::QueryRef { alias, path } = fv {
-                    // Strip optional `@` — same convention as scalar refs.
-                    let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
-                    if let Some(qr) = ctx.resolved_refs.get(key) {
-                        let column = resolve_query_ref_column(qr, path.as_deref());
-                        return column
-                            .iter()
-                            .any(|cv| compare_values(field_val, cv) == Some(Ordering::Equal));
-                    }
-                }
-                return false;
-            }
-            // Single value
-            match resolve_filter_value(fv, record, ctx) {
-                Some(resolved) => compare_values(field_val, &resolved) == Some(Ordering::Equal),
-                None => false,
-            }
-        });
-
-        if self.negate { !found } else { found }
-    }
-}
-
-/// Always-true callback
-struct TrueCallback;
-
-impl FilterCallback for TrueCallback {
-    fn matches(&self, _record: &InnerValue, _ctx: &FilterContext) -> bool {
-        true
-    }
-}
-
-/// Always-false callback for unresolvable field paths
-struct FalseCallback;
-
-impl FilterCallback for FalseCallback {
-    fn matches(&self, _record: &InnerValue, _ctx: &FilterContext) -> bool {
-        false
-    }
-}
-
-/// Like — SQL-like pattern matching (% = any chars, _ = single char)
-struct LikeCallback {
-    field_path: Vec<u64>,
-    regex: Regex,
-}
-
-impl FilterCallback for LikeCallback {
-    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        match resolve_field_ref(record, &self.field_path) {
-            Some(InnerValue::Str(s)) => self.regex.is_match(s),
-            _ => false,
-        }
-    }
-}
-
-/// Regex — regex pattern matching on string fields
-struct RegexCallback {
-    field_path: Vec<u64>,
-    regex: Regex,
-}
-
-impl FilterCallback for RegexCallback {
-    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        match resolve_field_ref(record, &self.field_path) {
-            Some(InnerValue::Str(s)) => self.regex.is_match(s),
-            _ => false,
-        }
-    }
-}
-
-/// Contains — for List/Set: check if collection contains the value.
-/// For Str: check if string contains substring.
-struct ContainsCallback {
-    field_path: Vec<u64>,
-    value: FilterValue,
-    pre_resolved: Option<InnerValue>,
-}
-
-impl FilterCallback for ContainsCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field_ref(record, &self.field_path) {
-            Some(v) => v,
-            None => return false,
-        };
-        let owned_rhs;
-        let filter_val: &InnerValue = if let Some(pre) = &self.pre_resolved {
-            pre
-        } else {
-            owned_rhs = match resolve_filter_value(&self.value, record, ctx) {
-                Some(v) => v,
-                None => return false,
-            };
-            &owned_rhs
-        };
-        match field_val {
-            InnerValue::Str(s) => {
-                if let InnerValue::Str(sub) = filter_val {
-                    s.contains(sub.as_str())
+            FilterNode::Compare {
+                field_path,
+                value,
+                pre_resolved,
+                op,
+            } => {
+                let field_val = resolve_field_ref(record, field_path);
+                let owned_rhs;
+                let filter_val: Option<&InnerValue> = if let Some(pre) = pre_resolved {
+                    Some(pre)
                 } else {
-                    false
+                    owned_rhs = resolve_filter_value(value, record, ctx);
+                    owned_rhs.as_ref()
+                };
+
+                match (field_val, filter_val) {
+                    (Some(a), Some(b)) => match op {
+                        CompareOp::Eq => compare_values(a, b) == Some(Ordering::Equal),
+                        CompareOp::Ne => compare_values(a, b) != Some(Ordering::Equal),
+                        CompareOp::Gt => compare_values(a, b) == Some(Ordering::Greater),
+                        CompareOp::Gte => matches!(
+                            compare_values(a, b),
+                            Some(Ordering::Greater | Ordering::Equal)
+                        ),
+                        CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
+                        CompareOp::Lte => matches!(
+                            compare_values(a, b),
+                            Some(Ordering::Less | Ordering::Equal)
+                        ),
+                    },
+                    (None, _) | (_, None) => matches!(op, CompareOp::Ne),
                 }
             }
-            InnerValue::List(list) => list
-                .iter()
-                .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
-            InnerValue::Set(set) => set
-                .iter()
-                .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
-            _ => false,
+
+            FilterNode::And(children) => children.iter().all(|c| c.matches(record, ctx)),
+            FilterNode::Or(children) => children.iter().any(|c| c.matches(record, ctx)),
+            FilterNode::Not(inner) => !inner.matches(record, ctx),
+
+            FilterNode::IsNull { field_path } => matches!(
+                resolve_field_ref(record, field_path),
+                None | Some(InnerValue::Null)
+            ),
+            FilterNode::IsNotNull { field_path } => !matches!(
+                resolve_field_ref(record, field_path),
+                None | Some(InnerValue::Null)
+            ),
+
+            FilterNode::In {
+                field_path,
+                values,
+                negate,
+            } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return *negate,
+                };
+                let found = values.iter().any(|fv| {
+                    if is_column_query_ref(fv) {
+                        if let FilterValue::QueryRef { alias, path } = fv {
+                            let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
+                            if let Some(qr) = ctx.resolved_refs.get(key) {
+                                let column = resolve_query_ref_column(qr, path.as_deref());
+                                return column
+                                    .iter()
+                                    .any(|cv| compare_values(field_val, cv) == Some(Ordering::Equal));
+                            }
+                        }
+                        return false;
+                    }
+                    match resolve_filter_value(fv, record, ctx) {
+                        Some(resolved) => compare_values(field_val, &resolved) == Some(Ordering::Equal),
+                        None => false,
+                    }
+                });
+                if *negate { !found } else { found }
+            }
+
+            FilterNode::Like { field_path, regex }
+            | FilterNode::Regex { field_path, regex } => match resolve_field_ref(record, field_path) {
+                Some(InnerValue::Str(s)) => regex.is_match(s),
+                _ => false,
+            },
+
+            FilterNode::Contains {
+                field_path,
+                value,
+                pre_resolved,
+            } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let owned_rhs;
+                let filter_val: &InnerValue = if let Some(pre) = pre_resolved {
+                    pre
+                } else {
+                    owned_rhs = match resolve_filter_value(value, record, ctx) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    &owned_rhs
+                };
+                match field_val {
+                    InnerValue::Str(s) => {
+                        if let InnerValue::Str(sub) = filter_val {
+                            s.contains(sub.as_str())
+                        } else {
+                            false
+                        }
+                    }
+                    InnerValue::List(list) => list
+                        .iter()
+                        .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
+                    InnerValue::Set(set) => set
+                        .iter()
+                        .any(|item| compare_values(item, filter_val) == Some(Ordering::Equal)),
+                    _ => false,
+                }
+            }
+
+            FilterNode::ContainsAny { field_path, values } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                values.iter().any(|fv| {
+                    let resolved = match resolve_filter_value(fv, record, ctx) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    match field_val {
+                        InnerValue::List(list) => list
+                            .iter()
+                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                        InnerValue::Set(set) => set
+                            .iter()
+                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                        _ => false,
+                    }
+                })
+            }
+
+            FilterNode::ContainsAll { field_path, values } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                values.iter().all(|fv| {
+                    let resolved = match resolve_filter_value(fv, record, ctx) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    match field_val {
+                        InnerValue::List(list) => list
+                            .iter()
+                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                        InnerValue::Set(set) => set
+                            .iter()
+                            .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
+                        _ => false,
+                    }
+                })
+            }
+
+            FilterNode::Between {
+                field_path,
+                from,
+                to,
+                pre_from,
+                pre_to,
+            } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                let owned_from;
+                let from_val: &InnerValue = if let Some(pre) = pre_from {
+                    pre
+                } else {
+                    owned_from = match resolve_filter_value(from, record, ctx) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    &owned_from
+                };
+                let owned_to;
+                let to_val: &InnerValue = if let Some(pre) = pre_to {
+                    pre
+                } else {
+                    owned_to = match resolve_filter_value(to, record, ctx) {
+                        Some(v) => v,
+                        None => return false,
+                    };
+                    &owned_to
+                };
+                matches!(
+                    compare_values(field_val, from_val),
+                    Some(Ordering::Greater | Ordering::Equal)
+                ) && matches!(
+                    compare_values(field_val, to_val),
+                    Some(Ordering::Less | Ordering::Equal)
+                )
+            }
+
+            FilterNode::Exists { field_path } => {
+                resolve_field_ref(record, field_path).is_some()
+            }
+            FilterNode::NotExists { field_path } => {
+                resolve_field_ref(record, field_path).is_none()
+            }
         }
     }
 }
 
-/// ContainsAny — collection contains at least one of the values
-struct ContainsAnyCallback {
-    field_path: Vec<u64>,
-    values: Vec<FilterValue>,
-}
-
-impl FilterCallback for ContainsAnyCallback {
+impl FilterCallback for FilterNode {
     fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field_ref(record, &self.field_path) {
-            Some(v) => v,
-            None => return false,
-        };
-        self.values.iter().any(|fv| {
-            let resolved = match resolve_filter_value(fv, record, ctx) {
-                Some(v) => v,
-                None => return false,
-            };
-            match field_val {
-                InnerValue::List(list) => list
-                    .iter()
-                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                InnerValue::Set(set) => set
-                    .iter()
-                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                _ => false,
-            }
-        })
-    }
-}
-
-/// ContainsAll — collection contains all of the values
-struct ContainsAllCallback {
-    field_path: Vec<u64>,
-    values: Vec<FilterValue>,
-}
-
-impl FilterCallback for ContainsAllCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field_ref(record, &self.field_path) {
-            Some(v) => v,
-            None => return false,
-        };
-        self.values.iter().all(|fv| {
-            let resolved = match resolve_filter_value(fv, record, ctx) {
-                Some(v) => v,
-                None => return false,
-            };
-            match field_val {
-                InnerValue::List(list) => list
-                    .iter()
-                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                InnerValue::Set(set) => set
-                    .iter()
-                    .any(|item| compare_values(item, &resolved) == Some(Ordering::Equal)),
-                _ => false,
-            }
-        })
-    }
-}
-
-/// Between — field >= from AND field <= to
-struct BetweenCallback {
-    field_path: Vec<u64>,
-    from: FilterValue,
-    to: FilterValue,
-    pre_from: Option<InnerValue>,
-    pre_to: Option<InnerValue>,
-}
-
-impl FilterCallback for BetweenCallback {
-    fn matches(&self, record: &InnerValue, ctx: &FilterContext) -> bool {
-        let field_val = match resolve_field_ref(record, &self.field_path) {
-            Some(v) => v,
-            None => return false,
-        };
-        let owned_from;
-        let from_val: &InnerValue = if let Some(pre) = &self.pre_from {
-            pre
-        } else {
-            owned_from = match resolve_filter_value(&self.from, record, ctx) {
-                Some(v) => v,
-                None => return false,
-            };
-            &owned_from
-        };
-        let owned_to;
-        let to_val: &InnerValue = if let Some(pre) = &self.pre_to {
-            pre
-        } else {
-            owned_to = match resolve_filter_value(&self.to, record, ctx) {
-                Some(v) => v,
-                None => return false,
-            };
-            &owned_to
-        };
-        matches!(
-            compare_values(field_val, from_val),
-            Some(Ordering::Greater | Ordering::Equal)
-        ) && matches!(
-            compare_values(field_val, to_val),
-            Some(Ordering::Less | Ordering::Equal)
-        )
-    }
-}
-
-/// Exists — field is present in the record (resolve_field returns Some)
-struct ExistsCallback {
-    field_path: Vec<u64>,
-}
-
-impl FilterCallback for ExistsCallback {
-    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        resolve_field_ref(record, &self.field_path).is_some()
-    }
-}
-
-/// NotExists — field is not present in the record
-struct NotExistsCallback {
-    field_path: Vec<u64>,
-}
-
-impl FilterCallback for NotExistsCallback {
-    fn matches(&self, record: &InnerValue, _ctx: &FilterContext) -> bool {
-        resolve_field_ref(record, &self.field_path).is_none()
+        FilterNode::matches(self, record, ctx)
     }
 }
 
@@ -592,7 +507,6 @@ fn like_pattern_to_regex(pattern: &str, case_insensitive: bool) -> Option<Regex>
         match ch {
             '%' => regex_str.push_str(".*"),
             '_' => regex_str.push('.'),
-            // Escape regex meta-characters
             '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' | '^'
             | '$' => {
                 regex_str.push('\\');
@@ -609,12 +523,11 @@ fn like_pattern_to_regex(pattern: &str, case_insensitive: bool) -> Option<Regex>
 // Compiler
 // ============================================================================
 
-/// Compile a Filter AST into a tree of callbacks.
+/// Compile a Filter AST into a tree of `FilterNode` (static dispatch).
 ///
-/// Field paths are resolved via the interner at compile time.
-/// If a field path cannot be interned (field doesn't exist), the callback
-/// will always return false for comparisons.
-pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCallback> {
+/// Field paths are resolved via the interner at compile time. If a field path
+/// cannot be interned (field doesn't exist), the node folds to True/False.
+pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
     match filter {
         Filter::Eq { field, value } => compile_compare(field, value, CompareOp::Eq, interner),
         Filter::Ne { field, value } => compile_compare(field, value, CompareOp::Ne, interner),
@@ -626,123 +539,109 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> Box<dyn FilterCal
             compile_compare(field, value, CompareOp::Eq, interner)
         }
 
-        Filter::And { filters } => {
-            let children = filters
-                .iter()
-                .map(|f| compile_filter(f, interner))
-                .collect();
-            Box::new(AndCallback { children })
-        }
-        Filter::Or { filters } => {
-            let children = filters
-                .iter()
-                .map(|f| compile_filter(f, interner))
-                .collect();
-            Box::new(OrCallback { children })
-        }
-        Filter::Not { filter } => {
-            let inner = compile_filter(filter, interner);
-            Box::new(NotCallback { inner })
-        }
+        Filter::And { filters } => FilterNode::And(
+            filters.iter().map(|f| compile_filter(f, interner)).collect(),
+        ),
+        Filter::Or { filters } => FilterNode::Or(
+            filters.iter().map(|f| compile_filter(f, interner)).collect(),
+        ),
+        Filter::Not { filter } => FilterNode::Not(Box::new(compile_filter(filter, interner))),
 
         Filter::IsNull { field } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(IsNullCallback { field_path: path }),
-            // If field path can't be interned, the field doesn't exist => always null
-            None => Box::new(TrueCallback),
+            Some(path) => FilterNode::IsNull { field_path: path },
+            None => FilterNode::True,
         },
         Filter::IsNotNull { field } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(IsNotNullCallback { field_path: path }),
-            None => Box::new(FalseCallback),
+            Some(path) => FilterNode::IsNotNull { field_path: path },
+            None => FilterNode::False,
         },
 
         Filter::In { field, values } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(InCallback {
+            Some(path) => FilterNode::In {
                 field_path: path,
                 values: values.clone(),
                 negate: false,
-            }),
-            None => Box::new(FalseCallback),
+            },
+            None => FilterNode::False,
         },
         Filter::NotIn { field, values } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(InCallback {
+            Some(path) => FilterNode::In {
                 field_path: path,
                 values: values.clone(),
                 negate: true,
-            }),
-            None => Box::new(TrueCallback),
+            },
+            None => FilterNode::True,
         },
 
         Filter::Like { field, pattern } => match intern_field_path(field, interner) {
             Some(path) => match like_pattern_to_regex(pattern, false) {
-                Some(regex) => Box::new(LikeCallback {
+                Some(regex) => FilterNode::Like {
                     field_path: path,
                     regex,
-                }),
-                None => Box::new(FalseCallback),
+                },
+                None => FilterNode::False,
             },
-            None => Box::new(FalseCallback),
+            None => FilterNode::False,
         },
         Filter::ILike { field, pattern } => match intern_field_path(field, interner) {
             Some(path) => match like_pattern_to_regex(pattern, true) {
-                Some(regex) => Box::new(LikeCallback {
+                Some(regex) => FilterNode::Like {
                     field_path: path,
                     regex,
-                }),
-                None => Box::new(FalseCallback),
+                },
+                None => FilterNode::False,
             },
-            None => Box::new(FalseCallback),
+            None => FilterNode::False,
         },
         Filter::Regex { field, pattern } => match intern_field_path(field, interner) {
             Some(path) => match Regex::new(pattern) {
-                Ok(regex) => Box::new(RegexCallback {
+                Ok(regex) => FilterNode::Regex {
                     field_path: path,
                     regex,
-                }),
-                Err(_) => Box::new(FalseCallback),
+                },
+                Err(_) => FilterNode::False,
             },
-            None => Box::new(FalseCallback),
+            None => FilterNode::False,
         },
         Filter::Contains { field, value } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(ContainsCallback {
+            Some(path) => FilterNode::Contains {
                 field_path: path,
                 pre_resolved: filter_value_to_inner(value),
                 value: value.clone(),
-            }),
-            None => Box::new(FalseCallback),
+            },
+            None => FilterNode::False,
         },
         Filter::ContainsAny { field, values } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(ContainsAnyCallback {
+            Some(path) => FilterNode::ContainsAny {
                 field_path: path,
                 values: values.clone(),
-            }),
-            None => Box::new(FalseCallback),
+            },
+            None => FilterNode::False,
         },
         Filter::ContainsAll { field, values } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(ContainsAllCallback {
+            Some(path) => FilterNode::ContainsAll {
                 field_path: path,
                 values: values.clone(),
-            }),
-            None => Box::new(FalseCallback),
+            },
+            None => FilterNode::False,
         },
         Filter::Between { field, from, to } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(BetweenCallback {
+            Some(path) => FilterNode::Between {
                 field_path: path,
                 pre_from: filter_value_to_inner(from),
                 pre_to: filter_value_to_inner(to),
                 from: from.clone(),
                 to: to.clone(),
-            }),
-            None => Box::new(FalseCallback),
+            },
+            None => FilterNode::False,
         },
         Filter::Exists { field } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(ExistsCallback { field_path: path }),
-            // If the field path can't be interned, the field doesn't exist => always false
-            None => Box::new(FalseCallback),
+            Some(path) => FilterNode::Exists { field_path: path },
+            None => FilterNode::False,
         },
         Filter::NotExists { field } => match intern_field_path(field, interner) {
-            Some(path) => Box::new(NotExistsCallback { field_path: path }),
-            // If the field path can't be interned, the field doesn't exist => always true
-            None => Box::new(TrueCallback),
+            Some(path) => FilterNode::NotExists { field_path: path },
+            None => FilterNode::True,
         },
     }
 }
@@ -752,14 +651,14 @@ fn compile_compare(
     value: &FilterValue,
     op: CompareOp,
     interner: &Interner,
-) -> Box<dyn FilterCallback> {
+) -> FilterNode {
     match intern_field_path(field, interner) {
-        Some(path) => Box::new(CompareCallback {
+        Some(path) => FilterNode::Compare {
             field_path: path,
             pre_resolved: filter_value_to_inner(value),
             value: value.clone(),
             op,
-        }),
-        None => Box::new(FalseCallback),
+        },
+        None => FilterNode::False,
     }
 }
