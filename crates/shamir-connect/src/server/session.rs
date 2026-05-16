@@ -87,6 +87,12 @@ pub struct Session {
     /// can derive the per-session HMAC key for destructive-op
     /// validation without consulting the store.
     pub session_id: [u8; limits::SESSION_ID_BYTES],
+    /// Cached HMAC key derived from `session_id`. Populated by
+    /// `SessionStore::insert` right after the session_id is
+    /// stamped (or lazily on first `hmac_key()` call). Avoids
+    /// the per-op SHA-256 redo on every destructive op in a
+    /// batch.
+    hmac_key_cache: std::sync::OnceLock<[u8; 32]>,
     /// Stable user identifier.
     pub user_id: [u8; 16],
     /// Username (post-NFC, UsernameCaseMapped).
@@ -122,6 +128,7 @@ impl Session {
     ) -> Self {
         Self {
             session_id: [0u8; limits::SESSION_ID_BYTES],
+            hmac_key_cache: std::sync::OnceLock::new(),
             user_id,
             username,
             permissions: parking_lot::RwLock::new(permissions),
@@ -132,6 +139,21 @@ impl Session {
             channel_binding_at_auth,
             pending_changepw_challenge: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// Derive the per-session HMAC key from `session_id`. Pure
+    /// `SHA256(domain || session_id)` — same shape `hmac_key()`
+    /// returns, factored out so `SessionStore::insert` can warm
+    /// the cache immediately after stamping `session_id`.
+    fn derive_hmac_key(session_id: &[u8; limits::SESSION_ID_BYTES]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"shamir-db hmac key v1\0");
+        h.update(session_id);
+        let out = h.finalize();
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&out);
+        k
     }
 
     /// Per-session HMAC key for destructive-op confirmation.
@@ -148,14 +170,9 @@ impl Session {
     /// about each specific drop/clear op. That's the formal
     /// guardrail we want on destructive DDL.
     pub fn hmac_key(&self) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(b"shamir-db hmac key v1\0");
-        h.update(self.session_id);
-        let out = h.finalize();
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&out);
-        k
+        *self
+            .hmac_key_cache
+            .get_or_init(|| Self::derive_hmac_key(&self.session_id))
     }
 
     /// Update `last_activity_ns` to current wall-clock.
@@ -234,6 +251,13 @@ impl SessionStore {
         mut session: Session,
     ) -> Arc<Session> {
         session.session_id = session_id;
+        // Warm the HMAC key cache while we still own the Session
+        // (OnceLock::set succeeds on the first attempt). The derive
+        // is SHA-256 over 23+32 bytes — cheap to do once at auth
+        // time, free for every subsequent destructive-op check.
+        let _ = session
+            .hmac_key_cache
+            .set(Session::derive_hmac_key(&session_id));
         let arc = Arc::new(session);
         self.by_sid.insert(session_id, arc.clone());
         arc
