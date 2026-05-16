@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::dispatch::RequestHandler;

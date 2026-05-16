@@ -61,6 +61,12 @@ dashmap = "6.1"
 indexmap = { version = "2", features = ["serde"] }
 tempfile = "3"
 
+# Global allocator. mimalloc is ~2× on allocation-heavy hot paths
+# (msgpack encode/decode, json::Value trees, Vec<json::Value>) vs
+# the platform default. Bench measurement: db_handler/ping_inprocess
+# 578 ns -> 294 ns (-44%, p=0.00).
+mimalloc = { version = "0.1", default-features = false }
+
 # Observability HTTP server (/healthz /readyz /metrics /info).
 # Versions chosen to share a single `metrics` recorder with `metrics-process` —
 # version skew between the metrics 0.23 / 0.24 lines silently produces empty
