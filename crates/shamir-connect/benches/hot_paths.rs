@@ -276,6 +276,18 @@ fn bench_session_store(c: &mut Criterion) {
             black_box(ok);
         });
     });
+    // Per-session HMAC key derivation. `Session::hmac_key()` is called
+    // by the server's destructive-op gate on every drop/clear op in a
+    // batch. The cache version returns from an OnceLock after the
+    // first call.
+    let session_arc_for_hmac = store.lookup(&sid).unwrap();
+    g.bench_function("hmac_key", |b| {
+        b.iter(|| {
+            let k = session_arc_for_hmac.hmac_key();
+            black_box(k);
+        });
+    });
+
     g.finish();
 }
 
