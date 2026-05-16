@@ -163,13 +163,14 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 
 ---
 
-## R6 — Interner Borrow + FilterNode enum + inlining
+## R6 — Interner Borrow + FilterNode enum + inlining + SmallVec
 
 | Commit | Сделано | Δ |
 |--------|---------|----|
 | `ecffd54` | **Interner Borrow<str>** на UserKey — `DashMap::get(s)` принимает `&str` напрямую, no `String` alloc на cache-hit | **2.2×** touch_ind (340→142 ns) |
 | `749b47a` | **FilterNode enum dispatch** — 14 `*Callback` структур + `Box<dyn FilterCallback>` → один `FilterNode` enum со static dispatch | refactor (вин on complex trees, parity на simple) |
 | `3c294a0` | **`#[inline]`** hints на горячих leaf functions (compare_values, resolve_field_ref, filter_value_to_inner) | hint cross-crate |
+| `eb10b41` | **SmallVec<[u64; 4]>** для FilterNode field_path — inline storage до 4 segments, no heap для типичных 1-2 уровневых путей | **1.36–1.46×** filter_eval (eq_int 186→137 µs, eq_str_nested 400→274 µs) |
 
 ---
 
@@ -243,6 +244,7 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | SelectProjection borrow + pre-keys | **3.06×** | `42720a4` |
 | FilterNode enum dispatch | refactor | `749b47a` |
 | `#[inline]` hints | hint | `3c294a0` |
+| SmallVec field_path | **1.36–1.46×** | `eb10b41` |
 
 ### Codecs
 | # | Win | Commit |
@@ -281,6 +283,8 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | bincode 1.x → 2.x | пропущен в разведке | Используется только для index metadata (admin path), не query hot path. ROI низкий. |
 | HMAC key cache local Option в db_handler | заменён на #33 OnceLock | Лучше через Session field. |
 | Encode buffer reuse (BytesMut pool) | #32 closed | Текущий паттерн `encode → Bytes::from(Vec)` (move ownership). Reuse требовал бы `Bytes::copy_from_slice` — добавляет memcpy. Net regression. |
+| `run_blocking` audit (db_handler) | #60 closed | Уже использует `tokio::task::block_in_place + Handle::current().block_on`. Правильный паттерн — НЕ spawn_blocking (без context switch). |
+| Audit log sync emission | #59 closed | `AuditAppender` уже имеет Strict + Batched modes. Production default = Batched (mutex.lock + Vec::push). Уже оптимально. |
 
 ---
 
@@ -297,6 +301,8 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | WAL fsync batching / group commit (#38) | Многодневная архитектурная работа: bench с durable backend, implement group commit window. |
 | Tokio runtime tuning (#40) | Defaults обычно OK. Требует production-like load + tokio-console. |
 | Backend durability further tuning (#54) | redb уже `Durability::None`; sled `flush_every_ms` default. Уже оптимизировано — следующий шаг требует production write-heavy bench. |
+| `rmp_serde::to_vec_named` → `to_vec` compact (#61) | Wire-breaking change. Decoder hot path для DbRequest/DbResponse. Win ~10-30% bytes + faster encode, но требует coordinated client SDK migration. Откладываю до major protocol revision. |
+| PGO build (#58) | Production-build concern. Setup: llvm-tools-preview + 2 builds + workload run. Win 5-15% broadly. Не для single /opti cycle — это release engineering. |
 
 ---
 
