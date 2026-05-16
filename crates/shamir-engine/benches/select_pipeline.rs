@@ -13,8 +13,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use shamir_engine::query::read::exec::apply_select;
-use shamir_engine::query::read::{Select, SelectItem};
+use shamir_engine::query::read::exec::{apply_order_by, apply_select};
+use shamir_engine::query::read::{OrderBy, OrderByItem, OrderDirection, Select, SelectItem};
+use serde_json as json;
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
@@ -84,6 +85,55 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(apply_select(&records, &select_all, &interner)))
     });
     group.finish();
+
+    // Projected JSON for ORDER BY bench. Build once, clone per
+    // iteration so the sort is the only measured work.
+    let projected: Vec<json::Value> = apply_select(&records, &select_5, &interner);
+    let order_by_single = OrderBy {
+        items: vec![OrderByItem {
+            field: vec!["age".to_string()],
+            direction: OrderDirection::Asc,
+            nulls: None,
+        }],
+    };
+    let order_by_two = OrderBy {
+        items: vec![
+            OrderByItem {
+                field: vec!["age".to_string()],
+                direction: OrderDirection::Asc,
+                nulls: None,
+            },
+            OrderByItem {
+                field: vec!["name".to_string()],
+                direction: OrderDirection::Asc,
+                nulls: None,
+            },
+        ],
+    };
+
+    let mut g2 = c.benchmark_group("apply_order_by");
+    g2.throughput(Throughput::Elements(1000));
+    g2.bench_function("single_int_1000", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_single);
+                black_box(recs);
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g2.bench_function("two_fields_1000", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_two);
+                black_box(recs);
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g2.finish();
 }
 
 criterion_group!(benches, bench);
