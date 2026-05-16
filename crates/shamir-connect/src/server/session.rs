@@ -97,8 +97,12 @@ pub struct Session {
     pub user_id: [u8; 16],
     /// Username (post-NFC, UsernameCaseMapped).
     pub username: String,
-    /// Permissions snapshot at auth time.
-    pub permissions: parking_lot::RwLock<SessionPermissions>,
+    /// Permissions snapshot at auth time. Frozen for the session's
+    /// lifetime — no code path writes to it (verified via repo-wide
+    /// grep). The previous `parking_lot::RwLock<...>` wrapper added a
+    /// shared-lock acquire on every request just to read a `bool`;
+    /// since there's no writer to race with, the lock is dead weight.
+    pub permissions: SessionPermissions,
     /// Wall-clock creation timestamp (for spec §7.5 validity check).
     pub created_at_ns: u64,
     /// Last activity wall-clock (idle TTL eviction).
@@ -131,7 +135,7 @@ impl Session {
             hmac_key_cache: std::sync::OnceLock::new(),
             user_id,
             username,
-            permissions: parking_lot::RwLock::new(permissions),
+            permissions,
             created_at_ns: now_ns,
             last_activity_ns: AtomicU64::new(now_ns),
             transport_kind,

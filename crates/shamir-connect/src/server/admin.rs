@@ -44,7 +44,7 @@ pub trait AuditSink: Send + Sync {
 
 /// Helper: enforce admin authorization on the calling session.
 fn require_superuser(session: &Session) -> Result<()> {
-    if session.permissions.read().is_superuser {
+    if session.permissions.is_superuser {
         Ok(())
     } else {
         Err(Error::AuthFailed)

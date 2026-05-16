@@ -564,7 +564,7 @@ fn resumed_admin_session_retains_roles_per_diagram_02() {
 
     // Pull the freshly-created session and assert role/superuser preserved.
     let session = store.lookup(&ok.session_id).expect("session created");
-    let perms = session.permissions.read();
+    let perms = &session.permissions;
     assert!(
         perms.is_superuser,
         "admin resumed via ticket must keep superuser flag (diagram 02 step 12)"
@@ -624,7 +624,7 @@ fn refresh_ticket_carries_roles_forward_per_diagram_02() {
     )
     .unwrap();
     let session2 = store.lookup(&ok2.session_id).expect("session created");
-    assert!(session2.permissions.read().is_superuser);
+    assert!(session2.permissions.is_superuser);
 }
 
 /// Spec §5.7 NORMATIVE / diagram 12 footer: a ticket issued under the

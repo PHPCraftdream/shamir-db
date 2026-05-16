@@ -278,7 +278,7 @@ impl ShamirDbHandler {
             .min(self.query_limits.max_queries_per_batch);
 
         // Admin / auth gate.
-        if !session.permissions.read().is_superuser {
+        if !session.permissions.is_superuser {
             for (alias, entry) in &batch.queries {
                 if entry.op.is_admin() {
                     return DbResponse::Error {
@@ -367,7 +367,7 @@ impl ShamirDbHandler {
         password: String,
         roles: Vec<String>,
     ) -> DbResponse {
-        if !session.permissions.read().is_superuser {
+        if !session.permissions.is_superuser {
             return DbResponse::Error {
                 code: "permission_denied".into(),
                 message: "create_scram_user requires superuser".into(),
