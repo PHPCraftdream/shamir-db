@@ -87,3 +87,7 @@ harness = false
 [[bench]]
 name = "distinct"
 harness = false
+
+[[bench]]
+name = "select_pipeline"
+harness = false
