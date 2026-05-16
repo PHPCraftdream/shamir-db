@@ -66,11 +66,15 @@ fn group_key_item(val: Option<&InnerValue>, interner: &Interner) -> GroupKeyItem
 // ============================================================================
 
 /// Pre-resolved select projection info (avoids re-interning paths per record).
+///
+/// Output keys (alias or last path segment) are pre-allocated as
+/// `String` at compile time — `project()` clones them per record
+/// instead of paying `to_string()` for each field on each row.
 pub struct SelectProjection {
     /// true → just convert whole record to JSON
     is_all: bool,
-    /// (interned_path, raw_path_segments, alias)
-    fields: Vec<(Option<Vec<u64>>, Vec<String>, Option<String>)>,
+    /// (interned_path, pre-built output key)
+    fields: Vec<(Option<Vec<u64>>, String)>,
 }
 
 impl SelectProjection {
@@ -88,7 +92,10 @@ impl SelectProjection {
                 .filter_map(|item| match item {
                     SelectItem::Field { path, alias } => {
                         let interned = intern_field_path(path, interner);
-                        Some((interned, path.clone(), alias.clone()))
+                        let key = alias
+                            .clone()
+                            .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                        Some((interned, key))
                     }
                     _ => None,
                 })
@@ -107,14 +114,16 @@ impl SelectProjection {
             return json::Value::Object(json::Map::new());
         }
         let mut obj = json::Map::new();
-        for (interned_path, raw_path, alias) in &self.fields {
+        for (interned_path, key) in &self.fields {
+            // Borrowing walk — no per-row leaf clone. The result is
+            // immediately consumed by inner_to_json_value, which takes
+            // `&InnerValue` already.
             let val = interned_path
                 .as_ref()
-                .and_then(|p| resolve_field(record, p))
-                .map(|v| inner_to_json_value(&v, interner))
+                .and_then(|p| resolve_field_ref(record, p))
+                .map(|v| inner_to_json_value(v, interner))
                 .unwrap_or(json::Value::Null);
-            let key = alias.as_deref().unwrap_or_else(|| raw_path.last().map(|s| s.as_str()).unwrap_or(""));
-            obj.insert(key.to_string(), val);
+            obj.insert(key.clone(), val);
         }
         json::Value::Object(obj)
     }

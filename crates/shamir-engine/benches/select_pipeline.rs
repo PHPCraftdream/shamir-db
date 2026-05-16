@@ -1,0 +1,90 @@
+//! SELECT projection bench — no GROUP BY, no aggregates.
+//!
+//! `SelectProjection::project` is called once per record on every read
+//! query. Hot loop allocates:
+//!   - `resolve_field` clones the leaf (already optimised on the
+//!     filter side via `resolve_field_ref` — projection still uses
+//!     the owned variant);
+//!   - `inner_to_json_value` walks the leaf into json::Value;
+//!   - `key.to_string()` allocates the output map key per field
+//!     per record (alias or last path segment).
+//!
+//! Bench drives `apply_select` over 1000 records, 5 selected fields.
+
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+
+use shamir_engine::query::read::exec::apply_select;
+use shamir_engine::query::read::{Select, SelectItem};
+use shamir_types::core::interner::{Interner, TouchInd};
+use shamir_types::types::common::new_map_wc;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+
+fn make_record(interner: &Interner, idx: u32) -> InnerValue {
+    let touch = |s: &str| match interner.touch_ind(s).unwrap() {
+        TouchInd::Exists(k) | TouchInd::New(k) => k,
+    };
+    let mut m = new_map_wc(10);
+    m.insert(touch("id"), InnerValue::Int(idx as i64));
+    m.insert(touch("name"), InnerValue::Str(format!("user-{}", idx)));
+    m.insert(touch("age"), InnerValue::Int((idx % 100) as i64));
+    m.insert(touch("score"), InnerValue::F64(idx as f64 * 1.5));
+    m.insert(touch("email"), InnerValue::Str(format!("u{}@example.com", idx)));
+    m.insert(touch("city"), InnerValue::Str("Jerusalem".into()));
+    m.insert(touch("active"), InnerValue::Bool(idx % 2 == 0));
+    InnerValue::Map(m)
+}
+
+fn bench(c: &mut Criterion) {
+    let interner = Interner::new();
+    for k in ["id", "name", "age", "score", "email", "city", "active"] {
+        let _ = interner.touch_ind(k);
+    }
+    let records: Vec<(RecordId, InnerValue)> = (0..1000)
+        .map(|i| (RecordId::new(), make_record(&interner, i)))
+        .collect();
+
+    let select_5 = Select {
+        items: vec![
+            SelectItem::Field {
+                path: vec!["id".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["name".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["age".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["score".to_string()],
+                alias: None,
+            },
+            SelectItem::Field {
+                path: vec!["email".to_string()],
+                alias: None,
+            },
+        ],
+        distinct: false,
+    };
+
+    let select_all = Select {
+        items: vec![SelectItem::All],
+        distinct: false,
+    };
+
+    let mut group = c.benchmark_group("apply_select");
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("5_fields_1000_records", |b| {
+        b.iter(|| black_box(apply_select(&records, &select_5, &interner)))
+    });
+    group.bench_function("select_all_1000_records", |b| {
+        b.iter(|| black_box(apply_select(&records, &select_all, &interner)))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench);
+criterion_main!(benches);
