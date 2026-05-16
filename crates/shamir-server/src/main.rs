@@ -5,6 +5,9 @@
 //! provider, init tracing, hand the [`Config`] to the launcher, then wait
 //! for SIGINT/SIGTERM.
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
