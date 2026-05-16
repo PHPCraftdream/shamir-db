@@ -14,6 +14,17 @@ impl AsRef<str> for UserKey {
     }
 }
 
+/// `Borrow<str>` lets HashMap-shape lookups (DashMap::get,
+/// HashMap::get) take a plain `&str` without first allocating
+/// a `UserKey` wrapper. Hot fast path on `touch_ind` /
+/// `get_ind` — every cache-hit lookup used to pay one
+/// `String::from(s)` to build the lookup key.
+impl std::borrow::Borrow<str> for UserKey {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl std::fmt::Display for UserKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
