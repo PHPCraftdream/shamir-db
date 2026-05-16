@@ -36,6 +36,7 @@ pub trait FilterCallback: Send + Sync {
 /// resolved leaf. All filter nodes below use this — the old owned
 /// variant survives only for callers outside the eval module that
 /// still rely on `Option<InnerValue>`.
+#[inline]
 pub fn resolve_field_ref<'a>(record: &'a InnerValue, path: &[u64]) -> Option<&'a InnerValue> {
     let mut cur = record;
     for &id in path {
@@ -67,6 +68,7 @@ pub fn intern_field_path(field: &[String], interner: &Interner) -> Option<Vec<u6
 }
 
 /// Compare two InnerValue instances. Returns an Ordering if comparable.
+#[inline]
 pub fn compare_values(a: &InnerValue, b: &InnerValue) -> Option<Ordering> {
     match (a, b) {
         (InnerValue::Null, InnerValue::Null) => Some(Ordering::Equal),
@@ -83,6 +85,7 @@ pub fn compare_values(a: &InnerValue, b: &InnerValue) -> Option<Ordering> {
 /// Convert a literal FilterValue to InnerValue without record/context.
 ///
 /// Returns `None` for non-literal variants (FieldRef, QueryRef, FnCall, Expr, Cond).
+#[inline]
 pub fn filter_value_to_inner(fv: &FilterValue) -> Option<InnerValue> {
     match fv {
         FilterValue::Null => Some(InnerValue::Null),
