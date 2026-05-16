@@ -77,12 +77,17 @@ impl Interner {
 
     /// Gets an ID for a string, creating it if it doesn't exist.
     pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, &'static str> {
-        let key = UserKey::from_str(str.as_ref());
+        let s = str.as_ref();
 
-        // Fast path: existing entry.
-        if let Some(existing) = self.map_user_to_interned.get(&key) {
+        // Fast path: existing entry. `UserKey: Borrow<str>` lets the
+        // DashMap lookup take a `&str` directly — no `String` alloc
+        // on cache hits (the 99% case once the codec/query has warmed
+        // up). Only the cold "first touch" path below allocates.
+        if let Some(existing) = self.map_user_to_interned.get(s) {
             return Ok(TouchInd::Exists(existing.clone()));
         }
+
+        let key = UserKey::from_str(s);
 
         // Reserve a new ID + serialize the reverse update under
         // the same mutex. Concurrent writers each clone the
@@ -134,9 +139,13 @@ impl Interner {
     }
 
     /// Gets the interned key corresponding to a user key.
+    /// Same Borrow<str> trick as `touch_ind` — no `String` alloc on
+    /// the lookup; only the cache miss path would (and we just
+    /// return None on miss anyway).
     pub fn get_ind<S: AsRef<str>>(&self, str: S) -> Option<InternerKey> {
-        let key = UserKey::from_str(str.as_ref());
-        self.map_user_to_interned.get(&key).map(|id| id.clone())
+        self.map_user_to_interned
+            .get(str.as_ref())
+            .map(|id| id.clone())
     }
 
     /// Returns the current number of interned keys.
