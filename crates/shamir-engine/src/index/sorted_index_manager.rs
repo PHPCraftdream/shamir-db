@@ -519,34 +519,44 @@ fn extract_and_encode(
     record: &InnerValue,
     field_path: &[u64],
 ) -> DbResult<Option<Vec<u8>>> {
-    let Some(val) = resolve_path(record, field_path) else {
+    let Some(val) = resolve_path_ref(record, field_path) else {
         return Ok(None);
     };
     let mut buf = Vec::new();
     match val {
         InnerValue::Null => sort_codec::encode_null(&mut buf),
-        InnerValue::Bool(b) => sort_codec::encode_bool(&mut buf, b),
-        InnerValue::Int(i) => sort_codec::encode_i64(&mut buf, i),
+        InnerValue::Bool(b) => sort_codec::encode_bool(&mut buf, *b),
+        InnerValue::Int(i) => sort_codec::encode_i64(&mut buf, *i),
         InnerValue::F64(f) => {
-            if sort_codec::encode_f64(&mut buf, f).is_err() {
+            if sort_codec::encode_f64(&mut buf, *f).is_err() {
                 return Ok(None);
             }
         }
-        InnerValue::Str(s) => sort_codec::encode_str(&mut buf, &s),
-        InnerValue::Bin(b) => sort_codec::encode_bytes(&mut buf, &b),
+        InnerValue::Str(s) => sort_codec::encode_str(&mut buf, s),
+        InnerValue::Bin(b) => sort_codec::encode_bytes(&mut buf, b),
         _ => return Ok(None),
     }
     Ok(Some(buf))
 }
 
-fn resolve_path(record: &InnerValue, field_path: &[u64]) -> Option<InnerValue> {
-    let mut cur = record.clone();
+/// Walk `record` along `field_path`, returning a borrow of the leaf.
+///
+/// The previous owned-`InnerValue` version started with
+/// `let mut cur = record.clone()` — a *full* deep clone of the
+/// entire record on every sorted-index entry, even when the path
+/// resolved to a 4-byte Int leaf. For batch writes that's a clone
+/// per (record × sorted-index) pair on the hot path. The ref walk
+/// allocates nothing — same shape as `IndexManager::extract_value_by_path_ref`.
+fn resolve_path_ref<'a>(record: &'a InnerValue, field_path: &[u64]) -> Option<&'a InnerValue> {
+    let mut cur = record;
     for &p in field_path {
-        let key = shamir_types::core::interner::InternerKey::new(p);
-        cur = match cur {
-            InnerValue::Map(map) => map.get(&key)?.clone(),
+        match cur {
+            InnerValue::Map(map) => {
+                let key = shamir_types::core::interner::InternerKey::new(p);
+                cur = map.get(&key)?;
+            }
             _ => return None,
-        };
+        }
     }
     Some(cur)
 }
