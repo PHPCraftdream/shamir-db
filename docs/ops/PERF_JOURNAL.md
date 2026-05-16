@@ -171,6 +171,7 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | `749b47a` | **FilterNode enum dispatch** — 14 `*Callback` структур + `Box<dyn FilterCallback>` → один `FilterNode` enum со static dispatch | refactor (вин on complex trees, parity на simple) |
 | `3c294a0` | **`#[inline]`** hints на горячих leaf functions (compare_values, resolve_field_ref, filter_value_to_inner) | hint cross-crate |
 | `eb10b41` | **SmallVec<[u64; 4]>** для FilterNode field_path — inline storage до 4 segments, no heap для типичных 1-2 уровневых путей | **1.36–1.46×** filter_eval (eq_int 186→137 µs, eq_str_nested 400→274 µs) |
+| `06c128f` | **Realistic Execute bench** добавлен в db_handler_rps — filter+select+order+limit на 100 records (32 µs/req) + full_scan на 100 records (21 µs/req). Realistic baseline зафиксирован — Execute path ≈108× медленнее Ping. | bench (enabling) |
 
 ---
 
@@ -285,6 +286,8 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | Encode buffer reuse (BytesMut pool) | #32 closed | Текущий паттерн `encode → Bytes::from(Vec)` (move ownership). Reuse требовал бы `Bytes::copy_from_slice` — добавляет memcpy. Net regression. |
 | `run_blocking` audit (db_handler) | #60 closed | Уже использует `tokio::task::block_in_place + Handle::current().block_on`. Правильный паттерн — НЕ spawn_blocking (без context switch). |
 | Audit log sync emission | #59 closed | `AuditAppender` уже имеет Strict + Batched modes. Production default = Batched (mutex.lock + Vec::push). Уже оптимально. |
+| TableManager lookup кэш в Session | #64 closed | DashMap<String, ...>::get ~100ns на 32µs request = 0.3%. Cache добавит invalidation complexity (table drop). Win не оправдан без profile signal. |
+| apply_select streaming (без Vec<json::Value>) | #63 closed | QueryResult.records: Vec<serde_json::Value> — публичный API. Streaming требует менять QueryResult shape (impl Serialize), broad refactor в query/batch/dispatch. Win неясен без profile (msgpack encode walks equally). Откладываю до architectural redesign. |
 
 ---
 
