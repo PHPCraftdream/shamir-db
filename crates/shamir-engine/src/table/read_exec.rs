@@ -8,7 +8,7 @@ use std::time::Instant;
 use futures::StreamExt;
 
 use shamir_types::core::interner::{Interner, InternerKey};
-use crate::query::filter::eval::{compile_filter, filter_value_to_inner, intern_field_path, FilterCallback};
+use crate::query::filter::eval::{compile_filter, filter_value_to_inner, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, PaginationInfo, QueryResult, QueryStats, ReadQuery, SelectItem};
@@ -493,19 +493,19 @@ impl TableManager {
         let has_order = query.order_by.is_some();
         let has_distinct = query.select.distinct;
 
-        let filter_cb: Option<Box<dyn FilterCallback>> =
+        let filter_cb: Option<FilterNode> =
             query.r#where.as_ref().map(|f| compile_filter(f, interner));
 
         let needs_full_collect = has_group_by || has_agg || has_order || has_distinct;
 
         if needs_full_collect {
-            self.read_collecting(query, ctx, interner, filter_cb.as_deref(), batch_size, start)
+            self.read_collecting(query, ctx, interner, filter_cb.as_ref(), batch_size, start)
                 .await
         } else if query.count_total {
-            self.read_counting(query, interner, filter_cb.as_deref(), ctx, batch_size, start)
+            self.read_counting(query, interner, filter_cb.as_ref(), ctx, batch_size, start)
                 .await
         } else {
-            self.read_streaming(query, interner, filter_cb.as_deref(), ctx, batch_size, start)
+            self.read_streaming(query, interner, filter_cb.as_ref(), ctx, batch_size, start)
                 .await
         }
     }
@@ -603,7 +603,7 @@ impl TableManager {
             .await?;
 
         // 2. Compile residual filter if present.
-        let residual_cb: Option<Box<dyn FilterCallback>> =
+        let residual_cb: Option<FilterNode> =
             residual.map(|f| compile_filter(f, interner));
 
         // 3. Vectored fetch + per-record residual filter. One round
@@ -820,7 +820,7 @@ impl TableManager {
         }
 
         // 2. Compile residual filter if present
-        let residual_cb: Option<Box<dyn FilterCallback>> =
+        let residual_cb: Option<FilterNode> =
             residual.map(|f| compile_filter(f, interner));
 
         // 3. Vectored fetch + per-record residual filter. Stale
@@ -897,7 +897,7 @@ impl TableManager {
         query: &ReadQuery,
         ctx: &FilterContext<'_>,
         interner: &Interner,
-        filter_cb: Option<&dyn FilterCallback>,
+        filter_cb: Option<&FilterNode>,
         batch_size: usize,
         start: Instant,
     ) -> DbResult<QueryResult> {
@@ -981,7 +981,7 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
-        filter_cb: Option<&dyn FilterCallback>,
+        filter_cb: Option<&FilterNode>,
         ctx: &FilterContext<'_>,
         batch_size: usize,
         start: Instant,
@@ -1057,7 +1057,7 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
-        filter_cb: Option<&dyn FilterCallback>,
+        filter_cb: Option<&FilterNode>,
         ctx: &FilterContext<'_>,
         batch_size: usize,
         start: Instant,
