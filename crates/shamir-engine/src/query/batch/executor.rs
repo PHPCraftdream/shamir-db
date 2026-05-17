@@ -48,17 +48,18 @@ pub async fn execute_batch(
     validate_tables(&request.queries, resolver).await?;
 
     // 3. Execute stages
-    let all_results = execute_plan(&plan, &request.queries, resolver, admin).await?;
+    let mut plan = plan;
+    let all_results = execute_plan(&mut plan, &request.queries, resolver, admin).await?;
 
     // 4. Filter results for response
-    let results = filter_results(&all_results, request, &plan);
+    let results = filter_results(all_results, request);
 
     let elapsed = start.elapsed();
 
     Ok(BatchResponse {
         id: request.id.clone(),
         results,
-        execution_plan: plan.stages.clone(),
+        execution_plan: std::mem::take(&mut plan.stages),
         execution_time_us: elapsed.as_micros() as u64,
         transaction: None,
     })
@@ -136,7 +137,7 @@ async fn validate_tables(
 /// scoped-spawn helper); kept out of scope for now and tracked as a
 /// future opt.
 async fn execute_plan(
-    plan: &BatchPlan,
+    plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
@@ -286,34 +287,20 @@ fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
 
 /// Filter results based on return_all / return_only / return_result flags.
 fn filter_results(
-    all_results: &TMap<String, QueryResult>,
+    mut all_results: TMap<String, QueryResult>,
     request: &BatchRequest,
-    _plan: &BatchPlan,
 ) -> TMap<String, QueryResult> {
-    let mut out: TMap<String, QueryResult> = new_map();
-
-    // return_only takes precedence
     if let Some(ref only) = request.return_only {
-        for alias in only {
-            if let Some(result) = all_results.get(alias) {
-                out.insert(alias.clone(), result.clone());
-            }
-        }
-        return out;
+        let keep: std::collections::HashSet<String> = only.iter().cloned().collect();
+        all_results.retain(|alias, _| keep.contains(alias));
+        return all_results;
     }
 
-    // Otherwise use return_all + per-entry return_result
-    for (alias, result) in all_results {
-        if !request.return_all {
-            // Only include entries that explicitly set return_result = true
-            if let Some(entry) = request.queries.get(alias) {
-                if !entry.return_result {
-                    continue;
-                }
-            }
-        }
-        out.insert(alias.clone(), result.clone());
+    if !request.return_all {
+        all_results.retain(|alias, _| {
+            request.queries.get(alias).map_or(false, |e| e.return_result)
+        });
     }
 
-    out
+    all_results
 }
