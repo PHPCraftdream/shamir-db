@@ -127,31 +127,23 @@ impl Store for InMemoryStore {
         let data = self.data.clone();
 
         Box::pin(stream! {
-            let mut all_keys: Vec<RecordKey> = data
+            // Collect (key, value) pairs in one pass. The previous shape
+            // built a `Vec<RecordKey>` and then re-looked up each value
+            // via `data.get(&key)` inside the batch loop — one extra
+            // hash + shard-lock per record. DashMap::iter already exposes
+            // both, so the second lookup is pure waste.
+            let mut entries: Vec<(RecordKey, Bytes)> = data
                 .iter()
-                .map(|ref_| ref_.key().clone())
+                .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
                 .collect();
 
-            // Sort for consistent ordering
-            all_keys.sort();
+            // Sort for consistent ordering (by key).
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-            while !all_keys.is_empty() {
-                let batch: Vec<_> = all_keys
-                    .drain(..std::cmp::min(batch_size, all_keys.len()))
-                    .collect();
-
-                let mut result = Vec::new();
-                for key in batch {
-                    if let Some(ref_) = data.get(&key) {
-                        result.push((key, ref_.value().clone()));
-                    }
-                }
-
-                if result.is_empty() {
-                    break;
-                }
-
-                yield Ok(result);
+            while !entries.is_empty() {
+                let take = std::cmp::min(batch_size, entries.len());
+                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
+                yield Ok(batch);
             }
         })
     }
@@ -165,32 +157,21 @@ impl Store for InMemoryStore {
 
         Box::pin(stream! {
             let prefix_slice = prefix.to_vec();
-            let matching_keys: Vec<RecordKey> = data
+            // Same shape as `iter_stream`: one pass collecting (key,
+            // value), filtered by prefix. No second `data.get(&key)`
+            // round-trip for the matched keys.
+            let mut entries: Vec<(RecordKey, Bytes)> = data
                 .iter()
                 .filter(|ref_| ref_.key().starts_with(&prefix_slice[..]))
-                .map(|ref_| ref_.key().clone())
+                .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
                 .collect();
 
-            let mut keys = matching_keys;
-            keys.sort();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-            while !keys.is_empty() {
-                let batch: Vec<_> = keys
-                    .drain(..std::cmp::min(batch_size, keys.len()))
-                    .collect();
-
-                let mut result = Vec::new();
-                for key in batch {
-                    if let Some(ref_) = data.get(&key) {
-                        result.push((key, ref_.value().clone()));
-                    }
-                }
-
-                if result.is_empty() {
-                    break;
-                }
-
-                yield Ok(result);
+            while !entries.is_empty() {
+                let take = std::cmp::min(batch_size, entries.len());
+                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
+                yield Ok(batch);
             }
         })
     }
