@@ -173,7 +173,14 @@ impl Store for CachedStore {
 
                 pending.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
-                    let _ = inner.set(key, value).await;
+                    // §B8: WriteMode::Async is fire-and-forget by design,
+                    // but a swallowed `Err` silently loses durability.
+                    // Log so an operator gets a signal under sustained
+                    // backing-store failure; the cache already holds the
+                    // value so subsequent reads still succeed.
+                    if let Err(e) = inner.set(key, value).await {
+                        log::error!("storage_cached async write to backing store failed: {}", e);
+                    }
                     pending.fetch_sub(1, Ordering::Relaxed);
                 });
 

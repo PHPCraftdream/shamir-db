@@ -257,6 +257,12 @@ impl TableManager {
     /// Persist a buffer config and hot-apply it to both stores.
     /// Idempotent — replays cleanly across restarts because the
     /// persisted value is reloaded on `TableManager::create`.
+    ///
+    /// cancel-safe: NO — persist → apply on data store → apply on
+    /// info store. Cancellation between persist and apply leaves
+    /// the live store config out of sync with the persisted value
+    /// until the next restart (idempotent reload converges). Do NOT
+    /// call under `tokio::select!` / `tokio::time::timeout`.
     pub async fn set_buffer_config(&self, cfg: &MemBufferConfig) -> DbResult<()> {
         buffer_config::save(&self.info_store, cfg).await?;
         self.table.data_store().apply_buffer_config(cfg).await?;
@@ -316,6 +322,14 @@ impl TableManager {
 
     /// Register a new sorted (B-tree-by-value) index over a single
     /// scalar field, then backfill it from existing records.
+    ///
+    /// cancel-safe: NO — `register` persists the definition, then
+    /// the backfill streams existing rows into the new index.
+    /// Cancellation after register but before/during the backfill
+    /// loop leaves a registered sorted index with partial entries;
+    /// the doctor's `repair()` rebuilds the index from scratch as a
+    /// recovery path. Do NOT call under `tokio::select!` /
+    /// `tokio::time::timeout`.
     pub async fn create_sorted_index(
         &self,
         index_name: &str,

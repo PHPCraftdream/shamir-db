@@ -57,6 +57,15 @@ pub struct RedbRepo {
 }
 
 impl RedbRepo {
+    /// Open / create a redb-backed repo at `path`.
+    ///
+    /// Synchronous on purpose — `Database::create` does a blocking
+    /// fsync chain (file open, allocate, write metadata). The only
+    /// in-tree async caller is `RedbRepoFactory::create` which
+    /// already wraps this in `tokio::task::spawn_blocking`. Tests
+    /// call it directly from sync code. Do NOT call this from an
+    /// `async fn` body without a `spawn_blocking` / `block_in_place`
+    /// wrapper — it will stall the tokio worker (§B11).
     pub fn new(path: impl AsRef<Path>) -> DbResult<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {

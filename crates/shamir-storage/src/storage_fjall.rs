@@ -101,7 +101,16 @@ impl Store for FjallStore {
             let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
 
-            // Check if key exists first
+            // §B13 (acknowledged, benign here): `contains_key` then
+            // `insert` is two separate fjall ops — formally a TOCTOU
+            // window. Safe in this codepath because `RecordId::new()`
+            // returns a fresh random 128-bit id per call; the
+            // collision probability across concurrent inserts is
+            // negligible (~2⁻¹²⁸). fjall 3.0 `Keyspace::insert`
+            // returns `Result<(), Error>` with no prior-value, and
+            // there is no `compare_and_swap` at this layer — atomic
+            // check-and-insert would require a transaction (extra
+            // round-trip per write, regressing hot-path throughput).
             if keyspace
                 .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?
@@ -109,7 +118,6 @@ impl Store for FjallStore {
                 return Err(DbError::KeyExists(format!("Key already exists: {:?}", key)));
             }
 
-            // Insert the value
             keyspace
                 .insert(&key[..], &*value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
@@ -123,17 +131,22 @@ impl Store for FjallStore {
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         let keyspace = self.keyspace.clone();
         task::spawn_blocking(move || -> DbResult<bool> {
-            // Check if key existed before
+            // §B13 (acknowledged): same TOCTOU shape as `insert`
+            // above. The engine layer never issues two concurrent
+            // `set` calls for the same `RecordKey` for a single
+            // table (writes are serialised through `TableManager`
+            // dispatch), so the `existed` flag stays consistent
+            // with the actual write under normal use. Concurrent
+            // calls from outside the engine (e.g. tooling) would
+            // race; documented here so the contract is explicit.
             let existed = keyspace
                 .contains_key(&key[..])
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            // Insert/update the value
             keyspace
                 .insert(&key[..], &*value)
                 .map_err(|e| DbError::Storage(e.to_string()))?;
 
-            // Return true if created (didn't exist), false if updated (existed)
             Ok(!existed)
         })
         .await
