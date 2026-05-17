@@ -297,16 +297,24 @@ impl UserDirectory for InMemoryUserDirectory {
     }
 
     fn insert(&self, username: String, record: UserRecord) -> Result<[u8; 16]> {
-        if self.by_name.contains_key(&username) {
-            return Err(Error::InvalidInput("user already exists"));
+        // §B13: atomic check-and-insert via DashMap entry — two concurrent
+        // `insert` calls with the same username must not both succeed.
+        use dashmap::mapref::entry::Entry;
+        match self.by_name.entry(username) {
+            Entry::Occupied(_) => Err(Error::InvalidInput("user already exists")),
+            Entry::Vacant(slot) => {
+                let id_u128 = {
+                    let mut nid = self.next_id.lock();
+                    let v = *nid;
+                    *nid += 1;
+                    v
+                };
+                let mut user_id = [0u8; 16];
+                user_id.copy_from_slice(&id_u128.to_be_bytes());
+                slot.insert((user_id, record));
+                Ok(user_id)
+            }
         }
-        let mut nid = self.next_id.lock();
-        let id_u128 = *nid;
-        *nid += 1;
-        let mut user_id = [0u8; 16];
-        user_id.copy_from_slice(&id_u128.to_be_bytes());
-        self.by_name.insert(username, (user_id, record));
-        Ok(user_id)
     }
 
     fn update_roles(&self, _username: &str, _roles: Vec<String>, _now_ns: u64) -> Result<bool> {

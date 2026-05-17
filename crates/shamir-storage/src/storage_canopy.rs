@@ -152,6 +152,12 @@ pub struct CanopyStore {
     table_name: String,
 }
 
+// SAFETY: `canopydb::Database` is internally synchronised (its read/write
+// transactions take `&self` and the crate documents concurrent access).
+// `Arc<Database>` keeps the handle alive across threads. All mutation
+// of `CanopyStore` happens through the transactional API which serialises
+// writers internally. These impls cover the case where canopydb's
+// auto-impl would not fire (e.g. PhantomData or future internal fields).
 unsafe impl Send for CanopyStore {}
 unsafe impl Sync for CanopyStore {}
 
