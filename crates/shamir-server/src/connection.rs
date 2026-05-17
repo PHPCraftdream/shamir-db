@@ -218,13 +218,19 @@ pub async fn handle_connection<F>(
             // Bucket the failure into a coarse counter label. Detailed
             // categorisation (which user / which subnet) lives in the
             // audit log; the counter is for at-a-glance dashboards.
-            let label = match e {
+            let label = match &e {
                 HandshakeError::LockedOut => "locked_out",
                 HandshakeError::BadProof => "bad_proof",
                 HandshakeError::UnknownUser => "unknown_user",
                 HandshakeError::UnsupportedVersion => "unsupported_version",
                 HandshakeError::Policy => "policy",
                 HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
+                HandshakeError::Storage(detail) => {
+                    // Storage failure during role lookup — log the cause
+                    // (operator-facing only; client sees a generic auth fail).
+                    tracing::error!(error = %detail, "handshake storage failure");
+                    "storage"
+                }
             };
             record_auth_attempt(label);
             // Pad to spec §8.5 floor before disconnecting on the negative
@@ -264,6 +270,9 @@ enum HandshakeError {
     /// Client requested a handshake-protocol version this server does not
     /// implement. Fast-rejected before any Argon2id work.
     UnsupportedVersion,
+    /// Transient storage failure during role lookup (§C2: must not silently
+    /// downgrade to empty roles).
+    Storage(String),
 }
 
 async fn run_handshake<F: Framer>(
@@ -483,10 +492,11 @@ async fn run_handshake<F: Framer>(
         Some(id) => id,
         None => return Err(HandshakeError::UnknownUser),
     };
-    let roles = ctx
-        .user_dir
-        .lookup_roles(username.as_str())
-        .unwrap_or_default();
+    let roles = match ctx.user_dir.lookup_roles(username.as_str()) {
+        Ok(Some(r)) => r,
+        Ok(None) => Vec::new(),
+        Err(e) => return Err(HandshakeError::Storage(format!("lookup_roles: {e}"))),
+    };
     let session = Session::new(
         user_id,
         username.as_str().to_string(),
@@ -524,6 +534,11 @@ async fn run_handshake<F: Framer>(
     // the client can reconnect without re-running Argon2id. TTL = 24h
     // matches the session max-age default in `SchedulerInputs::session_max_age_ns`.
     const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
+    let roles_for_ticket = match ctx.user_dir.lookup_roles(username.as_str()) {
+        Ok(Some(r)) => r,
+        Ok(None) => Vec::new(),
+        Err(e) => return Err(HandshakeError::Storage(format!("lookup_roles (ticket): {e}"))),
+    };
     let (ticket_bytes, ticket_expires_at_ns) =
         match shamir_connect::server::resume::issue_initial_ticket(
             &ctx.resume_config.ticket_key,
@@ -532,7 +547,7 @@ async fn run_handshake<F: Framer>(
             ctx.transport_kind.as_u8(),
             binding_mode.as_u8(),
             exporter,
-            ctx.user_dir.lookup_roles(username.as_str()).unwrap_or_default(),
+            roles_for_ticket,
             ctx.identity.current_version(),
             now_ns,
             RESUMPTION_TICKET_TTL_NS,

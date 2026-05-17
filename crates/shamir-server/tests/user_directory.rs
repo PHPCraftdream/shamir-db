@@ -89,7 +89,7 @@ fn lookup_unknown_returns_none() {
     let (_tmp, store) = fresh_dir();
     assert!(store.lookup_by_name("nobody").is_none());
     assert!(store.user_id("nobody").is_none());
-    assert!(store.lookup_roles("nobody").is_none());
+    assert!(store.lookup_roles("nobody").unwrap().is_none());
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn update_roles_changes_roles_and_bumps_timestamp() {
         .unwrap();
     assert!(changed, "first role assignment must change state");
     assert_eq!(
-        store.lookup_roles("alice"),
+        store.lookup_roles("alice").unwrap(),
         Some(vec!["read_write".to_string()])
     );
 
@@ -133,7 +133,7 @@ fn update_roles_changes_roles_and_bumps_timestamp() {
 
     // Roles persisted.
     assert_eq!(
-        store.lookup_roles("alice"),
+        store.lookup_roles("alice").unwrap(),
         Some(vec!["superuser".to_string()])
     );
 
@@ -154,13 +154,13 @@ fn bump_tickets_invalid_does_not_change_roles() {
         .update_roles("alice", vec!["read_write".to_string()], 1_000)
         .unwrap();
 
-    let before = store.lookup_roles("alice").unwrap();
+    let before = store.lookup_roles("alice").unwrap().unwrap();
 
     let now_ns = 5_000u64;
     let bumped = store.bump_tickets_invalid("alice", now_ns).unwrap();
     assert!(bumped, "advancing timestamp should report change");
 
-    let after = store.lookup_roles("alice").unwrap();
+    let after = store.lookup_roles("alice").unwrap().unwrap();
     assert_eq!(before, after, "roles must not change on bump-only op");
 
     let rec = store.lookup_by_name("alice").unwrap();
@@ -207,7 +207,7 @@ fn state_survives_restart() {
         assert_eq!(loaded.kdf_params, original.kdf_params);
         assert_eq!(loaded.tickets_invalid_before_ns, 12_345);
         assert_eq!(store.user_id("alice"), Some(initial_uid));
-        assert_eq!(store.lookup_roles("alice"), Some(initial_roles));
+        assert_eq!(store.lookup_roles("alice").unwrap(), Some(initial_roles));
     }
 }
 
