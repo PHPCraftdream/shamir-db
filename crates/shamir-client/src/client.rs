@@ -99,7 +99,7 @@ impl Client {
             Some(pin) => hb.pinned_hash(pin),
             None => hb.accept_new_host(opts.accept_new_host),
         };
-        let hs = hb.build().map_err(|e| ClientError::Handshake(e.to_string()))?;
+        let mut hs = hb.build().map_err(|e| ClientError::Handshake(e.to_string()))?;
 
         let (mut r, mut w) = split(tls);
 
@@ -139,13 +139,19 @@ impl Client {
             server_nonce,
         };
 
-        // Step 3: derive proof (Argon2id ~50ms-2s on the client thread)
+        // Step 3: derive proof (Argon2id ~50ms-2s — spawn_blocking so
+        // it doesn't stall the tokio worker thread).
         let mut password_buf = opts.password.to_vec();
-        let (proof, derived, auth_message) = hs
-            .process_challenge(&challenge, &mut password_buf)
-            .map_err(|e| ClientError::Handshake(e.to_string()))?;
-        // process_challenge zeroizes password_buf; the original
-        // Zeroizing<Vec<u8>> in opts is dropped at function return.
+        let challenge_clone = challenge.clone();
+        let (hs_ret, result) = tokio::task::spawn_blocking(move || {
+            let res = hs.process_challenge(&challenge_clone, &mut password_buf);
+            (hs, res)
+        })
+        .await
+        .map_err(|e| ClientError::Handshake(format!("Argon2 spawn_blocking: {e}")))?;
+        hs = hs_ret;
+        let (proof, derived, auth_message) =
+            result.map_err(|e| ClientError::Handshake(e.to_string()))?;
 
         // Step 4: send proof
         let proof_wire = WireClientProof {

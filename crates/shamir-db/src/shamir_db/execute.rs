@@ -2,6 +2,8 @@
 
 use serde_json::json;
 
+use std::sync::Arc;
+
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
@@ -373,6 +375,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::GrantRole(op) => {
+                let user_lock = self
+                    .shamir
+                    .admin_user_locks()
+                    .entry(op.user.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                let _user_guard = user_lock.lock().await;
+
                 // Read user, add role, write back
                 let table = self.shamir.system_store().users_table().await
                     .map_err(|e| err(e.to_string()))?;
@@ -407,6 +417,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::RevokeRole(op) => {
+                let user_lock = self
+                    .shamir
+                    .admin_user_locks()
+                    .entry(op.user.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone();
+                let _user_guard = user_lock.lock().await;
+
                 let table = self.shamir.system_store().users_table().await
                     .map_err(|e| err(e.to_string()))?;
                 let interner = table.interner().get().await

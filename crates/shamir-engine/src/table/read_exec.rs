@@ -280,7 +280,7 @@ impl TableManager {
                             let json_val = match val {
                                 Some(v) => shamir_types::codecs::interned::inner_to_json_value(
                                     &v, interner,
-                                ),
+                                )?,
                                 None => serde_json::Value::Null,
                             };
                             let key = alias
@@ -408,7 +408,7 @@ impl TableManager {
                             let json_val = match val {
                                 Some(v) => shamir_types::codecs::interned::inner_to_json_value(
                                     &v, interner,
-                                ),
+                                )?,
                                 None => serde_json::Value::Null,
                             };
                             let key = alias

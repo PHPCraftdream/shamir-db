@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use shamir_types::codecs::CodecError;
+
 /// A generic error type for all database and storage operations.
 #[derive(Error, Debug)]
 pub enum DbError {
@@ -45,6 +47,12 @@ pub enum DbError {
     /// A validation error (e.g., schema validation).
     #[error("Validation error: {0}")]
     Validation(String),
+}
+
+impl From<CodecError> for DbError {
+    fn from(err: CodecError) -> Self {
+        DbError::Codec(err.to_string())
+    }
 }
 
 pub type DbResult<T> = Result<T, DbError>;
