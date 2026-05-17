@@ -1,6 +1,7 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
 use arc_swap::ArcSwap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use super::{InternerKey, TouchInd, UserKey};
 
@@ -95,7 +96,7 @@ impl Interner {
         // later writer's store would clobber an earlier writer's
         // append (lost update). Reads are unaffected — they
         // never take this lock.
-        let mut current_id = self.current_id.lock().unwrap();
+        let mut current_id = self.current_id.lock();
         *current_id += 1;
         let new_key = InternerKey::new(*current_id);
         let new_id = new_key.id();
