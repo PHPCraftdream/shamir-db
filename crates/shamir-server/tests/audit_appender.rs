@@ -156,7 +156,10 @@ fn truncation_detected_after_restart() {
     );
 }
 
-#[tokio::test]
+// multi_thread flavor: the batched appender's background flusher
+// calls `tokio::task::block_in_place` around the synchronous fsync,
+// which panics on the default current-thread runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batched_mode_flushes_on_interval() {
     let dir = TempDir::new().unwrap();
     let appender = RedbAuditAppender::open_batched(dir.path(), Duration::from_millis(100)).unwrap();
@@ -177,7 +180,8 @@ async fn batched_mode_flushes_on_interval() {
     appender.shutdown().await;
 }
 
-#[tokio::test]
+// multi_thread flavor: see `batched_mode_flushes_on_interval` above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_flushes_pending() {
     let dir = TempDir::new().unwrap();
     // 1-hour interval — only `shutdown()` should drain the buffer.
