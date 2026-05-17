@@ -48,8 +48,8 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + for<'de> Deserialize<'de> + Debu
     Value<Key>
 {
     /// Serializes the `Value` into `Bytes` using MessagePack.
-    pub fn to_bytes(&self) -> Bytes {
-        Bytes::from(rmp_serde::to_vec(self).expect("Failed to serialize Value"))
+    pub fn to_bytes(&self) -> Result<Bytes, rmp_serde::encode::Error> {
+        rmp_serde::to_vec(self).map(Bytes::from)
     }
 
     /// Deserializes bytes into a `Value` using MessagePack.

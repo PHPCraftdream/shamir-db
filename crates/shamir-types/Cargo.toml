@@ -19,6 +19,7 @@ dashmap = "6.1.0"
 # reverse is a growing Vec read-heavy from many threads, where
 # RwLock's atomic-counter bouncing was a real contention point.
 arc-swap = "1.7"
+parking_lot = "0.12"
 
 # Numeric / temporal value types
 rust_decimal = { version = "1.40.0", features = ["serde"] }

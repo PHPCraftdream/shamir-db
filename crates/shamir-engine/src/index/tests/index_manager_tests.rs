@@ -168,7 +168,7 @@ async fn test_create_index_with_data() {
     ]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -190,7 +190,7 @@ async fn test_create_composite_index() {
     ]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -214,7 +214,7 @@ async fn test_create_nested_field_index() {
 
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -233,7 +233,7 @@ async fn test_create_index_missing_field_skipped() {
     let value = create_test_value(&[(2, InnerValue::Int(42))]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -300,7 +300,7 @@ async fn test_drop_index_with_data() {
     let value = create_test_value(&[(1, InnerValue::Str("test".to_string()))]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -552,7 +552,7 @@ async fn test_empty_path_index() {
     let value = create_test_value(&[(1, InnerValue::Int(42))]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -579,7 +579,7 @@ async fn test_various_value_types_in_index() {
         let value = create_test_value(&[(*key, val.clone())]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes())
+            .set(record_id.to_bytes(), value.to_bytes().unwrap())
             .await
             .unwrap();
     }
@@ -962,11 +962,11 @@ async fn test_create_unique_index_with_unique_data() {
     let id2 = RecordId::new();
 
     data_store
-        .set(id1.to_bytes(), value1.to_bytes())
+        .set(id1.to_bytes(), value1.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id2.to_bytes(), value2.to_bytes())
+        .set(id2.to_bytes(), value2.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -988,15 +988,15 @@ async fn test_create_unique_index_with_duplicate_data_fails() {
     let id3 = RecordId::new();
 
     data_store
-        .set(id1.to_bytes(), value.to_bytes())
+        .set(id1.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id2.to_bytes(), value.to_bytes())
+        .set(id2.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id3.to_bytes(), value.to_bytes())
+        .set(id3.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -1382,7 +1382,7 @@ async fn test_create_index_actually_indexes_records() {
         let value = create_test_value(&[(1, InnerValue::Str(format!("value_{}", i)))]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes())
+            .set(record_id.to_bytes(), value.to_bytes().unwrap())
             .await
             .unwrap();
         record_ids.push(record_id);
@@ -1417,7 +1417,7 @@ async fn test_create_index_with_many_records() {
         let value = create_test_value(&[(1, InnerValue::Int(i))]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes())
+            .set(record_id.to_bytes(), value.to_bytes().unwrap())
             .await
             .unwrap();
         record_ids.push(record_id);
@@ -1449,7 +1449,7 @@ async fn test_create_index_with_duplicate_values() {
         let value = create_test_value(&[(1, shared_value.clone())]);
         let record_id = RecordId::new();
         data_store
-            .set(record_id.to_bytes(), value.to_bytes())
+            .set(record_id.to_bytes(), value.to_bytes().unwrap())
             .await
             .unwrap();
         shared_ids.push(record_id);
@@ -1481,7 +1481,7 @@ async fn test_create_index_with_null_value() {
     let value = create_test_value(&[(1, InnerValue::Null)]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -1508,7 +1508,7 @@ async fn test_create_index_with_list_value() {
     let value = create_test_value(&[(1, list.clone())]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -1531,7 +1531,7 @@ async fn test_create_index_with_map_value() {
     let value = create_test_value(&[(1, map.clone())]);
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), value.to_bytes())
+        .set(record_id.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -1877,11 +1877,11 @@ async fn test_composite_unique_index_creation_fails_with_duplicates() {
     let id1 = RecordId::new();
     let id2 = RecordId::new();
     data_store
-        .set(id1.to_bytes(), value.to_bytes())
+        .set(id1.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
     data_store
-        .set(id2.to_bytes(), value.to_bytes())
+        .set(id2.to_bytes(), value.to_bytes().unwrap())
         .await
         .unwrap();
 
@@ -1922,7 +1922,7 @@ async fn test_composite_unique_index_creation_succeeds_with_unique_data() {
 
     for v in [&value1, &value2, &value3] {
         let id = RecordId::new();
-        data_store.set(id.to_bytes(), v.to_bytes()).await.unwrap();
+        data_store.set(id.to_bytes(), v.to_bytes().unwrap()).await.unwrap();
     }
 
     // Create unique composite index - should succeed
@@ -1989,7 +1989,7 @@ async fn test_deeply_nested_path_index() {
 
     let record_id = RecordId::new();
     data_store
-        .set(record_id.to_bytes(), level1.to_bytes())
+        .set(record_id.to_bytes(), level1.to_bytes().unwrap())
         .await
         .unwrap();
 

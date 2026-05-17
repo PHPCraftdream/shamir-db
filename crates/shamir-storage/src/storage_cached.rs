@@ -217,7 +217,13 @@ impl Store for CachedStore {
 
                 pending.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
-                    let _ = inner.remove(key).await;
+                    // §B8: WriteMode::Async is fire-and-forget by design,
+                    // but a swallowed `Err` silently loses durability.
+                    // Log so an operator gets a signal under sustained
+                    // backing-store failure.
+                    if let Err(e) = inner.remove(key).await {
+                        log::error!("storage_cached async remove from backing store failed: {}", e);
+                    }
                     pending.fetch_sub(1, Ordering::Relaxed);
                 });
 
@@ -373,7 +379,7 @@ mod tests {
 
         // Insert should be in both cache and inner immediately
         let value1 = InnerValue::Str("sync_value".to_string());
-        let key1 = cached.insert(value1.to_bytes()).await.unwrap();
+        let key1 = cached.insert(value1.to_bytes().unwrap()).await.unwrap();
 
         assert!(cached.cache.get(&key1).is_some());
         assert!(inner.get(key1.clone()).await.is_ok());
@@ -386,7 +392,7 @@ mod tests {
 
         // Insert - immediately in cache
         let value1 = InnerValue::Str("async_value".to_string());
-        let key1 = cached.insert(value1.to_bytes()).await.unwrap();
+        let key1 = cached.insert(value1.to_bytes().unwrap()).await.unwrap();
 
         assert!(cached.cache.get(&key1).is_some());
 
@@ -445,7 +451,7 @@ mod tests {
         // Add some data to inner store BEFORE creating cached store
         for i in 0..10 {
             let value = InnerValue::Int(i);
-            inner.insert(value.to_bytes()).await.unwrap();
+            inner.insert(value.to_bytes().unwrap()).await.unwrap();
         }
 
         // Create cached store - should load all data
@@ -465,7 +471,7 @@ mod tests {
 
         // Add data to inner
         let value1 = InnerValue::Str("test_value".to_string());
-        let key1 = inner.insert(value1.to_bytes()).await.unwrap();
+        let key1 = inner.insert(value1.to_bytes().unwrap()).await.unwrap();
 
         // Create cached store - loads all data
         let cached = CachedStore::new_sync(inner.clone()).await.unwrap();
@@ -483,7 +489,7 @@ mod tests {
 
         // Add NEW data to inner directly (external modification)
         let value2 = InnerValue::Str("new_external_value".to_string());
-        let key2 = inner.insert(value2.to_bytes()).await.unwrap();
+        let key2 = inner.insert(value2.to_bytes().unwrap()).await.unwrap();
 
         // Get should work with fallback - loads from inner and caches it
         let retrieved3 = cached.get(key2.clone()).await.unwrap();
@@ -500,7 +506,7 @@ mod tests {
 
         // Insert through cached store
         let value1 = InnerValue::Str("mirrored".to_string());
-        let key1 = cached.insert(value1.to_bytes()).await.unwrap();
+        let key1 = cached.insert(value1.to_bytes().unwrap()).await.unwrap();
 
         // Should be in cache
         assert_eq!(cached.cache_size(), 1);
@@ -520,7 +526,7 @@ mod tests {
         // Set new value
         let key = Bytes::from(b"test_key".to_vec());
         let value1 = InnerValue::Str("new_value".to_string());
-        let created = cached.set(key.clone(), value1.to_bytes()).await.unwrap();
+        let created = cached.set(key.clone(), value1.to_bytes().unwrap()).await.unwrap();
         assert!(created);
 
         // Both cache and inner should have it
@@ -531,7 +537,7 @@ mod tests {
 
         // Update value
         let value2 = InnerValue::Str("updated".to_string());
-        let created2 = cached.set(key.clone(), value2.to_bytes()).await.unwrap();
+        let created2 = cached.set(key.clone(), value2.to_bytes().unwrap()).await.unwrap();
         assert!(!created2);
 
         // Both should reflect update

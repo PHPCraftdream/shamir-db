@@ -427,14 +427,14 @@ mod tests {
     async fn run_store_tests(store: Arc<dyn Store>) {
         // Test insert and get
         let value1 = InnerValue::Str("hello".to_string());
-        let key1 = store.insert(value1.to_bytes()).await.unwrap();
+        let key1 = store.insert(value1.to_bytes().unwrap()).await.unwrap();
         let retrieved_bytes = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes).unwrap(), value1);
 
         // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        let created = store.set(key1.clone(), value2.to_bytes()).await.unwrap();
+        let created = store.set(key1.clone(), value2.to_bytes().unwrap()).await.unwrap();
         assert!(!created); // Should be false, as it's an update
         let retrieved_bytes2 = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
@@ -443,14 +443,14 @@ mod tests {
         let id2 = RecordId::new();
         let key2 = Bytes::copy_from_slice(id2.as_bytes());
         let value3 = InnerValue::Int(123);
-        let created2 = store.set(key2.clone(), value3.to_bytes()).await.unwrap();
+        let created2 = store.set(key2.clone(), value3.to_bytes().unwrap()).await.unwrap();
         assert!(created2); // Should be true, as it's a new record
         let retrieved_bytes3 = store.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
 
         // Test iter
         let value4 = InnerValue::Bool(true);
-        let _key3 = store.insert(value4.to_bytes()).await.unwrap();
+        let _key3 = store.insert(value4.to_bytes().unwrap()).await.unwrap();
         let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 3);
         assert!(all_records.iter().any(|(k, _)| *k == key1));

@@ -44,7 +44,7 @@ impl Table {
     /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         // Serialize InnerValue
-        let inner_bytes = value.to_bytes();
+        let inner_bytes = value.to_bytes().map_err(|e| DbError::Codec(e.to_string()))?;
 
         // Insert to data store - returns Bytes (16 random bytes)
         let key_bytes = self.data_store.insert(inner_bytes).await?;
@@ -93,7 +93,10 @@ impl Table {
     /// falls through to N sequential inserts (same cost as the
     /// per-record path).
     pub async fn insert_many(&self, values: &[InnerValue]) -> DbResult<Vec<RecordId>> {
-        let value_bytes: Vec<bytes::Bytes> = values.iter().map(|v| v.to_bytes()).collect();
+        let value_bytes: Vec<bytes::Bytes> = values
+            .iter()
+            .map(|v| v.to_bytes().map_err(|e| DbError::Codec(e.to_string())))
+            .collect::<DbResult<Vec<_>>>()?;
         let keys = self.data_store.insert_many(value_bytes).await?;
         keys.into_iter()
             .map(|k| {
@@ -136,7 +139,7 @@ impl Table {
         }
 
         // Serialize and update
-        let inner_bytes = value.to_bytes();
+        let inner_bytes = value.to_bytes().map_err(|e| DbError::Codec(e.to_string()))?;
         self.data_store.set(key_bytes, inner_bytes).await?;
         Ok(true)
     }
@@ -154,7 +157,7 @@ impl Table {
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
 
         // Serialize and set
-        let inner_bytes = value.to_bytes();
+        let inner_bytes = value.to_bytes().map_err(|e| DbError::Codec(e.to_string()))?;
         self.data_store.set(key_bytes, inner_bytes).await?;
 
         Ok(!exists)
