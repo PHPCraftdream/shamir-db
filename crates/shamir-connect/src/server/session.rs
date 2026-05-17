@@ -11,6 +11,7 @@
 use crate::common::time::UnixNanos;
 use crate::common::types::{limits, BindingMode, TransportKind};
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -235,9 +236,16 @@ pub const DISCONNECT_GRACE_NS: u64 = 5 * crate::common::time::ns::SECOND;
 /// not from the hash function. SipHash's per-byte cost is wasted here.
 type SessionIdHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionStore {
     by_sid: DashMap<[u8; limits::SESSION_ID_BYTES], Arc<Session>, SessionIdHasher>,
+    cap_lock: Mutex<()>,
+}
+
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionStore {
@@ -245,6 +253,7 @@ impl SessionStore {
     pub fn new() -> Self {
         Self {
             by_sid: DashMap::with_hasher(SessionIdHasher::default()),
+            cap_lock: Mutex::new(()),
         }
     }
 
@@ -286,6 +295,8 @@ impl SessionStore {
     ) {
         session.session_id = session_id;
         let user_id = session.user_id;
+
+        let _cap_guard = self.cap_lock.lock();
 
         // Atomically: collect snapshot of all current sids for this user
         // (cheap — typically ≤16) and evict LRU if cap reached.
