@@ -172,6 +172,9 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | `3c294a0` | **`#[inline]`** hints на горячих leaf functions (compare_values, resolve_field_ref, filter_value_to_inner) | hint cross-crate |
 | `eb10b41` | **SmallVec<[u64; 4]>** для FilterNode field_path — inline storage до 4 segments, no heap для типичных 1-2 уровневых путей | **1.36–1.46×** filter_eval (eq_int 186→137 µs, eq_str_nested 400→274 µs) |
 | `06c128f` | **Realistic Execute bench** добавлен в db_handler_rps — filter+select+order+limit на 100 records (32 µs/req) + full_scan на 100 records (21 µs/req). Realistic baseline зафиксирован — Execute path ≈108× медленнее Ping. | bench (enabling) |
+| `a45dc67` | **InMemoryStore iter/scan_prefix_stream** — собирать (key, value) в один pass (раньше делал второй `data.get` per record). Найдено crush storage агентом. | **1.21×** full_scan (21.29 → 17.64 µs) |
+| `f0f9513` | **apply_pagination** in-place `split_off` + `truncate` (вместо `into_iter().skip().take().collect()`). Найдено crush allocs агентом, реализовано crush impl-агентом. | **1.47%** execute_read (41.43 → 40.82 µs) |
+| `fdce5a8` | **batch executor ownership** — `mem::take(plan.stages)` + `filter_results` consume `all_results` через `retain` (вместо clone-into-new-map). Найдено crush batch агентом, реализовано crush impl-агентом. | **1.36×** execute_read (38.5 → 28.3 µs) |
 
 ---
 
