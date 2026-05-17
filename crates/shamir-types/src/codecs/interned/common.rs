@@ -11,11 +11,10 @@ use crate::core::interner::{Interner, InternerKey};
 /// This is used by both JSON and MessagePack codecs to intern
 /// map keys during conversion from external format to InnerValue.
 pub fn intern_string_key(interner: &Interner, key_str: &str) -> Result<InternerKey, CodecError> {
-    Ok(interner
+    interner
         .touch_ind(key_str)
-        .map_err(|e| CodecError::Decode(format!("Failed to intern key '{}': {}", key_str, e)))?
-        .key()
-        .clone())
+        .map(|t| t.into_key())
+        .map_err(|e| CodecError::Decode(format!("Failed to intern key '{}': {}", key_str, e)))
 }
 
 /// Helper function to de-intern a key from InternedKey to String
@@ -24,8 +23,6 @@ pub fn intern_string_key(interner: &Interner, key_str: &str) -> Result<InternerK
 /// interned keys back to their string representation.
 pub fn deintern_key(interner: &Interner, interned_key: &InternerKey) -> String {
     interner
-        .get_str(interned_key)
+        .with_str(interned_key, |s| s.to_string())
         .expect("Interned key not found in interner")
-        .as_ref()
-        .to_string()
 }
