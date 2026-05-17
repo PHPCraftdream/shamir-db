@@ -573,10 +573,16 @@ pub fn apply_pagination(
     let (skip, take) = pagination.resolve();
     let skip = skip as usize;
 
-    let sliced: Vec<json::Value> = if let Some(limit) = take {
-        records.into_iter().skip(skip).take(limit as usize).collect()
-    } else {
-        records.into_iter().skip(skip).collect()
+    let sliced: Vec<json::Value> = {
+        let mut v = records;
+        if skip > 0 {
+            let tail = v.split_off(skip.min(v.len()));
+            v = tail;
+        }
+        if let Some(limit) = take {
+            v.truncate(limit as usize);
+        }
+        v
     };
 
     // Determine has_next
