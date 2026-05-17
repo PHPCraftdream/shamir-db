@@ -43,6 +43,11 @@ pub struct TableManager {
     /// `true` when a background verify is in flight — prevents
     /// multiple concurrent verifies piling up.
     verify_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Serialises validate + write + index-update for tables that have
+    /// unique indexes. Tables without unique indexes hit the fast path
+    /// (no lock). `tokio::sync::Mutex` because the guard lives across
+    /// `.await` points.
+    unique_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// How often the background watchdog runs a `verify` pass.
@@ -64,6 +69,7 @@ impl Clone for TableManager {
             wal: Arc::clone(&self.wal),
             write_counter: Arc::clone(&self.write_counter),
             verify_running: Arc::clone(&self.verify_running),
+            unique_write_lock: Arc::clone(&self.unique_write_lock),
         }
     }
 }
@@ -97,6 +103,7 @@ impl TableManager {
             wal,
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
         // Hot-load persisted buffer config (if any) and apply
@@ -164,6 +171,7 @@ impl TableManager {
             wal,
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -396,6 +404,12 @@ impl TableManager {
     /// under `tokio::select!` or `tokio::time::timeout` — use
     /// `insert_many(&[value])` for the WAL-covered single-record path.
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+        let _guard = if self.index_manager.has_unique_indexes() {
+            Some(self.unique_write_lock.lock().await)
+        } else {
+            None
+        };
+
         // 1. Validate unique indexes BEFORE write
         self.index_manager.validate_unique_for_create(value).await?;
 
@@ -558,6 +572,12 @@ impl TableManager {
     /// matters; do NOT call this under `tokio::select!` or
     /// `tokio::time::timeout`.
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
+        let _guard = if self.index_manager.has_unique_indexes() {
+            Some(self.unique_write_lock.lock().await)
+        } else {
+            None
+        };
+
         // Get old value before update for index maintenance
         let old_value = self.table.get(id).await.ok();
 
