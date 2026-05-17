@@ -175,6 +175,7 @@ serde stream**. Это убирает один pass (build tree) + per-node allo
 | `a45dc67` | **InMemoryStore iter/scan_prefix_stream** — собирать (key, value) в один pass (раньше делал второй `data.get` per record). Найдено crush storage агентом. | **1.21×** full_scan (21.29 → 17.64 µs) |
 | `f0f9513` | **apply_pagination** in-place `split_off` + `truncate` (вместо `into_iter().skip().take().collect()`). Найдено crush allocs агентом, реализовано crush impl-агентом. | **1.47%** execute_read (41.43 → 40.82 µs) |
 | `fdce5a8` | **batch executor ownership** — `mem::take(plan.stages)` + `filter_results` consume `all_results` через `retain` (вместо clone-into-new-map). Найдено crush batch агентом, реализовано crush impl-агентом. | **1.36×** execute_read (38.5 → 28.3 µs) |
+| `8b51fbb` | **interner with_str + TouchInd::into_key** — закрытие двух double-alloc patterns: `deintern_key` через closure `with_str(|s|...)` (1 alloc вместо 2), `intern_string_key` через `TouchInd::into_key()` (no atomic ref bump). Найдено crush codecs агентом, реализовано crush impl-агентом. | **1.11×** codec_msgpack (5.46→4.90 ms), **1.08×** execute_read (38.7→35.7 µs) |
 
 ---
 
