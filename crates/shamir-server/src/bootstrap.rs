@@ -215,7 +215,10 @@ mod tests {
         assert!(matches!(r2, BootstrapOutcome::AlreadyExists),
             "second call must be a no-op even with different password");
 
-        let roles = user_dir.lookup_roles(DEFAULT_BOOTSTRAP_NAME).unwrap();
+        let roles = user_dir
+            .lookup_roles(DEFAULT_BOOTSTRAP_NAME)
+            .expect("lookup_roles should not fail on a local redb")
+            .expect("bootstrap user must exist after init");
         assert!(roles.iter().any(|r| r == "superuser"));
     }
 

@@ -212,17 +212,27 @@ impl RedbUserDirectory {
     /// Roles live alongside the SCRAM record but are NOT part of
     /// [`UserRecord`] (shamir-connect's snapshot type is SCRAM-only).
     /// Session-creation code looks them up here.
-    pub fn lookup_roles(&self, username: &str) -> Option<Vec<String>> {
-        let blob = self.read_blob(username)?;
-        let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
-        Some(user.roles)
+    pub fn lookup_roles(&self, username: &str) -> Result<Option<Vec<String>>> {
+        let blob = match self.read_blob(username)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let user: PersistedUser = rmp_serde::from_slice(&blob)
+            .map_err(|e| Error::Encoding(format!("user_dir: decode PersistedUser: {e}")))?;
+        Ok(Some(user.roles))
     }
 
-    fn read_blob(&self, username: &str) -> Option<Vec<u8>> {
-        let txn = self.db.begin_read().ok()?;
-        let table = txn.open_table(USERS_TABLE).ok()?;
-        let entry = table.get(username).ok().flatten()?;
-        Some(entry.value().to_vec())
+    fn read_blob(&self, username: &str) -> Result<Option<Vec<u8>>> {
+        let txn = self.db.begin_read()
+            .map_err(|e| Error::Encoding(format!("user_dir read txn: {e}")))?;
+        let table = match txn.open_table(USERS_TABLE) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(Error::Encoding(format!("user_dir open_table: {e}"))),
+        };
+        let entry = table.get(username)
+            .map_err(|e| Error::Encoding(format!("user_dir table.get: {e}")))?;
+        Ok(entry.map(|guard| guard.value().to_vec()))
     }
 
     fn fresh_user_id() -> [u8; 16] {
@@ -264,7 +274,7 @@ impl RedbUserDirectory {
 
 impl UserDirectory for RedbUserDirectory {
     fn lookup_by_name(&self, username: &str) -> Option<UserRecord> {
-        let blob = self.read_blob(username)?;
+        let blob = self.read_blob(username).ok().flatten()?;
         let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
         user.to_record()
     }
@@ -391,7 +401,7 @@ impl UserDirectory for RedbUserDirectory {
     }
 
     fn user_id(&self, username: &str) -> Option<[u8; 16]> {
-        let blob = self.read_blob(username)?;
+        let blob = self.read_blob(username).ok().flatten()?;
         let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
         user.user_id_array()
     }

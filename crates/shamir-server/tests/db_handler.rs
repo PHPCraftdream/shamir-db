@@ -579,7 +579,7 @@ async fn create_scram_user_success_then_duplicate() {
 
     use shamir_connect::server::admin::UserDirectory;
     assert!(user_dir.lookup_by_name("bob").is_some(), "persisted in directory");
-    let roles = user_dir.lookup_roles("bob").unwrap_or_default();
+    let roles = user_dir.lookup_roles("bob").unwrap().unwrap_or_default();
     assert!(roles.iter().any(|r| r == "read_write"), "roles attached");
 
     // Second insert with same name -> typed user_exists error.
