@@ -96,7 +96,10 @@ impl Serialize for InternedRef<'_> {
                     let user_key = self
                         .interner
                         .get_str(interned_key)
-                        .expect("Interned key not found in interner");
+                        .ok_or_else(|| serde::ser::Error::custom(format!(
+                            "Interned key not found in interner: {:?}",
+                            interned_key
+                        )))?;
                     map.serialize_entry(
                         user_key.as_ref(),
                         &InternedRef {
@@ -156,48 +159,53 @@ pub fn json_value_to_inner(
 }
 
 /// Converts InnerValue to serde_json::Value, de-interning all keys
-pub fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> json::Value {
+pub fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> Result<json::Value, CodecError> {
     match value {
-        Value::Null => json::Value::Null,
-        Value::Bool(b) => json::Value::Bool(*b),
-        Value::Int(i) => json::Value::Number((*i).into()),
+        Value::Null => Ok(json::Value::Null),
+        Value::Bool(b) => Ok(json::Value::Bool(*b)),
+        Value::Int(i) => Ok(json::Value::Number((*i).into())),
         Value::F64(f) => {
             if f.is_finite() {
                 if let Some(n) = serde_json::Number::from_f64(*f) {
-                    json::Value::Number(n)
+                    Ok(json::Value::Number(n))
                 } else {
-                    json::Value::String(f.to_string())
+                    Ok(json::Value::String(f.to_string()))
                 }
             } else {
-                json::Value::String(f.to_string())
+                Ok(json::Value::String(f.to_string()))
             }
         }
-        Value::Dec(d) => json::Value::String(d.to_string()),
-        Value::Big(b) => json::Value::String(b.to_string()),
-        Value::Str(s) => json::Value::String(s.clone()),
+        Value::Dec(d) => Ok(json::Value::String(d.to_string())),
+        Value::Big(b) => Ok(json::Value::String(b.to_string())),
+        Value::Str(s) => Ok(json::Value::String(s.clone())),
         Value::Bin(b) => {
-            // Binary data as base64 or array? JSON doesn't have binary type
-            // Using array of numbers for simplicity
-            json::Value::Array(
+            Ok(json::Value::Array(
                 b.iter()
                     .map(|&byte| json::Value::Number(byte.into()))
                     .collect(),
-            )
+            ))
         }
         Value::List(l) => {
-            json::Value::Array(l.iter().map(|v| inner_to_json_value(v, interner)).collect())
+            let arr: Result<Vec<_>, _> = l
+                .iter()
+                .map(|v| inner_to_json_value(v, interner))
+                .collect();
+            Ok(json::Value::Array(arr?))
         }
         Value::Set(s) => {
-            // Sets become arrays in JSON, but we use "set:" prefix to distinguish them
-            json::Value::Array(s.iter().map(|v| inner_to_json_value(v, interner)).collect())
+            let arr: Result<Vec<_>, _> = s
+                .iter()
+                .map(|v| inner_to_json_value(v, interner))
+                .collect();
+            Ok(json::Value::Array(arr?))
         }
         Value::Map(m) => {
             let mut obj = json::Map::new();
             for (interned_key, val) in m {
-                let key_str = deintern_key(interner, interned_key);
-                obj.insert(key_str, inner_to_json_value(val, interner));
+                let key_str = deintern_key(interner, interned_key)?;
+                obj.insert(key_str, inner_to_json_value(val, interner)?);
             }
-            json::Value::Object(obj)
+            Ok(json::Value::Object(obj))
         }
     }
 }

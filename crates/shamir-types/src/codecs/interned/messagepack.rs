@@ -81,7 +81,10 @@ impl Serialize for InternedRef<'_> {
                     let user_key = self
                         .interner
                         .get_str(k)
-                        .expect("Interned key not found in interner");
+                        .ok_or_else(|| serde::ser::Error::custom(format!(
+                            "Interned key not found in interner: {:?}",
+                            k
+                        )))?;
                     map.serialize_entry(
                         user_key.as_ref(),
                         &InternedRef {

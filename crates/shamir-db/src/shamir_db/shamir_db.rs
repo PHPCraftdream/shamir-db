@@ -7,6 +7,7 @@ use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex;
 
 use super::system_store::{SystemStore, SystemStoreConfig};
 
@@ -31,6 +32,12 @@ const SYSTEM_DB_NAME: &str = "__system__";
 pub struct ShamirDb {
     dbs: Arc<DashMap<String, DbInstance>>,
     system_store: SystemStore,
+    /// Serialises admin RMW ops (GrantRole/RevokeRole) per user_name
+    /// to close the §B9 read-modify-write race when two concurrent
+    /// admin commands target the same user.  Entries leak by design
+    /// (each unique user occupies a slot forever), but admin ops are
+    /// rare so the memory cost is negligible.
+    admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl ShamirDb {
@@ -42,8 +49,13 @@ impl ShamirDb {
         let system_store = SystemStore::init(config).await?;
 
         let dbs = Arc::new(DashMap::new());
+        let admin_user_locks = Arc::new(DashMap::new());
 
-        let shamir = Self { dbs, system_store };
+        let shamir = Self {
+            dbs,
+            system_store,
+            admin_user_locks,
+        };
 
         // Load existing databases from system store
         let db_records = shamir.system_store.load_databases().await?;
@@ -84,6 +96,12 @@ impl ShamirDb {
     /// Get the system store.
     pub fn system_store(&self) -> &SystemStore {
         &self.system_store
+    }
+
+    /// Per-user lock map used to serialise admin RMW ops (GrantRole /
+    /// RevokeRole) and close the §B9 read-modify-write race.
+    pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>>> {
+        &self.admin_user_locks
     }
 
     fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {

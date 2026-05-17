@@ -181,7 +181,7 @@ impl TableManager {
                     UpdateReturnMode::Unchanged => !changed,
                 };
                 if should_include {
-                    result_records.push(inner_to_json_value(&new_record, interner));
+                    result_records.push(inner_to_json_value(&new_record, interner)?);
                 }
             }
         }
@@ -340,11 +340,11 @@ impl TableManager {
             };
             let merged = merge_inner_maps(&existing, new_map);
             self.set(id, &merged).await?;
-            (false, inner_to_json_value(&merged, interner))
+            (false, inner_to_json_value(&merged, interner)?)
         } else {
             // Insert new record
             let id = self.insert(&new_inner).await?;
-            let mut obj = match inner_to_json_value(&new_inner, interner) {
+            let mut obj = match inner_to_json_value(&new_inner, interner)? {
                 json::Value::Object(m) => m,
                 other => {
                     let mut m = json::Map::new();
