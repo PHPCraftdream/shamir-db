@@ -25,6 +25,13 @@ impl TouchInd {
         }
     }
 
+    /// Consume the variant and return the owned InternerKey.
+    pub fn into_key(self) -> InternerKey {
+        match self {
+            TouchInd::Exists(k) | TouchInd::New(k) => k,
+        }
+    }
+
     /// Returns true if the key was newly created.
     pub fn is_new(&self) -> bool {
         match self {

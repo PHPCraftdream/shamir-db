@@ -138,6 +138,12 @@ impl Interner {
         rev.get(idx).and_then(|slot| slot.clone())
     }
 
+    pub fn with_str<R>(&self, id: &InternerKey, f: impl FnOnce(&str) -> R) -> Option<R> {
+        let rev = self.reverse.load();
+        let idx = id.id() as usize;
+        rev.get(idx).and_then(|slot| slot.as_ref()).map(|key| f(key.as_str()))
+    }
+
     /// Gets the interned key corresponding to a user key.
     /// Same Borrow<str> trick as `touch_ind` — no `String` alloc on
     /// the lookup; only the cache miss path would (and we just
