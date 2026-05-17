@@ -177,6 +177,12 @@ pub struct NebariStore {
     name: String,
 }
 
+// SAFETY: nebari `Tree` and `Roots` are designed for concurrent access
+// (the crate's `Tree::insert` / `Roots::transaction` take `&self`). Both
+// are wrapped in `Arc` here so the handle is shared safely across the
+// tokio worker pool; all writes go through `spawn_blocking`. `String`
+// is inherently Send+Sync. Impls are explicit per §B5 — auto-impl would
+// otherwise apply.
 unsafe impl Send for NebariStore {}
 unsafe impl Sync for NebariStore {}
 

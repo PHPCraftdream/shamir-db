@@ -83,6 +83,10 @@ pub struct SledStore {
     tree: Arc<Tree>,
 }
 
+// SAFETY: `sled::Tree` is documented Send+Sync (sled exposes it for
+// concurrent multi-thread access). `Arc<Tree>` preserves both. These
+// impls are technically redundant given auto-impl on `Arc<T: Send+Sync>`
+// — kept explicit to make the contract visible per §B5.
 unsafe impl Send for SledStore {}
 unsafe impl Sync for SledStore {}
 

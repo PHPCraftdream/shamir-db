@@ -372,6 +372,15 @@ impl TableManager {
     /// Insert an InnerValue, returns RecordId (with counter and index update)
     ///
     /// Validates unique indexes BEFORE insert, returns error if constraint violated.
+    ///
+    /// cancel-safe: NO — sequence is data-write → counter-bump → 3 index
+    /// updates with no WAL marker around it (unlike `insert_many` which
+    /// uses `wal.begin_with_delta`/`commit`). Cancellation between the
+    /// data write (`self.table.insert`) and the index hooks leaves the
+    /// data store with orphan records that the indexes don't see; the
+    /// doctor's `repair()` pass is the recovery path. Do NOT call this
+    /// under `tokio::select!` or `tokio::time::timeout` — use
+    /// `insert_many(&[value])` for the WAL-covered single-record path.
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         // 1. Validate unique indexes BEFORE write
         self.index_manager.validate_unique_for_create(value).await?;
@@ -498,6 +507,14 @@ impl TableManager {
     }
 
     /// Delete a record by RecordId (with counter and index update)
+    ///
+    /// cancel-safe: NO — data-delete → counter decrement → 3 index
+    /// deletes without WAL coverage. Cancellation after the data delete
+    /// but before the index hooks leaves orphan index entries (a record
+    /// the data store no longer has but the indexes still point to).
+    /// The batch path `execute_delete` uses WAL; this single-record path
+    /// does not. Do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout`.
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Get old value before deletion for index cleanup
         let old_value = self.table.get(id).await.ok();
@@ -518,6 +535,14 @@ impl TableManager {
     /// Set a record by RecordId - creates if not exists, updates if exists (with counter and index update)
     ///
     /// Validates unique indexes BEFORE write, returns error if constraint violated.
+    ///
+    /// cancel-safe: NO — read-then-validate-then-write-then-index-update
+    /// without WAL coverage. Cancellation between the table write and
+    /// the index hooks leaves stale index entries (indexes point at the
+    /// previous value while the data store holds the new one). Use the
+    /// batch path (`execute_update` / `insert_many`) when atomicity
+    /// matters; do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout`.
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
         // Get old value before update for index maintenance
         let old_value = self.table.get(id).await.ok();

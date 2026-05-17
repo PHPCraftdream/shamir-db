@@ -53,21 +53,29 @@ impl RepoInstance {
     }
 
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
-        if !self.configs.contains_key(table_name) {
-            return Err(DbError::NotFound(format!(
-                "Table '{}' is not configured in this repository",
-                table_name
-            )));
-        }
-
         let cell = self
             .tables
             .entry(table_name.to_string())
             .or_insert_with(OnceCell::new);
 
-        cell.get_or_try_init(|| async move { self.create_table_context(table_name).await })
-            .await
-            .cloned()
+        // §B13: existence-check happens INSIDE the init closure, so it
+        // is serialized with the actual context construction. Doing the
+        // check up-front would race with concurrent `remove_table`
+        // between our `configs.contains_key` and the `tables.entry`
+        // install (two independent DashMaps). On a removed table the
+        // init returns Err and `OnceCell::get_or_try_init` leaves the
+        // cell empty so subsequent calls retry.
+        cell.get_or_try_init(|| async move {
+            if !self.configs.contains_key(table_name) {
+                return Err(DbError::NotFound(format!(
+                    "Table '{}' is not configured in this repository",
+                    table_name
+                )));
+            }
+            self.create_table_context(table_name).await
+        })
+        .await
+        .cloned()
     }
 
     async fn create_table_context(&self, table_name: &str) -> DbResult<TableManager> {

@@ -136,6 +136,12 @@ pub struct PersyStore {
     index_name: String,
 }
 
+// SAFETY: `persy::Persy` exposes transactional APIs that take `&self`
+// and the crate documents thread-safety via internal locking around its
+// page cache + WAL. `Arc<Persy>` keeps that thread-safe handle alive;
+// `String` fields (`table_name`, `index_name`) are inherently Send+Sync.
+// Impls are explicit to make the trust on persy's internal sync visible
+// per §B5 — auto-impl would otherwise apply.
 unsafe impl Send for PersyStore {}
 unsafe impl Sync for PersyStore {}
 

@@ -353,10 +353,10 @@ impl RedbAuditAppender {
                     break;
                 };
                 if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = strong.flush_buffer();
+                    let _ = tokio::task::block_in_place(|| strong.flush_buffer());
                     break;
                 }
-                let _ = strong.flush_buffer();
+                let _ = tokio::task::block_in_place(|| strong.flush_buffer());
             }
         });
 
