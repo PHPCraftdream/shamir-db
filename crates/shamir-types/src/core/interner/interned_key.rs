@@ -5,7 +5,7 @@ use std::hash::{Hash, Hasher};
 /// Interned binary key - represents a compressed ID stored as variable-size bytes.
 /// Size adapts dynamically: 1, 2, 4, or 8 bytes based on id value.
 #[derive(Clone, Debug)]
-pub struct InternerKey(pub Bytes);
+pub struct InternerKey(pub(crate) Bytes);
 
 impl InternerKey {
     /// Create a new interned key from u64 with minimal byte size.
@@ -32,13 +32,26 @@ impl InternerKey {
                 self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5], self.0[6],
                 self.0[7],
             ]),
-            _ => panic!("Invalid InternedKey length: {}", self.0.len()),
+            _ => unreachable!(
+            "InternerKey invariant broken: length {} (must be 1/2/4/8)",
+            self.0.len()
+        ),
         }
     }
 
     /// Get raw bytes reference.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    /// Borrow the inner bytes representation.
+    pub fn bytes(&self) -> &Bytes {
+        &self.0
+    }
+
+    /// Take ownership of the inner bytes.
+    pub fn into_bytes(self) -> Bytes {
+        self.0
     }
 }
 
