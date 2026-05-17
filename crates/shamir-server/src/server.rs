@@ -247,14 +247,15 @@ impl ServerLauncher {
         let session_store = Arc::new(SessionStore::new());
 
         // 4. Audit chain — load from checkpoint if present.
+        let ack = meta.audit_chain_key().map_err(|e| BootError::ServerMeta(e.to_string()))?;
         let audit_chain = match meta.audit_checkpoint() {
             Some((seq, hmac)) => {
-                Arc::new(AuditChain::from_checkpoint(meta.audit_chain_key(), seq, hmac))
+                Arc::new(AuditChain::from_checkpoint(ack, seq, hmac))
             }
-            None => Arc::new(AuditChain::new(meta.audit_chain_key())),
+            None => Arc::new(AuditChain::new(ack)),
         };
         let audit_writer = Arc::new(AuditChainWriter::new(
-            AuditChain::new(meta.audit_chain_key()),
+            AuditChain::new(ack),
             audit_appender.clone() as Arc<dyn AuditAppender>,
         ));
 
@@ -336,7 +337,7 @@ impl ServerLauncher {
         );
 
         // 6. ResumeConfig.
-        let (current_key, previous_key) = meta.ticket_keys();
+        let (current_key, previous_key) = meta.ticket_keys().map_err(|e| BootError::ServerMeta(e.to_string()))?;
         let resume_config = Arc::new(ResumeConfig::new(
             current_key,
             previous_key,
@@ -345,9 +346,9 @@ impl ServerLauncher {
         ));
 
         // 7. Identity material.
-        let identity = Arc::new(meta.identity_state());
-        let identity_seed = meta.current_identity_seed();
-        let secrets = Arc::new(meta.server_secrets());
+        let identity = Arc::new(meta.identity_state().map_err(|e| BootError::ServerMeta(e.to_string()))?);
+        let identity_seed = meta.current_identity_seed().map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let secrets = Arc::new(meta.server_secrets().map_err(|e| BootError::ServerMeta(e.to_string()))?);
 
         // 8. Scheduler.
         let scheduler = Scheduler::spawn(

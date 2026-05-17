@@ -137,6 +137,9 @@ pub enum MetaError {
     /// Plain I/O failure (kept for symmetry with the other stores).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A required key was absent — the store has not been initialised.
+    #[error("not initialised: {0}")]
+    NotInitialised(&'static str),
 }
 
 // ---------------------------------------------------------------------------
@@ -325,38 +328,32 @@ impl ServerMetaStore {
 
     /// Return the current `(server_secret, lockout_secret)` as a clonable
     /// `ServerSecrets` value.
-    pub fn server_secrets(&self) -> ServerSecrets {
+    pub fn server_secrets(&self) -> Result<ServerSecrets, MetaError> {
         let p: PersistedSecrets = self
-            .read_blob(KEY_SECRETS)
-            .ok()
-            .flatten()
-            .expect("server_meta secrets missing — store not initialised");
-        ServerSecrets {
+            .read_blob(KEY_SECRETS)?
+            .ok_or(MetaError::NotInitialised(KEY_SECRETS))?;
+        Ok(ServerSecrets {
             server_secret: bytes32(&p.server_secret),
             lockout_secret: bytes32(&p.lockout_secret),
-        }
+        })
     }
 
     /// Current `audit_chain_key`.
-    pub fn audit_chain_key(&self) -> [u8; 32] {
+    pub fn audit_chain_key(&self) -> Result<[u8; 32], MetaError> {
         let p: PersistedAuditChain = self
-            .read_blob(KEY_AUDIT_CHAIN)
-            .ok()
-            .flatten()
-            .expect("server_meta audit_chain missing — store not initialised");
-        bytes32(&p.audit_chain_key)
+            .read_blob(KEY_AUDIT_CHAIN)?
+            .ok_or(MetaError::NotInitialised(KEY_AUDIT_CHAIN))?;
+        Ok(bytes32(&p.audit_chain_key))
     }
 
     /// Current ticket key plus optional previous key (during rotation overlap).
-    pub fn ticket_keys(&self) -> ([u8; 32], Option<[u8; 32]>) {
+    pub fn ticket_keys(&self) -> Result<([u8; 32], Option<[u8; 32]>), MetaError> {
         let p: PersistedTicket = self
-            .read_blob(KEY_TICKET)
-            .ok()
-            .flatten()
-            .expect("server_meta ticket missing — store not initialised");
+            .read_blob(KEY_TICKET)?
+            .ok_or(MetaError::NotInitialised(KEY_TICKET))?;
         let current = bytes32(&p.ticket_key);
         let previous = p.ticket_key_previous.as_ref().map(|v| bytes32(v));
-        (current, previous)
+        Ok((current, previous))
     }
 
     /// Current Ed25519 identity seed (32 bytes). Useful for callers that
@@ -364,30 +361,26 @@ impl ServerMetaStore {
     /// — e.g. `connection.rs` holds a separate keypair handle so it can
     /// pass `&Ed25519Keypair` into `verify_proof` (the rotation state
     /// doesn't expose the keypair directly).
-    pub fn current_identity_seed(&self) -> [u8; 32] {
+    pub fn current_identity_seed(&self) -> Result<[u8; 32], MetaError> {
         let p: PersistedIdentity = self
-            .read_blob(KEY_IDENTITY)
-            .ok()
-            .flatten()
-            .expect("server_meta identity missing — store not initialised");
-        bytes32(&p.current_seed)
+            .read_blob(KEY_IDENTITY)?
+            .ok_or(MetaError::NotInitialised(KEY_IDENTITY))?;
+        Ok(bytes32(&p.current_seed))
     }
 
     /// Rehydrated [`ServerIdentityState`].
-    pub fn identity_state(&self) -> ServerIdentityState {
+    pub fn identity_state(&self) -> Result<ServerIdentityState, MetaError> {
         let p: PersistedIdentity = self
-            .read_blob(KEY_IDENTITY)
-            .ok()
-            .flatten()
-            .expect("server_meta identity missing — store not initialised");
+            .read_blob(KEY_IDENTITY)?
+            .ok_or(MetaError::NotInitialised(KEY_IDENTITY))?;
         let current_seed = bytes32(&p.current_seed);
         let previous_seed = p.previous_seed.as_ref().map(|v| bytes32(v));
-        ServerIdentityState::from_material(
+        Ok(ServerIdentityState::from_material(
             &current_seed,
             previous_seed.as_ref(),
             p.rotation_until_ns,
             p.current_version,
-        )
+        ))
     }
 
     /// Rehydrated [`BootstrapState`] (constructed via `from_meta`).

@@ -24,7 +24,7 @@ fn init_creates_random_secrets() {
     let (_dir, path) = tmp_path();
     let store = ServerMetaStore::open_or_init(&path).expect("init");
 
-    let secrets = store.server_secrets();
+    let secrets = store.server_secrets().expect("secrets");
 
     // Must not be all zeros.
     assert_ne!(
@@ -43,14 +43,14 @@ fn init_creates_random_secrets() {
         "server_secret and lockout_secret must be derived independently"
     );
 
-    let audit_chain = store.audit_chain_key();
-    assert_ne!(audit_chain, [0u8; 32], "audit_chain_key must be random");
+    let audit_chain_key = store.audit_chain_key().expect("audit_chain_key");
+    assert_ne!(audit_chain_key, [0u8; 32], "audit_chain_key must be random");
     assert_ne!(
-        audit_chain, secrets.server_secret,
+        audit_chain_key, secrets.server_secret,
         "audit_chain_key must be independent of server_secret"
     );
 
-    let (ticket_current, ticket_previous) = store.ticket_keys();
+    let (ticket_current, ticket_previous) = store.ticket_keys().expect("ticket_keys");
     assert_ne!(ticket_current, [0u8; 32], "ticket_key must be random");
     assert!(
         ticket_previous.is_none(),
@@ -58,7 +58,7 @@ fn init_creates_random_secrets() {
     );
 
     // Identity rehydrates without panic; current_version starts at 0.
-    let identity = store.identity_state();
+    let identity = store.identity_state().expect("identity_state");
     assert_eq!(identity.current_version(), 0);
     assert!(identity.previous_pub().is_none());
 
@@ -79,13 +79,13 @@ fn init_persists_across_reopen() {
 
     let (server_secret, lockout_secret, audit_key, ticket_current, created_at_ns, identity_pub) = {
         let store = ServerMetaStore::open_or_init(&path).expect("init");
-        let secrets = store.server_secrets();
-        let identity = store.identity_state();
+        let secrets = store.server_secrets().expect("secrets");
+        let identity = store.identity_state().expect("identity_state");
         (
             secrets.server_secret,
             secrets.lockout_secret,
-            store.audit_chain_key(),
-            store.ticket_keys().0,
+            store.audit_chain_key().expect("audit_chain_key"),
+            store.ticket_keys().expect("ticket_keys").0,
             store.created_at_ns(),
             identity.current_pub(),
         )
@@ -93,18 +93,18 @@ fn init_persists_across_reopen() {
 
     // Reopen the same path.
     let store = ServerMetaStore::open_or_init(&path).expect("reopen");
-    let secrets2 = store.server_secrets();
+    let secrets2 = store.server_secrets().expect("secrets");
     assert_eq!(secrets2.server_secret, server_secret);
     assert_eq!(secrets2.lockout_secret, lockout_secret);
-    assert_eq!(store.audit_chain_key(), audit_key);
-    assert_eq!(store.ticket_keys().0, ticket_current);
+    assert_eq!(store.audit_chain_key().expect("audit_chain_key"), audit_key);
+    assert_eq!(store.ticket_keys().expect("ticket_keys").0, ticket_current);
     assert_eq!(
         store.created_at_ns(),
         created_at_ns,
         "created_at_ns must NOT change on reopen"
     );
     assert_eq!(
-        store.identity_state().current_pub(),
+        store.identity_state().expect("identity_state").current_pub(),
         identity_pub,
         "Ed25519 seed must rehydrate into the same pub key"
     );
@@ -119,14 +119,14 @@ fn rotate_ticket_key_atomically() {
     let (_dir, path) = tmp_path();
     let store = ServerMetaStore::open_or_init(&path).expect("init");
 
-    let (initial, prev) = store.ticket_keys();
+    let (initial, prev) = store.ticket_keys().expect("ticket_keys");
     assert!(prev.is_none());
 
     let new_key = [0xa5u8; 32];
     let now = 1_700_000_000_000_000_000u64;
     store.rotate_ticket_key(new_key, now).expect("rotate");
 
-    let (current_after, previous_after) = store.ticket_keys();
+    let (current_after, previous_after) = store.ticket_keys().expect("ticket_keys");
     assert_eq!(current_after, new_key);
     assert_eq!(
         previous_after,
@@ -137,7 +137,7 @@ fn rotate_ticket_key_atomically() {
     // Reopen → state preserved (durability test).
     drop(store);
     let store = ServerMetaStore::open_or_init(&path).expect("reopen");
-    let (current_after_reopen, previous_after_reopen) = store.ticket_keys();
+    let (current_after_reopen, previous_after_reopen) = store.ticket_keys().expect("ticket_keys");
     assert_eq!(current_after_reopen, new_key);
     assert_eq!(previous_after_reopen, Some(initial));
 }
@@ -163,7 +163,7 @@ fn finalize_identity_rotation_clears_previous() {
     // Reopen → previous_seed = Some, rotation_until_ns = Some.
     drop(store);
     let store = ServerMetaStore::open_or_init(&path).expect("reopen");
-    let identity = store.identity_state();
+    let identity = store.identity_state().expect("identity_state");
     assert_eq!(identity.current_version(), new_version);
     assert!(
         identity.previous_pub().is_some(),
@@ -176,7 +176,7 @@ fn finalize_identity_rotation_clears_previous() {
         .finalize_identity_rotation()
         .expect("finalize_identity_rotation");
 
-    let identity_after = store.identity_state();
+    let identity_after = store.identity_state().expect("identity_state");
     assert!(
         identity_after.previous_pub().is_none(),
         "previous pub must be cleared after finalize"
@@ -191,7 +191,7 @@ fn finalize_identity_rotation_clears_previous() {
     // Reopen → still cleared.
     drop(store);
     let store = ServerMetaStore::open_or_init(&path).expect("reopen-2");
-    let final_identity = store.identity_state();
+    let final_identity = store.identity_state().expect("identity_state");
     assert!(final_identity.previous_pub().is_none());
     assert!(final_identity.rotation_until_ns().is_none());
 }
@@ -280,9 +280,9 @@ fn crash_simulation_preserves_state() {
     let initial_secret;
     {
         let store = ServerMetaStore::open_or_init(&path).expect("init");
-        initial_ticket = store.ticket_keys().0;
-        initial_audit = store.audit_chain_key();
-        initial_secret = store.server_secrets().server_secret;
+        initial_ticket = store.ticket_keys().expect("ticket_keys").0;
+        initial_audit = store.audit_chain_key().expect("audit_chain_key");
+        initial_secret = store.server_secrets().expect("secrets").server_secret;
     }
 
     // Step 2: rotate ticket_key + crash.
@@ -300,8 +300,8 @@ fn crash_simulation_preserves_state() {
     {
         let store = ServerMetaStore::open_or_init(&path).expect("reopen-2");
         // Verify prior rotation persisted.
-        assert_eq!(store.ticket_keys().0, new_ticket);
-        assert_eq!(store.ticket_keys().1, Some(initial_ticket));
+        assert_eq!(store.ticket_keys().expect("ticket_keys").0, new_ticket);
+        assert_eq!(store.ticket_keys().expect("ticket_keys").1, Some(initial_ticket));
 
         store
             .rotate_audit_chain_key(new_audit, 2_000)
@@ -312,7 +312,7 @@ fn crash_simulation_preserves_state() {
     let new_secret = [0x03u8; 32];
     {
         let store = ServerMetaStore::open_or_init(&path).expect("reopen-3");
-        assert_eq!(store.audit_chain_key(), new_audit);
+        assert_eq!(store.audit_chain_key().expect("audit_chain_key"), new_audit);
         // Audit chain key has previous slot now; server_secret previous still
         // None because we haven't rotated it yet.
         store
@@ -325,9 +325,9 @@ fn crash_simulation_preserves_state() {
     let prev_seed = [0x05u8; 32];
     {
         let store = ServerMetaStore::open_or_init(&path).expect("reopen-4");
-        assert_eq!(store.server_secrets().server_secret, new_secret);
+        assert_eq!(store.server_secrets().expect("secrets").server_secret, new_secret);
         // lockout_secret never moves under server_secret rotation.
-        assert_ne!(store.server_secrets().lockout_secret, new_secret);
+        assert_ne!(store.server_secrets().expect("secrets").lockout_secret, new_secret);
 
         store
             .store_identity_after_rotate(cur_seed, prev_seed, 4_000, 7)
@@ -339,7 +339,7 @@ fn crash_simulation_preserves_state() {
     let chk_hmac = [0x06u8; 32];
     {
         let store = ServerMetaStore::open_or_init(&path).expect("reopen-5");
-        let identity = store.identity_state();
+        let identity = store.identity_state().expect("identity_state");
         assert_eq!(identity.current_version(), 7);
         assert_eq!(identity.rotation_until_ns(), Some(4_000));
         assert!(identity.previous_pub().is_some());
@@ -353,17 +353,17 @@ fn crash_simulation_preserves_state() {
     let store = ServerMetaStore::open_or_init(&path).expect("reopen-final");
 
     // Ticket: rotated once.
-    assert_eq!(store.ticket_keys().0, new_ticket);
-    assert_eq!(store.ticket_keys().1, Some(initial_ticket));
+    assert_eq!(store.ticket_keys().expect("ticket_keys").0, new_ticket);
+    assert_eq!(store.ticket_keys().expect("ticket_keys").1, Some(initial_ticket));
 
     // Audit chain: rotated once.
-    assert_eq!(store.audit_chain_key(), new_audit);
+    assert_eq!(store.audit_chain_key().expect("audit_chain_key"), new_audit);
 
     // Server secret: rotated once.
-    assert_eq!(store.server_secrets().server_secret, new_secret);
+    assert_eq!(store.server_secrets().expect("secrets").server_secret, new_secret);
 
     // Identity: stored.
-    let identity_final = store.identity_state();
+    let identity_final = store.identity_state().expect("identity_state");
     assert_eq!(identity_final.current_version(), 7);
     assert_eq!(identity_final.rotation_until_ns(), Some(4_000));
     assert!(identity_final.previous_pub().is_some());
