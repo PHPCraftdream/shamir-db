@@ -98,7 +98,7 @@ impl<S> ConnectionExporter for tokio_rustls::server::TlsStream<S> {
         context: Option<&[u8]>,
     ) -> Result<(), rustls::Error> {
         let (_, conn) = self.get_ref();
-        let _ = conn.export_keying_material(&mut out[..], label, context)?;
+        conn.export_keying_material(&mut out[..], label, context)?;
         Ok(())
     }
 }
@@ -111,7 +111,7 @@ impl<S> ConnectionExporter for tokio_rustls::client::TlsStream<S> {
         context: Option<&[u8]>,
     ) -> Result<(), rustls::Error> {
         let (_, conn) = self.get_ref();
-        let _ = conn.export_keying_material(&mut out[..], label, context)?;
+        conn.export_keying_material(&mut out[..], label, context)?;
         Ok(())
     }
 }

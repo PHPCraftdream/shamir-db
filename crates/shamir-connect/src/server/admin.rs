@@ -143,6 +143,7 @@ pub fn kick_session<D: UserDirectory, A: AuditSink>(
         .ok_or(Error::InvalidInput("user not found"))?;
 
     // Step 1: bump tickets_invalid_before_ns first (persist barrier).
+    // Ok-value (bool) intentionally discarded; ? propagates errors.
     let _ = directory.bump_tickets_invalid(target_username, now_ns)?;
 
     // Step 2: snapshot + kill.

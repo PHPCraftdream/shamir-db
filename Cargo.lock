@@ -2991,6 +2991,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "log",
  "parking_lot 0.12.5",
  "precis-profiles",
  "rand 0.8.5",

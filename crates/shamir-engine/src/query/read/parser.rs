@@ -17,7 +17,7 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
         _ => return Err(QueryParseError::NotAnObject),
     };
 
-    let from = match map.get(&"from".to_string()) {
+    let from = match map.get("from") {
         Some(Value::Str(s)) => TableRef::new(s.clone()),
         Some(Value::List(parts)) if parts.len() == 2 => {
             if let (Some(Value::Str(repo)), Some(Value::Str(table))) =
@@ -31,32 +31,32 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
         _ => return Err(QueryParseError::MissingField("from")),
     };
 
-    let select = match map.get(&"select".to_string()) {
+    let select = match map.get("select") {
         Some(v) => select_from_value(v)?,
         None => Select::all(),
     };
 
-    let r#where = match map.get(&"where".to_string()) {
+    let r#where = match map.get("where") {
         Some(v) => Some(filter_from_value(v)?),
         None => None,
     };
 
-    let group_by = match map.get(&"group_by".to_string()) {
+    let group_by = match map.get("group_by") {
         Some(v) => Some(group_by_from_value(v)?),
         None => None,
     };
 
-    let order_by = match map.get(&"order_by".to_string()) {
+    let order_by = match map.get("order_by") {
         Some(v) => Some(order_by_from_value(v)?),
         None => None,
     };
 
-    let pagination = match map.get(&"limit".to_string()) {
+    let pagination = match map.get("limit") {
         Some(v) => pagination_from_value(v)?,
         None => Pagination::None,
     };
 
-    let count_total = match map.get(&"count_total".to_string()) {
+    let count_total = match map.get("count_total") {
         Some(Value::Bool(b)) => *b,
         _ => false,
     };
@@ -76,12 +76,12 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
 fn select_from_value(value: &QueryValue) -> Result<Select, QueryParseError> {
     match value {
         Value::Map(map) => {
-            let items = match map.get(&"items".to_string()) {
+            let items = match map.get("items") {
                 Some(v) => items_from_value(v)?,
                 None => Vec::new(),
             };
 
-            let distinct = match map.get(&"distinct".to_string()) {
+            let distinct = match map.get("distinct") {
                 Some(Value::Bool(b)) => *b,
                 _ => false,
             };
@@ -104,7 +104,7 @@ fn items_from_value(value: &QueryValue) -> Result<Vec<SelectItem>, QueryParseErr
 fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
     match value {
         Value::Map(map) => {
-            let type_str = match map.get(&"type".to_string()) {
+            let type_str = match map.get("type") {
                 Some(Value::Str(s)) => s.as_str(),
                 _ => return Err(QueryParseError::MissingField("item.type")),
             };
@@ -112,7 +112,7 @@ fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
             match type_str {
                 "all" => Ok(SelectItem::All),
                 "field" => {
-                    let path = match map.get(&"path".to_string()) {
+                    let path = match map.get("path") {
                         Some(Value::Str(s)) => vec![s.clone()],
                         Some(Value::List(list)) => list
                             .iter()
@@ -124,7 +124,7 @@ fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
                         _ => return Err(QueryParseError::MissingField("field.path")),
                     };
 
-                    let alias = match map.get(&"alias".to_string()) {
+                    let alias = match map.get("alias") {
                         Some(Value::Str(s)) => Some(s.clone()),
                         _ => None,
                     };
@@ -132,24 +132,24 @@ fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
                     Ok(SelectItem::Field { path, alias })
                 }
                 "aggregate" => {
-                    let func_str = match map.get(&"func".to_string()) {
+                    let func_str = match map.get("func") {
                         Some(Value::Str(s)) => s.as_str(),
                         _ => return Err(QueryParseError::MissingField("aggregate.func")),
                     };
 
                     let func = agg_func_from_str(func_str)?;
 
-                    let field = match map.get(&"field".to_string()) {
+                    let field = match map.get("field") {
                         Some(v) => aggregate_field_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("aggregate.field")),
                     };
 
-                    let alias = match map.get(&"alias".to_string()) {
+                    let alias = match map.get("alias") {
                         Some(Value::Str(s)) => Some(s.clone()),
                         _ => None,
                     };
 
-                    let distinct = match map.get(&"distinct".to_string()) {
+                    let distinct = match map.get("distinct") {
                         Some(Value::Bool(b)) => *b,
                         _ => false,
                     };
@@ -162,7 +162,7 @@ fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
                     })
                 }
                 "count_all" => {
-                    let alias = match map.get(&"alias".to_string()) {
+                    let alias = match map.get("alias") {
                         Some(Value::Str(s)) => Some(s.clone()),
                         _ => None,
                     };
@@ -172,12 +172,12 @@ fn item_from_value(value: &QueryValue) -> Result<SelectItem, QueryParseError> {
                 "expr" => {
                     use crate::query::common::expr_from_value;
 
-                    let expr = match map.get(&"expr".to_string()) {
+                    let expr = match map.get("expr") {
                         Some(v) => expr_from_value(v)?,
                         None => return Err(QueryParseError::MissingField("expr.expr")),
                     };
 
-                    let alias = match map.get(&"alias".to_string()) {
+                    let alias = match map.get("alias") {
                         Some(Value::Str(s)) => Some(s.clone()),
                         _ => None,
                     };

@@ -183,11 +183,15 @@ impl ConsumedCounterStore for RedbConsumedCounters {
         if !to_remove.is_empty() {
             if let Ok(mut table) = txn.open_table(COUNTERS_TABLE) {
                 for key in &to_remove {
-                    let _ = table.remove(key);
+                    if let Err(e) = table.remove(key) {
+                        log::warn!("durable_counters::gc: remove failed: {}", e);
+                    }
                 }
             }
         }
-        let _ = txn.commit();
+        if let Err(e) = txn.commit() {
+            log::warn!("durable_counters::gc: commit failed: {}", e);
+        }
     }
 }
 

@@ -200,15 +200,15 @@ where
                 Some("float") => map.next_value::<f64>().map(Value::F64)?,
                 Some("dec") => {
                     let s: String = map.next_value()?;
-                    // Validate that it's a valid decimal, but store as string
+                    // validation-only; parsed value not retained
                     let _ = Decimal::from_str(&s).map_err(de::Error::custom)?;
                     Value::Str(s)
                 }
                 Some("big") => {
                     let source: BigIntSource = map.next_value()?;
-                    // Validate that it's a valid bigint, but store as string
                     let s = match source {
                         BigIntSource::Str(s) => {
+                            // validation-only; parsed value not retained
                             let _ = BigInt::from_str(&s).map_err(de::Error::custom)?;
                             s
                         }

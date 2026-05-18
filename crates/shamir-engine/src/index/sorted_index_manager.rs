@@ -148,6 +148,7 @@ impl SortedIndexManager {
             }
         }
         if !to_drop.is_empty() {
+            // Ok-value (removed entries) intentionally discarded; ? propagates errors.
             let _ = self.info_store.remove_many(to_drop).await?;
         }
         self.persist_defs().await?;
@@ -194,6 +195,7 @@ impl SortedIndexManager {
             }
             if let Some(ref ov) = old_enc {
                 let key = self.build_entry_key(def.name_interned, ov, record_id);
+                // Ok-value (removed entry) intentionally discarded; ? propagates errors.
                 let _ = self.info_store.remove(key).await?;
             }
             if let Some(ref nv) = new_enc {
@@ -244,6 +246,7 @@ impl SortedIndexManager {
         for def in &defs {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
+                // Ok-value (removed entry) intentionally discarded; ? propagates errors.
                 let _ = self.info_store.remove(key).await?;
             }
         }
