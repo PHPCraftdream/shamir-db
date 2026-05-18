@@ -3050,6 +3050,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "serde",
+ "serde_bytes",
  "serde_json",
  "serial_test",
  "shamir-query-types",
