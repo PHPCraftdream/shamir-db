@@ -106,13 +106,50 @@ function drop_role_op(client, role) {
   return { drop_role: role, hmac: sign(client, canonical) };
 }
 
+/** Build a `start_migration` op with HMAC attached. */
+function start_migration_op(client, dbInUse, srcRepo, table, dstRepo, dstEngine, opts = {}) {
+  const canonical = joinNullBytes([
+    'start_migration',
+    dbInUse,
+    srcRepo,
+    table,
+    dstRepo,
+    dstEngine,
+  ]);
+  const op = {
+    start_migration: table,
+    repo: srcRepo,
+    dst_repo: dstRepo,
+    dst_engine: dstEngine,
+    hmac: sign(client, canonical),
+  };
+  if (opts.dst_path) op.dst_path = opts.dst_path;
+  return op;
+}
+
+/** Build a `commit_migration` op with HMAC attached. */
+function commit_migration_op(client, dbInUse, migrationId) {
+  const canonical = joinNullBytes(['commit_migration', dbInUse, migrationId]);
+  return { commit_migration: migrationId, hmac: sign(client, canonical) };
+}
+
+/** Build a `rollback_migration` op with HMAC attached. */
+function rollback_migration_op(client, dbInUse, migrationId) {
+  const canonical = joinNullBytes(['rollback_migration', dbInUse, migrationId]);
+  return { rollback_migration: migrationId, hmac: sign(client, canonical) };
+}
+
 module.exports = {
   deriveKey,
   joinNullBytes,
+  sign,
   drop_db_op,
   drop_repo_op,
   drop_table_op,
   drop_index_op,
   drop_user_op,
   drop_role_op,
+  start_migration_op,
+  commit_migration_op,
+  rollback_migration_op,
 };

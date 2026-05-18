@@ -499,6 +499,24 @@ fn check_destructive_hmacs(
                 canon::canonical_drop_role(&op.drop_role),
                 op.hmac.as_ref(),
             ),
+            BatchOp::StartMigration(op) => (
+                canon::canonical_start_migration(
+                    db_name,
+                    &op.repo,
+                    &op.start_migration,
+                    &op.dst_repo,
+                    &op.dst_engine,
+                ),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::CommitMigration(op) => (
+                canon::canonical_commit_migration(db_name, &op.commit_migration),
+                op.hmac.as_ref(),
+            ),
+            BatchOp::RollbackMigration(op) => (
+                canon::canonical_rollback_migration(db_name, &op.rollback_migration),
+                op.hmac.as_ref(),
+            ),
             _ => continue, // non-destructive — pass.
         };
 

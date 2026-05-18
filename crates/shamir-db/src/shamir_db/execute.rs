@@ -455,6 +455,34 @@ impl AdminExecutor for ShamirAdminExecutor {
                 Ok(admin_result(json!({"revoked_role": op.revoke_role, "user": op.user})))
             }
 
+            BatchOp::StartMigration(op) => {
+                Err(err(format!(
+                    "start_migration '{}' → '{}/{}': not yet implemented (Phase B)",
+                    op.start_migration, op.dst_repo, op.dst_engine
+                )))
+            }
+
+            BatchOp::CommitMigration(op) => {
+                Err(err(format!(
+                    "commit_migration '{}': not yet implemented (Phase C)",
+                    op.commit_migration
+                )))
+            }
+
+            BatchOp::RollbackMigration(op) => {
+                Err(err(format!(
+                    "rollback_migration '{}': not yet implemented (Phase C)",
+                    op.rollback_migration
+                )))
+            }
+
+            BatchOp::MigrationStatus(op) => {
+                Err(err(format!(
+                    "migration_status '{}': not yet implemented (Phase C)",
+                    op.migration_status
+                )))
+            }
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }

@@ -105,6 +105,39 @@ pub fn canonical_drop_role(role: &str) -> Vec<u8> {
     join_null(&[b"drop_role", role.as_bytes()])
 }
 
+pub fn canonical_start_migration(
+    db_in_use: &str,
+    src_repo: &str,
+    table: &str,
+    dst_repo: &str,
+    dst_engine: &str,
+) -> Vec<u8> {
+    join_null(&[
+        b"start_migration",
+        db_in_use.as_bytes(),
+        src_repo.as_bytes(),
+        table.as_bytes(),
+        dst_repo.as_bytes(),
+        dst_engine.as_bytes(),
+    ])
+}
+
+pub fn canonical_commit_migration(db_in_use: &str, migration_id: &str) -> Vec<u8> {
+    join_null(&[
+        b"commit_migration",
+        db_in_use.as_bytes(),
+        migration_id.as_bytes(),
+    ])
+}
+
+pub fn canonical_rollback_migration(db_in_use: &str, migration_id: &str) -> Vec<u8> {
+    join_null(&[
+        b"rollback_migration",
+        db_in_use.as_bytes(),
+        migration_id.as_bytes(),
+    ])
+}
+
 /// Compute a hex-encoded HMAC-SHA256 tag.
 pub fn compute_tag_hex(key: &[u8; 32], canonical: &[u8]) -> String {
     use hmac::{Hmac, Mac};
@@ -208,6 +241,19 @@ mod tests {
         );
         assert_eq!(canonical_drop_user("bob"), b"drop_user\0bob");
         assert_eq!(canonical_drop_role("admin"), b"drop_role\0admin");
+
+        assert_eq!(
+            canonical_start_migration("mydb", "main", "users", "cold", "redb"),
+            b"start_migration\0mydb\0main\0users\0cold\0redb"
+        );
+        assert_eq!(
+            canonical_commit_migration("mydb", "mig-001"),
+            b"commit_migration\0mydb\0mig-001"
+        );
+        assert_eq!(
+            canonical_rollback_migration("mydb", "mig-001"),
+            b"rollback_migration\0mydb\0mig-001"
+        );
     }
 
     #[test]
