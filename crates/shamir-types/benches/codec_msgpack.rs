@@ -10,7 +10,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use shamir_types::codecs::interned::messagepack::inner_to_msgpack;
+use shamir_types::codecs::interned::messagepack::{inner_to_msgpack, msgpack_to_inner};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
@@ -72,5 +72,25 @@ fn bench_encode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode);
+fn bench_decode(c: &mut Criterion) {
+    let interner = Interner::new();
+    let records: Vec<InnerValue> = (0..1000).map(|i| make_record(&interner, i)).collect();
+    let encoded: Vec<Vec<u8>> = records
+        .iter()
+        .map(|r| inner_to_msgpack(&interner, r).unwrap())
+        .collect();
+
+    let mut group = c.benchmark_group("codec_msgpack_decode");
+    group.throughput(Throughput::Elements(encoded.len() as u64));
+    group.bench_function("interned_1000_records", |b| {
+        b.iter(|| {
+            for blob in &encoded {
+                black_box(msgpack_to_inner(&interner, blob).unwrap());
+            }
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_encode, bench_decode);
 criterion_main!(benches);
