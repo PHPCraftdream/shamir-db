@@ -3065,6 +3065,7 @@ dependencies = [
 name = "shamir-query-types"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fxhash",
  "hmac",
  "indexmap",
@@ -3124,6 +3125,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "canopydb",
+ "criterion",
  "dashmap 6.1.0",
  "fjall",
  "futures",
