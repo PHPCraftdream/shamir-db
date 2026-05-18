@@ -532,7 +532,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .map_err(|e| err(e.to_string()))?;
                 let (src_count, dst_count) = coord.verify_record_count().await
                     .map_err(|e| err(e.to_string()))?;
-                let state = coord.state();
+                let state = coord.state().await;
 
                 Ok(admin_result(json!({
                     "migration_id": op.commit_migration,
@@ -561,7 +561,8 @@ impl AdminExecutor for ShamirAdminExecutor {
                 let coord = self.shamir.active_migrations().get(&op.migration_status)
                     .ok_or_else(|| err(format!("migration '{}' not found", op.migration_status)))?
                     .clone();
-                let state = coord.state();
+                let state = coord.state().await;
+                let shadow_lag = coord.shadow_lag().await;
 
                 Ok(admin_result(json!({
                     "migration_id": state.id,
@@ -573,7 +574,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                     "snapshot_lsn": state.snapshot_lsn,
                     "last_lsn_applied": state.last_lsn_applied,
                     "records_copied": state.records_copied,
-                    "shadow_lag": coord.shadow_lag(),
+                    "shadow_lag": shadow_lag,
                 })))
             }
 
