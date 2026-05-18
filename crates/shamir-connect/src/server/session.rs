@@ -272,7 +272,7 @@ impl SessionStore {
             .hmac_key_cache
             .set(Session::derive_hmac_key(&session_id));
         let arc = Arc::new(session);
-        self.by_sid.insert(session_id, arc.clone());
+        self.by_sid.insert(session_id, Arc::clone(&arc));
         arc
     }
 

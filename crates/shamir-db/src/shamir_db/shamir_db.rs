@@ -80,7 +80,12 @@ impl ShamirDb {
                 if let Some(factory) = factory {
                     // Load table configs for this repo (tables will be loaded lazily)
                     let config = RepoConfig::new(repo_name, factory);
-                    let _ = db.add_repo(config).await;
+                    if let Err(e) = db.add_repo(config).await {
+                        log::warn!(
+                            "shamir_db::init: failed to attach repo '{}/{}' ({}): {}",
+                            db_name, repo_name, engine, e
+                        );
+                    }
                 }
             }
         }
@@ -146,10 +151,12 @@ impl ShamirDb {
             .as_secs();
 
         // Persist to system store
-        let _ = self.system_store.save_database(name, &json!({
+        if let Err(e) = self.system_store.save_database(name, &json!({
             "name": name,
             "created_at": created_at,
-        })).await;
+        })).await {
+            log::warn!("shamir_db::create_db: failed to persist '{}': {}", name, e);
+        }
 
         db
     }
@@ -170,7 +177,12 @@ impl ShamirDb {
         let removed = self.dbs.remove(name).is_some();
 
         if removed {
-            let _ = self.system_store.remove_database(name).await;
+            if let Err(e) = self.system_store.remove_database(name).await {
+                log::warn!(
+                    "shamir_db::remove_db: failed to remove '{}' from system store: {}",
+                    name, e
+                );
+            }
         }
 
         removed
@@ -189,12 +201,17 @@ impl ShamirDb {
         db.add_repo(config).await?;
 
         // Persist to system store
-        let _ = self.system_store.save_repository(
+        if let Err(e) = self.system_store.save_repository(
             db_name,
             &repo_name,
             &storage_type,
             path.as_deref(),
-        ).await;
+        ).await {
+            log::warn!(
+                "shamir_db::add_repo: failed to persist '{}/{}': {}",
+                db_name, repo_name, e
+            );
+        }
 
         Ok(())
     }
@@ -247,7 +264,12 @@ impl ShamirDb {
         if let Some(db) = self.get_db(db_name) {
             let removed = db.remove_repo(repo_name).await;
             if removed {
-                let _ = self.system_store.remove_repository(db_name, repo_name).await;
+                if let Err(e) = self.system_store.remove_repository(db_name, repo_name).await {
+                    log::warn!(
+                        "shamir_db::remove_repo: failed to remove '{}/{}' from system store: {}",
+                        db_name, repo_name, e
+                    );
+                }
             }
             removed
         } else {

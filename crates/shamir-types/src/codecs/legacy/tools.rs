@@ -138,11 +138,21 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue {
         Value::Map(map) => {
             let mut user_map = new_map_wc(map.len());
             for (key_id, val) in map {
-                let key = interner
-                    .get_str(key_id)
-                    .expect("Data corruption: interned key not found");
-                let user_val = inner_to_user(val, interner);
-                user_map.insert(key.as_str().to_string(), user_val);
+                match interner.get_str(key_id) {
+                    Some(key) => {
+                        let user_val = inner_to_user(val, interner);
+                        user_map.insert(key.as_str().to_string(), user_val);
+                    }
+                    None => {
+                        // Deprecated codec; defensive recovery — skip
+                        // entry instead of crashing the caller on a stale
+                        // or corrupted interner snapshot.
+                        log::error!(
+                            "inner_to_user (legacy): interned key {:?} not found — skipping entry",
+                            key_id
+                        );
+                    }
+                }
             }
             Value::Map(user_map)
         }

@@ -93,6 +93,7 @@ impl WalManager {
     /// actual writes have landed durably. Idempotent: removing an
     /// already-absent marker is a no-op.
     pub async fn commit(&self, txn_id: u64) -> DbResult<()> {
+        // Ok-value (removed entry) intentionally discarded; ? propagates errors.
         let _ = self.info_store.remove(Self::marker_key(txn_id)).await?;
         Ok(())
     }
@@ -114,6 +115,7 @@ impl WalManager {
         let info_store = self.info_store.clone();
         let key = Self::marker_key(txn_id);
         tokio::spawn(async move {
+            // Ok-value (removed entry) intentionally discarded; ? propagates errors.
             let _ = info_store.remove(key).await?;
             Ok(())
         })

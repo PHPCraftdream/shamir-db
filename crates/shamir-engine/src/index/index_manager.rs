@@ -343,6 +343,7 @@ impl IndexManager {
     ) -> DbResult<()> {
         let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
         let posting_key = Self::build_posting_key(&index_key, record_id);
+        // Ok-value (removed entry) intentionally discarded; ? propagates errors.
         let _ = self.info_store.remove(posting_key).await?;
         // Opt G: drop the cached posting list for this (name, values).
         self.invalidate_posting_cache(name_interned, values);
@@ -462,6 +463,7 @@ impl IndexManager {
             }
         }
         if !to_remove.is_empty() {
+            // Ok-value (removed entries) intentionally discarded; ? propagates errors.
             let _ = self.info_store.remove_many(to_remove).await?;
         }
 
@@ -1195,6 +1197,7 @@ impl IndexManager {
             }
         }
         if !to_remove.is_empty() {
+            // Ok-value (removed entries) intentionally discarded; ? propagates errors.
             let _ = self.info_store.remove_many(to_remove).await?;
         }
 

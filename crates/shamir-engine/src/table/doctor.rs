@@ -392,6 +392,7 @@ impl TableManager {
         for id in &deleted_ids {
             // Returns false if record was already absent; that's
             // fine — orphan postings (if any) are caught by step 3.
+            // Ok-value (bool) intentionally discarded; ? propagates errors.
             let _ = self.delete(*id).await?;
         }
         records_processed += deleted_ids.len() as u64;

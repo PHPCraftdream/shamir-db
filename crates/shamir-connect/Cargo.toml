@@ -40,6 +40,10 @@ precis-profiles = "0.1"
 # Errors
 thiserror = "2.0"
 
+# Logging for background GC / persistence failures that should not
+# kill the request path but must surface to operators.
+log = "0.4"
+
 # Server-only (concurrent state)
 dashmap = { version = "6.1", optional = true }
 parking_lot = { version = "0.12", optional = true }
