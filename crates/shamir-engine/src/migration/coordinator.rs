@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use super::shadow_log::{MigrationShadowLog, ShadowOp};
 
@@ -75,7 +76,7 @@ impl MigrationState {
 }
 
 pub struct MigrationCoordinator {
-    state: std::sync::Mutex<MigrationState>,
+    state: Mutex<MigrationState>,
     shadow_log: Arc<MigrationShadowLog>,
     src_data: Arc<dyn Store>,
     dst_data: Arc<dyn Store>,
@@ -89,23 +90,23 @@ impl MigrationCoordinator {
         dst_data: Arc<dyn Store>,
     ) -> Self {
         Self {
-            state: std::sync::Mutex::new(state),
+            state: Mutex::new(state),
             shadow_log,
             src_data,
             dst_data,
         }
     }
 
-    pub fn state(&self) -> MigrationState {
-        self.state.lock().unwrap().clone()
+    pub async fn state(&self) -> MigrationState {
+        self.state.lock().await.clone()
     }
 
-    pub fn phase(&self) -> MigrationPhase {
-        self.state.lock().unwrap().phase
+    pub async fn phase(&self) -> MigrationPhase {
+        self.state.lock().await.phase
     }
 
-    pub fn migration_id(&self) -> String {
-        self.state.lock().unwrap().id.clone()
+    pub async fn migration_id(&self) -> String {
+        self.state.lock().await.id.clone()
     }
 
     pub fn shadow_log(&self) -> &Arc<MigrationShadowLog> {
@@ -114,7 +115,7 @@ impl MigrationCoordinator {
 
     pub async fn run_snapshot(&self) -> DbResult<u64> {
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock().await;
             if s.phase != MigrationPhase::ShadowStarted {
                 return Err(DbError::Internal(format!(
                     "snapshot requires ShadowStarted, got {}",
@@ -142,7 +143,7 @@ impl MigrationCoordinator {
         }
 
         {
-            let mut s = self.state.lock().unwrap();
+            let mut s = self.state.lock().await;
             s.records_copied = copied;
             s.phase = MigrationPhase::Draining;
         }
@@ -151,7 +152,7 @@ impl MigrationCoordinator {
 
     pub async fn drain_shadow_log(&self) -> DbResult<u64> {
         let start_lsn = {
-            let s = self.state.lock().unwrap();
+            let s = self.state.lock().await;
             if s.phase != MigrationPhase::Draining {
                 return Err(DbError::Internal(format!(
                     "drain requires Draining, got {}",
@@ -178,16 +179,19 @@ impl MigrationCoordinator {
         }
 
         if let Some(last) = entries.last() {
-            self.state.lock().unwrap().last_lsn_applied = last.lsn;
+            self.state.lock().await.last_lsn_applied = last.lsn;
         }
 
         Ok(applied)
     }
 
-    pub fn shadow_lag(&self) -> u64 {
-        let s = self.state.lock().unwrap();
+    pub async fn shadow_lag(&self) -> u64 {
+        let (last_applied, snapshot_lsn) = {
+            let s = self.state.lock().await;
+            (s.last_lsn_applied, s.snapshot_lsn)
+        };
         let current = self.shadow_log.current_lsn();
-        current.saturating_sub(s.last_lsn_applied.max(s.snapshot_lsn))
+        current.saturating_sub(last_applied.max(snapshot_lsn))
     }
 
     pub async fn drain_until_caught_up(&self, max_lag: u64) -> DbResult<u64> {
@@ -195,7 +199,7 @@ impl MigrationCoordinator {
         loop {
             let applied = self.drain_shadow_log().await?;
             total += applied;
-            if self.shadow_lag() <= max_lag {
+            if self.shadow_lag().await <= max_lag {
                 break;
             }
             if applied == 0 {
@@ -206,7 +210,7 @@ impl MigrationCoordinator {
     }
 
     pub async fn mark_cutover_ready(&self) -> DbResult<()> {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock().await;
         if s.phase != MigrationPhase::Draining {
             return Err(DbError::Internal(format!(
                 "cutover_ready requires Draining, got {}",
@@ -219,7 +223,7 @@ impl MigrationCoordinator {
 
     pub async fn final_drain_and_commit(&self) -> DbResult<u64> {
         {
-            let s = self.state.lock().unwrap();
+            let s = self.state.lock().await;
             if s.phase != MigrationPhase::CutoverReady {
                 return Err(DbError::Internal(format!(
                     "final_drain requires CutoverReady, got {}",
@@ -228,7 +232,7 @@ impl MigrationCoordinator {
             }
         }
 
-        let start_lsn = self.state.lock().unwrap().last_lsn_applied + 1;
+        let start_lsn = self.state.lock().await.last_lsn_applied + 1;
         let entries = self.shadow_log.read_from(start_lsn).await?;
         let mut applied = 0u64;
         for entry in &entries {
@@ -245,22 +249,22 @@ impl MigrationCoordinator {
             applied += 1;
         }
         if let Some(last) = entries.last() {
-            self.state.lock().unwrap().last_lsn_applied = last.lsn;
+            self.state.lock().await.last_lsn_applied = last.lsn;
         }
 
-        self.state.lock().unwrap().phase = MigrationPhase::Committed;
+        self.state.lock().await.phase = MigrationPhase::Committed;
         Ok(applied)
     }
 
     pub async fn rollback(&self) -> DbResult<()> {
-        let phase = self.phase();
+        let phase = self.phase().await;
         if phase == MigrationPhase::Committed {
             return Err(DbError::Internal(
                 "cannot rollback a committed migration".into(),
             ));
         }
         self.shadow_log.purge().await?;
-        self.state.lock().unwrap().phase = MigrationPhase::RolledBack;
+        self.state.lock().await.phase = MigrationPhase::RolledBack;
         Ok(())
     }
 
@@ -315,7 +319,7 @@ mod tests {
         );
         let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone());
 
-        assert_eq!(coord.phase(), MigrationPhase::ShadowStarted);
+        assert_eq!(coord.phase().await, MigrationPhase::ShadowStarted);
 
         let copied = coord.run_snapshot().await.unwrap();
 
@@ -325,13 +329,13 @@ mod tests {
             value: b"concurrent_write".to_vec(),
         }).await.unwrap();
         assert_eq!(copied, 10);
-        assert_eq!(coord.phase(), MigrationPhase::Draining);
+        assert_eq!(coord.phase().await, MigrationPhase::Draining);
 
         let drained = coord.drain_until_caught_up(0).await.unwrap();
         assert_eq!(drained, 1);
 
         coord.mark_cutover_ready().await.unwrap();
-        assert_eq!(coord.phase(), MigrationPhase::CutoverReady);
+        assert_eq!(coord.phase().await, MigrationPhase::CutoverReady);
 
         // One more write during cutover prep
         shadow.append(ShadowOp::Put {
@@ -341,7 +345,7 @@ mod tests {
 
         let final_drained = coord.final_drain_and_commit().await.unwrap();
         assert_eq!(final_drained, 1);
-        assert_eq!(coord.phase(), MigrationPhase::Committed);
+        assert_eq!(coord.phase().await, MigrationPhase::Committed);
 
         let (src_count, dst_count) = coord.verify_record_count().await.unwrap();
         assert_eq!(src_count, 10);
@@ -363,7 +367,7 @@ mod tests {
 
         coord.run_snapshot().await.unwrap();
         coord.rollback().await.unwrap();
-        assert_eq!(coord.phase(), MigrationPhase::RolledBack);
+        assert_eq!(coord.phase().await, MigrationPhase::RolledBack);
     }
 
     #[tokio::test]
