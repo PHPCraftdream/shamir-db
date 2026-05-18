@@ -1747,6 +1747,134 @@ criterion_group!{
     bench_steady_state_insert,
     bench_wal_high_qps,
     bench_eviction_byte_pressure,
-    bench_ttl_sweep_50k
+    bench_ttl_sweep_50k,
+    bench_concurrent_inserts,
+    bench_ddl_create_index_on_seeded
 }
 criterion_main!(benches);
+
+// ═══════════════════════════════════════════════════════════════════
+// Concurrent write contention
+// ═══════════════════════════════════════════════════════════════════
+
+fn bench_concurrent_inserts(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let shamir = rt.block_on(async {
+        let s = Arc::new(ShamirDb::init_memory().await.unwrap());
+        s.create_db("bench").await;
+        let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+            .add_table(TableConfig::new("users"));
+        s.add_repo("bench", cfg).await.unwrap();
+        s
+    });
+
+    let mut group = c.benchmark_group("concurrent_inserts");
+    for n_writers in [1, 2, 4, 8] {
+        group.throughput(Throughput::Elements(n_writers as u64));
+        group.bench_with_input(
+            BenchmarkId::new("writers", n_writers),
+            &n_writers,
+            |b, &n| {
+                let counter = std::sync::atomic::AtomicU64::new(0);
+                b.to_async(&rt).iter(|| {
+                    let shamir = Arc::clone(&shamir);
+                    let c = &counter;
+                    async move {
+                        let mut handles = Vec::new();
+                        for _w in 0..n {
+                            let s = Arc::clone(&shamir);
+                            let id = c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            handles.push(tokio::spawn(async move {
+                                let req: BatchRequest = serde_json::from_value(json!({
+                                    "id": id,
+                                    "queries": {
+                                        "ups": {
+                                            "set": "users",
+                                            "key": {"id": id},
+                                            "value": {"id": id, "name": format!("w{id}"), "score": id}
+                                        }
+                                    }
+                                })).unwrap();
+                                s.execute("bench", &req).await.unwrap();
+                            }));
+                        }
+                        for h in handles {
+                            h.await.unwrap();
+                        }
+                    }
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DDL: create_index on a seeded table (rebuild cost)
+// ═══════════════════════════════════════════════════════════════════
+
+fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("ddl_create_index");
+    group.sample_size(10);
+    for n_records in [100, 1000] {
+        group.bench_with_input(
+            BenchmarkId::new("records", n_records),
+            &n_records,
+            |b, &n| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let shamir = rt.block_on(async {
+                            let s = Arc::new(ShamirDb::init_memory().await.unwrap());
+                            s.create_db("bench").await;
+                            let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
+                                .add_table(TableConfig::new("items"));
+                            s.add_repo("bench", cfg).await.unwrap();
+                            seed_users_inner(&s, n, "items").await;
+                            s
+                        });
+                        let start = Instant::now();
+                        rt.block_on(async {
+                            let req: BatchRequest = serde_json::from_value(json!({
+                                "id": 1,
+                                "queries": {
+                                    "idx": {
+                                        "create_index": "by_score",
+                                        "table": "items",
+                                        "fields": [["score"]]
+                                    }
+                                }
+                            })).unwrap();
+                            shamir.execute("bench", &req).await.unwrap();
+                        });
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
+    for chunk_start in (0..n).step_by(50) {
+        let chunk_end = (chunk_start + 50).min(n);
+        let values: Vec<JsonValue> = (chunk_start..chunk_end)
+            .map(|i| gen_user(i))
+            .collect();
+        let req: BatchRequest = serde_json::from_value(json!({
+            "id": chunk_start,
+            "queries": {
+                "s": {
+                    "insert_into": table,
+                    "values": values,
+                    "return_result": false
+                }
+            }
+        })).unwrap();
+        shamir.execute("bench", &req).await.unwrap();
+    }
+}
