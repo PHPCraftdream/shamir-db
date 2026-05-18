@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
+use crate::engine::migration::MigrationCoordinator;
+
 use super::system_store::{SystemStore, SystemStoreConfig};
 
 const SYSTEM_DB_NAME: &str = "__system__";
@@ -38,6 +40,7 @@ pub struct ShamirDb {
     /// (each unique user occupies a slot forever), but admin ops are
     /// rare so the memory cost is negligible.
     admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    active_migrations: Arc<DashMap<String, Arc<MigrationCoordinator>>>,
 }
 
 impl ShamirDb {
@@ -50,11 +53,13 @@ impl ShamirDb {
 
         let dbs = Arc::new(DashMap::new());
         let admin_user_locks = Arc::new(DashMap::new());
+        let active_migrations = Arc::new(DashMap::new());
 
         let shamir = Self {
             dbs,
             system_store,
             admin_user_locks,
+            active_migrations,
         };
 
         // Load existing databases from system store
@@ -107,6 +112,10 @@ impl ShamirDb {
     /// RevokeRole) and close the §B9 read-modify-write race.
     pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>>> {
         &self.admin_user_locks
+    }
+
+    pub fn active_migrations(&self) -> &Arc<DashMap<String, Arc<MigrationCoordinator>>> {
+        &self.active_migrations
     }
 
     fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {

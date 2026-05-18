@@ -221,9 +221,23 @@ async fn test_execute_unknown_db() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_start_migration_returns_not_implemented() {
+async fn test_migration_lifecycle_in_memory() {
     let shamir = setup_shamir().await;
 
+    // Seed some data
+    let seed: BatchRequest = serde_json::from_value(json!({
+        "id": 0,
+        "queries": {
+            "s": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}, {"name": "Bob"}, {"name": "Carol"}],
+                "return_result": false
+            }
+        }
+    })).unwrap();
+    shamir.execute("testdb", &seed).await.unwrap();
+
+    // Start migration: users from main → cold (in_memory)
     let req: BatchRequest = serde_json::from_value(json!({
         "id": 1,
         "queries": {
@@ -231,79 +245,116 @@ async fn test_start_migration_returns_not_implemented() {
                 "start_migration": "users",
                 "repo": "main",
                 "dst_repo": "cold",
-                "dst_engine": "redb"
+                "dst_engine": "in_memory"
             }
         }
     })).unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let mig_result = &resp.results["mig"].records[0];
+    assert_eq!(mig_result["phase"], "cutover_ready");
+    let migration_id = mig_result["migration_id"].as_str().unwrap().to_string();
 
-    let err = shamir.execute("testdb", &req).await.unwrap_err();
-    match &err {
-        crate::query::batch::BatchError::QueryError { message, .. } => {
-            assert!(message.contains("not yet implemented"), "got: {message}");
-            assert!(message.contains("start_migration"), "got: {message}");
+    // Query status
+    let status_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "s": {"migration_status": migration_id}
         }
-        other => panic!("expected QueryError, got: {other:?}"),
-    }
+    })).unwrap();
+    let status_resp = shamir.execute("testdb", &status_req).await.unwrap();
+    let status = &status_resp.results["s"].records[0];
+    assert_eq!(status["phase"], "cutover_ready");
+    assert_eq!(status["records_copied"], 3);
+
+    // Commit
+    let commit_req: BatchRequest = serde_json::from_value(json!({
+        "id": 3,
+        "queries": {
+            "c": {"commit_migration": migration_id}
+        }
+    })).unwrap();
+    let commit_resp = shamir.execute("testdb", &commit_req).await.unwrap();
+    let commit = &commit_resp.results["c"].records[0];
+    assert_eq!(commit["phase"], "committed");
+    assert_eq!(commit["src_records"], 3);
+    assert_eq!(commit["dst_records"], 3);
+
+    // Read from the destination table
+    let read_req: BatchRequest = serde_json::from_value(json!({
+        "id": 4,
+        "queries": {
+            "r": {"from": ["cold", "users"]}
+        }
+    })).unwrap();
+    let read_resp = shamir.execute("testdb", &read_req).await.unwrap();
+    assert_eq!(read_resp.results["r"].records.len(), 3);
 }
 
 #[tokio::test]
-async fn test_commit_migration_returns_not_implemented() {
+async fn test_migration_rollback() {
+    let shamir = setup_shamir().await;
+
+    // Seed
+    let seed: BatchRequest = serde_json::from_value(json!({
+        "id": 0,
+        "queries": {
+            "s": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}],
+                "return_result": false
+            }
+        }
+    })).unwrap();
+    shamir.execute("testdb", &seed).await.unwrap();
+
+    // Start migration
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "mig": {
+                "start_migration": "users",
+                "repo": "main",
+                "dst_repo": "rollback_dst",
+                "dst_engine": "in_memory"
+            }
+        }
+    })).unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let migration_id = resp.results["mig"].records[0]["migration_id"].as_str().unwrap().to_string();
+
+    // Rollback
+    let rb_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "r": {"rollback_migration": migration_id}
+        }
+    })).unwrap();
+    let rb_resp = shamir.execute("testdb", &rb_req).await.unwrap();
+    assert_eq!(rb_resp.results["r"].records[0]["phase"], "rolled_back");
+
+    // Status should fail (migration removed)
+    let status_req: BatchRequest = serde_json::from_value(json!({
+        "id": 3,
+        "queries": {
+            "s": {"migration_status": migration_id}
+        }
+    })).unwrap();
+    let status_err = shamir.execute("testdb", &status_req).await.unwrap_err();
+    assert!(matches!(status_err, crate::query::batch::BatchError::QueryError { .. }));
+}
+
+#[tokio::test]
+async fn test_migration_unknown_id() {
     let shamir = setup_shamir().await;
 
     let req: BatchRequest = serde_json::from_value(json!({
         "id": 1,
         "queries": {
-            "c": {"commit_migration": "mig-001"}
+            "c": {"commit_migration": "nonexistent"}
         }
     })).unwrap();
-
     let err = shamir.execute("testdb", &req).await.unwrap_err();
-    match &err {
-        crate::query::batch::BatchError::QueryError { message, .. } => {
-            assert!(message.contains("not yet implemented"), "got: {message}");
-        }
-        other => panic!("expected QueryError, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn test_rollback_migration_returns_not_implemented() {
-    let shamir = setup_shamir().await;
-
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "r": {"rollback_migration": "mig-001"}
-        }
-    })).unwrap();
-
-    let err = shamir.execute("testdb", &req).await.unwrap_err();
-    match &err {
-        crate::query::batch::BatchError::QueryError { message, .. } => {
-            assert!(message.contains("not yet implemented"), "got: {message}");
-        }
-        other => panic!("expected QueryError, got: {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn test_migration_status_returns_not_implemented() {
-    let shamir = setup_shamir().await;
-
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "s": {"migration_status": "mig-001"}
-        }
-    })).unwrap();
-
-    let err = shamir.execute("testdb", &req).await.unwrap_err();
-    match &err {
-        crate::query::batch::BatchError::QueryError { message, .. } => {
-            assert!(message.contains("not yet implemented"), "got: {message}");
-        }
-        other => panic!("expected QueryError, got: {other:?}"),
-    }
+    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
 }
 
 // ============================================================================
