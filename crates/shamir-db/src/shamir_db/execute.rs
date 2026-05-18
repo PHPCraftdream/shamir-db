@@ -15,6 +15,10 @@ use crate::query::read::{QueryResult, QueryStats};
 use crate::query::TableRef;
 use crate::DbResult;
 
+use crate::engine::migration::{
+    MigrationCoordinator, MigrationShadowLog, MigrationState,
+};
+
 use super::shamir_db::ShamirDb;
 
 /// TableResolver that resolves TableRef within a DbInstance.
@@ -456,31 +460,121 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::StartMigration(op) => {
-                Err(err(format!(
-                    "start_migration '{}' → '{}/{}': not yet implemented (Phase B)",
-                    op.start_migration, op.dst_repo, op.dst_engine
-                )))
+                let db = self.shamir.get_db(&self.db_name)
+                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+
+                let table_name = &op.start_migration;
+                let migration_id = format!("mig_{}_{}", table_name, std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+
+                // Check no active migration for this table
+                if self.shamir.active_migrations().contains_key(&migration_id) {
+                    return Err(err("migration already in progress for this table".into()));
+                }
+
+                // Get source table's data_store + info_store
+                let src_table = db.get_table(&op.repo, table_name).await
+                    .map_err(|e| err(e.to_string()))?;
+                let src_data = Arc::clone(src_table.table().data_store());
+                let info_store = Arc::clone(src_table.info_store());
+
+                // Create destination repo + table (in-memory for now; real engine wiring TBD)
+                let dst_factory = match op.dst_engine.as_str() {
+                    "in_memory" => BoxRepoFactory::in_memory(),
+                    engine => return Err(err(format!(
+                        "Migration dst_engine '{}' not yet supported. Supported: in_memory",
+                        engine
+                    ))),
+                };
+                let dst_repo_name = &op.dst_repo;
+                let dst_config = RepoConfig::new(dst_repo_name, dst_factory)
+                    .add_table(TableConfig::new(table_name));
+                db.add_repo(dst_config).await.map_err(|e| err(e.to_string()))?;
+
+                let dst_table = db.get_table(dst_repo_name, table_name).await
+                    .map_err(|e| err(e.to_string()))?;
+                let dst_data = Arc::clone(dst_table.table().data_store());
+
+                // Create shadow log + coordinator
+                let shadow = Arc::new(MigrationShadowLog::new(migration_id.clone(), info_store));
+                let state = MigrationState::new(
+                    migration_id.clone(),
+                    table_name.to_string(),
+                    op.repo.clone(),
+                    op.dst_repo.clone(),
+                    op.dst_engine.clone(),
+                    op.dst_path.clone(),
+                );
+                let coord = Arc::new(MigrationCoordinator::new(state, shadow, src_data, dst_data));
+
+                // Run snapshot + drain in background-ish (blocking here for simplicity)
+                coord.run_snapshot().await.map_err(|e| err(e.to_string()))?;
+                coord.drain_until_caught_up(0).await.map_err(|e| err(e.to_string()))?;
+                coord.mark_cutover_ready().await.map_err(|e| err(e.to_string()))?;
+
+                self.shamir.active_migrations().insert(migration_id.clone(), coord);
+
+                Ok(admin_result(json!({
+                    "migration_id": migration_id,
+                    "phase": "cutover_ready",
+                    "table": table_name,
+                    "src_repo": op.repo,
+                    "dst_repo": op.dst_repo,
+                    "dst_engine": op.dst_engine,
+                })))
             }
 
             BatchOp::CommitMigration(op) => {
-                Err(err(format!(
-                    "commit_migration '{}': not yet implemented (Phase C)",
-                    op.commit_migration
-                )))
+                let coord = self.shamir.active_migrations().get(&op.commit_migration)
+                    .ok_or_else(|| err(format!("migration '{}' not found", op.commit_migration)))?
+                    .clone();
+                let tail = coord.final_drain_and_commit().await
+                    .map_err(|e| err(e.to_string()))?;
+                let (src_count, dst_count) = coord.verify_record_count().await
+                    .map_err(|e| err(e.to_string()))?;
+                let state = coord.state();
+
+                Ok(admin_result(json!({
+                    "migration_id": op.commit_migration,
+                    "phase": "committed",
+                    "tail_drained": tail,
+                    "src_records": src_count,
+                    "dst_records": dst_count,
+                    "records_copied": state.records_copied,
+                })))
             }
 
             BatchOp::RollbackMigration(op) => {
-                Err(err(format!(
-                    "rollback_migration '{}': not yet implemented (Phase C)",
-                    op.rollback_migration
-                )))
+                let coord = self.shamir.active_migrations().get(&op.rollback_migration)
+                    .ok_or_else(|| err(format!("migration '{}' not found", op.rollback_migration)))?
+                    .clone();
+                coord.rollback().await.map_err(|e| err(e.to_string()))?;
+                self.shamir.active_migrations().remove(&op.rollback_migration);
+
+                Ok(admin_result(json!({
+                    "migration_id": op.rollback_migration,
+                    "phase": "rolled_back",
+                })))
             }
 
             BatchOp::MigrationStatus(op) => {
-                Err(err(format!(
-                    "migration_status '{}': not yet implemented (Phase C)",
-                    op.migration_status
-                )))
+                let coord = self.shamir.active_migrations().get(&op.migration_status)
+                    .ok_or_else(|| err(format!("migration '{}' not found", op.migration_status)))?
+                    .clone();
+                let state = coord.state();
+
+                Ok(admin_result(json!({
+                    "migration_id": state.id,
+                    "phase": state.phase.to_string(),
+                    "table": state.table_name,
+                    "src_repo": state.src_repo,
+                    "dst_repo": state.dst_repo,
+                    "dst_engine": state.dst_engine,
+                    "snapshot_lsn": state.snapshot_lsn,
+                    "last_lsn_applied": state.last_lsn_applied,
+                    "records_copied": state.records_copied,
+                    "shadow_lag": coord.shadow_lag(),
+                })))
             }
 
             _ => Err(err("Not an admin operation".to_string())),
