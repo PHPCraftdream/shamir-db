@@ -13,8 +13,10 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use shamir_engine::query::read::exec::{apply_order_by, apply_select};
-use shamir_engine::query::read::{OrderBy, OrderByItem, OrderDirection, Select, SelectItem};
+use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
+use shamir_engine::query::read::{
+    OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
+};
 use serde_json as json;
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::common::new_map_wc;
@@ -134,6 +136,50 @@ fn bench(c: &mut Criterion) {
         )
     });
     g2.finish();
+
+    // ── apply_pagination ────────────────────────────────────────
+    let mut g3 = c.benchmark_group("apply_pagination");
+    g3.throughput(Throughput::Elements(1000));
+    g3.bench_function("skip_50_limit_100", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |recs| {
+                black_box(apply_pagination(
+                    recs,
+                    &Pagination::LimitOffset { limit: Some(100), offset: 50 },
+                    false,
+                ));
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g3.bench_function("limit_10_from_1000", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |recs| {
+                black_box(apply_pagination(
+                    recs,
+                    &Pagination::LimitOffset { limit: Some(10), offset: 0 },
+                    false,
+                ));
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g3.bench_function("count_total_1000", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |recs| {
+                black_box(apply_pagination(
+                    recs,
+                    &Pagination::None,
+                    true,
+                ));
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+    g3.finish();
 }
 
 criterion_group!(benches, bench);
