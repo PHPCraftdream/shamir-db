@@ -83,6 +83,19 @@ pub struct MigrationCoordinator {
 }
 
 impl MigrationCoordinator {
+    /// Non-blocking check: does this coordinator target the given
+    /// `(src_repo, table_name)`? Skips on lock contention (caller
+    /// retries via the normal phase check in start_migration). Used
+    /// to detect concurrent migrations on the same table.
+    pub fn targets_table(&self, src_repo: &str, table_name: &str) -> bool {
+        match self.state.try_lock() {
+            Ok(s) => s.table_name == table_name && s.src_repo == src_repo,
+            Err(_) => false,
+        }
+    }
+}
+
+impl MigrationCoordinator {
     pub fn new(
         state: MigrationState,
         shadow_log: Arc<MigrationShadowLog>,
@@ -172,7 +185,12 @@ impl MigrationCoordinator {
                 }
                 ShadowOp::Delete { record_id } => {
                     let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    let _ = self.dst_data.remove(key).await;
+                    // NotFound is benign — record already absent on dst;
+                    // other errors propagate.
+                    match self.dst_data.remove(key).await {
+                        Ok(_) | Err(DbError::NotFound(_)) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             applied += 1;
@@ -243,7 +261,10 @@ impl MigrationCoordinator {
                 }
                 ShadowOp::Delete { record_id } => {
                     let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    let _ = self.dst_data.remove(key).await;
+                    match self.dst_data.remove(key).await {
+                        Ok(_) | Err(DbError::NotFound(_)) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             applied += 1;

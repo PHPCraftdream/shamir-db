@@ -464,12 +464,22 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
 
                 let table_name = &op.start_migration;
-                let migration_id = format!("mig_{}_{}", table_name, std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+                // Atomic counter + ns timestamp + random suffix — collision-free
+                // even under concurrent start_migration on same table within
+                // the same nanosecond.
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+                let rand_suffix: u32 = rand::random();
+                let migration_id = format!("mig_{}_{}_{:08x}", table_name, now_ns, rand_suffix);
 
-                // Check no active migration for this table
-                if self.shamir.active_migrations().contains_key(&migration_id) {
-                    return Err(err("migration already in progress for this table".into()));
+                // Reject if any active migration already targets this table.
+                let table_already_migrating = self.shamir.active_migrations()
+                    .iter()
+                    .any(|e| e.value().targets_table(&op.repo, table_name));
+                if table_already_migrating {
+                    return Err(err(format!(
+                        "migration already in progress for table '{}/{}'", op.repo, table_name
+                    )));
                 }
 
                 // Get source table's data_store + info_store
@@ -478,7 +488,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 let src_data = Arc::clone(src_table.table().data_store());
                 let info_store = Arc::clone(src_table.info_store());
 
-                // Create destination repo + table (in-memory for now; real engine wiring TBD)
+                // Resolve dst engine factory
                 let dst_factory = match op.dst_engine.as_str() {
                     "in_memory" => BoxRepoFactory::in_memory(),
                     engine => return Err(err(format!(
@@ -491,26 +501,39 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .add_table(TableConfig::new(table_name));
                 db.add_repo(dst_config).await.map_err(|e| err(e.to_string()))?;
 
-                let dst_table = db.get_table(dst_repo_name, table_name).await
-                    .map_err(|e| err(e.to_string()))?;
-                let dst_data = Arc::clone(dst_table.table().data_store());
+                // From here on, any error must clean up dst repo
+                // (rollback-on-failure). We pull dst_data + run snapshot/drain;
+                // a `?` aborts the whole batch, but the dst repo would leak.
+                // So unwind explicitly on failure.
+                let run = async {
+                    let dst_table = db.get_table(dst_repo_name, table_name).await?;
+                    let dst_data = Arc::clone(dst_table.table().data_store());
 
-                // Create shadow log + coordinator
-                let shadow = Arc::new(MigrationShadowLog::new(migration_id.clone(), info_store));
-                let state = MigrationState::new(
-                    migration_id.clone(),
-                    table_name.to_string(),
-                    op.repo.clone(),
-                    op.dst_repo.clone(),
-                    op.dst_engine.clone(),
-                    op.dst_path.clone(),
-                );
-                let coord = Arc::new(MigrationCoordinator::new(state, shadow, src_data, dst_data));
+                    let shadow = Arc::new(MigrationShadowLog::new(migration_id.clone(), info_store));
+                    let state = MigrationState::new(
+                        migration_id.clone(),
+                        table_name.to_string(),
+                        op.repo.clone(),
+                        op.dst_repo.clone(),
+                        op.dst_engine.clone(),
+                        op.dst_path.clone(),
+                    );
+                    let coord = Arc::new(MigrationCoordinator::new(state, shadow, src_data, dst_data));
 
-                // Run snapshot + drain in background-ish (blocking here for simplicity)
-                coord.run_snapshot().await.map_err(|e| err(e.to_string()))?;
-                coord.drain_until_caught_up(0).await.map_err(|e| err(e.to_string()))?;
-                coord.mark_cutover_ready().await.map_err(|e| err(e.to_string()))?;
+                    coord.run_snapshot().await?;
+                    coord.drain_until_caught_up(0).await?;
+                    coord.mark_cutover_ready().await?;
+                    Ok::<_, shamir_storage::error::DbError>(coord)
+                }.await;
+
+                let coord = match run {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // Roll back: remove the orphan dst repo.
+                        db.remove_repo(dst_repo_name).await;
+                        return Err(err(e.to_string()));
+                    }
+                };
 
                 self.shamir.active_migrations().insert(migration_id.clone(), coord);
 
@@ -533,6 +556,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                 let (src_count, dst_count) = coord.verify_record_count().await
                     .map_err(|e| err(e.to_string()))?;
                 let state = coord.state().await;
+
+                // Remove from active map — committed migrations are
+                // terminal, no further state changes possible. Status
+                // queries on a committed id will now return 404, which
+                // is the correct semantics (migration is done; query the
+                // dst table directly).
+                self.shamir.active_migrations().remove(&op.commit_migration);
 
                 Ok(admin_result(json!({
                     "migration_id": op.commit_migration,
