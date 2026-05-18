@@ -337,6 +337,19 @@ impl SessionPermissions {
                 (Action::ManageRoles, Resource::Global)
             }
 
+            // Migration — alter on the source table (destructive DDL)
+            BatchOp::StartMigration(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.start_migration.clone(),
+                },
+            ),
+            BatchOp::CommitMigration(_)
+            | BatchOp::RollbackMigration(_)
+            | BatchOp::MigrationStatus(_) => (Action::Alter, Resource::Global),
+
             // List — read on global
             BatchOp::List(_) => (Action::Read, Resource::Global),
         }

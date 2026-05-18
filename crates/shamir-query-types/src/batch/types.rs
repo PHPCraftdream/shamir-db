@@ -7,9 +7,9 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AlterBufferConfigOp, CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
-    DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp,
-    SetBufferConfigOp,
+    AlterBufferConfigOp, CommitMigrationOp, CreateDbOp, CreateIndexOp, CreateRepoOp,
+    CreateTableOp, DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp,
+    MigrationStatusOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
 };
 use crate::auth::{
     CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp,
@@ -61,6 +61,12 @@ pub enum BatchOp {
     AlterBufferConfig(AlterBufferConfigOp),
     List(ListOp),
 
+    // Migration (online engine change)
+    StartMigration(StartMigrationOp),
+    CommitMigration(CommitMigrationOp),
+    RollbackMigration(RollbackMigrationOp),
+    MigrationStatus(MigrationStatusOp),
+
     // Auth operations
     CreateUser(CreateUserOp),
     DropUser(DropUserOp),
@@ -90,6 +96,10 @@ impl Serialize for BatchOp {
             BatchOp::GetBufferConfig(op) => op.serialize(serializer),
             BatchOp::AlterBufferConfig(op) => op.serialize(serializer),
             BatchOp::List(op) => op.serialize(serializer),
+            BatchOp::StartMigration(op) => op.serialize(serializer),
+            BatchOp::CommitMigration(op) => op.serialize(serializer),
+            BatchOp::RollbackMigration(op) => op.serialize(serializer),
+            BatchOp::MigrationStatus(op) => op.serialize(serializer),
             BatchOp::CreateUser(op) => op.serialize(serializer),
             BatchOp::DropUser(op) => op.serialize(serializer),
             BatchOp::CreateRole(op) => op.serialize(serializer),
@@ -138,6 +148,14 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value).map(BatchOp::GetBufferConfig).map_err(serde::de::Error::custom)
         } else if obj.contains_key("alter_buffer_config") {
             serde_json::from_value(value).map(BatchOp::AlterBufferConfig).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("start_migration") {
+            serde_json::from_value(value).map(BatchOp::StartMigration).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("commit_migration") {
+            serde_json::from_value(value).map(BatchOp::CommitMigration).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("rollback_migration") {
+            serde_json::from_value(value).map(BatchOp::RollbackMigration).map_err(serde::de::Error::custom)
+        } else if obj.contains_key("migration_status") {
+            serde_json::from_value(value).map(BatchOp::MigrationStatus).map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_user") {
             serde_json::from_value(value).map(BatchOp::CreateUser).map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_user") {
@@ -192,6 +210,10 @@ impl BatchOp {
                 | BatchOp::GetBufferConfig(_)
                 | BatchOp::AlterBufferConfig(_)
                 | BatchOp::List(_)
+                | BatchOp::StartMigration(_)
+                | BatchOp::CommitMigration(_)
+                | BatchOp::RollbackMigration(_)
+                | BatchOp::MigrationStatus(_)
                 | BatchOp::CreateUser(_)
                 | BatchOp::DropUser(_)
                 | BatchOp::CreateRole(_)
@@ -557,3 +579,93 @@ impl std::fmt::Display for BatchError {
 }
 
 impl std::error::Error for BatchError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(json: &str) -> BatchOp {
+        let op: BatchOp = serde_json::from_str(json).unwrap();
+        let back = serde_json::to_string(&op).unwrap();
+        let op2: BatchOp = serde_json::from_str(&back).unwrap();
+        assert_eq!(op, op2);
+        op
+    }
+
+    #[test]
+    fn start_migration_serde() {
+        let op = roundtrip(r#"{
+            "start_migration": "users",
+            "repo": "main",
+            "dst_repo": "cold",
+            "dst_engine": "redb",
+            "dst_path": "/data/cold",
+            "hmac": "deadbeef"
+        }"#);
+        match &op {
+            BatchOp::StartMigration(m) => {
+                assert_eq!(m.start_migration, "users");
+                assert_eq!(m.repo, "main");
+                assert_eq!(m.dst_repo, "cold");
+                assert_eq!(m.dst_engine, "redb");
+                assert_eq!(m.dst_path.as_deref(), Some("/data/cold"));
+                assert_eq!(m.hmac.as_deref(), Some("deadbeef"));
+            }
+            _ => panic!("expected StartMigration"),
+        }
+        assert!(op.is_admin());
+        assert!(op.table_ref().is_none());
+    }
+
+    #[test]
+    fn start_migration_defaults() {
+        let op = roundtrip(r#"{
+            "start_migration": "logs",
+            "dst_repo": "archive",
+            "dst_engine": "fjall"
+        }"#);
+        match &op {
+            BatchOp::StartMigration(m) => {
+                assert_eq!(m.repo, "main");
+                assert!(m.dst_path.is_none());
+                assert!(m.hmac.is_none());
+            }
+            _ => panic!("expected StartMigration"),
+        }
+    }
+
+    #[test]
+    fn commit_migration_serde() {
+        let op = roundtrip(r#"{"commit_migration": "mig-001", "hmac": "abcd1234"}"#);
+        match &op {
+            BatchOp::CommitMigration(m) => {
+                assert_eq!(m.commit_migration, "mig-001");
+                assert_eq!(m.hmac.as_deref(), Some("abcd1234"));
+            }
+            _ => panic!("expected CommitMigration"),
+        }
+        assert!(op.is_admin());
+    }
+
+    #[test]
+    fn rollback_migration_serde() {
+        let op = roundtrip(r#"{"rollback_migration": "mig-001", "hmac": "ff00"}"#);
+        match &op {
+            BatchOp::RollbackMigration(m) => {
+                assert_eq!(m.rollback_migration, "mig-001");
+                assert_eq!(m.hmac.as_deref(), Some("ff00"));
+            }
+            _ => panic!("expected RollbackMigration"),
+        }
+    }
+
+    #[test]
+    fn migration_status_serde() {
+        let op = roundtrip(r#"{"migration_status": "mig-001"}"#);
+        match &op {
+            BatchOp::MigrationStatus(m) => assert_eq!(m.migration_status, "mig-001"),
+            _ => panic!("expected MigrationStatus"),
+        }
+        assert!(op.is_admin());
+    }
+}

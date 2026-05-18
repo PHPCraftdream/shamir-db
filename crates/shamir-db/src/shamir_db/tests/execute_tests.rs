@@ -217,6 +217,96 @@ async fn test_execute_unknown_db() {
 }
 
 // ============================================================================
+// Migration ops — Phase A stubs return "not yet implemented"
+// ============================================================================
+
+#[tokio::test]
+async fn test_start_migration_returns_not_implemented() {
+    let shamir = setup_shamir().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "mig": {
+                "start_migration": "users",
+                "repo": "main",
+                "dst_repo": "cold",
+                "dst_engine": "redb"
+            }
+        }
+    })).unwrap();
+
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    match &err {
+        crate::query::batch::BatchError::QueryError { message, .. } => {
+            assert!(message.contains("not yet implemented"), "got: {message}");
+            assert!(message.contains("start_migration"), "got: {message}");
+        }
+        other => panic!("expected QueryError, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_commit_migration_returns_not_implemented() {
+    let shamir = setup_shamir().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "c": {"commit_migration": "mig-001"}
+        }
+    })).unwrap();
+
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    match &err {
+        crate::query::batch::BatchError::QueryError { message, .. } => {
+            assert!(message.contains("not yet implemented"), "got: {message}");
+        }
+        other => panic!("expected QueryError, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_rollback_migration_returns_not_implemented() {
+    let shamir = setup_shamir().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "r": {"rollback_migration": "mig-001"}
+        }
+    })).unwrap();
+
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    match &err {
+        crate::query::batch::BatchError::QueryError { message, .. } => {
+            assert!(message.contains("not yet implemented"), "got: {message}");
+        }
+        other => panic!("expected QueryError, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_migration_status_returns_not_implemented() {
+    let shamir = setup_shamir().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "s": {"migration_status": "mig-001"}
+        }
+    })).unwrap();
+
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    match &err {
+        crate::query::batch::BatchError::QueryError { message, .. } => {
+            assert!(message.contains("not yet implemented"), "got: {message}");
+        }
+        other => panic!("expected QueryError, got: {other:?}"),
+    }
+}
+
+// ============================================================================
 // Error: unknown repo
 // ============================================================================
 
