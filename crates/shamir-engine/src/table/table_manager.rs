@@ -336,6 +336,24 @@ impl TableManager {
         &self.sorted_indexes
     }
 
+    async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) {
+        for backend in self.index2_registry.all_backends().await {
+            let _ = backend.on_insert(*rid, rec).await;
+        }
+    }
+
+    async fn index2_on_update(&self, rid: &RecordId, old: &InnerValue, new: &InnerValue) {
+        for backend in self.index2_registry.all_backends().await {
+            let _ = backend.on_update(*rid, old, new).await;
+        }
+    }
+
+    async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) {
+        for backend in self.index2_registry.all_backends().await {
+            let _ = backend.on_delete(*rid, rec).await;
+        }
+    }
+
     /// Register a new sorted (B-tree-by-value) index over a single
     /// scalar field, then backfill it from existing records.
     ///
@@ -431,6 +449,7 @@ impl TableManager {
             .on_record_created_unique(&id, value)
             .await?;
         self.sorted_indexes.on_record_created(&id, value).await?;
+        self.index2_on_insert(&id, value).await;
 
         Ok(id)
     }
@@ -523,6 +542,9 @@ impl TableManager {
         self.sorted_indexes
             .on_records_created_batch(pairs_iter())
             .await?;
+        for (id, value) in pairs_iter() {
+            self.index2_on_insert(id, value).await;
+        }
 
         // 5. Clear the WAL marker — durable batch from here on.
         self.wal.commit(txn_id).await?;
@@ -563,6 +585,7 @@ impl TableManager {
                     .on_record_deleted_unique(&id, old)
                     .await?;
                 self.sorted_indexes.on_record_deleted(&id, old).await?;
+                self.index2_on_delete(&id, old).await;
             }
         }
         Ok(removed)
@@ -609,6 +632,7 @@ impl TableManager {
                 .on_record_created_unique(&id, value)
                 .await?;
             self.sorted_indexes.on_record_created(&id, value).await?;
+            self.index2_on_insert(&id, value).await;
         } else if let Some(old) = old_value {
             self.index_manager
                 .on_record_updated(&id, &old, value)
@@ -619,6 +643,7 @@ impl TableManager {
             self.sorted_indexes
                 .on_record_updated(&id, &old, value)
                 .await?;
+            self.index2_on_update(&id, &old, value).await;
         }
         Ok(created)
     }
