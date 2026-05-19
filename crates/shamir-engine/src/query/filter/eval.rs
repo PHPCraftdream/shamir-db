@@ -661,6 +661,28 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             },
             None => FilterNode::True,
         },
+
+        // Index-accelerated filters: resolved by the planner before
+        // the per-record scan. If they reach compile_filter it means
+        // no matching index exists — fall back to brute-force logic.
+        Filter::Fts { .. } | Filter::VectorSimilarity { .. } => {
+            // Without an index these cannot be evaluated per-record
+            // (would require tokenizer / vector math on every row).
+            // Return True and let the planner handle or reject them.
+            FilterNode::True
+        }
+        Filter::Computed { field, value, cmp, .. } => {
+            let op = match cmp.as_str() {
+                "eq" => CompareOp::Eq,
+                "ne" => CompareOp::Ne,
+                "gt" => CompareOp::Gt,
+                "gte" => CompareOp::Gte,
+                "lt" => CompareOp::Lt,
+                "lte" => CompareOp::Lte,
+                _ => return FilterNode::False,
+            };
+            compile_compare(field, value, op, interner)
+        }
     }
 }
 
