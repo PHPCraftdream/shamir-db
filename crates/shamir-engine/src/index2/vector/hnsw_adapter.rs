@@ -40,8 +40,12 @@ impl Distance<f32> for ShamirDist {
                 1.0 - dot / (na * nb)
             }
             VectorMetric::Dot => {
+                // HNSW requires non-negative distances. For normalized
+                // vectors, dot ∈ [-1, 1] and dist = 1 - dot ∈ [0, 2]
+                // preserves the search ordering. Callers must normalize
+                // their vectors for correct top-k with `Dot`.
                 let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                -dot
+                (1.0 - dot).max(0.0)
             }
         }
     }
@@ -308,5 +312,100 @@ mod tests {
         let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
         let err = adapter.upsert(rid(1), &[1.0, 2.0]).await.unwrap_err();
         assert!(matches!(err, VectorError::DimMismatch { expected: 3, got: 2 }));
+    }
+
+    #[tokio::test]
+    async fn search_dim_mismatch_rejected() {
+        let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
+        adapter.upsert(rid(1), &[1.0, 2.0, 3.0]).await.unwrap();
+        let err = adapter.search(&[1.0, 2.0], 1).await.unwrap_err();
+        assert!(matches!(err, VectorError::DimMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn empty_index_returns_empty() {
+        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+        let results = adapter.search(&[0.0, 0.0], 5).await.unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dot_product_metric_normalized() {
+        // HNSW Dot requires normalized vectors so dot ∈ [-1, 1].
+        let adapter = HnswAdapter::new(2, VectorMetric::Dot, HnswConfig::default());
+        let s = 2.0_f32.sqrt().recip();
+        adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[s, s]).await.unwrap();
+        adapter.upsert(rid(3), &[0.0, 1.0]).await.unwrap();
+
+        // dot([1,0],[1,0]) = 1.0 → dist 0.0
+        // dot([1,0],[s,s]) ≈ 0.707 → dist 0.293
+        // dot([1,0],[0,1]) = 0.0 → dist 1.0
+        let results = adapter.search(&[1.0, 0.0], 3).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].0, rid(1));
+        assert!(results[0].1 < 0.01);
+    }
+
+    #[tokio::test]
+    async fn k_larger_than_dataset() {
+        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
+
+        let results = adapter.search(&[0.0, 0.0], 100).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_searches_lock_free() {
+        let dim = 16;
+        let adapter = std::sync::Arc::new(HnswAdapter::new(
+            dim,
+            VectorMetric::Cosine,
+            HnswConfig {
+                max_elements: 1000,
+                ..Default::default()
+            },
+        ));
+        // Populate
+        for i in 0..100 {
+            let mut a = [0u8; 16];
+            a[15] = i as u8;
+            adapter.upsert(RecordId(a), &random_vec(dim as usize, i as u64)).await.unwrap();
+        }
+
+        // 8 concurrent searches.
+        let mut handles = Vec::new();
+        for s in 0..8u64 {
+            let a = std::sync::Arc::clone(&adapter);
+            handles.push(tokio::spawn(async move {
+                let q = random_vec(dim as usize, s + 100);
+                a.search(&q, 10).await.unwrap()
+            }));
+        }
+        for h in handles {
+            let r = h.await.unwrap();
+            assert!(!r.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_no_error() {
+        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+        adapter.delete(rid(99)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn many_upserts_same_rid() {
+        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+        for i in 0..10 {
+            adapter.upsert(rid(1), &[i as f32, 0.0]).await.unwrap();
+        }
+        // Only latest visible
+        let results = adapter.search(&[9.0, 0.0], 10).await.unwrap();
+        let matching: Vec<_> = results.iter().filter(|(r, _)| *r == rid(1)).collect();
+        assert_eq!(matching.len(), 1, "rid(1) should appear once after 10 upserts");
+        assert!(matching[0].1 < 0.5);
     }
 }
