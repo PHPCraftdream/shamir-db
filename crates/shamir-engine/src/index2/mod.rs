@@ -19,11 +19,13 @@
 pub mod actor;
 pub mod backend;
 pub mod descriptor;
+pub mod expr;
 pub mod kind;
 pub mod posting_layout;
 pub mod registry;
 
 pub use actor::IndexActor;
+pub use expr::{ExprError, IndexExpr};
 pub use backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
 pub use descriptor::IndexDescriptor;
 pub use kind::{

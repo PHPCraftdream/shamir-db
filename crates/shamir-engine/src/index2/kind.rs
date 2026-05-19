@@ -26,12 +26,9 @@ pub enum TokenizerKind {
     Ngram { n: u8 },
 }
 
-/// Placeholder for the Phase 1 `IndexExpr` AST — kept as opaque
-/// bytes so Phase 0 doesn't have to ship the full expression
-/// language. Phase 1 will replace this with a structured variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionalConfig {
-    pub expr_serialized: Vec<u8>,
+    pub expr: crate::index2::expr::IndexExpr,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
