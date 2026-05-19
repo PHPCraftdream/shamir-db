@@ -71,6 +71,14 @@ impl IndexRegistry {
         self.by_id.is_empty()
     }
 
+    pub fn peek_next_id(&self) -> u32 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
+    pub fn set_next_id(&self, id: u32) {
+        self.next_id.store(id, Ordering::Relaxed);
+    }
+
     /// Collect all registered backends (snapshot).
     pub async fn all_backends(&self) -> Vec<Arc<dyn IndexBackend>> {
         let mut out = Vec::with_capacity(self.by_id.len());

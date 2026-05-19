@@ -117,6 +117,52 @@ impl TableManager {
             mgr.info_store.apply_buffer_config(&cfg).await?;
         }
 
+        // Restore index2 backends from persisted metadata.
+        if let Some(persisted) = crate::index2::persistence::load_index2_metadata(&mgr.info_store).await? {
+            mgr.index2_registry.set_next_id(persisted.next_id);
+            for desc in persisted.descriptors {
+                let first_path = desc.paths.first().cloned().unwrap_or_default();
+                let backend: Arc<dyn crate::index2::backend::IndexBackend> = match &desc.kind {
+                    crate::index2::kind::IndexKind::Fts { .. } => {
+                        Arc::new(crate::index2::fts_ranked_backend::FtsRankedBackend::new(
+                            desc.clone(),
+                            first_path,
+                            Arc::clone(&info_store),
+                        ))
+                    }
+                    crate::index2::kind::IndexKind::Functional(cfg) => {
+                        Arc::new(crate::index2::functional_backend::FunctionalBackend::new(
+                            desc.clone(),
+                            cfg.expr.clone(),
+                            Arc::clone(&info_store),
+                        ))
+                    }
+                    crate::index2::kind::IndexKind::Vector(cfg) => {
+                        let adapter = Arc::new(
+                            crate::index2::vector::hnsw_adapter::HnswAdapter::new(
+                                cfg.dim,
+                                cfg.metric,
+                                crate::index2::vector::hnsw_adapter::HnswConfig {
+                                    max_elements: 100_000,
+                                    m: 16,
+                                    ef_construction: 200,
+                                    ef_search: 50,
+                                    ..Default::default()
+                                },
+                            ),
+                        );
+                        Arc::new(crate::index2::vector::VectorBackend::new(
+                            desc.clone(),
+                            first_path,
+                            adapter,
+                        ))
+                    }
+                    crate::index2::kind::IndexKind::Btree { .. } => continue,
+                };
+                let _ = mgr.index2_registry.insert(backend).await;
+            }
+        }
+
         // Auto-recovery on open. Cheap on clean shutdown (one
         // prefix scan returning zero entries); targeted recovery
         // (O(batch_size)) or full repair (O(table_size)) when a
@@ -889,6 +935,12 @@ impl TableManager {
             .insert(backend)
             .await
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+
+        crate::index2::persistence::save_index2_metadata(
+            &self.index2_registry,
+            &self.info_store,
+        )
+        .await?;
 
         Ok(())
     }
