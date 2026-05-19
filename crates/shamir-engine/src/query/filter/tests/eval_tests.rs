@@ -1507,3 +1507,204 @@ fn test_not_exists_field_in_interner_but_not_record() {
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&record, &ctx)); // "email" not in record
 }
+
+// ============================================================================
+// FTS brute-force (FtsMatch FilterNode)
+// ============================================================================
+
+fn make_body_record(interner: &Interner, body: &str) -> InnerValue {
+    let mut map = new_map();
+    let k_body = interner.touch_ind("body").unwrap().key().clone();
+    map.insert(k_body, InnerValue::Str(body.to_string()));
+    InnerValue::Map(map)
+}
+
+#[test]
+fn test_fts_and_match() {
+    let interner = Interner::new();
+    let rec = make_body_record(&interner, "Hello World foo bar");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Fts {
+        field: vec!["body".into()],
+        query: "hello world".into(),
+        mode: "and".into(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_fts_and_no_match() {
+    let interner = Interner::new();
+    let rec = make_body_record(&interner, "Hello bar");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Fts {
+        field: vec!["body".into()],
+        query: "hello world".into(),
+        mode: "and".into(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_fts_or_match() {
+    let interner = Interner::new();
+    let rec = make_body_record(&interner, "baz qux");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Fts {
+        field: vec!["body".into()],
+        query: "hello baz".into(),
+        mode: "or".into(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_fts_case_insensitive() {
+    let interner = Interner::new();
+    let rec = make_body_record(&interner, "HELLO world");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Fts {
+        field: vec!["body".into()],
+        query: "hello WORLD".into(),
+        mode: "and".into(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_fts_missing_field() {
+    let interner = Interner::new();
+    let rec = make_alice_record(&interner);
+    interner.touch_ind("body").unwrap();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Fts {
+        field: vec!["body".into()],
+        query: "hello".into(),
+        mode: "and".into(),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&rec, &ctx));
+}
+
+// ============================================================================
+// Computed expression comparison (ComputedCompare FilterNode)
+// ============================================================================
+
+fn make_email_record(interner: &Interner, email: &str) -> InnerValue {
+    let mut map = new_map();
+    let k_email = interner.touch_ind("email").unwrap().key().clone();
+    map.insert(k_email, InnerValue::Str(email.to_string()));
+    InnerValue::Map(map)
+}
+
+#[test]
+fn test_computed_lower_eq() {
+    let interner = Interner::new();
+    let rec = make_email_record(&interner, "ALICE@FOO.COM");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Computed {
+        expr_op: "lower".into(),
+        field: vec!["email".into()],
+        expr_args: None,
+        cmp: "eq".into(),
+        value: FilterValue::String("alice@foo.com".into()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_computed_lower_eq_no_match() {
+    let interner = Interner::new();
+    let rec = make_email_record(&interner, "Bob@bar.com");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Computed {
+        expr_op: "lower".into(),
+        field: vec!["email".into()],
+        expr_args: None,
+        cmp: "eq".into(),
+        value: FilterValue::String("alice@foo.com".into()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_computed_upper_eq() {
+    let interner = Interner::new();
+    let rec = make_email_record(&interner, "alice@foo.com");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Computed {
+        expr_op: "upper".into(),
+        field: vec!["email".into()],
+        expr_args: None,
+        cmp: "eq".into(),
+        value: FilterValue::String("ALICE@FOO.COM".into()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_computed_trim_eq() {
+    let interner = Interner::new();
+    let rec = make_email_record(&interner, "  alice  ");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Computed {
+        expr_op: "trim".into(),
+        field: vec!["email".into()],
+        expr_args: None,
+        cmp: "eq".into(),
+        value: FilterValue::String("alice".into()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_computed_length_gt() {
+    let interner = Interner::new();
+    let rec = make_email_record(&interner, "alexander@example.com");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Computed {
+        expr_op: "length".into(),
+        field: vec!["email".into()],
+        expr_args: None,
+        cmp: "gt".into(),
+        value: FilterValue::Int(10),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(cb.matches(&rec, &ctx));
+}
+
+#[test]
+fn test_computed_unknown_op_is_false() {
+    let interner = Interner::new();
+    interner.touch_ind("email").unwrap();
+    let rec = make_email_record(&interner, "alice");
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+    let filter = Filter::Computed {
+        expr_op: "nonexistent".into(),
+        field: vec!["email".into()],
+        expr_args: None,
+        cmp: "eq".into(),
+        value: FilterValue::String("alice".into()),
+    };
+    let cb = compile_filter(&filter, &interner);
+    assert!(!cb.matches(&rec, &ctx));
+}

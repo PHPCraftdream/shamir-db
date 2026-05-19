@@ -145,3 +145,80 @@ pub enum Filter {
 fn default_fts_mode() -> String {
     "and".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fts_serde_round_trip() {
+        let json = r#"{"op":"fts","field":["body"],"query":"hello world","mode":"and"}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        match &f {
+            Filter::Fts { field, query, mode } => {
+                assert_eq!(field, &["body"]);
+                assert_eq!(query, "hello world");
+                assert_eq!(mode, "and");
+            }
+            _ => panic!("expected Fts"),
+        }
+        let back = serde_json::to_string(&f).unwrap();
+        let f2: Filter = serde_json::from_str(&back).unwrap();
+        assert_eq!(f, f2);
+    }
+
+    #[test]
+    fn fts_default_mode_is_and() {
+        let json = r#"{"op":"fts","field":["body"],"query":"test"}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        match &f {
+            Filter::Fts { mode, .. } => assert_eq!(mode, "and"),
+            _ => panic!("expected Fts"),
+        }
+    }
+
+    #[test]
+    fn vector_similarity_serde_round_trip() {
+        let json = r#"{"op":"vector_similarity","field":["emb"],"query":[1.0,0.0,0.5],"k":10}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        match &f {
+            Filter::VectorSimilarity { field, query, k } => {
+                assert_eq!(field, &["emb"]);
+                assert_eq!(query.len(), 3);
+                assert_eq!(*k, 10);
+            }
+            _ => panic!("expected VectorSimilarity"),
+        }
+        let back = serde_json::to_string(&f).unwrap();
+        let f2: Filter = serde_json::from_str(&back).unwrap();
+        assert_eq!(f, f2);
+    }
+
+    #[test]
+    fn computed_serde_round_trip() {
+        let json = r#"{"op":"computed","expr_op":"lower","field":["email"],"cmp":"eq","value":"alice"}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        match &f {
+            Filter::Computed {
+                expr_op, field, cmp, value, expr_args,
+            } => {
+                assert_eq!(expr_op, "lower");
+                assert_eq!(field, &["email"]);
+                assert_eq!(cmp, "eq");
+                assert_eq!(value, &FilterValue::String("alice".into()));
+                assert!(expr_args.is_none());
+            }
+            _ => panic!("expected Computed"),
+        }
+        let back = serde_json::to_string(&f).unwrap();
+        let f2: Filter = serde_json::from_str(&back).unwrap();
+        assert_eq!(f, f2);
+    }
+
+    #[test]
+    fn existing_eq_still_works() {
+        let json = r#"{"op":"eq","field":["age"],"value":30}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        assert!(matches!(f, Filter::Eq { .. }));
+    }
+}

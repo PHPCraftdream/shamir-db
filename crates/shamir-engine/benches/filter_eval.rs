@@ -212,6 +212,71 @@ fn bench(c: &mut Criterion) {
         })
     });
 
+    // ── FTS brute-force AND: 2 tokens on 1000 text records ──────
+    let fts_and = compile_filter(
+        &Filter::Fts {
+            field: vec!["name".to_string()],
+            query: "user alpha".to_string(),
+            mode: "and".to_string(),
+        },
+        &interner,
+    );
+    group.bench_function("fts_brute_and_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if fts_and.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
+    // ── FTS brute-force OR: 2 tokens on 1000 text records ────
+    let fts_or = compile_filter(
+        &Filter::Fts {
+            field: vec!["name".to_string()],
+            query: "user alpha".to_string(),
+            mode: "or".to_string(),
+        },
+        &interner,
+    );
+    group.bench_function("fts_brute_or_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if fts_or.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
+    // ── Computed: LOWER(name) == "user-50" on 1000 records ────
+    let computed_lower = compile_filter(
+        &Filter::Computed {
+            expr_op: "lower".to_string(),
+            field: vec!["name".to_string()],
+            expr_args: None,
+            cmp: "eq".to_string(),
+            value: FilterValue::String("user-50".to_string()),
+        },
+        &interner,
+    );
+    group.bench_function("computed_lower_eq_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if computed_lower.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
     group.finish();
 }
 
