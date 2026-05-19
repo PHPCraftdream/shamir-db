@@ -1749,7 +1749,8 @@ criterion_group!{
     bench_eviction_byte_pressure,
     bench_ttl_sweep_50k,
     bench_concurrent_inserts,
-    bench_ddl_create_index_on_seeded
+    bench_ddl_create_index_on_seeded,
+    bench_group_by_sum_e2e
 }
 criterion_main!(benches);
 
@@ -1856,6 +1857,68 @@ fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
             },
         );
     }
+    group.finish();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// GROUP BY + aggregation e2e
+// ═══════════════════════════════════════════════════════════════════
+
+fn bench_group_by_sum_e2e(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let shamir = rt.block_on(seeded(1000, false));
+
+    let req_group_sum: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "g": {
+                "from": "users",
+                "select": {
+                    "items": [
+                        {"type": "field", "path": ["city"]},
+                        {"type": "aggregate", "func": "sum", "field": ["score"], "alias": "total_score"},
+                        {"type": "count_all", "alias": "n"}
+                    ]
+                },
+                "group_by": {"fields": [["city"]]}
+            }
+        }
+    })).unwrap();
+
+    let req_group_avg: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "g": {
+                "from": "users",
+                "select": {
+                    "items": [
+                        {"type": "field", "path": ["city"]},
+                        {"type": "aggregate", "func": "avg", "field": ["score"], "alias": "avg_score"}
+                    ]
+                },
+                "group_by": {"fields": [["city"]]}
+            }
+        }
+    })).unwrap();
+
+    let mut group = c.benchmark_group("group_by_e2e");
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("sum_count_by_city_1000", |b| {
+        let s = Arc::clone(&shamir);
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&s);
+            let req = req_group_sum.clone();
+            async move { s.execute("bench", &req).await.unwrap() }
+        });
+    });
+    group.bench_function("avg_by_city_1000", |b| {
+        let s = Arc::clone(&shamir);
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&s);
+            let req = req_group_avg.clone();
+            async move { s.execute("bench", &req).await.unwrap() }
+        });
+    });
     group.finish();
 }
 

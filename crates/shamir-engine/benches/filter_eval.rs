@@ -104,6 +104,114 @@ fn bench(c: &mut Criterion) {
         })
     });
 
+    // ── Compound AND: age > 20 AND active = true ──────────────
+    let compound_and = compile_filter(
+        &Filter::And {
+            filters: vec![
+                Filter::Gt {
+                    field: vec!["age".to_string()],
+                    value: FilterValue::Int(20),
+                },
+                Filter::Eq {
+                    field: vec!["active".to_string()],
+                    value: FilterValue::Bool(true),
+                },
+            ],
+        },
+        &interner,
+    );
+    group.bench_function("compound_and_2_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if compound_and.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
+    // ── Compound AND(3): age > 20 AND active = true AND score < 500 ─
+    let compound_and3 = compile_filter(
+        &Filter::And {
+            filters: vec![
+                Filter::Gt {
+                    field: vec!["age".to_string()],
+                    value: FilterValue::Int(20),
+                },
+                Filter::Eq {
+                    field: vec!["active".to_string()],
+                    value: FilterValue::Bool(true),
+                },
+                Filter::Lt {
+                    field: vec!["score".to_string()],
+                    value: FilterValue::Float(500.0),
+                },
+            ],
+        },
+        &interner,
+    );
+    group.bench_function("compound_and_3_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if compound_and3.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
+    // ── Compound OR: age = 50 OR age = 30 ──────────────────────
+    let compound_or = compile_filter(
+        &Filter::Or {
+            filters: vec![
+                Filter::Eq {
+                    field: vec!["age".to_string()],
+                    value: FilterValue::Int(50),
+                },
+                Filter::Eq {
+                    field: vec!["age".to_string()],
+                    value: FilterValue::Int(30),
+                },
+            ],
+        },
+        &interner,
+    );
+    group.bench_function("compound_or_2_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if compound_or.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
+    // ── Regex match on name ────────────────────────────────────
+    let regex_filter = compile_filter(
+        &Filter::Regex {
+            field: vec!["name".to_string()],
+            pattern: "user-[0-9]{2}$".to_string(),
+        },
+        &interner,
+    );
+    group.bench_function("regex_match_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if regex_filter.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
     group.finish();
 }
 
