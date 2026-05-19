@@ -96,3 +96,11 @@ harness = false
 [[bench]]
 name = "select_pipeline"
 harness = false
+
+[[bench]]
+name = "permission_check"
+harness = false
+
+[[bench]]
+name = "membuffer_pump"
+harness = false
