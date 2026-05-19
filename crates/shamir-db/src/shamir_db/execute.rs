@@ -117,6 +117,16 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .collect();
                 let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
 
+                if op.index_type.as_deref().is_some_and(|t| t != "btree") {
+                    table.create_index_v2(&op).await
+                        .map_err(|e| err(e.to_string()))?;
+                    return Ok(admin_result(json!({
+                        "created_index": op.create_index,
+                        "table": op.table,
+                        "index_type": op.index_type,
+                    })));
+                }
+
                 if op.sorted && op.unique {
                     return Err(err(
                         "Index cannot be both sorted and unique".to_string(),
