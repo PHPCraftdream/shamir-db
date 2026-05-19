@@ -42,6 +42,70 @@ impl TableManager {
     // Index scan planning
     // ============================================================================
 
+    async fn try_plan_index2(
+        &self,
+        filter: &Filter,
+        interner: &shamir_types::core::interner::Interner,
+    ) -> Option<crate::index2::backend::IndexResult> {
+        use crate::index2::backend::{FtsMode, IndexQuery};
+        use crate::query::filter::eval::intern_field_path;
+
+        if self.index2_registry().is_empty() {
+            return None;
+        }
+        let registry = self.index2_registry();
+
+        match filter {
+            Filter::Fts { field, query, mode } => {
+                let interned = intern_field_path(field, interner)?;
+                let backend = registry.find_by_field_and_kind(&interned, "fts").await?;
+                let tokens: Vec<u64> = query
+                    .split_whitespace()
+                    .map(|w| crate::index2::tokenizer::token_hash(&w.to_lowercase()))
+                    .collect();
+                let fts_mode = if mode == "or" {
+                    FtsMode::OrAny
+                } else {
+                    FtsMode::AndAll
+                };
+                backend
+                    .lookup(IndexQuery::Fts {
+                        tokens,
+                        mode: fts_mode,
+                    })
+                    .await
+                    .ok()
+            }
+            Filter::VectorSimilarity { field, query, k } => {
+                let interned = intern_field_path(field, interner)?;
+                let backend = registry.find_by_field_and_kind(&interned, "vector").await?;
+                backend
+                    .lookup(IndexQuery::Vector {
+                        vec: query.clone(),
+                        k: *k,
+                    })
+                    .await
+                    .ok()
+            }
+            Filter::Computed {
+                field, cmp, value, ..
+            } if cmp == "eq" => {
+                let interned = intern_field_path(field, interner)?;
+                let backend = registry.find_by_field_and_kind(&interned, "functional").await?;
+                let resolved = crate::query::filter::eval::filter_value_to_inner(value)?;
+                let hash =
+                    crate::index2::functional_backend::FunctionalBackend::hash_value(&resolved);
+                backend
+                    .lookup(IndexQuery::Point {
+                        keys: smallvec::smallvec![hash.to_vec()],
+                    })
+                    .await
+                    .ok()
+            }
+            _ => None,
+        }
+    }
+
     /// Try to find an index that can satisfy (part of) the filter.
     ///
     /// Returns `Some((index_name_interned, lookup_value_sets, residual_filter))`:
@@ -327,7 +391,47 @@ impl TableManager {
             }
         }
 
-        // Try index scan first
+        // ── index2: FTS / Functional / Vector accelerated path ─────
+        if let Some(ref filter) = query.r#where {
+            if let Some(result) = self.try_plan_index2(filter, interner).await {
+                let (rids_vec, index_tag) = match result {
+                    crate::index2::backend::IndexResult::Set(rids) => {
+                        (rids.into_iter().collect::<Vec<_>>(), "index2")
+                    }
+                    crate::index2::backend::IndexResult::Ranked(ranked) => {
+                        (ranked.into_iter().map(|(r, _)| r).collect::<Vec<_>>(), "index2_ranked")
+                    }
+                };
+                if !rids_vec.is_empty() {
+                    let inner_records = self.table().get_many(&rids_vec).await?;
+                    let mut records = Vec::with_capacity(inner_records.len());
+                    for maybe in inner_records {
+                        if let Some(inner) = maybe {
+                            match shamir_types::codecs::interned::inner_to_json_value(
+                                &inner, interner,
+                            ) {
+                                Ok(json) => records.push(json),
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                    let scanned = rids_vec.len() as u64;
+                    let returned = records.len() as u64;
+                    return Ok(crate::query::read::QueryResult {
+                        records,
+                        stats: Some(crate::query::read::QueryStats {
+                            index_used: Some(index_tag.into()),
+                            records_scanned: scanned,
+                            records_returned: returned,
+                            execution_time_us: start.elapsed().as_micros() as u64,
+                        }),
+                        pagination: None,
+                    });
+                }
+            }
+        }
+
+        // Try index scan first (legacy btree)
         if let Some(ref filter) = query.r#where {
             if let Some((idx_name, lookup_sets, residual)) =
                 self.try_plan_index_scan(filter, interner)
