@@ -20,7 +20,9 @@ pub mod actor;
 pub mod backend;
 pub mod descriptor;
 pub mod expr;
+pub mod bm25;
 pub mod fts_backend;
+pub mod fts_ranked_backend;
 pub mod functional_backend;
 pub mod kind;
 
