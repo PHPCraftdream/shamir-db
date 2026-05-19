@@ -276,6 +276,20 @@ pub enum FilterNode {
     NotExists {
         field_path: CompactPath,
     },
+
+    /// FTS brute-force per-record fallback (no FTS index available).
+    FtsMatch {
+        field_path: CompactPath,
+        query_tokens: Vec<String>,
+        mode_and: bool,
+    },
+    /// Computed expression comparison (for functional index fallback).
+    ComputedCompare {
+        expr: Box<crate::index2::expr::IndexExpr>,
+        value: FilterValue,
+        pre_resolved: Option<InnerValue>,
+        op: CompareOp,
+    },
 }
 
 impl FilterNode {
@@ -494,6 +508,61 @@ impl FilterNode {
             FilterNode::NotExists { field_path } => {
                 resolve_field_ref(record, field_path).is_none()
             }
+
+            FilterNode::FtsMatch {
+                field_path,
+                query_tokens,
+                mode_and,
+            } => {
+                let text = match resolve_field_ref(record, field_path) {
+                    Some(InnerValue::Str(s)) => s,
+                    _ => return false,
+                };
+                let lower = text.to_lowercase();
+                let words: std::collections::HashSet<&str> =
+                    lower.split_whitespace().collect();
+                if *mode_and {
+                    query_tokens.iter().all(|t| words.contains(t.as_str()))
+                } else {
+                    query_tokens.iter().any(|t| words.contains(t.as_str()))
+                }
+            }
+
+            FilterNode::ComputedCompare {
+                expr,
+                value,
+                pre_resolved,
+                op,
+            } => {
+                let computed = match expr.eval(record) {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+                let owned_rhs;
+                let rhs: &InnerValue = if let Some(pre) = pre_resolved {
+                    pre
+                } else {
+                    owned_rhs = resolve_filter_value(value, record, ctx);
+                    match owned_rhs.as_ref() {
+                        Some(v) => v,
+                        None => return false,
+                    }
+                };
+                match op {
+                    CompareOp::Eq => compare_values(&computed, rhs) == Some(Ordering::Equal),
+                    CompareOp::Ne => compare_values(&computed, rhs) != Some(Ordering::Equal),
+                    CompareOp::Gt => compare_values(&computed, rhs) == Some(Ordering::Greater),
+                    CompareOp::Gte => matches!(
+                        compare_values(&computed, rhs),
+                        Some(Ordering::Greater | Ordering::Equal)
+                    ),
+                    CompareOp::Lt => compare_values(&computed, rhs) == Some(Ordering::Less),
+                    CompareOp::Lte => matches!(
+                        compare_values(&computed, rhs),
+                        Some(Ordering::Less | Ordering::Equal)
+                    ),
+                }
+            }
         }
     }
 }
@@ -662,16 +731,31 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             None => FilterNode::True,
         },
 
-        // Index-accelerated filters: resolved by the planner before
-        // the per-record scan. If they reach compile_filter it means
-        // no matching index exists — fall back to brute-force logic.
-        Filter::Fts { .. } | Filter::VectorSimilarity { .. } => {
-            // Without an index these cannot be evaluated per-record
-            // (would require tokenizer / vector math on every row).
-            // Return True and let the planner handle or reject them.
-            FilterNode::True
-        }
-        Filter::Computed { field, value, cmp, .. } => {
+        // Vector similarity cannot be brute-forced per-record
+        // (would be O(n×dim) without an index). Planner must handle.
+        Filter::VectorSimilarity { .. } => FilterNode::True,
+
+        // FTS brute-force fallback (when no FTS index exists).
+        Filter::Fts { field, query, mode } => match intern_field_path(field, interner) {
+            Some(path) => FilterNode::FtsMatch {
+                field_path: SmallVec::from_vec(path),
+                query_tokens: query
+                    .split_whitespace()
+                    .map(|w| w.to_lowercase())
+                    .collect(),
+                mode_and: mode != "or",
+            },
+            None => FilterNode::False,
+        },
+
+        // Computed expression comparison.
+        Filter::Computed {
+            expr_op,
+            field,
+            cmp,
+            value,
+            expr_args,
+        } => {
             let op = match cmp.as_str() {
                 "eq" => CompareOp::Eq,
                 "ne" => CompareOp::Ne,
@@ -681,9 +765,36 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
                 "lte" => CompareOp::Lte,
                 _ => return FilterNode::False,
             };
-            compile_compare(field, value, op, interner)
+            match build_index_expr(expr_op, field, expr_args.as_deref(), interner) {
+                Some(expr) => FilterNode::ComputedCompare {
+                    expr: Box::new(expr),
+                    pre_resolved: filter_value_to_inner(value),
+                    value: value.clone(),
+                    op,
+                },
+                None => FilterNode::False,
+            }
         }
     }
+}
+
+fn build_index_expr(
+    expr_op: &str,
+    field: &[String],
+    _expr_args: Option<&[FilterValue]>,
+    interner: &Interner,
+) -> Option<crate::index2::expr::IndexExpr> {
+    use crate::index2::expr::IndexExpr;
+    let path = intern_field_path(field, interner)?;
+    let base = IndexExpr::Field(path);
+    Some(match expr_op {
+        "lower" => IndexExpr::Lower(Box::new(base)),
+        "upper" => IndexExpr::Upper(Box::new(base)),
+        "trim" => IndexExpr::Trim(Box::new(base)),
+        "length" => IndexExpr::Length(Box::new(base)),
+        "field" => base,
+        _ => return None,
+    })
 }
 
 fn compile_compare(
