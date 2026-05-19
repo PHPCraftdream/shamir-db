@@ -95,6 +95,35 @@ pub struct CreateIndexOp {
     pub sorted: bool,
     #[serde(default = "default_repo")]
     pub repo: String,
+
+    /// Index type: "btree" (default), "fts", "functional", "vector".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_type: Option<String>,
+
+    /// FTS tokenizer: "whitespace" (default) or "unicode".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fts_tokenizer: Option<String>,
+
+    /// FTS language hint (for future stemming).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fts_language: Option<String>,
+
+    /// Functional index expression operator: "lower", "upper", "trim",
+    /// "length", "substring", "mod", "coalesce", "concat".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub functional_op: Option<String>,
+
+    /// Additional args for functional expr (e.g., mod divisor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub functional_args: Option<Vec<serde_json::Value>>,
+
+    /// Vector dimension (required for vector indexes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_dim: Option<u32>,
+
+    /// Vector metric: "l2", "cosine" (default), "dot".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_metric: Option<String>,
 }
 
 /// Drop an index.
