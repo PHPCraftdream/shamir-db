@@ -110,4 +110,38 @@ pub enum Filter {
         field: FieldPath,
         value: FilterValue,
     },
+
+    // ── Index-accelerated operators (Phase 0 — FTS / Functional / Vector) ──
+
+    /// Full-text search on a text field.
+    /// mode: "and" (all tokens must match) or "or" (any token matches).
+    Fts {
+        field: FieldPath,
+        query: String,
+        #[serde(default = "default_fts_mode")]
+        mode: String,
+    },
+
+    /// Vector similarity search (top-k nearest neighbors).
+    VectorSimilarity {
+        field: FieldPath,
+        query: Vec<f32>,
+        k: u32,
+    },
+
+    /// Comparison on a computed expression (for functional indexes).
+    /// expr_op: "lower" | "upper" | "trim" | "length" | "substring" | "mod"
+    /// cmp: "eq" | "lt" | "gt" | "lte" | "gte"
+    Computed {
+        expr_op: String,
+        field: FieldPath,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expr_args: Option<Vec<FilterValue>>,
+        cmp: String,
+        value: FilterValue,
+    },
+}
+
+fn default_fts_mode() -> String {
+    "and".to_string()
 }

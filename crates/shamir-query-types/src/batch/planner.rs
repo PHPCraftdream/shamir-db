@@ -244,7 +244,17 @@ impl BatchPlanner {
             | Filter::IsNull { .. }
             | Filter::IsNotNull { .. }
             | Filter::Exists { .. }
-            | Filter::NotExists { .. } => {}
+            | Filter::NotExists { .. }
+            | Filter::Fts { .. }
+            | Filter::VectorSimilarity { .. } => {}
+            Filter::Computed { value, expr_args, .. } => {
+                Self::extract_deps_from_filter_value(value, deps);
+                if let Some(args) = expr_args {
+                    for v in args {
+                        Self::extract_deps_from_filter_value(v, deps);
+                    }
+                }
+            }
         }
     }
 
