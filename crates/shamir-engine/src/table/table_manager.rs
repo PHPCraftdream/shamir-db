@@ -863,7 +863,17 @@ impl TableManager {
                     interned_paths.clone(), kind.clone(),
                 );
                 let adapter = Arc::new(
-                    crate::index2::vector::brute_force::BruteForceAdapter::new(dim, metric),
+                    crate::index2::vector::hnsw_adapter::HnswAdapter::new(
+                        dim,
+                        metric,
+                        crate::index2::vector::hnsw_adapter::HnswConfig {
+                            max_elements: 100_000,
+                            m: 16,
+                            ef_construction: 200,
+                            ef_search: 50,
+                            ..Default::default()
+                        },
+                    ),
                 );
                 let backend: Arc<dyn IndexBackend> = Arc::new(
                     crate::index2::vector::VectorBackend::new(desc, first_path, adapter),
