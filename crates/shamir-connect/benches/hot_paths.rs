@@ -720,6 +720,24 @@ fn bench_scram_post_argon(c: &mut Criterion) {
 // Criterion entrypoint
 // ----------------------------------------------------------------------------
 
+fn bench_argon2_derive(c: &mut Criterion) {
+    use shamir_connect::common::kdf_params::KdfParams;
+    use shamir_connect::common::scram::DerivedKeys;
+
+    let password = b"correct horse battery staple";
+    let salt = [0xA1u8; 16];
+    let kdf = KdfParams::DEFAULT;
+
+    let mut g = c.benchmark_group("argon2_derive");
+    g.sample_size(10);
+    g.bench_function("default_params", |b| {
+        b.iter(|| {
+            criterion::black_box(DerivedKeys::derive(password, &salt, &kdf).unwrap());
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_envelope,
@@ -729,5 +747,6 @@ criterion_group!(
     bench_protocol_construction,
     bench_handshake_verify,
     bench_scram_post_argon,
+    bench_argon2_derive,
 );
 criterion_main!(benches);
