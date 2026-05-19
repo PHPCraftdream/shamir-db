@@ -48,6 +48,7 @@ pub struct TableManager {
     /// (no lock). `tokio::sync::Mutex` because the guard lives across
     /// `.await` points.
     unique_write_lock: Arc<tokio::sync::Mutex<()>>,
+    index2_registry: Arc<crate::index2::IndexRegistry>,
 }
 
 /// How often the background watchdog runs a `verify` pass.
@@ -70,6 +71,7 @@ impl Clone for TableManager {
             write_counter: Arc::clone(&self.write_counter),
             verify_running: Arc::clone(&self.verify_running),
             unique_write_lock: Arc::clone(&self.unique_write_lock),
+            index2_registry: Arc::clone(&self.index2_registry),
         }
     }
 }
@@ -104,6 +106,7 @@ impl TableManager {
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
         };
 
         // Hot-load persisted buffer config (if any) and apply
@@ -172,6 +175,7 @@ impl TableManager {
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
         }
     }
 
@@ -319,6 +323,10 @@ impl TableManager {
     /// boundary needs `pub`.
     pub fn index_manager_ref(&self) -> &IndexManager {
         &self.index_manager
+    }
+
+    pub fn index2_registry(&self) -> &Arc<crate::index2::IndexRegistry> {
+        &self.index2_registry
     }
 
     /// Borrow the table's sorted-index manager — used by the planner
@@ -727,6 +735,129 @@ impl TableManager {
     /// table.create_index("email_idx", &["email"]).await?;
     /// table.create_index("name_city_idx", &["name", "address.city"]).await?;
     /// ```
+    pub async fn create_index_v2(
+        &self,
+        op: &shamir_query_types::admin::CreateIndexOp,
+    ) -> DbResult<()> {
+        use crate::index2::backend::IndexBackend;
+        use crate::index2::descriptor::IndexDescriptor;
+        use crate::index2::kind::*;
+        use smallvec::SmallVec;
+
+        let index_type = op.index_type.as_deref().unwrap_or("btree");
+        if index_type == "btree" {
+            let paths: Vec<String> = op.fields.iter()
+                .map(|segs| segs.join("."))
+                .collect();
+            let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+            return if op.unique {
+                self.create_unique_index(&op.create_index, &path_refs).await
+            } else {
+                self.create_index(&op.create_index, &path_refs).await
+            };
+        }
+
+        let interner = self.interner.get().await?;
+        let mut interned_paths: SmallVec<[Vec<u64>; 2]> = SmallVec::new();
+        for field_path in &op.fields {
+            let mut seg_ids = Vec::with_capacity(field_path.len());
+            for seg in field_path {
+                let key = match interner.touch_ind(seg).map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))? {
+                    TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+                };
+                seg_ids.push(key);
+            }
+            interned_paths.push(seg_ids);
+        }
+
+        let id = self.index2_registry.allocate_id();
+        let name_key = match interner.touch_ind(&op.create_index).map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))? {
+            TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+        };
+
+        let first_path = interned_paths.first().cloned().unwrap_or_default();
+
+        let (kind, backend): (IndexKind, Arc<dyn IndexBackend>) = match index_type {
+            "fts" => {
+                let tok = match op.fts_tokenizer.as_deref() {
+                    Some("unicode") => TokenizerKind::Unicode,
+                    _ => TokenizerKind::Whitespace,
+                };
+                let kind = IndexKind::Fts {
+                    tokenizer: tok,
+                    language: op.fts_language.clone(),
+                };
+                let desc = IndexDescriptor::new(
+                    id, &op.create_index, name_key,
+                    interned_paths.clone(), kind.clone(),
+                );
+                let backend: Arc<dyn IndexBackend> = Arc::new(
+                    crate::index2::fts_ranked_backend::FtsRankedBackend::new(
+                        desc, first_path, Arc::clone(self.info_store()),
+                    ),
+                );
+                (kind, backend)
+            }
+            "functional" => {
+                let expr_op = op.functional_op.as_deref().unwrap_or("lower");
+                let base = crate::index2::expr::IndexExpr::Field(first_path.clone());
+                let expr = match expr_op {
+                    "lower" => crate::index2::expr::IndexExpr::Lower(Box::new(base)),
+                    "upper" => crate::index2::expr::IndexExpr::Upper(Box::new(base)),
+                    "trim" => crate::index2::expr::IndexExpr::Trim(Box::new(base)),
+                    "length" => crate::index2::expr::IndexExpr::Length(Box::new(base)),
+                    _ => return Err(shamir_storage::error::DbError::Internal(
+                        format!("unknown functional_op: {expr_op}"),
+                    )),
+                };
+                let kind = IndexKind::Functional(Box::new(FunctionalConfig { expr: expr.clone() }));
+                let desc = IndexDescriptor::new(
+                    id, &op.create_index, name_key,
+                    interned_paths.clone(), kind.clone(),
+                );
+                let backend: Arc<dyn IndexBackend> = Arc::new(
+                    crate::index2::functional_backend::FunctionalBackend::new(
+                        desc, expr, Arc::clone(self.info_store()),
+                    ),
+                );
+                (kind, backend)
+            }
+            "vector" => {
+                let dim = op.vector_dim.unwrap_or(384);
+                let metric = match op.vector_metric.as_deref() {
+                    Some("l2") => VectorMetric::L2,
+                    Some("dot") => VectorMetric::Dot,
+                    _ => VectorMetric::Cosine,
+                };
+                let kind = IndexKind::Vector(Box::new(VectorConfig {
+                    dim, metric,
+                    backend: VectorBackendRef::InProcessHnsw { ef_construct: 200, m: 16 },
+                }));
+                let desc = IndexDescriptor::new(
+                    id, &op.create_index, name_key,
+                    interned_paths.clone(), kind.clone(),
+                );
+                let adapter = Arc::new(
+                    crate::index2::vector::brute_force::BruteForceAdapter::new(dim, metric),
+                );
+                let backend: Arc<dyn IndexBackend> = Arc::new(
+                    crate::index2::vector::VectorBackend::new(desc, first_path, adapter),
+                );
+                (kind, backend)
+            }
+            _ => return Err(shamir_storage::error::DbError::Internal(
+                format!("unknown index_type: {index_type}"),
+            )),
+        };
+
+        self.index2_registry
+            .insert(backend)
+            .await
+            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
         self.index_manager.create_index(index_def).await

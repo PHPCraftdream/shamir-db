@@ -70,6 +70,51 @@ impl IndexRegistry {
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
+
+    /// Collect all registered backends (snapshot).
+    pub async fn all_backends(&self) -> Vec<Arc<dyn IndexBackend>> {
+        let mut out = Vec::with_capacity(self.by_id.len());
+        self.by_id.scan_async(|_, v| out.push(v.clone())).await;
+        out
+    }
+
+    /// Collect all descriptors (for persistence).
+    pub async fn all_descriptors(&self) -> Vec<crate::index2::descriptor::IndexDescriptor> {
+        let mut out = Vec::with_capacity(self.by_id.len());
+        self.by_id
+            .scan_async(|_, v| out.push(v.descriptor().clone()))
+            .await;
+        out
+    }
+
+    /// Find a backend whose first field path matches and whose kind
+    /// matches the given tag ("fts", "functional", "vector").
+    pub async fn find_by_field_and_kind(
+        &self,
+        field_path: &[u64],
+        kind_tag: &str,
+    ) -> Option<Arc<dyn IndexBackend>> {
+        let mut found = None;
+        self.by_id
+            .scan_async(|_, backend| {
+                if found.is_some() {
+                    return;
+                }
+                let desc = backend.descriptor();
+                let kind_matches = match (&desc.kind, kind_tag) {
+                    (crate::index2::kind::IndexKind::Fts { .. }, "fts") => true,
+                    (crate::index2::kind::IndexKind::Functional(_), "functional") => true,
+                    (crate::index2::kind::IndexKind::Vector(_), "vector") => true,
+                    (crate::index2::kind::IndexKind::Btree { .. }, "btree") => true,
+                    _ => false,
+                };
+                if kind_matches && !desc.paths.is_empty() && desc.paths[0] == field_path {
+                    found = Some(backend.clone());
+                }
+            })
+            .await;
+        found
+    }
 }
 
 impl Default for IndexRegistry {
