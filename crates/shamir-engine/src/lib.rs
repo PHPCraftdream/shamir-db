@@ -10,6 +10,8 @@
 
 pub mod db_instance;
 pub mod index;
+pub mod index2;
+pub mod meta;
 pub mod migration;
 pub mod query;
 pub mod repo;

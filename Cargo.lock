@@ -3035,6 +3035,7 @@ dependencies = [
 name = "shamir-engine"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-stream",
  "async-trait",
  "bincode",
@@ -3049,6 +3050,7 @@ dependencies = [
  "regex",
  "rmp-serde",
  "rmpv",
+ "scc",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -3058,6 +3060,7 @@ dependencies = [
  "shamir-types",
  "smallvec 1.15.1",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -3288,6 +3291,9 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smallvec"
