@@ -42,6 +42,7 @@ serde_bytes = "0.11"      # efficient byte-slice serde for shadow log
 thiserror = "2.0"         # error types for index2/* (Phase 0)
 scc = "2.2"               # lock-free concurrent hashmap (index2::registry)
 arc-swap = "1.7"          # RCU-style atomic Arc swap (index2::actor snapshots)
+hnsw_rs = "0.3"           # HNSW approximate nearest neighbor (vector index)
 
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
@@ -106,4 +107,8 @@ harness = false
 
 [[bench]]
 name = "membuffer_pump"
+harness = false
+
+[[bench]]
+name = "vector_search"
 harness = false
