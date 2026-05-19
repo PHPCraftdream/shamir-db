@@ -20,10 +20,13 @@ pub mod actor;
 pub mod backend;
 pub mod descriptor;
 pub mod expr;
+pub mod fts_backend;
 pub mod functional_backend;
 pub mod kind;
+
 pub mod posting_layout;
 pub mod registry;
+pub mod tokenizer;
 
 pub use actor::IndexActor;
 pub use expr::{ExprError, IndexExpr};
