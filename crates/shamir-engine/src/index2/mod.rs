@@ -29,6 +29,7 @@ pub mod kind;
 pub mod posting_layout;
 pub mod registry;
 pub mod tokenizer;
+pub mod vector;
 
 pub use actor::IndexActor;
 pub use expr::{ExprError, IndexExpr};
