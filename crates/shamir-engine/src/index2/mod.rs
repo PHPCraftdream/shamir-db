@@ -25,6 +25,7 @@ pub mod fts_backend;
 pub mod fts_ranked_backend;
 pub mod functional_backend;
 pub mod kind;
+pub mod persistence;
 
 pub mod posting_layout;
 pub mod registry;
