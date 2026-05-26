@@ -163,6 +163,22 @@ impl TableManager {
             }
         }
 
+        // Rebuild in-memory vector HNSW graphs from persisted data.
+        // FTS/Functional backends store postings in info_store and need
+        // no rebuild; only Vector backends lose their in-memory state.
+        {
+            let backends = mgr.index2_registry.all_backends().await;
+            for b in &backends {
+                if matches!(
+                    b.descriptor().kind,
+                    crate::index2::kind::IndexKind::Vector(_)
+                ) {
+                    let data = Arc::clone(mgr.table.data_store());
+                    let _ = b.rebuild(data).await;
+                }
+            }
+        }
+
         // Auto-recovery on open. Cheap on clean shutdown (one
         // prefix scan returning zero entries); targeted recovery
         // (O(batch_size)) or full repair (O(table_size)) when a

@@ -2,6 +2,7 @@ pub mod buffer_config_tests;
 pub mod concurrent_tests;
 pub mod doctor_tests;
 pub mod filter_stream_tests;
+pub mod index2_persistence_tests;
 pub mod index_scan_tests;
 pub mod write_exec_tests;
 pub mod interner_manager_tests;
