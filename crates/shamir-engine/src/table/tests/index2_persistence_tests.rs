@@ -193,3 +193,179 @@ async fn vector_index_survives_reopen() {
         _ => panic!("phase2: expected Ranked result"),
     }
 }
+
+#[tokio::test]
+async fn fts_ranked_index_survives_reopen() {
+    let (data_store, info_store) = make_stores();
+
+    // --- Phase 1: create FTS index, insert records, query ---
+    let mgr1 = TableManager::create(
+        "docs".into(),
+        Arc::clone(&data_store),
+        Arc::clone(&info_store),
+    )
+    .await
+    .unwrap();
+
+    // Create FTS index on "body" field.
+    let op = CreateIndexOp {
+        create_index: "body_fts".into(),
+        table: "docs".into(),
+        fields: vec![vec!["body".into()]],
+        unique: false,
+        sorted: false,
+        repo: "main".into(),
+        index_type: Some("fts".into()),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: None,
+        functional_args: None,
+        vector_dim: None,
+        vector_metric: None,
+    };
+    mgr1.create_index_v2(&op).await.unwrap();
+
+    // Intern field keys so we can build InnerValue records.
+    let (body_key_id, lbl_key_id) = {
+        let interner = mgr1.interner().get().await.unwrap();
+        let body = match interner.touch_ind("body").unwrap() {
+            TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+        };
+        let lbl = match interner.touch_ind("label").unwrap() {
+            TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+        };
+        (body, lbl)
+    };
+
+    // Insert 5 records with different body lengths.
+    let docs: [(&str, &str); 5] = [
+        ("rust rust rust is great", "r1"),
+        ("rust is ok", "r2"),
+        ("rust rocks", "r3"),
+        ("the rust programming language is fast and safe", "r4"),
+        ("hello world", "r5"),
+    ];
+
+    for (body, label) in &docs {
+        let mut m = new_map_wc(2);
+        m.insert(
+            InternerKey::new(body_key_id),
+            InnerValue::Str((*body).into()),
+        );
+        m.insert(
+            InternerKey::new(lbl_key_id),
+            InnerValue::Str((*label).into()),
+        );
+        let rec = InnerValue::Map(m);
+        mgr1.insert(&rec).await.unwrap();
+    }
+
+    // Persist interner so keys survive reopen.
+    mgr1.interner().persist().await.unwrap();
+
+    // Query FTS for "rust" via index2 registry.
+    use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
+    use crate::index2::tokenizer::token_hash;
+    let registry = mgr1.index2_registry();
+    let backends = registry.all_backends().await;
+    assert_eq!(backends.len(), 1, "expected exactly 1 index2 backend");
+    let backend = &backends[0];
+
+    let result = backend
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_hash("rust")],
+            mode: FtsMode::AndAll,
+        })
+        .await
+        .unwrap();
+
+    let phase1_labels: Vec<String> = match &result {
+        IndexResult::Ranked(ranked) => {
+            assert!(
+                ranked.len() >= 4,
+                "phase1: expected at least 4 results, got {ranked:?}"
+            );
+            let mut labels = Vec::new();
+            for (rid, _score) in ranked {
+                let rec_bytes = data_store.get(rid.to_bytes()).await.unwrap();
+                let rec = InnerValue::from_bytes(&rec_bytes).unwrap();
+                let lbl = match &rec {
+                    InnerValue::Map(m) => match m.get(&InternerKey::new(lbl_key_id)) {
+                        Some(InnerValue::Str(s)) => s.clone(),
+                        _ => "?".into(),
+                    },
+                    _ => "?".into(),
+                };
+                labels.push(lbl);
+            }
+            labels
+        }
+        _ => panic!("phase1: expected Ranked result"),
+    };
+
+    // --- Drop TableManager 1 ---
+    drop(mgr1);
+
+    // --- Phase 2: reopen on same stores ---
+    let mgr2 = TableManager::create(
+        "docs".into(),
+        Arc::clone(&data_store),
+        Arc::clone(&info_store),
+    )
+    .await
+    .unwrap();
+
+    // Verify index was restored.
+    let registry2 = mgr2.index2_registry();
+    let backends2 = registry2.all_backends().await;
+    assert_eq!(
+        backends2.len(),
+        1,
+        "phase2: expected 1 restored backend, got {}",
+        backends2.len()
+    );
+    let backend2 = &backends2[0];
+    assert!(
+        matches!(
+            backend2.descriptor().kind,
+            crate::index2::kind::IndexKind::Fts { .. }
+        ),
+        "expected Fts kind"
+    );
+
+    // Same query — must return the same labels in the same order.
+    let result2 = backend2
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_hash("rust")],
+            mode: FtsMode::AndAll,
+        })
+        .await
+        .unwrap();
+    match &result2 {
+        IndexResult::Ranked(ranked) => {
+            assert!(
+                ranked.len() >= 4,
+                "phase2: expected at least 4 results, got {} results: {ranked:?}",
+                ranked.len()
+            );
+            let mut phase2_labels = Vec::new();
+            for (rid, _score) in ranked {
+                let rec_bytes = data_store.get(rid.to_bytes()).await.unwrap();
+                let rec = InnerValue::from_bytes(&rec_bytes).unwrap();
+                let lbl = match &rec {
+                    InnerValue::Map(m) => match m.get(&InternerKey::new(lbl_key_id)) {
+                        Some(InnerValue::Str(s)) => s.clone(),
+                        _ => "?".into(),
+                    },
+                    _ => "?".into(),
+                };
+                phase2_labels.push(lbl);
+            }
+            assert_eq!(
+                phase1_labels, phase2_labels,
+                "labels after reopen must match phase1 labels"
+            );
+        }
+        _ => panic!("phase2: expected Ranked result"),
+    }
+}

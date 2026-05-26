@@ -207,7 +207,9 @@ impl IndexBackend for FunctionalBackend {
     }
 
     async fn rebuild(&self, _source: Arc<dyn Store>) -> Result<(), IndexError> {
-        Err(IndexError::Backend("rebuild not yet implemented".into()))
+        // FunctionalBackend has no in-memory state — postings live entirely
+        // in the info_store. Nothing to rebuild.
+        Ok(())
     }
 
     async fn drop_all(&self) -> Result<(), IndexError> {

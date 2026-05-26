@@ -163,18 +163,19 @@ impl TableManager {
             }
         }
 
-        // Rebuild in-memory vector HNSW graphs from persisted data.
-        // FTS/Functional backends store postings in info_store and need
-        // no rebuild; only Vector backends lose their in-memory state.
+        // Rebuild in-memory state from persisted data.
+        // Vector backends lose their HNSW graph; FTS ranked backends
+        // lose BM25 doc_count/sum_doc_len counters; others are no-op.
         {
             let backends = mgr.index2_registry.all_backends().await;
             for b in &backends {
-                if matches!(
-                    b.descriptor().kind,
-                    crate::index2::kind::IndexKind::Vector(_)
-                ) {
-                    let data = Arc::clone(mgr.table.data_store());
-                    let _ = b.rebuild(data).await;
+                let data = Arc::clone(mgr.table.data_store());
+                if let Err(e) = b.rebuild(data).await {
+                    log::warn!(
+                        "index2 rebuild failed for index {}: {}",
+                        b.descriptor().name,
+                        e
+                    );
                 }
             }
         }
