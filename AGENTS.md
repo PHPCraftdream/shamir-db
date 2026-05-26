@@ -27,9 +27,33 @@
 4.  **Reliability:** Checksums, Crash safety (storage backends handle durability).
 
 ### 🧹 Code Quality (ОБЯЗАТЕЛЬНО)
-1.  **cargo clippy --all-targets --workspace** - Проверить все предупреждения перед завершением работы
-2.  **cargo fmt --all** - Отформатировать код после завершения работы
-3.  **cargo test --workspace --lib** (или `scripts/test-all`) - Все тесты должны проходить
+
+**Pre-commit gate.** Перед коммитом КАЖДОЙ задачи (feature, fix, test,
+refactor) обязательно прогнать **все три** проверки. Коммит не делается,
+пока любая из них падает:
+
+```
+cargo fmt --all -- --check          # formatting drift
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test  --workspace --lib       # или scripts/test-all
+```
+
+Если `fmt --check` падает — это значит, что в твоих изменениях есть
+неформатированный код. **Не запускай `cargo fmt --all`** — он
+переформатирует весь репозиторий. Прогоняй `cargo fmt -p <crate>` только
+по тем крейтам, которые ты трогал, либо вручную пофикси затронутые
+файлы.
+
+Если `clippy` падает с warnings от **существующего** (не твоего) кода —
+не лечи их в feature-коммите. Открой отдельную задачу и/или сделай
+отдельный `chore(clippy):` коммит.
+
+**Чистые style-only коммиты.** `cargo fmt --all` или массовый clippy
+auto-fix по всему репо делается **отдельным коммитом** с префиксом
+`style:` или `chore:`. SHA такого коммита добавляется в
+`.git-blame-ignore-revs`, чтобы `git blame` пропускал его и сохранял
+авторство строк. Никогда не смешивай fmt-sweep с содержательными
+изменениями — это раздувает diff и ломает review.
 
 Проект — Cargo workspace из 9 крейтов: `shamir-types`, `shamir-storage`,
 `shamir-query-types`, `shamir-engine`, `shamir-db`, `shamir-connect`,
