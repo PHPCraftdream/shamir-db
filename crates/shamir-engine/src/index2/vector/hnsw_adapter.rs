@@ -73,6 +73,8 @@ impl Default for HnswConfig {
 
 pub struct HnswAdapter {
     dim: u32,
+    // Stored for potential future use in search-time distance selection
+    #[allow(dead_code)]
     metric: VectorMetric,
     ef_search: usize,
     hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,

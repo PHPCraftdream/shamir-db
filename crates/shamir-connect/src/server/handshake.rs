@@ -107,7 +107,7 @@ pub struct AuthOkView {
 #[derive(Debug)]
 pub enum ProofOutcome {
     /// Proof was valid → emit `auth_ok`.
-    Accepted(AuthOkView),
+    Accepted(Box<AuthOkView>),
     /// Proof invalid OR user unknown → emit generic `authentication_failed`.
     /// Caller must apply latency padding before responding.
     Rejected,
@@ -228,7 +228,7 @@ impl<'a> ServerHandshake<'a> {
         let _ = constant_time_eq;
 
         if verified && self.user_record.is_some() {
-            Ok(ProofOutcome::Accepted(AuthOkView {
+            Ok(ProofOutcome::Accepted(Box::new(AuthOkView {
                 server_signature,
                 server_pub_key: identity_keypair.public_bytes(),
                 identity_sig,
@@ -238,7 +238,7 @@ impl<'a> ServerHandshake<'a> {
                 resumption_expires_at_ns: None,
                 rotation_in_progress: None,
                 kdf_upgrade_required: None,
-            }))
+            })))
         } else {
             Ok(ProofOutcome::Rejected)
         }

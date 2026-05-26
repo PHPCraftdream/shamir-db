@@ -21,8 +21,6 @@
 //! compiles to nothing and only `InMemoryConsumedCounters` (in
 //! `server/resume.rs`) is available.
 
-#![cfg(feature = "durable-redb")]
-
 use crate::common::time::ns;
 use crate::common::types::limits;
 use crate::server::resume::ConsumedCounterStore;

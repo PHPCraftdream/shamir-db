@@ -115,13 +115,14 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
     }
 
     buf.clear();
-    buf.reserve(len);
     // SAFETY: `reserve(len)` ensured `capacity >= len`. `set_len(len)`
     // exposes uninitialized bytes — we IMMEDIATELY pass `&mut buf[..]` to
     // `read_exact` which fully overwrites all `len` bytes or returns
     // `Err`. The uninit bytes are never read by safe code: on success the
     // buffer is fully initialized; on error we never observe `&buf[..]`
     // (the function returns the error directly without exposing `buf`).
+    buf.reserve(len);
+    #[allow(clippy::uninit_vec)] // see SAFETY comment above
     unsafe {
         buf.set_len(len);
     }

@@ -1,8 +1,8 @@
 //! End-to-end smoke test for the SDK.
 //!
 //! Boots a real `ServerLauncher` against a TempDir, connects through the
-//! SDK, exercises the canonical happy-path: ping → create_db → create_repo
-//! + create_table → set + read → graceful close. Mirrors what
+//! SDK, exercises the canonical happy-path: ping, create_db, create_repo,
+//! create_table, set, read, graceful close. Mirrors what
 //! `crates/shamir-server/tests/mvp_e2e.rs` does in 436 lines, but in
 //! ~80 because all the wire/SCRAM machinery is encapsulated.
 //!

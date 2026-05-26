@@ -147,8 +147,8 @@ struct MemBufferState {
     ///
     /// This replaces an earlier design that used `DashSet<Key>`
     /// + a moka async eviction listener to flush. The listener
-    /// was firing per evicted entry (TTL/Size cause); on tight
-    /// loops with frequent eviction it dominated the cost.
+    ///   was firing per evicted entry (TTL/Size cause); on tight
+    ///   loops with frequent eviction it dominated the cost.
     dirty: Arc<DashMap<RecordKey, Slot>>,
     /// Atomic-config — read on hot paths so DDL changes apply
     /// without rewrapping the store.

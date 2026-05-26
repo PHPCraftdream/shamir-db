@@ -181,6 +181,7 @@ impl AuditChain {
     /// Append an event. Caller supplies the entry fields; this method
     /// fills in `seq`, `prev_hmac`, computes `hmac`, and updates state.
     /// Returns the persisted [`AuditEntry`].
+    #[allow(clippy::too_many_arguments)] // audit fields are per-spec, not groupable
     pub fn append(
         &self,
         event: impl Into<String>,

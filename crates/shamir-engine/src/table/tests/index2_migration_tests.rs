@@ -124,7 +124,6 @@ async fn migrate_index2_fts() {
     let hit_count = match &result {
         IndexResult::Ranked(r) => r.len(),
         IndexResult::Set(s) => s.len(),
-        _ => panic!("unexpected result kind"),
     };
     assert_eq!(
         hit_count, 2,

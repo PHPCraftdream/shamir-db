@@ -444,10 +444,7 @@ impl SortedIndexManager {
     /// sort codec can encode (i.e. an entry for this record *should*
     /// exist in a sorted index keyed on this path).
     pub fn has_indexable_value(record: &InnerValue, field_path: &[u64]) -> bool {
-        match extract_and_encode(record, field_path) {
-            Ok(Some(_)) => true,
-            _ => false,
-        }
+        matches!(extract_and_encode(record, field_path), Ok(Some(_)))
     }
 
     /// Prefix common to every entry of one sorted index.

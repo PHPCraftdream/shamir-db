@@ -47,9 +47,9 @@ pub enum BoxRepo {
     /// Full-mirror cache wrapper. Loads every record from inner on
     /// open; subsequent reads are pure-memory; writes go to cache
     /// + inner (Sync or Async per `WriteMode`). Useful for small
-    /// hot datasets where the working set fits in RAM and every
-    /// read should be free of disk latency. Stacks on top of
-    /// MemBuffer or any other backend.
+    ///   hot datasets where the working set fits in RAM and every
+    ///   read should be free of disk latency. Stacks on top of
+    ///   MemBuffer or any other backend.
     Cached(Arc<CachedRepoComposite>),
 }
 

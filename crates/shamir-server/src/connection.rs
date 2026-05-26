@@ -476,7 +476,7 @@ async fn run_handshake<F: Framer>(
     drop(permit_opt);
 
     let auth_ok: AuthOkView = match outcome {
-        ProofOutcome::Accepted(ok) => ok,
+        ProofOutcome::Accepted(ok) => *ok,
         ProofOutcome::Rejected => {
             // Register the failure for backoff / lockout.
             let _ = ctx.lockout.register_failure(pair, now_ns);

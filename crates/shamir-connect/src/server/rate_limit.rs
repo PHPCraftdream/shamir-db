@@ -73,6 +73,7 @@ pub trait RateLimiter: Send + Sync {
 /// limiter itself is what protects against DoS.
 type SubnetHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
 
+/// Token-bucket rate limiter keyed by client subnet.
 pub struct InMemoryRateLimiter {
     buckets: DashMap<Subnet, BucketState, SubnetHasher>,
     /// Wall-clock at server-process start. Used to detect warmup window.

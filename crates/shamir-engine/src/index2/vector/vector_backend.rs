@@ -154,7 +154,6 @@ mod tests {
     use super::*;
     use crate::index2::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
     use crate::index2::vector::brute_force::BruteForceAdapter;
-    use bytes::Bytes;
     use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
     use shamir_types::types::common::new_map_wc;
     use smallvec::SmallVec;

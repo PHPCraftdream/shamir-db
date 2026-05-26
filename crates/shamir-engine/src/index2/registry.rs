@@ -111,13 +111,13 @@ impl IndexRegistry {
                     return;
                 }
                 let desc = backend.descriptor();
-                let kind_matches = match (&desc.kind, kind_tag) {
-                    (crate::index2::kind::IndexKind::Fts { .. }, "fts") => true,
-                    (crate::index2::kind::IndexKind::Functional(_), "functional") => true,
-                    (crate::index2::kind::IndexKind::Vector(_), "vector") => true,
-                    (crate::index2::kind::IndexKind::Btree { .. }, "btree") => true,
-                    _ => false,
-                };
+                let kind_matches = matches!(
+                    (&desc.kind, kind_tag),
+                    (crate::index2::kind::IndexKind::Fts { .. }, "fts")
+                        | (crate::index2::kind::IndexKind::Functional(_), "functional")
+                        | (crate::index2::kind::IndexKind::Vector(_), "vector")
+                        | (crate::index2::kind::IndexKind::Btree { .. }, "btree")
+                );
                 if kind_matches && !desc.paths.is_empty() && desc.paths[0] == field_path {
                     found = Some(backend.clone());
                 }

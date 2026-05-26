@@ -32,9 +32,9 @@ use std::sync::Arc;
 /// Maximum number of posting-list entries cached in memory per
 /// `IndexManager`. Hit on a cached entry is a single `HashMap::get`
 /// + `Arc::clone`; miss falls back to `info_store.get` + bincode
-/// deserialise. Capacity is intentionally small — typical workloads
-/// (admin UIs, filter-by-status, find-by-id) concentrate on a handful
-/// of values per index.
+///   deserialise. Capacity is intentionally small — typical workloads
+///   (admin UIs, filter-by-status, find-by-id) concentrate on a handful
+///   of values per index.
 const POSTING_CACHE_CAP: usize = 512;
 
 /// Менеджер индексов для одной таблицы.

@@ -66,7 +66,7 @@ impl Table {
     ///
     /// On native-`get_many` backends this collapses N×spawn_blocking
     /// + N transaction setups into one — the main win for indexed
-    /// read paths.
+    ///   read paths.
     pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
         if ids.is_empty() {
             return Ok(Vec::new());
