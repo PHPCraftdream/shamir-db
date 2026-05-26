@@ -114,7 +114,7 @@ fn happy_path_full_round_trip() {
         .verify_proof(&proof, &identity_kp, SESSION_MAX_AGE_NS)
         .unwrap();
     let auth_ok_server = match outcome {
-        ProofOutcome::Accepted(ok) => ok,
+        ProofOutcome::Accepted(ok) => *ok,
         ProofOutcome::Rejected => panic!("server rejected legitimate proof"),
     };
 

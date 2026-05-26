@@ -21,8 +21,9 @@
 //!   * shamir_db_default_main.redb (the data we wrote)
 //!   * wire_tables.json     (registry of tables created over the wire)
 //!   * cert.pem / key.pem   (TLS material — without it the second boot
-//!                           would generate a NEW Ed25519 + new server pub-key,
-//!                           breaking client TOFU pin sanity)
+//!   * cert.pem / key.pem   (TLS material — without it the second boot
+//!     would generate a NEW Ed25519 + new server pub-key,
+//!     breaking client TOFU pin sanity)
 
 use std::path::PathBuf;
 use std::sync::Arc;

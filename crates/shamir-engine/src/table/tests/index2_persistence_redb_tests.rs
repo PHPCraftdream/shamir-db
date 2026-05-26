@@ -39,6 +39,7 @@ async fn open_redb_stores(
 }
 
 /// Build a record: `{ body: <s>, email: <s>, emb: <vec>, label: <s> }`.
+#[allow(clippy::too_many_arguments)] // test helper: each arg maps to a record field
 fn make_record(
     body_key: u64,
     email_key: u64,

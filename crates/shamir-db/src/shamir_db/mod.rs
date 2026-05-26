@@ -2,6 +2,7 @@
 mod tests;
 
 mod execute;
+#[allow(clippy::module_inception)]
 pub mod shamir_db;
 pub mod system_store;
 

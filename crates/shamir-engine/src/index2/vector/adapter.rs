@@ -21,4 +21,7 @@ pub trait VectorAdapter: Send + Sync {
     async fn search(&self, query: &[f32], k: u32) -> Result<Vec<(RecordId, f32)>, VectorError>;
     fn dim(&self) -> u32;
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }

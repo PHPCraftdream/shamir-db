@@ -620,6 +620,7 @@ impl TableManager {
     /// Gt / Lt are intentionally NOT routed here yet — they need an
     /// "exclude exact-match boundary" trick that we'll add in a
     /// follow-up. They fall through to the full-scan path.
+    #[allow(clippy::type_complexity)] // scan plan tuple; kept unpacked for caller convenience
     pub fn try_plan_sorted_index_scan(
         &self,
         filter: &Filter,
@@ -684,6 +685,7 @@ impl TableManager {
     /// Scan a sorted index for a range of record_ids, then apply the
     /// usual read pipeline (residual filter, projection, group_by,
     /// aggregates, sort, paginate).
+    #[allow(clippy::too_many_arguments)] // read-path parameters mirror query plan fields
     async fn read_sorted_index_scan(
         &self,
         query: &ReadQuery,
@@ -817,6 +819,7 @@ impl TableManager {
     /// Execute the ORDER BY LIMIT K fast path: pull `skip + take`
     /// record ids from the sorted index in the requested direction,
     /// skip the offset, load + project.
+    #[allow(clippy::too_many_arguments)] // read-path parameters mirror query plan fields
     async fn read_order_limit_fast(
         &self,
         query: &ReadQuery,
@@ -890,6 +893,7 @@ impl TableManager {
     ///
     /// `lookup_sets` contains one or more value sets to look up.
     /// For Eq — one set. For In — one set per value. Results are unioned.
+    #[allow(clippy::too_many_arguments)] // read-path parameters mirror query plan fields
     async fn read_index_scan(
         &self,
         query: &ReadQuery,

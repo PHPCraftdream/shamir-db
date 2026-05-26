@@ -239,6 +239,7 @@ pub const DISCONNECT_GRACE_NS: u64 = 5 * crate::common::time::ns::SECOND;
 type SessionIdHasher = std::hash::BuildHasherDefault<fxhash::FxHasher>;
 
 #[derive(Debug)]
+/// Active sessions indexed by session ID.
 pub struct SessionStore {
     by_sid: DashMap<[u8; limits::SESSION_ID_BYTES], Arc<Session>, SessionIdHasher>,
     cap_lock: Mutex<()>,

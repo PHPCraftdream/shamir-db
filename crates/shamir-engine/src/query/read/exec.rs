@@ -400,6 +400,7 @@ pub fn apply_group_by(
     // only on first insertion (Vacant branch) — repeated records into
     // an existing group skip the rebuild.
     use indexmap::map::Entry;
+    #[allow(clippy::type_complexity)] // grouped aggregate accumulator; clarity over brevity
     let mut groups: TMap<Vec<GroupKeyItem>, (Vec<&InnerValue>, Vec<(String, json::Value)>)> =
         new_map_wc(0);
 

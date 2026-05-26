@@ -247,7 +247,7 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
             .verify_proof(&proof_arr, &server_identity, SESSION_MAX_AGE_NS)
             .unwrap()
         {
-            ProofOutcome::Accepted(ok) => ok,
+            ProofOutcome::Accepted(ok) => *ok,
             ProofOutcome::Rejected => panic!("server rejected proof"),
         };
 

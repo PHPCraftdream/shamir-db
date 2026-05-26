@@ -108,6 +108,7 @@ pub fn build_request(
 /// Lightweight helper for testing & convenience: wrap a complete bootstrap
 /// flow (hello → challenge → request) into one call. Intended for in-process
 /// integration tests; production caller wires each step to its own transport.
+#[allow(clippy::too_many_arguments)] // convenience wrapper for integration tests
 pub fn run_local_bootstrap_with(
     keypair: &Ed25519Keypair,
     pinned_hash: &[u8; 32],
