@@ -7,6 +7,7 @@ use super::adapter::{VectorAdapter, VectorError};
 use crate::index2::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::index2::descriptor::IndexDescriptor;
 use async_trait::async_trait;
+use futures::StreamExt;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -117,8 +118,31 @@ impl IndexBackend for VectorBackend {
         }
     }
 
-    async fn rebuild(&self, _source: Arc<dyn Store>) -> Result<(), IndexError> {
-        Err(IndexError::Backend("rebuild not yet implemented".into()))
+    async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
+        let batch_size = 1000usize;
+        let mut stream = source.iter_stream(batch_size);
+        while let Some(batch_res) = stream.next().await {
+            let batch = batch_res.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let mut items: Vec<(RecordId, Vec<f32>)> = Vec::new();
+            for (key_bytes, val_bytes) in batch {
+                let arr: [u8; 16] = key_bytes
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| IndexError::Backend("invalid key length".into()))?;
+                let rid = RecordId(arr);
+                let rec = InnerValue::from_bytes(&val_bytes)
+                    .map_err(|e| IndexError::Backend(e.to_string()))?;
+                if let Some(v) = self.extract_vec(&rec) {
+                    items.push((rid, v));
+                }
+            }
+            for chunk in items.chunks(64) {
+                for (rid, v) in chunk {
+                    self.adapter.upsert(*rid, v).await.map_err(ve)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn drop_all(&self) -> Result<(), IndexError> {
@@ -133,6 +157,7 @@ mod tests {
     use super::*;
     use crate::index2::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
     use crate::index2::vector::brute_force::BruteForceAdapter;
+    use bytes::Bytes;
     use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
     use shamir_types::types::common::new_map_wc;
     use smallvec::SmallVec;
@@ -229,6 +254,46 @@ mod tests {
 
         match result {
             IndexResult::Ranked(ranked) => assert!(ranked.is_empty()),
+            _ => panic!("expected Ranked"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rebuild_from_store() {
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use crate::index2::backend::IndexBackend;
+
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+        // Write 3 records into the store as (RecordId → InnerValue).
+        let r1 = RecordId::new();
+        let r2 = RecordId::new();
+        let r3 = RecordId::new();
+        let rec1 = make_rec(&i, &[1.0, 0.0, 0.0]);
+        let rec2 = make_rec(&i, &[0.0, 1.0, 0.0]);
+        let rec3 = make_rec(&i, &[0.9, 0.1, 0.0]);
+        store.set(r1.to_bytes(), Bytes::from(rec1.to_bytes().unwrap())).await.unwrap();
+        store.set(r2.to_bytes(), Bytes::from(rec2.to_bytes().unwrap())).await.unwrap();
+        store.set(r3.to_bytes(), Bytes::from(rec3.to_bytes().unwrap())).await.unwrap();
+
+        // Create a fresh backend (empty adapter) and rebuild from store.
+        let backend = make_backend(&i);
+        backend.rebuild(Arc::clone(&store)).await.unwrap();
+
+        // Search for [1,0,0] — top-2 should contain r1 (closest).
+        let result = backend
+            .lookup(IndexQuery::Vector {
+                vec: vec![1.0, 0.0, 0.0],
+                k: 2,
+            })
+            .await
+            .unwrap();
+        match result {
+            IndexResult::Ranked(ranked) => {
+                assert_eq!(ranked.len(), 2, "expected 2 results, got {ranked:?}");
+                assert_eq!(ranked[0].0, r1, "r1 should be the closest");
+            }
             _ => panic!("expected Ranked"),
         }
     }
