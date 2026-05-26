@@ -63,3 +63,7 @@ harness = false
 [[bench]]
 name = "codec_json_encode"
 harness = false
+
+[[bench]]
+name = "json_clone"
+harness = false
