@@ -286,8 +286,23 @@ impl IndexBackend for FtsRankedBackend {
         }
     }
 
-    async fn rebuild(&self, _source: Arc<dyn Store>) -> Result<(), IndexError> {
-        Err(IndexError::Backend("rebuild not yet implemented".into()))
+    async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
+        let batch_size = 1000usize;
+        let mut stream = source.iter_stream(batch_size);
+        while let Some(batch_res) = stream.next().await {
+            let batch = batch_res.map_err(|e| IndexError::Storage(e.to_string()))?;
+            for (_key_bytes, val_bytes) in batch {
+                let rec = match InnerValue::from_bytes(&val_bytes) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let (_, doc_len) = self.tokenize_with_freq(&rec);
+                if doc_len > 0 {
+                    self.stats.on_insert(doc_len);
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn drop_all(&self) -> Result<(), IndexError> {
@@ -468,5 +483,65 @@ mod tests {
             }
             _ => panic!("expected Ranked"),
         }
+    }
+
+    #[tokio::test]
+    async fn rebuild_restores_stats_from_data_store() {
+        let i = Interner::new();
+        // Separate stores: data_store holds records, info_store holds postings.
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let fts = make_backend(&i, Arc::clone(&info_store));
+
+        // Insert records via data_store directly (simulating persisted data).
+        let recs = [
+            make_rec(&i, "alpha beta gamma"),       // 3 tokens
+            make_rec(&i, "hello world foo bar"),    // 4 tokens
+            make_rec(&i, "short"),                   // 1 token
+            make_rec(&i, "a b c d e f"),             // 6 tokens
+            make_rec(&i, ""),                        // 0 tokens — skipped
+        ];
+        for rec in &recs {
+            let rid = RecordId::new();
+            data_store
+                .set(rid.to_bytes(), Bytes::from(rec.to_bytes().unwrap()))
+                .await
+                .unwrap();
+            // Also feed into FTS so postings exist (rebuild only updates stats).
+            fts.on_insert(rid, rec).await.unwrap();
+        }
+
+        // Verify stats are correct after inserts.
+        assert_eq!(
+            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            4
+        ); // "" has doc_len=0 → not counted
+        assert_eq!(
+            fts.stats.sum_doc_len.load(std::sync::atomic::Ordering::Relaxed),
+            14
+        ); // 3+4+1+6
+
+        // Reset stats to zero (simulates reopen where counters start at 0).
+        fts.stats.doc_count.store(0, std::sync::atomic::Ordering::Relaxed);
+        fts.stats.sum_doc_len.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(
+            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        // Rebuild from data_store.
+        fts.rebuild(Arc::clone(&data_store)).await.unwrap();
+
+        // Stats must be restored.
+        assert_eq!(
+            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            4
+        );
+        assert_eq!(
+            fts.stats.sum_doc_len.load(std::sync::atomic::Ordering::Relaxed),
+            14
+        );
+        assert!((fts.stats.avg_doc_len() - 3.5).abs() < 0.01); // 14/4
     }
 }
