@@ -121,44 +121,10 @@ impl TableManager {
         if let Some(persisted) = crate::index2::persistence::load_index2_metadata(&mgr.info_store).await? {
             mgr.index2_registry.set_next_id(persisted.next_id);
             for desc in persisted.descriptors {
-                let first_path = desc.paths.first().cloned().unwrap_or_default();
-                let backend: Arc<dyn crate::index2::backend::IndexBackend> = match &desc.kind {
-                    crate::index2::kind::IndexKind::Fts { .. } => {
-                        Arc::new(crate::index2::fts_ranked_backend::FtsRankedBackend::new(
-                            desc.clone(),
-                            first_path,
-                            Arc::clone(&info_store),
-                        ))
-                    }
-                    crate::index2::kind::IndexKind::Functional(cfg) => {
-                        Arc::new(crate::index2::functional_backend::FunctionalBackend::new(
-                            desc.clone(),
-                            cfg.expr.clone(),
-                            Arc::clone(&info_store),
-                        ))
-                    }
-                    crate::index2::kind::IndexKind::Vector(cfg) => {
-                        let adapter = Arc::new(
-                            crate::index2::vector::hnsw_adapter::HnswAdapter::new(
-                                cfg.dim,
-                                cfg.metric,
-                                crate::index2::vector::hnsw_adapter::HnswConfig {
-                                    max_elements: 100_000,
-                                    m: 16,
-                                    ef_construction: 200,
-                                    ef_search: 50,
-                                    ..Default::default()
-                                },
-                            ),
-                        );
-                        Arc::new(crate::index2::vector::VectorBackend::new(
-                            desc.clone(),
-                            first_path,
-                            adapter,
-                        ))
-                    }
-                    crate::index2::kind::IndexKind::Btree { .. } => continue,
-                };
+                if matches!(desc.kind, crate::index2::kind::IndexKind::Btree { .. }) {
+                    continue;
+                }
+                let backend = crate::index2::build_index2_backend(desc, &info_store);
                 let _ = mgr.index2_registry.insert(backend).await;
             }
         }
@@ -806,6 +772,149 @@ impl TableManager {
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         self.table.get(id).await
+    }
+
+    // ============================================================================
+    // Migration support — index2 cutover
+    // ============================================================================
+
+    /// Replicate src's index2 descriptors onto this TableManager.
+    ///
+    /// For each non-Btree descriptor on `src`:
+    /// 1. Intern the name + path segments in **this** manager's interner
+    ///    (so `name_interned` and `paths` resolve correctly in the dst
+    ///    address space).
+    /// 2. Allocate a fresh local `id` (src ids are a separate counter).
+    /// 3. Build a backend via `build_index2_backend` (empty — no postings
+    ///    yet) and register it in this registry.
+    /// 4. Persist metadata.
+    ///
+    /// Must be called **before** `bulk_populate_index2` and **before**
+    /// any writes reach the dst table.
+    pub async fn replicate_index2_descriptors_from(
+        &self,
+        src: &TableManager,
+    ) -> DbResult<()> {
+        let src_backends = src.index2_registry.all_backends().await;
+        if src_backends.is_empty() {
+            return Ok(());
+        }
+
+        let interner = self.interner.get().await?;
+
+        for src_backend in &src_backends {
+            let src_desc = src_backend.descriptor();
+
+            // Intern name in dst address space.
+            let name_key = match interner
+                .touch_ind(&src_desc.name)
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
+            {
+                TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+            };
+
+            // Intern each path segment in dst address space.
+            let mut interned_paths: smallvec::SmallVec<[Vec<u64>; 2]> =
+                smallvec::SmallVec::new();
+            for path in &src_desc.paths {
+                let mut seg_ids = Vec::with_capacity(path.len());
+                // The src's `paths` already contain interned u64s from
+                // src's interner — but we need the original field names
+                // to re-intern on dst. Recover them via src's interner.
+                let src_interner = src.interner.get().await?;
+                for &seg_u64 in path {
+                    let seg_str = src_interner
+                        .get_str(&src_interner.make_key(seg_u64))
+                        .ok_or_else(|| {
+                            shamir_storage::error::DbError::Internal(format!(
+                                "cannot resolve interned segment {} from src",
+                                seg_u64
+                            ))
+                        })?;
+                    let dst_key = match interner
+                        .touch_ind(seg_str)
+                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
+                    {
+                        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+                    };
+                    seg_ids.push(dst_key);
+                }
+                interned_paths.push(seg_ids);
+            }
+
+            let new_id = self.index2_registry.allocate_id();
+            let new_desc = crate::index2::descriptor::IndexDescriptor::new(
+                new_id,
+                src_desc.name.clone(),
+                name_key,
+                interned_paths,
+                src_desc.kind.clone(),
+            );
+
+            let backend =
+                crate::index2::build_index2_backend(new_desc, &self.info_store);
+            self.index2_registry
+                .insert(backend)
+                .await
+                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+        }
+
+        self.interner.persist().await?;
+        crate::index2::persistence::save_index2_metadata(
+            &self.index2_registry,
+            &self.info_store,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Bulk-populate all index2 backends by streaming records from this
+    /// TableManager's data_store and calling `on_batch_insert` for each
+    /// batch on every registered backend.
+    ///
+    /// This creates postings in info_store **and** populates in-memory
+    /// state (HNSW graph, BM25 counters, etc.). Intended for migration
+    /// cutover — the dst table has data_store populated by snapshot/drain
+    /// but its info_store is empty.
+    ///
+    /// Must be called **after** `replicate_index2_descriptors_from` and
+    /// **after** all data has landed in the dst data_store (i.e. after
+    /// `drain_until_caught_up`). New writes after `bulk_populate_index2`
+    /// must go through `insert()` which calls `index2_on_insert` — the
+    /// migration coordinator's `final_drain_and_commit` writes directly
+    /// to `dst_data` (data_store only) and does **not** trigger index2
+    /// hooks. Therefore `bulk_populate_index2` should be called **after**
+    /// `final_drain_and_commit` if any shadow-log entries may have been
+    /// written between `drain_until_caught_up` and `mark_cutover_ready`.
+    pub async fn bulk_populate_index2(&self) -> DbResult<()> {
+        let backends = self.index2_registry.all_backends().await;
+        if backends.is_empty() {
+            return Ok(());
+        }
+
+        let stream = self.table.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            let items: Vec<(RecordId, &InnerValue)> = batch
+                .iter()
+                .map(|(rid, val)| (*rid, val))
+                .collect();
+            for backend in &backends {
+                backend
+                    .on_batch_insert(&items)
+                    .await
+                    .map_err(|e| {
+                        shamir_storage::error::DbError::Internal(format!(
+                            "bulk_populate_index2 on_batch_insert failed: {}",
+                            e
+                        ))
+                    })?;
+            }
+        }
+
+        Ok(())
     }
 
     // ============================================================================
