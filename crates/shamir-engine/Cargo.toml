@@ -64,6 +64,9 @@ nebari = ["shamir-storage/nebari"]
 persy  = ["shamir-storage/persy"]
 canopy = ["shamir-storage/canopy"]
 
+[target.'cfg(unix)'.dev-dependencies]
+dhat = "0.3"
+
 [dev-dependencies]
 tempfile = "3.10.1"
 serial_test = "3.3.1"
