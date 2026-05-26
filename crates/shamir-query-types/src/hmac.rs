@@ -233,11 +233,11 @@ mod tests {
         );
         assert_eq!(
             canonical_drop_index("mydb", "main", "users", "by_email", false),
-            b"drop_index\0mydb\0main\0users\0by_email\x00"
+            b"drop_index\0mydb\0main\0users\0by_email\x000"
         );
         assert_eq!(
             canonical_drop_index("mydb", "main", "users", "by_email", true),
-            b"drop_index\0mydb\0main\0users\0by_email\x01"
+            b"drop_index\0mydb\0main\0users\0by_email\x001"
         );
         assert_eq!(canonical_drop_user("bob"), b"drop_user\0bob");
         assert_eq!(canonical_drop_role("admin"), b"drop_role\0admin");
