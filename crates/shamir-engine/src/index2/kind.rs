@@ -23,7 +23,33 @@ pub enum IndexKind {
 pub enum TokenizerKind {
     Whitespace,
     Unicode,
-    Ngram { n: u8 },
+    Ngram {
+        n: u8,
+    },
+    /// Full pipeline: whitespace split → lowercase → optional stopwords
+    /// → optional snowball stemming.  `language` selects both the
+    /// stopword list and the stemmer algorithm.
+    Full {
+        language: StemLanguage,
+        #[serde(default = "default_true")]
+        stopwords: bool,
+        #[serde(default = "default_true")]
+        stem: bool,
+    },
+}
+
+/// Language selector for [`TokenizerKind::Full`].
+///
+/// Maps 1:1 to `rust_stemmers::Algorithm` and to a built-in stopword
+/// list.  Serialises as a lowercase string (`"english"` / `"russian"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StemLanguage {
+    English,
+    Russian,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

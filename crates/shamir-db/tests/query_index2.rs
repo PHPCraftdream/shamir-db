@@ -293,3 +293,90 @@ async fn create_index_persists_metadata() {
     // This just proves the index exists and is queryable.
     assert!(resp.results.contains_key("q1"));
 }
+
+// ============================================================================
+// FTS — stemming (English)
+// ============================================================================
+
+#[tokio::test]
+async fn fts_stemmed_en_query() {
+    let shamir = setup().await;
+
+    exec(&shamir, json!({
+        "id": 1,
+        "queries": {
+            "mk": {
+                "create_index": "body_fts",
+                "table": "posts",
+                "fields": [["body"]],
+                "index_type": "fts",
+                "fts_tokenizer": "stemmed_en",
+            }
+        }
+    })).await;
+
+    exec(&shamir, json!({
+        "id": 2,
+        "queries": {
+            "w1": {"insert_into": "posts", "values": [{"body": "running fast"}]},
+        }
+    })).await;
+
+    // "run" should match "running" through stemming.
+    let resp = exec(&shamir, json!({
+        "id": 3,
+        "queries": {
+            "q": {
+                "from": "posts",
+                "where": {"op": "fts", "field": ["body"], "query": "run", "mode": "and"}
+            }
+        }
+    })).await;
+    let records = &resp.results["q"].records;
+    assert_eq!(records.len(), 1, "stemmed query 'run' should match 'running'");
+    assert_eq!(records[0]["body"], "running fast");
+}
+
+// ============================================================================
+// FTS — stopwords filtered
+// ============================================================================
+
+#[tokio::test]
+async fn fts_stopwords_filtered() {
+    let shamir = setup().await;
+
+    exec(&shamir, json!({
+        "id": 1,
+        "queries": {
+            "mk": {
+                "create_index": "body_fts",
+                "table": "posts",
+                "fields": [["body"]],
+                "index_type": "fts",
+                "fts_tokenizer": "stemmed_en",
+            }
+        }
+    })).await;
+
+    exec(&shamir, json!({
+        "id": 2,
+        "queries": {
+            "w1": {"insert_into": "posts", "values": [{"body": "the cat sat"}]},
+        }
+    })).await;
+
+    // Query "the cat" — "the" is a stopword and gets filtered both at
+    // index time and query time, so the lookup matches by "cat" only.
+    let resp = exec(&shamir, json!({
+        "id": 3,
+        "queries": {
+            "q": {
+                "from": "posts",
+                "where": {"op": "fts", "field": ["body"], "query": "the cat", "mode": "and"}
+            }
+        }
+    })).await;
+    let records = &resp.results["q"].records;
+    assert_eq!(records.len(), 1, "stopword 'the' should be filtered, match on 'cat'");
+    assert_eq!(records[0]["body"], "the cat sat");
+}

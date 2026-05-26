@@ -40,6 +40,7 @@ rmpv = { version = "1.3.1", features = ["serde"] }
 bincode = "1.3.3"         # admin / index serialisation
 serde_bytes = "0.11"      # efficient byte-slice serde for shadow log
 thiserror = "2.0"         # error types for index2/* (Phase 0)
+rust-stemmers = "1.2"    # snowball stemming for FTS tokenizers
 scc = "2.2"               # lock-free concurrent hashmap (index2::registry)
 arc-swap = "1.7"          # RCU-style atomic Arc swap (index2::actor snapshots)
 hnsw_rs = "0.3"           # HNSW approximate nearest neighbor (vector index)

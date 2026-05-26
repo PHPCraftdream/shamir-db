@@ -8,7 +8,7 @@ use crate::index2::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, Inde
 use crate::index2::bm25::{self, Bm25Params, FtsPostingValue, FtsStats};
 use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
-use crate::index2::tokenizer::{token_hash, Tokenizer, WhitespaceTokenizer};
+use crate::index2::tokenizer::{self, token_hash, Tokenizer, WhitespaceTokenizer};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -33,10 +33,16 @@ impl FtsRankedBackend {
         field_path: Vec<u64>,
         store: Arc<dyn Store>,
     ) -> Self {
+        let tokenizer: Arc<dyn Tokenizer> = match &descriptor.kind {
+            crate::index2::kind::IndexKind::Fts { tokenizer: tk, .. } => {
+                Arc::from(tokenizer::build_tokenizer(tk))
+            }
+            _ => Arc::new(WhitespaceTokenizer),
+        };
         Self {
             descriptor,
             field_path,
-            tokenizer: Arc::new(WhitespaceTokenizer),
+            tokenizer,
             store,
             stats: Arc::new(FtsStats::new()),
             params: Bm25Params::default(),
