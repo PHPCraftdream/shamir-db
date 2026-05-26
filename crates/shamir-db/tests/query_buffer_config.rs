@@ -276,13 +276,10 @@ async fn get_unknown_table_errors_cleanly() {
     // fails (no `_ignore` semantics yet). Either Err(_) or an
     // empty/missing result entry both indicate the op didn't
     // silently succeed against a phantom table.
-    match resp {
-        Ok(r) => {
-            assert!(
-                !r.results.contains_key("get") || r.results["get"].records.is_empty(),
-                "phantom table must not produce a success record"
-            );
-        }
-        Err(_) => {}
+    if let Ok(r) = resp {
+        assert!(
+            !r.results.contains_key("get") || r.results["get"].records.is_empty(),
+            "phantom table must not produce a success record"
+        );
     }
 }

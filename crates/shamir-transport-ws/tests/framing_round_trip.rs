@@ -61,7 +61,7 @@ async fn rejects_oversized_frame() {
     // validates length internally), so we test the cap by setting a tiny
     // max. Send a 200-byte payload, then receive with cap=100 → TooLarge.
     let writer = tokio::spawn(async move {
-        ws_send(&mut client, &vec![0xa5u8; 200]).await.unwrap();
+        ws_send(&mut client, &[0xa5u8; 200]).await.unwrap();
     });
     let result = ws_recv(&mut server, 100).await;
     assert!(result.is_err());

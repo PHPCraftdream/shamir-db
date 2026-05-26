@@ -29,7 +29,7 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     m.insert(touch("name"), InnerValue::Str(format!("user-{}", idx)));
     m.insert(touch("age"), InnerValue::Int((idx % 100) as i64));
     m.insert(touch("score"), InnerValue::F64(idx as f64 * 1.5));
-    m.insert(touch("active"), InnerValue::Bool(idx % 2 == 0));
+    m.insert(touch("active"), InnerValue::Bool(idx.is_multiple_of(2)));
     m.insert(
         touch("email"),
         InnerValue::Str(format!("u{}@example.com", idx)),

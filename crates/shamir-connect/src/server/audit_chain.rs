@@ -396,7 +396,7 @@ impl AuditChainWriter {
         );
         self.appender.append_entry(&entry);
         // Checkpoint every 1000 entries (truncation defence).
-        if entry.seq % 1000 == 0 {
+        if entry.seq.is_multiple_of(1000) {
             let (next_seq, prev_hmac) = self.chain.checkpoint();
             self.appender.checkpoint(next_seq, &prev_hmac);
         }

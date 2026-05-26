@@ -83,9 +83,8 @@ impl RegistrySnapshot {
         self.tables_by_repo
             .iter()
             .filter_map(|(key, tables)| {
-                let mut parts = key.splitn(2, '.');
-                let db = parts.next()?;
-                let repo = parts.next()?;
+                let (db, repo) = key.split_once('.')?;
+
                 Some((db, repo, tables))
             })
             .flat_map(|(db, repo, tables)| tables.iter().map(move |t| (db, repo, t.as_str())))
@@ -139,7 +138,7 @@ impl TablesRegistry {
         if !guard.add(db, repo, table) {
             return Ok(()); // already present
         }
-        Self::write_atomic(&self.path, &*guard)
+        Self::write_atomic(&self.path, &guard)
     }
 
     /// Remove `table` from `(db, repo)` and persist.
@@ -148,7 +147,7 @@ impl TablesRegistry {
         if !guard.remove(db, repo, table) {
             return Ok(());
         }
-        Self::write_atomic(&self.path, &*guard)
+        Self::write_atomic(&self.path, &guard)
     }
 
     /// Atomic write: serialize to a temp file in the same directory, then

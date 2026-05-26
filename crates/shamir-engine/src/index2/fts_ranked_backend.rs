@@ -514,7 +514,7 @@ mod tests {
         for rec in &recs {
             let rid = RecordId::new();
             data_store
-                .set(rid.to_bytes(), Bytes::from(rec.to_bytes().unwrap()))
+                .set(rid.to_bytes(), rec.to_bytes().unwrap())
                 .await
                 .unwrap();
             // Also feed into FTS so postings exist (rebuild only updates stats).

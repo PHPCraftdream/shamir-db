@@ -30,7 +30,10 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     );
     m.insert(intern(interner, "age"), InnerValue::Int((idx % 100) as i64));
     m.insert(intern(interner, "score"), InnerValue::F64(idx as f64 * 1.5));
-    m.insert(intern(interner, "active"), InnerValue::Bool(idx % 2 == 0));
+    m.insert(
+        intern(interner, "active"),
+        InnerValue::Bool(idx.is_multiple_of(2)),
+    );
     m.insert(
         intern(interner, "email"),
         InnerValue::Str(format!("u{}@example.com", idx)),

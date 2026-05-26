@@ -55,6 +55,12 @@ pub struct FtsStats {
     pub sum_doc_len: std::sync::atomic::AtomicU64,
 }
 
+impl Default for FtsStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FtsStats {
     pub fn new() -> Self {
         Self {

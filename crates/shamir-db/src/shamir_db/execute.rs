@@ -141,7 +141,7 @@ impl AdminExecutor for ShamirAdminExecutor {
 
                 if op.index_type.as_deref().is_some_and(|t| t != "btree") {
                     table
-                        .create_index_v2(&op)
+                        .create_index_v2(op)
                         .await
                         .map_err(|e| err(e.to_string()))?;
                     return Ok(admin_result(json!({

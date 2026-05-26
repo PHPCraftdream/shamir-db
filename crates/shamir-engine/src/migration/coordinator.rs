@@ -146,7 +146,7 @@ impl MigrationCoordinator {
             if records.is_empty() {
                 break;
             }
-            let items: Vec<(RecordKey, Bytes)> = records.into_iter().map(|(k, v)| (k, v)).collect();
+            let items: Vec<(RecordKey, Bytes)> = records.into_iter().collect();
             let count = items.len() as u64;
             self.dst_data.set_many(items).await?;
             copied += count;

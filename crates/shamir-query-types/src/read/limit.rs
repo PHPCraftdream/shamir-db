@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Pagination mode for queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode")]
+#[derive(Default)]
 pub enum Pagination {
     /// Classic limit + offset
     LimitOffset {
@@ -23,6 +24,7 @@ pub enum Pagination {
         page_size: u64,
     },
     /// No pagination
+    #[default]
     None,
 }
 
@@ -52,12 +54,6 @@ impl Pagination {
     /// Check if this is the default (no pagination)
     pub fn is_none(&self) -> bool {
         matches!(self, Pagination::None)
-    }
-}
-
-impl Default for Pagination {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -91,7 +87,7 @@ impl PaginationInfo {
 
         match (take, total_count) {
             (Some(page_size), Some(total)) if page_size > 0 => {
-                let total_pages = (total + page_size - 1) / page_size;
+                let total_pages = total.div_ceil(page_size);
                 let has_next = skip + page_size < total;
                 let current_page = match pagination {
                     Pagination::Page { page, .. } => Some(*page),

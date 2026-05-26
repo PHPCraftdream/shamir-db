@@ -18,7 +18,7 @@ fn make_record(idx: u32) -> json::Value {
         "name": format!("user-{}", idx),
         "age": (idx % 100),
         "score": idx as f64 * 1.5,
-        "active": idx % 2 == 0,
+        "active": idx.is_multiple_of(2),
         "email": format!("u{}@example.com", idx),
         "tags": ["alpha", "beta", "gamma"],
         "address": {

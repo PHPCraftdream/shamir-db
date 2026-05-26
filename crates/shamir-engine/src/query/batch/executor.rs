@@ -300,12 +300,7 @@ fn filter_results(
     }
 
     if !request.return_all {
-        all_results.retain(|alias, _| {
-            request
-                .queries
-                .get(alias)
-                .map_or(false, |e| e.return_result)
-        });
+        all_results.retain(|alias, _| request.queries.get(alias).is_some_and(|e| e.return_result));
     }
 
     all_results
