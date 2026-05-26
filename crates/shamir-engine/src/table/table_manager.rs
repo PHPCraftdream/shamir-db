@@ -946,7 +946,7 @@ impl TableManager {
 
         let first_path = interned_paths.first().cloned().unwrap_or_default();
 
-        let (kind, backend): (IndexKind, Arc<dyn IndexBackend>) = match index_type {
+        let (_kind, backend): (IndexKind, Arc<dyn IndexBackend>) = match index_type {
             "fts" => {
                 // DSL names for fts_tokenizer:
                 //   "whitespace"      → plain whitespace split

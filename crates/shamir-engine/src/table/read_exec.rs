@@ -400,14 +400,11 @@ impl TableManager {
                 if !rids_vec.is_empty() {
                     let inner_records = self.table().get_many(&rids_vec).await?;
                     let mut records = Vec::with_capacity(inner_records.len());
-                    for maybe in inner_records {
-                        if let Some(inner) = maybe {
-                            match shamir_types::codecs::interned::inner_to_json_value(
-                                &inner, interner,
-                            ) {
-                                Ok(json) => records.push(json),
-                                Err(_) => {}
-                            }
+                    for inner in inner_records.into_iter().flatten() {
+                        if let Ok(json) =
+                            shamir_types::codecs::interned::inner_to_json_value(&inner, interner)
+                        {
+                            records.push(json)
                         }
                     }
                     let scanned = rids_vec.len() as u64;

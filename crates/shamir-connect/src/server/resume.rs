@@ -259,7 +259,7 @@ pub fn process_resume(
     let invalid_before = user_lookup.lookup(&user_id).ok_or(Error::AuthFailed)?;
 
     // Step 9: STRICT > comparison (spec §5.4 step 9).
-    if !(plain.original_auth_at_ns > invalid_before) {
+    if plain.original_auth_at_ns <= invalid_before {
         return Err(Error::AuthFailed);
     }
 

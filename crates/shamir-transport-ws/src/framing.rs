@@ -59,7 +59,7 @@ where
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(payload);
-    stream.send(Message::Binary(buf.into())).await?;
+    stream.send(Message::Binary(buf)).await?;
     Ok(())
 }
 

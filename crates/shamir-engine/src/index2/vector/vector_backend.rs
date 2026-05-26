@@ -271,15 +271,15 @@ mod tests {
         let rec2 = make_rec(&i, &[0.0, 1.0, 0.0]);
         let rec3 = make_rec(&i, &[0.9, 0.1, 0.0]);
         store
-            .set(r1.to_bytes(), Bytes::from(rec1.to_bytes().unwrap()))
+            .set(r1.to_bytes(), rec1.to_bytes().unwrap())
             .await
             .unwrap();
         store
-            .set(r2.to_bytes(), Bytes::from(rec2.to_bytes().unwrap()))
+            .set(r2.to_bytes(), rec2.to_bytes().unwrap())
             .await
             .unwrap();
         store
-            .set(r3.to_bytes(), Bytes::from(rec3.to_bytes().unwrap()))
+            .set(r3.to_bytes(), rec3.to_bytes().unwrap())
             .await
             .unwrap();
 

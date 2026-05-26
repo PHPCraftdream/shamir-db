@@ -467,7 +467,7 @@ async fn run_handshake<F: Framer>(
     // reference but is simplest.
     let outcome = match hs.verify_proof(
         &proof,
-        &ctx.identity_keypair_for_verify(),
+        ctx.identity_keypair_for_verify(),
         SESSION_MAX_AGE_NS,
     ) {
         Ok(o) => o,

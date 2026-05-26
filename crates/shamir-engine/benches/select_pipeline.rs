@@ -37,7 +37,7 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
         InnerValue::Str(format!("u{}@example.com", idx)),
     );
     m.insert(touch("city"), InnerValue::Str("Jerusalem".into()));
-    m.insert(touch("active"), InnerValue::Bool(idx % 2 == 0));
+    m.insert(touch("active"), InnerValue::Bool(idx.is_multiple_of(2)));
     InnerValue::Map(m)
 }
 

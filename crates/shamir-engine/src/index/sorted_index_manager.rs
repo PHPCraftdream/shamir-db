@@ -303,7 +303,7 @@ impl SortedIndexManager {
             .iter_range_stream(Some(lower), Some(upper), 1);
         futures::pin_mut!(stream);
         if let Some(batch) = stream.next().await {
-            for (k, _) in batch? {
+            if let Some((k, _)) = batch?.into_iter().next() {
                 return Ok(decode_record_id_suffix(k.as_ref()));
             }
         }
@@ -321,7 +321,7 @@ impl SortedIndexManager {
             .iter_range_stream_reverse(Some(lower), Some(upper), 1);
         futures::pin_mut!(stream);
         if let Some(batch) = stream.next().await {
-            for (k, _) in batch? {
+            if let Some((k, _)) = batch?.into_iter().next() {
                 return Ok(decode_record_id_suffix(k.as_ref()));
             }
         }

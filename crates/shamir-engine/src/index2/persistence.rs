@@ -2,7 +2,7 @@
 //! via `MetaEnvelope` to `__meta__/indexes`.
 
 use crate::index2::descriptor::IndexDescriptor;
-use crate::meta::{MetaEnvelope, MetaError};
+use crate::meta::MetaEnvelope;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_storage::types::Store;
@@ -74,7 +74,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_with_descriptors() {
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let registry = crate::index2::IndexRegistry::new();
+        let _registry = crate::index2::IndexRegistry::new();
 
         // Simulate: 2 descriptors persisted (via save, not through registry —
         // just testing save/load serialization).

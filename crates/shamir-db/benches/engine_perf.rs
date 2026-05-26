@@ -58,7 +58,7 @@ fn gen_user(i: usize) -> JsonValue {
         "age":           18 + ((i * 37) % 60) as i64,
         "city":          CITIES[i % CITIES.len()],
         "score":         ((i * 7919) % 1000) as i64,
-        "active":        i % 3 != 0,
+        "active":        !i.is_multiple_of(3),
         "created_at_ns": 1_700_000_000_000_000_000_u64 + (i as u64 * 60_000_000_000),
         "tags":          vec![
                             format!("tag_{}", i % 10),
@@ -1491,7 +1491,7 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
                     flush_batch_size: 256,
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let v = RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
+                let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
                 let start = Instant::now();
                 for _ in 0..50_000 {
                     let id = RecordId::new();
@@ -1521,7 +1521,7 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
                     flush_batch_size: 256,
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-                let v = RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
+                let v = RecordKey::copy_from_slice(&[0xAAu8; 80]);
                 let start = Instant::now();
                 for _ in 0..50_000 {
                     let id = RecordId::new();
@@ -1574,7 +1574,7 @@ fn bench_eviction_byte_pressure(c: &mut Criterion) {
                 };
                 let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v: shamir_db::storage::types::RecordKey =
-                    shamir_db::storage::types::RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
+                    shamir_db::storage::types::RecordKey::copy_from_slice(&[0xAAu8; 80]);
                 for _ in 0..8_000 {
                     let id = RecordId::new();
                     let k = RecordKey::copy_from_slice(id.as_bytes());
@@ -1967,7 +1967,7 @@ fn bench_group_by_sum_e2e(c: &mut Criterion) {
 async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
-        let values: Vec<JsonValue> = (chunk_start..chunk_end).map(|i| gen_user(i)).collect();
+        let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user).collect();
         let req: BatchRequest = serde_json::from_value(json!({
             "id": chunk_start,
             "queries": {

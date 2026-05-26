@@ -67,7 +67,7 @@ async fn setup_table_with_users() -> crate::table::TableManager {
             map.insert(k.to_string(), v.clone());
         }
         let user_val = UserValue::Map(map);
-        let result = transform::user_to_inner(&user_val, &interner);
+        let result = transform::user_to_inner(&user_val, interner);
         if let Some(ref new_keys) = result.new_keys {
             table.interner().save_new_keys(new_keys).await.unwrap();
         }
@@ -114,7 +114,7 @@ async fn test_filter_stream_eq_status_active() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let filter = parse_filter(r#"{"op": "eq", "field": "status", "value": "active"}"#);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
@@ -131,7 +131,7 @@ async fn test_filter_stream_eq_no_match() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let filter = parse_filter(r#"{"op": "eq", "field": "status", "value": "banned"}"#);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
@@ -150,7 +150,7 @@ async fn test_filter_stream_gt_age() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let filter = parse_filter(r#"{"op": "gt", "field": "age", "value": 28}"#);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
@@ -168,7 +168,7 @@ async fn test_filter_stream_lte_age() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let filter = parse_filter(r#"{"op": "lte", "field": "age", "value": 25}"#);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
@@ -190,7 +190,7 @@ async fn test_filter_stream_and() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let json = r#"{
         "op": "and",
@@ -219,7 +219,7 @@ async fn test_filter_stream_or() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let json = r#"{
         "op": "or",
@@ -248,7 +248,7 @@ async fn test_filter_stream_not() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let json = r#"{
         "op": "not",
@@ -274,7 +274,7 @@ async fn test_filter_stream_ne() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let filter = parse_filter(r#"{"op": "ne", "field": "status", "value": "active"}"#);
     let results = collect_filter_stream(table.filter_stream(100, &filter, &ctx).await.unwrap())
@@ -296,7 +296,7 @@ async fn test_filter_stream_nested_and_or() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // (status == "active" AND score >= 60) OR (status == "inactive")
     let json = r#"{
@@ -332,7 +332,7 @@ async fn test_filter_stream_triple_nesting() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // NOT ( (status == "deleted") OR (status == "inactive" AND score < 90) )
     // Excluded: Eve(deleted), Carol(inactive, score 80 < 90)
@@ -372,7 +372,7 @@ async fn test_filter_stream_small_batches() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let filter = parse_filter(r#"{"op": "eq", "field": "status", "value": "active"}"#);
     // batch_size=2 forces multiple iterations over 5 records
@@ -405,7 +405,7 @@ async fn test_filter_stream_with_query_ref() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // score >= $query("@threshold[0].min_score")
     let json = r#"{
@@ -433,7 +433,7 @@ async fn test_filter_stream_all_excluded() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // age > 100 — nobody
     let filter = parse_filter(r#"{"op": "gt", "field": "age", "value": 100}"#);
@@ -453,7 +453,7 @@ async fn test_filter_stream_all_match() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // age > 0 — everyone
     let filter = parse_filter(r#"{"op": "gt", "field": "age", "value": 0}"#);
@@ -494,7 +494,7 @@ async fn test_filter_stream_query_ref_in_and() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // age >= @config[0].min_age AND score >= @scoring[0].cutoff
     let json = r#"{
@@ -532,7 +532,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // (score >= @vip_list[0].score_threshold) OR (status == "deleted")
     let json = r#"{
@@ -569,7 +569,7 @@ async fn test_filter_stream_not_query_ref() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // NOT (age > @limits[0].max_age)
     // age > 30 is only Carol(35), so NOT gives everyone except Carol
@@ -612,7 +612,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // AND [
     //   status == @status_config[0].allowed,      -- must be "active"
@@ -669,7 +669,7 @@ async fn test_filter_stream_query_ref_missing_graceful() {
     // Empty refs — query ref can't resolve
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // age >= @nonexistent[0].value — should not match anything (unresolvable ref)
     let json = r#"{
@@ -701,7 +701,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // AND [
     //   score >= @bonus[0].threshold,   -- QueryRef: score >= 50
@@ -738,7 +738,7 @@ async fn test_filter_stream_in_literals() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let json = r#"{
         "op": "in",
@@ -761,7 +761,7 @@ async fn test_filter_stream_not_in_literals() {
     let table = setup_table_with_users().await;
     let refs = new_map();
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     let json = r#"{
         "op": "not_in",
@@ -802,7 +802,7 @@ async fn test_filter_stream_in_query_ref_column() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // status IN @whitelist[].status
     let json = r#"{
@@ -840,7 +840,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // score NOT IN @exclude_scores[].val
     let json = r#"{
@@ -891,7 +891,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // AND [
     //   status IN @allowed_statuses[].s,
@@ -935,7 +935,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
     );
 
     let interner = table.interner().get().await.unwrap();
-    let ctx = FilterContext::new(&interner, &refs);
+    let ctx = FilterContext::new(interner, &refs);
 
     // OR [
     //   name NOT IN @blacklist[].n,      -- excludes Dave and Eve

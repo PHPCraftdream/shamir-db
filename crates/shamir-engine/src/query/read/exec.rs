@@ -57,7 +57,7 @@ fn group_key_item(val: Option<&InnerValue>, interner: &Interner) -> GroupKeyItem
             // Fall back to JSON canonical form for non-scalar leaves.
             // Rare in practice — GROUP BY on a Map/List/Set field is
             // unusual — but kept for parity with the previous code path.
-            let jv = inner_to_json_value(other, interner).unwrap_or_else(|_| json::Value::Null);
+            let jv = inner_to_json_value(other, interner).unwrap_or(json::Value::Null);
             GroupKeyItem::Complex(jv.to_string().into_boxed_str())
         }
     }
@@ -110,7 +110,7 @@ impl SelectProjection {
     /// Project a single InnerValue record to JSON.
     pub fn project(&self, record: &InnerValue, interner: &Interner) -> json::Value {
         if self.is_all {
-            return inner_to_json_value(record, interner).unwrap_or_else(|_| json::Value::Null);
+            return inner_to_json_value(record, interner).unwrap_or(json::Value::Null);
         }
         if self.fields.is_empty() {
             return json::Value::Object(json::Map::new());
@@ -120,7 +120,7 @@ impl SelectProjection {
             let val = interned_path
                 .as_ref()
                 .and_then(|p| resolve_field_ref(record, p))
-                .map(|v| inner_to_json_value(v, interner).unwrap_or_else(|_| json::Value::Null))
+                .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
                 .unwrap_or(json::Value::Null);
             obj.insert(key.clone(), val);
         }
@@ -279,7 +279,7 @@ fn compute_aggregate(
                     }
                 }
             }
-            min.map(|v| inner_to_json_value(v, interner).unwrap_or_else(|_| json::Value::Null))
+            min.map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
                 .unwrap_or(json::Value::Null)
         }
         AggFunc::Max => {
@@ -294,7 +294,7 @@ fn compute_aggregate(
                     }
                 }
             }
-            max.map(|v| inner_to_json_value(v, interner).unwrap_or_else(|_| json::Value::Null))
+            max.map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
                 .unwrap_or(json::Value::Null)
         }
     }
@@ -350,8 +350,7 @@ fn build_aggregate_object(
                         if let Some(interned) = intern_field_path(path, interner) {
                             let val = resolve_field(first, &interned)
                                 .map(|v| {
-                                    inner_to_json_value(&v, interner)
-                                        .unwrap_or_else(|_| json::Value::Null)
+                                    inner_to_json_value(&v, interner).unwrap_or(json::Value::Null)
                                 })
                                 .unwrap_or(json::Value::Null);
                             obj.insert(key.to_string(), val);
@@ -424,9 +423,7 @@ pub fn apply_group_by(
                         .as_ref()
                         .and_then(|p| resolve_field_ref(record, p));
                     let json_val = val_ref
-                        .map(|vv| {
-                            inner_to_json_value(vv, interner).unwrap_or_else(|_| json::Value::Null)
-                        })
+                        .map(|vv| inner_to_json_value(vv, interner).unwrap_or(json::Value::Null))
                         .unwrap_or(json::Value::Null);
                     key_json_values.push((field_name.clone(), json_val));
                 }
