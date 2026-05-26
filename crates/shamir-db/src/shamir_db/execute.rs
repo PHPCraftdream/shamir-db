@@ -519,6 +519,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                     let dst_table = db.get_table(dst_repo_name, table_name).await?;
                     let dst_data = Arc::clone(dst_table.table().data_store());
 
+                    // Replicate index2 descriptors (FTS / Functional /
+                    // Vector) from src → dst. This creates empty backends
+                    // on dst so that bulk_populate_index2 (called later
+                    // in CommitMigration) can fill them. Must happen
+                    // before any data lands on dst.
+                    dst_table.replicate_index2_descriptors_from(&src_table).await?;
+
                     let shadow = Arc::new(MigrationShadowLog::new(migration_id.clone(), info_store));
                     let state = MigrationState::new(
                         migration_id.clone(),
@@ -566,6 +573,26 @@ impl AdminExecutor for ShamirAdminExecutor {
                 let (src_count, dst_count) = coord.verify_record_count().await
                     .map_err(|e| err(e.to_string()))?;
                 let state = coord.state().await;
+
+                // Bulk-populate index2 backends on dst.
+                //
+                // Order of operations:
+                //   1. replicate_index2_descriptors_from (StartMigration) — empty backends
+                //   2. run_snapshot + drain_until_caught_up — data_store only
+                //   3. final_drain_and_commit — drains remaining shadow log
+                //      entries into dst data_store (NO index2 hooks)
+                //   4. bulk_populate_index2 ← we are here — streams ALL
+                //      dst data_store records into on_batch_insert, creating
+                //      postings in info_store + in-memory state.
+                //
+                // After this point the migration is committed. New writes
+                // go through `insert()` → `index2_on_insert` automatically.
+                let db = self.shamir.get_db(&self.db_name)
+                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
+                let dst_table = db.get_table(&state.dst_repo, &state.table_name).await
+                    .map_err(|e| err(e.to_string()))?;
+                dst_table.bulk_populate_index2().await
+                    .map_err(|e| err(e.to_string()))?;
 
                 // Remove from active map — committed migrations are
                 // terminal, no further state changes possible. Status
