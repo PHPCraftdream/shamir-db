@@ -391,6 +391,83 @@ fn order_by_nulls_last() {
     assert!(records[2].get("age").is_none() || records[2]["age"].is_null());
 }
 
+#[test]
+fn order_by_empty_records() {
+    let mut records: Vec<serde_json::Value> = vec![];
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "asc"}]
+    }))
+    .unwrap();
+    apply_order_by(&mut records, &order);
+    assert!(records.is_empty());
+}
+
+#[test]
+fn order_by_single_record() {
+    let mut records = vec![json!({"name": "Alice", "age": 30})];
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "desc"}]
+    }))
+    .unwrap();
+    apply_order_by(&mut records, &order);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["age"], 30);
+}
+
+#[test]
+fn order_by_explicit_null_value() {
+    let mut records = vec![
+        json!({"name": "Alice", "age": 30}),
+        json!({"name": "Bob", "age": null}),
+        json!({"name": "Carol", "age": 25}),
+    ];
+
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["age"], "direction": "asc"}]
+    }))
+    .unwrap();
+    apply_order_by(&mut records, &order);
+    // Default ASC → NullsOrder::Last
+    assert_eq!(records[0]["age"], 25);
+    assert_eq!(records[1]["age"], 30);
+    assert!(records[2]["age"].is_null());
+}
+
+#[test]
+fn order_by_mixed_types() {
+    let mut records = vec![
+        json!({"val": "hello"}),
+        json!({"val": 42}),
+        json!({"val": true}),
+    ];
+
+    let order: OrderBy = serde_json::from_value(json!({
+        "items": [{"field": ["val"], "direction": "asc"}]
+    }))
+    .unwrap();
+    apply_order_by(&mut records, &order);
+    // Mixed types compare as Equal in the default comparator,
+    // so original order is preserved (stable sort).
+    assert_eq!(records[0]["val"], "hello");
+    assert_eq!(records[1]["val"], 42);
+    assert_eq!(records[2]["val"], true);
+}
+
+#[test]
+fn order_by_empty_items() {
+    let mut records = vec![
+        json!({"name": "Carol"}),
+        json!({"name": "Alice"}),
+        json!({"name": "Bob"}),
+    ];
+    let order: OrderBy = serde_json::from_value(json!({"items": []})).unwrap();
+    apply_order_by(&mut records, &order);
+    // Empty order_by → no sort → original order preserved
+    assert_eq!(records[0]["name"], "Carol");
+    assert_eq!(records[1]["name"], "Alice");
+    assert_eq!(records[2]["name"], "Bob");
+}
+
 // ============================================================================
 // apply_pagination tests
 // ============================================================================

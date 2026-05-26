@@ -23,6 +23,14 @@
 //! Conclusion: PROCEED with task #67 (precomputed field positions /
 //! pre-extracted sort keys).
 //!
+//! After #67 (commit pending, typed-SortKey enum + index sort):
+//!   - apply_order_by (email): ~37 ms (was ~44 ms) — ~15-20% wall-clock win
+//!   - Theoretical floor from prof_order_by remains ~25 ms
+//!     (5 ms sort+permute + 20 ms extract); the gap is enum-tag matching
+//!     and SmallVec[SortKey; 4] cache pressure. A typed columnar buffer
+//!     for the single-column case would unlock the remaining ~6× — tracked
+//!     as a follow-up refinement (do after #70 / arena lands).
+//!
 //! Bonus signal: `apply_select` (JSON projection) is 63% of the full
 //! read pipeline — strong evidence for task #68 too (inner_to_json_value
 //! string clones).
