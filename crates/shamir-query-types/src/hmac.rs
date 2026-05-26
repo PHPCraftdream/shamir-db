@@ -142,8 +142,8 @@ pub fn canonical_rollback_migration(db_in_use: &str, migration_id: &str) -> Vec<
 pub fn compute_tag_hex(key: &[u8; 32], canonical: &[u8]) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts any key length");
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(canonical);
     let bytes = mac.finalize().into_bytes();
     hex_encode(&bytes)
@@ -156,8 +156,8 @@ pub fn compute_tag_hex(key: &[u8; 32], canonical: &[u8]) -> String {
 pub fn verify_tag_hex(key: &[u8; 32], canonical: &[u8], candidate_hex: &str) -> bool {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts any key length");
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(canonical);
     let Ok(bytes) = hex_decode(candidate_hex) else {
         return false;

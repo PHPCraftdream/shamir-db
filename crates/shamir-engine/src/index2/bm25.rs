@@ -26,7 +26,13 @@ pub fn idf(total_docs: u64, doc_freq: u64) -> f64 {
 }
 
 /// Per-term BM25 contribution for one document.
-pub fn term_score(params: &Bm25Params, tf: u32, doc_len: u32, avg_doc_len: f64, idf_val: f64) -> f64 {
+pub fn term_score(
+    params: &Bm25Params,
+    tf: u32,
+    doc_len: u32,
+    avg_doc_len: f64,
+    idf_val: f64,
+) -> f64 {
     let tf = tf as f64;
     let dl = doc_len as f64;
     let norm = 1.0 - params.b + params.b * dl / avg_doc_len;
@@ -136,7 +142,10 @@ mod tests {
         let stats = FtsStats::new();
         stats.on_insert(100);
         stats.on_insert(200);
-        assert_eq!(stats.doc_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(
+            stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
         assert!((stats.avg_doc_len() - 150.0).abs() < 0.001);
         stats.on_delete(100);
         assert!((stats.avg_doc_len() - 200.0).abs() < 0.001);
@@ -150,7 +159,10 @@ mod tests {
 
     #[test]
     fn posting_value_serde() {
-        let pv = FtsPostingValue { tf: 5, doc_len: 100 };
+        let pv = FtsPostingValue {
+            tf: 5,
+            doc_len: 100,
+        };
         let bytes = bincode::serialize(&pv).unwrap();
         assert_eq!(bytes.len(), 8); // u32 + u32
         let got: FtsPostingValue = bincode::deserialize(&bytes).unwrap();

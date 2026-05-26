@@ -83,8 +83,10 @@ fn rotation_event_per_recipient_signing() {
     let event_a = build_identity_rotation_event(&s, &[0x01u8; 32]).unwrap();
     let event_b = build_identity_rotation_event(&s, &[0x02u8; 32]).unwrap();
 
-    assert_ne!(event_a.signed_by_old, event_b.signed_by_old,
-        "per-recipient sigs must differ");
+    assert_ne!(
+        event_a.signed_by_old, event_b.signed_by_old,
+        "per-recipient sigs must differ"
+    );
 }
 
 #[test]
@@ -160,8 +162,7 @@ fn rotation_event_rejects_far_future_transition_window_high_2() {
     // Note: signature was over the original transition_until_ns, so it WILL
     // fail signature verification — proving the upper-bound check is layered
     // on top of signature validation.
-    let result =
-        verify_identity_rotation_event(&event, &pinned, &[0xaau8; 32], now, true);
+    let result = verify_identity_rotation_event(&event, &pinned, &[0xaau8; 32], now, true);
     assert!(result.is_err());
 }
 

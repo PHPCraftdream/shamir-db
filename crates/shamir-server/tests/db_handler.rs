@@ -20,10 +20,10 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
+use shamir_connect::common::kdf_params::KdfParams;
 use shamir_server::db_handler::{
     AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler,
 };
-use shamir_connect::common::kdf_params::KdfParams;
 use shamir_server::user_directory::RedbUserDirectory;
 use tempfile::TempDir;
 
@@ -54,8 +54,7 @@ fn root_session() -> Session {
 async fn make_db_with_table(db: &str, repo: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     shamir.create_db(db).await;
-    let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new(table));
+    let cfg = RepoConfig::new(repo, BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");
     Arc::new(shamir)
 }
@@ -196,7 +195,10 @@ async fn read_with_filter_order_limit_returns_full_payload() {
 
     // Stats and pagination metadata flow through.
     assert!(qr.stats.is_some(), "stats should be returned");
-    assert!(qr.pagination.is_some(), "pagination metadata should be returned");
+    assert!(
+        qr.pagination.is_some(),
+        "pagination metadata should be returned"
+    );
 
     // Execution plan + timing in the envelope.
     assert!(!resp.execution_plan.is_empty(), "execution_plan present");
@@ -494,8 +496,11 @@ async fn current_query_version_accepted() {
         }),
     );
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
-    assert!(matches!(res, DbResponse::Batch { .. }),
-        "current version must be accepted; got {:?}", res);
+    assert!(
+        matches!(res, DbResponse::Batch { .. }),
+        "current version must be accepted; got {:?}",
+        res
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -536,7 +541,11 @@ async fn create_scram_user_denied_for_non_superuser() {
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
-        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf(), tables_registry: None },
+        AdminGlue {
+            user_dir: user_dir.clone(),
+            kdf: fast_kdf(),
+            tables_registry: None,
+        },
     );
     let session = user_session();
 
@@ -559,7 +568,11 @@ async fn create_scram_user_success_then_duplicate() {
     let db = ShamirDb::init_memory().await.expect("init shamir");
     let handler = ShamirDbHandler::with_admin(
         Arc::new(db),
-        AdminGlue { user_dir: user_dir.clone(), kdf: fast_kdf(), tables_registry: None },
+        AdminGlue {
+            user_dir: user_dir.clone(),
+            kdf: fast_kdf(),
+            tables_registry: None,
+        },
     );
     let session = root_session();
 
@@ -578,7 +591,10 @@ async fn create_scram_user_success_then_duplicate() {
     }
 
     use shamir_connect::server::admin::UserDirectory;
-    assert!(user_dir.lookup_by_name("bob").is_some(), "persisted in directory");
+    assert!(
+        user_dir.lookup_by_name("bob").is_some(),
+        "persisted in directory"
+    );
     let roles = user_dir.lookup_roles("bob").unwrap().unwrap_or_default();
     assert!(roles.iter().any(|r| r == "read_write"), "roles attached");
 

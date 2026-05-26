@@ -7,10 +7,10 @@
 use serde_json::json;
 
 use crate::codecs::interned::json_value_to_inner;
+use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::{TableConfig, TableManager};
-use crate::engine::db_instance::db_instance::DbInstance;
 use crate::{DbError, DbResult};
 
 const SYSTEM_REPO: &str = "system";
@@ -72,8 +72,8 @@ impl SystemStore {
     pub async fn save_database(&self, name: &str, record: &serde_json::Value) -> DbResult<()> {
         let table = self.table(TABLE_DATABASES).await?;
         let interner = table.interner().get().await?;
-        let _inner = json_value_to_inner(record, interner)
-            .map_err(|e| DbError::Codec(e.to_string()))?;
+        let _inner =
+            json_value_to_inner(record, interner).map_err(|e| DbError::Codec(e.to_string()))?;
         // Use set with name-based key lookup
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
@@ -118,7 +118,13 @@ impl SystemStore {
     // ========================================================================
 
     /// Save repository metadata.
-    pub async fn save_repository(&self, db_name: &str, repo_name: &str, engine: &str, path: Option<&str>) -> DbResult<()> {
+    pub async fn save_repository(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        engine: &str,
+        path: Option<&str>,
+    ) -> DbResult<()> {
         let record = json!({
             "db_name": db_name,
             "repo_name": repo_name,
@@ -195,13 +201,18 @@ impl SystemStore {
         let interner = table.interner().get().await?;
         let refs = crate::types::common::new_map();
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
-        let query = crate::query::read::ReadQuery::new(TABLE_SETTINGS)
-            .filter(crate::query::filter::Filter::Eq {
+        let query = crate::query::read::ReadQuery::new(TABLE_SETTINGS).filter(
+            crate::query::filter::Filter::Eq {
                 field: vec!["key".to_string()],
                 value: crate::query::filter::FilterValue::String(key.to_string()),
-            });
+            },
+        );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next().map(|r| r["value"].clone()))
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(|r| r["value"].clone()))
     }
 
     // ========================================================================

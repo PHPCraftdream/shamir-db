@@ -258,9 +258,18 @@ mod tests {
         {
             let s2 = RedbConsumedCounters::open(&path).unwrap();
             assert_eq!(s2.peek(&uid, &fam), Some(7));
-            assert!(!s2.try_advance(&uid, &fam, 7), "post-restart replay must reject");
-            assert!(!s2.try_advance(&uid, &fam, 6), "post-restart older must reject");
-            assert!(s2.try_advance(&uid, &fam, 8), "post-restart higher must accept");
+            assert!(
+                !s2.try_advance(&uid, &fam, 7),
+                "post-restart replay must reject"
+            );
+            assert!(
+                !s2.try_advance(&uid, &fam, 6),
+                "post-restart older must reject"
+            );
+            assert!(
+                s2.try_advance(&uid, &fam, 8),
+                "post-restart higher must accept"
+            );
         }
     }
 

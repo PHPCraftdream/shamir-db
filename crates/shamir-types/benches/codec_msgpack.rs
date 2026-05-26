@@ -46,13 +46,22 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     });
     m.insert(intern(interner, "address"), {
         let mut a = new_map_wc(3);
-        a.insert(intern(interner, "city"), InnerValue::Str("Jerusalem".into()));
+        a.insert(
+            intern(interner, "city"),
+            InnerValue::Str("Jerusalem".into()),
+        );
         a.insert(intern(interner, "zip"), InnerValue::Str("9100000".into()));
         a.insert(intern(interner, "country"), InnerValue::Str("IL".into()));
         InnerValue::Map(a)
     });
-    m.insert(intern(interner, "created_at"), InnerValue::Int(1_700_000_000 + idx as i64));
-    m.insert(intern(interner, "balance"), InnerValue::F64(idx as f64 * 12.34));
+    m.insert(
+        intern(interner, "created_at"),
+        InnerValue::Int(1_700_000_000 + idx as i64),
+    );
+    m.insert(
+        intern(interner, "balance"),
+        InnerValue::F64(idx as f64 * 12.34),
+    );
     InnerValue::Map(m)
 }
 

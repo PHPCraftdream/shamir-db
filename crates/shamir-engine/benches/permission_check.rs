@@ -27,7 +27,9 @@ fn typical_role(db: &str, n_tables: usize) -> Role {
         Permission {
             effect: Effect::Allow,
             actions: vec![Action::Read],
-            resource: Resource::Database { database: db.into() },
+            resource: Resource::Database {
+                database: db.into(),
+            },
             row_filter: None,
         },
         Permission {

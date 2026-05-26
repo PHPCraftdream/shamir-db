@@ -13,11 +13,11 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
+use serde_json as json;
 use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
 };
-use serde_json as json;
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
@@ -32,7 +32,10 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     m.insert(touch("name"), InnerValue::Str(format!("user-{}", idx)));
     m.insert(touch("age"), InnerValue::Int((idx % 100) as i64));
     m.insert(touch("score"), InnerValue::F64(idx as f64 * 1.5));
-    m.insert(touch("email"), InnerValue::Str(format!("u{}@example.com", idx)));
+    m.insert(
+        touch("email"),
+        InnerValue::Str(format!("u{}@example.com", idx)),
+    );
     m.insert(touch("city"), InnerValue::Str("Jerusalem".into()));
     m.insert(touch("active"), InnerValue::Bool(idx % 2 == 0));
     InnerValue::Map(m)
@@ -146,7 +149,10 @@ fn bench(c: &mut Criterion) {
             |recs| {
                 black_box(apply_pagination(
                     recs,
-                    &Pagination::LimitOffset { limit: Some(100), offset: 50 },
+                    &Pagination::LimitOffset {
+                        limit: Some(100),
+                        offset: 50,
+                    },
                     false,
                 ));
             },
@@ -159,7 +165,10 @@ fn bench(c: &mut Criterion) {
             |recs| {
                 black_box(apply_pagination(
                     recs,
-                    &Pagination::LimitOffset { limit: Some(10), offset: 0 },
+                    &Pagination::LimitOffset {
+                        limit: Some(10),
+                        offset: 0,
+                    },
                     false,
                 ));
             },
@@ -170,11 +179,7 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || projected.clone(),
             |recs| {
-                black_box(apply_pagination(
-                    recs,
-                    &Pagination::None,
-                    true,
-                ));
+                black_box(apply_pagination(recs, &Pagination::None, true));
             },
             criterion::BatchSize::SmallInput,
         )

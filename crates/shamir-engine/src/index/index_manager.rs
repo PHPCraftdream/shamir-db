@@ -14,17 +14,17 @@
 //! Для быстрой проверки наличия индексов используются атомарные флаги,
 //! что позволяет избежать блокировок на чтение в большинстве случаев.
 
-use shamir_types::core::interner::InternerKey;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info::IndexInfo;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_record_key::IndexRecordKey;
-use shamir_storage::types::Store;
-use shamir_storage::error::DbResult;
-use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
 use bytes::Bytes;
 use dashmap::DashMap;
+use shamir_storage::error::DbResult;
+use shamir_storage::types::Store;
+use shamir_types::core::interner::InternerKey;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -208,7 +208,10 @@ impl IndexManager {
     /// paths (build_index_key needs only `&InnerValue` to feed into
     /// FxHash) use this; the owned variant survives for the few
     /// callers that genuinely consume the value.
-    fn extract_value_by_path_ref<'a>(value: &'a InnerValue, path: &[u64]) -> Option<&'a InnerValue> {
+    fn extract_value_by_path_ref<'a>(
+        value: &'a InnerValue,
+        path: &[u64],
+    ) -> Option<&'a InnerValue> {
         let mut cur = value;
         for &id in path {
             match cur {
@@ -403,11 +406,8 @@ impl IndexManager {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if let Some(values) =
-                    Self::extract_index_values(&value, &index_def.paths)
-                {
-                    let index_key =
-                        Self::build_index_key(false, name_interned, &values).to_bytes();
+                if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
+                    let index_key = Self::build_index_key(false, name_interned, &values).to_bytes();
                     let posting_key = Self::build_posting_key(&index_key, &record_id);
                     posting_writes.push((posting_key, Bytes::new()));
                     cache_keys.push((name_interned, values));
@@ -470,8 +470,7 @@ impl IndexManager {
         // Posting cache: blow away every entry whose key starts
         // with the index's prefix. Cheap — typical hotsets are
         // small and the cache is bounded.
-        self.posting_cache
-            .retain(|k, _| !k.starts_with(&prefix));
+        self.posting_cache.retain(|k, _| !k.starts_with(&prefix));
 
         // Удаляем определение индекса из метаданных
         let was_removed = self.indexes.remove_index(name_interned);
@@ -764,11 +763,7 @@ impl IndexManager {
 
     /// Count entries for one regular or unique index — used by the
     /// doctor's verify pass.
-    pub async fn entry_count(
-        &self,
-        name_interned: u64,
-        unique: bool,
-    ) -> DbResult<u64> {
+    pub async fn entry_count(&self, name_interned: u64, unique: bool) -> DbResult<u64> {
         use futures::StreamExt;
         let prefix = IndexRecordKey::new(unique, name_interned).to_prefix_bytes();
         let mut count: u64 = 0;
@@ -1056,8 +1051,8 @@ impl IndexManager {
     ///   - количество записей с дублирующимися значениями
     ///   - пример дублирующегося значения
     pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use shamir_types::types::common::TMap;
         use shamir_types::types::common::new_map;
+        use shamir_types::types::common::TMap;
 
         let name_interned = index_def.name_interned;
         // TMap для отслеживания количества каждого значения
@@ -1125,8 +1120,7 @@ impl IndexManager {
         let count = entries.len();
         let mut writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(count);
         for (record_id, _values_key, values) in entries {
-            let index_key =
-                Self::build_index_key(true, name_interned, &values).to_bytes();
+            let index_key = Self::build_index_key(true, name_interned, &values).to_bytes();
             writes.push((index_key, Bytes::copy_from_slice(record_id.as_bytes())));
         }
         if !writes.is_empty() {

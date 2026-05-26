@@ -112,7 +112,10 @@ fn make_test_config(temp: &TempDir) -> Config {
     let data_dir = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -130,7 +133,9 @@ fn make_test_config(temp: &TempDir) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
+        observability: shamir_server::config::ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 
@@ -164,7 +169,9 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     // tokio_tungstenite resolves "localhost" via DNS; we want to land on
     // the actual bound IP (which is 127.0.0.1 from `addr: 127.0.0.1:0`).
     // Pre-build a TcpStream and pass it via `client_async_tls_with_config`.
-    let tcp = tokio::net::TcpStream::connect(server_addr).await.expect("tcp");
+    let tcp = tokio::net::TcpStream::connect(server_addr)
+        .await
+        .expect("tcp");
     let req = url.into_client_request().expect("uri");
 
     let (ws, _resp) = tokio_tungstenite::client_async_tls_with_config(
@@ -238,7 +245,9 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     let (proof, derived, am) = hs
         .process_challenge(&challenge, &mut password_buf)
         .expect("process challenge");
-    let proof_wire = WireClientProof { client_proof: proof.to_vec() };
+    let proof_wire = WireClientProof {
+        client_proof: proof.to_vec(),
+    };
     ws_send(&mut ws, &rmp_serde::to_vec(&proof_wire).unwrap())
         .await
         .expect("send proof");
@@ -292,9 +301,17 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         db: "default".into(),
         batch: mk,
     };
-    let env_a = RequestEnvelope::new(session_id, Some(41), rmp_serde::to_vec_named(&req_a).unwrap());
-    ws_send(&mut ws, &env_a.to_msgpack().unwrap()).await.expect("send mk");
-    ws_recv_into(&mut ws, MAX_WS_FRAME_SIZE, &mut buf).await.expect("read mk");
+    let env_a = RequestEnvelope::new(
+        session_id,
+        Some(41),
+        rmp_serde::to_vec_named(&req_a).unwrap(),
+    );
+    ws_send(&mut ws, &env_a.to_msgpack().unwrap())
+        .await
+        .expect("send mk");
+    ws_recv_into(&mut ws, MAX_WS_FRAME_SIZE, &mut buf)
+        .await
+        .expect("read mk");
     let resp = ResponseEnvelope::from_msgpack(&buf).expect("env mk");
     let db_resp: DbResponse = rmp_serde::from_slice(&resp.res).expect("decode mk");
     match &db_resp {
@@ -316,9 +333,17 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         db: "default".into(),
         batch: ins,
     };
-    let env_b = RequestEnvelope::new(session_id, Some(42), rmp_serde::to_vec_named(&req_b).unwrap());
-    ws_send(&mut ws, &env_b.to_msgpack().unwrap()).await.expect("send ins");
-    ws_recv_into(&mut ws, MAX_WS_FRAME_SIZE, &mut buf).await.expect("read ins");
+    let env_b = RequestEnvelope::new(
+        session_id,
+        Some(42),
+        rmp_serde::to_vec_named(&req_b).unwrap(),
+    );
+    ws_send(&mut ws, &env_b.to_msgpack().unwrap())
+        .await
+        .expect("send ins");
+    ws_recv_into(&mut ws, MAX_WS_FRAME_SIZE, &mut buf)
+        .await
+        .expect("read ins");
     let resp = ResponseEnvelope::from_msgpack(&buf).expect("env ins");
     let db_resp: DbResponse = rmp_serde::from_slice(&resp.res).expect("decode ins");
     match &db_resp {
@@ -336,9 +361,17 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         db: "default".into(),
         batch: rd,
     };
-    let env_c = RequestEnvelope::new(session_id, Some(43), rmp_serde::to_vec_named(&req_c).unwrap());
-    ws_send(&mut ws, &env_c.to_msgpack().unwrap()).await.expect("send rd");
-    ws_recv_into(&mut ws, MAX_WS_FRAME_SIZE, &mut buf).await.expect("read rd");
+    let env_c = RequestEnvelope::new(
+        session_id,
+        Some(43),
+        rmp_serde::to_vec_named(&req_c).unwrap(),
+    );
+    ws_send(&mut ws, &env_c.to_msgpack().unwrap())
+        .await
+        .expect("send rd");
+    ws_recv_into(&mut ws, MAX_WS_FRAME_SIZE, &mut buf)
+        .await
+        .expect("read rd");
     let resp = ResponseEnvelope::from_msgpack(&buf).expect("env rd");
     assert_eq!(resp.request_id, Some(43), "request_id echoed");
 

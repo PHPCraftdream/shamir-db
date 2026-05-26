@@ -4,13 +4,13 @@
 
 use serde_json::json;
 
-use shamir_types::codecs::transform;
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::UserValue;
 
@@ -75,7 +75,8 @@ async fn test_execute_insert_single() {
     let op: InsertOp = serde_json::from_value(json!({
         "insert_into": "users",
         "values": [{"name": "Alice", "age": 30}]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_insert(&op).await.unwrap();
 
@@ -100,7 +101,8 @@ async fn test_execute_insert_multiple() {
             {"name": "Bob", "age": 25},
             {"name": "Carol", "age": 35}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_insert(&op).await.unwrap();
 
@@ -116,7 +118,8 @@ async fn test_execute_insert_empty() {
     let op: InsertOp = serde_json::from_value(json!({
         "insert_into": "users",
         "values": []
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_insert(&op).await.unwrap();
 
@@ -140,7 +143,8 @@ async fn test_execute_update_with_filter() {
         "update": "users",
         "where": {"op": "eq", "field": ["status"], "value": "active"},
         "set": {"status": "premium"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
 
@@ -164,7 +168,8 @@ async fn test_execute_update_returns_changed() {
         "where": {"op": "eq", "field": ["status"], "value": "active"},
         "set": {"status": "premium"},
         "select": {"return_mode": "changed"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
 
@@ -187,7 +192,8 @@ async fn test_execute_update_no_match() {
         "update": "users",
         "where": {"op": "eq", "field": ["status"], "value": "deleted"},
         "set": {"status": "active"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 0);
@@ -205,7 +211,8 @@ async fn test_execute_update_all_records() {
         "update": "users",
         "set": {"verified": true},
         "select": {"return_mode": "all"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 3);
@@ -228,7 +235,8 @@ async fn test_execute_update_unchanged_mode() {
         "where": {"op": "eq", "field": ["status"], "value": "active"},
         "set": {"status": "active"},
         "select": {"return_mode": "unchanged"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
     // Nothing actually changed
@@ -251,7 +259,8 @@ async fn test_execute_delete_with_filter() {
     let op: DeleteOp = serde_json::from_value(json!({
         "delete_from": "users",
         "where": {"op": "eq", "field": ["status"], "value": "inactive"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_delete(&op, &ctx).await.unwrap();
 
@@ -270,7 +279,8 @@ async fn test_execute_delete_no_match() {
     let op: DeleteOp = serde_json::from_value(json!({
         "delete_from": "users",
         "where": {"op": "eq", "field": ["status"], "value": "deleted"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_delete(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 0);
@@ -288,7 +298,8 @@ async fn test_execute_delete_multiple() {
     let op: DeleteOp = serde_json::from_value(json!({
         "delete_from": "users",
         "where": {"op": "eq", "field": ["status"], "value": "active"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_delete(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 2);
@@ -313,7 +324,8 @@ async fn test_insert_update_delete_pipeline() {
             {"name": "Alice", "score": 100},
             {"name": "Bob", "score": 50}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     let r = table.execute_insert(&insert_op).await.unwrap();
     assert_eq!(r.affected, 2);
 
@@ -327,7 +339,8 @@ async fn test_insert_update_delete_pipeline() {
         "where": {"op": "eq", "field": ["name"], "value": "Bob"},
         "set": {"score": 75},
         "select": {"return_mode": "changed"}
-    })).unwrap();
+    }))
+    .unwrap();
     let r = table.execute_update(&update_op, &ctx).await.unwrap();
     assert_eq!(r.affected, 1);
     assert_eq!(r.records[0]["score"], 75);
@@ -336,7 +349,8 @@ async fn test_insert_update_delete_pipeline() {
     let delete_op: DeleteOp = serde_json::from_value(json!({
         "delete_from": "users",
         "where": {"op": "lt", "field": ["score"], "value": 80}
-    })).unwrap();
+    }))
+    .unwrap();
     let r = table.execute_delete(&delete_op, &ctx).await.unwrap();
     assert_eq!(r.affected, 1); // Bob(75) deleted
 
@@ -355,7 +369,8 @@ async fn test_execute_set_insert_new() {
         "set": "users",
         "key": {"email": "alice@example.com"},
         "value": {"email": "alice@example.com", "name": "Alice"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_set(&op).await.unwrap();
 
@@ -375,7 +390,8 @@ async fn test_execute_set_update_existing() {
         "set": "users",
         "key": {"name": "Alice"},
         "value": {"name": "Alice", "status": "vip", "score": 100}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_set(&op).await.unwrap();
 
@@ -395,7 +411,8 @@ async fn test_execute_set_no_match_inserts() {
         "set": "users",
         "key": {"name": "Zara"},
         "value": {"name": "Zara", "age": 22}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.execute_set(&op).await.unwrap();
 
@@ -425,7 +442,8 @@ async fn test_interner_persisted_after_insert() {
     let op: InsertOp = serde_json::from_value(json!({
         "insert_into": "users",
         "values": [{"brand_new_field": "value1"}, {"brand_new_field": "value2"}]
-    })).unwrap();
+    }))
+    .unwrap();
     table.execute_insert(&op).await.unwrap();
 
     // Verify the key was interned
@@ -436,7 +454,9 @@ async fn test_interner_persisted_after_insert() {
     // The key test: do the persisted entries contain "brand_new_field"?
     let entries = interner.all_entries();
     assert!(
-        entries.iter().any(|(_, user_key)| user_key.as_str() == "brand_new_field"),
+        entries
+            .iter()
+            .any(|(_, user_key)| user_key.as_str() == "brand_new_field"),
         "brand_new_field should be in interner entries after persist"
     );
 }
@@ -453,7 +473,8 @@ async fn test_interner_persisted_after_update() {
     let op: UpdateOp = serde_json::from_value(json!({
         "update": "users",
         "set": {"completely_new_key": 42}
-    })).unwrap();
+    }))
+    .unwrap();
     table.execute_update(&op, &ctx).await.unwrap();
 
     // The new key should be persisted
@@ -461,7 +482,9 @@ async fn test_interner_persisted_after_update() {
     assert!(interner.get_ind("completely_new_key").is_some());
     let entries = interner.all_entries();
     assert!(
-        entries.iter().any(|(_, uk)| uk.as_str() == "completely_new_key"),
+        entries
+            .iter()
+            .any(|(_, uk)| uk.as_str() == "completely_new_key"),
         "completely_new_key should be persisted"
     );
 }
@@ -475,7 +498,8 @@ async fn test_interner_persisted_after_set() {
         "set": "users",
         "key": {"unique_field_xyz": "val"},
         "value": {"unique_field_xyz": "val", "another_new_field": 99}
-    })).unwrap();
+    }))
+    .unwrap();
     table.execute_set(&op).await.unwrap();
 
     let interner = table.interner().get().await.unwrap();

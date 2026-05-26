@@ -135,7 +135,10 @@ fn test_select_with_limit_offset() {
 
     assert!(matches!(
         query.pagination,
-        crate::query::read::Pagination::LimitOffset { limit: Some(10), offset: 20 }
+        crate::query::read::Pagination::LimitOffset {
+            limit: Some(10),
+            offset: 20
+        }
     ));
 }
 
@@ -434,7 +437,10 @@ fn test_complex_query() {
     assert!(query.order_by.is_some());
     assert!(matches!(
         query.pagination,
-        crate::query::read::Pagination::LimitOffset { limit: Some(100), offset: 0 }
+        crate::query::read::Pagination::LimitOffset {
+            limit: Some(100),
+            offset: 0
+        }
     ));
 }
 

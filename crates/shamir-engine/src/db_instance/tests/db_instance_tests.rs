@@ -273,10 +273,8 @@ async fn test_db_drop_index() {
 #[tokio::test]
 async fn test_db_index_multiple_repos() {
     let configs = vec![
-        RepoConfig::new("repo1", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("users")),
-        RepoConfig::new("repo2", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("users")),
+        RepoConfig::new("repo1", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users")),
+        RepoConfig::new("repo2", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users")),
     ];
 
     let db = DbInstance::with_repos(configs).await.unwrap();

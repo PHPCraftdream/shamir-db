@@ -6,11 +6,12 @@
 //! whichever ones they don't need (`default-features = false,
 //! features = ["redb"]`).
 
+use shamir_storage::error::DbResult;
+use shamir_storage::storage_cached::{CachedStore, WriteMode};
 #[cfg(feature = "canopy")]
 use shamir_storage::storage_canopy::CanopyRepo;
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_fjall::FjallRepo;
-use shamir_storage::storage_cached::{CachedStore, WriteMode};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 #[cfg(feature = "nebari")]
@@ -22,7 +23,6 @@ use shamir_storage::storage_redb::RedbRepo;
 #[cfg(feature = "sled")]
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::{Repo, Store};
-use shamir_storage::error::DbResult;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task;
@@ -85,10 +85,7 @@ impl Repo for BoxRepo {
             BoxRepo::Canopy(repo) => repo.store_get(name).await,
             BoxRepo::MemBuffer(c) => {
                 let inner_store = c.inner.store_get(name).await?;
-                Ok(Arc::new(MemBufferStore::new(
-                    inner_store,
-                    c.config.clone(),
-                )))
+                Ok(Arc::new(MemBufferStore::new(inner_store, c.config.clone())))
             }
             BoxRepo::Cached(c) => {
                 let inner_store = c.inner.store_get(name).await?;
@@ -414,7 +411,9 @@ impl BoxRepoFactory {
     /// Fjall, MemBuffer-wrapped by default.
     #[cfg(feature = "fjall")]
     pub fn fjall(path: impl Into<PathBuf>) -> Self {
-        Self::wrapped(BoxRepoFactory::Fjall(FjallRepoFactory { path: path.into() }))
+        Self::wrapped(BoxRepoFactory::Fjall(FjallRepoFactory {
+            path: path.into(),
+        }))
     }
 
     /// Nebari, MemBuffer-wrapped by default.
@@ -428,7 +427,9 @@ impl BoxRepoFactory {
     /// Persy, MemBuffer-wrapped by default.
     #[cfg(feature = "persy")]
     pub fn persy(path: impl Into<PathBuf>) -> Self {
-        Self::wrapped(BoxRepoFactory::Persy(PersyRepoFactory { path: path.into() }))
+        Self::wrapped(BoxRepoFactory::Persy(PersyRepoFactory {
+            path: path.into(),
+        }))
     }
 
     /// Canopy, MemBuffer-wrapped by default.
@@ -550,10 +551,9 @@ impl Clone for BoxRepoFactory {
             BoxRepoFactory::Persy(f) => BoxRepoFactory::persy(f.path.clone()),
             #[cfg(feature = "canopy")]
             BoxRepoFactory::Canopy(f) => BoxRepoFactory::canopy(f.path.clone()),
-            BoxRepoFactory::MemBuffer(f) => BoxRepoFactory::membuffer(
-                f.inner.clone(),
-                f.config.clone(),
-            ),
+            BoxRepoFactory::MemBuffer(f) => {
+                BoxRepoFactory::membuffer(f.inner.clone(), f.config.clone())
+            }
             BoxRepoFactory::Cached(f) => BoxRepoFactory::cached(f.inner.clone(), f.mode),
         }
     }

@@ -13,8 +13,8 @@ use shamir_db::ShamirDb;
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await;
-    let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("users"));
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo(repo_config).await.unwrap();
     shamir
 }
@@ -278,8 +278,10 @@ async fn get_unknown_table_errors_cleanly() {
     // silently succeed against a phantom table.
     match resp {
         Ok(r) => {
-            assert!(!r.results.contains_key("get") || r.results["get"].records.is_empty(),
-                "phantom table must not produce a success record");
+            assert!(
+                !r.results.contains_key("get") || r.results["get"].records.is_empty(),
+                "phantom table must not produce a success record"
+            );
         }
         Err(_) => {}
     }

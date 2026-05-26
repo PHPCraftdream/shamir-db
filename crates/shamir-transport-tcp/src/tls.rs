@@ -37,8 +37,7 @@ pub fn make_server_config_from_pem(
     cert_pem: &str,
     key_pem: &str,
 ) -> Result<Arc<ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
-    let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
     let key_pem_bytes = key_pem.as_bytes().to_vec();
     let mut slice = key_pem_bytes.as_slice();
     let mut key_iter = rustls_pemfile::pkcs8_private_keys(&mut slice);

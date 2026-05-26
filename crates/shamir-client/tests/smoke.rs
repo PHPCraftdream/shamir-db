@@ -36,7 +36,10 @@ fn make_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -53,7 +56,9 @@ fn make_config(temp: &TempDir) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
+        observability: shamir_server::config::ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 
@@ -117,7 +122,10 @@ async fn sdk_full_lifecycle() {
         }
     }))
     .expect("parse mk_table");
-    let resp = client.execute("prod", mk_table).await.expect("create table");
+    let resp = client
+        .execute("prod", mk_table)
+        .await
+        .expect("create table");
     assert!(resp.results.contains_key("mr"));
     assert!(resp.results.contains_key("tb"));
 
@@ -133,7 +141,10 @@ async fn sdk_full_lifecycle() {
     let resp = client.execute("prod", work).await.expect("rw");
     let rd = resp.results.get("rd").expect("rd alias");
     assert_eq!(rd.records.len(), 1);
-    assert_eq!(rd.records[0].get("sku").and_then(|v| v.as_str()), Some("X1"));
+    assert_eq!(
+        rd.records[0].get("sku").and_then(|v| v.as_str()),
+        Some("X1")
+    );
     assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
 
     // 5. clean close

@@ -5,9 +5,7 @@
 
 use std::sync::Arc;
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tokio::runtime::Runtime;
 
 use shamir_engine::wal::{WalManager, WalOp};

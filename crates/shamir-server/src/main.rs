@@ -106,10 +106,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let launcher = ServerLauncher {
-        config,
-        bootstrap,
-    };
+    let launcher = ServerLauncher { config, bootstrap };
     let handle = launcher.launch().await?;
     tracing::info!(
         bound = ?handle.bound_addrs.iter().filter_map(|a| *a).collect::<Vec<_>>(),

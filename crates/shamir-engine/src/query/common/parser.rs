@@ -3,10 +3,12 @@
 //! This module provides parsers for query components that are used by
 //! multiple query types (SELECT, UPDATE, DELETE, etc.).
 
-use crate::query::filter::{Cond, FieldPath, FilterExpr, FilterExprOp, Filter, FilterValue, FnCall};
+use crate::query::filter::{
+    Cond, FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall,
+};
 use crate::query::read::{
-    AggFunc, AggregateField, SelectExpr, SelectExprValue, GroupBy, OrderDirection, Pagination,
-    OrderBy, OrderByItem,
+    AggFunc, AggregateField, GroupBy, OrderBy, OrderByItem, OrderDirection, Pagination, SelectExpr,
+    SelectExprValue,
 };
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::{QueryValue, Value};
@@ -474,7 +476,11 @@ pub fn group_by_from_value(value: &QueryValue) -> Result<GroupBy, QueryParseErro
                 Some(_) => return Err(QueryParseError::InvalidType("having", "filter")),
             };
 
-            Ok(GroupBy { fields, having: None }.having_opt(having))
+            Ok(GroupBy {
+                fields,
+                having: None,
+            }
+            .having_opt(having))
         }
         _ => Err(QueryParseError::InvalidType("group_by", "object")),
     }
@@ -645,7 +651,9 @@ pub fn aggregate_field_from_value(value: &QueryValue) -> Result<AggregateField, 
                 _ => Err(QueryParseError::UnknownType(type_str.to_string())),
             }
         }
-        Value::Str(s) => Ok(AggregateField::Field(s.split('.').map(|seg| seg.to_string()).collect())),
+        Value::Str(s) => Ok(AggregateField::Field(
+            s.split('.').map(|seg| seg.to_string()).collect(),
+        )),
         _ => Err(QueryParseError::InvalidType(
             "aggregate.field",
             "object or string",

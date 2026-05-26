@@ -94,11 +94,7 @@ pub fn start_change_password_challenge(
 ///
 /// Caller is responsible for persisting the new `tickets_invalid_before_ns`
 /// to the user record (we just return it for atomicity reasons).
-pub fn finalize_change_password(
-    store: &SessionStore,
-    user_id: &[u8; 16],
-    now_ns: u64,
-) -> u64 {
+pub fn finalize_change_password(store: &SessionStore, user_id: &[u8; 16], now_ns: u64) -> u64 {
     let victim_sids = store.snapshot_by_user(user_id);
     for sid in victim_sids {
         store.remove(&sid);

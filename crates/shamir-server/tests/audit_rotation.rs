@@ -28,8 +28,7 @@ fn make_entry(seq: u64) -> AuditEntry {
 async fn rotation_kicks_in_after_threshold() {
     let temp = TempDir::new().unwrap();
     // Tiny 1 KB threshold so the test only has to write a handful of entries.
-    let appender =
-        RedbAuditAppender::open_strict_with_rotation(temp.path(), Some(1024)).unwrap();
+    let appender = RedbAuditAppender::open_strict_with_rotation(temp.path(), Some(1024)).unwrap();
 
     // Write enough entries to comfortably cross 1 KB. Each JSON line is
     // ~250 bytes, so 10 entries = ~2.5 KB.
@@ -60,7 +59,10 @@ async fn rotation_kicks_in_after_threshold() {
 
     // Active file should still be present (just freshly opened post-rotation).
     let active = temp.path().join("audit.log");
-    assert!(active.exists(), "active audit.log must be reopened after rotation");
+    assert!(
+        active.exists(),
+        "active audit.log must be reopened after rotation"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -121,8 +123,7 @@ async fn hmac_chain_is_intact_across_rotation() {
     let key = [0xC0u8; 32];
     let chain = AuditChain::new(key);
     // Tiny 1 KB threshold to force several rotations.
-    let appender =
-        RedbAuditAppender::open_strict_with_rotation(temp.path(), Some(1024)).unwrap();
+    let appender = RedbAuditAppender::open_strict_with_rotation(temp.path(), Some(1024)).unwrap();
 
     // Write 30 entries via the chain so each one carries a real
     // `prev_hmac → hmac` link (the make_entry helper above uses fake
@@ -162,8 +163,7 @@ async fn hmac_chain_is_intact_across_rotation() {
 
     // The fix in `read_log_for_verify`: it must read rotated files
     // (lex-sorted) plus the active file, in chronological order.
-    let entries = RedbAuditAppender::read_log_for_verify(temp.path())
-        .expect("read_log_for_verify");
+    let entries = RedbAuditAppender::read_log_for_verify(temp.path()).expect("read_log_for_verify");
     assert_eq!(entries.len(), 30, "every entry survives across rotation");
 
     // The headline assertion: the chain still verifies after rotation.

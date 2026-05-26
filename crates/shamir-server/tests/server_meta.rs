@@ -104,7 +104,10 @@ fn init_persists_across_reopen() {
         "created_at_ns must NOT change on reopen"
     );
     assert_eq!(
-        store.identity_state().expect("identity_state").current_pub(),
+        store
+            .identity_state()
+            .expect("identity_state")
+            .current_pub(),
         identity_pub,
         "Ed25519 seed must rehydrate into the same pub key"
     );
@@ -301,7 +304,10 @@ fn crash_simulation_preserves_state() {
         let store = ServerMetaStore::open_or_init(&path).expect("reopen-2");
         // Verify prior rotation persisted.
         assert_eq!(store.ticket_keys().expect("ticket_keys").0, new_ticket);
-        assert_eq!(store.ticket_keys().expect("ticket_keys").1, Some(initial_ticket));
+        assert_eq!(
+            store.ticket_keys().expect("ticket_keys").1,
+            Some(initial_ticket)
+        );
 
         store
             .rotate_audit_chain_key(new_audit, 2_000)
@@ -325,9 +331,15 @@ fn crash_simulation_preserves_state() {
     let prev_seed = [0x05u8; 32];
     {
         let store = ServerMetaStore::open_or_init(&path).expect("reopen-4");
-        assert_eq!(store.server_secrets().expect("secrets").server_secret, new_secret);
+        assert_eq!(
+            store.server_secrets().expect("secrets").server_secret,
+            new_secret
+        );
         // lockout_secret never moves under server_secret rotation.
-        assert_ne!(store.server_secrets().expect("secrets").lockout_secret, new_secret);
+        assert_ne!(
+            store.server_secrets().expect("secrets").lockout_secret,
+            new_secret
+        );
 
         store
             .store_identity_after_rotate(cur_seed, prev_seed, 4_000, 7)
@@ -354,13 +366,19 @@ fn crash_simulation_preserves_state() {
 
     // Ticket: rotated once.
     assert_eq!(store.ticket_keys().expect("ticket_keys").0, new_ticket);
-    assert_eq!(store.ticket_keys().expect("ticket_keys").1, Some(initial_ticket));
+    assert_eq!(
+        store.ticket_keys().expect("ticket_keys").1,
+        Some(initial_ticket)
+    );
 
     // Audit chain: rotated once.
     assert_eq!(store.audit_chain_key().expect("audit_chain_key"), new_audit);
 
     // Server secret: rotated once.
-    assert_eq!(store.server_secrets().expect("secrets").server_secret, new_secret);
+    assert_eq!(
+        store.server_secrets().expect("secrets").server_secret,
+        new_secret
+    );
 
     // Identity: stored.
     let identity_final = store.identity_state().expect("identity_state");

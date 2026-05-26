@@ -94,7 +94,7 @@ pub fn canonical_bytes(entry: &AuditEntry) -> Vec<u8> {
         + 8                                       // session_id_prefix
         + 1 + result_bytes.len()
         + 4 + details.len()
-        + 32;                                     // prev_hmac
+        + 32; // prev_hmac
 
     let mut out = Vec::with_capacity(cap);
     out.extend_from_slice(&entry.seq.to_be_bytes());
@@ -232,7 +232,10 @@ impl AuditChain {
     /// the chain links are intact.
     ///
     /// Use after loading entries from durable storage at startup.
-    pub fn verify_chain(audit_chain_key: &[u8; 32], entries: &[AuditEntry]) -> Result<(), AuditError> {
+    pub fn verify_chain(
+        audit_chain_key: &[u8; 32],
+        entries: &[AuditEntry],
+    ) -> Result<(), AuditError> {
         let mut expected_seq = 1u64;
         let mut expected_prev = [0u8; 32];
         for (idx, e) in entries.iter().enumerate() {
@@ -501,7 +504,11 @@ mod tests {
         let mut entries = c.snapshot();
         entries[2].seq = 999;
         match AuditChain::verify_chain(&key(), &entries) {
-            Err(AuditError::SequenceGap { at, expected, found }) => {
+            Err(AuditError::SequenceGap {
+                at,
+                expected,
+                found,
+            }) => {
                 assert_eq!(at, 2);
                 assert_eq!(expected, 3);
                 assert_eq!(found, 999);

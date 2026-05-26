@@ -35,7 +35,7 @@ use tokio_tungstenite::WebSocketStream;
 use shamir_transport_tcp::framing::{
     read_frame_into as tcp_read_frame_into, write_frame_into as tcp_write_frame_into,
 };
-use shamir_transport_ws::framing::{ws_recv_into, ws_send, MAX_WS_FRAME_SIZE, WsFrameError};
+use shamir_transport_ws::framing::{ws_recv_into, ws_send, WsFrameError, MAX_WS_FRAME_SIZE};
 
 /// Unified error surface — collapses the per-transport error types into
 /// the shape `connection.rs` cares about.

@@ -7,13 +7,15 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use shamir_types::core::interner::{Interner, InternerKey};
-use crate::query::filter::eval::{compile_filter, filter_value_to_inner, intern_field_path, FilterNode};
+use crate::query::filter::eval::{
+    compile_filter, filter_value_to_inner, intern_field_path, FilterNode,
+};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::{exec, PaginationInfo, QueryResult, QueryStats, ReadQuery, SelectItem};
-use shamir_types::core::sort_codec;
 use shamir_storage::error::DbResult;
+use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::core::sort_codec;
 use shamir_types::types::common::new_set;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -91,7 +93,9 @@ impl TableManager {
                 field, cmp, value, ..
             } if cmp == "eq" => {
                 let interned = intern_field_path(field, interner)?;
-                let backend = registry.find_by_field_and_kind(&interned, "functional").await?;
+                let backend = registry
+                    .find_by_field_and_kind(&interned, "functional")
+                    .await?;
                 let resolved = crate::query::filter::eval::filter_value_to_inner(value)?;
                 let hash =
                     crate::index2::functional_backend::FunctionalBackend::hash_value(&resolved);
@@ -147,9 +151,7 @@ impl TableManager {
             }
 
             // And: extract Eq/In conditions, try to match indexes
-            Filter::And { filters } => {
-                self.try_plan_and_index_scan(filters, interner)
-            }
+            Filter::And { filters } => self.try_plan_and_index_scan(filters, interner),
 
             _ => None,
         }
@@ -232,9 +234,10 @@ impl TableManager {
                 let mut all_matched = true;
 
                 for idx_path in &def.paths {
-                    if let Some(item) = items.iter().find(|it| {
-                        it.field_path == idx_path.path && it.lookup_sets.len() == 1
-                    }) {
+                    if let Some(item) = items
+                        .iter()
+                        .find(|it| it.field_path == idx_path.path && it.lookup_sets.len() == 1)
+                    {
                         lookup_values.push(item.lookup_sets[0][0].clone());
                         consumed.push(item.filter_idx);
                     } else {
@@ -276,9 +279,7 @@ impl TableManager {
         match remaining.len() {
             0 => None,
             1 => Some(remaining.into_iter().next().unwrap()),
-            _ => Some(Filter::And {
-                filters: remaining,
-            }),
+            _ => Some(Filter::And { filters: remaining }),
         }
     }
 
@@ -295,11 +296,7 @@ impl TableManager {
     /// 1. **Streaming** — early termination, memory ~ page_size
     /// 2. **Counting** — count_total without ORDER BY, memory ~ page_size
     /// 3. **Collecting** — ORDER BY / GROUP BY / DISTINCT / aggregates
-    pub async fn read(
-        &self,
-        query: &ReadQuery,
-        ctx: &FilterContext<'_>,
-    ) -> DbResult<QueryResult> {
+    pub async fn read(&self, query: &ReadQuery, ctx: &FilterContext<'_>) -> DbResult<QueryResult> {
         let start = Instant::now();
         let batch_size = 1000;
         let interner = self.interner().get().await?;
@@ -338,9 +335,8 @@ impl TableManager {
                         {
                             // Load the record and extract the field value.
                             let record = self.get(id).await?;
-                            let val = crate::query::filter::eval::resolve_field(
-                                &record, &field_path,
-                            );
+                            let val =
+                                crate::query::filter::eval::resolve_field(&record, &field_path);
                             let json_val = match val {
                                 Some(v) => shamir_types::codecs::interned::inner_to_json_value(
                                     &v, interner,
@@ -349,9 +345,7 @@ impl TableManager {
                             };
                             let key = alias
                                 .as_deref()
-                                .unwrap_or_else(|| {
-                                    path.last().map(|s| s.as_str()).unwrap_or("min")
-                                })
+                                .unwrap_or_else(|| path.last().map(|s| s.as_str()).unwrap_or("min"))
                                 .to_string();
                             let mut obj = serde_json::Map::new();
                             obj.insert(key, json_val);
@@ -398,9 +392,10 @@ impl TableManager {
                     crate::index2::backend::IndexResult::Set(rids) => {
                         (rids.into_iter().collect::<Vec<_>>(), "index2")
                     }
-                    crate::index2::backend::IndexResult::Ranked(ranked) => {
-                        (ranked.into_iter().map(|(r, _)| r).collect::<Vec<_>>(), "index2_ranked")
-                    }
+                    crate::index2::backend::IndexResult::Ranked(ranked) => (
+                        ranked.into_iter().map(|(r, _)| r).collect::<Vec<_>>(),
+                        "index2_ranked",
+                    ),
                 };
                 if !rids_vec.is_empty() {
                     let inner_records = self.table().get_many(&rids_vec).await?;
@@ -476,7 +471,15 @@ impl TableManager {
                 }
 
                 return self
-                    .read_index_scan(query, ctx, interner, idx_name, &lookup_sets, residual.as_ref(), start)
+                    .read_index_scan(
+                        query,
+                        ctx,
+                        interner,
+                        idx_name,
+                        &lookup_sets,
+                        residual.as_ref(),
+                        start,
+                    )
                     .await;
             }
         }
@@ -506,9 +509,8 @@ impl TableManager {
                             self.sorted_indexes().lookup_max(def.name_interned).await?
                         {
                             let record = self.get(id).await?;
-                            let val = crate::query::filter::eval::resolve_field(
-                                &record, &field_path,
-                            );
+                            let val =
+                                crate::query::filter::eval::resolve_field(&record, &field_path);
                             let json_val = match val {
                                 Some(v) => shamir_types::codecs::interned::inner_to_json_value(
                                     &v, interner,
@@ -517,9 +519,7 @@ impl TableManager {
                             };
                             let key = alias
                                 .as_deref()
-                                .unwrap_or_else(|| {
-                                    path.last().map(|s| s.as_str()).unwrap_or("max")
-                                })
+                                .unwrap_or_else(|| path.last().map(|s| s.as_str()).unwrap_or("max"))
                                 .to_string();
                             let mut obj = serde_json::Map::new();
                             obj.insert(key, json_val);
@@ -563,9 +563,7 @@ impl TableManager {
             self.try_plan_order_limit_fast_path(query, interner)
         {
             return self
-                .read_order_limit_fast(
-                    query, ctx, interner, idx_name, take, skip, direction, start,
-                )
+                .read_order_limit_fast(query, ctx, interner, idx_name, take, skip, direction, start)
                 .await;
         }
 
@@ -707,8 +705,7 @@ impl TableManager {
             .await?;
 
         // 2. Compile residual filter if present.
-        let residual_cb: Option<FilterNode> =
-            residual.map(|f| compile_filter(f, interner));
+        let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter(f, interner));
 
         // 3. Vectored fetch + per-record residual filter. One round
         //    trip to the data store via `Store::get_many`; stale
@@ -716,8 +713,7 @@ impl TableManager {
         //    skipped (same semantic as the previous NotFound branch).
         let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
         let records = self.table().get_many(&id_vec).await?;
-        let mut matched: Vec<(RecordId, InnerValue)> =
-            Vec::with_capacity(id_vec.len());
+        let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
         for (id, opt) in id_vec.iter().zip(records) {
             if let Some(record) = opt {
                 let passes = match &residual_cb {
@@ -787,12 +783,7 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
-    ) -> Option<(
-        u64,
-        usize,
-        usize,
-        shamir_query_types::read::OrderDirection,
-    )> {
+    ) -> Option<(u64, usize, usize, shamir_query_types::read::OrderDirection)> {
         // Shape guards.
         if query.r#where.is_some()
             || query.group_by.is_some()
@@ -842,13 +833,9 @@ impl TableManager {
     ) -> DbResult<QueryResult> {
         use shamir_query_types::read::OrderDirection;
 
-        let want = skip
-            .checked_add(take)
-            .ok_or_else(|| {
-                shamir_storage::error::DbError::Validation(
-                    "LIMIT + OFFSET overflow".to_string(),
-                )
-            })?;
+        let want = skip.checked_add(take).ok_or_else(|| {
+            shamir_storage::error::DbError::Validation("LIMIT + OFFSET overflow".to_string())
+        })?;
 
         let (ids, label) = match direction {
             OrderDirection::Asc => (
@@ -919,13 +906,15 @@ impl TableManager {
         // 1. Lookup matching RecordIds from index (union across all sets)
         let mut record_ids = new_set::<RecordId>();
         for values in lookup_sets {
-            let ids = self.index_manager_ref().lookup_by_index(index_name, values).await?;
+            let ids = self
+                .index_manager_ref()
+                .lookup_by_index(index_name, values)
+                .await?;
             record_ids.extend(ids);
         }
 
         // 2. Compile residual filter if present
-        let residual_cb: Option<FilterNode> =
-            residual.map(|f| compile_filter(f, interner));
+        let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter(f, interner));
 
         // 3. Vectored fetch + per-record residual filter. Stale
         //    index entries materialise as None and are skipped.
@@ -1221,10 +1210,7 @@ impl TableManager {
         let pagination = if query.pagination.is_none() {
             None
         } else {
-            Some(
-                PaginationInfo::compute(&query.pagination, None)
-                    .with_has_next(has_next),
-            )
+            Some(PaginationInfo::compute(&query.pagination, None).with_has_next(has_next))
         };
 
         Ok(QueryResult {

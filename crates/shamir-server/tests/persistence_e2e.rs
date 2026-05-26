@@ -111,7 +111,10 @@ fn fast_kdf() -> KdfConfig {
 fn make_config(data_dir: PathBuf, port: u16) -> Config {
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -128,7 +131,9 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
+        observability: shamir_server::config::ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 
@@ -196,7 +201,9 @@ async fn login(
         .expect("send auth_init");
 
     // challenge
-    let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.expect("read challenge");
+    let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .expect("read challenge");
     let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes).unwrap();
     let mut salt = [0u8; 16];
     salt.copy_from_slice(&ch_wire.salt);
@@ -218,13 +225,17 @@ async fn login(
     let (proof, derived, am) = hs
         .process_challenge(&challenge, &mut password_buf)
         .expect("process challenge");
-    let proof_wire = WireClientProof { client_proof: proof.to_vec() };
+    let proof_wire = WireClientProof {
+        client_proof: proof.to_vec(),
+    };
     write_frame(&mut w, &rmp_serde::to_vec(&proof_wire).unwrap())
         .await
         .expect("send proof");
 
     // auth_ok
-    let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.expect("read auth_ok");
+    let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .expect("read auth_ok");
     let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes).unwrap();
     let mut sig32 = [0u8; 32];
     sig32.copy_from_slice(&ok_wire.server_signature);
@@ -274,8 +285,7 @@ where
     .await
     .expect("response within 10s")
     .expect("read response");
-    let resp_envelope =
-        ResponseEnvelope::from_msgpack(&resp_bytes).expect("response envelope");
+    let resp_envelope = ResponseEnvelope::from_msgpack(&resp_bytes).expect("response envelope");
     rmp_serde::from_slice(&resp_envelope.res).expect("decode DbResponse")
 }
 
@@ -346,8 +356,7 @@ async fn data_written_via_wire_survives_restart() {
             other => panic!("create_table failed: {:?}", other),
         }
 
-        let written =
-            roundtrip(&write_req("widgets", "X1", 42), sid, 2, &mut w, &mut r).await;
+        let written = roundtrip(&write_req("widgets", "X1", 42), sid, 2, &mut w, &mut r).await;
         match &written {
             DbResponse::Batch { response } => {
                 assert!(response.results.contains_key("ins"));
@@ -361,7 +370,10 @@ async fn data_written_via_wire_survives_restart() {
             DbResponse::Batch { response } => {
                 let rd = response.results.get("rd").expect("rd alias");
                 assert_eq!(rd.records.len(), 1);
-                assert_eq!(rd.records[0].get("sku").and_then(|v| v.as_str()), Some("X1"));
+                assert_eq!(
+                    rd.records[0].get("sku").and_then(|v| v.as_str()),
+                    Some("X1")
+                );
                 assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
             }
             other => panic!("read failed inside boot #1: {:?}", other),
@@ -377,7 +389,9 @@ async fn data_written_via_wire_survives_restart() {
 
     // ----- BOOT #2: same data_dir, expect data + table to still be there -----
     let handle = launch(data_dir.clone(), port, password).await;
-    let addr = handle.first_tls_exporter_addr().expect("bound after restart");
+    let addr = handle
+        .first_tls_exporter_addr()
+        .expect("bound after restart");
     assert_eq!(addr.port(), port, "second boot must reuse the same port");
 
     let (mut r, mut w, sid) = login(addr, password).await;

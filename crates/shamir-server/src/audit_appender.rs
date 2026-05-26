@@ -567,7 +567,8 @@ impl RedbAuditAppender {
         // Open a new empty file in place.
         *current = Self::open_log(&self.log_path)?;
         if let Some(rot) = &self.rotation {
-            rot.current_size.store(0, std::sync::atomic::Ordering::Relaxed);
+            rot.current_size
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
         tracing::info!(rotated = %rotated.display(), "audit log rotated");
         Ok(())

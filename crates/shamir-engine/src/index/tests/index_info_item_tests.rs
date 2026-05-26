@@ -1,5 +1,5 @@
-use shamir_types::codecs::basic::bincode;
 use crate::index::index_info_item::IndexInfoItem;
+use shamir_types::codecs::basic::bincode;
 
 #[test]
 fn test_index_info_item_creation() {

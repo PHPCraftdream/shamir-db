@@ -15,9 +15,7 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::bootstrap::BootstrapState;
 use shamir_connect::server::config::ServerSecrets;
-use shamir_connect::server::session::{
-    PendingChangePwChallenge, Session, SessionPermissions,
-};
+use shamir_connect::server::session::{PendingChangePwChallenge, Session, SessionPermissions};
 use shamir_connect::server::ticket::TicketPlain;
 use shamir_connect::server::user_record::UserRecord;
 use zeroize::Zeroizing;
@@ -37,7 +35,11 @@ fn stored_key_debug_redacts() {
     let s = StoredKey([0xabu8; 32]);
     let dbg = format!("{:?}", s);
     assert!(dbg.contains("REDACTED"), "expected REDACTED, got: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "ab"), "stored_key bytes leaked: {}", dbg);
+    assert!(
+        !contains_repeated_pattern(&dbg, "ab"),
+        "stored_key bytes leaked: {}",
+        dbg
+    );
 }
 
 #[test]
@@ -48,7 +50,11 @@ fn ed25519_keypair_debug_redacts_private() {
     // The seed bytes (cd) MUST NOT appear; the public key fingerprint may
     // appear (it's a 4-byte hash-ish prefix derived from the seed, but
     // doesn't reveal the seed itself).
-    assert!(!contains_repeated_pattern(&dbg, "cd"), "private key bytes leaked: {}", dbg);
+    assert!(
+        !contains_repeated_pattern(&dbg, "cd"),
+        "private key bytes leaked: {}",
+        dbg
+    );
 }
 
 #[test]
@@ -62,11 +68,27 @@ fn user_record_debug_redacts_all_secret_fields() {
     };
     let dbg = format!("{:?}", rec);
     assert!(dbg.contains("REDACTED"), "expected REDACTED, got: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "ef"), "salt bytes leaked: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "ab"), "stored_key bytes leaked: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "ba"), "server_key bytes leaked: {}", dbg);
+    assert!(
+        !contains_repeated_pattern(&dbg, "ef"),
+        "salt bytes leaked: {}",
+        dbg
+    );
+    assert!(
+        !contains_repeated_pattern(&dbg, "ab"),
+        "stored_key bytes leaked: {}",
+        dbg
+    );
+    assert!(
+        !contains_repeated_pattern(&dbg, "ba"),
+        "server_key bytes leaked: {}",
+        dbg
+    );
     // Non-secret fields SHOULD appear.
-    assert!(dbg.contains("12345"), "tickets_invalid_before_ns missing: {}", dbg);
+    assert!(
+        dbg.contains("12345"),
+        "tickets_invalid_before_ns missing: {}",
+        dbg
+    );
 }
 
 #[test]
@@ -77,8 +99,16 @@ fn server_secrets_debug_redacts_both() {
     };
     let dbg = format!("{:?}", s);
     assert!(dbg.contains("REDACTED"), "expected REDACTED, got: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "a1"), "server_secret bytes leaked: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "b2"), "lockout_secret bytes leaked: {}", dbg);
+    assert!(
+        !contains_repeated_pattern(&dbg, "a1"),
+        "server_secret bytes leaked: {}",
+        dbg
+    );
+    assert!(
+        !contains_repeated_pattern(&dbg, "b2"),
+        "lockout_secret bytes leaked: {}",
+        dbg
+    );
 }
 
 #[test]
@@ -94,8 +124,16 @@ fn session_debug_redacts_user_id_and_channel_binding() {
     );
     let dbg = format!("{:?}", session);
     assert!(dbg.contains("REDACTED"), "expected REDACTED, got: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "11"), "user_id leaked: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "77"), "channel_binding leaked: {}", dbg);
+    assert!(
+        !contains_repeated_pattern(&dbg, "11"),
+        "user_id leaked: {}",
+        dbg
+    );
+    assert!(
+        !contains_repeated_pattern(&dbg, "77"),
+        "channel_binding leaked: {}",
+        dbg
+    );
 }
 
 #[test]
@@ -130,9 +168,21 @@ fn ticket_plain_debug_redacts_identifying_fields() {
     };
     let dbg = format!("{:?}", t);
     assert!(dbg.contains("REDACTED"), "expected REDACTED, got: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "21"), "user_id leaked: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "33"), "channel_binding leaked: {}", dbg);
-    assert!(!contains_repeated_pattern(&dbg, "44"), "ticket_family_id leaked: {}", dbg);
+    assert!(
+        !contains_repeated_pattern(&dbg, "21"),
+        "user_id leaked: {}",
+        dbg
+    );
+    assert!(
+        !contains_repeated_pattern(&dbg, "33"),
+        "channel_binding leaked: {}",
+        dbg
+    );
+    assert!(
+        !contains_repeated_pattern(&dbg, "44"),
+        "ticket_family_id leaked: {}",
+        dbg
+    );
     assert!(!dbg.contains("secret-username"), "username leaked: {}", dbg);
     assert!(!dbg.contains("superuser"), "roles leaked: {}", dbg);
     // Non-identifying fields SHOULD appear.

@@ -59,7 +59,10 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     assert_eq!(sorted.len(), 5, "insert_many returned duplicate keys");
 
     // Empty input must return empty output (no transaction, no fsync).
-    let empty = store.insert_many(Vec::new()).await.expect("insert_many empty");
+    let empty = store
+        .insert_many(Vec::new())
+        .await
+        .expect("insert_many empty");
     assert!(empty.is_empty());
 
     // ---- set_many -----------------------------------------------------
@@ -124,15 +127,12 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     let missing_id = shamir_types::types::record_id::RecordId::new();
     let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
     let probe_keys = vec![
-        keys[0].clone(),     // hit — was set to "updated-0"
-        missing_k.clone(),   // miss
-        new_k1.clone(),      // hit — set to "fresh-1"
-        new_k2.clone(),      // hit — set to "fresh-2"
+        keys[0].clone(),   // hit — was set to "updated-0"
+        missing_k.clone(), // miss
+        new_k1.clone(),    // hit — set to "fresh-1"
+        new_k2.clone(),    // hit — set to "fresh-2"
     ];
-    let got = store
-        .get_many(probe_keys.clone())
-        .await
-        .expect("get_many");
+    let got = store.get_many(probe_keys.clone()).await.expect("get_many");
     assert_eq!(got.len(), 4, "get_many length mismatch");
     assert_eq!(got[0].as_deref(), Some(&b"updated-0"[..]));
     assert_eq!(got[1], None, "missing key must be None");

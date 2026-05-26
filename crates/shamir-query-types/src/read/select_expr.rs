@@ -9,16 +9,32 @@ use crate::filter::FieldPath;
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SelectExpr {
     // Arithmetic
-    Add { left: Box<SelectExpr>, right: Box<SelectExpr> },
-    Sub { left: Box<SelectExpr>, right: Box<SelectExpr> },
-    Mul { left: Box<SelectExpr>, right: Box<SelectExpr> },
-    Div { left: Box<SelectExpr>, right: Box<SelectExpr> },
+    Add {
+        left: Box<SelectExpr>,
+        right: Box<SelectExpr>,
+    },
+    Sub {
+        left: Box<SelectExpr>,
+        right: Box<SelectExpr>,
+    },
+    Mul {
+        left: Box<SelectExpr>,
+        right: Box<SelectExpr>,
+    },
+    Div {
+        left: Box<SelectExpr>,
+        right: Box<SelectExpr>,
+    },
 
     // Field reference
-    Field { path: FieldPath },
+    Field {
+        path: FieldPath,
+    },
 
     // Literal value
-    Literal { value: SelectExprValue },
+    Literal {
+        value: SelectExprValue,
+    },
 }
 
 /// Expression values

@@ -9,8 +9,8 @@
 
 use super::adapter::{VectorAdapter, VectorError};
 use crate::index2::kind::VectorMetric;
-use hnsw_rs::anndists::dist::distances::Distance;
 use async_trait::async_trait;
+use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::hnsw::Hnsw;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -139,11 +139,7 @@ impl VectorAdapter for HnswAdapter {
         Ok(())
     }
 
-    async fn search(
-        &self,
-        query: &[f32],
-        k: u32,
-    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+    async fn search(&self, query: &[f32], k: u32) -> Result<Vec<(RecordId, f32)>, VectorError> {
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
@@ -154,11 +150,10 @@ impl VectorAdapter for HnswAdapter {
         let ef = self.ef_search;
         let overscan = (k as usize) * 2 + 10;
         let query_owned = query.to_vec();
-        let neighbors = tokio::task::spawn_blocking(move || {
-            hnsw.search(&query_owned, overscan, ef)
-        })
-        .await
-        .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let neighbors =
+            tokio::task::spawn_blocking(move || hnsw.search(&query_owned, overscan, ef))
+                .await
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
 
         let mut results = Vec::with_capacity(k as usize);
         for n in neighbors {
@@ -180,8 +175,7 @@ impl VectorAdapter for HnswAdapter {
     }
 
     fn len(&self) -> usize {
-        self.next_id.load(Ordering::Relaxed)
-            - self.deleted.len()
+        self.next_id.load(Ordering::Relaxed) - self.deleted.len()
     }
 }
 
@@ -199,7 +193,9 @@ mod tests {
         let mut v = Vec::with_capacity(dim);
         let mut s = seed;
         for _ in 0..dim {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             v.push(((s >> 33) as f32) / (u32::MAX as f32) - 0.5);
         }
         v
@@ -207,10 +203,14 @@ mod tests {
 
     #[tokio::test]
     async fn basic_cosine_search() {
-        let adapter = HnswAdapter::new(3, VectorMetric::Cosine, HnswConfig {
-            max_elements: 100,
-            ..Default::default()
-        });
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::Cosine,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
 
         adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
         adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
@@ -224,10 +224,14 @@ mod tests {
 
     #[tokio::test]
     async fn delete_removes_from_results() {
-        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig {
-            max_elements: 100,
-            ..Default::default()
-        });
+        let adapter = HnswAdapter::new(
+            2,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
 
         adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
         adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
@@ -241,10 +245,14 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_replaces() {
-        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig {
-            max_elements: 100,
-            ..Default::default()
-        });
+        let adapter = HnswAdapter::new(
+            2,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
 
         adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
         adapter.upsert(rid(1), &[10.0, 10.0]).await.unwrap();
@@ -258,12 +266,16 @@ mod tests {
     async fn recall_at_10_on_1k_vectors() {
         let dim = 32;
         let n = 1000;
-        let adapter = HnswAdapter::new(dim as u32, VectorMetric::L2, HnswConfig {
-            max_elements: n + 100,
-            ef_construction: 200,
-            ef_search: 50,
-            ..Default::default()
-        });
+        let adapter = HnswAdapter::new(
+            dim as u32,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: n + 100,
+                ef_construction: 200,
+                ef_search: 50,
+                ..Default::default()
+            },
+        );
 
         let mut vecs = Vec::with_capacity(n);
         for i in 0..n {
@@ -301,17 +313,20 @@ mod tests {
             hnsw_results.iter().map(|(r, _)| *r).collect();
 
         let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
-        assert!(
-            recall >= 0.8,
-            "recall@10 = {recall:.2} — expected >= 0.80"
-        );
+        assert!(recall >= 0.8, "recall@10 = {recall:.2} — expected >= 0.80");
     }
 
     #[tokio::test]
     async fn dim_mismatch_rejected() {
         let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
         let err = adapter.upsert(rid(1), &[1.0, 2.0]).await.unwrap_err();
-        assert!(matches!(err, VectorError::DimMismatch { expected: 3, got: 2 }));
+        assert!(matches!(
+            err,
+            VectorError::DimMismatch {
+                expected: 3,
+                got: 2
+            }
+        ));
     }
 
     #[tokio::test]
@@ -372,7 +387,10 @@ mod tests {
         for i in 0..100 {
             let mut a = [0u8; 16];
             a[15] = i as u8;
-            adapter.upsert(RecordId(a), &random_vec(dim as usize, i as u64)).await.unwrap();
+            adapter
+                .upsert(RecordId(a), &random_vec(dim as usize, i as u64))
+                .await
+                .unwrap();
         }
 
         // 8 concurrent searches.
@@ -405,7 +423,11 @@ mod tests {
         // Only latest visible
         let results = adapter.search(&[9.0, 0.0], 10).await.unwrap();
         let matching: Vec<_> = results.iter().filter(|(r, _)| *r == rid(1)).collect();
-        assert_eq!(matching.len(), 1, "rid(1) should appear once after 10 upserts");
+        assert_eq!(
+            matching.len(),
+            1,
+            "rid(1) should appear once after 10 upserts"
+        );
         assert!(matching[0].1 < 0.5);
     }
 }

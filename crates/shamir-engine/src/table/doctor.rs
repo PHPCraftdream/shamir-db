@@ -85,12 +85,10 @@ impl TableManager {
         let start = Instant::now();
 
         let counter_value = self.count().await? as u64;
-        let regular_defs: Vec<IndexDefinition> =
-            self.index_manager_ref().iter_indexes().collect();
+        let regular_defs: Vec<IndexDefinition> = self.index_manager_ref().iter_indexes().collect();
         let unique_defs: Vec<IndexDefinition> =
             self.index_manager_ref().iter_unique_indexes().collect();
-        let sorted_defs: Vec<SortedIndexDefinition> =
-            self.sorted_indexes().iter_indexes();
+        let sorted_defs: Vec<SortedIndexDefinition> = self.sorted_indexes().iter_indexes();
 
         // Single streaming pass over the data store: count records
         // and tally "should have an entry" per index.
@@ -149,10 +147,7 @@ impl TableManager {
         }
         let mut sorted_indexes = Vec::with_capacity(sorted_defs.len());
         for (def, expected) in sorted_defs.iter().zip(expected_sorted.iter()) {
-            let actual = self
-                .sorted_indexes()
-                .entry_count(def.name_interned)
-                .await?;
+            let actual = self.sorted_indexes().entry_count(def.name_interned).await?;
             sorted_indexes.push(IndexHealth {
                 name_interned: def.name_interned,
                 expected_entries: *expected,
@@ -182,12 +177,10 @@ impl TableManager {
     pub async fn repair(&self) -> DbResult<RepairReport> {
         let start = Instant::now();
 
-        let regular_defs: Vec<IndexDefinition> =
-            self.index_manager_ref().iter_indexes().collect();
+        let regular_defs: Vec<IndexDefinition> = self.index_manager_ref().iter_indexes().collect();
         let unique_defs: Vec<IndexDefinition> =
             self.index_manager_ref().iter_unique_indexes().collect();
-        let sorted_defs: Vec<SortedIndexDefinition> =
-            self.sorted_indexes().iter_indexes();
+        let sorted_defs: Vec<SortedIndexDefinition> = self.sorted_indexes().iter_indexes();
 
         let counter_before = self.count().await? as u64;
 
@@ -204,18 +197,13 @@ impl TableManager {
                 .await?;
         }
         for def in &sorted_defs {
-            let _ = self
-                .sorted_indexes()
-                .drop_index(def.name_interned)
-                .await?;
+            let _ = self.sorted_indexes().drop_index(def.name_interned).await?;
         }
 
         // Recreate regular + unique via the existing create_index
         // path — it scans data + adds entries.
         for def in regular_defs.iter() {
-            self.index_manager_ref()
-                .create_index(def.clone())
-                .await?;
+            self.index_manager_ref().create_index(def.clone()).await?;
         }
         for def in unique_defs.iter() {
             self.index_manager_ref()
@@ -234,9 +222,7 @@ impl TableManager {
             while let Some(batch) = stream.next().await {
                 let pairs = batch?;
                 for (id, value) in &pairs {
-                    self.sorted_indexes()
-                        .on_record_created(id, value)
-                        .await?;
+                    self.sorted_indexes().on_record_created(id, value).await?;
                 }
             }
         }

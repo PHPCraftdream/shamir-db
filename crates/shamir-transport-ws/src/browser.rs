@@ -42,7 +42,9 @@ impl BrowserOriginPolicy {
 
     /// Test whether an `Origin` header value is allowed by this policy.
     pub fn allows(&self, origin: &str) -> bool {
-        self.allowed.iter().any(|pattern| origin_matches(pattern, origin))
+        self.allowed
+            .iter()
+            .any(|pattern| origin_matches(pattern, origin))
     }
 
     /// Number of configured allowed origins.
@@ -118,10 +120,7 @@ mod tests {
     #[test]
     fn missing_origin_always_rejected() {
         let p = BrowserOriginPolicy::allow(["https://example.com"]);
-        assert_eq!(
-            validate_origin(&p, None),
-            Err(OriginRejected::Missing)
-        );
+        assert_eq!(validate_origin(&p, None), Err(OriginRejected::Missing));
     }
 
     #[test]

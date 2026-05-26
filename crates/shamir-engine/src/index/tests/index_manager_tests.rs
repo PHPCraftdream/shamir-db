@@ -1,10 +1,10 @@
-use shamir_types::core::interner::InternerKey;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info::IndexInfo;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -1922,7 +1922,10 @@ async fn test_composite_unique_index_creation_succeeds_with_unique_data() {
 
     for v in [&value1, &value2, &value3] {
         let id = RecordId::new();
-        data_store.set(id.to_bytes(), v.to_bytes().unwrap()).await.unwrap();
+        data_store
+            .set(id.to_bytes(), v.to_bytes().unwrap())
+            .await
+            .unwrap();
     }
 
     // Create unique composite index - should succeed
@@ -2075,7 +2078,10 @@ async fn test_delete_last_record_removes_index_key() {
         .to_bytes();
     let store_result = info_store.get(index_key).await;
     assert!(
-        matches!(store_result, Err(shamir_storage::error::DbError::NotFound(_))),
+        matches!(
+            store_result,
+            Err(shamir_storage::error::DbError::NotFound(_))
+        ),
         "Index key should be removed from store after last record deleted"
     );
 }

@@ -2,28 +2,24 @@
 
 #![allow(deprecated)]
 
-use shamir_types::codecs::transform;
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
 use crate::table::Table;
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::Repo;
+use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::{InnerValue, UserValue};
 use std::sync::Arc;
 
 /// Helper to create InternerManager for a table
-fn create_interner_manager(
-    info_store: Arc<dyn shamir_storage::types::Store>,
-) -> InternerManager {
+fn create_interner_manager(info_store: Arc<dyn shamir_storage::types::Store>) -> InternerManager {
     InternerManager::new(info_store)
 }
 
 /// Helper to create RecordCounter for a table
-fn create_record_counter(
-    info_store: Arc<dyn shamir_storage::types::Store>,
-) -> Arc<RecordCounter> {
+fn create_record_counter(info_store: Arc<dyn shamir_storage::types::Store>) -> Arc<RecordCounter> {
     Arc::new(RecordCounter::new(info_store))
 }
 

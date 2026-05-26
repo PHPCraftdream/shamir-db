@@ -74,8 +74,8 @@ fn gen_user(i: usize) -> JsonValue {
 async fn fresh_db() -> Arc<ShamirDb> {
     let shamir = Arc::new(ShamirDb::init_memory().await.expect("init"));
     shamir.create_db("bench").await;
-    let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("users"));
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     shamir.add_repo("bench", cfg).await.expect("add_repo");
     shamir
 }
@@ -821,7 +821,9 @@ fn bench_count_all_no_filter(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_count_all();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -840,7 +842,9 @@ fn bench_count_with_filter_no_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_count_with_filter("NYC");
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -861,7 +865,9 @@ fn bench_count_with_filter_with_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_count_with_filter("NYC");
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -880,7 +886,9 @@ fn bench_min_max_no_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_min_max_score();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -901,7 +909,9 @@ fn bench_min_max_with_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_min_max_score();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -920,7 +930,9 @@ fn bench_min_only_no_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_min_score();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -943,7 +955,9 @@ fn bench_min_only_with_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_min_score();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -1052,7 +1066,9 @@ fn bench_order_limit_with_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_read_with_order_limit();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -1071,7 +1087,9 @@ fn bench_range_query_no_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_range_age();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -1094,7 +1112,9 @@ fn bench_range_query_with_index(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_range_age();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
     }
@@ -1154,59 +1174,75 @@ macro_rules! bench_bulk_insert_for_backend {
             group.measurement_time(Duration::from_secs(10));
             for &count in bulk_sweep() {
                 group.throughput(Throughput::Elements(count as u64));
-                group.bench_with_input(
-                    BenchmarkId::from_parameter(count),
-                    &count,
-                    |b, &count| {
-                        b.to_async(&rt).iter_custom(|iters| async move {
-                            let mut total = Duration::ZERO;
-                            for _ in 0..iters {
-                                let tempdir = tempfile::TempDir::new().expect("tempdir");
-                                let shamir = $fresh(tempdir.path()).await;
-                                let req = req_bulk_insert(0, count);
-                                let start = Instant::now();
-                                shamir.execute("bench", &req).await.unwrap();
-                                total += start.elapsed();
-                                drop(shamir);
-                                drop(tempdir);
-                            }
-                            total
-                        });
-                    },
-                );
+                group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+                    b.to_async(&rt).iter_custom(|iters| async move {
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let tempdir = tempfile::TempDir::new().expect("tempdir");
+                            let shamir = $fresh(tempdir.path()).await;
+                            let req = req_bulk_insert(0, count);
+                            let start = Instant::now();
+                            shamir.execute("bench", &req).await.unwrap();
+                            total += start.elapsed();
+                            drop(shamir);
+                            drop(tempdir);
+                        }
+                        total
+                    });
+                });
             }
             group.finish();
         }
     };
 }
 
-bench_bulk_insert_for_backend!(bench_bulk_insert_redb,   "bulk_insert_redb",   fresh_db_redb);
-bench_bulk_insert_for_backend!(bench_bulk_insert_persy,  "bulk_insert_persy",  fresh_db_persy);
-bench_bulk_insert_for_backend!(bench_bulk_insert_canopy, "bulk_insert_canopy", fresh_db_canopy);
-bench_bulk_insert_for_backend!(bench_bulk_insert_fjall,  "bulk_insert_fjall",  fresh_db_fjall);
-bench_bulk_insert_for_backend!(bench_bulk_insert_nebari, "bulk_insert_nebari", fresh_db_nebari);
+bench_bulk_insert_for_backend!(bench_bulk_insert_redb, "bulk_insert_redb", fresh_db_redb);
+bench_bulk_insert_for_backend!(bench_bulk_insert_persy, "bulk_insert_persy", fresh_db_persy);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_canopy,
+    "bulk_insert_canopy",
+    fresh_db_canopy
+);
+bench_bulk_insert_for_backend!(bench_bulk_insert_fjall, "bulk_insert_fjall", fresh_db_fjall);
+bench_bulk_insert_for_backend!(
+    bench_bulk_insert_nebari,
+    "bulk_insert_nebari",
+    fresh_db_nebari
+);
 
 // MemBuffer-wrapped variants. Same backends, same numbers as raw
 // for the passthrough proxy phase. Once the LRU + flusher ship,
 // expect: persy/nebari/canopy biggest win; sled/redb/fjall
 // near-noise.
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_sled,   "bulk_insert_membuffer_sled",   fresh_db_membuffer_sled
+    bench_bulk_insert_membuffer_sled,
+    "bulk_insert_membuffer_sled",
+    fresh_db_membuffer_sled
 );
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_redb,   "bulk_insert_membuffer_redb",   fresh_db_membuffer_redb
+    bench_bulk_insert_membuffer_redb,
+    "bulk_insert_membuffer_redb",
+    fresh_db_membuffer_redb
 );
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_persy,  "bulk_insert_membuffer_persy",  fresh_db_membuffer_persy
+    bench_bulk_insert_membuffer_persy,
+    "bulk_insert_membuffer_persy",
+    fresh_db_membuffer_persy
 );
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_canopy, "bulk_insert_membuffer_canopy", fresh_db_membuffer_canopy
+    bench_bulk_insert_membuffer_canopy,
+    "bulk_insert_membuffer_canopy",
+    fresh_db_membuffer_canopy
 );
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_fjall,  "bulk_insert_membuffer_fjall",  fresh_db_membuffer_fjall
+    bench_bulk_insert_membuffer_fjall,
+    "bulk_insert_membuffer_fjall",
+    fresh_db_membuffer_fjall
 );
 bench_bulk_insert_for_backend!(
-    bench_bulk_insert_membuffer_nebari, "bulk_insert_membuffer_nebari", fresh_db_membuffer_nebari
+    bench_bulk_insert_membuffer_nebari,
+    "bulk_insert_membuffer_nebari",
+    fresh_db_membuffer_nebari
 );
 
 // Membuffer-only bench using the macro shape: in-memory backend
@@ -1280,7 +1316,9 @@ fn bench_range_query_no_index_sled(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_range_age();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
         // Drop shamir before tempdir so sled releases the directory.
@@ -1306,7 +1344,9 @@ fn bench_range_query_with_index_sled(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_range_age();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
         drop(shamir);
@@ -1332,7 +1372,9 @@ fn bench_range_query_narrow_no_index_sled(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_range_age_narrow();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
         drop(shamir);
@@ -1357,7 +1399,9 @@ fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let shamir = Arc::clone(&shamir);
                 let req = req_range_age_narrow();
-                async move { shamir.execute("bench", &req).await.unwrap(); }
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
             });
         });
         drop(shamir);
@@ -1446,8 +1490,7 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
                     flush_interval_ms: 60_000,
                     flush_batch_size: 256,
                 };
-                let store: Arc<dyn Store> =
-                    Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v = RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
                 let start = Instant::now();
                 for _ in 0..50_000 {
@@ -1477,8 +1520,7 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
                     flush_interval_ms: 300,
                     flush_batch_size: 256,
                 };
-                let store: Arc<dyn Store> =
-                    Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v = RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
                 let start = Instant::now();
                 for _ in 0..50_000 {
@@ -1530,8 +1572,7 @@ fn bench_eviction_byte_pressure(c: &mut Criterion) {
                     flush_interval_ms: 60_000, // effectively no auto-flush
                     flush_batch_size: 256,
                 };
-                let store: Arc<dyn Store> =
-                    Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
                 let v: shamir_db::storage::types::RecordKey =
                     shamir_db::storage::types::RecordKey::copy_from_slice(&vec![0xAAu8; 80]);
                 for _ in 0..8_000 {
@@ -1610,27 +1651,27 @@ fn bench_cache_hit_get(c: &mut Criterion) {
     for &n in &[1_000usize, 10_000] {
         // Build a warmed MemBuffer cache holding `n` keys, all
         // resident (cache size = n, large max_bytes).
-        let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt.block_on(async {
-            let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-            let cfg = MemBufferConfig {
-                max_bytes: 64 * 1024 * 1024,
-                max_entries: n * 2,
-                ttl_ms: None,
-                flush_interval_ms: 500,
-                flush_batch_size: 256,
-            };
-            let store: Arc<dyn Store> =
-                Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
-            let mut keys = Vec::with_capacity(n);
-            for i in 0..n {
-                let id = RecordId::new();
-                let key = shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
-                let value = shamir_db::storage::types::RecordKey::from(format!("v{i}"));
-                store.set(key.clone(), value).await.unwrap();
-                keys.push(key);
-            }
-            (store, keys)
-        });
+        let (store, keys): (Arc<dyn Store>, Vec<shamir_db::storage::types::RecordKey>) = rt
+            .block_on(async {
+                let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+                let cfg = MemBufferConfig {
+                    max_bytes: 64 * 1024 * 1024,
+                    max_entries: n * 2,
+                    ttl_ms: None,
+                    flush_interval_ms: 500,
+                    flush_batch_size: 256,
+                };
+                let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(Arc::clone(&inner), cfg));
+                let mut keys = Vec::with_capacity(n);
+                for i in 0..n {
+                    let id = RecordId::new();
+                    let key = shamir_db::storage::types::RecordKey::copy_from_slice(id.as_bytes());
+                    let value = shamir_db::storage::types::RecordKey::from(format!("v{i}"));
+                    store.set(key.clone(), value).await.unwrap();
+                    keys.push(key);
+                }
+                (store, keys)
+            });
 
         // Shuffle keys for uniform-random access pattern.
         let mut rng = rand::thread_rng();
@@ -1694,7 +1735,7 @@ fn quick_aware_criterion() -> Criterion {
     }
 }
 
-criterion_group!{
+criterion_group! {
     name = benches;
     config = quick_aware_criterion();
     targets =
@@ -1847,7 +1888,8 @@ fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
                                         "fields": [["score"]]
                                     }
                                 }
-                            })).unwrap();
+                            }))
+                            .unwrap();
                             shamir.execute("bench", &req).await.unwrap();
                         });
                         total += start.elapsed();
@@ -1925,9 +1967,7 @@ fn bench_group_by_sum_e2e(c: &mut Criterion) {
 async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
-        let values: Vec<JsonValue> = (chunk_start..chunk_end)
-            .map(|i| gen_user(i))
-            .collect();
+        let values: Vec<JsonValue> = (chunk_start..chunk_end).map(|i| gen_user(i)).collect();
         let req: BatchRequest = serde_json::from_value(json!({
             "id": chunk_start,
             "queries": {
@@ -1937,7 +1977,8 @@ async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
                     "return_result": false
                 }
             }
-        })).unwrap();
+        }))
+        .unwrap();
         shamir.execute("bench", &req).await.unwrap();
     }
 }

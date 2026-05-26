@@ -55,8 +55,8 @@ fn session_key(session: &Session) -> [u8; 32] {
 async fn make_db_with_table(db: &str, table: &str) -> Arc<ShamirDb> {
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     shamir.create_db(db).await;
-    let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new(table));
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new(table));
     shamir.add_repo(db, cfg).await.expect("add repo");
     Arc::new(shamir)
 }
@@ -147,10 +147,7 @@ async fn drop_table_with_correct_hmac_accepted() {
     let session = root_session();
 
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(
-        &key,
-        &canon::canonical_drop_table("prod", "main", "items"),
-    );
+    let tag = canon::compute_tag_hex(&key, &canon::canonical_drop_table("prod", "main", "items"));
 
     let req = execute(
         "prod",
@@ -185,10 +182,8 @@ async fn drop_table_tag_bound_to_target_table() {
     let session = root_session();
 
     let key = session_key(&session);
-    let tag_for_items = canon::compute_tag_hex(
-        &key,
-        &canon::canonical_drop_table("prod", "main", "items"),
-    );
+    let tag_for_items =
+        canon::compute_tag_hex(&key, &canon::canonical_drop_table("prod", "main", "items"));
 
     // Submit drop_table for "other" with the items-tag.
     let req = execute(
@@ -245,10 +240,7 @@ async fn drop_db_with_correct_hmac_accepted() {
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
-    let tag = canon::compute_tag_hex(
-        &session_key(&session),
-        &canon::canonical_drop_db("victim"),
-    );
+    let tag = canon::compute_tag_hex(&session_key(&session), &canon::canonical_drop_db("victim"));
     let req = execute(
         "scratch",
         json!({

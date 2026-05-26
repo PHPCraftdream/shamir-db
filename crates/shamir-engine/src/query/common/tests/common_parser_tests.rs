@@ -4,11 +4,11 @@
 
 use crate::query::common::{
     agg_func_from_str, aggregate_field_from_value, expr_from_value, expr_value_from_value,
-    filter_from_value, group_by_from_value, pagination_from_value, order_by_from_value,
-    order_by_item_from_value, QueryParseError,
+    filter_from_value, group_by_from_value, order_by_from_value, order_by_item_from_value,
+    pagination_from_value, QueryParseError,
 };
 use crate::query::read::{
-    AggFunc, AggregateField, Pagination, SelectExpr, SelectExprValue, NullsOrder, OrderDirection,
+    AggFunc, AggregateField, NullsOrder, OrderDirection, Pagination, SelectExpr, SelectExprValue,
 };
 use shamir_types::types::value::QueryValue;
 
@@ -93,7 +93,13 @@ fn test_limit_only() {
     let json = r#"{ "limit": 10 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let p = pagination_from_value(&value).unwrap();
-    assert_eq!(p, Pagination::LimitOffset { limit: Some(10), offset: 0 });
+    assert_eq!(
+        p,
+        Pagination::LimitOffset {
+            limit: Some(10),
+            offset: 0
+        }
+    );
 }
 
 #[test]
@@ -101,7 +107,13 @@ fn test_limit_with_offset() {
     let json = r#"{ "limit": 10, "offset": 20 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let p = pagination_from_value(&value).unwrap();
-    assert_eq!(p, Pagination::LimitOffset { limit: Some(10), offset: 20 });
+    assert_eq!(
+        p,
+        Pagination::LimitOffset {
+            limit: Some(10),
+            offset: 20
+        }
+    );
 }
 
 #[test]
@@ -109,7 +121,13 @@ fn test_offset_only() {
     let json = r#"{ "offset": 50 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let p = pagination_from_value(&value).unwrap();
-    assert_eq!(p, Pagination::LimitOffset { limit: None, offset: 50 });
+    assert_eq!(
+        p,
+        Pagination::LimitOffset {
+            limit: None,
+            offset: 50
+        }
+    );
 }
 
 // ============================================================================
@@ -121,7 +139,13 @@ fn test_page_based() {
     let json = r#"{ "page": 2, "page_size": 10 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let p = pagination_from_value(&value).unwrap();
-    assert_eq!(p, Pagination::Page { page: 2, page_size: 10 });
+    assert_eq!(
+        p,
+        Pagination::Page {
+            page: 2,
+            page_size: 10
+        }
+    );
 }
 
 #[test]
@@ -129,7 +153,13 @@ fn test_page_based_page_1() {
     let json = r#"{ "page": 1, "page_size": 25 }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let p = pagination_from_value(&value).unwrap();
-    assert_eq!(p, Pagination::Page { page: 1, page_size: 25 });
+    assert_eq!(
+        p,
+        Pagination::Page {
+            page: 1,
+            page_size: 25
+        }
+    );
 }
 
 #[test]
@@ -166,7 +196,10 @@ fn test_group_by_multiple_fields() {
     let json = r#"{ "fields": ["department", "role"] }"#;
     let value: QueryValue = serde_json::from_str(json).unwrap();
     let group = group_by_from_value(&value).unwrap();
-    assert_eq!(group.fields, vec![vec!["department".to_string()], vec!["role".to_string()]]);
+    assert_eq!(
+        group.fields,
+        vec![vec!["department".to_string()], vec!["role".to_string()]]
+    );
 }
 
 #[test]
@@ -291,7 +324,10 @@ fn test_expr_literal_null() {
 fn test_expr_value_types() {
     // Null
     let v: QueryValue = serde_json::from_str("null").unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::Null)));
+    assert!(matches!(
+        expr_value_from_value(&v),
+        Ok(SelectExprValue::Null)
+    ));
 
     // Bool
     let v: QueryValue = serde_json::from_str("true").unwrap();
@@ -302,11 +338,17 @@ fn test_expr_value_types() {
 
     // Int
     let v: QueryValue = serde_json::from_str("42").unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::Int(42))));
+    assert!(matches!(
+        expr_value_from_value(&v),
+        Ok(SelectExprValue::Int(42))
+    ));
 
     // Float
     let v: QueryValue = serde_json::from_str("3.14").unwrap();
-    assert!(matches!(expr_value_from_value(&v), Ok(SelectExprValue::Float(_))));
+    assert!(matches!(
+        expr_value_from_value(&v),
+        Ok(SelectExprValue::Float(_))
+    ));
 
     // String
     let v: QueryValue = serde_json::from_str(r#""hello""#).unwrap();

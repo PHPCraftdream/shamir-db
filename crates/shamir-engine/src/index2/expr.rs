@@ -219,9 +219,9 @@ mod tests {
     fn lower_trim_compose() {
         let i = Interner::new();
         let rec = make_rec(&i);
-        let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(
-            vec![intern(&i, "email")],
-        )))));
+        let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(vec![
+            intern(&i, "email"),
+        ])))));
         let v = expr.eval(&rec).unwrap();
         assert_eq!(v, InnerValue::Str("alice@example.com".into()));
     }
@@ -277,7 +277,7 @@ mod tests {
         let i = Interner::new();
         let rec = make_rec(&i);
         let expr = IndexExpr::Coalesce(vec![
-            IndexExpr::Field(vec![intern(&i, "name")]),       // Null
+            IndexExpr::Field(vec![intern(&i, "name")]),        // Null
             IndexExpr::Field(vec![intern(&i, "nonexistent")]), // FieldNotFound
             IndexExpr::Field(vec![intern(&i, "email")]),       // actual
         ]);
@@ -331,9 +331,9 @@ mod tests {
 
     #[test]
     fn serde_round_trip() {
-        let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(
-            vec![42],
-        )))));
+        let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(vec![
+            42,
+        ])))));
         let bytes = bincode::serialize(&expr).unwrap();
         let got: IndexExpr = bincode::deserialize(&bytes).unwrap();
         match got {

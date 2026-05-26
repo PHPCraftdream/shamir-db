@@ -4,7 +4,7 @@
 
 use crate::query::common::{
     agg_func_from_str, aggregate_field_from_value, filter_from_value, group_by_from_value,
-    pagination_from_value, order_by_from_value, QueryParseError,
+    order_by_from_value, pagination_from_value, QueryParseError,
 };
 use crate::query::read::{Pagination, ReadQuery, Select, SelectItem};
 use crate::query::TableRef;
@@ -20,12 +20,14 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
     let from = match map.get("from") {
         Some(Value::Str(s)) => TableRef::new(s.clone()),
         Some(Value::List(parts)) if parts.len() == 2 => {
-            if let (Some(Value::Str(repo)), Some(Value::Str(table))) =
-                (parts.first(), parts.get(1))
+            if let (Some(Value::Str(repo)), Some(Value::Str(table))) = (parts.first(), parts.get(1))
             {
                 TableRef::with_repo(repo.clone(), table.clone())
             } else {
-                return Err(QueryParseError::InvalidType("from", "string or [repo, table]"));
+                return Err(QueryParseError::InvalidType(
+                    "from",
+                    "string or [repo, table]",
+                ));
             }
         }
         _ => return Err(QueryParseError::MissingField("from")),

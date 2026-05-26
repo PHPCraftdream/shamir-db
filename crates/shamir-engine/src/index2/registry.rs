@@ -41,7 +41,9 @@ impl IndexRegistry {
         self.by_name
             .insert_async(name_interned, id)
             .await
-            .map_err(|_| IndexError::Backend(format!("index name {name_interned} already registered")))?;
+            .map_err(|_| {
+                IndexError::Backend(format!("index name {name_interned} already registered"))
+            })?;
         Ok(())
     }
 
@@ -165,10 +167,7 @@ mod tests {
         async fn on_delete(&self, _: RecordId, _: &InnerValue) -> Result<(), IndexError> {
             Ok(())
         }
-        async fn on_batch_insert(
-            &self,
-            _: &[(RecordId, &InnerValue)],
-        ) -> Result<(), IndexError> {
+        async fn on_batch_insert(&self, _: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
             Ok(())
         }
         async fn lookup(&self, _: IndexQuery) -> Result<IndexResult, IndexError> {

@@ -10,8 +10,8 @@ use crate::index2::expr::{ExprError, IndexExpr};
 use crate::index2::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 use async_trait::async_trait;
 use bytes::Bytes;
-use fxhash::FxHasher;
 use futures::StreamExt;
+use fxhash::FxHasher;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -170,10 +170,7 @@ impl IndexBackend for FunctionalBackend {
         Ok(())
     }
 
-    async fn on_batch_insert(
-        &self,
-        items: &[(RecordId, &InnerValue)],
-    ) -> Result<(), IndexError> {
+    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
         for (rid, rec) in items {
             self.on_insert(*rid, rec).await?;
         }
@@ -251,9 +248,9 @@ mod tests {
     }
 
     fn make_backend(interner: &Interner, store: Arc<dyn Store>) -> FunctionalBackend {
-        let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(
-            vec![intern(interner, "email")],
-        )))));
+        let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(vec![
+            intern(interner, "email"),
+        ])))));
         let desc = IndexDescriptor::new(
             1,
             "email_lower",

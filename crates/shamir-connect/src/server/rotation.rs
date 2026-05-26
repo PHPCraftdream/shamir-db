@@ -106,7 +106,11 @@ impl ServerIdentityState {
 
     /// Previous public key during overlap (if any).
     pub fn previous_pub(&self) -> Option<[u8; 32]> {
-        self.inner.read().previous.as_ref().map(|kp| kp.public_bytes())
+        self.inner
+            .read()
+            .previous
+            .as_ref()
+            .map(|kp| kp.public_bytes())
     }
 
     /// `transition_until_ns` if currently in overlap.
@@ -129,11 +133,7 @@ impl ServerIdentityState {
 
     /// Sign a message with the **previous** priv key (if in overlap).
     pub fn sign_with_previous(&self, msg: &[u8]) -> Option<[u8; 64]> {
-        self.inner
-            .read()
-            .previous
-            .as_ref()
-            .map(|kp| kp.sign(msg))
+        self.inner.read().previous.as_ref().map(|kp| kp.sign(msg))
     }
 
     /// Execute `rotateServerIdentity` (spec §12.2):
@@ -216,7 +216,12 @@ pub fn build_identity_rotation_event(
     let old_pub = previous.public_bytes();
     let new_pub = inner.current.public_bytes();
 
-    let payload = build_rotate_event_input(&old_pub, &new_pub, transition_until_ns, recipient_session_id);
+    let payload = build_rotate_event_input(
+        &old_pub,
+        &new_pub,
+        transition_until_ns,
+        recipient_session_id,
+    );
     let signed_by_old = previous.sign(&payload);
 
     Ok(IdentityRotationEvent {

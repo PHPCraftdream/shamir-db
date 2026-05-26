@@ -36,7 +36,10 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -61,7 +64,9 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
             query_limits: Default::default(),
         },
         audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
+        observability: shamir_server::config::ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 
@@ -126,10 +131,13 @@ async fn cap_two_refuses_third_concurrent_client() {
     let result = tokio::time::timeout(Duration::from_secs(2), attempt).await;
     match result {
         Ok(Ok(_tls_stream)) => {
-            panic!("server should NOT have completed TLS handshake — cap is 2 and we have 2 active");
+            panic!(
+                "server should NOT have completed TLS handshake — cap is 2 and we have 2 active"
+            );
         }
         Ok(Err(_e)) => { /* TLS failed — expected */ }
-        Err(_elapsed) => { /* TLS hung past timeout — also expected (kernel held SYN-RECEIVED) */ }
+        Err(_elapsed) => { /* TLS hung past timeout — also expected (kernel held SYN-RECEIVED) */
+        }
     }
 
     // Sanity: drop one of the open sessions, give the server a moment,
@@ -138,13 +146,10 @@ async fn cap_two_refuses_third_concurrent_client() {
     tokio::time::sleep(Duration::from_millis(150)).await;
     let _s3 = {
         let tcp = TcpStream::connect(addr).await.expect("tcp 3 after release");
-        let r = tokio::time::timeout(
-            Duration::from_secs(3),
-            connector.connect(server_name, tcp),
-        )
-        .await
-        .expect("tls 3 within timeout")
-        .expect("tls 3 should succeed after slot frees");
+        let r = tokio::time::timeout(Duration::from_secs(3), connector.connect(server_name, tcp))
+            .await
+            .expect("tls 3 within timeout")
+            .expect("tls 3 should succeed after slot frees");
         r
     };
 

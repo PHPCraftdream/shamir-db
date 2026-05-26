@@ -10,9 +10,7 @@ use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use shamir_connect::client::handshake::{
-    HandshakeBuilder, ServerAuthOk, ServerChallenge,
-};
+use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -89,17 +87,15 @@ impl Client {
             .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
 
         // ---- SCRAM ----
-        let mut hb = HandshakeBuilder::new(
-            username,
-            TransportKind::Tcp,
-            BindingMode::TlsExporter,
-        )
-        .tls_exporter(exporter);
+        let mut hb = HandshakeBuilder::new(username, TransportKind::Tcp, BindingMode::TlsExporter)
+            .tls_exporter(exporter);
         hb = match opts.trusted_pin {
             Some(pin) => hb.pinned_hash(pin),
             None => hb.accept_new_host(opts.accept_new_host),
         };
-        let mut hs = hb.build().map_err(|e| ClientError::Handshake(e.to_string()))?;
+        let mut hs = hb
+            .build()
+            .map_err(|e| ClientError::Handshake(e.to_string()))?;
 
         let (mut r, mut w) = split(tls);
 

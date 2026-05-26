@@ -39,7 +39,9 @@ async fn test_add_repo_persists() {
     shamir.add_repo("production", config).await.unwrap();
 
     let repos = shamir.system_store().load_repositories().await.unwrap();
-    assert!(repos.iter().any(|r| r["repo_name"] == "users_db" && r["db_name"] == "production"));
+    assert!(repos
+        .iter()
+        .any(|r| r["repo_name"] == "users_db" && r["db_name"] == "production"));
 }
 
 #[tokio::test]
@@ -60,7 +62,11 @@ async fn test_system_store_has_tables() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
     // System store should have settings, users, roles tables accessible
-    let settings = shamir.system_store().load_setting("nonexistent").await.unwrap();
+    let settings = shamir
+        .system_store()
+        .load_setting("nonexistent")
+        .await
+        .unwrap();
     assert!(settings.is_none());
 }
 
@@ -68,9 +74,17 @@ async fn test_system_store_has_tables() {
 async fn test_settings_persistence() {
     let shamir = ShamirDb::init_memory().await.unwrap();
 
-    shamir.system_store().save_setting("max_connections", &serde_json::json!(100)).await.unwrap();
+    shamir
+        .system_store()
+        .save_setting("max_connections", &serde_json::json!(100))
+        .await
+        .unwrap();
 
-    let val = shamir.system_store().load_setting("max_connections").await.unwrap();
+    let val = shamir
+        .system_store()
+        .load_setting("max_connections")
+        .await
+        .unwrap();
     assert_eq!(val, Some(serde_json::json!(100)));
 }
 
@@ -88,6 +102,9 @@ async fn test_multiple_repos_persist() {
     shamir.add_repo("production", config2).await.unwrap();
 
     let repos = shamir.system_store().load_repositories().await.unwrap();
-    let prod_repos: Vec<_> = repos.iter().filter(|r| r["db_name"] == "production").collect();
+    let prod_repos: Vec<_> = repos
+        .iter()
+        .filter(|r| r["db_name"] == "production")
+        .collect();
     assert_eq!(prod_repos.len(), 2);
 }

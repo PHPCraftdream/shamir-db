@@ -28,11 +28,7 @@ pub struct FtsRankedBackend {
 }
 
 impl FtsRankedBackend {
-    pub fn new(
-        descriptor: IndexDescriptor,
-        field_path: Vec<u64>,
-        store: Arc<dyn Store>,
-    ) -> Self {
+    pub fn new(descriptor: IndexDescriptor, field_path: Vec<u64>, store: Arc<dyn Store>) -> Self {
         let tokenizer: Arc<dyn Tokenizer> = match &descriptor.kind {
             crate::index2::kind::IndexKind::Fts { tokenizer: tk, .. } => {
                 Arc::from(tokenizer::build_tokenizer(tk))
@@ -103,9 +99,7 @@ impl FtsRankedBackend {
         th: u64,
     ) -> Result<Vec<(RecordId, FtsPostingValue)>, IndexError> {
         let prefix = self.prefix_for_token(th);
-        let mut stream = self
-            .store
-            .scan_prefix_stream(Bytes::from(prefix), 1024);
+        let mut stream = self.store.scan_prefix_stream(Bytes::from(prefix), 1024);
         let mut results = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
@@ -197,10 +191,7 @@ impl IndexBackend for FtsRankedBackend {
         Ok(())
     }
 
-    async fn on_batch_insert(
-        &self,
-        items: &[(RecordId, &InnerValue)],
-    ) -> Result<(), IndexError> {
+    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
         for (rid, rec) in items {
             self.on_insert(*rid, rec).await?;
         }
@@ -254,11 +245,11 @@ impl IndexBackend for FtsRankedBackend {
                                 }
                             }
                         }
-                        let mut ranked: Vec<(RecordId, f32)> = scores
-                            .into_iter()
-                            .map(|(r, s)| (r, s as f32))
-                            .collect();
-                        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        let mut ranked: Vec<(RecordId, f32)> =
+                            scores.into_iter().map(|(r, s)| (r, s as f32)).collect();
+                        ranked.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                         Ok(IndexResult::Ranked(ranked))
                     }
                     FtsMode::OrAny => {
@@ -277,11 +268,11 @@ impl IndexBackend for FtsRankedBackend {
                                 );
                             }
                         }
-                        let mut ranked: Vec<(RecordId, f32)> = scores
-                            .into_iter()
-                            .map(|(r, s)| (r, s as f32))
-                            .collect();
-                        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                        let mut ranked: Vec<(RecordId, f32)> =
+                            scores.into_iter().map(|(r, s)| (r, s as f32)).collect();
+                        ranked.sort_by(|a, b| {
+                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                        });
                         Ok(IndexResult::Ranked(ranked))
                     }
                 }
@@ -409,9 +400,15 @@ mod tests {
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         let r3 = RecordId::new();
-        fts.on_insert(r1, &make_rec(&i, "alpha beta")).await.unwrap();
-        fts.on_insert(r2, &make_rec(&i, "gamma delta")).await.unwrap();
-        fts.on_insert(r3, &make_rec(&i, "alpha gamma")).await.unwrap();
+        fts.on_insert(r1, &make_rec(&i, "alpha beta"))
+            .await
+            .unwrap();
+        fts.on_insert(r2, &make_rec(&i, "gamma delta"))
+            .await
+            .unwrap();
+        fts.on_insert(r3, &make_rec(&i, "alpha gamma"))
+            .await
+            .unwrap();
 
         let result = fts
             .lookup(IndexQuery::Fts {
@@ -442,14 +439,18 @@ mod tests {
         fts.on_insert(r1, &rec).await.unwrap();
 
         assert_eq!(
-            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
         assert!((fts.stats.avg_doc_len() - 4.0).abs() < 0.01);
 
         fts.on_delete(r1, &rec).await.unwrap();
         assert_eq!(
-            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
     }
@@ -468,7 +469,10 @@ mod tests {
             .unwrap();
         fts.on_insert(
             r_long,
-            &make_rec(&i, "rust is just one of many many many many many words here"),
+            &make_rec(
+                &i,
+                "rust is just one of many many many many many words here",
+            ),
         )
         .await
         .unwrap();
@@ -501,11 +505,11 @@ mod tests {
 
         // Insert records via data_store directly (simulating persisted data).
         let recs = [
-            make_rec(&i, "alpha beta gamma"),       // 3 tokens
-            make_rec(&i, "hello world foo bar"),    // 4 tokens
-            make_rec(&i, "short"),                   // 1 token
-            make_rec(&i, "a b c d e f"),             // 6 tokens
-            make_rec(&i, ""),                        // 0 tokens — skipped
+            make_rec(&i, "alpha beta gamma"),    // 3 tokens
+            make_rec(&i, "hello world foo bar"), // 4 tokens
+            make_rec(&i, "short"),               // 1 token
+            make_rec(&i, "a b c d e f"),         // 6 tokens
+            make_rec(&i, ""),                    // 0 tokens — skipped
         ];
         for rec in &recs {
             let rid = RecordId::new();
@@ -519,20 +523,30 @@ mod tests {
 
         // Verify stats are correct after inserts.
         assert_eq!(
-            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             4
         ); // "" has doc_len=0 → not counted
         assert_eq!(
-            fts.stats.sum_doc_len.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .sum_doc_len
+                .load(std::sync::atomic::Ordering::Relaxed),
             14
         ); // 3+4+1+6
 
         // Reset stats to zero (simulates reopen where counters start at 0).
-        fts.stats.doc_count.store(0, std::sync::atomic::Ordering::Relaxed);
-        fts.stats.sum_doc_len.store(0, std::sync::atomic::Ordering::Relaxed);
+        fts.stats
+            .doc_count
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        fts.stats
+            .sum_doc_len
+            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         assert_eq!(
-            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
 
@@ -541,11 +555,15 @@ mod tests {
 
         // Stats must be restored.
         assert_eq!(
-            fts.stats.doc_count.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             4
         );
         assert_eq!(
-            fts.stats.sum_doc_len.load(std::sync::atomic::Ordering::Relaxed),
+            fts.stats
+                .sum_doc_len
+                .load(std::sync::atomic::Ordering::Relaxed),
             14
         );
         assert!((fts.stats.avg_doc_len() - 3.5).abs() < 0.01); // 14/4

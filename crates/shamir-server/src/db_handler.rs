@@ -224,17 +224,21 @@ impl ShamirDbHandler {
 
 impl RequestHandler for ShamirDbHandler {
     fn handle(&self, session: &Session, req: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        let request: DbRequest = rmp_serde::from_slice(req)
-            .map_err(|e| format!("invalid_request: {}", e))?;
+        let request: DbRequest =
+            rmp_serde::from_slice(req).map_err(|e| format!("invalid_request: {}", e))?;
 
         let response = match request {
             DbRequest::Ping => DbResponse::Pong,
-            DbRequest::Execute { query_version, db, batch } => {
-                self.execute(session, query_version, &db, batch)
-            }
-            DbRequest::CreateScramUser { name, password, roles } => {
-                self.create_scram_user(session, name, password, roles)
-            }
+            DbRequest::Execute {
+                query_version,
+                db,
+                batch,
+            } => self.execute(session, query_version, &db, batch),
+            DbRequest::CreateScramUser {
+                name,
+                password,
+                roles,
+            } => self.create_scram_user(session, name, password, roles),
         };
 
         rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
@@ -283,10 +287,7 @@ impl ShamirDbHandler {
                 if entry.op.is_admin() {
                     return DbResponse::Error {
                         code: "permission_denied".into(),
-                        message: format!(
-                            "query '{}' requires superuser (admin/auth op)",
-                            alias
-                        ),
+                        message: format!("query '{}' requires superuser (admin/auth op)", alias),
                     };
                 }
             }
@@ -340,7 +341,9 @@ impl ShamirDbHandler {
     /// boot-replay aid.
     fn persist_table_lifecycle(&self, db_name: &str, batch: &BatchRequest) {
         let Some(admin) = &self.admin else { return };
-        let Some(reg) = &admin.tables_registry else { return };
+        let Some(reg) = &admin.tables_registry else {
+            return;
+        };
         for entry in batch.queries.values() {
             match &entry.op {
                 BatchOp::CreateTable(op) => {
@@ -391,17 +394,16 @@ impl ShamirDbHandler {
 
         // Argon2id is CPU-heavy — wrap in block_in_place so we don't stall
         // the runtime worker.
-        let derived = match tokio::task::block_in_place(|| {
-            DerivedKeys::derive(&pw_buf, &salt, &admin.kdf)
-        }) {
-            Ok(d) => d,
-            Err(e) => {
-                return DbResponse::Error {
-                    code: "query".into(),
-                    message: format!("argon2id: {e}"),
-                };
-            }
-        };
+        let derived =
+            match tokio::task::block_in_place(|| DerivedKeys::derive(&pw_buf, &salt, &admin.kdf)) {
+                Ok(d) => d,
+                Err(e) => {
+                    return DbResponse::Error {
+                        code: "query".into(),
+                        message: format!("argon2id: {e}"),
+                    };
+                }
+            };
         drop(pw_buf);
 
         let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
@@ -418,7 +420,11 @@ impl ShamirDbHandler {
             Ok(id) => id,
             Err(e) => {
                 let msg = e.to_string();
-                let code = if msg.contains("exists") { "user_exists" } else { "query" };
+                let code = if msg.contains("exists") {
+                    "user_exists"
+                } else {
+                    "query"
+                };
                 return DbResponse::Error {
                     code: code.into(),
                     message: msg,
@@ -491,14 +497,8 @@ fn check_destructive_hmacs(
                 ),
                 op.hmac.as_ref(),
             ),
-            BatchOp::DropUser(op) => (
-                canon::canonical_drop_user(&op.drop_user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::DropRole(op) => (
-                canon::canonical_drop_role(&op.drop_role),
-                op.hmac.as_ref(),
-            ),
+            BatchOp::DropUser(op) => (canon::canonical_drop_user(&op.drop_user), op.hmac.as_ref()),
+            BatchOp::DropRole(op) => (canon::canonical_drop_role(&op.drop_role), op.hmac.as_ref()),
             BatchOp::StartMigration(op) => (
                 canon::canonical_start_migration(
                     db_name,

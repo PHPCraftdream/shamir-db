@@ -135,14 +135,12 @@ async fn test_multiple_dbs_isolation() {
 
     // Configure each db independently
     db1.add_repo(
-        RepoConfig::new("data", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("users")),
+        RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users")),
     )
     .await
     .unwrap();
     db2.add_repo(
-        RepoConfig::new("data", BoxRepoFactory::in_memory())
-            .add_table(TableConfig::new("users")),
+        RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users")),
     )
     .await
     .unwrap();

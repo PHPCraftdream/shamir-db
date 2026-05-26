@@ -29,8 +29,18 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     m.insert(
         touch("city"),
         InnerValue::Str(
-            ["Jerusalem", "Tel-Aviv", "Haifa", "Beer-Sheva", "Eilat",
-             "Tiberias", "Nazareth", "Acre", "Ashdod", "Netanya"][(idx as usize) % 10]
+            [
+                "Jerusalem",
+                "Tel-Aviv",
+                "Haifa",
+                "Beer-Sheva",
+                "Eilat",
+                "Tiberias",
+                "Nazareth",
+                "Acre",
+                "Ashdod",
+                "Netanya",
+            ][(idx as usize) % 10]
                 .to_string(),
         ),
     );
@@ -58,10 +68,7 @@ fn bench(c: &mut Criterion) {
         having: None,
     };
     let group_by_two = GroupBy {
-        fields: vec![
-            vec!["city".to_string()],
-            vec!["age".to_string()],
-        ],
+        fields: vec![vec!["city".to_string()], vec!["age".to_string()]],
         having: None,
     };
 
@@ -76,13 +83,37 @@ fn bench(c: &mut Criterion) {
     group.throughput(Throughput::Elements(records.len() as u64));
 
     group.bench_function("by_int_100_groups", |b| {
-        b.iter(|| black_box(apply_group_by(&records, &group_by_age, &select, &interner, &ctx)));
+        b.iter(|| {
+            black_box(apply_group_by(
+                &records,
+                &group_by_age,
+                &select,
+                &interner,
+                &ctx,
+            ))
+        });
     });
     group.bench_function("by_str_10_groups", |b| {
-        b.iter(|| black_box(apply_group_by(&records, &group_by_city, &select, &interner, &ctx)));
+        b.iter(|| {
+            black_box(apply_group_by(
+                &records,
+                &group_by_city,
+                &select,
+                &interner,
+                &ctx,
+            ))
+        });
     });
     group.bench_function("by_str_int_composite", |b| {
-        b.iter(|| black_box(apply_group_by(&records, &group_by_two, &select, &interner, &ctx)));
+        b.iter(|| {
+            black_box(apply_group_by(
+                &records,
+                &group_by_two,
+                &select,
+                &interner,
+                &ctx,
+            ))
+        });
     });
 
     group.finish();

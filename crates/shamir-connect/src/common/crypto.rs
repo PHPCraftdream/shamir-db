@@ -299,7 +299,13 @@ pub fn aes256gcm_encrypt_with_cipher(
 ) -> Result<Vec<u8>> {
     let nonce = Nonce::from_slice(nonce);
     cipher
-        .encrypt(nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| Error::Crypto("AES-GCM: encrypt failed"))
 }
 

@@ -31,7 +31,9 @@ use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManag
 
 async fn fresh_mgr() -> (Arc<dyn Store>, SortedIndexManager) {
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let mgr = SortedIndexManager::new(Arc::clone(&info_store)).await.unwrap();
+    let mgr = SortedIndexManager::new(Arc::clone(&info_store))
+        .await
+        .unwrap();
     (info_store, mgr)
 }
 
@@ -131,7 +133,10 @@ async fn lookup_range_open_lower_bound() {
     }
 
     // (-∞ .. 3] → 1, 2, 3.
-    let result = mgr.lookup_range(101, None, Some(&enc_i64(3))).await.unwrap();
+    let result = mgr
+        .lookup_range(101, None, Some(&enc_i64(3)))
+        .await
+        .unwrap();
     assert_eq!(result.len(), 3);
 }
 
@@ -148,7 +153,10 @@ async fn lookup_range_open_upper_bound() {
     }
 
     // [3 .. ∞) → 3, 4, 5.
-    let result = mgr.lookup_range(101, Some(&enc_i64(3)), None).await.unwrap();
+    let result = mgr
+        .lookup_range(101, Some(&enc_i64(3)), None)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 3);
 }
 
@@ -433,7 +441,10 @@ async fn missing_field_is_skipped_silently() {
     // Must not error; just no entry written.
     mgr.on_record_created(&id, &rec).await.unwrap();
     let r = mgr.lookup_range(101, None, None).await.unwrap();
-    assert!(r.is_empty(), "no entry for record missing the indexed field");
+    assert!(
+        r.is_empty(),
+        "no entry for record missing the indexed field"
+    );
 }
 
 #[tokio::test]
@@ -532,7 +543,12 @@ async fn string_prefix_does_not_match_longer_value() {
         !r.contains(&rid_aa),
         "Eq(\"a\") incorrectly matched rid_aa — sorted index leaked across string boundary"
     );
-    assert_eq!(r.len(), 1, "Eq(\"a\") returned {} records, expected 1", r.len());
+    assert_eq!(
+        r.len(),
+        1,
+        "Eq(\"a\") returned {} records, expected 1",
+        r.len()
+    );
 
     // Range "aa"..="aa" must return only rid_aa.
     let bound_aa = enc_str("aa");

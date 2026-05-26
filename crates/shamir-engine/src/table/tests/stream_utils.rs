@@ -4,10 +4,10 @@
 //! For production code, use streaming APIs directly.
 
 use crate::table::Table;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use futures::StreamExt;
 
 /// Collect all records from list_stream into a Vec.
 ///

@@ -70,7 +70,10 @@ pub struct SortedIndexDefinition {
 
 impl SortedIndexDefinition {
     pub fn new(name_interned: u64, field_path: Vec<u64>) -> Self {
-        Self { name_interned, field_path }
+        Self {
+            name_interned,
+            field_path,
+        }
     }
 }
 
@@ -327,19 +330,15 @@ impl SortedIndexManager {
 
     /// Last K record ids under the sorted prefix, in value-DESC order.
     /// Mirror of `lookup_first_k` using `iter_range_stream_reverse`.
-    pub async fn lookup_last_k(
-        &self,
-        name_interned: u64,
-        k: usize,
-    ) -> DbResult<Vec<RecordId>> {
+    pub async fn lookup_last_k(&self, name_interned: u64, k: usize) -> DbResult<Vec<RecordId>> {
         if k == 0 {
             return Ok(Vec::new());
         }
         let prefix = self.entry_prefix(name_interned);
         let (lower, upper) = self.range_bounds(&prefix, None, None);
-        let stream = self
-            .info_store
-            .iter_range_stream_reverse(Some(lower), Some(upper), k.min(256));
+        let stream =
+            self.info_store
+                .iter_range_stream_reverse(Some(lower), Some(upper), k.min(256));
         futures::pin_mut!(stream);
         let mut out = Vec::with_capacity(k);
         while let Some(batch) = stream.next().await {
@@ -356,11 +355,7 @@ impl SortedIndexManager {
     }
 
     /// First K record ids under the sorted prefix, in value-asc order.
-    pub async fn lookup_first_k(
-        &self,
-        name_interned: u64,
-        k: usize,
-    ) -> DbResult<Vec<RecordId>> {
+    pub async fn lookup_first_k(&self, name_interned: u64, k: usize) -> DbResult<Vec<RecordId>> {
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -481,9 +476,7 @@ impl SortedIndexManager {
     async fn persist_defs(&self) -> DbResult<()> {
         let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
         let bytes = bincode::serialize(&defs).map_err(|e| {
-            shamir_storage::error::DbError::Codec(format!(
-                "sorted-index defs encode: {e}"
-            ))
+            shamir_storage::error::DbError::Codec(format!("sorted-index defs encode: {e}"))
         })?;
         let sys_id = shamir_types::types::record_id::RecordId::system("sorted_indexes");
         self.info_store
@@ -501,11 +494,9 @@ impl SortedIndexManager {
         if bytes.is_empty() {
             return Ok(());
         }
-        let defs: Vec<SortedIndexDefinition> = bincode::deserialize(bytes.as_ref())
-            .map_err(|e| {
-                shamir_storage::error::DbError::Codec(format!(
-                    "sorted-index defs decode: {e}"
-                ))
+        let defs: Vec<SortedIndexDefinition> =
+            bincode::deserialize(bytes.as_ref()).map_err(|e| {
+                shamir_storage::error::DbError::Codec(format!("sorted-index defs decode: {e}"))
             })?;
         for d in defs {
             self.indexes.insert(d.name_interned, d);
@@ -518,10 +509,7 @@ impl SortedIndexManager {
 /// `sort_codec`. Returns `None` if the field is missing or has a type
 /// we don't index (we intentionally skip such records — they won't
 /// surface in sorted lookups).
-fn extract_and_encode(
-    record: &InnerValue,
-    field_path: &[u64],
-) -> DbResult<Option<Vec<u8>>> {
+fn extract_and_encode(record: &InnerValue, field_path: &[u64]) -> DbResult<Option<Vec<u8>>> {
     let Some(val) = resolve_path_ref(record, field_path) else {
         return Ok(None);
     };

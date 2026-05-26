@@ -1,8 +1,8 @@
 use super::super::table::{TableConfig, TableManager};
 use crate::repo::{RepoConfig, RepoInstance};
+use dashmap::DashMap;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::value::InnerValue;
-use dashmap::DashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -110,18 +110,20 @@ impl DbInstance {
 
     /// Create a table in a repository.
     pub fn create_table(&self, repo_name: &str, table_name: &str) -> DbResult<()> {
-        let repo = self.repos.get(repo_name).ok_or_else(|| {
-            DbError::NotFound(format!("Repository '{}' not found", repo_name))
-        })?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         repo.add_table(TableConfig::new(table_name));
         Ok(())
     }
 
     /// Drop a table from a repository.
     pub fn drop_table(&self, repo_name: &str, table_name: &str) -> DbResult<bool> {
-        let repo = self.repos.get(repo_name).ok_or_else(|| {
-            DbError::NotFound(format!("Repository '{}' not found", repo_name))
-        })?;
+        let repo = self
+            .repos
+            .get(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
         Ok(repo.remove_table(table_name))
     }
 

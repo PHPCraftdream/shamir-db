@@ -1,12 +1,12 @@
 pub mod buffer_config;
 pub mod doctor;
 pub mod interner_manager;
+mod read_exec;
 pub mod record_counter;
 #[allow(clippy::module_inception)]
 pub mod table;
 pub mod table_config;
 pub mod table_manager;
-mod read_exec;
 mod write_exec;
 
 #[cfg(test)]

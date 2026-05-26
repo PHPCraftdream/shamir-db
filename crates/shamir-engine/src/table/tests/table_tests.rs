@@ -2,14 +2,14 @@
 
 #![allow(deprecated)]
 
-use shamir_types::codecs::transform;
 use crate::table::interner_manager::InternerManager;
 use crate::table::record_counter::RecordCounter;
 use crate::table::tests::stream_utils::collect_list_stream;
 use crate::table::Table;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_sled::SledRepo;
 use shamir_storage::types::Repo;
-use shamir_storage::error::{DbError, DbResult};
+use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, UserValue};

@@ -88,9 +88,7 @@ impl RegistrySnapshot {
                 let repo = parts.next()?;
                 Some((db, repo, tables))
             })
-            .flat_map(|(db, repo, tables)| {
-                tables.iter().map(move |t| (db, repo, t.as_str()))
-            })
+            .flat_map(|(db, repo, tables)| tables.iter().map(move |t| (db, repo, t.as_str())))
     }
 }
 
@@ -195,11 +193,15 @@ mod tests {
         // Reopen — file picked up.
         let r2 = TablesRegistry::open(tmp.path()).unwrap();
         let snap = r2.snapshot();
-        assert_eq!(snap.tables_by_repo.get("default.main").unwrap(),
-                   &vec!["orders".to_string(), "widgets".to_string()],
-                   "tables sorted");
-        assert_eq!(snap.tables_by_repo.get("default.archive").unwrap(),
-                   &vec!["events".to_string()]);
+        assert_eq!(
+            snap.tables_by_repo.get("default.main").unwrap(),
+            &vec!["orders".to_string(), "widgets".to_string()],
+            "tables sorted"
+        );
+        assert_eq!(
+            snap.tables_by_repo.get("default.archive").unwrap(),
+            &vec!["events".to_string()]
+        );
 
         let entries: Vec<_> = snap.iter_entries().collect();
         assert!(entries.contains(&("default", "main", "orders")));

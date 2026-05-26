@@ -8,14 +8,16 @@
 
 use serde_json as json;
 
-use shamir_types::codecs::interned::inner_to_json_value;
-use shamir_types::core::interner::Interner;
-use crate::query::filter::eval::{compare_values, intern_field_path, resolve_field, resolve_field_ref};
+use crate::query::filter::eval::{
+    compare_values, intern_field_path, resolve_field, resolve_field_ref,
+};
 use crate::query::filter::{compile_filter, FilterContext};
 use crate::query::read::{
     AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderDirection, Pagination,
     PaginationInfo, Select, SelectItem,
 };
+use shamir_types::codecs::interned::inner_to_json_value;
+use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -55,8 +57,7 @@ fn group_key_item(val: Option<&InnerValue>, interner: &Interner) -> GroupKeyItem
             // Fall back to JSON canonical form for non-scalar leaves.
             // Rare in practice — GROUP BY on a Map/List/Set field is
             // unusual — but kept for parity with the previous code path.
-            let jv = inner_to_json_value(other, interner)
-                .unwrap_or_else(|_| json::Value::Null);
+            let jv = inner_to_json_value(other, interner).unwrap_or_else(|_| json::Value::Null);
             GroupKeyItem::Complex(jv.to_string().into_boxed_str())
         }
     }
@@ -81,8 +82,8 @@ pub struct SelectProjection {
 impl SelectProjection {
     /// Build a reusable projection from a Select + Interner.
     pub fn new(select: &Select, interner: &Interner) -> Self {
-        let is_all = select.items.is_empty()
-            || select.items.iter().any(|i| matches!(i, SelectItem::All));
+        let is_all =
+            select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
 
         let fields = if is_all {
             Vec::new()
@@ -109,8 +110,7 @@ impl SelectProjection {
     /// Project a single InnerValue record to JSON.
     pub fn project(&self, record: &InnerValue, interner: &Interner) -> json::Value {
         if self.is_all {
-            return inner_to_json_value(record, interner)
-                .unwrap_or_else(|_| json::Value::Null);
+            return inner_to_json_value(record, interner).unwrap_or_else(|_| json::Value::Null);
         }
         if self.fields.is_empty() {
             return json::Value::Object(json::Map::new());
@@ -151,7 +151,10 @@ pub fn apply_select(
 /// Check whether the select list contains any aggregates.
 pub fn has_aggregates(select: &Select) -> bool {
     select.items.iter().any(|item| {
-        matches!(item, SelectItem::Aggregate { .. } | SelectItem::CountAll { .. })
+        matches!(
+            item,
+            SelectItem::Aggregate { .. } | SelectItem::CountAll { .. }
+        )
     })
 }
 
@@ -172,9 +175,7 @@ fn pre_intern_select_keys(select: &Select, interner: &Interner) {
                 }
             }
             SelectItem::CountAll { alias } => alias.as_deref().unwrap_or("count"),
-            SelectItem::Aggregate {
-                alias, ..
-            } => {
+            SelectItem::Aggregate { alias, .. } => {
                 if let Some(a) = alias {
                     a.as_str()
                 } else {
@@ -319,16 +320,18 @@ fn build_aggregate_object(
         match item {
             SelectItem::CountAll { alias } => {
                 let key = alias.as_deref().unwrap_or("count");
-                obj.insert(key.to_string(), json::Value::Number(group_records.len().into()));
+                obj.insert(
+                    key.to_string(),
+                    json::Value::Number(group_records.len().into()),
+                );
             }
             SelectItem::Aggregate {
-                func,
-                field,
-                alias,
-                ..
+                func, field, alias, ..
             } => {
                 let default_name = match (func, field) {
-                    (_, AggregateField::Field(f)) => format!("{:?}_{}", func, f.join(".")).to_lowercase(),
+                    (_, AggregateField::Field(f)) => {
+                        format!("{:?}_{}", func, f.join(".")).to_lowercase()
+                    }
                     (_, AggregateField::All) => format!("{:?}", func).to_lowercase(),
                 };
                 let key = alias.as_deref().unwrap_or(&default_name);
@@ -346,7 +349,10 @@ fn build_aggregate_object(
                     if let Some(first) = group_records.first() {
                         if let Some(interned) = intern_field_path(path, interner) {
                             let val = resolve_field(first, &interned)
-                                .map(|v| inner_to_json_value(&v, interner).unwrap_or_else(|_| json::Value::Null))
+                                .map(|v| {
+                                    inner_to_json_value(&v, interner)
+                                        .unwrap_or_else(|_| json::Value::Null)
+                                })
                                 .unwrap_or(json::Value::Null);
                             obj.insert(key.to_string(), val);
                         } else {
@@ -418,7 +424,9 @@ pub fn apply_group_by(
                         .as_ref()
                         .and_then(|p| resolve_field_ref(record, p));
                     let json_val = val_ref
-                        .map(|vv| inner_to_json_value(vv, interner).unwrap_or_else(|_| json::Value::Null))
+                        .map(|vv| {
+                            inner_to_json_value(vv, interner).unwrap_or_else(|_| json::Value::Null)
+                        })
                         .unwrap_or(json::Value::Null);
                     key_json_values.push((field_name.clone(), json_val));
                 }
@@ -434,7 +442,12 @@ pub fn apply_group_by(
 
     let mut result: Vec<json::Value> = Vec::with_capacity(groups.len());
     for (_k, (recs, key_vals)) in &groups {
-        result.push(build_aggregate_object(recs, select, Some(key_vals), interner));
+        result.push(build_aggregate_object(
+            recs,
+            select,
+            Some(key_vals),
+            interner,
+        ));
     }
 
     // Apply HAVING filter

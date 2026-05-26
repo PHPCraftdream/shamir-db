@@ -240,7 +240,10 @@ impl Scheduler {
         }
 
         tracing::info!(tasks = handles.len(), "scheduler spawned");
-        Self { handles, shutdown_tx }
+        Self {
+            handles,
+            shutdown_tx,
+        }
     }
 
     /// Signal shutdown and await all tasks.

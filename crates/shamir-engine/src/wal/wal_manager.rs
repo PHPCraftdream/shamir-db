@@ -139,9 +139,8 @@ impl WalManager {
                     Some(id) => id,
                     None => continue, // skip foreign keys
                 };
-                let entry: WalEntry = bincode::deserialize(&v).map_err(|e| {
-                    DbError::Codec(format!("WAL deserialize: {e}"))
-                })?;
+                let entry: WalEntry = bincode::deserialize(&v)
+                    .map_err(|e| DbError::Codec(format!("WAL deserialize: {e}")))?;
                 out.push(entry);
             }
         }
@@ -223,10 +222,7 @@ mod tests {
         let inflight = wal2.list_inflight().await.unwrap();
         assert_eq!(inflight.len(), 1);
         assert_eq!(inflight[0].txn_id, txn_id);
-        assert!(matches!(
-            inflight[0].ops[0],
-            WalOp::RecordCreated { .. }
-        ));
+        assert!(matches!(inflight[0].ops[0], WalOp::RecordCreated { .. }));
     }
 
     #[tokio::test]

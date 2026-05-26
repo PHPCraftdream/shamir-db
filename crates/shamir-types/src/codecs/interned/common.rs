@@ -21,10 +21,7 @@ pub fn intern_string_key(interner: &Interner, key_str: &str) -> Result<InternerK
 ///
 /// This is used by both JSON and MessagePack codecs to resolve
 /// interned keys back to their string representation.
-pub fn deintern_key(
-    interner: &Interner,
-    interned_key: &InternerKey,
-) -> Result<String, CodecError> {
+pub fn deintern_key(interner: &Interner, interned_key: &InternerKey) -> Result<String, CodecError> {
     interner
         .with_str(interned_key, |s| s.to_string())
         .ok_or_else(|| CodecError::Decode(format!("Interned key not found: {:?}", interned_key)))

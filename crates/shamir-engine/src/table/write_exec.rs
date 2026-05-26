@@ -8,14 +8,14 @@ use std::time::Instant;
 use futures::StreamExt;
 use serde_json as json;
 
-use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
-use shamir_types::core::interner::InternerKey;
+use crate::query::filter::eval::resolve_field;
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::eval::resolve_field;
 use crate::query::filter::Filter;
 use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
 use shamir_storage::error::DbResult;
+use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -99,10 +99,7 @@ impl TableManager {
         // Collect matching records — Opt C: try index path first, fall
         // back to scan when no index plan applies.
         let matched = if let Some(ref filter) = op.where_clause {
-            if let Some(via_index) = self
-                .lookup_records_via_index(filter, ctx)
-                .await?
-            {
+            if let Some(via_index) = self.lookup_records_via_index(filter, ctx).await? {
                 via_index
             } else {
                 let callback = compile_filter(filter, interner);
@@ -195,7 +192,7 @@ impl TableManager {
         // Persist any newly interned keys (set fields may have new keys)
         if affected > 0 {
             self.interner().persist().await?;
-        self.counter().persist().await?;
+            self.counter().persist().await?;
         }
 
         Ok(WriteResult {
@@ -219,26 +216,24 @@ impl TableManager {
         let interner = self.interner().get().await?;
 
         // Collect IDs to delete — Opt C: try index path, fall back to scan.
-        let to_delete: Vec<RecordId> = if let Some(via_index) = self
-            .lookup_records_via_index(&op.where_clause, ctx)
-            .await?
-        {
-            via_index.into_iter().map(|(id, _)| id).collect()
-        } else {
-            let callback = compile_filter(&op.where_clause, interner);
-            let mut result = Vec::new();
-            let stream = self.list_stream(batch_size);
-            futures::pin_mut!(stream);
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result?;
-                for (id, record) in batch {
-                    if callback.matches(&record, ctx) {
-                        result.push(id);
+        let to_delete: Vec<RecordId> =
+            if let Some(via_index) = self.lookup_records_via_index(&op.where_clause, ctx).await? {
+                via_index.into_iter().map(|(id, _)| id).collect()
+            } else {
+                let callback = compile_filter(&op.where_clause, interner);
+                let mut result = Vec::new();
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result?;
+                    for (id, record) in batch {
+                        if callback.matches(&record, ctx) {
+                            result.push(id);
+                        }
                     }
                 }
-            }
-            result
-        };
+                result
+            };
 
         // Open a WAL marker spanning the whole DELETE batch.
         // counter_delta is set pessimistically to -|to_delete| (the
@@ -397,8 +392,7 @@ impl TableManager {
         ctx: &FilterContext<'_>,
     ) -> DbResult<Option<Vec<(RecordId, InnerValue)>>> {
         let interner = self.interner().get().await?;
-        let Some((idx_name, lookup_sets, residual)) =
-            self.try_plan_index_scan(filter, interner)
+        let Some((idx_name, lookup_sets, residual)) = self.try_plan_index_scan(filter, interner)
         else {
             return Ok(None);
         };
@@ -477,8 +471,10 @@ impl TableManager {
             for (id, record) in batch {
                 let all_match = key_fields.iter().all(|(path, expected)| {
                     resolve_field(&record, path)
-                        .map(|v| crate::query::filter::compare_values(&v, expected)
-                            == Some(std::cmp::Ordering::Equal))
+                        .map(|v| {
+                            crate::query::filter::compare_values(&v, expected)
+                                == Some(std::cmp::Ordering::Equal)
+                        })
                         .unwrap_or(false)
                 });
                 if all_match {

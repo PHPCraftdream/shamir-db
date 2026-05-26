@@ -1,7 +1,7 @@
-use shamir_types::core::interner::UserKey;
 use crate::table::interner_manager::InternerManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::UserKey;
 use std::sync::Arc;
 
 async fn create_manager() -> InternerManager {

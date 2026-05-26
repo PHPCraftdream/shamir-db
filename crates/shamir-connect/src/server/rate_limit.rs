@@ -251,7 +251,10 @@ mod tests {
             assert_eq!(r.check(s(1), now), RateDecision::Allowed);
         }
         // Subnet 1 throttled, but subnet 2 fresh.
-        assert!(matches!(r.check(s(1), now), RateDecision::RateLimited { .. }));
+        assert!(matches!(
+            r.check(s(1), now),
+            RateDecision::RateLimited { .. }
+        ));
         assert_eq!(r.check(s(2), now), RateDecision::Allowed);
     }
 
@@ -286,6 +289,9 @@ mod tests {
         let r = InMemoryRateLimiter::new(0);
         // At exactly the boundary: not warmup anymore.
         assert_eq!(r.effective_rate_per_sec(WARMUP_WINDOW_NS), 10);
-        assert_eq!(r.effective_rate_per_sec(WARMUP_WINDOW_NS - 1), 10 / WARMUP_DIVISOR);
+        assert_eq!(
+            r.effective_rate_per_sec(WARMUP_WINDOW_NS - 1),
+            10 / WARMUP_DIVISOR
+        );
     }
 }

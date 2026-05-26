@@ -18,8 +18,7 @@ use crate::common::types::limits::{PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS};
 /// (non-secret) reason string on failure. The password itself is never
 /// included in the error.
 pub fn validate_password(password: &[u8]) -> Result<()> {
-    let s =
-        std::str::from_utf8(password).map_err(|_| Error::InvalidPassword("not valid UTF-8"))?;
+    let s = std::str::from_utf8(password).map_err(|_| Error::InvalidPassword("not valid UTF-8"))?;
 
     let char_count = s.chars().count();
     if char_count < PASSWORD_MIN_CHARS {

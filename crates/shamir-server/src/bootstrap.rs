@@ -191,8 +191,7 @@ mod tests {
     fn creates_then_idempotent() {
         let dir = TempDir::new().unwrap();
         let dir_path = dir.path();
-        let user_dir =
-            RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
+        let user_dir = RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
 
         let r1 = ensure_superuser(
             &user_dir,
@@ -212,8 +211,10 @@ mod tests {
             &fast_kdf(),
         )
         .unwrap();
-        assert!(matches!(r2, BootstrapOutcome::AlreadyExists),
-            "second call must be a no-op even with different password");
+        assert!(
+            matches!(r2, BootstrapOutcome::AlreadyExists),
+            "second call must be a no-op even with different password"
+        );
 
         let roles = user_dir
             .lookup_roles(DEFAULT_BOOTSTRAP_NAME)
@@ -226,8 +227,7 @@ mod tests {
     fn random_token_writes_file() {
         let dir = TempDir::new().unwrap();
         let dir_path = dir.path();
-        let user_dir =
-            RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
+        let user_dir = RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
 
         let r = ensure_superuser(
             &user_dir,
@@ -238,7 +238,10 @@ mod tests {
         )
         .unwrap();
         match r {
-            BootstrapOutcome::Created { token: Some(tok), token_path: Some(p) } => {
+            BootstrapOutcome::Created {
+                token: Some(tok),
+                token_path: Some(p),
+            } => {
                 assert_eq!(fs::read_to_string(p).unwrap(), tok);
                 assert!(tok.len() >= 32, "token long enough");
             }
@@ -254,8 +257,7 @@ mod tests {
         // we just check key derivation symmetry.
         let dir = TempDir::new().unwrap();
         let dir_path = dir.path();
-        let user_dir =
-            RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
+        let user_dir = RedbUserDirectory::open(dir_path.join("users.redb")).unwrap();
 
         let pw = b"correct horse battery staple";
         ensure_superuser(
@@ -269,7 +271,9 @@ mod tests {
 
         let stored = user_dir.lookup_by_name("alice").unwrap();
         let redo = DerivedKeys::derive(pw, &stored.salt, &stored.kdf_params).unwrap();
-        assert_eq!(redo.stored_key.0, stored.stored_key.0,
-            "stored_key must round-trip through ensure_superuser");
+        assert_eq!(
+            redo.stored_key.0, stored.stored_key.0,
+            "stored_key must round-trip through ensure_superuser"
+        );
     }
 }

@@ -2,10 +2,10 @@
 
 use serde_json::json;
 
-use shamir_types::core::interner::{InternerKey, Interner, TouchInd};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::exec::*;
 use crate::query::read::*;
+use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -21,9 +21,18 @@ fn intern(interner: &Interner, s: &str) -> u64 {
 /// Build a simple record: `{ "name": Str, "age": Int, "city": Str }`.
 fn make_record(interner: &Interner, name: &str, age: i64, city: &str) -> InnerValue {
     let mut map = new_map();
-    map.insert(InternerKey::new(intern(interner, "name")), InnerValue::Str(name.into()));
-    map.insert(InternerKey::new(intern(interner, "age")), InnerValue::Int(age));
-    map.insert(InternerKey::new(intern(interner, "city")), InnerValue::Str(city.into()));
+    map.insert(
+        InternerKey::new(intern(interner, "name")),
+        InnerValue::Str(name.into()),
+    );
+    map.insert(
+        InternerKey::new(intern(interner, "age")),
+        InnerValue::Int(age),
+    );
+    map.insert(
+        InternerKey::new(intern(interner, "city")),
+        InnerValue::Str(city.into()),
+    );
     InnerValue::Map(map)
 }
 
@@ -46,7 +55,8 @@ fn select_all() {
     let records = make_records(&interner);
     let select: Select = serde_json::from_value(json!({
         "items": [{"type": "all"}]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result.len(), 4);
@@ -63,7 +73,8 @@ fn select_specific_fields() {
             {"type": "field", "path": ["name"]},
             {"type": "field", "path": ["age"]}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result.len(), 4);
@@ -78,7 +89,8 @@ fn select_with_alias() {
     let records = make_records(&interner);
     let select: Select = serde_json::from_value(json!({
         "items": [{"type": "field", "path": ["name"], "alias": "user_name"}]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result[0]["user_name"], "Alice");
@@ -94,7 +106,8 @@ fn select_nonexistent_field_returns_null() {
             {"type": "field", "path": ["name"]},
             {"type": "field", "path": ["nonexistent"]}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_select(&records, &select, &interner);
     assert_eq!(result[0]["name"], "Alice");
@@ -114,13 +127,15 @@ fn group_by_count() {
 
     let group_by: GroupBy = serde_json::from_value(json!({
         "fields": [["city"]]
-    })).unwrap();
+    }))
+    .unwrap();
     let select: Select = serde_json::from_value(json!({
         "items": [
             {"type": "field", "path": ["city"]},
             {"type": "count_all", "alias": "cnt"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert_eq!(result.len(), 2);
@@ -144,7 +159,8 @@ fn group_by_sum_avg() {
             {"type": "aggregate", "func": "sum", "field": ["age"], "alias": "total_age"},
             {"type": "aggregate", "func": "avg", "field": ["age"], "alias": "avg_age"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert_eq!(result[0]["city"], "LA");
@@ -169,7 +185,8 @@ fn group_by_min_max() {
             {"type": "aggregate", "func": "min", "field": ["age"], "alias": "min_age"},
             {"type": "aggregate", "func": "max", "field": ["age"], "alias": "max_age"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert_eq!(result[0]["min_age"], 25);
@@ -188,13 +205,15 @@ fn group_by_having() {
     let group_by: GroupBy = serde_json::from_value(json!({
         "fields": [["city"]],
         "having": {"op": "gt", "field": ["total_age"], "value": 55}
-    })).unwrap();
+    }))
+    .unwrap();
     let select: Select = serde_json::from_value(json!({
         "items": [
             {"type": "field", "path": ["city"]},
             {"type": "aggregate", "func": "sum", "field": ["age"], "alias": "total_age"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert_eq!(result.len(), 1);
@@ -214,14 +233,16 @@ fn group_by_multiple_fields() {
 
     let group_by: GroupBy = serde_json::from_value(json!({
         "fields": [["city"], ["age"]]
-    })).unwrap();
+    }))
+    .unwrap();
     let select: Select = serde_json::from_value(json!({
         "items": [
             {"type": "field", "path": ["city"]},
             {"type": "field", "path": ["age"]},
             {"type": "count_all", "alias": "cnt"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert_eq!(result.len(), 2);
@@ -237,7 +258,8 @@ fn group_by_empty_input() {
     let group_by: GroupBy = serde_json::from_value(json!({"fields": [["city"]]})).unwrap();
     let select: Select = serde_json::from_value(json!({
         "items": [{"type": "count_all"}]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
     assert!(result.is_empty());
@@ -257,7 +279,8 @@ fn aggregate_all_count_sum() {
             {"type": "count_all", "alias": "total"},
             {"type": "aggregate", "func": "sum", "field": ["age"], "alias": "sum_age"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = apply_aggregate_all(&records, &select, &interner);
     assert_eq!(result.len(), 1);
@@ -279,7 +302,8 @@ fn order_by_asc() {
 
     let order: OrderBy = serde_json::from_value(json!({
         "items": [{"field": ["age"], "direction": "asc"}]
-    })).unwrap();
+    }))
+    .unwrap();
     apply_order_by(&mut records, &order);
     assert_eq!(records[0]["age"], 25);
     assert_eq!(records[1]["age"], 30);
@@ -296,7 +320,8 @@ fn order_by_desc() {
 
     let order: OrderBy = serde_json::from_value(json!({
         "items": [{"field": ["age"], "direction": "desc"}]
-    })).unwrap();
+    }))
+    .unwrap();
     apply_order_by(&mut records, &order);
     assert_eq!(records[0]["age"], 35);
     assert_eq!(records[1]["age"], 30);
@@ -317,7 +342,8 @@ fn order_by_multiple_fields() {
             {"field": ["city"], "direction": "asc"},
             {"field": ["age"], "direction": "asc"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     apply_order_by(&mut records, &order);
     assert_eq!(records[0]["city"], "LA");
     assert_eq!(records[0]["age"], 25);
@@ -339,7 +365,8 @@ fn order_by_nulls_first() {
 
     let order: OrderBy = serde_json::from_value(json!({
         "items": [{"field": ["age"], "direction": "asc", "nulls": "first"}]
-    })).unwrap();
+    }))
+    .unwrap();
     apply_order_by(&mut records, &order);
     assert!(records[0].get("age").is_none() || records[0]["age"].is_null());
     assert_eq!(records[1]["age"], 25);
@@ -356,7 +383,8 @@ fn order_by_nulls_last() {
 
     let order: OrderBy = serde_json::from_value(json!({
         "items": [{"field": ["age"], "direction": "asc", "nulls": "last"}]
-    })).unwrap();
+    }))
+    .unwrap();
     apply_order_by(&mut records, &order);
     assert_eq!(records[0]["age"], 25);
     assert_eq!(records[1]["age"], 30);
@@ -373,7 +401,8 @@ fn pagination_limit_offset() {
 
     let pagination: Pagination = serde_json::from_value(json!({
         "mode": "LimitOffset", "limit": 2, "offset": 1
-    })).unwrap();
+    }))
+    .unwrap();
     let (result, info) = apply_pagination(records, &pagination, true);
 
     assert_eq!(result, vec![json!(2), json!(3)]);
@@ -389,7 +418,8 @@ fn pagination_page_based() {
 
     let pagination: Pagination = serde_json::from_value(json!({
         "mode": "Page", "page": 2, "page_size": 2
-    })).unwrap();
+    }))
+    .unwrap();
     let (result, info) = apply_pagination(records, &pagination, true);
 
     assert_eq!(result, vec![json!(3), json!(4)]);
@@ -406,7 +436,8 @@ fn pagination_count_total_false() {
 
     let pagination: Pagination = serde_json::from_value(json!({
         "mode": "LimitOffset", "limit": 2, "offset": 0
-    })).unwrap();
+    }))
+    .unwrap();
     let (result, info) = apply_pagination(records, &pagination, false);
 
     assert_eq!(result, vec![json!(1), json!(2)]);
@@ -455,7 +486,8 @@ fn has_aggregates_true() {
             {"type": "field", "path": ["name"]},
             {"type": "count_all"}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(has_aggregates(&select));
 }
 
@@ -466,6 +498,7 @@ fn has_aggregates_false() {
             {"type": "field", "path": ["name"]},
             {"type": "field", "path": ["age"]}
         ]
-    })).unwrap();
+    }))
+    .unwrap();
     assert!(!has_aggregates(&select));
 }

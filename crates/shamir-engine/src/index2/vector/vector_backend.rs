@@ -96,10 +96,7 @@ impl IndexBackend for VectorBackend {
         Ok(())
     }
 
-    async fn on_batch_insert(
-        &self,
-        items: &[(RecordId, &InnerValue)],
-    ) -> Result<(), IndexError> {
+    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
         for (rid, rec) in items {
             self.on_insert(*rid, rec).await?;
         }
@@ -260,8 +257,8 @@ mod tests {
 
     #[tokio::test]
     async fn rebuild_from_store() {
-        use shamir_storage::storage_in_memory::InMemoryStore;
         use crate::index2::backend::IndexBackend;
+        use shamir_storage::storage_in_memory::InMemoryStore;
 
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -273,9 +270,18 @@ mod tests {
         let rec1 = make_rec(&i, &[1.0, 0.0, 0.0]);
         let rec2 = make_rec(&i, &[0.0, 1.0, 0.0]);
         let rec3 = make_rec(&i, &[0.9, 0.1, 0.0]);
-        store.set(r1.to_bytes(), Bytes::from(rec1.to_bytes().unwrap())).await.unwrap();
-        store.set(r2.to_bytes(), Bytes::from(rec2.to_bytes().unwrap())).await.unwrap();
-        store.set(r3.to_bytes(), Bytes::from(rec3.to_bytes().unwrap())).await.unwrap();
+        store
+            .set(r1.to_bytes(), Bytes::from(rec1.to_bytes().unwrap()))
+            .await
+            .unwrap();
+        store
+            .set(r2.to_bytes(), Bytes::from(rec2.to_bytes().unwrap()))
+            .await
+            .unwrap();
+        store
+            .set(r3.to_bytes(), Bytes::from(rec3.to_bytes().unwrap()))
+            .await
+            .unwrap();
 
         // Create a fresh backend (empty adapter) and rebuild from store.
         let backend = make_backend(&i);

@@ -38,15 +38,15 @@ async fn seeded(n: usize) -> crate::table::TableManager {
     let interner = table.interner().get().await.unwrap();
     for i in 0..n {
         let mut m = new_map();
-        m.insert(
-            "id".to_string(),
-            UserValue::Str(format!("u{:04}", i)),
-        );
+        m.insert("id".to_string(), UserValue::Str(format!("u{:04}", i)));
         m.insert(
             "city".to_string(),
             UserValue::Str(format!("city_{}", i % 4)),
         );
-        m.insert("score".to_string(), UserValue::Int((i * 7919) as i64 % 1000));
+        m.insert(
+            "score".to_string(),
+            UserValue::Int((i * 7919) as i64 % 1000),
+        );
         let user = UserValue::Map(m);
         let r = transform::user_to_inner(&user, interner);
         if let Some(ref new_keys) = r.new_keys {
@@ -234,8 +234,7 @@ async fn recover_on_open_targeted_re_adds_missing_index_entries() {
     use futures::StreamExt;
     let info_store = info_store_of(&table);
     let target = ids[2];
-    let prefix_scan_key =
-        IndexRecordKey::new(false, def.name_interned).to_prefix_bytes();
+    let prefix_scan_key = IndexRecordKey::new(false, def.name_interned).to_prefix_bytes();
     let stream = info_store.scan_prefix_stream(prefix_scan_key, 1024);
     futures::pin_mut!(stream);
     let mut found_and_removed: u32 = 0;
@@ -258,12 +257,7 @@ async fn recover_on_open_targeted_re_adds_missing_index_entries() {
     let txn_id = table.wal().fresh_txn_id();
     table
         .wal()
-        .begin(
-            txn_id,
-            vec![WalOp::RecordCreated {
-                record_id: ids[2],
-            }],
-        )
+        .begin(txn_id, vec![WalOp::RecordCreated { record_id: ids[2] }])
         .await
         .unwrap();
 
@@ -334,10 +328,7 @@ async fn auto_recovery_fires_when_table_manager_is_reopened() {
     }
     let txn_id = mgr1.wal().fresh_txn_id();
     mgr1.wal()
-        .begin(
-            txn_id,
-            vec![WalOp::RecordCreated { record_id: target }],
-        )
+        .begin(txn_id, vec![WalOp::RecordCreated { record_id: target }])
         .await
         .unwrap();
     drop(mgr1);
@@ -545,24 +536,21 @@ async fn recover_on_open_escalates_to_repair_when_targeted_leaves_orphan() {
 /// Build a fresh `TableManager` against a sled-backed repo at
 /// `path`. Used for the crash-simulation tests below — same
 /// path, second `TableManager::create` = "reopen".
-async fn fresh_sled_table(
-    path: &std::path::Path,
-    table_name: &str,
-) -> crate::table::TableManager {
+async fn fresh_sled_table(path: &std::path::Path, table_name: &str) -> crate::table::TableManager {
     use shamir_storage::storage_sled::SledRepo;
     use shamir_storage::types::{Repo, Store};
     let repo = SledRepo::new(path).unwrap();
-    let data_store: std::sync::Arc<dyn Store> =
-        repo.store_get(format!("__data__{}", table_name)).await.unwrap();
-    let info_store: std::sync::Arc<dyn Store> =
-        repo.store_get(format!("__info__{}", table_name)).await.unwrap();
-    crate::table::TableManager::create(
-        table_name.to_string(),
-        data_store,
-        info_store,
-    )
-    .await
-    .unwrap()
+    let data_store: std::sync::Arc<dyn Store> = repo
+        .store_get(format!("__data__{}", table_name))
+        .await
+        .unwrap();
+    let info_store: std::sync::Arc<dyn Store> = repo
+        .store_get(format!("__info__{}", table_name))
+        .await
+        .unwrap();
+    crate::table::TableManager::create(table_name.to_string(), data_store, info_store)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -589,9 +577,7 @@ async fn wal_marker_durable_through_crash_on_sled() {
         // flusher (default 500ms), so for safety we explicitly
         // request a flush on the info_store before dropping.
         // This emulates a normal commit-boundary write.
-        mgr.index_manager_ref()
-            .iter_indexes()
-            .for_each(drop); // touch to avoid optimisation removing
+        mgr.index_manager_ref().iter_indexes().for_each(drop); // touch to avoid optimisation removing
         drop(mgr);
     }
     // Reopen — auto-recovery should fire and clear the marker.
@@ -681,7 +667,11 @@ async fn end_to_end_crash_recovery_completes_pending_delete_on_sled() {
 
         // verify is clean.
         let v = mgr.verify().await.unwrap();
-        assert!(v.is_healthy(), "after recovery, db must be healthy: {:?}", v);
+        assert!(
+            v.is_healthy(),
+            "after recovery, db must be healthy: {:?}",
+            v
+        );
     }
 }
 
@@ -725,11 +715,7 @@ async fn end_to_end_crash_recovery_re_adds_missing_index_on_sled() {
         // Plant the WAL marker.
         let txn_id = mgr.wal().fresh_txn_id();
         mgr.wal()
-            .begin_with_delta(
-                txn_id,
-                vec![WalOp::RecordUpdated { record_id: target }],
-                0,
-            )
+            .begin_with_delta(txn_id, vec![WalOp::RecordUpdated { record_id: target }], 0)
             .await
             .unwrap();
         // Drop mgr (releases sled lock).
@@ -817,8 +803,7 @@ async fn bump_write_counter_is_single_flight() {
 
     // First crossing — starts verify.
     table.bump_write_counter(100);
-    assert!(table.is_background_verify_running()
-        || !table.is_background_verify_running()); // race-safe; the assertion is below
+    assert!(table.is_background_verify_running() || !table.is_background_verify_running()); // race-safe; the assertion is below
 
     // Second crossing while first running — must NOT spawn second.
     table.bump_write_counter(2048);
@@ -933,11 +918,7 @@ async fn recover_on_open_rolls_forward_pending_updates_indexes() {
     let txn_id = table.wal().fresh_txn_id();
     table
         .wal()
-        .begin_with_delta(
-            txn_id,
-            vec![WalOp::RecordUpdated { record_id: target }],
-            0,
-        )
+        .begin_with_delta(txn_id, vec![WalOp::RecordUpdated { record_id: target }], 0)
         .await
         .unwrap();
 

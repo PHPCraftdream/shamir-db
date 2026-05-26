@@ -17,24 +17,16 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub enum IndexQuery {
     /// Equality / `IN` — one or more exact keys.
-    Point {
-        keys: SmallVec<[Vec<u8>; 4]>,
-    },
+    Point { keys: SmallVec<[Vec<u8>; 4]> },
     /// Range lookup (`Gt` / `Lt` / `Between`).
     Range {
         lo: Bound<Vec<u8>>,
         hi: Bound<Vec<u8>>,
     },
     /// FTS — interned token IDs + combination mode.
-    Fts {
-        tokens: Vec<u64>,
-        mode: FtsMode,
-    },
+    Fts { tokens: Vec<u64>, mode: FtsMode },
     /// Vector similarity (top-k by `kind`'s metric).
-    Vector {
-        vec: Vec<f32>,
-        k: u32,
-    },
+    Vector { vec: Vec<f32>, k: u32 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -75,10 +67,7 @@ pub trait IndexBackend: Send + Sync {
         new: &InnerValue,
     ) -> Result<(), IndexError>;
     async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError>;
-    async fn on_batch_insert(
-        &self,
-        items: &[(RecordId, &InnerValue)],
-    ) -> Result<(), IndexError>;
+    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError>;
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError>;
 

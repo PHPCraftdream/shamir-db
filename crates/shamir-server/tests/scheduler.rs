@@ -76,7 +76,11 @@ struct CountingRateLimiter {
 }
 
 impl RateLimiter for CountingRateLimiter {
-    fn check(&self, _subnet: shamir_connect::server::lockout::Subnet, _now_ns: u64) -> RateDecision {
+    fn check(
+        &self,
+        _subnet: shamir_connect::server::lockout::Subnet,
+        _now_ns: u64,
+    ) -> RateDecision {
         RateDecision::Allowed
     }
     fn gc(&self, _now_ns: u64) {

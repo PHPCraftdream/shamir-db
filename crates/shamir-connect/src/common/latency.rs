@@ -164,7 +164,10 @@ mod tests {
                 saw_ceiling = true;
             }
         }
-        assert!(saw_floor, "must occasionally hit the FIXED_FLOOR_MS exactly");
+        assert!(
+            saw_floor,
+            "must occasionally hit the FIXED_FLOOR_MS exactly"
+        );
         assert!(
             saw_ceiling,
             "must occasionally hit FIXED_FLOOR_MS + JITTER_MAX_MS"

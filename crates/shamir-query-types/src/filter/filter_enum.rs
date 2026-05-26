@@ -112,7 +112,6 @@ pub enum Filter {
     },
 
     // ── Index-accelerated operators (Phase 0 — FTS / Functional / Vector) ──
-
     /// Full-text search on a text field.
     /// mode: "and" (all tokens must match) or "or" (any token matches).
     Fts {
@@ -196,11 +195,16 @@ mod tests {
 
     #[test]
     fn computed_serde_round_trip() {
-        let json = r#"{"op":"computed","expr_op":"lower","field":["email"],"cmp":"eq","value":"alice"}"#;
+        let json =
+            r#"{"op":"computed","expr_op":"lower","field":["email"],"cmp":"eq","value":"alice"}"#;
         let f: Filter = serde_json::from_str(json).unwrap();
         match &f {
             Filter::Computed {
-                expr_op, field, cmp, value, expr_args,
+                expr_op,
+                field,
+                cmp,
+                value,
+                expr_args,
             } => {
                 assert_eq!(expr_op, "lower");
                 assert_eq!(field, &["email"]);

@@ -123,7 +123,11 @@ pub fn verify_rotation_in_progress(
         current_pub,
         payload.transition_until_ns,
     );
-    if !ed25519_verify_strict(&payload.previous_pub, &proof_payload, &payload.rotation_proof) {
+    if !ed25519_verify_strict(
+        &payload.previous_pub,
+        &proof_payload,
+        &payload.rotation_proof,
+    ) {
         return Err(Error::ServerSignatureInvalid);
     }
 

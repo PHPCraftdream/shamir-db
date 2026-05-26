@@ -33,7 +33,10 @@ impl SessionPermissions {
     /// is among them.
     pub fn from_roles(roles: Vec<String>) -> Self {
         let is_superuser = roles.iter().any(|r| r == "superuser");
-        Self { is_superuser, roles }
+        Self {
+            is_superuser,
+            roles,
+        }
     }
 }
 
@@ -203,8 +206,7 @@ impl Session {
     /// Whether this session has expired by wall-clock.
     pub fn is_expired(&self, now_ns: u64, max_age_ns: u64, idle_ttl_ns: u64) -> bool {
         let last = self.last_activity_ns.load(Ordering::Relaxed);
-        now_ns > self.created_at_ns + max_age_ns
-            || now_ns > last + idle_ttl_ns
+        now_ns > self.created_at_ns + max_age_ns || now_ns > last + idle_ttl_ns
     }
 
     /// Per-request session validity check per spec §7.5 [NORMATIVE].
@@ -289,10 +291,7 @@ impl SessionStore {
         session_id: [u8; limits::SESSION_ID_BYTES],
         mut session: Session,
         max_sessions_per_user: usize,
-    ) -> (
-        Arc<Session>,
-        Option<[u8; limits::SESSION_ID_BYTES]>,
-    ) {
+    ) -> (Arc<Session>, Option<[u8; limits::SESSION_ID_BYTES]>) {
         session.session_id = session_id;
         let user_id = session.user_id;
 
@@ -383,10 +382,7 @@ impl SessionStore {
 
     /// Snapshot all sessions belonging to a given `user_id` (for admin
     /// `kickSession` / `updateUser` snapshot+kill semantics, spec §12.4 / §12.6).
-    pub fn snapshot_by_user(
-        &self,
-        user_id: &[u8; 16],
-    ) -> Vec<[u8; limits::SESSION_ID_BYTES]> {
+    pub fn snapshot_by_user(&self, user_id: &[u8; 16]) -> Vec<[u8; limits::SESSION_ID_BYTES]> {
         self.by_sid
             .iter()
             .filter(|e| &e.value().user_id == user_id)

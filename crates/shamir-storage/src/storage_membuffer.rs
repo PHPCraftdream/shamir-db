@@ -276,9 +276,7 @@ impl MemBufferStore {
         // unreachable and the dirty set has nothing to flush.
         self.drain_all().await?;
 
-        self.state
-            .max_bytes
-            .store(cfg.max_bytes, Ordering::Relaxed);
+        self.state.max_bytes.store(cfg.max_bytes, Ordering::Relaxed);
         self.state
             .max_entries
             .store(cfg.max_entries, Ordering::Relaxed);
@@ -361,8 +359,7 @@ impl MemBufferStore {
     /// Drain the entire dirty queue.
     async fn drain_all(&self) -> DbResult<()> {
         loop {
-            let drained =
-                Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
+            let drained = Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
             if drained == 0 {
                 break;
             }
@@ -374,8 +371,7 @@ impl MemBufferStore {
         // listener removes from dirty before flushing — but the
         // flush itself doesn't re-dirty). Defensive second pass.
         loop {
-            let drained =
-                Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
+            let drained = Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
             if drained == 0 {
                 break;
             }
@@ -391,8 +387,7 @@ impl Drop for MemBufferStore {
     }
 }
 
-type RecordStream =
-    Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
+type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 
 #[async_trait]
 impl Store for MemBufferStore {
@@ -401,11 +396,7 @@ impl Store for MemBufferStore {
         let key = RecordKey::copy_from_slice(id.as_bytes());
         let slot = Slot::Live(value);
         self.state.dirty.insert(key.clone(), slot.clone());
-        self.state
-            .cache
-            .load()
-            .insert(key.clone(), slot)
-            .await;
+        self.state.cache.load().insert(key.clone(), slot).await;
         self.notify.notify_one();
         Ok(key)
     }
@@ -476,11 +467,7 @@ impl Store for MemBufferStore {
             },
         };
         self.state.dirty.insert(key.clone(), Slot::Tombstone);
-        self.state
-            .cache
-            .load()
-            .insert(key, Slot::Tombstone)
-            .await;
+        self.state.cache.load().insert(key, Slot::Tombstone).await;
         self.notify.notify_one();
         Ok(existed)
     }
@@ -490,10 +477,7 @@ impl Store for MemBufferStore {
         let state = Arc::clone(&self.state);
         let inner = Arc::clone(&self.inner);
         let batch = batch_size;
-        let bs = self
-            .state
-            .flush_batch_size
-            .load(Ordering::Relaxed);
+        let bs = self.state.flush_batch_size.load(Ordering::Relaxed);
         Box::pin(async_stream::stream! {
             while {
                 let n = MemBufferStore::drain_once(&state, inner.as_ref(), bs).await
@@ -656,10 +640,8 @@ mod tests {
     async fn buffered_passes_full_batch_suite() {
         let inner_repo = InMemoryRepo::new();
         let inner_store = inner_repo.store_get("t").await.unwrap();
-        let store: Arc<dyn Store> = Arc::new(MemBufferStore::new(
-            inner_store,
-            MemBufferConfig::default(),
-        ));
+        let store: Arc<dyn Store> =
+            Arc::new(MemBufferStore::new(inner_store, MemBufferConfig::default()));
         run_batch_store_tests(store).await;
     }
 
@@ -683,10 +665,7 @@ mod tests {
     async fn read_after_write_returns_buffered_value() {
         let inner_repo = InMemoryRepo::new();
         let inner_store = inner_repo.store_get("t").await.unwrap();
-        let buffered = Arc::new(MemBufferStore::new(
-            inner_store,
-            MemBufferConfig::default(),
-        ));
+        let buffered = Arc::new(MemBufferStore::new(inner_store, MemBufferConfig::default()));
         let key = buffered.insert(Bytes::from_static(b"hello")).await.unwrap();
         let got = buffered.get(key).await.unwrap();
         assert_eq!(got.as_ref(), b"hello");
@@ -713,7 +692,10 @@ mod tests {
         let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), cfg));
 
         let k1 = buffered.insert(Bytes::from_static(b"first")).await.unwrap();
-        let k2 = buffered.insert(Bytes::from_static(b"second")).await.unwrap();
+        let k2 = buffered
+            .insert(Bytes::from_static(b"second"))
+            .await
+            .unwrap();
 
         // Wait for the eviction listener + flusher.
         let mut got1 = None;
@@ -786,7 +768,11 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(found, keys.len(), "background flusher must drain dirty entries");
+        assert_eq!(
+            found,
+            keys.len(),
+            "background flusher must drain dirty entries"
+        );
         buffered.flush().await.unwrap();
     }
 
@@ -810,7 +796,9 @@ mod tests {
         let mut keys = Vec::new();
         for _ in 0..10u8 {
             let key = buffered
-                .insert(Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+                .insert(Bytes::from_static(
+                    b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ))
                 .await
                 .unwrap();
             keys.push(key);
@@ -879,7 +867,9 @@ mod tests {
 
         for _ in 0..16u8 {
             let _ = buffered
-                .insert(Bytes::from_static(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
+                .insert(Bytes::from_static(
+                    b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                ))
                 .await
                 .unwrap();
         }
@@ -898,7 +888,10 @@ mod tests {
         // After config swap the new cache is empty (rebuilt).
         // Insert ONE more entry; the new cache should hold at most
         // its capacity. The 16 prior entries reside in inner only.
-        let _ = buffered.insert(Bytes::from_static(b"trigger")).await.unwrap();
+        let _ = buffered
+            .insert(Bytes::from_static(b"trigger"))
+            .await
+            .unwrap();
         // run_pending_tasks fires any synchronous eviction.
         buffered.state.cache.load().run_pending_tasks().await;
         assert!(
@@ -928,7 +921,10 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(80)).await;
         buffered.state.cache.load().run_pending_tasks().await;
-        assert!(buffered.cache_bytes() > 0, "no TTL set — entry should persist");
+        assert!(
+            buffered.cache_bytes() > 0,
+            "no TTL set — entry should persist"
+        );
 
         let with_ttl = MemBufferConfig {
             max_bytes: 64 * 1024,
@@ -956,14 +952,14 @@ mod tests {
     async fn flush_drains_then_calls_inner_flush() {
         let inner_repo = InMemoryRepo::new();
         let inner_store = inner_repo.store_get("t").await.unwrap();
-        let buffered = Arc::new(MemBufferStore::new(
-            inner_store.clone(),
-            small_config(),
-        ));
+        let buffered = Arc::new(MemBufferStore::new(inner_store.clone(), small_config()));
         for i in 0..50u8 {
             let _ = buffered.insert(Bytes::copy_from_slice(&[i])).await.unwrap();
         }
         buffered.flush().await.unwrap();
-        assert!(buffered.state.dirty.is_empty(), "dirty must be empty after flush");
+        assert!(
+            buffered.state.dirty.is_empty(),
+            "dirty must be empty after flush"
+        );
     }
 }

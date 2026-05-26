@@ -13,9 +13,9 @@ pub use batch::{
 pub use common::QueryParseError;
 pub use filter::{FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue};
 pub use read::{
-    AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy,
-    OrderByItem, OrderDirection, Pagination, PaginationInfo, QueryResult, QueryStats, ReadQuery,
-    Select, SelectExpr, SelectExprValue, SelectItem,
+    AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection, Pagination,
+    PaginationInfo, QueryResult, QueryStats, ReadQuery, Select, SelectExpr, SelectExprValue,
+    SelectItem,
 };
 // `TableRef` lives in shamir-query-types now; re-exported here so
 // `crate::query::TableRef` paths inside the engine keep resolving.

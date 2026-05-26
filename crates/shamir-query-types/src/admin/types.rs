@@ -179,7 +179,7 @@ pub struct BufferConfigPatch {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_double_option",
+        deserialize_with = "deserialize_double_option"
     )]
     pub ttl_ms: Option<Option<u64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,7 +1,7 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
 use arc_swap::ArcSwap;
-use std::sync::Arc;
 use parking_lot::Mutex;
+use std::sync::Arc;
 
 use super::{InternerKey, TouchInd, UserKey};
 
@@ -142,7 +142,9 @@ impl Interner {
     pub fn with_str<R>(&self, id: &InternerKey, f: impl FnOnce(&str) -> R) -> Option<R> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;
-        rev.get(idx).and_then(|slot| slot.as_ref()).map(|key| f(key.as_str()))
+        rev.get(idx)
+            .and_then(|slot| slot.as_ref())
+            .map(|key| f(key.as_str()))
     }
 
     /// Gets the interned key corresponding to a user key.

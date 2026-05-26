@@ -79,11 +79,20 @@ mod tests {
         // Simulate: 2 descriptors persisted (via save, not through registry —
         // just testing save/load serialization).
         let d1 = IndexDescriptor::new(
-            1, "fts_body", 100, SmallVec::new(),
-            IndexKind::Fts { tokenizer: TokenizerKind::Whitespace, language: None },
+            1,
+            "fts_body",
+            100,
+            SmallVec::new(),
+            IndexKind::Fts {
+                tokenizer: TokenizerKind::Whitespace,
+                language: None,
+            },
         );
         let d2 = IndexDescriptor::new(
-            2, "lower_email", 200, SmallVec::new(),
+            2,
+            "lower_email",
+            200,
+            SmallVec::new(),
             IndexKind::Functional(Box::new(FunctionalConfig {
                 expr: crate::index2::expr::IndexExpr::Lower(Box::new(
                     crate::index2::expr::IndexExpr::Field(vec![200]),

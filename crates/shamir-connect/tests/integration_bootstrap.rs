@@ -84,7 +84,9 @@ fn full_bootstrap_round_trip() {
 #[test]
 fn pin_mismatch_aborts_before_password_leaks() {
     let state = BootstrapState::empty();
-    let _ = state.issue_token(ns::HOUR, UnixNanos::now().as_u64()).unwrap();
+    let _ = state
+        .issue_token(ns::HOUR, UnixNanos::now().as_u64())
+        .unwrap();
 
     let kp = Ed25519Keypair::generate();
     let exporter = [0x99u8; 32];
@@ -103,13 +105,18 @@ fn pin_mismatch_aborts_before_password_leaks() {
         &challenge,
         UnixNanos::now().as_u64(),
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
 fn rejects_token_replay_to_different_client_via_client_nonce_check() {
     let state = BootstrapState::empty();
-    let _ = state.issue_token(ns::HOUR, UnixNanos::now().as_u64()).unwrap();
+    let _ = state
+        .issue_token(ns::HOUR, UnixNanos::now().as_u64())
+        .unwrap();
 
     let kp = Ed25519Keypair::generate();
     let pin = sha256(&kp.public_bytes());
@@ -130,13 +137,18 @@ fn rejects_token_replay_to_different_client_via_client_nonce_check() {
         &challenge_a,
         UnixNanos::now().as_u64(),
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
 fn rejects_clock_skew_beyond_60s() {
     let state = BootstrapState::empty();
-    let _ = state.issue_token(ns::HOUR, UnixNanos::now().as_u64()).unwrap();
+    let _ = state
+        .issue_token(ns::HOUR, UnixNanos::now().as_u64())
+        .unwrap();
 
     let kp = Ed25519Keypair::generate();
     let pin = sha256(&kp.public_bytes());
@@ -156,7 +168,10 @@ fn rejects_clock_skew_beyond_60s() {
         &challenge,
         now_ns,
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
@@ -183,7 +198,10 @@ fn cannot_bootstrap_twice() {
     // After successful bootstrap: cannot issue a second token (invariant).
     sk.fill(0);
     let result = state.issue_token(ns::HOUR, UnixNanos::now().as_u64());
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
@@ -203,7 +221,10 @@ fn rejects_expired_token() {
         &fast_kdf(),
         later,
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 
     // After failed expired-consume, state is cleaned: bootstrap path remains
     // closed because we're under "issued but never succeeded" semantics.
@@ -227,7 +248,10 @@ fn rejects_wrong_token() {
         &fast_kdf(),
         now,
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
@@ -252,7 +276,10 @@ fn rejects_kdf_params_below_floor() {
         &too_weak,
         now,
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
@@ -273,7 +300,10 @@ fn rejects_mismatched_kdf_params_vs_current() {
         &fast_kdf(), // current
         now,
     );
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
 
 #[test]
@@ -281,5 +311,8 @@ fn rehydrate_from_meta_blocks_when_already_used() {
     let state = BootstrapState::from_meta(None, None, true);
     assert!(!state.is_bootstrap_allowed());
     let result = state.issue_token(ns::HOUR, UnixNanos::now().as_u64());
-    assert!(matches!(result, Err(shamir_connect::Error::BootstrapFailed)));
+    assert!(matches!(
+        result,
+        Err(shamir_connect::Error::BootstrapFailed)
+    ));
 }
