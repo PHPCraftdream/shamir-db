@@ -1,0 +1,16 @@
+# Revisions listed here are skipped by `git blame` so that authorship
+# attribution falls through to the substantive author of each line.
+#
+# To make your local `git blame` honour this file, run once:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub's web UI reads this file automatically — no setup required.
+#
+# Add only commits that are purely mechanical / cosmetic:
+#   - cargo fmt --all sweeps
+#   - mass rename / sed migrations
+#   - lint auto-fix passes
+
+# style: cargo fmt --all (initial formatting pass)
+a84c32e9f83b4ed48d50ee91b47f1845544ddb3c
