@@ -2,8 +2,8 @@
 
 use super::index_definition::IndexDefinition;
 use crate::index::index_status::IndexStatus;
-use shamir_types::types::common::{new_dash_map_wc, TDashMap};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use shamir_types::types::common::{new_dash_map_wc, TDashMap};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;

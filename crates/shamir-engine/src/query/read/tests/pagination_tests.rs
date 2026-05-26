@@ -192,7 +192,11 @@ fn test_pagination_is_none() {
     assert!(Pagination::None.is_none());
     assert!(Pagination::default().is_none());
     assert!(!Pagination::page(1, 10).is_none());
-    assert!(!Pagination::LimitOffset { limit: Some(10), offset: 0 }.is_none());
+    assert!(!Pagination::LimitOffset {
+        limit: Some(10),
+        offset: 0
+    }
+    .is_none());
 }
 
 // ============================================================================
@@ -216,7 +220,10 @@ fn test_parse_page_based_query() {
     assert_eq!(query.from, crate::query::TableRef::new("users"));
     assert!(matches!(
         query.pagination,
-        Pagination::Page { page: 3, page_size: 20 }
+        Pagination::Page {
+            page: 3,
+            page_size: 20
+        }
     ));
     assert!(query.count_total);
 }
@@ -236,7 +243,10 @@ fn test_parse_limit_offset_query_backward_compat() {
 
     assert!(matches!(
         query.pagination,
-        Pagination::LimitOffset { limit: Some(10), offset: 20 }
+        Pagination::LimitOffset {
+            limit: Some(10),
+            offset: 20
+        }
     ));
     assert!(!query.count_total);
 }
@@ -270,7 +280,10 @@ fn test_parse_count_total_false_explicit() {
 
     assert!(matches!(
         query.pagination,
-        Pagination::Page { page: 1, page_size: 10 }
+        Pagination::Page {
+            page: 1,
+            page_size: 10
+        }
     ));
     assert!(!query.count_total);
 }
@@ -290,7 +303,10 @@ fn test_parse_limit_only_full_query() {
 
     assert!(matches!(
         query.pagination,
-        Pagination::LimitOffset { limit: Some(50), offset: 0 }
+        Pagination::LimitOffset {
+            limit: Some(50),
+            offset: 0
+        }
     ));
 }
 
@@ -309,7 +325,10 @@ fn test_parse_page_based_without_count_total() {
 
     assert!(matches!(
         query.pagination,
-        Pagination::Page { page: 5, page_size: 100 }
+        Pagination::Page {
+            page: 5,
+            page_size: 100
+        }
     ));
     assert!(!query.count_total);
 }
@@ -331,7 +350,10 @@ fn test_parse_page_1_edge_case() {
 
     assert!(matches!(
         query.pagination,
-        Pagination::Page { page: 1, page_size: 25 }
+        Pagination::Page {
+            page: 1,
+            page_size: 25
+        }
     ));
     assert!(query.count_total);
     assert!(query.r#where.is_some());
@@ -357,6 +379,9 @@ fn test_parse_offset_only_full_query() {
 
     assert!(matches!(
         query.pagination,
-        Pagination::LimitOffset { limit: None, offset: 100 }
+        Pagination::LimitOffset {
+            limit: None,
+            offset: 100
+        }
     ));
 }

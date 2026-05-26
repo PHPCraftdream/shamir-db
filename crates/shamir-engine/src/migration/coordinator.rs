@@ -146,10 +146,7 @@ impl MigrationCoordinator {
             if records.is_empty() {
                 break;
             }
-            let items: Vec<(RecordKey, Bytes)> = records
-                .into_iter()
-                .map(|(k, v)| (k, v))
-                .collect();
+            let items: Vec<(RecordKey, Bytes)> = records.into_iter().map(|(k, v)| (k, v)).collect();
             let count = items.len() as u64;
             self.dst_data.set_many(items).await?;
             copied += count;
@@ -335,8 +332,12 @@ mod tests {
 
         let shadow = Arc::new(MigrationShadowLog::new("mig1".into(), info));
         let state = MigrationState::new(
-            "mig1".into(), "users".into(), "main".into(),
-            "cold".into(), "redb".into(), None,
+            "mig1".into(),
+            "users".into(),
+            "main".into(),
+            "cold".into(),
+            "redb".into(),
+            None,
         );
         let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone());
 
@@ -345,10 +346,13 @@ mod tests {
         let copied = coord.run_snapshot().await.unwrap();
 
         // Simulate a write that arrives after snapshot cut
-        shadow.append(ShadowOp::Put {
-            record_id: RecordId::new(),
-            value: b"concurrent_write".to_vec(),
-        }).await.unwrap();
+        shadow
+            .append(ShadowOp::Put {
+                record_id: RecordId::new(),
+                value: b"concurrent_write".to_vec(),
+            })
+            .await
+            .unwrap();
         assert_eq!(copied, 10);
         assert_eq!(coord.phase().await, MigrationPhase::Draining);
 
@@ -359,10 +363,13 @@ mod tests {
         assert_eq!(coord.phase().await, MigrationPhase::CutoverReady);
 
         // One more write during cutover prep
-        shadow.append(ShadowOp::Put {
-            record_id: RecordId::new(),
-            value: b"late_write".to_vec(),
-        }).await.unwrap();
+        shadow
+            .append(ShadowOp::Put {
+                record_id: RecordId::new(),
+                value: b"late_write".to_vec(),
+            })
+            .await
+            .unwrap();
 
         let final_drained = coord.final_drain_and_commit().await.unwrap();
         assert_eq!(final_drained, 1);
@@ -381,8 +388,12 @@ mod tests {
 
         let shadow = Arc::new(MigrationShadowLog::new("mig2".into(), info));
         let state = MigrationState::new(
-            "mig2".into(), "t".into(), "main".into(),
-            "cold".into(), "redb".into(), None,
+            "mig2".into(),
+            "t".into(),
+            "main".into(),
+            "cold".into(),
+            "redb".into(),
+            None,
         );
         let coord = MigrationCoordinator::new(state, shadow.clone(), src, dst);
 
@@ -398,8 +409,12 @@ mod tests {
 
         let shadow = Arc::new(MigrationShadowLog::new("mig3".into(), info));
         let state = MigrationState::new(
-            "mig3".into(), "t".into(), "main".into(),
-            "cold".into(), "redb".into(), None,
+            "mig3".into(),
+            "t".into(),
+            "main".into(),
+            "cold".into(),
+            "redb".into(),
+            None,
         );
         let coord = MigrationCoordinator::new(state, shadow, src, dst);
 
@@ -417,8 +432,12 @@ mod tests {
 
         let shadow = Arc::new(MigrationShadowLog::new("mig4".into(), info));
         let state = MigrationState::new(
-            "mig4".into(), "t".into(), "main".into(),
-            "cold".into(), "redb".into(), None,
+            "mig4".into(),
+            "t".into(),
+            "main".into(),
+            "cold".into(),
+            "redb".into(),
+            None,
         );
         let coord = MigrationCoordinator::new(state, shadow, src, dst);
 
@@ -437,8 +456,12 @@ mod tests {
 
         let shadow = Arc::new(MigrationShadowLog::new("mig5".into(), info));
         let state = MigrationState::new(
-            "mig5".into(), "t".into(), "main".into(),
-            "cold".into(), "redb".into(), None,
+            "mig5".into(),
+            "t".into(),
+            "main".into(),
+            "cold".into(),
+            "redb".into(),
+            None,
         );
         let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone());
 
@@ -448,7 +471,10 @@ mod tests {
         let mut arr = [0u8; 16];
         arr.copy_from_slice(&keys[0].as_ref()[..16]);
         let rid = RecordId(arr);
-        shadow.append(ShadowOp::Delete { record_id: rid }).await.unwrap();
+        shadow
+            .append(ShadowOp::Delete { record_id: rid })
+            .await
+            .unwrap();
 
         coord.drain_until_caught_up(0).await.unwrap();
         coord.mark_cutover_ready().await.unwrap();

@@ -34,7 +34,11 @@ pub struct RequestEnvelope {
 
 impl RequestEnvelope {
     /// Build with a fresh request id.
-    pub fn new(session_id: [u8; limits::SESSION_ID_BYTES], request_id: Option<u32>, req: Vec<u8>) -> Self {
+    pub fn new(
+        session_id: [u8; limits::SESSION_ID_BYTES],
+        request_id: Option<u32>,
+        req: Vec<u8>,
+    ) -> Self {
         Self {
             session_id: session_id.to_vec(),
             request_id,

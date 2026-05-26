@@ -39,7 +39,8 @@ async fn test_execute_single_insert() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
@@ -59,7 +60,8 @@ async fn test_execute_single_read() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Read
@@ -68,7 +70,8 @@ async fn test_execute_single_read() {
         "queries": {
             "users": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     assert_eq!(resp.results["users"].records.len(), 2);
@@ -96,7 +99,8 @@ async fn test_execute_crud_pipeline() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &q1).await.unwrap();
 
     // 2. Update: activate Bob
@@ -112,7 +116,8 @@ async fn test_execute_crud_pipeline() {
                 }
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &q2).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
     assert_eq!(resp.results["upd"].records[0]["status"], "active");
@@ -127,7 +132,8 @@ async fn test_execute_crud_pipeline() {
             },
             "remaining": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &q3).await.unwrap();
 
     assert_eq!(resp.results["remaining"].records.len(), 2);
@@ -163,7 +169,8 @@ async fn test_execute_multi_table_with_dependency() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Query: find VIP users, then find their orders
@@ -183,7 +190,8 @@ async fn test_execute_multi_table_with_dependency() {
                 }
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
@@ -207,13 +215,14 @@ async fn test_execute_unknown_db() {
         "queries": {
             "r": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
-    let err = shamir
-        .execute("nonexistent", &req)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
+    let err = shamir.execute("nonexistent", &req).await.unwrap_err();
+    assert!(matches!(
+        err,
+        crate::query::batch::BatchError::QueryError { .. }
+    ));
 }
 
 // ============================================================================
@@ -234,7 +243,8 @@ async fn test_migration_lifecycle_in_memory() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Start migration: users from main → cold (in_memory)
@@ -248,7 +258,8 @@ async fn test_migration_lifecycle_in_memory() {
                 "dst_engine": "in_memory"
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let mig_result = &resp.results["mig"].records[0];
     assert_eq!(mig_result["phase"], "cutover_ready");
@@ -260,7 +271,8 @@ async fn test_migration_lifecycle_in_memory() {
         "queries": {
             "s": {"migration_status": migration_id}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let status_resp = shamir.execute("testdb", &status_req).await.unwrap();
     let status = &status_resp.results["s"].records[0];
     assert_eq!(status["phase"], "cutover_ready");
@@ -272,7 +284,8 @@ async fn test_migration_lifecycle_in_memory() {
         "queries": {
             "c": {"commit_migration": migration_id}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let commit_resp = shamir.execute("testdb", &commit_req).await.unwrap();
     let commit = &commit_resp.results["c"].records[0];
     assert_eq!(commit["phase"], "committed");
@@ -285,7 +298,8 @@ async fn test_migration_lifecycle_in_memory() {
         "queries": {
             "r": {"from": ["cold", "users"]}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let read_resp = shamir.execute("testdb", &read_req).await.unwrap();
     assert_eq!(read_resp.results["r"].records.len(), 3);
 }
@@ -304,7 +318,8 @@ async fn test_migration_rollback() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Start migration
@@ -318,9 +333,13 @@ async fn test_migration_rollback() {
                 "dst_engine": "in_memory"
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let migration_id = resp.results["mig"].records[0]["migration_id"].as_str().unwrap().to_string();
+    let migration_id = resp.results["mig"].records[0]["migration_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Rollback
     let rb_req: BatchRequest = serde_json::from_value(json!({
@@ -328,7 +347,8 @@ async fn test_migration_rollback() {
         "queries": {
             "r": {"rollback_migration": migration_id}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let rb_resp = shamir.execute("testdb", &rb_req).await.unwrap();
     assert_eq!(rb_resp.results["r"].records[0]["phase"], "rolled_back");
 
@@ -338,9 +358,13 @@ async fn test_migration_rollback() {
         "queries": {
             "s": {"migration_status": migration_id}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let status_err = shamir.execute("testdb", &status_req).await.unwrap_err();
-    assert!(matches!(status_err, crate::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(
+        status_err,
+        crate::query::batch::BatchError::QueryError { .. }
+    ));
 }
 
 #[tokio::test]
@@ -352,9 +376,13 @@ async fn test_migration_unknown_id() {
         "queries": {
             "c": {"commit_migration": "nonexistent"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let err = shamir.execute("testdb", &req).await.unwrap_err();
-    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(
+        err,
+        crate::query::batch::BatchError::QueryError { .. }
+    ));
 }
 
 // ============================================================================
@@ -373,11 +401,12 @@ async fn test_execute_unknown_repo() {
                 "from": ["nonexistent", "users"]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
-    let err = shamir
-        .execute("testdb", &req)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    assert!(matches!(
+        err,
+        crate::query::batch::BatchError::QueryError { .. }
+    ));
 }

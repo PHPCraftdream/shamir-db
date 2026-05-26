@@ -49,7 +49,10 @@ impl core::fmt::Debug for BootstrapState {
                     "<None>"
                 },
             )
-            .field("bootstrap_token_expires_at_ns", &g.bootstrap_token_expires_at_ns)
+            .field(
+                "bootstrap_token_expires_at_ns",
+                &g.bootstrap_token_expires_at_ns,
+            )
             .field("superuser_ever_existed", &g.superuser_ever_existed)
             .finish()
     }
@@ -102,11 +105,7 @@ impl BootstrapState {
     ///
     /// Caller is responsible for outputting the token via the configured
     /// channel (TTY / file / command), per spec §11.2.3.
-    pub fn issue_token(
-        &self,
-        ttl_ns: u64,
-        now_ns: u64,
-    ) -> Result<Zeroizing<[u8; 32]>> {
+    pub fn issue_token(&self, ttl_ns: u64, now_ns: u64) -> Result<Zeroizing<[u8; 32]>> {
         let mut g = self.inner.lock();
         if g.superuser_ever_existed {
             return Err(Error::BootstrapFailed);

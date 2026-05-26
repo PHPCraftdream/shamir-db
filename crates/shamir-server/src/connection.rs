@@ -13,21 +13,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
+use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
+use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::AuditChainWriter;
-use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::config::ServerSecrets;
 use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome, RequestHandler};
 use shamir_connect::server::handshake::{
     AuthInitView, AuthOkView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
-use shamir_connect::server::lockout::{
-    subnet_of, username_hash, LockoutStore, PairKey,
-};
+use shamir_connect::server::lockout::{subnet_of, username_hash, LockoutStore, PairKey};
 use shamir_connect::server::rate_limit::{RateDecision, RateLimiter};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::rotation::ServerIdentityState;
@@ -35,7 +34,6 @@ use shamir_connect::server::session::{
     Session, SessionPermissions, SessionStore, MAX_SESSIONS_PER_USER,
 };
 use shamir_connect::server::user_record::UserRecord;
-use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::Error as ConnectError;
 
 use crate::framer::Framer;
@@ -250,7 +248,14 @@ pub async fn handle_connection<F>(
         tokio::time::sleep(pad).await;
     }
 
-    request_loop(&ctx, &mut framer, &mut frame_buf, &mut write_scratch, session_id).await;
+    request_loop(
+        &ctx,
+        &mut framer,
+        &mut frame_buf,
+        &mut write_scratch,
+        session_id,
+    )
+    .await;
 
     // Terminal: 5s grace is a transport-layer concept (the session sticks
     // around in SessionStore after disconnect; resume can re-bind within
@@ -369,8 +374,7 @@ async fn run_handshake<F: Framer>(
         binding_mode,
         version: init.version,
     };
-    let listener_policy =
-        shamir_connect::server::config::ListenerPolicy::new(ctx.binding_mode);
+    let listener_policy = shamir_connect::server::config::ListenerPolicy::new(ctx.binding_mode);
     let hs = match ServerHandshake::new(
         listener_policy,
         ctx.transport_kind,
@@ -397,12 +401,17 @@ async fn run_handshake<F: Framer>(
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Decode),
     };
-    if framer.write_frame_into(&bytes, write_scratch).await.is_err() {
+    if framer
+        .write_frame_into(&bytes, write_scratch)
+        .await
+        .is_err()
+    {
         return Err(HandshakeError::Io);
     }
 
     // 5. Read client_proof (Argon2id ran on the client side, ~2s).
-    if framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
+    if framer
+        .read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
         .await
         .is_err()
     {
@@ -537,7 +546,11 @@ async fn run_handshake<F: Framer>(
     let roles_for_ticket = match ctx.user_dir.lookup_roles(username.as_str()) {
         Ok(Some(r)) => r,
         Ok(None) => Vec::new(),
-        Err(e) => return Err(HandshakeError::Storage(format!("lookup_roles (ticket): {e}"))),
+        Err(e) => {
+            return Err(HandshakeError::Storage(format!(
+                "lookup_roles (ticket): {e}"
+            )))
+        }
     };
     let (ticket_bytes, ticket_expires_at_ns) =
         match shamir_connect::server::resume::issue_initial_ticket(
@@ -556,7 +569,10 @@ async fn run_handshake<F: Framer>(
             Err(e) => {
                 // Issuing the ticket is best-effort — a failure must not
                 // tank a successful auth. Log and continue with no ticket.
-                tracing::warn!(?e, "resumption ticket issuance failed; auth_ok will carry no ticket");
+                tracing::warn!(
+                    ?e,
+                    "resumption ticket issuance failed; auth_ok will carry no ticket"
+                );
                 (Vec::new(), 0u64)
             }
         };
@@ -573,7 +589,11 @@ async fn run_handshake<F: Framer>(
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),
     };
-    if framer.write_frame_into(&bytes, write_scratch).await.is_err() {
+    if framer
+        .write_frame_into(&bytes, write_scratch)
+        .await
+        .is_err()
+    {
         return Err(HandshakeError::Io);
     }
 
@@ -598,7 +618,10 @@ async fn request_loop<F: Framer>(
     };
 
     loop {
-        match framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf).await {
+        match framer
+            .read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
+            .await
+        {
             Ok(()) => {}
             Err(_) => break, // client closed
         }
@@ -629,30 +652,26 @@ async fn request_loop<F: Framer>(
             }
         }
         let dyn_handler = DynRef(handler_ref);
-        let outcome = match dispatch_request_view(
-            &view,
-            &ctx.session_store,
-            &lookup_tib,
-            &dyn_handler,
-        ) {
-            Ok(o) => o,
-            Err(_) => {
-                // Internal error — best-effort error envelope.
-                let err = ErrorEnvelope::new(view.request_id, "internal_error");
-                if let Ok(bytes) = err.to_msgpack() {
-                    let _ = framer.write_frame_into(&bytes, write_scratch).await;
+        let outcome =
+            match dispatch_request_view(&view, &ctx.session_store, &lookup_tib, &dyn_handler) {
+                Ok(o) => o,
+                Err(_) => {
+                    // Internal error — best-effort error envelope.
+                    let err = ErrorEnvelope::new(view.request_id, "internal_error");
+                    if let Ok(bytes) = err.to_msgpack() {
+                        let _ = framer.write_frame_into(&bytes, write_scratch).await;
+                    }
+                    continue;
                 }
-                continue;
-            }
-        };
+            };
         let reply_bytes = match outcome {
             DispatchOutcome::Response(resp) => match resp.to_msgpack() {
                 Ok(b) => b,
                 Err(_) => continue,
             },
             DispatchOutcome::Error(err) => {
-                let invalidated = err.error == "session_invalidated"
-                    || err.error == "session_expired";
+                let invalidated =
+                    err.error == "session_invalidated" || err.error == "session_expired";
                 let bytes = match err.to_msgpack() {
                     Ok(b) => b,
                     Err(_) => continue,
@@ -665,7 +684,11 @@ async fn request_loop<F: Framer>(
                 continue;
             }
         };
-        if framer.write_frame_into(&reply_bytes, write_scratch).await.is_err() {
+        if framer
+            .write_frame_into(&reply_bytes, write_scratch)
+            .await
+            .is_err()
+        {
             break;
         }
     }

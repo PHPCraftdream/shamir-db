@@ -181,10 +181,7 @@ fn kick_session_kills_target_sessions_and_bumps_invalidation() {
     let store = SessionStore::new();
     store.insert([0xa1u8; 32], make_normal_session(alice_uid, "alice"));
     store.insert([0xa2u8; 32], make_normal_session(alice_uid, "alice"));
-    store.insert(
-        [0xb1u8; 32],
-        make_normal_session([0xbbu8; 16], "bob"),
-    );
+    store.insert([0xb1u8; 32], make_normal_session([0xbbu8; 16], "bob"));
 
     let now = UnixNanos::now().as_u64();
     let result = kick_session(&admin, "alice", now, &dir, &store, &audit).unwrap();
@@ -228,9 +225,16 @@ fn update_user_with_new_roles_kills_sessions_and_bumps() {
     store.insert([0xa1u8; 32], make_normal_session(alice_uid, "alice"));
 
     let now = UnixNanos::now().as_u64();
-    let result =
-        update_user(&admin, "alice", Some(vec!["read_only".into()]), now, &dir, &store, &audit)
-            .unwrap();
+    let result = update_user(
+        &admin,
+        "alice",
+        Some(vec!["read_only".into()]),
+        now,
+        &dir,
+        &store,
+        &audit,
+    )
+    .unwrap();
     assert!(result.changes_applied);
     assert_eq!(store.len(), 0);
 

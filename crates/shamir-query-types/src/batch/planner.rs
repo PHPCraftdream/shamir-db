@@ -44,8 +44,8 @@
 
 use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
 use crate::filter::Filter;
-use shamir_types::types::common::{new_map, new_set, TMap, TSet};
 use serde_json::Value;
+use shamir_types::types::common::{new_map, new_set, TMap, TSet};
 
 /// Batch query planner.
 ///
@@ -247,7 +247,9 @@ impl BatchPlanner {
             | Filter::NotExists { .. }
             | Filter::Fts { .. }
             | Filter::VectorSimilarity { .. } => {}
-            Filter::Computed { value, expr_args, .. } => {
+            Filter::Computed {
+                value, expr_args, ..
+            } => {
                 Self::extract_deps_from_filter_value(value, deps);
                 if let Some(args) = expr_args {
                     for v in args {
@@ -259,10 +261,7 @@ impl BatchPlanner {
     }
 
     /// Extract dependencies from a filter value.
-    fn extract_deps_from_filter_value(
-        value: &crate::filter::FilterValue,
-        deps: &mut TSet<String>,
-    ) {
+    fn extract_deps_from_filter_value(value: &crate::filter::FilterValue, deps: &mut TSet<String>) {
         use crate::filter::FilterValue;
 
         match value {

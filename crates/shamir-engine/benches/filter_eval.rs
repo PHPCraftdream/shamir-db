@@ -8,8 +8,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use shamir_engine::query::filter::{compile_filter, FilterContext};
 use shamir_engine::query::filter::Filter;
+use shamir_engine::query::filter::{compile_filter, FilterContext};
 use shamir_query_types::filter::FilterValue;
 
 use shamir_types::core::interner::{Interner, TouchInd};
@@ -30,7 +30,10 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     m.insert(touch("age"), InnerValue::Int((idx % 100) as i64));
     m.insert(touch("score"), InnerValue::F64(idx as f64 * 1.5));
     m.insert(touch("active"), InnerValue::Bool(idx % 2 == 0));
-    m.insert(touch("email"), InnerValue::Str(format!("u{}@example.com", idx)));
+    m.insert(
+        touch("email"),
+        InnerValue::Str(format!("u{}@example.com", idx)),
+    );
     m.insert(touch("tags"), {
         InnerValue::List(vec![
             InnerValue::Str("alpha".into()),
@@ -52,8 +55,8 @@ fn bench(c: &mut Criterion) {
     let interner = Interner::new();
     // Make sure all field-names are interned before compile_filter runs.
     for k in [
-        "id", "name", "age", "score", "active", "email", "tags", "address", "city",
-        "zip", "country",
+        "id", "name", "age", "score", "active", "email", "tags", "address", "city", "zip",
+        "country",
     ] {
         intern(&interner, k);
     }

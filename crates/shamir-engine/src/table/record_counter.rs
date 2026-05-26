@@ -11,9 +11,9 @@
 //! persist call the engine already makes (and is itself a no-op when
 //! nothing changed).
 
-use shamir_types::codecs::basic::bincode;
-use shamir_storage::types::Store;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::Store;
+use shamir_types::codecs::basic::bincode;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

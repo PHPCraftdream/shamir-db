@@ -1,8 +1,8 @@
-use shamir_types::codecs::basic::bincode;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info::IndexInfo;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_status::IndexStatus;
+use shamir_types::codecs::basic::bincode;
 
 #[test]
 fn test_selective_mode_with_definitions() {

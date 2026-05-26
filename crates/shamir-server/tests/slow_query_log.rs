@@ -77,11 +77,11 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
     // will exceed it (each takes at least a few microseconds).
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     shamir.create_db("prod").await;
-    let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("items"));
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("prod", cfg).await.expect("add repo");
-    let handler = ShamirDbHandler::new(Arc::new(shamir))
-        .with_slow_query(SlowQueryConfig { threshold_us: 1 });
+    let handler =
+        ShamirDbHandler::new(Arc::new(shamir)).with_slow_query(SlowQueryConfig { threshold_us: 1 });
 
     // 3. Run a batch — should trigger the warn line.
     let batch: BatchRequest = serde_json::from_value(json!({
@@ -108,8 +108,16 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
     );
     // Field assertions — exact format depends on the formatter, but each
     // value should appear as `<field>=<value>` somewhere in the line.
-    assert!(captured.contains("db=\"prod\""), "db field, got {:?}", captured);
-    assert!(captured.contains("queries=1"), "queries field, got {:?}", captured);
+    assert!(
+        captured.contains("db=\"prod\""),
+        "db field, got {:?}",
+        captured
+    );
+    assert!(
+        captured.contains("queries=1"),
+        "queries field, got {:?}",
+        captured
+    );
     assert!(
         captured.contains("threshold_us=1"),
         "threshold_us field, got {:?}",
@@ -132,12 +140,11 @@ async fn no_warn_when_threshold_is_zero() {
 
     let shamir = ShamirDb::init_memory().await.expect("init shamir");
     shamir.create_db("prod").await;
-    let cfg = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("items"));
+    let cfg =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
     shamir.add_repo("prod", cfg).await.expect("add repo");
     // threshold_us = 0 → DISABLED.
-    let handler = ShamirDbHandler::new(Arc::new(shamir))
-        .with_slow_query(SlowQueryConfig::DISABLED);
+    let handler = ShamirDbHandler::new(Arc::new(shamir)).with_slow_query(SlowQueryConfig::DISABLED);
 
     let batch: BatchRequest = serde_json::from_value(json!({
         "id": "noop",

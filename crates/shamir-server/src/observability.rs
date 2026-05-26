@@ -214,9 +214,7 @@ pub async fn spawn(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(ObservabilityError::Bind)?;
-    let bound_addr = listener
-        .local_addr()
-        .map_err(ObservabilityError::Bind)?;
+    let bound_addr = listener.local_addr().map_err(ObservabilityError::Bind)?;
     tracing::info!(bound_addr = %bound_addr, "observability HTTP server bound");
 
     let shutdown_for_serve = shutdown.clone();

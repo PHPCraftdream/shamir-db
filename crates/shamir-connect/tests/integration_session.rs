@@ -367,13 +367,12 @@ fn insert_with_per_user_cap_does_not_affect_other_users() {
     store.insert(bob_sid, make_session(bob, 1000));
 
     // Alice insert with cap=3 → evicts an alice session, NOT bob's.
-    let (_arc, evicted) = store.insert_with_per_user_cap(
-        [99u8; 32],
-        make_session(alice, 5000),
-        3,
-    );
+    let (_arc, evicted) = store.insert_with_per_user_cap([99u8; 32], make_session(alice, 5000), 3);
     assert!(evicted.is_some());
-    assert!(store.lookup(&bob_sid).is_some(), "bob's session must be untouched");
+    assert!(
+        store.lookup(&bob_sid).is_some(),
+        "bob's session must be untouched"
+    );
 }
 
 /// v1 #7: cap of 0 disables the LRU policy (insert always succeeds, no
@@ -385,11 +384,8 @@ fn insert_with_per_user_cap_zero_disables_eviction() {
     let store = SessionStore::new();
     let uid = [0xa1u8; 16];
     for i in 0..50 {
-        let (_, evicted) = store.insert_with_per_user_cap(
-            [i as u8; 32],
-            make_session(uid, 1000 + i),
-            0,
-        );
+        let (_, evicted) =
+            store.insert_with_per_user_cap([i as u8; 32], make_session(uid, 1000 + i), 0);
         assert!(evicted.is_none());
     }
     assert_eq!(store.len(), 50);

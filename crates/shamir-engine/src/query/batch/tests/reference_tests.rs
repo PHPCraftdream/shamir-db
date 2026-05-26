@@ -4,9 +4,7 @@
 
 use crate::query::batch::{QueryPath, QueryReference};
 
-fn parse(
-    s: &str,
-) -> Result<QueryReference, crate::query::batch::ReferenceParseError> {
+fn parse(s: &str) -> Result<QueryReference, crate::query::batch::ReferenceParseError> {
     QueryReference::parse(s)
 }
 

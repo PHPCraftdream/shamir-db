@@ -130,6 +130,9 @@ pub fn dispatch_request_view<H: RequestHandler, F: Fn(&[u8; 16]) -> u64>(
             view.request_id,
             res_bytes,
         ))),
-        Err(err) => Ok(DispatchOutcome::Error(ErrorEnvelope::new(view.request_id, err))),
+        Err(err) => Ok(DispatchOutcome::Error(ErrorEnvelope::new(
+            view.request_id,
+            err,
+        ))),
     }
 }

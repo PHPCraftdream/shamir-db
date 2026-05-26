@@ -5,6 +5,6 @@
 
 pub use shamir_query_types::admin::{
     AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, CreateDbOp, CreateIndexOp,
-    CreateRepoOp, CreateTableOp, DropDbOp, DropIndexOp, DropRepoOp, DropTableOp,
-    GetBufferConfigOp, ListOp, SetBufferConfigOp,
+    CreateRepoOp, CreateTableOp, DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp,
+    ListOp, SetBufferConfigOp,
 };

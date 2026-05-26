@@ -30,30 +30,32 @@ pub struct BruteForceAdapter {
 
 impl BruteForceAdapter {
     pub fn new(dim: u32, metric: VectorMetric) -> Self {
-        let actor = IndexActor::spawn(HashMap::new(), |op, snap: Arc<ArcSwap<Snapshot>>| async move {
-            let mut current: Snapshot = (**snap.load()).clone();
-            match op {
-                WriteOp::Upsert(rid, vec) => {
-                    current.insert(rid, vec);
+        let actor = IndexActor::spawn(
+            HashMap::new(),
+            |op, snap: Arc<ArcSwap<Snapshot>>| async move {
+                let mut current: Snapshot = (**snap.load()).clone();
+                match op {
+                    WriteOp::Upsert(rid, vec) => {
+                        current.insert(rid, vec);
+                    }
+                    WriteOp::Delete(rid) => {
+                        current.remove(&rid);
+                    }
                 }
-                WriteOp::Delete(rid) => {
-                    current.remove(&rid);
-                }
-            }
-            snap.store(Arc::new(current));
-        });
+                snap.store(Arc::new(current));
+            },
+        );
         Self { dim, metric, actor }
     }
 
     fn distance(metric: &VectorMetric, a: &[f32], b: &[f32]) -> f32 {
         match metric {
-            VectorMetric::L2 => {
-                a.iter()
-                    .zip(b.iter())
-                    .map(|(x, y)| (x - y) * (x - y))
-                    .sum::<f32>()
-                    .sqrt()
-            }
+            VectorMetric::L2 => a
+                .iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y) * (x - y))
+                .sum::<f32>()
+                .sqrt(),
             VectorMetric::Cosine => {
                 let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
                 let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -100,11 +102,7 @@ impl VectorAdapter for BruteForceAdapter {
         Ok(())
     }
 
-    async fn search(
-        &self,
-        query: &[f32],
-        k: u32,
-    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
+    async fn search(&self, query: &[f32], k: u32) -> Result<Vec<(RecordId, f32)>, VectorError> {
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
@@ -203,7 +201,13 @@ mod tests {
     async fn dim_mismatch_rejected() {
         let adapter = BruteForceAdapter::new(3, VectorMetric::L2);
         let err = adapter.upsert(rid(1), &[1.0, 2.0]).await.unwrap_err();
-        assert!(matches!(err, VectorError::DimMismatch { expected: 3, got: 2 }));
+        assert!(matches!(
+            err,
+            VectorError::DimMismatch {
+                expected: 3,
+                got: 2
+            }
+        ));
     }
 
     #[tokio::test]

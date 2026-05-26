@@ -96,8 +96,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 async fn server_refuses_tls12_only_client_per_transport_tcp_3_1() {
     install_provider_once();
 
-    let (cert_pem, key_pem) =
-        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
     let client_cfg = tls12_only_client_config();
 
@@ -129,8 +128,7 @@ async fn server_refuses_tls12_only_client_per_transport_tcp_3_1() {
 async fn client_refuses_tls12_only_server_per_transport_tcp_3_1() {
     install_provider_once();
 
-    let (cert_pem, key_pem) =
-        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = tls12_only_server_config(&cert_pem, &key_pem);
     let client_cfg = make_client_config_no_ca();
 

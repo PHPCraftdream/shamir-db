@@ -9,7 +9,7 @@ use crate::core::interner::Interner;
 use crate::types::common::new_map;
 use crate::types::value::{InnerValue, Value};
 use rmpv::Value as RmpvValue;
-use serde::ser::{SerializeMap, SerializeSeq, Serialize, Serializer};
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 /// Decodes MessagePack bytes to InnerValue, interning string keys
 ///
@@ -78,13 +78,12 @@ impl Serialize for InternedRef<'_> {
             Value::Map(m) => {
                 let mut map = ser.serialize_map(Some(m.len()))?;
                 for (k, v) in m {
-                    let user_key = self
-                        .interner
-                        .get_str(k)
-                        .ok_or_else(|| serde::ser::Error::custom(format!(
+                    let user_key = self.interner.get_str(k).ok_or_else(|| {
+                        serde::ser::Error::custom(format!(
                             "Interned key not found in interner: {:?}",
                             k
-                        )))?;
+                        ))
+                    })?;
                     map.serialize_entry(
                         user_key.as_ref(),
                         &InternedRef {
@@ -162,4 +161,3 @@ fn rmpv_value_to_inner(
         }
     }
 }
-

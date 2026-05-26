@@ -93,13 +93,12 @@ impl Serialize for InternedRef<'_> {
             Value::Map(m) => {
                 let mut map = ser.serialize_map(Some(m.len()))?;
                 for (interned_key, val) in m {
-                    let user_key = self
-                        .interner
-                        .get_str(interned_key)
-                        .ok_or_else(|| serde::ser::Error::custom(format!(
+                    let user_key = self.interner.get_str(interned_key).ok_or_else(|| {
+                        serde::ser::Error::custom(format!(
                             "Interned key not found in interner: {:?}",
                             interned_key
-                        )))?;
+                        ))
+                    })?;
                     map.serialize_entry(
                         user_key.as_ref(),
                         &InternedRef {
@@ -159,7 +158,10 @@ pub fn json_value_to_inner(
 }
 
 /// Converts InnerValue to serde_json::Value, de-interning all keys
-pub fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> Result<json::Value, CodecError> {
+pub fn inner_to_json_value(
+    value: &InnerValue,
+    interner: &Interner,
+) -> Result<json::Value, CodecError> {
     match value {
         Value::Null => Ok(json::Value::Null),
         Value::Bool(b) => Ok(json::Value::Bool(*b)),
@@ -178,25 +180,19 @@ pub fn inner_to_json_value(value: &InnerValue, interner: &Interner) -> Result<js
         Value::Dec(d) => Ok(json::Value::String(d.to_string())),
         Value::Big(b) => Ok(json::Value::String(b.to_string())),
         Value::Str(s) => Ok(json::Value::String(s.clone())),
-        Value::Bin(b) => {
-            Ok(json::Value::Array(
-                b.iter()
-                    .map(|&byte| json::Value::Number(byte.into()))
-                    .collect(),
-            ))
-        }
+        Value::Bin(b) => Ok(json::Value::Array(
+            b.iter()
+                .map(|&byte| json::Value::Number(byte.into()))
+                .collect(),
+        )),
         Value::List(l) => {
-            let arr: Result<Vec<_>, _> = l
-                .iter()
-                .map(|v| inner_to_json_value(v, interner))
-                .collect();
+            let arr: Result<Vec<_>, _> =
+                l.iter().map(|v| inner_to_json_value(v, interner)).collect();
             Ok(json::Value::Array(arr?))
         }
         Value::Set(s) => {
-            let arr: Result<Vec<_>, _> = s
-                .iter()
-                .map(|v| inner_to_json_value(v, interner))
-                .collect();
+            let arr: Result<Vec<_>, _> =
+                s.iter().map(|v| inner_to_json_value(v, interner)).collect();
             Ok(json::Value::Array(arr?))
         }
         Value::Map(m) => {

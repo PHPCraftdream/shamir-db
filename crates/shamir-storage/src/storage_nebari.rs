@@ -1,6 +1,5 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::error::{DbError, DbResult};
-use shamir_types::types::record_id::RecordId;
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -10,6 +9,7 @@ use nebari::{
     tree::{Operation, Root, ScanEvaluation, Unversioned, UnversionedTreeRoot},
     ArcBytes, Config, Roots, Tree,
 };
+use shamir_types::types::record_id::RecordId;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -368,8 +368,7 @@ impl Store for NebariStore {
                 .map(|_| RecordKey::copy_from_slice(RecordId::new().as_bytes()))
                 .collect();
             // Sort (key, value) pairs by key for nebari.
-            let mut pairs: Vec<(RecordKey, Bytes)> =
-                ids.iter().cloned().zip(values).collect();
+            let mut pairs: Vec<(RecordKey, Bytes)> = ids.iter().cloned().zip(values).collect();
             pairs.sort_by(|a, b| a.0.as_ref().cmp(b.0.as_ref()));
 
             let keys: Vec<ArcBytes<'static>> = pairs
@@ -662,7 +661,10 @@ mod tests {
         // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        let created = store.set(key1.clone(), value2.to_bytes().unwrap()).await.unwrap();
+        let created = store
+            .set(key1.clone(), value2.to_bytes().unwrap())
+            .await
+            .unwrap();
         assert!(!created); // Should be false, as it's an update
         let retrieved_bytes2 = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
@@ -671,7 +673,10 @@ mod tests {
         let id2 = RecordId::new();
         let key2 = Bytes::copy_from_slice(id2.as_bytes());
         let value3 = InnerValue::Int(123);
-        let created2 = store.set(key2.clone(), value3.to_bytes().unwrap()).await.unwrap();
+        let created2 = store
+            .set(key2.clone(), value3.to_bytes().unwrap())
+            .await
+            .unwrap();
         assert!(created2); // Should be true, as it's a new record
         let retrieved_bytes3 = store.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);

@@ -157,9 +157,9 @@ impl ResumeConfig {
         let previous = self
             .cached_previous
             .get_or_init(|| {
-                self.ticket_key_previous.as_ref().map(|k| {
-                    aes256gcm_cipher(k).expect("AES-256 key length validated")
-                })
+                self.ticket_key_previous
+                    .as_ref()
+                    .map(|k| aes256gcm_cipher(k).expect("AES-256 key length validated"))
             })
             .as_ref();
         (current, previous)
@@ -295,9 +295,8 @@ pub fn process_resume(
     // of whether a refresh ticket is issued (down from 2 + 2 = 4 in the
     // previous version).
 
-    let issue_refresh =
-        plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS
-            > now_ns + new_ticket_ttl_ns;
+    let issue_refresh = plain.original_auth_at_ns + ticket_limits::RESUMPTION_MAX_CHAIN_AGE_NS
+        > now_ns + new_ticket_ttl_ns;
 
     let transport_at_auth = plain.transport_kind_at_auth;
     let session_transport = crate::common::types::TransportKind::from_u8(transport_at_auth)
@@ -311,12 +310,12 @@ pub fn process_resume(
 
         let new_plain = TicketPlain {
             version: 1,
-            user_id: plain.user_id, // ByteArray<16>: Copy, free
+            user_id: plain.user_id,           // ByteArray<16>: Copy, free
             username_nfc: plain.username_nfc, // moved
             transport_kind_at_auth: transport_at_auth,
             binding_mode_at_auth: plain.binding_mode_at_auth,
             channel_binding_at_auth: plain.channel_binding_at_auth, // ByteArray<32>: Copy
-            ticket_family_id: plain.ticket_family_id, // ByteArray<16>: Copy
+            ticket_family_id: plain.ticket_family_id,               // ByteArray<16>: Copy
             original_auth_at_ns: plain.original_auth_at_ns,
             expires_at_ns: now_ns.saturating_add(new_ticket_ttl_ns),
             family_counter: plain.family_counter.saturating_add(1),
@@ -343,7 +342,7 @@ pub fn process_resume(
         // No refresh: move plain directly into Session — zero clones.
         let session = Session::new(
             user_id,
-            plain.username_nfc, // moved
+            plain.username_nfc,                          // moved
             SessionPermissions::from_roles(plain.roles), // moved
             session_transport,
             request.binding_mode_now,
@@ -431,4 +430,3 @@ impl UserStateLookup for InMemoryUserStateMap {
 
 // `parse_user_id` and `parse_family_id` removed in Optim #2 — fields are
 // now `serde_bytes::ByteArray<N>` and accessed directly as `[u8; N]`.
-

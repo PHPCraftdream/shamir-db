@@ -1,11 +1,11 @@
 use super::types::{RecordKey, Repo, Store};
 use crate::error::{DbError, DbResult};
-use shamir_types::types::common::{new_dash_map, new_dash_map_wc, TDashMap};
-use shamir_types::types::record_id::RecordId;
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
+use shamir_types::types::common::{new_dash_map, new_dash_map_wc, TDashMap};
+use shamir_types::types::record_id::RecordId;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -187,8 +187,8 @@ mod tests {
 
     use super::super::types::collect_stream;
     use super::*;
-    use shamir_types::types::value::InnerValue;
     use futures::StreamExt;
+    use shamir_types::types::value::InnerValue;
     use tokio::time::{sleep, Duration};
 
     async fn run_store_tests(store: Arc<dyn Store>) {
@@ -201,7 +201,10 @@ mod tests {
         // Test set (update)
         sleep(Duration::from_micros(50)).await;
         let value2 = InnerValue::Str("world".to_string());
-        let created = store.set(key1.clone(), value2.to_bytes().unwrap()).await.unwrap();
+        let created = store
+            .set(key1.clone(), value2.to_bytes().unwrap())
+            .await
+            .unwrap();
         assert!(!created); // Should be false, as it's an update
         let retrieved_bytes2 = store.get(key1.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes2).unwrap(), value2);
@@ -210,7 +213,10 @@ mod tests {
         let id2 = RecordId::new();
         let key2 = Bytes::copy_from_slice(id2.as_bytes());
         let value3 = InnerValue::Int(123);
-        let created2 = store.set(key2.clone(), value3.to_bytes().unwrap()).await.unwrap();
+        let created2 = store
+            .set(key2.clone(), value3.to_bytes().unwrap())
+            .await
+            .unwrap();
         assert!(created2); // Should be true, as it's a new record
         let retrieved_bytes3 = store.get(key2.clone()).await.unwrap();
         assert_eq!(InnerValue::from_bytes(retrieved_bytes3).unwrap(), value3);
@@ -314,11 +320,8 @@ mod tests {
         }
 
         // Range [k05 ..= k10] — six entries inclusive.
-        let stream = store.iter_range_stream(
-            Some(Bytes::from("k05")),
-            Some(Bytes::from("k10")),
-            100,
-        );
+        let stream =
+            store.iter_range_stream(Some(Bytes::from("k05")), Some(Bytes::from("k10")), 100);
         let mut got: Vec<String> = Vec::new();
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
@@ -401,11 +404,7 @@ mod tests {
                 .unwrap();
         }
         // Bounds outside the data — no matches.
-        let stream = store.iter_range_stream(
-            Some(Bytes::from("z0")),
-            Some(Bytes::from("z9")),
-            100,
-        );
+        let stream = store.iter_range_stream(Some(Bytes::from("z0")), Some(Bytes::from("z9")), 100);
         let mut count = 0;
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
@@ -419,21 +418,25 @@ mod tests {
         let store = InMemoryStore::new();
         for i in 0..50 {
             store
-                .set(Bytes::from(format!("k{i:03}")), Bytes::from(format!("v{i}")))
+                .set(
+                    Bytes::from(format!("k{i:03}")),
+                    Bytes::from(format!("v{i}")),
+                )
                 .await
                 .unwrap();
         }
         // batch_size=10 over a 25-key window.
-        let stream = store.iter_range_stream(
-            Some(Bytes::from("k010")),
-            Some(Bytes::from("k034")),
-            10,
-        );
+        let stream =
+            store.iter_range_stream(Some(Bytes::from("k010")), Some(Bytes::from("k034")), 10);
         let mut total = 0;
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             let b = batch.unwrap();
-            assert!(b.len() <= 10, "no batch exceeds requested size: {}", b.len());
+            assert!(
+                b.len() <= 10,
+                "no batch exceeds requested size: {}",
+                b.len()
+            );
             total += b.len();
         }
         assert_eq!(total, 25, "25 keys in [k010..=k034]");

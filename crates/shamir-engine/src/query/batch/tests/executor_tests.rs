@@ -3,13 +3,11 @@
 use serde_json::json;
 
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::batch::{execute_batch, BatchRequest, TableResolver};
+use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
-use crate::query::batch::{
-    execute_batch, BatchRequest, TableResolver,
-};
-use crate::query::TableRef;
 use shamir_storage::error::DbResult;
 
 /// Simple resolver that wraps a DbInstance + repo name.
@@ -29,10 +27,7 @@ async fn setup_resolver() -> TestResolver {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
-        tables: vec![
-            TableConfig::new("users"),
-            TableConfig::new("orders"),
-        ],
+        tables: vec![TableConfig::new("users"), TableConfig::new("orders")],
     };
     let db = DbInstance::with_repos(vec![repo_config]).await.unwrap();
     TestResolver {
@@ -61,7 +56,8 @@ async fn test_single_read_query() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = execute_batch(&insert_req, &resolver, None).await.unwrap();
     assert_eq!(resp.results["insert"].records.len(), 2);
 
@@ -71,7 +67,8 @@ async fn test_single_read_query() {
         "queries": {
             "users": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
@@ -103,7 +100,8 @@ async fn test_independent_queries_same_stage() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     execute_batch(&seed_req, &resolver, None).await.unwrap();
 
     // Two independent reads
@@ -113,7 +111,8 @@ async fn test_independent_queries_same_stage() {
             "users": {"from": "users"},
             "orders": {"from": "orders"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
@@ -145,7 +144,8 @@ async fn test_dependent_query_ref() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     execute_batch(&seed_req, &resolver, None).await.unwrap();
 
     // Query 1: get active users
@@ -166,7 +166,8 @@ async fn test_dependent_query_ref() {
                 }
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
@@ -196,7 +197,8 @@ async fn test_insert_then_read() {
             },
             "read": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
@@ -225,7 +227,8 @@ async fn test_return_only() {
             "read": {"from": "users"}
         },
         "return_only": ["read"]
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
@@ -253,7 +256,8 @@ async fn test_return_result_false() {
             "read": {"from": "users"}
         },
         "return_all": false
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
 
@@ -283,7 +287,8 @@ async fn test_batch_with_delete() {
                 "return_result": false
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     execute_batch(&seed_req, &resolver, None).await.unwrap();
 
     // Delete inactive, then read
@@ -295,11 +300,19 @@ async fn test_batch_with_delete() {
                 "where": {"op": "eq", "field": ["status"], "value": "inactive"}
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
     // 1 record deleted (Bob)
-    assert_eq!(resp.results["cleanup"].stats.as_ref().unwrap().records_scanned, 1);
+    assert_eq!(
+        resp.results["cleanup"]
+            .stats
+            .as_ref()
+            .unwrap()
+            .records_scanned,
+        1
+    );
 }
 
 // ============================================================================
@@ -331,10 +344,14 @@ async fn test_circular_dependency_error() {
                 }
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let err = execute_batch(&req, &resolver, None).await.unwrap_err();
-    assert!(matches!(err, crate::query::batch::BatchError::CircularDependency { .. }));
+    assert!(matches!(
+        err,
+        crate::query::batch::BatchError::CircularDependency { .. }
+    ));
 }
 
 // ============================================================================
@@ -354,11 +371,15 @@ async fn test_unknown_table_fails_early() {
             },
             "bad": {"from": "nonexistent_table"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let err = execute_batch(&req, &resolver, None).await.unwrap_err();
     // Should fail with table not found error BEFORE any execution
-    assert!(matches!(err, crate::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(
+        err,
+        crate::query::batch::BatchError::QueryError { .. }
+    ));
 }
 
 // ============================================================================
@@ -375,7 +396,8 @@ async fn test_request_id_echoed() {
         "queries": {
             "q": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
     assert_eq!(resp.id, json!("req-42"));
 
@@ -385,7 +407,8 @@ async fn test_request_id_echoed() {
         "queries": {
             "q": {"from": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
     assert_eq!(resp.id, json!(123));
 }

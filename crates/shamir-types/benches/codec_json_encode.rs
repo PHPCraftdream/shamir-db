@@ -24,27 +24,45 @@ fn intern(i: &Interner, s: &str) -> InternerKey {
 fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     let mut m = new_map_wc(10);
     m.insert(intern(interner, "id"), InnerValue::Int(idx as i64));
-    m.insert(intern(interner, "name"), InnerValue::Str(format!("user-{}", idx)));
+    m.insert(
+        intern(interner, "name"),
+        InnerValue::Str(format!("user-{}", idx)),
+    );
     m.insert(intern(interner, "age"), InnerValue::Int((idx % 100) as i64));
     m.insert(intern(interner, "score"), InnerValue::F64(idx as f64 * 1.5));
     m.insert(intern(interner, "active"), InnerValue::Bool(idx % 2 == 0));
-    m.insert(intern(interner, "email"), InnerValue::Str(format!("u{}@example.com", idx)));
-    m.insert(intern(interner, "tags"), InnerValue::List(vec![
-        InnerValue::Str("alpha".into()),
-        InnerValue::Str("beta".into()),
-        InnerValue::Str("gamma".into()),
-        InnerValue::Str("delta".into()),
-        InnerValue::Str("epsilon".into()),
-    ]));
+    m.insert(
+        intern(interner, "email"),
+        InnerValue::Str(format!("u{}@example.com", idx)),
+    );
+    m.insert(
+        intern(interner, "tags"),
+        InnerValue::List(vec![
+            InnerValue::Str("alpha".into()),
+            InnerValue::Str("beta".into()),
+            InnerValue::Str("gamma".into()),
+            InnerValue::Str("delta".into()),
+            InnerValue::Str("epsilon".into()),
+        ]),
+    );
     m.insert(intern(interner, "address"), {
         let mut a = new_map_wc(3);
-        a.insert(intern(interner, "city"), InnerValue::Str("Jerusalem".into()));
+        a.insert(
+            intern(interner, "city"),
+            InnerValue::Str("Jerusalem".into()),
+        );
         a.insert(intern(interner, "zip"), InnerValue::Str("9100000".into()));
         a.insert(intern(interner, "country"), InnerValue::Str("IL".into()));
         InnerValue::Map(a)
     });
-    m.insert(intern(interner, "created_at"), InnerValue::Int(1_700_000_000 + idx as i64));
-    m.insert(intern(interner, "balance"), InnerValue::F64(idx as f64 * 12.34));
+    m.insert(
+        intern(interner, "created_at"),
+        InnerValue::Int(1_700_000_000 + idx as i64),
+    );
+    m.insert(
+        intern(interner, "balance"),
+        InnerValue::F64(idx as f64 * 12.34),
+    );
     InnerValue::Map(m)
 }
 

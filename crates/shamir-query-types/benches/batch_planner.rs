@@ -42,23 +42,15 @@ fn bench_planner(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("batch_planner");
     for n in [5, 10, 20, 50] {
-        group.bench_with_input(
-            BenchmarkId::new("independent", n),
-            &n,
-            |b, &n| {
-                let batch = make_batch(n, false);
-                b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap()));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("independent", n), &n, |b, &n| {
+            let batch = make_batch(n, false);
+            b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap()));
+        });
         if n <= 20 {
-            group.bench_with_input(
-                BenchmarkId::new("chain", n),
-                &n,
-                |b, &n| {
-                    let batch = make_batch(n, true);
-                    b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap()));
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("chain", n), &n, |b, &n| {
+                let batch = make_batch(n, true);
+                b.iter(|| black_box(BatchPlanner::plan(&batch.queries, &limits).unwrap()));
+            });
         }
     }
     group.finish();

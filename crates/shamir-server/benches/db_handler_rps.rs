@@ -17,8 +17,8 @@ use serde_json::json;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::time::UnixNanos;
+use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};

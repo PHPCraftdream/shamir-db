@@ -7,8 +7,6 @@ use super::buffer_config;
 use super::interner_manager::InternerManager;
 use super::record_counter::RecordCounter;
 use super::table::Table;
-use shamir_storage::storage_membuffer::MemBufferConfig;
-use shamir_types::core::interner::TouchInd;
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_manager::IndexManager;
@@ -17,8 +15,10 @@ use crate::query::filter::eval::{compile_filter, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use crate::wal::WalManager;
-use shamir_storage::types::Store;
 use shamir_storage::error::DbResult;
+use shamir_storage::storage_membuffer::MemBufferConfig;
+use shamir_storage::types::Store;
+use shamir_types::core::interner::TouchInd;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -118,7 +118,9 @@ impl TableManager {
         }
 
         // Restore index2 backends from persisted metadata.
-        if let Some(persisted) = crate::index2::persistence::load_index2_metadata(&mgr.info_store).await? {
+        if let Some(persisted) =
+            crate::index2::persistence::load_index2_metadata(&mgr.info_store).await?
+        {
             mgr.index2_registry.set_next_id(persisted.next_id);
             for desc in persisted.descriptors {
                 if matches!(desc.kind, crate::index2::kind::IndexKind::Btree { .. }) {
@@ -182,15 +184,13 @@ impl TableManager {
         // in-memory store. Its persisted defs blob then lives in a
         // throwaway store, which is fine because these tests never
         // call sorted-index methods.
-        let info_store: Arc<dyn Store> = Arc::new(
-            shamir_storage::storage_in_memory::InMemoryStore::new(),
-        );
+        let info_store: Arc<dyn Store> =
+            Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new());
         // Construct synchronously: SortedIndexManager::new() is async
         // but the empty-state path doesn't await any real work.
-        let sorted_indexes = futures::executor::block_on(
-            SortedIndexManager::new(info_store.clone()),
-        )
-        .expect("sorted index manager init for test");
+        let sorted_indexes =
+            futures::executor::block_on(SortedIndexManager::new(info_store.clone()))
+                .expect("sorted index manager init for test");
         let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
         Self {
             name,
@@ -221,20 +221,14 @@ impl TableManager {
         }
         let prev = self.write_counter.fetch_add(n, Ordering::Relaxed);
         let next = prev.saturating_add(n);
-        let crossed = prev / AUTO_VERIFY_EVERY_N_WRITES
-            != next / AUTO_VERIFY_EVERY_N_WRITES;
+        let crossed = prev / AUTO_VERIFY_EVERY_N_WRITES != next / AUTO_VERIFY_EVERY_N_WRITES;
         if !crossed {
             return;
         }
         // Single-flight: skip if another verify is in flight.
         if self
             .verify_running
-            .compare_exchange(
-                false,
-                true,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
             return;
@@ -252,15 +246,9 @@ impl TableManager {
                         );
                     }
                 }
-                Err(e) => log::warn!(
-                    "Background verify on '{}' failed: {}",
-                    self_clone.name(),
-                    e,
-                ),
+                Err(e) => log::warn!("Background verify on '{}' failed: {}", self_clone.name(), e,),
             }
-            self_clone
-                .verify_running
-                .store(false, Ordering::Release);
+            self_clone.verify_running.store(false, Ordering::Release);
         });
     }
 
@@ -320,10 +308,7 @@ impl TableManager {
     where
         F: FnOnce(&mut MemBufferConfig),
     {
-        let mut cfg = self
-            .get_buffer_config()
-            .await?
-            .unwrap_or_default();
+        let mut cfg = self.get_buffer_config().await?.unwrap_or_default();
         mutate(&mut cfg);
         self.set_buffer_config(&cfg).await?;
         Ok(cfg)
@@ -393,11 +378,7 @@ impl TableManager {
     /// the doctor's `repair()` rebuilds the index from scratch as a
     /// recovery path. Do NOT call under `tokio::select!` /
     /// `tokio::time::timeout`.
-    pub async fn create_sorted_index(
-        &self,
-        index_name: &str,
-        field_path: &[&str],
-    ) -> DbResult<()> {
+    pub async fn create_sorted_index(&self, index_name: &str, field_path: &[&str]) -> DbResult<()> {
         use crate::index::sorted_index_manager::SortedIndexDefinition;
         let interner = self.interner.get().await?;
         let name_interned = interner
@@ -791,10 +772,7 @@ impl TableManager {
     ///
     /// Must be called **before** `bulk_populate_index2` and **before**
     /// any writes reach the dst table.
-    pub async fn replicate_index2_descriptors_from(
-        &self,
-        src: &TableManager,
-    ) -> DbResult<()> {
+    pub async fn replicate_index2_descriptors_from(&self, src: &TableManager) -> DbResult<()> {
         let src_backends = src.index2_registry.all_backends().await;
         if src_backends.is_empty() {
             return Ok(());
@@ -814,8 +792,7 @@ impl TableManager {
             };
 
             // Intern each path segment in dst address space.
-            let mut interned_paths: smallvec::SmallVec<[Vec<u64>; 2]> =
-                smallvec::SmallVec::new();
+            let mut interned_paths: smallvec::SmallVec<[Vec<u64>; 2]> = smallvec::SmallVec::new();
             for path in &src_desc.paths {
                 let mut seg_ids = Vec::with_capacity(path.len());
                 // The src's `paths` already contain interned u64s from
@@ -851,8 +828,7 @@ impl TableManager {
                 src_desc.kind.clone(),
             );
 
-            let backend =
-                crate::index2::build_index2_backend(new_desc, &self.info_store);
+            let backend = crate::index2::build_index2_backend(new_desc, &self.info_store);
             self.index2_registry
                 .insert(backend)
                 .await
@@ -860,11 +836,8 @@ impl TableManager {
         }
 
         self.interner.persist().await?;
-        crate::index2::persistence::save_index2_metadata(
-            &self.index2_registry,
-            &self.info_store,
-        )
-        .await?;
+        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
+            .await?;
 
         Ok(())
     }
@@ -897,20 +870,15 @@ impl TableManager {
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-            let items: Vec<(RecordId, &InnerValue)> = batch
-                .iter()
-                .map(|(rid, val)| (*rid, val))
-                .collect();
+            let items: Vec<(RecordId, &InnerValue)> =
+                batch.iter().map(|(rid, val)| (*rid, val)).collect();
             for backend in &backends {
-                backend
-                    .on_batch_insert(&items)
-                    .await
-                    .map_err(|e| {
-                        shamir_storage::error::DbError::Internal(format!(
-                            "bulk_populate_index2 on_batch_insert failed: {}",
-                            e
-                        ))
-                    })?;
+                backend.on_batch_insert(&items).await.map_err(|e| {
+                    shamir_storage::error::DbError::Internal(format!(
+                        "bulk_populate_index2 on_batch_insert failed: {}",
+                        e
+                    ))
+                })?;
             }
         }
 
@@ -943,9 +911,7 @@ impl TableManager {
 
         let index_type = op.index_type.as_deref().unwrap_or("btree");
         if index_type == "btree" {
-            let paths: Vec<String> = op.fields.iter()
-                .map(|segs| segs.join("."))
-                .collect();
+            let paths: Vec<String> = op.fields.iter().map(|segs| segs.join(".")).collect();
             let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
             return if op.unique {
                 self.create_unique_index(&op.create_index, &path_refs).await
@@ -959,7 +925,10 @@ impl TableManager {
         for field_path in &op.fields {
             let mut seg_ids = Vec::with_capacity(field_path.len());
             for seg in field_path {
-                let key = match interner.touch_ind(seg).map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))? {
+                let key = match interner
+                    .touch_ind(seg)
+                    .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
+                {
                     TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
                 };
                 seg_ids.push(key);
@@ -968,7 +937,10 @@ impl TableManager {
         }
 
         let id = self.index2_registry.allocate_id();
-        let name_key = match interner.touch_ind(&op.create_index).map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))? {
+        let name_key = match interner
+            .touch_ind(&op.create_index)
+            .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
+        {
             TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
         };
 
@@ -1001,14 +973,18 @@ impl TableManager {
                     language: op.fts_language.clone(),
                 };
                 let desc = IndexDescriptor::new(
-                    id, &op.create_index, name_key,
-                    interned_paths.clone(), kind.clone(),
+                    id,
+                    &op.create_index,
+                    name_key,
+                    interned_paths.clone(),
+                    kind.clone(),
                 );
-                let backend: Arc<dyn IndexBackend> = Arc::new(
-                    crate::index2::fts_ranked_backend::FtsRankedBackend::new(
-                        desc, first_path, Arc::clone(self.info_store()),
-                    ),
-                );
+                let backend: Arc<dyn IndexBackend> =
+                    Arc::new(crate::index2::fts_ranked_backend::FtsRankedBackend::new(
+                        desc,
+                        first_path,
+                        Arc::clone(self.info_store()),
+                    ));
                 (kind, backend)
             }
             "functional" => {
@@ -1019,20 +995,26 @@ impl TableManager {
                     "upper" => crate::index2::expr::IndexExpr::Upper(Box::new(base)),
                     "trim" => crate::index2::expr::IndexExpr::Trim(Box::new(base)),
                     "length" => crate::index2::expr::IndexExpr::Length(Box::new(base)),
-                    _ => return Err(shamir_storage::error::DbError::Internal(
-                        format!("unknown functional_op: {expr_op}"),
-                    )),
+                    _ => {
+                        return Err(shamir_storage::error::DbError::Internal(format!(
+                            "unknown functional_op: {expr_op}"
+                        )))
+                    }
                 };
                 let kind = IndexKind::Functional(Box::new(FunctionalConfig { expr: expr.clone() }));
                 let desc = IndexDescriptor::new(
-                    id, &op.create_index, name_key,
-                    interned_paths.clone(), kind.clone(),
+                    id,
+                    &op.create_index,
+                    name_key,
+                    interned_paths.clone(),
+                    kind.clone(),
                 );
-                let backend: Arc<dyn IndexBackend> = Arc::new(
-                    crate::index2::functional_backend::FunctionalBackend::new(
-                        desc, expr, Arc::clone(self.info_store()),
-                    ),
-                );
+                let backend: Arc<dyn IndexBackend> =
+                    Arc::new(crate::index2::functional_backend::FunctionalBackend::new(
+                        desc,
+                        expr,
+                        Arc::clone(self.info_store()),
+                    ));
                 (kind, backend)
             }
             "vector" => {
@@ -1043,34 +1025,41 @@ impl TableManager {
                     _ => VectorMetric::Cosine,
                 };
                 let kind = IndexKind::Vector(Box::new(VectorConfig {
-                    dim, metric,
-                    backend: VectorBackendRef::InProcessHnsw { ef_construct: 200, m: 16 },
+                    dim,
+                    metric,
+                    backend: VectorBackendRef::InProcessHnsw {
+                        ef_construct: 200,
+                        m: 16,
+                    },
                 }));
                 let desc = IndexDescriptor::new(
-                    id, &op.create_index, name_key,
-                    interned_paths.clone(), kind.clone(),
+                    id,
+                    &op.create_index,
+                    name_key,
+                    interned_paths.clone(),
+                    kind.clone(),
                 );
-                let adapter = Arc::new(
-                    crate::index2::vector::hnsw_adapter::HnswAdapter::new(
-                        dim,
-                        metric,
-                        crate::index2::vector::hnsw_adapter::HnswConfig {
-                            max_elements: 100_000,
-                            m: 16,
-                            ef_construction: 200,
-                            ef_search: 50,
-                            ..Default::default()
-                        },
-                    ),
-                );
+                let adapter = Arc::new(crate::index2::vector::hnsw_adapter::HnswAdapter::new(
+                    dim,
+                    metric,
+                    crate::index2::vector::hnsw_adapter::HnswConfig {
+                        max_elements: 100_000,
+                        m: 16,
+                        ef_construction: 200,
+                        ef_search: 50,
+                        ..Default::default()
+                    },
+                ));
                 let backend: Arc<dyn IndexBackend> = Arc::new(
                     crate::index2::vector::VectorBackend::new(desc, first_path, adapter),
                 );
                 (kind, backend)
             }
-            _ => return Err(shamir_storage::error::DbError::Internal(
-                format!("unknown index_type: {index_type}"),
-            )),
+            _ => {
+                return Err(shamir_storage::error::DbError::Internal(format!(
+                    "unknown index_type: {index_type}"
+                )))
+            }
         };
 
         self.index2_registry
@@ -1078,11 +1067,8 @@ impl TableManager {
             .await
             .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
 
-        crate::index2::persistence::save_index2_metadata(
-            &self.index2_registry,
-            &self.info_store,
-        )
-        .await?;
+        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
+            .await?;
 
         Ok(())
     }

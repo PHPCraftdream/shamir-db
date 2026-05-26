@@ -57,9 +57,9 @@ use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::conn_limiter::ConnLimiter;
 use crate::connection::{handle_connection, ConnectionContext};
 use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig};
-use crate::tables_registry::TablesRegistry;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server_meta::ServerMetaStore;
+use crate::tables_registry::TablesRegistry;
 use crate::tls::{load_or_generate, subject_alts_from_addrs, LoadedTls};
 use crate::user_directory::RedbUserDirectory;
 
@@ -247,11 +247,11 @@ impl ServerLauncher {
         let session_store = Arc::new(SessionStore::new());
 
         // 4. Audit chain — load from checkpoint if present.
-        let ack = meta.audit_chain_key().map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let ack = meta
+            .audit_chain_key()
+            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
         let audit_chain = match meta.audit_checkpoint() {
-            Some((seq, hmac)) => {
-                Arc::new(AuditChain::from_checkpoint(ack, seq, hmac))
-            }
+            Some((seq, hmac)) => Arc::new(AuditChain::from_checkpoint(ack, seq, hmac)),
             None => Arc::new(AuditChain::new(ack)),
         };
         let audit_writer = Arc::new(AuditChainWriter::new(
@@ -309,8 +309,11 @@ impl ServerLauncher {
                     if !db.has_table(repo_name, table_name) {
                         if let Err(e) = db.create_table(repo_name, table_name) {
                             tracing::warn!(
-                                db = db_name, repo = repo_name, table = table_name,
-                                ?e, "tables_registry replay: create_table failed"
+                                db = db_name,
+                                repo = repo_name,
+                                table = table_name,
+                                ?e,
+                                "tables_registry replay: create_table failed"
                             );
                         }
                     }
@@ -337,7 +340,9 @@ impl ServerLauncher {
         );
 
         // 6. ResumeConfig.
-        let (current_key, previous_key) = meta.ticket_keys().map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let (current_key, previous_key) = meta
+            .ticket_keys()
+            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
         let resume_config = Arc::new(ResumeConfig::new(
             current_key,
             previous_key,
@@ -346,9 +351,17 @@ impl ServerLauncher {
         ));
 
         // 7. Identity material.
-        let identity = Arc::new(meta.identity_state().map_err(|e| BootError::ServerMeta(e.to_string()))?);
-        let identity_seed = meta.current_identity_seed().map_err(|e| BootError::ServerMeta(e.to_string()))?;
-        let secrets = Arc::new(meta.server_secrets().map_err(|e| BootError::ServerMeta(e.to_string()))?);
+        let identity = Arc::new(
+            meta.identity_state()
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
+        );
+        let identity_seed = meta
+            .current_identity_seed()
+            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let secrets = Arc::new(
+            meta.server_secrets()
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
+        );
 
         // 8. Scheduler.
         let scheduler = Scheduler::spawn(
@@ -378,7 +391,10 @@ impl ServerLauncher {
             .iter()
             .filter_map(|l| l.addr.parse::<SocketAddr>().ok())
             .collect();
-        let LoadedTls { server_config: tls_server, generated } = load_or_generate(
+        let LoadedTls {
+            server_config: tls_server,
+            generated,
+        } = load_or_generate(
             &config.tls.cert_path,
             &config.tls.key_path,
             subject_alts_from_addrs(&parsed_addrs),
@@ -402,8 +418,7 @@ impl ServerLauncher {
             Duration::from_millis(config.security.connection.auth_init_timeout_ms);
         // Global cap on simultaneously-active connections — shared across
         // every listener.
-        let conn_limiter =
-            ConnLimiter::new(config.security.connection.max_active_connections);
+        let conn_limiter = ConnLimiter::new(config.security.connection.max_active_connections);
 
         for l in &config.listeners {
             let addr: SocketAddr = match l.addr.parse() {
@@ -563,19 +578,15 @@ impl ServerLauncher {
         let observability = if config.observability.addr.is_empty() {
             None
         } else {
-            let addr: std::net::SocketAddr = config
-                .observability
-                .addr
-                .parse()
-                .map_err(|e| BootError::Bind(format!(
+            let addr: std::net::SocketAddr = config.observability.addr.parse().map_err(|e| {
+                BootError::Bind(format!(
                     "observability.addr {} invalid: {e}",
                     config.observability.addr
-                )))?;
+                ))
+            })?;
             let state = crate::observability::ObservabilityState::new();
             // Record what the data-path bound to — `/info` surfaces this.
-            state.set_bound_addrs(
-                bound_addrs.iter().filter_map(|a| *a).collect(),
-            );
+            state.set_bound_addrs(bound_addrs.iter().filter_map(|a| *a).collect());
             // The Prometheus recorder is global per-process. In integration
             // tests where multiple servers spawn back-to-back the second
             // launcher would error on `set_global_recorder`. We swallow
@@ -895,7 +906,10 @@ fn log_bootstrap_outcome(name: &str, outcome: &BootstrapOutcome) {
                 "bootstrap: superuser created with operator-supplied password",
             );
         }
-        BootstrapOutcome::Created { token: Some(tok), token_path } => {
+        BootstrapOutcome::Created {
+            token: Some(tok),
+            token_path,
+        } => {
             // SECURITY: print the token at WARN so operators see it, but do
             // NOT log it on every restart. Once the operator changes the
             // password, the file should be deleted so this branch never

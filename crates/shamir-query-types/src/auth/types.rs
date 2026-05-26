@@ -45,9 +45,39 @@ impl Resource {
             (Resource::Database { database: d1 }, Resource::Database { database: d2 }) => d1 == d2,
             (Resource::Database { database: d1 }, Resource::Repo { database: d2, .. }) => d1 == d2,
             (Resource::Database { database: d1 }, Resource::Table { database: d2, .. }) => d1 == d2,
-            (Resource::Repo { database: d1, repo: r1 }, Resource::Repo { database: d2, repo: r2 }) => d1 == d2 && r1 == r2,
-            (Resource::Repo { database: d1, repo: r1 }, Resource::Table { database: d2, repo: r2, .. }) => d1 == d2 && r1 == r2,
-            (Resource::Table { database: d1, repo: r1, table: t1 }, Resource::Table { database: d2, repo: r2, table: t2 }) => d1 == d2 && r1 == r2 && t1 == t2,
+            (
+                Resource::Repo {
+                    database: d1,
+                    repo: r1,
+                },
+                Resource::Repo {
+                    database: d2,
+                    repo: r2,
+                },
+            ) => d1 == d2 && r1 == r2,
+            (
+                Resource::Repo {
+                    database: d1,
+                    repo: r1,
+                },
+                Resource::Table {
+                    database: d2,
+                    repo: r2,
+                    ..
+                },
+            ) => d1 == d2 && r1 == r2,
+            (
+                Resource::Table {
+                    database: d1,
+                    repo: r1,
+                    table: t1,
+                },
+                Resource::Table {
+                    database: d2,
+                    repo: r2,
+                    table: t2,
+                },
+            ) => d1 == d2 && r1 == r2 && t1 == t2,
             _ => false,
         }
     }

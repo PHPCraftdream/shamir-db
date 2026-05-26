@@ -10,9 +10,9 @@ use std::cmp::Ordering;
 use regex::Regex;
 use smallvec::SmallVec;
 
-use shamir_types::core::interner::{Interner, InternerKey};
 use crate::query::filter::{Filter, FilterValue};
 use crate::query::read::QueryResult;
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::value::InnerValue;
 
 /// Compact field-path representation for `FilterNode` variants.
@@ -323,10 +323,9 @@ impl FilterNode {
                             Some(Ordering::Greater | Ordering::Equal)
                         ),
                         CompareOp::Lt => compare_values(a, b) == Some(Ordering::Less),
-                        CompareOp::Lte => matches!(
-                            compare_values(a, b),
-                            Some(Ordering::Less | Ordering::Equal)
-                        ),
+                        CompareOp::Lte => {
+                            matches!(compare_values(a, b), Some(Ordering::Less | Ordering::Equal))
+                        }
                     },
                     (None, _) | (_, None) => matches!(op, CompareOp::Ne),
                 }
@@ -360,26 +359,33 @@ impl FilterNode {
                             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
                             if let Some(qr) = ctx.resolved_refs.get(key) {
                                 let column = resolve_query_ref_column(qr, path.as_deref());
-                                return column
-                                    .iter()
-                                    .any(|cv| compare_values(field_val, cv) == Some(Ordering::Equal));
+                                return column.iter().any(|cv| {
+                                    compare_values(field_val, cv) == Some(Ordering::Equal)
+                                });
                             }
                         }
                         return false;
                     }
                     match resolve_filter_value(fv, record, ctx) {
-                        Some(resolved) => compare_values(field_val, &resolved) == Some(Ordering::Equal),
+                        Some(resolved) => {
+                            compare_values(field_val, &resolved) == Some(Ordering::Equal)
+                        }
                         None => false,
                     }
                 });
-                if *negate { !found } else { found }
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
             }
 
-            FilterNode::Like { field_path, regex }
-            | FilterNode::Regex { field_path, regex } => match resolve_field_ref(record, field_path) {
-                Some(InnerValue::Str(s)) => regex.is_match(s),
-                _ => false,
-            },
+            FilterNode::Like { field_path, regex } | FilterNode::Regex { field_path, regex } => {
+                match resolve_field_ref(record, field_path) {
+                    Some(InnerValue::Str(s)) => regex.is_match(s),
+                    _ => false,
+                }
+            }
 
             FilterNode::Contains {
                 field_path,
@@ -502,12 +508,8 @@ impl FilterNode {
                 )
             }
 
-            FilterNode::Exists { field_path } => {
-                resolve_field_ref(record, field_path).is_some()
-            }
-            FilterNode::NotExists { field_path } => {
-                resolve_field_ref(record, field_path).is_none()
-            }
+            FilterNode::Exists { field_path } => resolve_field_ref(record, field_path).is_some(),
+            FilterNode::NotExists { field_path } => resolve_field_ref(record, field_path).is_none(),
 
             FilterNode::FtsMatch {
                 field_path,
@@ -519,8 +521,7 @@ impl FilterNode {
                     _ => return false,
                 };
                 let lower = text.to_lowercase();
-                let words: std::collections::HashSet<&str> =
-                    lower.split_whitespace().collect();
+                let words: std::collections::HashSet<&str> = lower.split_whitespace().collect();
                 if *mode_and {
                     query_tokens.iter().all(|t| words.contains(t.as_str()))
                 } else {
@@ -586,8 +587,7 @@ fn like_pattern_to_regex(pattern: &str, case_insensitive: bool) -> Option<Regex>
         match ch {
             '%' => regex_str.push_str(".*"),
             '_' => regex_str.push('.'),
-            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' | '^'
-            | '$' => {
+            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' | '^' | '$' => {
                 regex_str.push('\\');
                 regex_str.push(ch);
             }
@@ -614,15 +614,19 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::Gte { field, value } => compile_compare(field, value, CompareOp::Gte, interner),
         Filter::Lt { field, value } => compile_compare(field, value, CompareOp::Lt, interner),
         Filter::Lte { field, value } => compile_compare(field, value, CompareOp::Lte, interner),
-        Filter::FieldEq { field, value } => {
-            compile_compare(field, value, CompareOp::Eq, interner)
-        }
+        Filter::FieldEq { field, value } => compile_compare(field, value, CompareOp::Eq, interner),
 
         Filter::And { filters } => FilterNode::And(
-            filters.iter().map(|f| compile_filter(f, interner)).collect(),
+            filters
+                .iter()
+                .map(|f| compile_filter(f, interner))
+                .collect(),
         ),
         Filter::Or { filters } => FilterNode::Or(
-            filters.iter().map(|f| compile_filter(f, interner)).collect(),
+            filters
+                .iter()
+                .map(|f| compile_filter(f, interner))
+                .collect(),
         ),
         Filter::Not { filter } => FilterNode::Not(Box::new(compile_filter(filter, interner))),
 
@@ -739,10 +743,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::Fts { field, query, mode } => match intern_field_path(field, interner) {
             Some(path) => FilterNode::FtsMatch {
                 field_path: SmallVec::from_vec(path),
-                query_tokens: query
-                    .split_whitespace()
-                    .map(|w| w.to_lowercase())
-                    .collect(),
+                query_tokens: query.split_whitespace().map(|w| w.to_lowercase()).collect(),
                 mode_and: mode != "or",
             },
             None => FilterNode::False,

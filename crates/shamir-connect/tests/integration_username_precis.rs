@@ -20,7 +20,11 @@ fn full_width_ascii_folded_to_half_width() {
     // U+FF21 FULLWIDTH LATIN CAPITAL LETTER A
     let raw = "\u{FF21}\u{FF22}\u{FF23}";
     let norm = NormalizedUsername::from_raw(raw).unwrap();
-    assert_eq!(norm.as_str(), "abc", "full-width ABC must fold to ascii abc");
+    assert_eq!(
+        norm.as_str(),
+        "abc",
+        "full-width ABC must fold to ascii abc"
+    );
 }
 
 /// RFC 8265 §3.3: PRECIS UsernameCaseMapped uses `Lowercase_Mapping` (NOT
@@ -137,7 +141,7 @@ fn idempotent_normalization() {
 /// Equality of two semantically-identical inputs (NFC-equivalent).
 #[test]
 fn nfc_equivalent_inputs_normalize_equal() {
-    let a = NormalizedUsername::from_raw("café").unwrap();        // composed
+    let a = NormalizedUsername::from_raw("café").unwrap(); // composed
     let b = NormalizedUsername::from_raw("cafe\u{0301}").unwrap(); // decomposed
     assert_eq!(a.as_str(), b.as_str());
 }

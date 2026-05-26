@@ -106,7 +106,10 @@ fn fast_kdf() -> KdfConfig {
 fn make_config(data_dir: PathBuf, port: u16) -> Config {
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -123,7 +126,9 @@ fn make_config(data_dir: PathBuf, port: u16) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
-        observability: ObservabilityConfig { addr: String::new() },
+        observability: ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 
@@ -190,9 +195,7 @@ async fn login(
     };
 
     let mut password_buf = password.to_vec();
-    let (proof, derived, am) = hs
-        .process_challenge(&challenge, &mut password_buf)
-        .unwrap();
+    let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
     write_frame(
         &mut w,
         &rmp_serde::to_vec(&WireClientProof {
@@ -246,7 +249,9 @@ where
 {
     let bytes = rmp_serde::to_vec_named(req).unwrap();
     let envelope = RequestEnvelope::new(sid, Some(rid), bytes);
-    write_frame(w, &envelope.to_msgpack().unwrap()).await.unwrap();
+    write_frame(w, &envelope.to_msgpack().unwrap())
+        .await
+        .unwrap();
     let resp_bytes = tokio::time::timeout(
         Duration::from_secs(10),
         read_frame(r, MAX_FRAME_SIZE_DEFAULT),
@@ -316,14 +321,7 @@ async fn backup_then_restore_recovers_data() {
         let res = roundtrip(&create_table_req("backup_items"), sid, 1, &mut w, &mut r).await;
         assert!(matches!(res, DbResponse::Batch { .. }), "create_table");
 
-        let res = roundtrip(
-            &write_req("backup_items", "X1", 42),
-            sid,
-            2,
-            &mut w,
-            &mut r,
-        )
-        .await;
+        let res = roundtrip(&write_req("backup_items", "X1", 42), sid, 2, &mut w, &mut r).await;
         assert!(matches!(res, DbResponse::Batch { .. }), "write");
 
         let _ = w.shutdown().await;
@@ -417,7 +415,10 @@ async fn backup_then_restore_recovers_data() {
                 1,
                 "exactly one record must survive backup → wipe → restore"
             );
-            assert_eq!(rd.records[0].get("sku").and_then(|v| v.as_str()), Some("X1"));
+            assert_eq!(
+                rd.records[0].get("sku").and_then(|v| v.as_str()),
+                Some("X1")
+            );
             assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
         }
         DbResponse::Error { code, message } => {

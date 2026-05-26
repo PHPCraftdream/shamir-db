@@ -44,7 +44,9 @@ fn bench_vector(c: &mut Criterion) {
         let brute = rt.block_on(async {
             let a = BruteForceAdapter::new(dim as u32, VectorMetric::Cosine);
             for i in 0..n {
-                a.upsert(rid_from(i), &random_vec(dim, i as u64)).await.unwrap();
+                a.upsert(rid_from(i), &random_vec(dim, i as u64))
+                    .await
+                    .unwrap();
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             a
@@ -52,44 +54,42 @@ fn bench_vector(c: &mut Criterion) {
 
         // Build HNSW
         let hnsw = rt.block_on(async {
-            let a = HnswAdapter::new(dim as u32, VectorMetric::Cosine, HnswConfig {
-                max_elements: n + 1000,
-                m: 16,
-                max_layer: 16,
-                ef_construction: 200,
-                ef_search: 50,
-            });
+            let a = HnswAdapter::new(
+                dim as u32,
+                VectorMetric::Cosine,
+                HnswConfig {
+                    max_elements: n + 1000,
+                    m: 16,
+                    max_layer: 16,
+                    ef_construction: 200,
+                    ef_search: 50,
+                },
+            );
             for i in 0..n {
-                a.upsert(rid_from(i), &random_vec(dim, i as u64)).await.unwrap();
+                a.upsert(rid_from(i), &random_vec(dim, i as u64))
+                    .await
+                    .unwrap();
             }
             a
         });
 
         let query = random_vec(dim, 999_999);
 
-        group.bench_with_input(
-            BenchmarkId::new("brute_force", n),
-            &n,
-            |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let q = query.clone();
-                    let a = &brute;
-                    async move { a.search(&q, 10).await.unwrap() }
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("brute_force", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let q = query.clone();
+                let a = &brute;
+                async move { a.search(&q, 10).await.unwrap() }
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("hnsw", n),
-            &n,
-            |b, _| {
-                b.to_async(&rt).iter(|| {
-                    let q = query.clone();
-                    let a = &hnsw;
-                    async move { a.search(&q, 10).await.unwrap() }
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("hnsw", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let q = query.clone();
+                let a = &hnsw;
+                async move { a.search(&q, 10).await.unwrap() }
+            });
+        });
 
         group.finish();
     }

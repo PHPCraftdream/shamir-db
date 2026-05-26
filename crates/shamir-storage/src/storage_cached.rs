@@ -1,10 +1,10 @@
 use super::types::{RecordKey, Store};
 use crate::error::{DbError, DbResult};
-use shamir_types::types::common::{new_dash_map, TDashMap};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
+use shamir_types::types::common::{new_dash_map, TDashMap};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -222,7 +222,10 @@ impl Store for CachedStore {
                     // Log so an operator gets a signal under sustained
                     // backing-store failure.
                     if let Err(e) = inner.remove(key).await {
-                        log::error!("storage_cached async remove from backing store failed: {}", e);
+                        log::error!(
+                            "storage_cached async remove from backing store failed: {}",
+                            e
+                        );
                     }
                     pending.fetch_sub(1, Ordering::Relaxed);
                 });
@@ -323,8 +326,8 @@ mod tests {
     use super::*;
     use crate::storage_in_memory::InMemoryStore;
     use crate::types::collect_stream;
-    use shamir_types::types::value::InnerValue;
     use futures::StreamExt;
+    use shamir_types::types::value::InnerValue;
     use tokio::time::{sleep, Duration};
 
     /// Regression: `flush` must work through `Arc<dyn Store>`. The
@@ -526,7 +529,10 @@ mod tests {
         // Set new value
         let key = Bytes::from(b"test_key".to_vec());
         let value1 = InnerValue::Str("new_value".to_string());
-        let created = cached.set(key.clone(), value1.to_bytes().unwrap()).await.unwrap();
+        let created = cached
+            .set(key.clone(), value1.to_bytes().unwrap())
+            .await
+            .unwrap();
         assert!(created);
 
         // Both cache and inner should have it
@@ -537,7 +543,10 @@ mod tests {
 
         // Update value
         let value2 = InnerValue::Str("updated".to_string());
-        let created2 = cached.set(key.clone(), value2.to_bytes().unwrap()).await.unwrap();
+        let created2 = cached
+            .set(key.clone(), value2.to_bytes().unwrap())
+            .await
+            .unwrap();
         assert!(!created2);
 
         // Both should reflect update

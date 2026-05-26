@@ -27,7 +27,11 @@ use std::sync::Arc;
 /// Helper: open two redb-backed stores (`data` / `info`) from one database.
 async fn open_redb_stores(
     dir: &std::path::Path,
-) -> (Arc<RedbRepo>, Arc<dyn shamir_storage::types::Store>, Arc<dyn shamir_storage::types::Store>) {
+) -> (
+    Arc<RedbRepo>,
+    Arc<dyn shamir_storage::types::Store>,
+    Arc<dyn shamir_storage::types::Store>,
+) {
     let repo = Arc::new(RedbRepo::new(dir.join("db.redb")).unwrap());
     let data = repo.store_get("data").await.unwrap();
     let info = repo.store_get("info").await.unwrap();
@@ -131,13 +135,9 @@ async fn index2_round_trip_through_redb() {
     // ==================================================================
     let (_repo1, data1, info1) = open_redb_stores(temp_dir.path()).await;
 
-    let mgr1 = TableManager::create(
-        "main".into(),
-        Arc::clone(&data1),
-        Arc::clone(&info1),
-    )
-    .await
-    .unwrap();
+    let mgr1 = TableManager::create("main".into(), Arc::clone(&data1), Arc::clone(&info1))
+        .await
+        .unwrap();
 
     mgr1.create_index_v2(&mk_fts_op()).await.unwrap();
     mgr1.create_index_v2(&mk_func_op()).await.unwrap();
@@ -149,17 +149,32 @@ async fn index2_round_trip_through_redb() {
         let resolve = |s: &str| match ig.touch_ind(s).unwrap() {
             TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
         };
-        (resolve("body"), resolve("email"), resolve("embedding"), resolve("label"))
+        (
+            resolve("body"),
+            resolve("email"),
+            resolve("embedding"),
+            resolve("label"),
+        )
     };
 
     // Insert 6 records.
     let records = [
-        ("hello rust world",      "Alice@FOO.com",  &[1.0, 0.0, 0.0][..], "a"),
-        ("rust is fast",          "Bob@Bar.com",    &[0.0, 1.0, 0.0],     "b"),
-        ("hello world",           "alice@foo.com",  &[0.95, 0.05, 0.0],   "c"),
-        ("the rust language",     "CAROL@BAZ.com",  &[0.0, 0.0, 1.0],     "d"),
-        ("goodbye world",         "Dave@QUX.com",   &[0.5, 0.5, 0.0],     "e"),
-        ("rust rust rust great",  "carol@baz.com",  &[0.1, 0.9, 0.0],     "f"),
+        (
+            "hello rust world",
+            "Alice@FOO.com",
+            &[1.0, 0.0, 0.0][..],
+            "a",
+        ),
+        ("rust is fast", "Bob@Bar.com", &[0.0, 1.0, 0.0], "b"),
+        ("hello world", "alice@foo.com", &[0.95, 0.05, 0.0], "c"),
+        ("the rust language", "CAROL@BAZ.com", &[0.0, 0.0, 1.0], "d"),
+        ("goodbye world", "Dave@QUX.com", &[0.5, 0.5, 0.0], "e"),
+        (
+            "rust rust rust great",
+            "carol@baz.com",
+            &[0.1, 0.9, 0.0],
+            "f",
+        ),
     ];
 
     for (body, email, emb, label) in &records {
@@ -179,7 +194,12 @@ async fn index2_round_trip_through_redb() {
 
     let fts_be = backends
         .iter()
-        .find(|b| matches!(b.descriptor().kind, crate::index2::kind::IndexKind::Fts { .. }))
+        .find(|b| {
+            matches!(
+                b.descriptor().kind,
+                crate::index2::kind::IndexKind::Fts { .. }
+            )
+        })
         .expect("FTS backend not found");
 
     let fts_res1 = fts_be
@@ -210,7 +230,12 @@ async fn index2_round_trip_through_redb() {
     // Functional: lower(email) == "alice@foo.com"
     let func_be = backends
         .iter()
-        .find(|b| matches!(b.descriptor().kind, crate::index2::kind::IndexKind::Functional(_)))
+        .find(|b| {
+            matches!(
+                b.descriptor().kind,
+                crate::index2::kind::IndexKind::Functional(_)
+            )
+        })
         .expect("Functional backend not found");
 
     let alice_hash = FunctionalBackend::hash_value(&InnerValue::Str("alice@foo.com".into()));
@@ -250,7 +275,12 @@ async fn index2_round_trip_through_redb() {
     // Vector: top-2 nearest to [1.0, 0.0, 0.0]
     let vec_be = backends
         .iter()
-        .find(|b| matches!(b.descriptor().kind, crate::index2::kind::IndexKind::Vector(_)))
+        .find(|b| {
+            matches!(
+                b.descriptor().kind,
+                crate::index2::kind::IndexKind::Vector(_)
+            )
+        })
         .expect("Vector backend not found");
 
     let vec_res1 = vec_be
@@ -287,32 +317,48 @@ async fn index2_round_trip_through_redb() {
     // ==================================================================
     let (_repo2, data2, info2) = open_redb_stores(temp_dir.path()).await;
 
-    let mgr2 = TableManager::create(
-        "main".into(),
-        Arc::clone(&data2),
-        Arc::clone(&info2),
-    )
-    .await
-    .unwrap();
+    let mgr2 = TableManager::create("main".into(), Arc::clone(&data2), Arc::clone(&info2))
+        .await
+        .unwrap();
 
     // All 3 backends must be restored.
     let reg2 = Arc::clone(mgr2.index2_registry());
     let backends2 = reg2.all_backends().await;
-    assert_eq!(backends2.len(), 3, "phase2: expected 3 backends, got {}", backends2.len());
+    assert_eq!(
+        backends2.len(),
+        3,
+        "phase2: expected 3 backends, got {}",
+        backends2.len()
+    );
 
     let fts_be2 = backends2
         .iter()
-        .find(|b| matches!(b.descriptor().kind, crate::index2::kind::IndexKind::Fts { .. }))
+        .find(|b| {
+            matches!(
+                b.descriptor().kind,
+                crate::index2::kind::IndexKind::Fts { .. }
+            )
+        })
         .expect("FTS backend not found after reopen");
 
     let func_be2 = backends2
         .iter()
-        .find(|b| matches!(b.descriptor().kind, crate::index2::kind::IndexKind::Functional(_)))
+        .find(|b| {
+            matches!(
+                b.descriptor().kind,
+                crate::index2::kind::IndexKind::Functional(_)
+            )
+        })
         .expect("Functional backend not found after reopen");
 
     let vec_be2 = backends2
         .iter()
-        .find(|b| matches!(b.descriptor().kind, crate::index2::kind::IndexKind::Vector(_)))
+        .find(|b| {
+            matches!(
+                b.descriptor().kind,
+                crate::index2::kind::IndexKind::Vector(_)
+            )
+        })
         .expect("Vector backend not found after reopen");
 
     // FTS query — same results.

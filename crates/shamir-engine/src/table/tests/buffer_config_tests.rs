@@ -111,14 +111,8 @@ async fn buffer_config_survives_table_manager_reopen() {
     // factory rebuilds the store stack, TableManager::create reads
     // info_store and re-applies the config to the fresh stack.
     let repo: Arc<InMemoryRepo> = Arc::new(InMemoryRepo::new());
-    let data_store = repo
-        .store_get("__data__reopen".to_string())
-        .await
-        .unwrap();
-    let info_store = repo
-        .store_get("__info__reopen".to_string())
-        .await
-        .unwrap();
+    let data_store = repo.store_get("__data__reopen".to_string()).await.unwrap();
+    let info_store = repo.store_get("__info__reopen".to_string()).await.unwrap();
 
     let cfg = sample_cfg();
 

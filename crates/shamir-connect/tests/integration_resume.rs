@@ -52,7 +52,18 @@ fn full_resume_round_trip() {
         channel_binding_now: [0x77u8; 32],
     };
 
-    let ok = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let ok = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    )
+    .unwrap();
     assert_eq!(store.len(), 1);
     assert_eq!(counters.len(), 1);
     let ticket_v2 = ok.resumption_ticket.expect("expected new ticket issued");
@@ -64,7 +75,17 @@ fn full_resume_round_trip() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req2, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req2,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 
     // Step 3: NEW ticket from step 1 (counter+1) does work.
@@ -74,7 +95,18 @@ fn full_resume_round_trip() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let _ok2 = process_resume(&req3, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let _ok2 = process_resume(
+        &req3,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    )
+    .unwrap();
     assert_eq!(store.len(), 2);
 }
 
@@ -111,7 +143,17 @@ fn rejects_expired_ticket() {
 
     // 2 seconds later — expired.
     let later = now + 2 * ns::SECOND;
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, later);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        later,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -148,7 +190,17 @@ fn rejects_when_user_kicked_via_tickets_invalid_before() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -182,7 +234,17 @@ fn ticket_one_ns_after_kick_succeeds() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now + 2);
+    let ok = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now + 2,
+    );
     assert!(ok.is_ok());
 }
 
@@ -217,7 +279,17 @@ fn rejects_anti_downgrade_tls_to_browser() {
         binding_mode_now: BindingMode::TlsNoExport,
         channel_binding_now: [0u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -251,7 +323,17 @@ fn allows_browser_to_native_upgrade_by_default() {
         binding_mode_now: BindingMode::TlsExporter, // upgrade to native
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(result.is_ok());
 }
 
@@ -287,7 +369,17 @@ fn strict_mode_rejects_browser_to_native() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -320,7 +412,17 @@ fn rejects_when_user_unknown() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -358,7 +460,17 @@ fn rejects_when_ticket_key_changed_no_overlap() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -397,7 +509,17 @@ fn ticket_works_under_previous_key_during_overlap() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let ok = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(ok.is_ok());
 }
 
@@ -434,7 +556,17 @@ fn rejects_aad_tampered_ticket() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let result = process_resume(&req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let result = process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
 }
 
@@ -486,7 +618,18 @@ fn multi_device_family_isolation() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok_a = process_resume(&req_a, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let ok_a = process_resume(
+        &req_a,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    )
+    .unwrap();
 
     // Laptop refreshes via the new ticket — family_a counter advances.
     let new_a_bytes = ok_a.resumption_ticket.unwrap();
@@ -496,7 +639,18 @@ fn multi_device_family_isolation() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let _ok_a2 = process_resume(&req_a2, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now).unwrap();
+    let _ok_a2 = process_resume(
+        &req_a2,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    )
+    .unwrap();
 
     // Phone uses ticket_b — must STILL succeed (different family_id).
     let req_b = ResumeRequest {
@@ -505,7 +659,17 @@ fn multi_device_family_isolation() {
         binding_mode_now: BindingMode::TlsExporter,
         channel_binding_now: [0x77u8; 32],
     };
-    let ok_b = process_resume(&req_b, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now);
+    let ok_b = process_resume(
+        &req_b,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
+    );
     assert!(ok_b.is_ok(), "phone ticket must survive laptop refresh");
 }
 
@@ -558,7 +722,15 @@ fn resumed_admin_session_retains_roles_per_diagram_02() {
         channel_binding_now: [0x77u8; 32],
     };
     let ok = process_resume(
-        &req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now,
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
     )
     .unwrap();
 
@@ -607,7 +779,15 @@ fn refresh_ticket_carries_roles_forward_per_diagram_02() {
         channel_binding_now: [0x77u8; 32],
     };
     let ok = process_resume(
-        &req, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now,
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
     )
     .unwrap();
     let ticket_v2 = ok.resumption_ticket.expect("refresh ticket issued");
@@ -620,7 +800,15 @@ fn refresh_ticket_carries_roles_forward_per_diagram_02() {
         channel_binding_now: [0x77u8; 32],
     };
     let ok2 = process_resume(
-        &req2, &cfg, &counters, &users, &store, &ServerIdentityState::fresh(), 24 * ns::HOUR, TICKET_TTL, now,
+        &req2,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &ServerIdentityState::fresh(),
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
     )
     .unwrap();
     let session2 = store.lookup(&ok2.session_id).expect("session created");
@@ -672,7 +860,15 @@ fn pre_rotation_ticket_rejected_during_overlap_per_diagram_12() {
         channel_binding_now: [0x77u8; 32],
     };
     let result = process_resume(
-        &req, &cfg, &counters, &users, &store, &identity, 24 * ns::HOUR, TICKET_TTL, now,
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &identity,
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
     );
     assert!(matches!(result, Err(shamir_connect::Error::AuthFailed)));
     assert_eq!(store.len(), 0, "no session should be created");
@@ -717,7 +913,15 @@ fn post_rotation_ticket_accepted_during_overlap() {
         channel_binding_now: [0x77u8; 32],
     };
     let ok = process_resume(
-        &req, &cfg, &counters, &users, &store, &identity, 24 * ns::HOUR, TICKET_TTL, now,
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &identity,
+        24 * ns::HOUR,
+        TICKET_TTL,
+        now,
     );
     assert!(ok.is_ok(), "post-rotation ticket must work during overlap");
 }

@@ -1,9 +1,9 @@
 //! Interner manager for lazy loading and persistence
 
+use shamir_storage::error::DbResult;
+use shamir_storage::types::Store;
 use shamir_types::codecs::basic::bincode;
 use shamir_types::core::interner::{Interner, InternerKey, UserKey};
-use shamir_storage::types::Store;
-use shamir_storage::error::DbResult;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

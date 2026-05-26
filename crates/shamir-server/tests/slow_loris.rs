@@ -37,7 +37,10 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -60,7 +63,9 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
             query_limits: Default::default(),
         },
         audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
+        observability: shamir_server::config::ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 

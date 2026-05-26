@@ -22,9 +22,7 @@ use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
-use shamir_connect::server::dispatch::{
-    dispatch_request_view, DispatchOutcome, RequestHandler,
-};
+use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome, RequestHandler};
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
@@ -165,8 +163,7 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
     let tickets_invalid_before_ns = Arc::new(AtomicU64::new(0));
 
     // ---- TLS ----
-    let (cert_pem, key_pem) =
-        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
     let client_cfg = make_client_config_no_ca();
 
@@ -323,11 +320,15 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
     let exporter = extract_tls_exporter(&tls).unwrap();
     let (mut r, mut w) = split(tls);
 
-    let hs = HandshakeBuilder::new(username.clone(), TransportKind::Tcp, BindingMode::TlsExporter)
-        .tls_exporter(exporter)
-        .pinned_hash(pinned_hash)
-        .build()
-        .unwrap();
+    let hs = HandshakeBuilder::new(
+        username.clone(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+    )
+    .tls_exporter(exporter)
+    .pinned_hash(pinned_hash)
+    .build()
+    .unwrap();
 
     // auth_init
     let init = hs.auth_init();
@@ -389,9 +390,7 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         rotation_in_progress: None,
         kdf_upgrade_required: None,
     };
-    let success = hs
-        .process_auth_ok(&auth_ok, &derived, &am, |_| {})
-        .unwrap();
+    let success = hs.process_auth_ok(&auth_ok, &derived, &am, |_| {}).unwrap();
     assert_eq!(success.session_id, sid);
 
     // ----- 3. Echo round trips -----
@@ -414,7 +413,9 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
     tickets_invalid_before_ns.store(now_ns + 60, Ordering::Relaxed);
 
     let env = RequestEnvelope::new(sid, Some(99), b"after-bump".to_vec());
-    write_frame(&mut w, &env.to_msgpack().unwrap()).await.unwrap();
+    write_frame(&mut w, &env.to_msgpack().unwrap())
+        .await
+        .unwrap();
     let reply_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
     let err = ErrorEnvelope::from_msgpack(&reply_bytes).unwrap();
     assert_eq!(err.request_id, Some(99));

@@ -128,8 +128,7 @@ where
     .await
     .expect("response within 10s")
     .expect("read response");
-    let resp_envelope =
-        ResponseEnvelope::from_msgpack(&resp_bytes).expect("response envelope");
+    let resp_envelope = ResponseEnvelope::from_msgpack(&resp_bytes).expect("response envelope");
     assert_eq!(resp_envelope.request_id, Some(rid), "request_id echoed");
     rmp_serde::from_slice(&resp_envelope.res).expect("decode DbResponse")
 }
@@ -153,7 +152,10 @@ fn make_test_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -172,7 +174,9 @@ fn make_test_config(temp: &TempDir) -> Config {
         },
         security: Default::default(),
         audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig { addr: String::new() },
+        observability: shamir_server::config::ObservabilityConfig {
+            addr: String::new(),
+        },
     }
 }
 
@@ -212,7 +216,10 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     let connector = TlsConnector::from(client_cfg);
     let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(server_addr).await.expect("connect");
-    let tls = connector.connect(server_name, tcp).await.expect("tls handshake");
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
+        .expect("tls handshake");
     let exporter = extract_tls_exporter(&tls).expect("client exporter");
 
     // --- Trust-on-first-use pin: the client doesn't know the server's
@@ -286,7 +293,9 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
         .expect("process challenge");
 
     // Step 4 — send proof.
-    let proof_wire = WireClientProof { client_proof: proof.to_vec() };
+    let proof_wire = WireClientProof {
+        client_proof: proof.to_vec(),
+    };
     write_frame(&mut w, &rmp_serde::to_vec(&proof_wire).unwrap())
         .await
         .expect("send proof");
@@ -368,7 +377,8 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     let mk_db: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
         "id": "mk-db",
         "queries": { "mk": { "create_db": "prod" } }
-    })).expect("parse mk batch");
+    }))
+    .expect("parse mk batch");
     let req_a = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
@@ -389,7 +399,8 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
             "mr": { "create_repo": "main" },
             "tb": { "create_table": "items", "repo": "main" }
         }
-    })).expect("parse work batch");
+    }))
+    .expect("parse work batch");
     let req_b = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
@@ -411,7 +422,8 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
             "ins": { "set": "items", "key": {"sku":"X1"}, "value": {"sku":"X1","qty":42} },
             "rd":  { "from": "items" }
         }
-    })).expect("parse rw batch");
+    }))
+    .expect("parse rw batch");
     let req_c = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
@@ -422,7 +434,10 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
         DbResponse::Batch { response } => {
             let rd = response.results.get("rd").expect("rd alias");
             assert_eq!(rd.records.len(), 1, "one record present");
-            assert_eq!(rd.records[0].get("sku").and_then(|v| v.as_str()), Some("X1"));
+            assert_eq!(
+                rd.records[0].get("sku").and_then(|v| v.as_str()),
+                Some("X1")
+            );
             assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
         }
         other => panic!("step C expected Batch, got {:?}", other),

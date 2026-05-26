@@ -314,13 +314,22 @@ mod tests {
         let now = 1_000_000_000;
         let k = key(1, 1);
 
-        let expected = [100u64, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000];
+        let expected = [
+            100u64, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000,
+        ];
         for (i, &want) in expected.iter().enumerate() {
             let got = match s.register_failure(k, now + (i as u64) * ns::SECOND) {
                 FailureOutcome::Backoff { delay_ms } => delay_ms,
                 FailureOutcome::LockedOut => 0,
             };
-            assert_eq!(got, want, "failure #{} expected {}ms got {}ms", i + 1, want, got);
+            assert_eq!(
+                got,
+                want,
+                "failure #{} expected {}ms got {}ms",
+                i + 1,
+                want,
+                got
+            );
         }
     }
 

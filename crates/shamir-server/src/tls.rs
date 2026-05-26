@@ -102,15 +102,20 @@ pub fn load_or_generate(
             }
             (cert, key, true)
         }
-        (a, b) => return Err(TlsError::Mismatched {
-            cert_exists: a,
-            key_exists: b,
-        }),
+        (a, b) => {
+            return Err(TlsError::Mismatched {
+                cert_exists: a,
+                key_exists: b,
+            })
+        }
     };
 
     let server_config = make_server_config_from_pem(&cert_pem, &key_pem)
         .map_err(|e| TlsError::Build(e.to_string()))?;
-    Ok(LoadedTls { server_config, generated })
+    Ok(LoadedTls {
+        server_config,
+        generated,
+    })
 }
 
 /// Convenience: build the SAN list from a slice of bound listener addresses.
@@ -170,7 +175,10 @@ mod tests {
         // `LoadedTls` does not impl Debug (its inner ServerConfig doesn't),
         // so we match instead of `unwrap_err`.
         match load_or_generate(&cert, &key, vec![]) {
-            Err(TlsError::Mismatched { cert_exists: true, key_exists: false }) => {}
+            Err(TlsError::Mismatched {
+                cert_exists: true,
+                key_exists: false,
+            }) => {}
             other => panic!("expected Mismatched (cert only); got {:?}", other.is_ok()),
         }
     }

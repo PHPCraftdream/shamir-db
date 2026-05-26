@@ -1,7 +1,7 @@
 //! FilterContext — evaluation context for filter callbacks.
 
-use shamir_types::core::interner::Interner;
 use crate::query::read::QueryResult;
+use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
 
 /// Context passed to filter callbacks during evaluation.

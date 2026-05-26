@@ -12,8 +12,8 @@ async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await;
 
-    let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("users"));
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
 
     db.add_repo(repo_config).await.unwrap();
     shamir
@@ -32,7 +32,8 @@ async fn test_list_databases() {
         "queries": {
             "dbs": {"list": "databases"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let dbs = &resp.results["dbs"].records[0]["databases"];
@@ -48,7 +49,8 @@ async fn test_list_repos() {
         "queries": {
             "repos": {"list": "repos"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let repos = &resp.results["repos"].records[0]["repos"];
@@ -64,7 +66,8 @@ async fn test_list_tables() {
         "queries": {
             "tables": {"list": "tables", "repo": "main"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let tables = &resp.results["tables"].records[0]["tables"];
@@ -88,10 +91,14 @@ async fn test_create_repo() {
                 "tables": ["sessions", "tokens"]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["create"].records[0]["created_repo"], "hot_cache");
+    assert_eq!(
+        resp.results["create"].records[0]["created_repo"],
+        "hot_cache"
+    );
 
     // Verify it exists
     let list_req: BatchRequest = serde_json::from_value(json!({
@@ -99,7 +106,8 @@ async fn test_create_repo() {
         "queries": {
             "repos": {"list": "repos"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &list_req).await.unwrap();
     let repos = &resp.results["repos"].records[0]["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("hot_cache")));
@@ -116,7 +124,8 @@ async fn test_drop_repo() {
             "create": {"create_repo": "temp", "engine": "in_memory"},
             "drop": {"drop_repo": "temp"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["drop"].records[0]["existed"], true);
@@ -142,7 +151,8 @@ async fn test_create_index_via_query() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Create index
@@ -156,7 +166,8 @@ async fn test_create_index_via_query() {
                 "unique": true
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["idx"].records[0]["created_index"], "email_idx");
@@ -171,7 +182,8 @@ async fn test_create_index_via_query() {
                 "where": {"op": "eq", "field": ["email"], "value": "alice@test.com"}
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &query).await.unwrap();
     assert_eq!(resp.results["find"].records.len(), 1);
@@ -196,7 +208,8 @@ async fn test_drop_index_via_query() {
                 "table": "users"
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["drop"].records[0]["existed"], true);
@@ -221,7 +234,8 @@ async fn test_ddl_then_dml_pipeline() {
                 "tables": ["products", "orders"]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("app", &setup).await.unwrap();
 
     // Step 2: Insert data + create index
@@ -242,7 +256,8 @@ async fn test_ddl_then_dml_pipeline() {
                 "fields": [["price"]]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("app", &populate).await.unwrap();
     assert_eq!(resp.results["products"].records.len(), 3);
 
@@ -255,7 +270,8 @@ async fn test_ddl_then_dml_pipeline() {
                 "where": {"op": "eq", "field": ["price"], "value": 10}
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("app", &query).await.unwrap();
     assert_eq!(resp.results["cheap"].records.len(), 1);
     assert_eq!(resp.results["cheap"].records[0]["name"], "Widget");
@@ -289,7 +305,8 @@ async fn test_list_indexes() {
                 "unique": true
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &setup).await.unwrap();
 
     // List indexes
@@ -298,14 +315,18 @@ async fn test_list_indexes() {
         "queries": {
             "idxs": {"list": "indexes", "table": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
-    let indexes = resp.results["idxs"].records[0]["indexes"].as_array().unwrap();
+    let indexes = resp.results["idxs"].records[0]["indexes"]
+        .as_array()
+        .unwrap();
     assert_eq!(indexes.len(), 2);
 
     // Check we have both regular and unique
-    let names: Vec<&str> = indexes.iter()
+    let names: Vec<&str> = indexes
+        .iter()
         .map(|i| i["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"name_idx"));
@@ -332,7 +353,8 @@ async fn test_create_table_then_use_it() {
         "queries": {
             "ct": {"create_table": "products", "repo": "main"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &create).await.unwrap();
     assert_eq!(resp.results["ct"].records[0]["created_table"], "products");
 
@@ -342,9 +364,12 @@ async fn test_create_table_then_use_it() {
         "queries": {
             "tables": {"list": "tables", "repo": "main"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &list).await.unwrap();
-    let tables = resp.results["tables"].records[0]["tables"].as_array().unwrap();
+    let tables = resp.results["tables"].records[0]["tables"]
+        .as_array()
+        .unwrap();
     assert!(tables.contains(&json!("products")));
 
     // Actually insert data into the new table
@@ -359,7 +384,8 @@ async fn test_create_table_then_use_it() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &insert).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
 
@@ -369,7 +395,8 @@ async fn test_create_table_then_use_it() {
         "queries": {
             "all": {"from": "products"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &read).await.unwrap();
     assert_eq!(resp.results["all"].records.len(), 2);
 }
@@ -384,7 +411,8 @@ async fn test_drop_table() {
         "queries": {
             "dt": {"drop_table": "users", "repo": "main"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &drop).await.unwrap();
     assert_eq!(resp.results["dt"].records[0]["existed"], true);
 
@@ -397,9 +425,13 @@ async fn test_drop_table() {
                 "values": [{"name": "Alice"}]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let err = shamir.execute("testdb", &insert).await.unwrap_err();
-    assert!(matches!(err, shamir_db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(
+        err,
+        shamir_db::query::batch::BatchError::QueryError { .. }
+    ));
 }
 
 #[tokio::test]
@@ -411,7 +443,8 @@ async fn test_drop_nonexistent_table() {
         "queries": {
             "dt": {"drop_table": "nonexistent", "repo": "main"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &drop).await.unwrap();
     assert_eq!(resp.results["dt"].records[0]["existed"], false);
 }
@@ -429,8 +462,12 @@ async fn test_admin_unknown_repo_error() {
         "queries": {
             "tables": {"list": "tables", "repo": "nonexistent"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
-    assert!(matches!(err, shamir_db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(
+        err,
+        shamir_db::query::batch::BatchError::QueryError { .. }
+    ));
 }

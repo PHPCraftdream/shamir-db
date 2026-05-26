@@ -33,9 +33,9 @@ impl InternerKey {
                 self.0[7],
             ]),
             _ => unreachable!(
-            "InternerKey invariant broken: length {} (must be 1/2/4/8)",
-            self.0.len()
-        ),
+                "InternerKey invariant broken: length {} (must be 1/2/4/8)",
+                self.0.len()
+            ),
         }
     }
 

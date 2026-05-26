@@ -223,14 +223,17 @@ impl RedbUserDirectory {
     }
 
     fn read_blob(&self, username: &str) -> Result<Option<Vec<u8>>> {
-        let txn = self.db.begin_read()
+        let txn = self
+            .db
+            .begin_read()
             .map_err(|e| Error::Encoding(format!("user_dir read txn: {e}")))?;
         let table = match txn.open_table(USERS_TABLE) {
             Ok(t) => t,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(e) => return Err(Error::Encoding(format!("user_dir open_table: {e}"))),
         };
-        let entry = table.get(username)
+        let entry = table
+            .get(username)
             .map_err(|e| Error::Encoding(format!("user_dir table.get: {e}")))?;
         Ok(entry.map(|guard| guard.value().to_vec()))
     }

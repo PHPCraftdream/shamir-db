@@ -11,8 +11,8 @@ use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use shamir_server::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig,
-    ObservabilityConfig, ProfileKind, TlsConfig,
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig,
+    ProfileKind, TlsConfig,
 };
 use shamir_server::server::{BootstrapMode, ServerLauncher};
 
@@ -29,7 +29,10 @@ fn make_config(temp: &TempDir, obs_addr: &str) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
         data_dir: data_dir.clone(),
-        logging: LoggingConfig { level: "warn".into(), slow_query_threshold_ms: 0 },
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+        },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
@@ -102,7 +105,11 @@ async fn endpoints_return_expected_codes_and_content() {
     // /healthz — always 200.
     let (status, body) = http_get(obs_addr, "/healthz").await;
     assert_eq!(status, 200, "healthz status");
-    assert!(body.contains("ok"), "healthz body should say ok, got {:?}", body);
+    assert!(
+        body.contains("ok"),
+        "healthz body should say ok, got {:?}",
+        body
+    );
 
     // /readyz — should be 200 because the launcher marked ready before
     // returning.
@@ -132,8 +139,16 @@ async fn endpoints_return_expected_codes_and_content() {
     // /info — pretty JSON.
     let (status, body) = http_get(obs_addr, "/info").await;
     assert_eq!(status, 200, "info status");
-    assert!(body.contains("uptime_seconds"), "info body fields, got {:?}", body);
-    assert!(body.contains("\"ready\":true"), "info should say ready=true, got {:?}", body);
+    assert!(
+        body.contains("uptime_seconds"),
+        "info body fields, got {:?}",
+        body
+    );
+    assert!(
+        body.contains("\"ready\":true"),
+        "info should say ready=true, got {:?}",
+        body
+    );
 
     handle.shutdown().await;
 }

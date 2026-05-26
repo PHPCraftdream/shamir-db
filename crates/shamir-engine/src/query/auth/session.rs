@@ -1,8 +1,6 @@
 //! Pre-computed permission cache for O(1) superadmin / O(n) access checks.
 
-use crate::query::auth::{
-    Action, Effect, Resource, Role,
-};
+use crate::query::auth::{Action, Effect, Resource, Role};
 use crate::query::batch::{BatchOp, QueryEntry};
 use crate::query::filter::Filter;
 use shamir_types::types::common::TMap;
@@ -86,11 +84,7 @@ impl SessionPermissions {
 
                     // Track row filters for Allow permissions
                     if perm.effect == Effect::Allow {
-                        raw_filters.push((
-                            *action,
-                            perm.resource.clone(),
-                            perm.row_filter.clone(),
-                        ));
+                        raw_filters.push((*action, perm.resource.clone(), perm.row_filter.clone()));
                     }
                 }
             }
@@ -330,9 +324,10 @@ impl SessionPermissions {
             ),
 
             // Auth management
-            BatchOp::CreateUser(_) | BatchOp::DropUser(_) | BatchOp::GrantRole(_) | BatchOp::RevokeRole(_) => {
-                (Action::ManageUsers, Resource::Global)
-            }
+            BatchOp::CreateUser(_)
+            | BatchOp::DropUser(_)
+            | BatchOp::GrantRole(_)
+            | BatchOp::RevokeRole(_) => (Action::ManageUsers, Resource::Global),
             BatchOp::CreateRole(_) | BatchOp::DropRole(_) => {
                 (Action::ManageRoles, Resource::Global)
             }
@@ -374,10 +369,7 @@ fn expand_actions(actions: &[Action]) -> Vec<Action> {
 }
 
 /// Convert a `TableRef` + db_name into a `Resource::Table`.
-fn table_ref_to_resource(
-    table_ref: &crate::query::TableRef,
-    db_name: &str,
-) -> Resource {
+fn table_ref_to_resource(table_ref: &crate::query::TableRef, db_name: &str) -> Resource {
     Resource::Table {
         database: db_name.to_string(),
         repo: table_ref.repo.clone(),
@@ -397,7 +389,9 @@ fn merge_row_filters(
     let mut groups: Vec<(Action, Resource, Vec<Option<Filter>>)> = Vec::new();
 
     for (action, resource, filter) in raw {
-        let found = groups.iter_mut().find(|(a, r, _)| *a == action && *r == resource);
+        let found = groups
+            .iter_mut()
+            .find(|(a, r, _)| *a == action && *r == resource);
         match found {
             Some((_, _, filters)) => filters.push(filter),
             None => groups.push((action, resource, vec![filter])),

@@ -7,14 +7,12 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AlterBufferConfigOp, CommitMigrationOp, CreateDbOp, CreateIndexOp, CreateRepoOp,
-    CreateTableOp, DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp,
-    MigrationStatusOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
+    AlterBufferConfigOp, CommitMigrationOp, CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
+    DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp, MigrationStatusOp,
+    RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
 };
-use crate::auth::{
-    CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp,
-};
-use crate::read::{ReadQuery, QueryResult};
+use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
+use crate::read::{QueryResult, ReadQuery};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_types::types::common::{TMap, TSet};
 
@@ -113,70 +111,122 @@ impl Serialize for BatchOp {
 impl<'de> Deserialize<'de> for BatchOp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let obj = value.as_object().ok_or_else(|| {
-            serde::de::Error::custom("BatchOp must be a JSON object")
-        })?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("BatchOp must be a JSON object"))?;
 
         // Dispatch by unique key
         if obj.contains_key("from") {
-            serde_json::from_value(value).map(BatchOp::Read).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::Read)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("insert_into") {
-            serde_json::from_value(value).map(BatchOp::Insert).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::Insert)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("update") {
-            serde_json::from_value(value).map(BatchOp::Update).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::Update)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("delete_from") {
-            serde_json::from_value(value).map(BatchOp::Delete).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::Delete)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_db") {
-            serde_json::from_value(value).map(BatchOp::CreateDb).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CreateDb)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_db") {
-            serde_json::from_value(value).map(BatchOp::DropDb).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::DropDb)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_repo") {
-            serde_json::from_value(value).map(BatchOp::CreateRepo).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CreateRepo)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_repo") {
-            serde_json::from_value(value).map(BatchOp::DropRepo).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::DropRepo)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_table") {
-            serde_json::from_value(value).map(BatchOp::CreateTable).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CreateTable)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_table") {
-            serde_json::from_value(value).map(BatchOp::DropTable).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::DropTable)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_index") {
-            serde_json::from_value(value).map(BatchOp::CreateIndex).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CreateIndex)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_index") {
-            serde_json::from_value(value).map(BatchOp::DropIndex).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::DropIndex)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set_buffer_config") {
-            serde_json::from_value(value).map(BatchOp::SetBufferConfig).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::SetBufferConfig)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("get_buffer_config") {
-            serde_json::from_value(value).map(BatchOp::GetBufferConfig).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::GetBufferConfig)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("alter_buffer_config") {
-            serde_json::from_value(value).map(BatchOp::AlterBufferConfig).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::AlterBufferConfig)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("start_migration") {
-            serde_json::from_value(value).map(BatchOp::StartMigration).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::StartMigration)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("commit_migration") {
-            serde_json::from_value(value).map(BatchOp::CommitMigration).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CommitMigration)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("rollback_migration") {
-            serde_json::from_value(value).map(BatchOp::RollbackMigration).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::RollbackMigration)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("migration_status") {
-            serde_json::from_value(value).map(BatchOp::MigrationStatus).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::MigrationStatus)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_user") {
-            serde_json::from_value(value).map(BatchOp::CreateUser).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CreateUser)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_user") {
-            serde_json::from_value(value).map(BatchOp::DropUser).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::DropUser)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("create_role") {
-            serde_json::from_value(value).map(BatchOp::CreateRole).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::CreateRole)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("drop_role") {
-            serde_json::from_value(value).map(BatchOp::DropRole).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::DropRole)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("grant_role") {
-            serde_json::from_value(value).map(BatchOp::GrantRole).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::GrantRole)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("revoke_role") {
-            serde_json::from_value(value).map(BatchOp::RevokeRole).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::RevokeRole)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("list") {
-            serde_json::from_value(value).map(BatchOp::List).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::List)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
-            serde_json::from_value(value).map(BatchOp::Set).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(BatchOp::Set)
+                .map_err(serde::de::Error::custom)
         } else {
-            Err(serde::de::Error::custom(
-                "Unknown operation type"
-            ))
+            Err(serde::de::Error::custom("Unknown operation type"))
         }
     }
 }
@@ -594,14 +644,16 @@ mod tests {
 
     #[test]
     fn start_migration_serde() {
-        let op = roundtrip(r#"{
+        let op = roundtrip(
+            r#"{
             "start_migration": "users",
             "repo": "main",
             "dst_repo": "cold",
             "dst_engine": "redb",
             "dst_path": "/data/cold",
             "hmac": "deadbeef"
-        }"#);
+        }"#,
+        );
         match &op {
             BatchOp::StartMigration(m) => {
                 assert_eq!(m.start_migration, "users");
@@ -619,11 +671,13 @@ mod tests {
 
     #[test]
     fn start_migration_defaults() {
-        let op = roundtrip(r#"{
+        let op = roundtrip(
+            r#"{
             "start_migration": "logs",
             "dst_repo": "archive",
             "dst_engine": "fjall"
-        }"#);
+        }"#,
+        );
         match &op {
             BatchOp::StartMigration(m) => {
                 assert_eq!(m.repo, "main");

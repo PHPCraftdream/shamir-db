@@ -30,9 +30,6 @@ use shamir_connect::common::crypto::{
     aes256gcm_encrypt_with_cipher, ed25519_verify_strict, hkdf_sha256, hmac_sha256, random_array,
     sha256, Ed25519Keypair, StoredKey,
 };
-use shamir_connect::server::ticket::{
-    decrypt_ticket_with_ciphers, encrypt_ticket_with_cipher,
-};
 use shamir_connect::common::envelope::{
     RequestEnvelope, RequestEnvelopeRef, RequestEnvelopeView, ResponseEnvelope,
 };
@@ -52,6 +49,7 @@ use shamir_connect::server::handshake::{
 };
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 use shamir_connect::server::ticket::{decrypt_ticket, encrypt_ticket, TicketPlain, TicketWire};
+use shamir_connect::server::ticket::{decrypt_ticket_with_ciphers, encrypt_ticket_with_cipher};
 // (decrypt_ticket_with_ciphers / encrypt_ticket_with_cipher imported above)
 use shamir_connect::server::user_record::UserRecord;
 
@@ -130,12 +128,16 @@ fn bench_envelope(c: &mut Criterion) {
         let encoded = env.to_msgpack().unwrap();
 
         g.throughput(Throughput::Bytes(body_size as u64));
-        g.bench_with_input(BenchmarkId::new("request_encode", body_size), &env, |b, e| {
-            b.iter(|| {
-                let bytes = e.to_msgpack().unwrap();
-                black_box(bytes);
-            });
-        });
+        g.bench_with_input(
+            BenchmarkId::new("request_encode", body_size),
+            &env,
+            |b, e| {
+                b.iter(|| {
+                    let bytes = e.to_msgpack().unwrap();
+                    black_box(bytes);
+                });
+            },
+        );
 
         // Optim #9: borrowed encode path — saves the per-call sid Vec<u8>
         // allocation that `RequestEnvelope::new` does.
@@ -167,12 +169,16 @@ fn bench_envelope(c: &mut Criterion) {
         );
 
         let resp = ResponseEnvelope::ok(Some(42), vec![0u8; body_size]);
-        g.bench_with_input(BenchmarkId::new("response_encode", body_size), &resp, |b, r| {
-            b.iter(|| {
-                let bytes = r.to_msgpack().unwrap();
-                black_box(bytes);
-            });
-        });
+        g.bench_with_input(
+            BenchmarkId::new("response_encode", body_size),
+            &resp,
+            |b, r| {
+                b.iter(|| {
+                    let bytes = r.to_msgpack().unwrap();
+                    black_box(bytes);
+                });
+            },
+        );
     }
 
     g.finish();
@@ -223,8 +229,7 @@ fn bench_dispatch(c: &mut Criterion) {
             |b, bytes| {
                 b.iter(|| {
                     let view = RequestEnvelopeView::from_msgpack(black_box(bytes)).unwrap();
-                    let outcome =
-                        dispatch_request_view(&view, &store, |_| 0u64, &handler).unwrap();
+                    let outcome = dispatch_request_view(&view, &store, |_| 0u64, &handler).unwrap();
                     let DispatchOutcome::Response(_) = outcome else {
                         panic!("expected response")
                     };
@@ -327,13 +332,7 @@ fn bench_crypto_primitives(c: &mut Criterion) {
     g.bench_function("hkdf_sha256_80b", |b| {
         let mut out = [0u8; 80];
         b.iter(|| {
-            hkdf_sha256(
-                black_box(&ikm),
-                black_box(&salt),
-                black_box(info),
-                &mut out,
-            )
-            .unwrap();
+            hkdf_sha256(black_box(&ikm), black_box(&salt), black_box(info), &mut out).unwrap();
             black_box(&out);
         });
     });
@@ -361,25 +360,15 @@ fn bench_crypto_primitives(c: &mut Criterion) {
     let cached_cipher = aes256gcm_cipher(&aes_key).unwrap();
     g.bench_function("aes256gcm_encrypt_256b_cached_cipher", |b| {
         b.iter(|| {
-            let out = aes256gcm_encrypt_with_cipher(
-                black_box(&cached_cipher),
-                &nonce,
-                &pt,
-                aad,
-            )
-            .unwrap();
+            let out =
+                aes256gcm_encrypt_with_cipher(black_box(&cached_cipher), &nonce, &pt, aad).unwrap();
             black_box(out);
         });
     });
     g.bench_function("aes256gcm_decrypt_256b_cached_cipher", |b| {
         b.iter(|| {
-            let out = aes256gcm_decrypt_with_cipher(
-                black_box(&cached_cipher),
-                &nonce,
-                &ct,
-                aad,
-            )
-            .unwrap();
+            let out =
+                aes256gcm_decrypt_with_cipher(black_box(&cached_cipher), &nonce, &ct, aad).unwrap();
             black_box(out);
         });
     });
@@ -577,9 +566,8 @@ fn bench_handshake_verify(c: &mut Criterion) {
         binding_mode: BindingMode::TlsExporter,
         version: 1,
     };
-    let lookup_known = |_u: &NormalizedUsername| -> Option<UserRecord> {
-        Some(user_record.clone())
-    };
+    let lookup_known =
+        |_u: &NormalizedUsername| -> Option<UserRecord> { Some(user_record.clone()) };
     g.bench_function("new_known_user", |b| {
         b.iter(|| {
             let hs = ServerHandshake::new(
@@ -638,7 +626,9 @@ fn bench_handshake_verify(c: &mut Criterion) {
                 lookup_known,
             )
             .unwrap();
-            let outcome = hs.verify_proof(&client_proof, &identity, SESSION_MAX_AGE_NS).unwrap();
+            let outcome = hs
+                .verify_proof(&client_proof, &identity, SESSION_MAX_AGE_NS)
+                .unwrap();
             black_box(outcome);
         });
     });
@@ -656,7 +646,9 @@ fn bench_handshake_verify(c: &mut Criterion) {
                 lookup_unknown,
             )
             .unwrap();
-            let outcome = hs.verify_proof(&client_proof, &identity, SESSION_MAX_AGE_NS).unwrap();
+            let outcome = hs
+                .verify_proof(&client_proof, &identity, SESSION_MAX_AGE_NS)
+                .unwrap();
             matches!(outcome, ProofOutcome::Rejected)
                 .then_some(())
                 .expect("expected Rejected");
@@ -703,8 +695,7 @@ fn bench_scram_post_argon(c: &mut Criterion) {
                 recovered[i] = proof[i] ^ sig[i];
             }
             let recomputed = sha256(&recovered);
-            let ok =
-                shamir_connect::common::crypto::constant_time_eq(&recomputed, &stored.0);
+            let ok = shamir_connect::common::crypto::constant_time_eq(&recomputed, &stored.0);
             black_box(ok);
         });
     });

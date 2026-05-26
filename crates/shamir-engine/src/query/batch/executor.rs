@@ -5,15 +5,15 @@
 
 use std::time::Instant;
 
-use crate::table::TableManager;
 use crate::query::auth::SessionPermissions;
 use crate::query::batch::{
     BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
 };
-use crate::query::TableRef;
 use crate::query::filter::FilterContext;
 use crate::query::read::{QueryResult, QueryStats};
 use crate::query::write::WriteResult;
+use crate::query::TableRef;
+use crate::table::TableManager;
 use shamir_storage::error::DbResult;
 use shamir_types::types::common::{new_map, TMap};
 
@@ -82,10 +82,7 @@ pub async fn execute_batch_with_permissions(
         .check_batch(&request.queries, db_name)
         .map_err(|(alias, action, resource)| BatchError::QueryError {
             alias,
-            message: format!(
-                "Permission denied: {:?} on {:?}",
-                action, resource
-            ),
+            message: format!("Permission denied: {:?} on {:?}", action, resource),
         })?;
 
     execute_batch(request, resolver, admin).await
@@ -105,15 +102,16 @@ async fn validate_tables(
         if let Some(table_ref) = entry.op.table_ref() {
             let key = format!("{}/{}", table_ref.repo, table_ref.table);
             if seen.insert(key) {
-                resolver.resolve(table_ref).await.map_err(|e| {
-                    BatchError::QueryError {
+                resolver
+                    .resolve(table_ref)
+                    .await
+                    .map_err(|e| BatchError::QueryError {
                         alias: alias.clone(),
                         message: format!(
                             "Table '{}' in repo '{}' not found: {}",
                             table_ref.table, table_ref.repo, e
                         ),
-                    }
-                })?;
+                    })?;
             }
         }
     }
@@ -219,50 +217,55 @@ async fn execute_single(
     let ctx = FilterContext::new(interner, resolved_refs);
 
     match &entry.op {
-        BatchOp::Read(query) => table.read(query, &ctx).await.map_err(|e| {
-            BatchError::QueryError {
+        BatchOp::Read(query) => table
+            .read(query, &ctx)
+            .await
+            .map_err(|e| BatchError::QueryError {
                 alias: alias.to_string(),
                 message: e.to_string(),
-            }
-        }),
+            }),
 
         BatchOp::Insert(op) => {
-            let wr = table.execute_insert(op).await.map_err(|e| {
-                BatchError::QueryError {
+            let wr = table
+                .execute_insert(op)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             Ok(write_result_to_query_result(wr))
         }
 
         BatchOp::Update(op) => {
-            let wr = table.execute_update(op, &ctx).await.map_err(|e| {
-                BatchError::QueryError {
+            let wr = table
+                .execute_update(op, &ctx)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             Ok(write_result_to_query_result(wr))
         }
 
         BatchOp::Delete(op) => {
-            let wr = table.execute_delete(op, &ctx).await.map_err(|e| {
-                BatchError::QueryError {
+            let wr = table
+                .execute_delete(op, &ctx)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             Ok(write_result_to_query_result(wr))
         }
 
         BatchOp::Set(op) => {
-            let wr = table.execute_set(op).await.map_err(|e| {
-                BatchError::QueryError {
+            let wr = table
+                .execute_set(op)
+                .await
+                .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
-                }
-            })?;
+                })?;
             Ok(write_result_to_query_result(wr))
         }
 
@@ -298,7 +301,10 @@ fn filter_results(
 
     if !request.return_all {
         all_results.retain(|alias, _| {
-            request.queries.get(alias).map_or(false, |e| e.return_result)
+            request
+                .queries
+                .get(alias)
+                .map_or(false, |e| e.return_result)
         });
     }
 

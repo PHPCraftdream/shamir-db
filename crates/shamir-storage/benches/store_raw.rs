@@ -154,8 +154,7 @@ fn make_redb_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;
     let repo = shamir_storage::storage_redb::RedbRepo::new(dir.join("bench.redb")).unwrap();
     let rt = rt();
-    rt.block_on(repo.store_get("bench"))
-        .unwrap()
+    rt.block_on(repo.store_get("bench")).unwrap()
 }
 
 #[cfg(feature = "sled")]
@@ -163,8 +162,7 @@ fn make_sled_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;
     let repo = shamir_storage::storage_sled::SledRepo::new(dir.join("sled")).unwrap();
     let rt = rt();
-    rt.block_on(repo.store_get("bench"))
-        .unwrap()
+    rt.block_on(repo.store_get("bench")).unwrap()
 }
 
 #[cfg(feature = "fjall")]
@@ -172,8 +170,7 @@ fn make_fjall_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;
     let repo = shamir_storage::storage_fjall::FjallRepo::new(dir.join("fjall")).unwrap();
     let rt = rt();
-    rt.block_on(repo.store_get("bench"))
-        .unwrap()
+    rt.block_on(repo.store_get("bench")).unwrap()
 }
 
 #[cfg(feature = "nebari")]
@@ -181,8 +178,7 @@ fn make_nebari_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;
     let repo = shamir_storage::storage_nebari::NebariRepo::new(dir.join("nebari")).unwrap();
     let rt = rt();
-    rt.block_on(repo.store_get("bench"))
-        .unwrap()
+    rt.block_on(repo.store_get("bench")).unwrap()
 }
 
 #[cfg(feature = "persy")]
@@ -190,8 +186,7 @@ fn make_persy_store(dir: &std::path::Path) -> Arc<dyn Store> {
     use shamir_storage::types::Repo;
     let repo = shamir_storage::storage_persy::PersyRepo::new(dir.join("bench.persy")).unwrap();
     let rt = rt();
-    rt.block_on(repo.store_get("bench"))
-        .unwrap()
+    rt.block_on(repo.store_get("bench")).unwrap()
 }
 
 #[cfg(feature = "canopy")]
@@ -201,21 +196,47 @@ fn make_canopy_store(dir: &std::path::Path) -> Arc<dyn Store> {
     std::fs::create_dir_all(&p).unwrap();
     let repo = shamir_storage::storage_canopy::CanopyRepo::new(p).unwrap();
     let rt = rt();
-    rt.block_on(repo.store_get("bench"))
-        .unwrap()
+    rt.block_on(repo.store_get("bench")).unwrap()
 }
 
-disk_backend!("redb",   storage_redb,   bench_redb,   "redb",   make_redb_store);
-disk_backend!("sled",   storage_sled,   bench_sled,   "sled",   make_sled_store);
-disk_backend!("fjall",  storage_fjall,  bench_fjall,  "fjall",  make_fjall_store);
-disk_backend!("nebari", storage_nebari, bench_nebari, "nebari", make_nebari_store);
-disk_backend!("persy",  storage_persy,  bench_persy,  "persy",  make_persy_store);
-disk_backend!("canopy", storage_canopy, bench_canopy, "canopy", make_canopy_store);
+disk_backend!("redb", storage_redb, bench_redb, "redb", make_redb_store);
+disk_backend!("sled", storage_sled, bench_sled, "sled", make_sled_store);
+disk_backend!(
+    "fjall",
+    storage_fjall,
+    bench_fjall,
+    "fjall",
+    make_fjall_store
+);
+disk_backend!(
+    "nebari",
+    storage_nebari,
+    bench_nebari,
+    "nebari",
+    make_nebari_store
+);
+disk_backend!(
+    "persy",
+    storage_persy,
+    bench_persy,
+    "persy",
+    make_persy_store
+);
+disk_backend!(
+    "canopy",
+    storage_canopy,
+    bench_canopy,
+    "canopy",
+    make_canopy_store
+);
 
 fn cached_in_memory_store() -> Arc<dyn Store> {
     let inner = in_memory_store();
     let rt = rt();
-    Arc::new(rt.block_on(shamir_storage::storage_cached::CachedStore::new_sync(inner)).unwrap())
+    Arc::new(
+        rt.block_on(shamir_storage::storage_cached::CachedStore::new_sync(inner))
+            .unwrap(),
+    )
 }
 
 fn bench_cached_in_memory(c: &mut Criterion) {
@@ -229,12 +250,18 @@ fn bench_cached_in_memory(c: &mut Criterion) {
 fn bench_all_backends(c: &mut Criterion) {
     bench_in_memory(c);
     bench_cached_in_memory(c);
-    #[cfg(feature = "redb")]   bench_redb(c);
-    #[cfg(feature = "sled")]   bench_sled(c);
-    #[cfg(feature = "fjall")]  bench_fjall(c);
-    #[cfg(feature = "nebari")] bench_nebari(c);
-    #[cfg(feature = "persy")]  bench_persy(c);
-    #[cfg(feature = "canopy")] bench_canopy(c);
+    #[cfg(feature = "redb")]
+    bench_redb(c);
+    #[cfg(feature = "sled")]
+    bench_sled(c);
+    #[cfg(feature = "fjall")]
+    bench_fjall(c);
+    #[cfg(feature = "nebari")]
+    bench_nebari(c);
+    #[cfg(feature = "persy")]
+    bench_persy(c);
+    #[cfg(feature = "canopy")]
+    bench_canopy(c);
 }
 
 criterion_group!(benches, bench_all_backends);

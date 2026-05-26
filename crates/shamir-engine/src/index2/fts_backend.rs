@@ -25,11 +25,7 @@ pub struct FtsBackend {
 }
 
 impl FtsBackend {
-    pub fn new(
-        descriptor: IndexDescriptor,
-        field_path: Vec<u64>,
-        store: Arc<dyn Store>,
-    ) -> Self {
+    pub fn new(descriptor: IndexDescriptor, field_path: Vec<u64>, store: Arc<dyn Store>) -> Self {
         let tokenizer: Arc<dyn Tokenizer> = match &descriptor.kind {
             crate::index2::kind::IndexKind::Fts { tokenizer: tk, .. } => {
                 Arc::from(tokenizer::build_tokenizer(tk))
@@ -88,12 +84,7 @@ impl FtsBackend {
     }
 
     fn posting_key_for_token(&self, th: u64, rid: &RecordId) -> Vec<u8> {
-        build_posting_key(
-            self.descriptor.id,
-            type_tag::FTS,
-            &th.to_le_bytes(),
-            rid,
-        )
+        build_posting_key(self.descriptor.id, type_tag::FTS, &th.to_le_bytes(), rid)
     }
 
     fn prefix_for_token(&self, th: u64) -> Vec<u8> {
@@ -175,10 +166,7 @@ impl IndexBackend for FtsBackend {
         Ok(())
     }
 
-    async fn on_batch_insert(
-        &self,
-        items: &[(RecordId, &InnerValue)],
-    ) -> Result<(), IndexError> {
+    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
         for (rid, rec) in items {
             self.on_insert(*rid, rec).await?;
         }
@@ -285,7 +273,9 @@ mod tests {
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         let r3 = RecordId::new();
-        fts.on_insert(r1, &make_rec(&i, "hello world foo")).await.unwrap();
+        fts.on_insert(r1, &make_rec(&i, "hello world foo"))
+            .await
+            .unwrap();
         fts.on_insert(r2, &make_rec(&i, "hello bar")).await.unwrap();
         fts.on_insert(r3, &make_rec(&i, "world bar")).await.unwrap();
 
@@ -316,7 +306,9 @@ mod tests {
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         let r3 = RecordId::new();
-        fts.on_insert(r1, &make_rec(&i, "hello world")).await.unwrap();
+        fts.on_insert(r1, &make_rec(&i, "hello world"))
+            .await
+            .unwrap();
         fts.on_insert(r2, &make_rec(&i, "hello bar")).await.unwrap();
         fts.on_insert(r3, &make_rec(&i, "baz qux")).await.unwrap();
 

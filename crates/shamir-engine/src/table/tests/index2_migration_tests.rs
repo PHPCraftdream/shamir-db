@@ -91,7 +91,13 @@ async fn migrate_index2_fts() {
         }
     };
 
-    let records = ["hello rust world", "rust is great", "hello python", "goodbye world", "hello world rust"];
+    let records = [
+        "hello rust world",
+        "rust is great",
+        "hello python",
+        "goodbye world",
+        "hello world rust",
+    ];
     for body in &records {
         let mut m = new_map_wc(1);
         m.insert(InternerKey::new(body_k), InnerValue::Str((*body).into()));
@@ -120,7 +126,10 @@ async fn migrate_index2_fts() {
         IndexResult::Set(s) => s.len(),
         _ => panic!("unexpected result kind"),
     };
-    assert_eq!(hit_count, 2, "FTS 'hello AND world' should match 2: {result:?}");
+    assert_eq!(
+        hit_count, 2,
+        "FTS 'hello AND world' should match 2: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -195,7 +204,10 @@ async fn migrate_index2_functional() {
         IndexResult::Set(s) => s.len(),
         _ => panic!("expected Set"),
     };
-    assert_eq!(n, 2, "lower(email)=alice@foo.com should match 2 (Alice@FOO.com + alice@foo.com)");
+    assert_eq!(
+        n, 2,
+        "lower(email)=alice@foo.com should match 2 (Alice@FOO.com + alice@foo.com)"
+    );
 }
 
 #[tokio::test]

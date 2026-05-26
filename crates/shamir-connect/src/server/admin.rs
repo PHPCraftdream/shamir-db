@@ -158,13 +158,12 @@ pub fn kick_session<D: UserDirectory, A: AuditSink>(
     audit.emit(
         "kick_session",
         &actor.username,
-        &[
-            ("target", target_username),
-            ("killed", &killed.to_string()),
-        ],
+        &[("target", target_username), ("killed", &killed.to_string())],
     );
 
-    Ok(KickSessionResult { killed_count: killed })
+    Ok(KickSessionResult {
+        killed_count: killed,
+    })
 }
 
 // -----------------------------------------------------------------

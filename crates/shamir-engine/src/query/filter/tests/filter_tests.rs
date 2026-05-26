@@ -3,7 +3,7 @@
 //! All tests use JSON strings as source, parse to QueryValue, then convert to Filter.
 
 use crate::query::common::{filter_from_value, filter_value_from_value, QueryParseError};
-use crate::query::filter::{FilterExprOp, Filter, FilterValue};
+use crate::query::filter::{Filter, FilterExprOp, FilterValue};
 use shamir_types::types::value::QueryValue;
 
 /// Parse JSON string to QueryValue, then to Filter
@@ -229,7 +229,9 @@ fn test_filter_is_not_null() {
     }"#;
 
     let filter = parse_filter(json).unwrap();
-    assert!(matches!(filter, Filter::IsNotNull { field } if field == vec!["email_verified_at".to_string()]));
+    assert!(
+        matches!(filter, Filter::IsNotNull { field } if field == vec!["email_verified_at".to_string()])
+    );
 }
 
 #[test]
@@ -362,14 +364,18 @@ fn test_complex_permission_check() {
 fn test_filter_value_field_ref() {
     let json = r#"{ "$ref": "address.city" }"#;
     let v = parse_filter_value(json).unwrap();
-    assert!(matches!(v, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()]));
+    assert!(
+        matches!(v, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()])
+    );
 }
 
 #[test]
 fn test_filter_value_field_ref_nested() {
     let json = r#"{ "$ref": "user.profile.bio" }"#;
     let v = parse_filter_value(json).unwrap();
-    assert!(matches!(v, FilterValue::FieldRef { path } if path == vec!["user".to_string(), "profile".to_string(), "bio".to_string()]));
+    assert!(
+        matches!(v, FilterValue::FieldRef { path } if path == vec!["user".to_string(), "profile".to_string(), "bio".to_string()])
+    );
 }
 
 #[test]
@@ -384,7 +390,9 @@ fn test_filter_eq_with_field_ref() {
     match filter {
         Filter::Eq { field, value } => {
             assert_eq!(field, vec!["billing_city".to_string()]);
-            assert!(matches!(value, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()]));
+            assert!(
+                matches!(value, FilterValue::FieldRef { path } if path == vec!["address".to_string(), "city".to_string()])
+            );
         }
         _ => panic!("Expected Eq filter"),
     }
@@ -402,7 +410,9 @@ fn test_filter_gt_with_field_ref() {
     match filter {
         Filter::Gt { field, value } => {
             assert_eq!(field, vec!["end_date".to_string()]);
-            assert!(matches!(value, FilterValue::FieldRef { path } if path == vec!["start_date".to_string()]));
+            assert!(
+                matches!(value, FilterValue::FieldRef { path } if path == vec!["start_date".to_string()])
+            );
         }
         _ => panic!("Expected Gt filter"),
     }
@@ -435,7 +445,9 @@ fn test_filter_value_array_with_field_refs() {
     match v {
         FilterValue::Array(arr) => {
             assert_eq!(arr.len(), 3);
-            assert!(matches!(&arr[0], FilterValue::FieldRef { path } if *path == vec!["user".to_string(), "id".to_string()]));
+            assert!(
+                matches!(&arr[0], FilterValue::FieldRef { path } if *path == vec!["user".to_string(), "id".to_string()])
+            );
             assert!(matches!(&arr[1], FilterValue::Int(42)));
             assert!(matches!(&arr[2], FilterValue::String(s) if s == "literal"));
         }
@@ -446,7 +458,9 @@ fn test_filter_value_array_with_field_refs() {
 #[test]
 fn test_field_ref_helper() {
     let v = FilterValue::field_ref("address.city");
-    assert!(matches!(v, FilterValue::FieldRef { path } if path == vec!["address.city".to_string()]));
+    assert!(
+        matches!(v, FilterValue::FieldRef { path } if path == vec!["address.city".to_string()])
+    );
 }
 
 // ============================================================================

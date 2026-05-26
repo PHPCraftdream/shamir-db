@@ -18,10 +18,10 @@
 
 pub mod actor;
 pub mod backend;
-pub mod descriptor;
-pub mod expr;
 pub mod bm25;
 pub mod build_backend;
+pub mod descriptor;
+pub mod expr;
 pub mod fts_backend;
 pub mod fts_ranked_backend;
 pub mod functional_backend;
@@ -34,10 +34,10 @@ pub mod tokenizer;
 pub mod vector;
 
 pub use actor::IndexActor;
-pub use build_backend::build_index2_backend;
-pub use expr::{ExprError, IndexExpr};
 pub use backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
+pub use build_backend::build_index2_backend;
 pub use descriptor::IndexDescriptor;
+pub use expr::{ExprError, IndexExpr};
 pub use kind::{
     FunctionalConfig, IndexKind, TokenizerKind, VectorBackendRef, VectorConfig, VectorMetric,
 };

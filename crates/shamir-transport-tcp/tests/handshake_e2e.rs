@@ -16,9 +16,9 @@ use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
+use shamir_connect::server::handshake::SESSION_MAX_AGE_NS;
 use shamir_connect::server::handshake::{AuthInitView, ProofOutcome, ServerHandshake};
 use shamir_connect::server::user_record::UserRecord;
-use shamir_connect::server::handshake::SESSION_MAX_AGE_NS;
 
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{
@@ -127,8 +127,7 @@ async fn full_handshake_over_tcp_tls() {
     let pinned_hash = sha256(&server_pub);
 
     // ---- TLS configs ----
-    let (cert_pem, key_pem) =
-        generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
+    let (cert_pem, key_pem) = generate_self_signed_server_cert(vec!["localhost".into()]).unwrap();
     let server_cfg = make_server_config_from_pem(&cert_pem, &key_pem).unwrap();
     let client_cfg = make_client_config_no_ca();
 
@@ -232,11 +231,15 @@ async fn full_handshake_over_tcp_tls() {
 
     let (mut r, mut w) = split(tls);
 
-    let mut hs = HandshakeBuilder::new(username.clone(), TransportKind::Tcp, BindingMode::TlsExporter)
-        .tls_exporter(exporter)
-        .pinned_hash(pinned_hash)
-        .build()
-        .unwrap();
+    let mut hs = HandshakeBuilder::new(
+        username.clone(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+    )
+    .tls_exporter(exporter)
+    .pinned_hash(pinned_hash)
+    .build()
+    .unwrap();
     // suppress unused-mut: hs is read-only beyond build; keep `let mut` cosmetic-free
     let _ = &mut hs;
 
@@ -271,9 +274,7 @@ async fn full_handshake_over_tcp_tls() {
 
     // Compute proof
     let mut password_buf = password.to_vec();
-    let (proof, derived, am) = hs
-        .process_challenge(&challenge, &mut password_buf)
-        .unwrap();
+    let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
 
     // Send proof
     let proof_wire = WireClientProof {

@@ -37,7 +37,9 @@ async fn round_trip_many_frames_in_sequence() {
 async fn close_frame_returns_peer_close_error() {
     let (mut a, mut b) = duplex(16);
     write_close(&mut a).await.unwrap();
-    let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT).await.unwrap_err();
+    let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .unwrap_err();
     assert!(matches!(err, FrameError::PeerClose));
 }
 
@@ -48,7 +50,9 @@ async fn rejects_oversized_frame_declaration() {
     use tokio::io::AsyncWriteExt;
     a.write_all(&too_big).await.unwrap();
     a.flush().await.unwrap();
-    let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT).await.unwrap_err();
+    let err = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .unwrap_err();
     assert!(matches!(err, FrameError::TooLarge { .. }));
 }
 
@@ -169,7 +173,9 @@ async fn write_frame_into_round_trip_reuses_buffer() {
 
     for sz in [16usize, 256, 1024, 256, 16] {
         let payload = vec![0xa5u8; sz];
-        write_frame_into(&mut a, &payload, &mut scratch).await.unwrap();
+        write_frame_into(&mut a, &payload, &mut scratch)
+            .await
+            .unwrap();
         let got = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
         assert_eq!(got, payload);
     }
@@ -193,7 +199,9 @@ async fn write_frame_and_write_frame_into_produce_identical_bytes() {
 
     let (mut a2, mut b2) = duplex(8 * 1024);
     let mut scratch = Vec::new();
-    write_frame_into(&mut a2, &payload, &mut scratch).await.unwrap();
+    write_frame_into(&mut a2, &payload, &mut scratch)
+        .await
+        .unwrap();
     let frame2 = read_frame(&mut b2, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
 
     assert_eq!(frame1, frame2);

@@ -251,9 +251,14 @@ fn test_concurrent_same_key_consistency() {
     }
 
     // The three keys must be distinct.
-    let unique: std::collections::HashSet<u64> =
-        [reference[0], reference[1], reference[2]].into_iter().collect();
-    assert_eq!(unique.len(), 3, "three distinct keys must produce three IDs");
+    let unique: std::collections::HashSet<u64> = [reference[0], reference[1], reference[2]]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        unique.len(),
+        3,
+        "three distinct keys must produce three IDs"
+    );
 
     // Final state.
     assert_eq!(interner.len(), 3);

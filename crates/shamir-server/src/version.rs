@@ -57,7 +57,9 @@ pub const CURRENT_QUERY_LANG_VERSION: u32 = 1;
 pub enum VersionError {
     /// Client asked for a handshake-protocol version this server does not
     /// implement.
-    #[error("handshake_protocol_version: client requested {requested}, server supports {supported:?}")]
+    #[error(
+        "handshake_protocol_version: client requested {requested}, server supports {supported:?}"
+    )]
     UnsupportedHandshake {
         requested: u8,
         supported: &'static [u8],

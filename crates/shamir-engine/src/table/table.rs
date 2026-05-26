@@ -1,11 +1,11 @@
 //! Table implementation - InnerValue only (no interning!)
 
-use shamir_storage::types::Store;
-use shamir_storage::error::{DbError, DbResult};
-use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
 use async_stream::stream;
 use futures::stream::{Stream, StreamExt};
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::Store;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
 /// Low-level table - InnerValue only (no interning/conversion)
@@ -44,7 +44,9 @@ impl Table {
     /// Note: This does not update the record counter - that's managed by TableContext
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         // Serialize InnerValue
-        let inner_bytes = value.to_bytes().map_err(|e| DbError::Codec(e.to_string()))?;
+        let inner_bytes = value
+            .to_bytes()
+            .map_err(|e| DbError::Codec(e.to_string()))?;
 
         // Insert to data store - returns Bytes (16 random bytes)
         let key_bytes = self.data_store.insert(inner_bytes).await?;
@@ -101,9 +103,7 @@ impl Table {
         keys.into_iter()
             .map(|k| {
                 let arr: [u8; 16] = k.as_ref().try_into().map_err(|_| {
-                    DbError::Internal(
-                        "Failed to convert key bytes to RecordId".to_string(),
-                    )
+                    DbError::Internal("Failed to convert key bytes to RecordId".to_string())
                 })?;
                 Ok(RecordId(arr))
             })
@@ -139,7 +139,9 @@ impl Table {
         }
 
         // Serialize and update
-        let inner_bytes = value.to_bytes().map_err(|e| DbError::Codec(e.to_string()))?;
+        let inner_bytes = value
+            .to_bytes()
+            .map_err(|e| DbError::Codec(e.to_string()))?;
         self.data_store.set(key_bytes, inner_bytes).await?;
         Ok(true)
     }
@@ -157,7 +159,9 @@ impl Table {
         let exists = self.data_store.get(key_bytes.clone()).await.is_ok();
 
         // Serialize and set
-        let inner_bytes = value.to_bytes().map_err(|e| DbError::Codec(e.to_string()))?;
+        let inner_bytes = value
+            .to_bytes()
+            .map_err(|e| DbError::Codec(e.to_string()))?;
         self.data_store.set(key_bytes, inner_bytes).await?;
 
         Ok(!exists)

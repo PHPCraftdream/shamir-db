@@ -11,8 +11,8 @@ use shamir_db::ShamirDb;
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await;
-    let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("users"));
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
     db.add_repo(repo_config).await.unwrap();
     shamir
 }
@@ -35,7 +35,8 @@ async fn test_create_user() {
                 "profile": {"department": "engineering", "level": 3}
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cu"].records[0]["created_user"], "alice");
@@ -52,7 +53,8 @@ async fn test_list_users() {
             "u1": {"create_user": "alice", "password": "pass1", "roles": ["readonly"]},
             "u2": {"create_user": "bob", "password": "pass2", "roles": ["readwrite"]}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &req).await.unwrap();
 
     // List users
@@ -61,7 +63,8 @@ async fn test_list_users() {
         "queries": {
             "list": {"list": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     let users = resp.results["list"].records[0]["users"].as_array().unwrap();
@@ -83,7 +86,8 @@ async fn test_drop_user() {
         "queries": {
             "cu": {"create_user": "alice", "password": "pass", "roles": []}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &req).await.unwrap();
 
     let req: BatchRequest = serde_json::from_value(json!({
@@ -91,7 +95,8 @@ async fn test_drop_user() {
         "queries": {
             "du": {"drop_user": "alice"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["du"].records[0]["existed"], true);
 
@@ -101,7 +106,8 @@ async fn test_drop_user() {
         "queries": {
             "du": {"drop_user": "alice"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["du"].records[0]["existed"], false);
 }
@@ -138,7 +144,8 @@ async fn test_create_role() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cr"].records[0]["created_role"], "analyst");
@@ -159,7 +166,8 @@ async fn test_list_roles() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &req).await.unwrap();
 
     // List roles
@@ -168,7 +176,8 @@ async fn test_list_roles() {
         "queries": {
             "list": {"list": "roles"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     let roles = resp.results["list"].records[0]["roles"].as_array().unwrap();
@@ -188,7 +197,8 @@ async fn test_drop_role() {
                 "permissions": []
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &req).await.unwrap();
 
     let req: BatchRequest = serde_json::from_value(json!({
@@ -196,7 +206,8 @@ async fn test_drop_role() {
         "queries": {
             "dr": {"drop_role": "temp_role"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["dr"].records[0]["existed"], true);
 }
@@ -221,7 +232,8 @@ async fn test_grant_and_revoke_role() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
     shamir.execute("testdb", &req).await.unwrap();
 
     // Grant role
@@ -230,7 +242,8 @@ async fn test_grant_and_revoke_role() {
         "queries": {
             "grant": {"grant_role": "analyst", "user": "alice"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["grant"].records[0]["granted_role"], "analyst");
 
@@ -240,7 +253,8 @@ async fn test_grant_and_revoke_role() {
         "queries": {
             "list": {"list": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let users = resp.results["list"].records[0]["users"].as_array().unwrap();
     let alice = &users[0];
@@ -254,7 +268,8 @@ async fn test_grant_and_revoke_role() {
         "queries": {
             "revoke": {"revoke_role": "analyst", "user": "alice"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["revoke"].records[0]["revoked_role"], "analyst");
 
@@ -264,7 +279,8 @@ async fn test_grant_and_revoke_role() {
         "queries": {
             "list": {"list": "users"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let users = resp.results["list"].records[0]["users"].as_array().unwrap();
     let alice = &users[0];
@@ -301,7 +317,8 @@ async fn test_create_role_with_row_filter() {
                 ]
             }
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cr"].records[0]["created_role"], "eu_manager");
@@ -312,7 +329,8 @@ async fn test_create_role_with_row_filter() {
         "queries": {
             "list": {"list": "roles"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let roles = resp.results["list"].records[0]["roles"].as_array().unwrap();
     let eu_role = &roles[0];
@@ -335,19 +353,21 @@ async fn test_grant_role_to_nonexistent_user() {
         "queries": {
             "grant": {"grant_role": "analyst", "user": "nonexistent"}
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
-    assert!(matches!(err, shamir_db::query::batch::BatchError::QueryError { .. }));
+    assert!(matches!(
+        err,
+        shamir_db::query::batch::BatchError::QueryError { .. }
+    ));
 }
 
 // ============================================================================
 // SessionPermissions — unit tests
 // ============================================================================
 
-use shamir_db::query::auth::{
-    Action, Effect, Permission, Resource, Role, SessionPermissions,
-};
+use shamir_db::query::auth::{Action, Effect, Permission, Resource, Role, SessionPermissions};
 use shamir_db::query::filter::Filter;
 
 #[test]
@@ -362,7 +382,10 @@ fn test_superadmin_allows_everything() {
         }],
     }];
     let session = SessionPermissions::build(&roles);
-    assert_eq!(session.check(Action::Read, &Resource::Global), Effect::Allow);
+    assert_eq!(
+        session.check(Action::Read, &Resource::Global),
+        Effect::Allow
+    );
     assert_eq!(
         session.check(
             Action::Delete,
@@ -678,7 +701,11 @@ fn test_row_filter_unrestricted_wins() {
             table: "users".into(),
         },
     );
-    assert!(filter.is_none(), "Expected None (unrestricted), got {:?}", filter);
+    assert!(
+        filter.is_none(),
+        "Expected None (unrestricted), got {:?}",
+        filter
+    );
 }
 
 #[test]

@@ -18,11 +18,7 @@ pub enum VectorError {
 pub trait VectorAdapter: Send + Sync {
     async fn upsert(&self, rid: RecordId, vec: &[f32]) -> Result<(), VectorError>;
     async fn delete(&self, rid: RecordId) -> Result<(), VectorError>;
-    async fn search(
-        &self,
-        query: &[f32],
-        k: u32,
-    ) -> Result<Vec<(RecordId, f32)>, VectorError>;
+    async fn search(&self, query: &[f32], k: u32) -> Result<Vec<(RecordId, f32)>, VectorError>;
     fn dim(&self) -> u32;
     fn len(&self) -> usize;
 }

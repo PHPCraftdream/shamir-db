@@ -8,13 +8,13 @@
 
 use serde_json::json;
 
-use shamir_types::codecs::transform;
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::read::ReadQuery;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::ReadQuery;
+use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::UserValue;
 
@@ -86,7 +86,11 @@ fn extract_names_from_result(result: &crate::query::read::QueryResult) -> Vec<St
     let mut names: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|r| {
+            r.get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     names.sort();
     names
@@ -106,11 +110,15 @@ async fn test_read_uses_index_for_eq_filter() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "eq", "field": ["status"], "value": "active"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
-    assert_eq!(extract_names_from_result(&result), vec!["Alice", "Bob", "Dave"]);
+    assert_eq!(
+        extract_names_from_result(&result),
+        vec!["Alice", "Bob", "Dave"]
+    );
     assert_eq!(
         result.stats.as_ref().unwrap().index_used,
         Some("status_idx".to_string())
@@ -138,7 +146,8 @@ async fn test_read_uses_index_for_and_with_eq() {
                 {"op": "gt", "field": ["age"], "value": 25}
             ]
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -178,7 +187,8 @@ async fn test_read_composite_index() {
                 {"op": "eq", "field": ["city"], "value": "LA"}
             ]
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -204,11 +214,15 @@ async fn test_read_no_index_for_gt() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "gt", "field": ["age"], "value": 25}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
-    assert_eq!(extract_names_from_result(&result), vec!["Alice", "Carol", "Eve"]);
+    assert_eq!(
+        extract_names_from_result(&result),
+        vec!["Alice", "Carol", "Eve"]
+    );
     assert_eq!(result.stats.as_ref().unwrap().index_used, None);
 }
 
@@ -232,7 +246,8 @@ async fn test_read_no_index_for_or() {
                 {"op": "eq", "field": ["status"], "value": "deleted"}
             ]
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
     assert_eq!(result.stats.as_ref().unwrap().index_used, None);
@@ -252,7 +267,8 @@ async fn test_read_index_with_no_results() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "eq", "field": ["status"], "value": "banned"}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -279,7 +295,8 @@ async fn test_read_index_with_pagination() {
         "where": {"op": "eq", "field": ["status"], "value": "active"},
         "pagination": {"mode": "LimitOffset", "limit": 2},
         "count_total": true
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -309,14 +326,19 @@ async fn test_read_index_with_order_by() {
         "from": "users",
         "where": {"op": "eq", "field": ["status"], "value": "active"},
         "order_by": {"items": [{"field": ["age"], "direction": "desc"}]}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
     let names: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| r.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .filter_map(|r| {
+            r.get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
     // Active sorted by age desc: Alice(30), Bob(25), Dave(22)
     assert_eq!(names, vec!["Alice", "Bob", "Dave"]);
@@ -340,7 +362,8 @@ async fn test_read_index_with_field_ref_falls_through() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "eq", "field": ["status"], "value": {"$ref": ["name"]}}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
     // FieldRef can't be used for index lookup -> full scan
@@ -361,7 +384,8 @@ async fn test_read_uses_index_for_in() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "in", "field": ["status"], "values": ["active", "deleted"]}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -386,7 +410,8 @@ async fn test_read_uses_index_for_in_single_value() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "in", "field": ["status"], "values": ["inactive"]}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -407,7 +432,8 @@ async fn test_read_uses_index_for_in_no_match() {
     let query: ReadQuery = serde_json::from_value(json!({
         "from": "users",
         "where": {"op": "in", "field": ["status"], "values": ["banned", "suspended"]}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -439,16 +465,14 @@ async fn test_read_uses_index_for_and_with_in() {
                 {"op": "gt", "field": ["age"], "value": 25}
             ]
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
     // active+inactive: Alice(30), Bob(25), Carol(35), Dave(22)
     // age > 25: Alice(30), Carol(35)
-    assert_eq!(
-        extract_names_from_result(&result),
-        vec!["Alice", "Carol"]
-    );
+    assert_eq!(extract_names_from_result(&result), vec!["Alice", "Carol"]);
     assert_eq!(
         result.stats.as_ref().unwrap().index_used,
         Some("status_idx".to_string())
@@ -516,7 +540,8 @@ async fn test_order_by_desc_limit_uses_sorted_index_fast_path() {
         "from": "users",
         "order_by": {"items": [{"field": ["score"], "direction": "desc"}]},
         "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 0}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -526,7 +551,11 @@ async fn test_order_by_desc_limit_uses_sorted_index_fast_path() {
     let got_scores: Vec<i64> = result
         .records
         .iter()
-        .map(|r| r.get("score").and_then(|v| v.as_i64()).expect("score field"))
+        .map(|r| {
+            r.get("score")
+                .and_then(|v| v.as_i64())
+                .expect("score field")
+        })
         .collect();
     assert_eq!(got_scores, expected[..5], "wrong records for DESC LIMIT 5");
 
@@ -567,7 +596,8 @@ async fn test_max_aggregate_uses_sorted_index() {
             }],
             "distinct": false
         }
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -608,18 +638,32 @@ async fn test_order_by_asc_limit_uses_sorted_index_fast_path() {
         "from": "users",
         "order_by": {"items": [{"field": ["score"], "direction": "asc"}]},
         "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 0}
-    })).unwrap();
+    }))
+    .unwrap();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
     // Returned exactly 5 records in ascending score order.
-    assert_eq!(result.records.len(), 5, "expected 5 records, got {}", result.records.len());
+    assert_eq!(
+        result.records.len(),
+        5,
+        "expected 5 records, got {}",
+        result.records.len()
+    );
     let got_scores: Vec<i64> = result
         .records
         .iter()
-        .map(|r| r.get("score").and_then(|v| v.as_i64()).expect("score field"))
+        .map(|r| {
+            r.get("score")
+                .and_then(|v| v.as_i64())
+                .expect("score field")
+        })
         .collect();
-    assert_eq!(got_scores, expected[..5], "wrong records returned for ORDER BY score ASC LIMIT 5");
+    assert_eq!(
+        got_scores,
+        expected[..5],
+        "wrong records returned for ORDER BY score ASC LIMIT 5"
+    );
 
     // Fast path marker. Without the fast path, `index_used` is None
     // because the fall-back full-scan path doesn't set it for an

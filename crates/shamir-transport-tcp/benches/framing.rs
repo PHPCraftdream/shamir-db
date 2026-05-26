@@ -28,15 +28,19 @@ fn bench_round_trip(c: &mut Criterion) {
     {
         let payload = vec![0xabu8; size];
         g.throughput(Throughput::Bytes(size as u64));
-        g.bench_with_input(BenchmarkId::new("write_then_read", size), &payload, |b, p| {
-            b.to_async(&rt).iter(|| async {
-                let buf_cap = size + 1024;
-                let (mut a, mut b) = duplex(buf_cap);
-                write_frame(&mut a, p).await.unwrap();
-                let got = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
-                black_box(got);
-            });
-        });
+        g.bench_with_input(
+            BenchmarkId::new("write_then_read", size),
+            &payload,
+            |b, p| {
+                b.to_async(&rt).iter(|| async {
+                    let buf_cap = size + 1024;
+                    let (mut a, mut b) = duplex(buf_cap);
+                    write_frame(&mut a, p).await.unwrap();
+                    let got = read_frame(&mut b, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+                    black_box(got);
+                });
+            },
+        );
     }
     g.finish();
 }
@@ -73,25 +77,34 @@ fn bench_round_trip_pooled(c: &mut Criterion) {
     {
         let payload = vec![0xabu8; size];
         g.throughput(Throughput::Bytes(size as u64));
-        g.bench_with_input(BenchmarkId::new("write_then_read", size), &payload, |b, p| {
-            // Buffer lives across iterations — simulates a per-connection
-            // scratch buffer in a real request loop.
-            let mut scratch: Vec<u8> = Vec::with_capacity(size);
-            b.iter(|| {
-                rt.block_on(async {
-                    let buf_cap = size + 1024;
-                    let (mut a, mut bb) = duplex(buf_cap);
-                    write_frame(&mut a, p).await.unwrap();
-                    read_frame_into(&mut bb, MAX_FRAME_SIZE_DEFAULT, &mut scratch)
-                        .await
-                        .unwrap();
-                    black_box(&scratch);
+        g.bench_with_input(
+            BenchmarkId::new("write_then_read", size),
+            &payload,
+            |b, p| {
+                // Buffer lives across iterations — simulates a per-connection
+                // scratch buffer in a real request loop.
+                let mut scratch: Vec<u8> = Vec::with_capacity(size);
+                b.iter(|| {
+                    rt.block_on(async {
+                        let buf_cap = size + 1024;
+                        let (mut a, mut bb) = duplex(buf_cap);
+                        write_frame(&mut a, p).await.unwrap();
+                        read_frame_into(&mut bb, MAX_FRAME_SIZE_DEFAULT, &mut scratch)
+                            .await
+                            .unwrap();
+                        black_box(&scratch);
+                    });
                 });
-            });
-        });
+            },
+        );
     }
     g.finish();
 }
 
-criterion_group!(benches, bench_round_trip, bench_round_trip_pooled, bench_write_only);
+criterion_group!(
+    benches,
+    bench_round_trip,
+    bench_round_trip_pooled,
+    bench_write_only
+);
 criterion_main!(benches);

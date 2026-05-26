@@ -631,7 +631,10 @@ fn complete_auth_ok_attaches_all_three_optional_fields() {
     assert_eq!(view.expires_at_ns, base.expires_at_ns);
 
     // Extensions populated.
-    assert_eq!(view.resumption_ticket.as_deref(), Some(ticket_bytes.as_slice()));
+    assert_eq!(
+        view.resumption_ticket.as_deref(),
+        Some(ticket_bytes.as_slice())
+    );
     assert_eq!(view.resumption_expires_at_ns, Some(ticket_expires));
     assert!(view.rotation_in_progress.is_some());
     let r = view.rotation_in_progress.unwrap();
@@ -719,7 +722,10 @@ fn auth_ok_view_with_methods_chain() {
     .with_resumption_ticket(vec![1, 2, 3], 200)
     .with_kdf_upgrade_required();
 
-    assert_eq!(view.resumption_ticket.as_deref(), Some([1u8, 2, 3].as_slice()));
+    assert_eq!(
+        view.resumption_ticket.as_deref(),
+        Some([1u8, 2, 3].as_slice())
+    );
     assert_eq!(view.resumption_expires_at_ns, Some(200));
     assert_eq!(view.kdf_upgrade_required, Some(true));
 }

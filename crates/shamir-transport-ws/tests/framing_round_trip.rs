@@ -42,7 +42,11 @@ async fn round_trip_into_buffer_reuses_capacity() {
             .await
             .unwrap();
         assert_eq!(buf.len(), sz);
-        assert_eq!(buf.capacity(), initial_cap, "scratch capacity must not grow");
+        assert_eq!(
+            buf.capacity(),
+            initial_cap,
+            "scratch capacity must not grow"
+        );
     }
     writer.await.unwrap();
 }

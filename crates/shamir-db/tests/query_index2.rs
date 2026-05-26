@@ -12,8 +12,8 @@ use shamir_db::ShamirDb;
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await;
-    let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory())
-        .add_table(TableConfig::new("posts"));
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("posts"));
     db.add_repo(repo_config).await.unwrap();
     shamir
 }
@@ -31,37 +31,49 @@ async fn exec(shamir: &ShamirDb, req: serde_json::Value) -> shamir_db::query::ba
 async fn fts_index_and_query() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "mk": {
-                "create_index": "body_fts",
-                "table": "posts",
-                "fields": [["body"]],
-                "index_type": "fts",
-                "fts_tokenizer": "whitespace",
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "body_fts",
+                    "table": "posts",
+                    "fields": [["body"]],
+                    "index_type": "fts",
+                    "fts_tokenizer": "whitespace",
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
 
-    exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"body": "hello rust world"}]},
-            "w2": {"insert_into": "posts", "values": [{"body": "rust is great"}]},
-            "w3": {"insert_into": "posts", "values": [{"body": "hello python"}]},
-        }
-    })).await;
-
-    let resp = exec(&shamir, json!({
-        "id": 3,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {"op": "fts", "field": ["body"], "query": "hello world", "mode": "and"}
+    exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [{"body": "hello rust world"}]},
+                "w2": {"insert_into": "posts", "values": [{"body": "rust is great"}]},
+                "w3": {"insert_into": "posts", "values": [{"body": "hello python"}]},
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
+
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {"op": "fts", "field": ["body"], "query": "hello world", "mode": "and"}
+                }
+            }
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1, "expected 1 record, got {records:?}");
     assert_eq!(records[0]["body"], "hello rust world");
@@ -74,36 +86,48 @@ async fn fts_index_and_query() {
 async fn fts_or_query() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "mk": {
-                "create_index": "body_fts",
-                "table": "posts",
-                "fields": [["body"]],
-                "index_type": "fts",
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "body_fts",
+                    "table": "posts",
+                    "fields": [["body"]],
+                    "index_type": "fts",
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
 
-    exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"body": "apple orange"}]},
-            "w2": {"insert_into": "posts", "values": [{"body": "banana pear"}]},
-            "w3": {"insert_into": "posts", "values": [{"body": "cherry grape"}]},
-        }
-    })).await;
-
-    let resp = exec(&shamir, json!({
-        "id": 3,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {"op": "fts", "field": ["body"], "query": "apple banana", "mode": "or"}
+    exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [{"body": "apple orange"}]},
+                "w2": {"insert_into": "posts", "values": [{"body": "banana pear"}]},
+                "w3": {"insert_into": "posts", "values": [{"body": "cherry grape"}]},
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
+
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {"op": "fts", "field": ["body"], "query": "apple banana", "mode": "or"}
+                }
+            }
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 2);
 }
@@ -116,18 +140,22 @@ async fn fts_or_query() {
 async fn functional_lower_eq() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "mk": {
-                "create_index": "email_lower",
-                "table": "posts",
-                "fields": [["email"]],
-                "index_type": "functional",
-                "functional_op": "lower",
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "email_lower",
+                    "table": "posts",
+                    "fields": [["email"]],
+                    "index_type": "functional",
+                    "functional_op": "lower",
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
 
     exec(&shamir, json!({
         "id": 2,
@@ -137,21 +165,25 @@ async fn functional_lower_eq() {
         }
     })).await;
 
-    let resp = exec(&shamir, json!({
-        "id": 3,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {
-                    "op": "computed",
-                    "expr_op": "lower",
-                    "field": ["email"],
-                    "cmp": "eq",
-                    "value": "alice@foo.com"
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {
+                        "op": "computed",
+                        "expr_op": "lower",
+                        "field": ["email"],
+                        "cmp": "eq",
+                        "value": "alice@foo.com"
+                    }
                 }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["name"], "alice");
@@ -167,19 +199,23 @@ async fn functional_lower_eq() {
 async fn vector_hnsw_similarity() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "mk": {
-                "create_index": "vec_idx",
-                "table": "posts",
-                "fields": [["embedding"]],
-                "index_type": "vector",
-                "vector_dim": 3,
-                "vector_metric": "cosine",
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "vec_idx",
+                    "table": "posts",
+                    "fields": [["embedding"]],
+                    "index_type": "vector",
+                    "vector_dim": 3,
+                    "vector_metric": "cosine",
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
 
     exec(&shamir, json!({
         "id": 2,
@@ -190,20 +226,24 @@ async fn vector_hnsw_similarity() {
         }
     })).await;
 
-    let resp = exec(&shamir, json!({
-        "id": 3,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {
-                    "op": "vector_similarity",
-                    "field": ["embedding"],
-                    "query": [1.0, 0.0, 0.0],
-                    "k": 2
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {
+                        "op": "vector_similarity",
+                        "field": ["embedding"],
+                        "query": [1.0, 0.0, 0.0],
+                        "k": 2
+                    }
                 }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 2, "expected top-2, got {records:?}");
     let labels: Vec<&str> = records
@@ -224,23 +264,31 @@ async fn vector_hnsw_similarity() {
 async fn fts_brute_force_fallback() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"body": "hello world"}]},
-            "w2": {"insert_into": "posts", "values": [{"body": "no match here"}]},
-        }
-    })).await;
-
-    let resp = exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {"op": "fts", "field": ["body"], "query": "hello", "mode": "and"}
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [{"body": "hello world"}]},
+                "w2": {"insert_into": "posts", "values": [{"body": "no match here"}]},
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
+
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {"op": "fts", "field": ["body"], "query": "hello", "mode": "and"}
+                }
+            }
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["body"], "hello world");
@@ -258,35 +306,43 @@ async fn create_index_persists_metadata() {
     let shamir = setup().await;
 
     // Create all 3 index types.
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "fts": {
-                "create_index": "body_fts", "table": "posts",
-                "fields": [["body"]], "index_type": "fts",
-            },
-            "fn": {
-                "create_index": "email_lower", "table": "posts",
-                "fields": [["email"]], "index_type": "functional", "functional_op": "lower",
-            },
-            "vec": {
-                "create_index": "vec_idx", "table": "posts",
-                "fields": [["emb"]], "index_type": "vector",
-                "vector_dim": 3, "vector_metric": "cosine",
-            },
-        }
-    })).await;
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "fts": {
+                    "create_index": "body_fts", "table": "posts",
+                    "fields": [["body"]], "index_type": "fts",
+                },
+                "fn": {
+                    "create_index": "email_lower", "table": "posts",
+                    "fields": [["email"]], "index_type": "functional", "functional_op": "lower",
+                },
+                "vec": {
+                    "create_index": "vec_idx", "table": "posts",
+                    "fields": [["emb"]], "index_type": "vector",
+                    "vector_dim": 3, "vector_metric": "cosine",
+                },
+            }
+        }),
+    )
+    .await;
 
     // Verify: all 3 should appear.
-    let resp = exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "q1": {
-                "from": "posts",
-                "where": {"op": "fts", "field": ["body"], "query": "test", "mode": "and"}
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "q1": {
+                    "from": "posts",
+                    "where": {"op": "fts", "field": ["body"], "query": "test", "mode": "and"}
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
     // Even with no data, the planner should find the FTS index and return empty results
     // via the index path (not fall through to full-scan).
     // Empty results via index → stats.index_used should be set OR empty results.
@@ -302,38 +358,54 @@ async fn create_index_persists_metadata() {
 async fn fts_stemmed_en_query() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "mk": {
-                "create_index": "body_fts",
-                "table": "posts",
-                "fields": [["body"]],
-                "index_type": "fts",
-                "fts_tokenizer": "stemmed_en",
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "body_fts",
+                    "table": "posts",
+                    "fields": [["body"]],
+                    "index_type": "fts",
+                    "fts_tokenizer": "stemmed_en",
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
 
-    exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"body": "running fast"}]},
-        }
-    })).await;
+    exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [{"body": "running fast"}]},
+            }
+        }),
+    )
+    .await;
 
     // "run" should match "running" through stemming.
-    let resp = exec(&shamir, json!({
-        "id": 3,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {"op": "fts", "field": ["body"], "query": "run", "mode": "and"}
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {"op": "fts", "field": ["body"], "query": "run", "mode": "and"}
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
-    assert_eq!(records.len(), 1, "stemmed query 'run' should match 'running'");
+    assert_eq!(
+        records.len(),
+        1,
+        "stemmed query 'run' should match 'running'"
+    );
     assert_eq!(records[0]["body"], "running fast");
 }
 
@@ -345,38 +417,54 @@ async fn fts_stemmed_en_query() {
 async fn fts_stopwords_filtered() {
     let shamir = setup().await;
 
-    exec(&shamir, json!({
-        "id": 1,
-        "queries": {
-            "mk": {
-                "create_index": "body_fts",
-                "table": "posts",
-                "fields": [["body"]],
-                "index_type": "fts",
-                "fts_tokenizer": "stemmed_en",
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "body_fts",
+                    "table": "posts",
+                    "fields": [["body"]],
+                    "index_type": "fts",
+                    "fts_tokenizer": "stemmed_en",
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
 
-    exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"body": "the cat sat"}]},
-        }
-    })).await;
+    exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [{"body": "the cat sat"}]},
+            }
+        }),
+    )
+    .await;
 
     // Query "the cat" — "the" is a stopword and gets filtered both at
     // index time and query time, so the lookup matches by "cat" only.
-    let resp = exec(&shamir, json!({
-        "id": 3,
-        "queries": {
-            "q": {
-                "from": "posts",
-                "where": {"op": "fts", "field": ["body"], "query": "the cat", "mode": "and"}
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {"op": "fts", "field": ["body"], "query": "the cat", "mode": "and"}
+                }
             }
-        }
-    })).await;
+        }),
+    )
+    .await;
     let records = &resp.results["q"].records;
-    assert_eq!(records.len(), 1, "stopword 'the' should be filtered, match on 'cat'");
+    assert_eq!(
+        records.len(),
+        1,
+        "stopword 'the' should be filtered, match on 'cat'"
+    );
     assert_eq!(records[0]["body"], "the cat sat");
 }
