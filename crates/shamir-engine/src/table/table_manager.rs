@@ -976,8 +976,24 @@ impl TableManager {
 
         let (kind, backend): (IndexKind, Arc<dyn IndexBackend>) = match index_type {
             "fts" => {
+                // DSL names for fts_tokenizer:
+                //   "whitespace"      → plain whitespace split
+                //   "unicode"         → unicode-aware split
+                //   "stemmed_en"      → Full { English, stopwords=true, stem=true }
+                //   "stemmed_ru"      → Full { Russian, stopwords=true, stem=true }
+                //   "stemmed_english" / "stemmed_russian" — aliases
                 let tok = match op.fts_tokenizer.as_deref() {
                     Some("unicode") => TokenizerKind::Unicode,
+                    Some("stemmed_en" | "stemmed_english") => TokenizerKind::Full {
+                        language: StemLanguage::English,
+                        stopwords: true,
+                        stem: true,
+                    },
+                    Some("stemmed_ru" | "stemmed_russian") => TokenizerKind::Full {
+                        language: StemLanguage::Russian,
+                        stopwords: true,
+                        stem: true,
+                    },
                     _ => TokenizerKind::Whitespace,
                 };
                 let kind = IndexKind::Fts {
