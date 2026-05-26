@@ -6,149 +6,165 @@
 
 **S.H.A.M.I.R. Database**
 
-**S** - Secure (Безопасная - Rust)  
-**H** - High-performance (Высокопроизводительная)  
-**A** - Asynchronous (Асинхронная)  
-**M** - Modular (Модульная - WASM)  
-**I** - Interconnected (Взаимосвязанное - Chat/P2P)  
-**R** - Repository (Хранилище)  
+**S** — Secure (Rust)
+**H** — High-performance
+**A** — Asynchronous
+**M** — Modular (WASM)
+**I** — Interconnected (Chat / P2P)
+**R** — Repository
 
 ---
 
-## 🧠 CONTEXT FOR AGENTS (КОНТЕКСТ ДЛЯ АГЕНТОВ)
+## 🧠 Context
 
-Ты — инженер-разработчик, работающий над проектом **S.H.A.M.I.R.**
-Это production-level, однофайловая (standalone binary), децентрализованная база данных на Rust.
+You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, decentralized database written in Rust. It ships as a single binary (< 50 MB) with no external runtime dependencies.
 
-### 🎯 Глобальные цели
-1.  **Self-contained:** Один бинарный файл (<50MB). Никаких внешних зависимостей.
-2.  **Hybrid Storage:** Данные — это MessagePack, но ключи полей (Schema) интернируются в числа (`u64`) для скорости и сжатия.
-3.  **WASM-First:** Логика БД — это WASM модули.
-4.  **Reliability:** Checksums, Crash safety (storage backends handle durability).
+### 🎯 Global goals
+1. **Self-contained.** One binary, no external services required.
+2. **Hybrid storage.** Records are MessagePack; field names are interned to `u64` ids for speed and compression.
+3. **WASM-first.** User logic runs as WASM modules.
+4. **Reliability.** Checksums everywhere; storage backends own durability; WAL handles crash recovery.
 
-### 🧹 Code Quality (ОБЯЗАТЕЛЬНО)
+### 📦 Workspace
 
-**Pre-commit gate.** Перед коммитом КАЖДОЙ задачи (feature, fix, test,
-refactor) обязательно прогнать **все три** проверки. Коммит не делается,
-пока любая из них падает:
+`Cargo.toml` declares `members = ["crates/*"]` and excludes `shamir-client-node`
+(napi-rs binding, MSVC-only on Windows — built separately). The default
+workspace ships **10 crates**:
+
+`shamir-types`, `shamir-storage`, `shamir-query-types`, `shamir-engine`,
+`shamir-db`, `shamir-connect`, `shamir-server`, `shamir-transport-tcp`,
+`shamir-transport-ws`, `shamir-client`.
+
+Prefer `--workspace` flags over per-crate invocations.
+
+---
+
+## 🧹 Code quality (MANDATORY)
+
+**Pre-commit gate.** Before committing each task (feature, fix, test,
+refactor) all three checks below must pass. If any fails — do not commit.
 
 ```
-cargo fmt --all -- --check          # formatting drift
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test  --workspace --lib       # или scripts/test-all
+cargo fmt --all -- --check                            # formatting drift
+cargo clippy --workspace --all-targets -- -D warnings # lint regressions
+cargo test  --workspace --lib                         # behavioural tests
 ```
 
-Если `fmt --check` падает — это значит, что в твоих изменениях есть
-неформатированный код. **Не запускай `cargo fmt --all`** — он
-переформатирует весь репозиторий. Прогоняй `cargo fmt -p <crate>` только
-по тем крейтам, которые ты трогал, либо вручную пофикси затронутые
-файлы.
+If `fmt --check` fails, do **not** run `cargo fmt --all` — that
+reformats the entire repo and pollutes a feature diff. Run
+`cargo fmt -p <crate>` on the crates you touched, or fix the few files
+by hand. Keep the diff scoped to the task.
 
-Если `clippy` падает с warnings от **существующего** (не твоего) кода —
-не лечи их в feature-коммите. Открой отдельную задачу и/или сделай
-отдельный `chore(clippy):` коммит.
+If `clippy` fails on **pre-existing** lints in untouched code, do not
+fix them inside the feature commit. Open a dedicated task and land a
+separate `chore(clippy): ...` commit.
 
-**Чистые style-only коммиты.** `cargo fmt --all` или массовый clippy
-auto-fix по всему репо делается **отдельным коммитом** с префиксом
-`style:` или `chore:`. SHA такого коммита добавляется в
-`.git-blame-ignore-revs`, чтобы `git blame` пропускал его и сохранял
-авторство строк. Никогда не смешивай fmt-sweep с содержательными
-изменениями — это раздувает diff и ломает review.
+**Style-only sweeps live in their own commits.** A repo-wide
+`cargo fmt --all` or bulk clippy auto-fix is committed alone with a
+`style:` or `chore:` prefix, and its SHA is appended to
+`.git-blame-ignore-revs` so `git blame` skips it and authorship for
+each line is preserved. Never mix a sweep with substantive changes.
 
-Проект — Cargo workspace из 9 крейтов: `shamir-types`, `shamir-storage`,
-`shamir-query-types`, `shamir-engine`, `shamir-db`, `shamir-connect`,
-`shamir-server`, `shamir-transport-tcp`, `shamir-transport-ws`. Используй
-`--workspace` флаги вместо одиночных `cargo test --lib`.
+To make local `git blame` honour the ignore file, each contributor runs
+once:
 
----
+```
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
 
-## 🛡️ PROTOCOL OF DEVELOPMENT (TDD)
-
-1.  **🔴 RED:** Напиши тест (`tokio::test`), который падает или не компилируется.
-2.  **🟢 GREEN:** Напиши минимальный код для прохождения теста.
-3.  **🔵 REFACTOR:** Улучши код, сохраняя "зеленый" статус.
-
-## 🛡️ Правила
-**Важно:** Используй `arc_swap`, `dashmap`, `tokio::task::spawn_blocking` для конкурентности. Избегай `Mutex` где возможно.
-**Важно:** не меняй код, который не относится к задаче.
-**Важно:** не меняй комментарии, которые не относятся к задаче.
-**Важно:** делай только точечные изменения.
-**Важно:** в тестах JSON всегда должен быть форматированным, многотрочным.
-**Важно:** mod.rs хранятся только экспорты - не пиши там ничего, кроме экспортов. типы складывай в соседнем файле.
+GitHub's web blame reads the file automatically.
 
 ---
 
-## 📁 Организация тестов (TEST ORGANIZATION)
+## 🔒 Concurrency invariants
 
-### Правила для модулей с тестами:
-1. **Структура директорий:** Каждый модуль (тип, компонент) имеет отдельную папку `tests/`
-   - Пример: `crates/shamir-types/src/types/tests/`, `crates/shamir-types/src/core/interner/tests/`, `crates/shamir-engine/src/table/tests/`
+Engine code paths must stay lock-free where the runtime is involved:
 
-2. **Разделение тестов по типам:**
-   - Создавай отдельные файлы для логически связанных тестов
-   - Примеры: `value_tests.rs`, `record_id_tests.rs`, `config_tests.rs`
+* `scc::HashMap` for shared registries (CAS-based, no `RwLock` poisoning).
+* `arc_swap::ArcSwap` for RCU-style snapshot reads.
+* `AtomicU*` / `AtomicBool` for counters and flags.
+* `tokio::task::spawn_blocking` for CPU-bound work (HNSW, hashing).
 
-3. **mod.rs в папке tests:**
-   - Содержит только экспорты модулей тестов: `mod value_tests;`
-   - Не содержит сам тестовый код
+Avoid `std::sync::Mutex`, `std::sync::RwLock`, and `parking_lot::*` in
+hot paths. `tokio::sync::Mutex` is permitted only when the guard must
+live across an `.await` and the contention is bounded (e.g. write
+serialisation for unique-index validation).
 
-4. **Подключение тестов в родительском модуле:**
-   - В файле модуля (например, `crates/shamir-types/src/types/mod.rs`) добавь:
+---
+
+## 🛡️ Protocol of development (TDD)
+
+1. **🔴 Red** — write a failing `#[tokio::test]` that compiles to the
+   bug.
+2. **🟢 Green** — minimum code to make it pass.
+3. **🔵 Refactor** — keep the suite green while you tidy.
+
+---
+
+## ✋ Discipline rules
+
+* Do **not** modify code unrelated to the task.
+* Do **not** touch comments unrelated to the task.
+* Make **surgical** changes — no incidental refactors riding along.
+* In tests, JSON literals are always multi-line and indented for
+  readability.
+* `mod.rs` files contain re-exports only. Types and logic live in
+  sibling files.
+* No new files unless the task genuinely needs them. Prefer extending
+  an existing module.
+
+---
+
+## 📁 Test organisation
+
+Modules with tests follow a strict layout:
+
+1. **One `tests/` directory per module.** Examples:
+   `crates/shamir-types/src/types/tests/`,
+   `crates/shamir-engine/src/table/tests/`.
+
+2. **Split tests by topic.** One file per logically related group:
+   `value_tests.rs`, `record_id_tests.rs`, `config_tests.rs`.
+
+3. **`tests/mod.rs` is a manifest only** — re-exports, no test code:
+   ```rust
+   pub mod value_tests;
+   pub mod record_id_tests;
+   ```
+
+4. **Wire tests in via the parent `mod.rs`:**
    ```rust
    #[cfg(test)]
    mod tests;
    ```
 
-5. **НЕ храни тесты в файлах реализации:**
-   - Не используй `#[cfg(test)] mod tests { ... }` внутри `.rs` файлов с кодом
-   - Переноси тесты в соответствующие файлы в `tests/` папке
+5. **Never embed `#[cfg(test)] mod tests { ... }` inline** inside
+   implementation files. Move them to the `tests/` directory.
 
-6. **Очистка после рефакторинга:**
-   - Удаляй отладочные файлы из корня проекта после завершения работы
-   - Примеры: `test_interned_size.rs`, `.exe` файлы тестов
+6. **Clean up after refactors.** Remove stray debug files
+   (`test_*.rs`, `.exe`, temporary fixtures) from the repo root.
 
-### Пример структуры:
+Example layout:
+
 ```
 crates/shamir-types/src/types/
-├── mod.rs            # содержит #[cfg(test)] mod tests;
-├── value.rs         # только реализация типов
-├── record_id.rs     # только реализация типов
+├── mod.rs            # contains #[cfg(test)] mod tests;
+├── value.rs          # implementation only
+├── record_id.rs      # implementation only
 └── tests/
-    ├── mod.rs       # только экспорты: mod value_tests; mod record_id_tests;
+    ├── mod.rs        # exports only: pub mod value_tests; pub mod record_id_tests;
     ├── value_tests.rs
     └── record_id_tests.rs
 ```
 
-
-# Обработка ошибок в Rust
-- Используй `Result<T, E>` вместо исключений
-- Оператор `?` извлекает `Ok` или пробрасывает `Err` вверх
-- `Box<dyn Error>` для разных типов ошибок
-- `thiserror` для своих enum-ов ошибок с `#[from]`
-- `anyhow` для приложений, `thiserror` для библиотек
-- Избегай `panic!`
-
 ---
 
-## 📍 PHASE 1: THE FOUNDATION (ТИПЫ И ИНТЕРНИРОВАНИЕ)
+## ⚠️ Error handling
 
-Мы создаем "язык" общения и механизм сжатия ключей.
-
-### 📋 Task List
-
-#### Task 1.1: Project Setup
-*   Создать `Cargo.toml` (workspace).
-*   Dependencies: `tokio`, `serde`, `rmp-serde`, `dashmap`, `crc32fast`, `thiserror`, `anyhow`.
-
-#### Task 1.2: Command Protocol (TDD)
-*   Создать `enum Command` (Put, Get, Del, Execute).
-*   Создать `struct Request` и `Response`.
-*   **Constraint:** Все структуры должны сериализоваться через `rmp-serde` (MessagePack).
-*   **TEST:** Round-trip сериализация (Struct -> Bytes -> Struct).
-
-#### Task 1.3: The Interner (Memory)
-*   **Goal:** Двунаправленный маппинг `String <-> u64`.
-*   **Constraint:** Использовать `u64` для ID, но помнить, что на диске они будут сжаты.
-*   **Components:** `DashMap<String, u64>` и `DashMap<u64, String>`.
-*   **TEST:** Конкурентный доступ (много потоков читают/пишут одни и те же строки).
-
+* Return `Result<T, E>`. Avoid `panic!` outside `unreachable!()` /
+  invariant violations that mean a programmer bug.
+* Use `?` to propagate.
+* `thiserror` for library error enums (with `#[from]` where natural).
+* `anyhow` is fine in binaries and tests; do not leak it into library
+  APIs.
+* `Box<dyn Error>` is a last resort for boundary code.
