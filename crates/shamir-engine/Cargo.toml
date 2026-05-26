@@ -113,3 +113,7 @@ harness = false
 [[bench]]
 name = "vector_search"
 harness = false
+
+[[bench]]
+name = "order_by_pipeline"
+harness = false
