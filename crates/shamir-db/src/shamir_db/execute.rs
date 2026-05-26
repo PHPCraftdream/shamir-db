@@ -698,11 +698,17 @@ impl AdminExecutor for ShamirAdminExecutor {
                     let dst_table = db.get_table(dst_repo_name, table_name).await?;
                     let dst_data = Arc::clone(dst_table.table().data_store());
 
-                    // Replicate index2 descriptors (FTS / Functional /
-                    // Vector) from src → dst. This creates empty backends
-                    // on dst so that bulk_populate_index2 (called later
-                    // in CommitMigration) can fill them. Must happen
-                    // before any data lands on dst.
+                    // Step 1: replicate src's interner state into dst's
+                    // info_store so the data_store bytes copied below
+                    // decode with the same field-name → id mappings.
+                    // Must precede any `.interner().get()` on dst.
+                    dst_table.replicate_interner_from(&src_table).await?;
+
+                    // Step 2: replicate index2 descriptors (FTS / Functional
+                    // / Vector) from src → dst. Creates empty backends on
+                    // dst so that bulk_populate_index2 (called later in
+                    // CommitMigration) can fill them. Must happen before
+                    // any data lands on dst.
                     dst_table
                         .replicate_index2_descriptors_from(&src_table)
                         .await?;

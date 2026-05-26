@@ -1,19 +1,17 @@
 //! Integration test: index2 migration cutover at the TableManager level.
 //!
-//! Verifies `replicate_index2_descriptors_from` + `bulk_populate_index2`.
-//! Simulates a migration manually:
+//! Verifies the full migration helper chain:
 //!   1. open src TableManager, create index2 indexes, insert records
-//!   2. open dst TableManager on separate stores; intern the same field
-//!      names in the same order so InternerKey ids align (the real
-//!      MigrationCoordinator does NOT replicate interner state — that's
-//!      task #102; for this test we control the interner manually so we
-//!      can exercise the index2 cutover logic in isolation)
-//!   3. copy src data_store bytes verbatim into dst data_store
-//!   4. `dst.replicate_index2_descriptors_from(&src)` — creates empty
+//!   2. open dst TableManager on separate stores
+//!   3. `dst.replicate_interner_from(&src)` — copies src's persisted
+//!      interner state so dst decodes the upcoming data_store bytes
+//!      with matching field-name → id mappings
+//!   4. copy src data_store bytes verbatim into dst data_store
+//!   5. `dst.replicate_index2_descriptors_from(&src)` — creates empty
 //!      backends on dst with paths re-interned through dst's interner
-//!   5. `dst.bulk_populate_index2()` — streams dst data_store records
+//!   6. `dst.bulk_populate_index2()` — streams dst data_store records
 //!      and creates postings + in-memory state on dst's backends
-//!   6. query dst's backends directly — assert results match src
+//!   7. query dst's backends directly — assert results match src
 
 use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
 use crate::index2::functional_backend::FunctionalBackend;
@@ -39,18 +37,6 @@ async fn copy_data_store(src: &Arc<dyn Store>, dst: &Arc<dyn Store>) {
     }
 }
 
-/// Intern the same list of names in both interners in the same order so
-/// `InternerKey` ids align. The real migration code (#102) needs to do
-/// this via info_store replication; here we pre-warm both interners.
-async fn warm_interners(tms: &[&TableManager], names: &[&str]) {
-    for n in names {
-        for tm in tms {
-            let i = tm.interner().get().await.unwrap();
-            let _ = i.touch_ind(n).unwrap();
-        }
-    }
-}
-
 #[tokio::test]
 async fn migrate_index2_fts() {
     let src_data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -64,8 +50,6 @@ async fn migrate_index2_fts() {
     let dst = TableManager::create("docs".into(), Arc::clone(&dst_data), Arc::clone(&dst_info))
         .await
         .unwrap();
-
-    warm_interners(&[&src, &dst], &["body"]).await;
 
     let op = CreateIndexOp {
         create_index: "body_fts".into(),
@@ -105,6 +89,7 @@ async fn migrate_index2_fts() {
     }
 
     // --- simulate migration: copy data_store + replicate + populate ---
+    dst.replicate_interner_from(&src).await.unwrap();
     copy_data_store(&src_data, &dst_data).await;
     dst.replicate_index2_descriptors_from(&src).await.unwrap();
     dst.bulk_populate_index2().await.unwrap();
@@ -145,8 +130,6 @@ async fn migrate_index2_functional() {
         .await
         .unwrap();
 
-    warm_interners(&[&src, &dst], &["email", "name"]).await;
-
     let op = CreateIndexOp {
         create_index: "email_lower".into(),
         table: "docs".into(),
@@ -185,6 +168,7 @@ async fn migrate_index2_functional() {
         src.insert(&InnerValue::Map(m)).await.unwrap();
     }
 
+    dst.replicate_interner_from(&src).await.unwrap();
     copy_data_store(&src_data, &dst_data).await;
     dst.replicate_index2_descriptors_from(&src).await.unwrap();
     dst.bulk_populate_index2().await.unwrap();
@@ -222,8 +206,6 @@ async fn migrate_index2_vector() {
     let dst = TableManager::create("docs".into(), Arc::clone(&dst_data), Arc::clone(&dst_info))
         .await
         .unwrap();
-
-    warm_interners(&[&src, &dst], &["embedding", "label"]).await;
 
     let op = CreateIndexOp {
         create_index: "vec_idx".into(),
@@ -267,6 +249,7 @@ async fn migrate_index2_vector() {
         src.insert(&InnerValue::Map(m)).await.unwrap();
     }
 
+    dst.replicate_interner_from(&src).await.unwrap();
     copy_data_store(&src_data, &dst_data).await;
     dst.replicate_index2_descriptors_from(&src).await.unwrap();
     dst.bulk_populate_index2().await.unwrap();
