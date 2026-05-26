@@ -759,6 +759,37 @@ impl TableManager {
     // Migration support — index2 cutover
     // ============================================================================
 
+    /// Replicate src's interner state into this TableManager's info_store.
+    ///
+    /// Migration copies raw `data_store` bytes, which embed `InternerKey(u64)`
+    /// references for field names. For those bytes to decode correctly on
+    /// dst, dst's interner must hold the **same** `id → name` mappings as
+    /// src. The interner persists itself under a fixed system key, so we
+    /// just copy that one record byte-for-byte and let the dst interner
+    /// pick it up via its normal lazy-load path.
+    ///
+    /// Must be called BEFORE any `.interner().get()` on `self` (so the
+    /// lazy load sees the freshly-copied bytes) and BEFORE
+    /// `replicate_index2_descriptors_from` (which re-interns names on dst).
+    /// Persists src first so the bytes are current.
+    pub async fn replicate_interner_from(&self, src: &TableManager) -> DbResult<()> {
+        src.interner().persist().await?;
+        let key = shamir_types::types::record_id::RecordId::system("internals").to_bytes();
+        match src.info_store.get(key.clone()).await {
+            Ok(bytes) => {
+                self.info_store.set(key, bytes).await?;
+                Ok(())
+            }
+            Err(shamir_storage::error::DbError::NotFound(_)) => {
+                // src has never persisted an interner — empty source, nothing
+                // to replicate. The dst interner's lazy load will start
+                // fresh, which is correct.
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Replicate src's index2 descriptors onto this TableManager.
     ///
     /// For each non-Btree descriptor on `src`:
