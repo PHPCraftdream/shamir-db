@@ -120,3 +120,7 @@ harness = false
 [[bench]]
 name = "order_by_pipeline"
 harness = false
+
+[[bench]]
+name = "select_projection"
+harness = false

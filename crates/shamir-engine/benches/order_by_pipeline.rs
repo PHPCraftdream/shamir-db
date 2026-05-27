@@ -53,7 +53,7 @@ fn touch(interner: &Interner, s: &str) -> InternerKey {
     }
 }
 
-/// Build one record: `{ id, name, email, score, created_at }`.
+/// Build one record: `{ id, name, email, score, active, created_at }`.
 fn make_record(interner: &Interner, idx: u32) -> InnerValue {
     let mut m = new_map_wc(8);
     m.insert(touch(interner, "id"), InnerValue::Int(idx as i64));
@@ -70,6 +70,10 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
         InnerValue::F64((idx as f64) * 1.7),
     );
     m.insert(
+        touch(interner, "active"),
+        InnerValue::Bool(idx.is_multiple_of(2)),
+    );
+    m.insert(
         touch(interner, "created_at"),
         InnerValue::Int(1_700_000_000 + idx as i64),
     );
@@ -79,7 +83,7 @@ fn make_record(interner: &Interner, idx: u32) -> InnerValue {
 fn bench(c: &mut Criterion) {
     // ── Setup ─────────────────────────────────────────────────────
     let interner = Interner::new();
-    for k in ["id", "name", "email", "score", "created_at"] {
+    for k in ["id", "name", "email", "score", "active", "created_at"] {
         let _ = interner.touch_ind(k);
     }
 
@@ -175,6 +179,111 @@ fn bench(c: &mut Criterion) {
         )
     });
     g3.finish();
+
+    // ══════════════════════════════════════════════════════════════
+    // Single-column type-specialised scenarios (for #109)
+    // ══════════════════════════════════════════════════════════════
+    //
+    // Each scenario sorts by exactly one column, so the planned
+    // typed-columnar fast path (Vec<i64>/Vec<f64>/Vec<&str>/Vec<bool>)
+    // applies. Use these to verify the columnar refinement actually
+    // hits the prof_order_by ~5-10ms floor without regressing on the
+    // mixed/multi-column paths.
+
+    let order_by_id = OrderBy {
+        items: vec![OrderByItem {
+            field: vec!["id".to_string()],
+            direction: OrderDirection::Asc,
+            nulls: None,
+        }],
+    };
+    let order_by_active = OrderBy {
+        items: vec![OrderByItem {
+            field: vec!["active".to_string()],
+            direction: OrderDirection::Asc,
+            nulls: None,
+        }],
+    };
+    let order_by_multi = OrderBy {
+        items: vec![
+            OrderByItem {
+                field: vec!["active".to_string()],
+                direction: OrderDirection::Asc,
+                nulls: None,
+            },
+            OrderByItem {
+                field: vec!["email".to_string()],
+                direction: OrderDirection::Asc,
+                nulls: None,
+            },
+        ],
+    };
+
+    let mut g4 = c.benchmark_group("order_by_single_column_typed");
+    g4.throughput(Throughput::Elements(n_records));
+    g4.sample_size(10);
+    g4.bench_function("id_i64_asc_full", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_id);
+                black_box(recs);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g4.bench_function("score_f64_asc_full", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_score);
+                black_box(recs);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g4.bench_function("email_str_asc_full", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_email);
+                black_box(recs);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g4.bench_function("active_bool_asc_full", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_active);
+                black_box(recs);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g4.finish();
+
+    // ── Multi-column / fallback path (must not regress) ───────────
+    //
+    // Two-column ORDER BY (active, email) — the typed-columnar fast
+    // path does NOT kick in here; the existing enum-based SortKey
+    // path runs. Bench guards against regressions when refining the
+    // single-column path.
+    let mut g5 = c.benchmark_group("order_by_multi_column");
+    g5.throughput(Throughput::Elements(n_records));
+    g5.sample_size(10);
+    g5.bench_function("active_then_email_asc_full", |b| {
+        b.iter_batched(
+            || projected.clone(),
+            |mut recs| {
+                apply_order_by(&mut recs, &order_by_multi);
+                black_box(recs);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g5.finish();
 }
 
 criterion_group!(benches, bench);
