@@ -1,0 +1,18 @@
+[package]
+name = "shamir-tx"
+version = "0.1.0"
+edition = "2021"
+description = "Transactional (MVCC) layer for ShamirDB — TxContext, MvccStore, RepoTxGate. Foundation phase."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bytes = "1.11.0"
+serde = { version = "1.0.217", features = ["derive"] }
+shamir-types = { path = "../shamir-types" }
+shamir-storage = { path = "../shamir-storage", default-features = false }
+shamir-wal = { path = "../shamir-wal" }
+thiserror = "2.0"
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1.49.0", features = ["full", "test-util"] }
