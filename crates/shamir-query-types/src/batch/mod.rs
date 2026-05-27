@@ -19,6 +19,6 @@ pub mod types;
 pub use planner::BatchPlanner;
 pub use reference::{QueryPath, QueryReference, ReferenceParseError};
 pub use types::{
-    BatchError, BatchLimits, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
-    TransactionInfo,
+    distinct_repos, BatchError, BatchLimits, BatchOp, BatchPlan, BatchRequest, BatchResponse,
+    QueryEntry, TransactionInfo,
 };
