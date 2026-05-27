@@ -19,8 +19,10 @@
 //! - Stage 3: `MvccStore`
 //! - Stage 6: `GcWorker`, `TxReaper`
 
+pub mod staging_store;
 pub mod types;
 pub mod version_codec;
 
+pub use staging_store::StagingStore;
 pub use types::{IsolationLevel, TxConflict, TxError, TxId};
 pub use version_codec::{decode_version_key, encode_version_key};
