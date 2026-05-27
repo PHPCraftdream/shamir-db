@@ -31,6 +31,21 @@ pub enum MetaKey {
     /// Legacy IndexManager unique-index registry.
     /// Inline as system("indexes_unique").
     LegacyIndexesUnique,
+
+    /// Last committed MVCC version (`u64 BE` body).
+    ///
+    /// Durable recovery marker. Read on repo open to seed
+    /// `RepoTxGate::last_committed_version`. Written on every tx
+    /// commit during phase 6 (publish). Without this marker, recovery
+    /// can't tell which versions in `MvccStore::history` are visible.
+    LastCommittedVersion,
+
+    /// Periodic snapshot of next tx id (`u64 BE` body).
+    ///
+    /// Written every N commits (config, default 100). On recovery, the
+    /// engine seeds the counter from `max(this, max(WAL active txn_id))`
+    /// so issued tx ids never collide with already-committed ones.
+    NextTxId,
 }
 
 impl MetaKey {
@@ -48,6 +63,8 @@ impl MetaKey {
             MetaKey::SortedIndexes => "sorted_indexes",
             MetaKey::LegacyIndexes => "indexes",
             MetaKey::LegacyIndexesUnique => "indexes_unique",
+            MetaKey::LastCommittedVersion => "_t.lcv",
+            MetaKey::NextTxId => "_t.nti",
         }
     }
 
@@ -60,46 +77,37 @@ impl MetaKey {
 mod tests {
     use super::*;
 
+    const ALL: &[MetaKey] = &[
+        MetaKey::Indexes,
+        MetaKey::Tables,
+        MetaKey::Wal,
+        MetaKey::Migrations,
+        MetaKey::Internals,
+        MetaKey::Count,
+        MetaKey::BufferConfig,
+        MetaKey::SortedIndexes,
+        MetaKey::LegacyIndexes,
+        MetaKey::LegacyIndexesUnique,
+        MetaKey::LastCommittedVersion,
+        MetaKey::NextTxId,
+    ];
+
     #[test]
     fn record_ids_are_distinct() {
-        let all = [
-            MetaKey::Indexes,
-            MetaKey::Tables,
-            MetaKey::Wal,
-            MetaKey::Migrations,
-            MetaKey::Internals,
-            MetaKey::Count,
-            MetaKey::BufferConfig,
-            MetaKey::SortedIndexes,
-            MetaKey::LegacyIndexes,
-            MetaKey::LegacyIndexesUnique,
-        ];
-        let mut rids: Vec<_> = all.iter().map(|k| k.as_record_id()).collect();
-        let original = rids.clone();
+        let mut rids: Vec<_> = ALL.iter().map(|k| k.as_record_id()).collect();
+        let original_len = rids.len();
         rids.sort();
         rids.dedup();
         assert_eq!(
             rids.len(),
-            original.len(),
+            original_len,
             "all MetaKey variants must produce distinct RecordIds (no truncation collision)"
         );
     }
 
     #[test]
     fn record_id_is_system() {
-        let all = [
-            MetaKey::Indexes,
-            MetaKey::Tables,
-            MetaKey::Wal,
-            MetaKey::Migrations,
-            MetaKey::Internals,
-            MetaKey::Count,
-            MetaKey::BufferConfig,
-            MetaKey::SortedIndexes,
-            MetaKey::LegacyIndexes,
-            MetaKey::LegacyIndexesUnique,
-        ];
-        for k in all {
+        for k in ALL {
             assert!(
                 k.as_record_id().is_system(),
                 "{:?} must be a system record",
