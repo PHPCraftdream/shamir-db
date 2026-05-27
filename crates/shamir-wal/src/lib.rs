@@ -56,10 +56,12 @@
 
 pub mod active_key;
 pub mod wal_entry;
+pub mod wal_entry_any;
 pub mod wal_entry_v2;
 pub mod wal_manager;
 
 pub use active_key::WalActiveKey;
 pub use wal_entry::{WalEntry, WalOp};
+pub use wal_entry_any::WalEntryAny;
 pub use wal_entry_v2::{WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION};
 pub use wal_manager::WalManager;
