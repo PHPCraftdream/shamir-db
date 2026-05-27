@@ -30,6 +30,7 @@
 //! RepoWalManager). Upcoming stages (see `docs/pre-transactional/`):
 //! - Stage 6: `GcWorker`, `TxReaper`
 
+pub mod id_remap;
 pub mod index_write_op;
 pub mod layered_interner;
 pub mod mvcc_store;
@@ -40,6 +41,7 @@ pub mod tx_context;
 pub mod types;
 pub mod version_codec;
 
+pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
 pub use mvcc_store::MvccStore;

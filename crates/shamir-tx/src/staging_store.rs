@@ -91,6 +91,39 @@ impl StagingStore {
     pub fn is_empty(&self) -> bool {
         self.writes.is_empty()
     }
+
+    /// Rewrite all staged `Set` values via a byte transform.
+    ///
+    /// Used by `TxContext::apply_id_remap` during commit phase 1 to
+    /// replace overlay interner ids with stable base ids in staged
+    /// record bytes before they reach `transact()`.
+    pub async fn rewrite_set_bytes<F>(&self, mut f: F) -> Result<(), String>
+    where
+        F: FnMut(&Bytes) -> Result<Bytes, String>,
+    {
+        let keys: Vec<RecordKey> = {
+            let mut out = Vec::new();
+            self.writes.scan_async(|k, _v| out.push(k.clone())).await;
+            out
+        };
+        for k in keys {
+            let mut err: Option<String> = None;
+            self.writes
+                .update_async(&k, |_kk, op| {
+                    if let StagedOp::Set(bytes) = op {
+                        match f(bytes) {
+                            Ok(new_bytes) => *bytes = new_bytes,
+                            Err(e) => err = Some(e),
+                        }
+                    }
+                })
+                .await;
+            if let Some(e) = err {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
