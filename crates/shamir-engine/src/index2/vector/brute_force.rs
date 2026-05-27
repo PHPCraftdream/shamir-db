@@ -11,6 +11,7 @@ use crate::index2::actor::IndexActor;
 use crate::index2::kind::VectorMetric;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use shamir_tx::TxId;
 use shamir_types::types::record_id::RecordId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,7 +80,12 @@ impl BruteForceAdapter {
 
 #[async_trait]
 impl VectorAdapter for BruteForceAdapter {
-    async fn upsert(&self, rid: RecordId, vec: &[f32]) -> Result<(), VectorError> {
+    async fn upsert(
+        &self,
+        rid: RecordId,
+        vec: &[f32],
+        _tx: Option<TxId>,
+    ) -> Result<(), VectorError> {
         if vec.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
@@ -94,7 +100,7 @@ impl VectorAdapter for BruteForceAdapter {
         Ok(())
     }
 
-    async fn delete(&self, rid: RecordId) -> Result<(), VectorError> {
+    async fn delete(&self, rid: RecordId, _tx: Option<TxId>) -> Result<(), VectorError> {
         self.actor
             .submit(WriteOp::Delete(rid))
             .map_err(|_| VectorError::Internal("actor stopped".into()))?;
@@ -102,7 +108,12 @@ impl VectorAdapter for BruteForceAdapter {
         Ok(())
     }
 
-    async fn search(&self, query: &[f32], k: u32) -> Result<Vec<(RecordId, f32)>, VectorError> {
+    async fn search(
+        &self,
+        query: &[f32],
+        k: u32,
+        _tx: Option<TxId>,
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
@@ -141,14 +152,23 @@ mod tests {
     #[tokio::test]
     async fn cosine_basic() {
         let adapter = BruteForceAdapter::new(3, VectorMetric::Cosine);
-        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(3), &[1.0, 1.0, 0.0]).await.unwrap();
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(2), &[0.0, 1.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(3), &[1.0, 1.0, 0.0], None)
+            .await
+            .unwrap();
 
         // Wait for actor to process writes.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let results = adapter.search(&[1.0, 0.0, 0.0], 2).await.unwrap();
+        let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, rid(1)); // exact match = distance 0
         assert!(results[0].1 < 0.01);
@@ -157,13 +177,13 @@ mod tests {
     #[tokio::test]
     async fn l2_basic() {
         let adapter = BruteForceAdapter::new(2, VectorMetric::L2);
-        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[3.0, 4.0]).await.unwrap();
-        adapter.upsert(rid(3), &[1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(2), &[3.0, 4.0], None).await.unwrap();
+        adapter.upsert(rid(3), &[1.0, 0.0], None).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let results = adapter.search(&[0.0, 0.0], 2).await.unwrap();
+        let results = adapter.search(&[0.0, 0.0], 2, None).await.unwrap();
         assert_eq!(results[0].0, rid(1)); // distance 0
         assert_eq!(results[1].0, rid(3)); // distance 1
     }
@@ -171,28 +191,28 @@ mod tests {
     #[tokio::test]
     async fn dot_product() {
         let adapter = BruteForceAdapter::new(2, VectorMetric::Dot);
-        adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[0.5, 0.5]).await.unwrap();
+        adapter.upsert(rid(1), &[1.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(2), &[0.5, 0.5], None).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // query = [1, 0], dot with rid(1)=1.0, dot with rid(2)=0.5
         // negated: rid(1)=-1.0 < rid(2)=-0.5 → rid(1) first
-        let results = adapter.search(&[1.0, 0.0], 2).await.unwrap();
+        let results = adapter.search(&[1.0, 0.0], 2, None).await.unwrap();
         assert_eq!(results[0].0, rid(1));
     }
 
     #[tokio::test]
     async fn delete_removes_from_search() {
         let adapter = BruteForceAdapter::new(2, VectorMetric::L2);
-        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0], None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        adapter.delete(rid(1)).await.unwrap();
+        adapter.delete(rid(1), None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let results = adapter.search(&[0.0, 0.0], 10).await.unwrap();
+        let results = adapter.search(&[0.0, 0.0], 10, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, rid(2));
     }
@@ -200,7 +220,7 @@ mod tests {
     #[tokio::test]
     async fn dim_mismatch_rejected() {
         let adapter = BruteForceAdapter::new(3, VectorMetric::L2);
-        let err = adapter.upsert(rid(1), &[1.0, 2.0]).await.unwrap_err();
+        let err = adapter.upsert(rid(1), &[1.0, 2.0], None).await.unwrap_err();
         assert!(matches!(
             err,
             VectorError::DimMismatch {
@@ -213,13 +233,13 @@ mod tests {
     #[tokio::test]
     async fn upsert_replaces() {
         let adapter = BruteForceAdapter::new(2, VectorMetric::L2);
-        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        adapter.upsert(rid(1), &[10.0, 10.0]).await.unwrap();
+        adapter.upsert(rid(1), &[10.0, 10.0], None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
         assert_eq!(adapter.len(), 1);
-        let results = adapter.search(&[10.0, 10.0], 1).await.unwrap();
+        let results = adapter.search(&[10.0, 10.0], 1, None).await.unwrap();
         assert_eq!(results[0].0, rid(1));
         assert!(results[0].1 < 0.01);
     }
