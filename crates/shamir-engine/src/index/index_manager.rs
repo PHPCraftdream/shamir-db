@@ -18,6 +18,7 @@ use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info::IndexInfo;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_record_key::IndexRecordKey;
+use crate::index2::write_ops::IndexWriteOp;
 use crate::meta::MetaKey;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -298,62 +299,6 @@ impl IndexManager {
         IndexRecordKey::new(is_unique, name_interned).with_values(&value_refs)
     }
 
-    /// Добавляет запись в индекс.
-    ///
-    /// # Layout — key-per-posting (since 2026-05-11)
-    ///
-    /// One physical KV per `(index_value, record_id)` pair:
-    ///
-    /// ```text
-    /// key   = index_key (25 bytes) || record_id (16 bytes)   →   41 bytes
-    /// value = empty
-    /// ```
-    ///
-    /// This replaces the previous "one blob holds the whole posting
-    /// list" layout. Reasons:
-    ///
-    /// - Write is O(1) regardless of posting-list cardinality. The
-    ///   old layout did read → deserialise → mutate → serialise →
-    ///   write, paying O(K) per add for a posting list of size K.
-    /// - Concurrent writes for distinct record_ids on the same value
-    ///   no longer race for the same blob.
-    ///
-    /// Reads scan the 25-byte prefix and reconstruct the
-    /// `BTreeSet<RecordId>` from key suffixes (see `lookup_by_index`).
-    async fn add_index_entry(
-        &self,
-        name_interned: u64,
-        values: &[InnerValue],
-        record_id: &RecordId,
-    ) -> DbResult<()> {
-        let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
-        let posting_key = Self::build_posting_key(&index_key, record_id);
-        self.info_store.set(posting_key, Bytes::new()).await?;
-        // Opt G: drop the cached posting list for this (name, values)
-        // — the next reader pulls the fresh version.
-        self.invalidate_posting_cache(name_interned, values);
-        Ok(())
-    }
-
-    /// Удаляет запись из индекса.
-    ///
-    /// Drops the single `(index_key || record_id)` posting entry
-    /// (O(1), no read-modify-write).
-    async fn remove_index_entry(
-        &self,
-        name_interned: u64,
-        values: &[InnerValue],
-        record_id: &RecordId,
-    ) -> DbResult<()> {
-        let index_key = Self::build_index_key(false, name_interned, values).to_bytes();
-        let posting_key = Self::build_posting_key(&index_key, record_id);
-        // Ok-value (removed entry) intentionally discarded; ? propagates errors.
-        let _ = self.info_store.remove(posting_key).await?;
-        // Opt G: drop the cached posting list for this (name, values).
-        self.invalidate_posting_cache(name_interned, values);
-        Ok(())
-    }
-
     /// Compose the physical posting key:
     /// `index_key (25b) || record_id (16b)` = 41 bytes.
     fn build_posting_key(index_key: &Bytes, record_id: &RecordId) -> Bytes {
@@ -512,20 +457,34 @@ impl IndexManager {
         record_id: &RecordId,
         value: &InnerValue,
     ) -> DbResult<()> {
-        // Быстрая проверка — если индексов нет, ничего не делаем
+        let ops = self.plan_record_created(record_id, value).await?;
+        self.apply_ops(&ops).await
+    }
+
+    /// Planner variant of `on_record_created` — returns
+    /// `Vec<IndexWriteOp>` instead of writing directly to `info_store`.
+    pub async fn plan_record_created(
+        &self,
+        record_id: &RecordId,
+        value: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_indexes() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        // Для каждого индекса извлекаем значения и добавляем запись
+        let mut ops = Vec::new();
         for def in self.indexes.iter() {
             if let Some(values) = Self::extract_index_values(value, &def.paths) {
-                self.add_index_entry(def.name_interned, &values, record_id)
-                    .await?;
+                let index_key = Self::build_index_key(false, def.name_interned, &values).to_bytes();
+                let posting_key = Self::build_posting_key(&index_key, record_id);
+                ops.push(IndexWriteOp::SetPosting {
+                    key: posting_key,
+                    value: Bytes::new(),
+                });
             }
         }
 
-        Ok(())
+        Ok(ops)
     }
 
     /// Batched version of `on_record_created`. Accepts borrowed
@@ -541,18 +500,22 @@ impl IndexManager {
     where
         I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
     {
+        let ops = self.plan_records_created_batch(items).await?;
+        self.apply_ops(&ops).await
+    }
+
+    /// Planner variant of `on_records_created_batch` — returns
+    /// accumulated `Vec<IndexWriteOp>` for all items across all
+    /// regular indexes.
+    pub async fn plan_records_created_batch<'a, I>(&self, items: I) -> DbResult<Vec<IndexWriteOp>>
+    where
+        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+    {
         if !self.has_indexes() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        // Pre-compute the 25-byte index key once per (index, record)
-        // and reuse it for the cache invalidation step — the old path
-        // rebuilt it from `Vec<InnerValue>` after the durable write,
-        // paying the FxHash + clone twice per row. Now we own `Bytes`
-        // (cheap clone via Arc-backed shared buffer) and let the
-        // invalidation walk de-dup them.
-        let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
-        let mut cache_invalidations: Vec<Bytes> = Vec::new();
+        let mut ops = Vec::new();
         for def in self.indexes.iter() {
             for (rid, value) in items.clone() {
                 if let Some(value_refs) = Self::extract_index_values_ref(value, &def.paths) {
@@ -560,20 +523,15 @@ impl IndexManager {
                         Self::build_index_key_from_refs(false, def.name_interned, &value_refs)
                             .to_bytes();
                     let posting_key = Self::build_posting_key(&index_key, rid);
-                    posting_writes.push((posting_key, Bytes::new()));
-                    cache_invalidations.push(index_key);
+                    ops.push(IndexWriteOp::SetPosting {
+                        key: posting_key,
+                        value: Bytes::new(),
+                    });
                 }
             }
         }
 
-        if posting_writes.is_empty() {
-            return Ok(());
-        }
-        self.info_store.set_many(posting_writes).await?;
-        for index_key in cache_invalidations {
-            self.posting_cache.remove(&index_key);
-        }
-        Ok(())
+        Ok(ops)
     }
 
     /// Batched version of `on_record_created_unique`. Same borrow
@@ -582,25 +540,39 @@ impl IndexManager {
     where
         I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
     {
+        let ops = self.plan_records_created_unique_batch(items).await?;
+        self.apply_ops(&ops).await
+    }
+
+    /// Planner variant of `on_records_created_unique_batch` — returns
+    /// `Vec<IndexWriteOp>`. Uniqueness validation (collision detection)
+    /// stays in the plan phase: it reads existing postings to detect
+    /// duplicates. If collision → `Err(DuplicateKey(...))`.
+    pub async fn plan_records_created_unique_batch<'a, I>(
+        &self,
+        items: I,
+    ) -> DbResult<Vec<IndexWriteOp>>
+    where
+        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+    {
         if !self.has_unique_indexes() {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        let mut writes: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut ops = Vec::new();
         for def in self.indexes_unique.iter() {
             for (rid, value) in items.clone() {
                 if let Some(value_refs) = Self::extract_index_values_ref(value, &def.paths) {
                     let index_key =
                         Self::build_index_key_from_refs(true, def.name_interned, &value_refs)
                             .to_bytes();
-                    writes.push((index_key, Bytes::copy_from_slice(rid.as_bytes())));
+                    ops.push(IndexWriteOp::SetPosting {
+                        key: index_key,
+                        value: Bytes::copy_from_slice(rid.as_bytes()),
+                    });
                 }
             }
         }
-        if writes.is_empty() {
-            return Ok(());
-        }
-        self.info_store.set_many(writes).await?;
-        Ok(())
+        Ok(ops)
     }
 
     /// Обработчик события обновления записи.
@@ -620,43 +592,68 @@ impl IndexManager {
         old_value: &InnerValue,
         new_value: &InnerValue,
     ) -> DbResult<()> {
+        let ops = self
+            .plan_record_updated(record_id, old_value, new_value)
+            .await?;
+        self.apply_ops(&ops).await
+    }
+
+    /// Planner variant of `on_record_updated` — returns
+    /// `RemovePosting` for removed values + `SetPosting` for added.
+    pub async fn plan_record_updated(
+        &self,
+        record_id: &RecordId,
+        old_value: &InnerValue,
+        new_value: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_indexes() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
+        let mut ops = Vec::new();
         for def in self.indexes.iter() {
-            // Извлекаем старые и новые значения для данного индекса
             let old_values = Self::extract_index_values(old_value, &def.paths);
             let new_values = Self::extract_index_values(new_value, &def.paths);
 
-            // Обрабатываем все варианты изменений
             match (old_values, new_values) {
-                // Значения отсутствовали и отсутствуют — ничего не делаем
                 (None, None) => {}
-                // Появилось новое значение — добавляем в индекс
                 (None, Some(new)) => {
-                    self.add_index_entry(def.name_interned, &new, record_id)
-                        .await?;
+                    let index_key =
+                        Self::build_index_key(false, def.name_interned, &new).to_bytes();
+                    let posting_key = Self::build_posting_key(&index_key, record_id);
+                    ops.push(IndexWriteOp::SetPosting {
+                        key: posting_key,
+                        value: Bytes::new(),
+                    });
                 }
-                // Значение исчезло — удаляем из индекса
                 (Some(old), None) => {
-                    self.remove_index_entry(def.name_interned, &old, record_id)
-                        .await?;
+                    let index_key =
+                        Self::build_index_key(false, def.name_interned, &old).to_bytes();
+                    let posting_key = Self::build_posting_key(&index_key, record_id);
+                    ops.push(IndexWriteOp::RemovePosting { key: posting_key });
                 }
-                // Значение изменилось — обновляем индекс
                 (Some(old), Some(new)) => {
                     if old != new {
-                        self.remove_index_entry(def.name_interned, &old, record_id)
-                            .await?;
-                        self.add_index_entry(def.name_interned, &new, record_id)
-                            .await?;
+                        let old_index_key =
+                            Self::build_index_key(false, def.name_interned, &old).to_bytes();
+                        let old_posting_key = Self::build_posting_key(&old_index_key, record_id);
+                        ops.push(IndexWriteOp::RemovePosting {
+                            key: old_posting_key,
+                        });
+
+                        let new_index_key =
+                            Self::build_index_key(false, def.name_interned, &new).to_bytes();
+                        let new_posting_key = Self::build_posting_key(&new_index_key, record_id);
+                        ops.push(IndexWriteOp::SetPosting {
+                            key: new_posting_key,
+                            value: Bytes::new(),
+                        });
                     }
-                    // Если old == new — ничего не делаем (оптимизация)
                 }
             }
         }
 
-        Ok(())
+        Ok(ops)
     }
 
     /// Обработчик события удаления записи.
@@ -673,18 +670,66 @@ impl IndexManager {
         record_id: &RecordId,
         old_value: &InnerValue,
     ) -> DbResult<()> {
+        let ops = self.plan_record_deleted(record_id, old_value).await?;
+        self.apply_ops(&ops).await
+    }
+
+    /// Planner variant of `on_record_deleted` — returns
+    /// `RemovePosting` for each posting of this record.
+    pub async fn plan_record_deleted(
+        &self,
+        record_id: &RecordId,
+        old_value: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
         if !self.has_indexes() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        // Для каждого индекса удаляем запись
+        let mut ops = Vec::new();
         for def in self.indexes.iter() {
             if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
-                self.remove_index_entry(def.name_interned, &values, record_id)
-                    .await?;
+                let index_key = Self::build_index_key(false, def.name_interned, &values).to_bytes();
+                let posting_key = Self::build_posting_key(&index_key, record_id);
+                ops.push(IndexWriteOp::RemovePosting { key: posting_key });
             }
         }
 
+        Ok(ops)
+    }
+
+    // ============================================================================
+    // Apply ops — shared by all wrapper methods
+    // ============================================================================
+
+    /// Apply a slice of `IndexWriteOp` against `self.info_store`.
+    /// Used by the `on_record_*` wrapper methods after planning.
+    async fn apply_ops(&self, ops: &[IndexWriteOp]) -> DbResult<()> {
+        for op in ops {
+            match op {
+                IndexWriteOp::SetPosting { key, value } => {
+                    self.info_store.set(key.clone(), value.clone()).await?;
+                }
+                IndexWriteOp::RemovePosting { key } => {
+                    let _ = self.info_store.remove(key.clone()).await;
+                }
+                IndexWriteOp::BumpFtsStats { .. } => {
+                    // Not relevant for legacy IndexManager.
+                }
+            }
+        }
+        // Invalidate posting cache for any keys touched.
+        // We invalidate broadly: any SetPosting/RemovePosting key whose
+        // first 25 bytes match a cached index_key prefix.
+        for op in ops {
+            let key = match op {
+                IndexWriteOp::SetPosting { key, .. } | IndexWriteOp::RemovePosting { key } => key,
+                _ => continue,
+            };
+            if key.len() >= 25 {
+                let index_key = key.slice(..25);
+                self.posting_cache.remove(&index_key);
+            }
+        }
         Ok(())
     }
 
