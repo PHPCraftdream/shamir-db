@@ -763,6 +763,48 @@ impl TableManager {
         }
     }
 
+    /// tx-aware streaming variant of [`list_stream`].
+    ///
+    /// In the current sub-stage (3.2.B) this method is a thin forward to
+    /// [`list_stream`] regardless of `tx` value — it adds the parameter so
+    /// downstream callsites can already be migrated and tested.
+    ///
+    /// Wiring to merge staged writes from `tx.write_set` and to read
+    /// through `mvcc_store` lands in subsequent sub-stages.
+    pub fn list_stream_tx<'a>(
+        &'a self,
+        _tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        self.list_stream(batch_size)
+    }
+
+    /// tx-aware streaming variant of [`filter_stream`].
+    ///
+    /// Same forward-only semantics as [`list_stream_tx`] in stage 3.2.B.
+    pub async fn filter_stream_tx<'a>(
+        &'a self,
+        _tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+        filter: &Filter,
+        ctx: &'a FilterContext<'a>,
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
+        self.filter_stream(batch_size, filter, ctx).await
+    }
+
+    /// tx-aware streaming variant of [`filter_stream_with_callback`].
+    ///
+    /// Same forward-only semantics as [`list_stream_tx`] in stage 3.2.B.
+    pub fn filter_stream_with_callback_tx<'a>(
+        &'a self,
+        _tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+        callback: &'a dyn FilterCallback,
+        ctx: &'a FilterContext<'a>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        self.filter_stream_with_callback(batch_size, callback, ctx)
+    }
+
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         self.table.get(id).await
