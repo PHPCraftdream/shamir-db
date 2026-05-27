@@ -15,8 +15,9 @@
 | D3 | MemBuffer / tx staging separation | `non_tx_writes_go_through_membuffer`, `tx_commit_bypasses_membuffer`, `tx_writes_invisible_to_concurrent_non_tx_read` | `non_tx_write_throughput_unchanged`, `tx_commit_throughput_with_membuffer_bypass` |
 | D4 | Repo-scoped WAL marker | `cross_table_tx_atomic`, `recovery_after_crash_mid_phase_{4,5,6,7}`, `mixed_v1_v2_recovery` | `repo_wal_append_latency`, `recovery_scan_with_n_inflight_tx` |
 | D5 | `Option<&TxContext>` not generic | `non_tx_call_paths_zero_overhead` (branch coverage), `tx_call_paths_through_pipeline` | `engine_perf_non_tx_regression` (target < 2%), `read_pipeline_with_tx_context` (compare None / Some) |
+| D6 | `version_codec` separator = `0xFF` | `round_trip`, `sort_order_matches_version`, `different_keys_dont_interleave`, `missing_separator_decodes_to_none` | (тривиальная функция, не требует bench) |
 
-**Правило:** ни одно из D1-D5 не считается реализованным, пока **обе
+**Правило:** ни одно из D1-D6 не считается реализованным, пока **обе
 колонки** имеют commit'нутые tests + бенчмарки с измеренными числами
 в комментарии или task summary.
 
@@ -296,6 +297,50 @@ Benchmarks (`crates/shamir-engine/benches/engine_perf.rs`,
 - `tx_write_overhead_vs_non_tx` — write через TxContext.write_set
   vs direct store.set. Acceptance: < 10% (один HashMap insert vs
   один store call).
+
+---
+
+## D6. `version_codec` separator = `0xFF`
+
+**Проблема.** Физический ключ MVCC history имеет форму
+`<original_key> || <separator> || <version_be_u64>`. Какой byte
+использовать как separator?
+
+**Выбранное решение.** Single `0xFF` byte.
+
+**Почему не иначе.**
+- `0x00` — встречается в `RecordId::system("name")` (4-byte zero
+  prefix + ASCII tag). Высокий риск collision.
+- `\\` или `:` (ASCII printable) — могут встретиться в
+  interner-encoded keys.
+- Length-prefix encoding (`varint(key_len) || key || version`) —
+  semantically чище, но 2-5 байт overhead вместо 1. И требует
+  две версии decoder (varint detection).
+
+`0xFF` в RecordId встречается с вероятностью ~1/256 в каждом байте
+(crypto-random); никогда не встречается в `system("tag")` RecordIds
+(4 нулевых байта + ASCII tag, ASCII никогда не достигает `0xFF`).
+History store **физически отделён** от main store — `decode_version_key`
+вызывается только на ключах, которые мы сами туда положили.
+Invariant контролируем.
+
+**Реализовано в** commit `a9791b4`
+(`crates/shamir-tx/src/version_codec.rs`).
+
+**Test coverage** (`tests` module в том же файле):
+- `round_trip` — encode → decode → original для 5 различных
+  version значений (0, 1, 42, u64::MAX/2, u64::MAX).
+- `empty_key_round_trip` — корректно работает для key = `b""`.
+- `sort_order_matches_version` — BE encoding даёт естественный
+  лексикографический порядок: `k::0 < k::1 < k::42`.
+- `different_keys_dont_interleave` — `aaa::MAX < aab::0`
+  (key-prefix dominates).
+- `short_input_decodes_to_none` — < 9 bytes → `None`.
+- `missing_separator_decodes_to_none` — 16-byte input без `0xFF`
+  на правильной позиции → `None`.
+
+**Bench coverage.** Не требуется — функция выполняет O(key.len())
+`extend_from_slice` + два byte writes. Нет hot-path риска.
 
 ---
 
