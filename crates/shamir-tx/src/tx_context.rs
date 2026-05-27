@@ -111,6 +111,32 @@ impl TxContext {
             self.tables_with_hnsw_staging.push(table_id);
         }
     }
+
+    /// Apply an overlay-id → base-id remap across all staged writes.
+    ///
+    /// Called during commit phase 1, immediately after
+    /// `commit_interner_overlay`, so subsequent flush phases see
+    /// stable base ids only.
+    ///
+    /// Errors if any staged value fails to decode/re-encode. Caller
+    /// should abort the transaction on error.
+    pub async fn apply_id_remap(
+        &mut self,
+        remap: &std::collections::HashMap<u64, u64>,
+    ) -> Result<(), String> {
+        if remap.is_empty() {
+            return Ok(());
+        }
+        for staging in self.write_set.values() {
+            staging
+                .rewrite_set_bytes(|bytes| {
+                    crate::id_remap::remap_inner_value_bytes(bytes.clone(), remap)
+                        .map_err(|e| format!("remap encode: {e}"))
+                })
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +193,60 @@ mod tests {
     fn drop_is_noop() {
         let ctx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
         drop(ctx);
+    }
+
+    #[tokio::test]
+    async fn apply_id_remap_rewrites_write_set_bytes() {
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use shamir_storage::types::Store;
+        use shamir_types::core::interner::InternerKey;
+        use shamir_types::types::common::TMap;
+        use shamir_types::types::value::InnerValue;
+
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Snapshot,
+        );
+
+        let base: std::sync::Arc<dyn Store> = std::sync::Arc::new(InMemoryStore::new());
+        let staging = crate::staging_store::StagingStore::new(base);
+
+        let mut m = TMap::default();
+        m.insert(InternerKey::new(100), InnerValue::Str("v".into()));
+        let val = InnerValue::Map(m);
+        let key: shamir_storage::types::RecordKey = bytes::Bytes::from_static(b"k1");
+        staging.set(key.clone(), val.to_bytes().unwrap()).await;
+
+        tx.write_set.insert(7, staging);
+
+        let mut remap = std::collections::HashMap::new();
+        remap.insert(100u64, 1000u64);
+        tx.apply_id_remap(&remap).await.unwrap();
+
+        let bytes = tx.write_set[&7].get(key).await.unwrap();
+        let decoded = InnerValue::from_bytes(&bytes).unwrap();
+        if let InnerValue::Map(m) = decoded {
+            assert!(
+                m.get(&InternerKey::new(1000)).is_some(),
+                "key 100 must have been remapped to 1000"
+            );
+            assert!(m.get(&InternerKey::new(100)).is_none());
+        } else {
+            panic!("expected Map");
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_id_remap_empty_is_noop() {
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Snapshot,
+        );
+        let empty = std::collections::HashMap::new();
+        tx.apply_id_remap(&empty).await.unwrap();
     }
 }
