@@ -41,6 +41,16 @@ pub async fn execute_batch(
 ) -> Result<BatchResponse, BatchError> {
     let start = Instant::now();
 
+    // 4.C: cross-repo guard for transactional batches.
+    if request.transactional {
+        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+        if repos.len() > 1 {
+            let mut repos: Vec<String> = repos.into_iter().collect();
+            repos.sort();
+            return Err(BatchError::CrossRepoNotSupported { repos });
+        }
+    }
+
     // 1. Plan
     let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
 

@@ -274,6 +274,19 @@ impl BatchOp {
     }
 }
 
+/// Returns the set of distinct repository names referenced by the
+/// data queries in `queries`. Admin ops (which return `None` from
+/// `BatchOp::table_ref`) do not contribute.
+///
+/// Used by the executor to enforce the cross-repo guard for
+/// transactional batches (Stage 4.C).
+pub fn distinct_repos(queries: &TMap<String, QueryEntry>) -> std::collections::HashSet<String> {
+    queries
+        .values()
+        .filter_map(|qe| qe.op.table_ref().map(|tr| tr.repo.clone()))
+        .collect()
+}
+
 impl From<ReadQuery> for BatchOp {
     fn from(q: ReadQuery) -> Self {
         BatchOp::Read(q)
@@ -642,6 +655,12 @@ pub enum BatchError {
     ///
     /// Could not acquire locks within the timeout period.
     LockTimeout { aliases: Vec<String> },
+
+    /// Transactional batch targets more than one repository.
+    ///
+    /// 2PC across repos is intentionally out of scope. Clients must
+    /// split such batches into separate single-repo transactions.
+    CrossRepoNotSupported { repos: Vec<String> },
 }
 
 impl std::fmt::Display for BatchError {
@@ -675,6 +694,11 @@ impl std::fmt::Display for BatchError {
             BatchError::LockTimeout { aliases } => {
                 write!(f, "Lock timeout for queries: {}", aliases.join(", "))
             }
+            BatchError::CrossRepoNotSupported { repos } => write!(
+                f,
+                "transactional batch targets multiple repositories ({}); single-repo only",
+                repos.join(", ")
+            ),
         }
     }
 }

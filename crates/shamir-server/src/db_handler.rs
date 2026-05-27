@@ -555,6 +555,7 @@ fn error_code(e: &BatchError) -> &'static str {
                 "query"
             }
         }
+        BatchError::CrossRepoNotSupported { .. } => "tx_cross_repo_not_supported",
     }
 }
 
