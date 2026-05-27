@@ -402,6 +402,17 @@ pub struct BatchRequest {
     #[serde(default)]
     pub transactional: bool,
 
+    /// Requested isolation level for transactional batches.
+    ///
+    /// - `"snapshot"` (default) — Snapshot Isolation. Reads see a
+    ///   consistent snapshot; writes use last-writer-wins.
+    /// - `"serializable"` — Serializable Snapshot Isolation. Read-set
+    ///   validated at commit; concurrent write conflict → abort.
+    ///
+    /// Ignored when `transactional` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+
     /// Queries map: alias -> query entry.
     ///
     /// Each key is the alias used in `$query` references.
@@ -462,13 +473,53 @@ pub struct BatchResponse {
     pub transaction: Option<TransactionInfo>,
 }
 
-/// Transaction metadata.
+/// Transaction metadata returned in batch responses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionInfo {
-    /// Transaction ID.
-    pub id: u64,
-    /// Whether commit succeeded.
-    pub committed: bool,
+    /// Transaction ID (monotonic per repo).
+    pub tx_id: u64,
+
+    /// Outcome: `"committed"` or `"aborted"`.
+    pub status: String,
+
+    /// Human-readable abort reason (null when committed).
+    /// E.g. `"tx_conflict"`, `"tx_cross_repo_not_supported"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// MVCC snapshot version the tx read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_version: Option<u64>,
+
+    /// Committed version (null when aborted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_version: Option<u64>,
+}
+
+impl TransactionInfo {
+    pub fn committed(tx_id: u64, snapshot_version: u64, commit_version: u64) -> Self {
+        Self {
+            tx_id,
+            status: "committed".into(),
+            reason: None,
+            snapshot_version: Some(snapshot_version),
+            commit_version: Some(commit_version),
+        }
+    }
+
+    pub fn aborted(tx_id: u64, reason: impl Into<String>) -> Self {
+        Self {
+            tx_id,
+            status: "aborted".into(),
+            reason: Some(reason.into()),
+            snapshot_version: None,
+            commit_version: None,
+        }
+    }
+
+    pub fn is_committed(&self) -> bool {
+        self.status == "committed"
+    }
 }
 
 /// Execution limits for security.
@@ -721,5 +772,53 @@ mod tests {
             _ => panic!("expected MigrationStatus"),
         }
         assert!(op.is_admin());
+    }
+
+    #[test]
+    fn batch_request_parses_isolation_field() {
+        let json = serde_json::json!({
+            "id": 1,
+            "transactional": true,
+            "isolation": "serializable",
+            "queries": {}
+        });
+        let req: BatchRequest = serde_json::from_value(json).unwrap();
+        assert!(req.transactional);
+        assert_eq!(req.isolation, Some("serializable".to_string()));
+    }
+
+    #[test]
+    fn batch_request_isolation_defaults_to_none() {
+        let json = serde_json::json!({
+            "id": 2,
+            "transactional": true,
+            "queries": {}
+        });
+        let req: BatchRequest = serde_json::from_value(json).unwrap();
+        assert!(req.isolation.is_none());
+    }
+
+    #[test]
+    fn transaction_info_committed_roundtrip() {
+        let info = TransactionInfo::committed(42, 100, 105);
+        assert!(info.is_committed());
+        assert_eq!(info.tx_id, 42);
+        assert_eq!(info.snapshot_version, Some(100));
+        assert_eq!(info.commit_version, Some(105));
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["status"], "committed");
+        assert!(json.get("reason").is_none()); // skip_serializing_if
+    }
+
+    #[test]
+    fn transaction_info_aborted_roundtrip() {
+        let info = TransactionInfo::aborted(7, "tx_conflict");
+        assert!(!info.is_committed());
+        assert_eq!(info.reason, Some("tx_conflict".to_string()));
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["status"], "aborted");
+        assert_eq!(json["reason"], "tx_conflict");
     }
 }
