@@ -518,6 +518,12 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_backend_default_is_none() {
+        let s: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        assert!(s.raw_backend().await.is_none());
+    }
+
+    #[tokio::test]
     async fn transact_mixed_set_remove() {
         let store = InMemoryStore::new();
         let k1 = RecordKey::from(b"k1".to_vec());
