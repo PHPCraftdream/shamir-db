@@ -8,7 +8,7 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 
-use super::wal_entry::{WalEntry, WalOp};
+use crate::wal_entry::{WalEntry, WalOp};
 
 /// Prefix used for all WAL marker keys in `info_store`.
 const ACTIVE_PREFIX: &[u8] = b"__wal_active_";

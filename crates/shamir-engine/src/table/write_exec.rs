@@ -152,7 +152,7 @@ impl TableManager {
             self.wal()
                 .begin_with_delta(
                     id,
-                    crate::wal::WalManager::ops_record_updated(&candidate_ids),
+                    shamir_wal::WalManager::ops_record_updated(&candidate_ids),
                     0,
                 )
                 .await?;
@@ -246,7 +246,7 @@ impl TableManager {
             self.wal()
                 .begin_with_delta(
                     id,
-                    crate::wal::WalManager::ops_record_deleted(&to_delete),
+                    shamir_wal::WalManager::ops_record_deleted(&to_delete),
                     -(to_delete.len() as i64),
                 )
                 .await?;

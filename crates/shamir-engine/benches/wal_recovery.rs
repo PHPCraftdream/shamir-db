@@ -8,10 +8,10 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tokio::runtime::Runtime;
 
-use shamir_engine::wal::{WalManager, WalOp};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
+use shamir_wal::{WalManager, WalOp};
 
 /// Seed `n` in-flight markers (begin without commit) and bench
 /// `list_inflight` over them.

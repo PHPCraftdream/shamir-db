@@ -11,11 +11,11 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
-use crate::wal::{WalManager, WalOp};
 use shamir_storage::types::Store;
 use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::UserValue;
+use shamir_wal::{WalManager, WalOp};
 
 /// Build a fresh in-memory DB with a `users` table, a regular index
 /// on `city`, a unique index on `id`, and a sorted index on `score`.
@@ -432,7 +432,7 @@ async fn execute_delete_wal_marker_carries_negative_counter_delta() {
         .wal()
         .begin_with_delta(
             txn_id,
-            crate::wal::WalManager::ops_record_deleted(&ids),
+            shamir_wal::WalManager::ops_record_deleted(&ids),
             -(ids.len() as i64),
         )
         .await
@@ -629,7 +629,7 @@ async fn end_to_end_crash_recovery_completes_pending_delete_on_sled() {
         mgr.wal()
             .begin_with_delta(
                 txn_id,
-                crate::wal::WalManager::ops_record_deleted(&to_delete),
+                shamir_wal::WalManager::ops_record_deleted(&to_delete),
                 -2,
             )
             .await
@@ -853,7 +853,7 @@ async fn recover_on_open_rolls_forward_pending_deletes() {
         .wal()
         .begin_with_delta(
             txn_id,
-            crate::wal::WalManager::ops_record_deleted(&to_delete),
+            shamir_wal::WalManager::ops_record_deleted(&to_delete),
             -2,
         )
         .await

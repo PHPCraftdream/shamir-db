@@ -14,6 +14,7 @@ shamir-storage = { path = "../shamir-storage", default-features = false }
 # Pure DTOs for the SDBQL surface — re-exported through the engine's
 # `query::*` modules so callers see no path change.
 shamir-query-types = { path = "../shamir-query-types" }
+shamir-wal = { path = "../shamir-wal" }
 
 # Async / runtime
 tokio = { version = "1.49.0", features = ["full"] }

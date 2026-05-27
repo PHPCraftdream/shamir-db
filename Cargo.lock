@@ -3279,6 +3279,7 @@ dependencies = [
  "shamir-query-types",
  "shamir-storage",
  "shamir-types",
+ "shamir-wal",
  "smallvec 1.15.1",
  "tempfile",
  "thiserror 2.0.18",
@@ -3437,6 +3438,19 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "unicode-normalization",
+]
+
+[[package]]
+name = "shamir-wal"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "futures",
+ "serde",
+ "shamir-storage",
+ "shamir-types",
+ "tokio",
 ]
 
 [[package]]
