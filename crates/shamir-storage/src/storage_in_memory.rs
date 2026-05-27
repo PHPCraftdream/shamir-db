@@ -60,6 +60,15 @@ impl Repo for InMemoryRepo {
 // InMemoryStore - individual in-memory store
 // ============================================================================
 
+/// In-memory key-value store backed by `DashMap`.
+///
+/// `InMemoryStore::transact` inherits the default sequential semantics
+/// -- partial state may be observable to concurrent readers under heavy
+/// contention. DashMap does not provide cross-key atomic batches
+/// without wrapping the entire map in a global lock, which would
+/// regress all single-key ops. Used primarily for testing; production
+/// atomicity guarantees come from disk backends (redb, sled, fjall,
+/// persy, nebari, canopy).
 pub struct InMemoryStore {
     data: Arc<TDashMap<RecordKey, Bytes>>,
 }

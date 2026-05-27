@@ -229,6 +229,38 @@ impl Store for FjallStore {
         })
     }
 
+    /// Native atomic `transact` via fjall `OwnedWriteBatch`.
+    ///
+    /// `Database::batch()` returns an `OwnedWriteBatch` that collects
+    /// insert/remove ops across keyspaces. `commit()` applies them
+    /// atomically — all succeed or none are visible.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let db = self.db.clone();
+        let keyspace = self.keyspace.clone();
+        task::spawn_blocking(move || -> DbResult<()> {
+            let mut batch = db.batch();
+            for op in ops {
+                match op {
+                    super::types::KvOp::Set(k, v) => {
+                        batch.insert(&keyspace, k.as_ref(), v.as_ref());
+                    }
+                    super::types::KvOp::Remove(k) => {
+                        batch.remove(&keyspace, k.as_ref());
+                    }
+                }
+            }
+            batch
+                .commit()
+                .map_err(|e| DbError::Storage(format!("Fjall batch commit: {}", e)))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
     /// Force the WAL to fsync-on-disk. fjall buffers individual
     /// writes in the journal; `persist(SyncAll)` fsyncs the journal
     /// + writes any pending metadata. Reachable through
@@ -497,6 +529,57 @@ mod tests {
         let repo = FjallRepo::new(path).unwrap();
         let store = repo.store_get("batch").await.unwrap();
         super::super::types::run_batch_store_tests(store).await;
+    }
+
+    /// Fjall transact test -- verifies all ops applied atomically via
+    /// one `OwnedWriteBatch::commit`.
+    ///
+    /// fjall's `Keyspace::get()` reads from the current LSM state
+    /// without snapshot isolation across multiple calls, so we only
+    /// verify final state here (write atomicity).
+    #[tokio::test]
+    async fn test_fjall_transact_atomic() {
+        use super::super::types::KvOp;
+
+        let path = "./test_data/fjall_transact";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let repo = FjallRepo::new(path).unwrap();
+        let store = repo.store_get("transact_test").await.unwrap();
+
+        // Seed
+        let k1: RecordKey = Bytes::from_static(b"k1");
+        let k2: RecordKey = Bytes::from_static(b"k2");
+        let k3: RecordKey = Bytes::from_static(b"k3");
+        store
+            .set(k1.clone(), Bytes::from_static(b"old1"))
+            .await
+            .unwrap();
+        store
+            .set(k2.clone(), Bytes::from_static(b"old2"))
+            .await
+            .unwrap();
+        store
+            .set(k3.clone(), Bytes::from_static(b"to_remove"))
+            .await
+            .unwrap();
+
+        // Mixed transact: update k1, update k2, remove k3
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"new1")),
+                KvOp::Set(k2.clone(), Bytes::from_static(b"new2")),
+                KvOp::Remove(k3.clone()),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(store.get(k1).await.unwrap().as_ref(), b"new1");
+        assert_eq!(store.get(k2).await.unwrap().as_ref(), b"new2");
+        assert!(store.get(k3).await.is_err(), "k3 should be removed");
+
+        fs::remove_dir_all(path).ok();
     }
 
     #[tokio::test]

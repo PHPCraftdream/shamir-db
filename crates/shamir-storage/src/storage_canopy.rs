@@ -313,6 +313,47 @@ impl Store for CanopyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    /// Native atomic `transact` via canopy's write transaction.
+    ///
+    /// Opens one `begin_write()`, applies all `KvOp`s (insert /
+    /// delete) within the same tree handle, then commits. If any
+    /// operation fails, the transaction is dropped (not committed)
+    /// — no partial state is observable.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        spawn_blocking(move || -> DbResult<()> {
+            let tx = db
+                .begin_write()
+                .map_err(|e| DbError::Storage(format!("CanopyDB begin_write: {}", e)))?;
+            {
+                let mut tree = tx
+                    .get_or_create_tree(table_name.as_bytes())
+                    .map_err(|e| DbError::Storage(format!("CanopyDB get_or_create_tree: {}", e)))?;
+                for op in ops {
+                    match op {
+                        super::types::KvOp::Set(k, v) => {
+                            tree.insert(&k[..], &v[..])
+                                .map_err(|e| DbError::Storage(format!("CanopyDB insert: {}", e)))?;
+                        }
+                        super::types::KvOp::Remove(k) => {
+                            tree.delete(&k[..])
+                                .map_err(|e| DbError::Storage(format!("CanopyDB delete: {}", e)))?;
+                        }
+                    }
+                }
+            }
+            tx.commit()
+                .map_err(|e| DbError::Storage(format!("CanopyDB commit: {}", e)))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     fn iter_stream(
         &self,
         batch_size: usize,
@@ -570,6 +611,58 @@ mod tests {
         let repo = CanopyRepo::new(path).unwrap();
         let store = repo.store_get("batch").await.unwrap();
         super::super::types::run_batch_store_tests(store).await;
+    }
+
+    /// Canopy transact test -- verifies all ops applied atomically via
+    /// one `begin_write()` / `commit()` cycle.
+    ///
+    /// Canopy's `begin_read()` opens a fresh snapshot per read tx,
+    /// but our `get()` calls are independent read txs, so we only
+    /// verify final state (write atomicity, not cross-read snapshot).
+    #[tokio::test]
+    async fn test_canopy_transact_atomic() {
+        use super::super::types::KvOp;
+
+        let path = "./test_data/canopy_transact";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        fs::create_dir_all(path).unwrap();
+        let repo = CanopyRepo::new(path).unwrap();
+        let store = repo.store_get("transact_test").await.unwrap();
+
+        // Seed
+        let k1: RecordKey = Bytes::from_static(b"k1");
+        let k2: RecordKey = Bytes::from_static(b"k2");
+        let k3: RecordKey = Bytes::from_static(b"k3");
+        store
+            .set(k1.clone(), Bytes::from_static(b"old1"))
+            .await
+            .unwrap();
+        store
+            .set(k2.clone(), Bytes::from_static(b"old2"))
+            .await
+            .unwrap();
+        store
+            .set(k3.clone(), Bytes::from_static(b"to_remove"))
+            .await
+            .unwrap();
+
+        // Mixed transact: update k1, update k2, remove k3
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"new1")),
+                KvOp::Set(k2.clone(), Bytes::from_static(b"new2")),
+                KvOp::Remove(k3.clone()),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(store.get(k1).await.unwrap().as_ref(), b"new1");
+        assert_eq!(store.get(k2).await.unwrap().as_ref(), b"new2");
+        assert!(store.get(k3).await.is_err(), "k3 should be removed");
+
+        fs::remove_dir_all(path).ok();
     }
 
     #[tokio::test]

@@ -578,6 +578,44 @@ impl Store for RedbStore {
         .map_err(|e| DbError::Internal(e.to_string()))?
     }
 
+    /// Native atomic `transact` via redb `WriteTransaction`.
+    ///
+    /// Opens one write transaction, applies all `KvOp`s (set / remove)
+    /// within the same table handle, then commits. If any operation
+    /// fails, the transaction is dropped (implicitly aborted by redb)
+    /// — no partial state is observable.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        task::spawn_blocking(move || -> DbResult<()> {
+            let mut write_txn = db.begin_write()?;
+            write_txn
+                .set_durability(Durability::None)
+                .map_err(|e| DbError::Storage(format!("Redb set_durability: {}", e)))?;
+            {
+                let table_def = TableDefinition::<&[u8], &[u8]>::new(&table_name);
+                let mut table = write_txn.open_table(table_def)?;
+                for op in ops {
+                    match op {
+                        super::types::KvOp::Set(k, v) => {
+                            table.insert(&k[..], &v[..])?;
+                        }
+                        super::types::KvOp::Remove(k) => {
+                            table.remove(&k[..])?;
+                        }
+                    }
+                }
+            }
+            write_txn.commit()?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?
+    }
+
     /// Explicit fsync. Per-write commits run with `Durability::None`
     /// (skips fsync, data goes to the OS page cache, visible to
     /// subsequent reads). `flush()` runs an empty commit with
@@ -736,6 +774,70 @@ mod tests {
 
     /// Native `iter_range_stream` on redb — exercises the
     /// `table.range((Included, Included))` path.
+    #[tokio::test]
+    async fn test_redb_transact_atomic() {
+        use super::super::types::KvOp;
+
+        let path = "./test_data/redb_transact/db.redb";
+        if let Some(parent) = Path::new(path).parent() {
+            if parent.exists() {
+                fs::remove_dir_all(parent).unwrap();
+            }
+        }
+        let repo = RedbRepo::new(path).unwrap();
+        let store = repo.store_get("transact_test").await.unwrap();
+
+        // Seed
+        let k1: RecordKey = Bytes::from_static(b"k1");
+        let k2: RecordKey = Bytes::from_static(b"k2");
+        store
+            .set(k1.clone(), Bytes::from_static(b"old1"))
+            .await
+            .unwrap();
+        store
+            .set(k2.clone(), Bytes::from_static(b"old2"))
+            .await
+            .unwrap();
+
+        // Spawn observer that reads both keys repeatedly
+        let obs_store = repo.store_get("transact_test").await.unwrap();
+        let k1c = k1.clone();
+        let k2c = k2.clone();
+        let observer = tokio::spawn(async move {
+            for _ in 0..50 {
+                let a = obs_store.get(k1c.clone()).await.ok();
+                let b = obs_store.get(k2c.clone()).await.ok();
+                // Either both old OR both new. Never mixed.
+                if let (Some(va), Some(vb)) = (&a, &b) {
+                    let a_new = va.as_ref() == b"new1";
+                    let b_new = vb.as_ref() == b"new2";
+                    assert_eq!(
+                        a_new, b_new,
+                        "partial state observed: a={:?} b={:?}",
+                        va, vb
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        // Transact
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"new1")),
+                KvOp::Set(k2.clone(), Bytes::from_static(b"new2")),
+            ])
+            .await
+            .unwrap();
+
+        observer.await.unwrap();
+
+        assert_eq!(store.get(k1).await.unwrap().as_ref(), b"new1");
+        assert_eq!(store.get(k2).await.unwrap().as_ref(), b"new2");
+
+        fs::remove_dir_all(Path::new(path).parent().unwrap()).ok();
+    }
+
     #[tokio::test]
     async fn test_redb_iter_range_stream_native() {
         let path = "./test_data/redb_iter_range/db.redb";
