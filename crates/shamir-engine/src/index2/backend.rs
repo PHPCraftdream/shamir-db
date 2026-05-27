@@ -8,6 +8,7 @@ use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use shamir_storage::types::Store;
+use shamir_tx::TxContext;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
@@ -64,6 +65,21 @@ pub trait IndexBackend: Send + Sync {
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError>;
     async fn drop_all(&self) -> Result<(), IndexError>;
+
+    /// tx-aware lookup variant.
+    ///
+    /// In the current sub-stage (3.2.C) the default implementation
+    /// forwards to [`lookup`] and ignores the `tx` parameter. Backends
+    /// that want to merge committed postings with in-tx staged index
+    /// writes will override this method in later sub-stages (see
+    /// docs/pre-transactional/04-mvcc-store.md §3.2 / §3.3).
+    async fn lookup_tx(
+        &self,
+        query: IndexQuery,
+        _tx: Option<&TxContext>,
+    ) -> Result<IndexResult, IndexError> {
+        self.lookup(query).await
+    }
 
     /// Plan ops for an insert.
     async fn plan_insert(

@@ -172,6 +172,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lookup_tx_none_forwards_to_lookup() {
+        let backend = MockBackend::new();
+        let res = backend
+            .lookup_tx(
+                IndexQuery::Point {
+                    keys: SmallVec::new(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(res, IndexResult::Set(ref s) if s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn lookup_tx_some_forwards_to_lookup() {
+        use shamir_tx::{IsolationLevel, TxContext, TxId};
+        let backend = MockBackend::new();
+        let tx = TxContext::new(TxId::new(1), 0, 42, IsolationLevel::Snapshot);
+        let res = backend
+            .lookup_tx(
+                IndexQuery::Point {
+                    keys: SmallVec::new(),
+                },
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(res, IndexResult::Set(ref s) if s.is_empty()));
+    }
+
+    #[tokio::test]
     async fn apply_mixed_ops_in_order() {
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let backend = MockBackend::new();
