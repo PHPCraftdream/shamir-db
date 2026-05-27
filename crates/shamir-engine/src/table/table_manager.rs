@@ -14,13 +14,13 @@ use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::query::filter::eval::{compile_filter, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
-use crate::wal::WalManager;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_membuffer::MemBufferConfig;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use shamir_wal::WalManager;
 
 pub struct TableManager {
     name: String,
@@ -535,7 +535,7 @@ impl TableManager {
         self.wal
             .begin_with_delta(
                 txn_id,
-                crate::wal::WalManager::ops_record_created(&ids),
+                shamir_wal::WalManager::ops_record_created(&ids),
                 ids.len() as i64,
             )
             .await?;

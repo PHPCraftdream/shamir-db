@@ -292,13 +292,13 @@ impl TableManager {
         for entry in &inflight {
             for op in &entry.ops {
                 match op {
-                    crate::wal::WalOp::RecordCreated { record_id } => {
+                    shamir_wal::WalOp::RecordCreated { record_id } => {
                         created_ids.push(*record_id);
                     }
-                    crate::wal::WalOp::RecordUpdated { record_id } => {
+                    shamir_wal::WalOp::RecordUpdated { record_id } => {
                         updated_ids.push(*record_id);
                     }
-                    crate::wal::WalOp::RecordDeleted { record_id } => {
+                    shamir_wal::WalOp::RecordDeleted { record_id } => {
                         deleted_ids.push(*record_id);
                     }
                     // Future variants (TxnBegin/Commit/Rollback,
