@@ -440,9 +440,12 @@ async fn execute_delete_wal_marker_carries_negative_counter_delta() {
 
     let inflight = table.wal().list_inflight().await.unwrap();
     assert_eq!(inflight.len(), 1);
-    assert_eq!(inflight[0].counter_delta, -3);
-    assert_eq!(inflight[0].ops.len(), 3);
-    for op in &inflight[0].ops {
+    let shamir_wal::WalEntryAny::V1(ref v1) = inflight[0] else {
+        panic!("expected V1 entry");
+    };
+    assert_eq!(v1.counter_delta, -3);
+    assert_eq!(v1.ops.len(), 3);
+    for op in &v1.ops {
         assert!(matches!(op, WalOp::RecordDeleted { .. }));
     }
 }

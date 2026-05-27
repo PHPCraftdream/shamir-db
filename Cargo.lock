@@ -3462,6 +3462,7 @@ dependencies = [
  "bytes",
  "futures",
  "serde",
+ "serde_bytes",
  "shamir-storage",
  "shamir-types",
  "tokio",

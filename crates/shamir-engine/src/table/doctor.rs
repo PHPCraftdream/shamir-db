@@ -290,29 +290,42 @@ impl TableManager {
         let mut deleted_ids: Vec<shamir_types::types::record_id::RecordId> = Vec::new();
         let mut has_unknown_op = false;
         for entry in &inflight {
-            for op in &entry.ops {
-                match op {
-                    shamir_wal::WalOp::RecordCreated { record_id } => {
-                        created_ids.push(*record_id);
+            match entry {
+                shamir_wal::WalEntryAny::V1(v1) => {
+                    for op in &v1.ops {
+                        match op {
+                            shamir_wal::WalOp::RecordCreated { record_id } => {
+                                created_ids.push(*record_id);
+                            }
+                            shamir_wal::WalOp::RecordUpdated { record_id } => {
+                                updated_ids.push(*record_id);
+                            }
+                            shamir_wal::WalOp::RecordDeleted { record_id } => {
+                                deleted_ids.push(*record_id);
+                            }
+                            // Future variants (TxnBegin/Commit/Rollback,
+                            // FtsTerm*, IndexCreated/Dropped, ...) — we
+                            // don't know how to roll them forward, so we
+                            // bail to full repair.
+                            _ => has_unknown_op = true,
+                        }
                     }
-                    shamir_wal::WalOp::RecordUpdated { record_id } => {
-                        updated_ids.push(*record_id);
-                    }
-                    shamir_wal::WalOp::RecordDeleted { record_id } => {
-                        deleted_ids.push(*record_id);
-                    }
-                    // Future variants (TxnBegin/Commit/Rollback,
-                    // FtsTerm*, IndexCreated/Dropped, ...) — we
-                    // don't know how to roll them forward, so we
-                    // bail to full repair.
-                    _ => has_unknown_op = true,
+                }
+                shamir_wal::WalEntryAny::V2(_) => {
+                    // V2 entries appear only after stage 4 lands. For now,
+                    // log and treat as unknown — recovery code for V2 is the
+                    // RepoTxGate forward-fix path (not yet written).
+                    log::warn!(
+                        "WalEntryV2 found in recovery — V2 forward-fix not wired yet (stage 4)"
+                    );
+                    has_unknown_op = true;
                 }
             }
         }
         if has_unknown_op {
             let report = self.repair().await?;
             for entry in &inflight {
-                self.wal().commit(entry.txn_id).await?;
+                self.wal().commit(entry.txn_id()).await?;
             }
             return Ok(Some(report));
         }
@@ -407,14 +420,14 @@ impl TableManager {
             );
             let report = self.repair().await?;
             for entry in &inflight {
-                self.wal().commit(entry.txn_id).await?;
+                self.wal().commit(entry.txn_id()).await?;
             }
             return Ok(Some(report));
         }
 
         // Targeted roll-forward succeeded. Clear markers.
         for entry in &inflight {
-            self.wal().commit(entry.txn_id).await?;
+            self.wal().commit(entry.txn_id()).await?;
         }
 
         Ok(Some(RepairReport {
