@@ -2318,3 +2318,144 @@ async fn test_concurrent_reads_with_index() {
         handle.await.unwrap();
     }
 }
+
+// ============================================================================
+// plan_* tests (Stage 1.1.E)
+// ============================================================================
+
+#[tokio::test]
+async fn plan_record_created_returns_postings() {
+    use crate::index2::write_ops::IndexWriteOp;
+
+    let (_, _, manager) = create_manager();
+    let idx1 = IndexDefinition::new(2001, vec![IndexInfoItem::new(vec![1])]);
+    let idx2 = IndexDefinition::new(2002, vec![IndexInfoItem::new(vec![2])]);
+    manager.create_index(idx1).await.unwrap();
+    manager.create_index(idx2).await.unwrap();
+
+    let record_id = RecordId::new();
+    let value = create_test_value(&[
+        (1, InnerValue::Str("hello".to_string())),
+        (2, InnerValue::Int(42)),
+    ]);
+
+    let ops = manager
+        .plan_record_created(&record_id, &value)
+        .await
+        .unwrap();
+
+    // One SetPosting per index definition
+    assert_eq!(ops.len(), 2);
+    for op in &ops {
+        match op {
+            IndexWriteOp::SetPosting { value, .. } => {
+                assert!(value.is_empty(), "posting value should be empty");
+            }
+            other => panic!("expected SetPosting, got {:?}", other),
+        }
+    }
+}
+
+#[tokio::test]
+async fn plan_record_deleted_returns_removes() {
+    use crate::index2::write_ops::IndexWriteOp;
+
+    let (_, _, manager) = create_manager();
+    let idx = IndexDefinition::new(3001, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(idx).await.unwrap();
+
+    let record_id = RecordId::new();
+    let value = create_test_value(&[(1, InnerValue::Str("bye".to_string()))]);
+
+    let ops = manager
+        .plan_record_deleted(&record_id, &value)
+        .await
+        .unwrap();
+
+    assert_eq!(ops.len(), 1);
+    match &ops[0] {
+        IndexWriteOp::RemovePosting { .. } => {}
+        other => panic!("expected RemovePosting, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn equivalence_plan_apply_vs_direct() {
+    let data1 = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let info1 = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let mgr1 = IndexManager::new(Arc::clone(&data1), Arc::clone(&info1))
+        .await
+        .unwrap();
+
+    let data2 = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let info2 = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let mgr2 = IndexManager::new(Arc::clone(&data2), Arc::clone(&info2))
+        .await
+        .unwrap();
+
+    let idx = IndexDefinition::new(4001, vec![IndexInfoItem::new(vec![1])]);
+    mgr1.create_index(idx.clone()).await.unwrap();
+    mgr2.create_index(idx).await.unwrap();
+
+    let rid = RecordId::new();
+    let val = create_test_value(&[(1, InnerValue::Str("equiv".to_string()))]);
+
+    // mgr1: on_record_created (wrapper — internally plan+apply)
+    mgr1.on_record_created(&rid, &val).await.unwrap();
+
+    // mgr2: explicit plan + manual apply via store
+    let ops = mgr2.plan_record_created(&rid, &val).await.unwrap();
+    assert!(!ops.is_empty());
+    for op in &ops {
+        match op {
+            crate::index2::write_ops::IndexWriteOp::SetPosting { key, value } => {
+                info2.set(key.clone(), value.clone()).await.unwrap();
+            }
+            crate::index2::write_ops::IndexWriteOp::RemovePosting { key } => {
+                let _ = info2.remove(key.clone()).await;
+            }
+            _ => {}
+        }
+    }
+
+    // Both should return the same lookup result.
+    let r1 = mgr1
+        .lookup_by_index(4001, &[InnerValue::Str("equiv".to_string())])
+        .await
+        .unwrap();
+    let r2 = mgr2
+        .lookup_by_index(4001, &[InnerValue::Str("equiv".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(r1, r2);
+    assert!(r1.contains(&rid));
+}
+
+#[tokio::test]
+async fn unique_index_collision_in_plan_phase() {
+    let data = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let info = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
+    let mgr = IndexManager::new(Arc::clone(&data), Arc::clone(&info))
+        .await
+        .unwrap();
+
+    let idx = IndexDefinition::new(5001, vec![IndexInfoItem::new(vec![1])]);
+    mgr.create_unique_index(idx).await.unwrap();
+
+    let rid1 = RecordId::new();
+    let val = create_test_value(&[(1, InnerValue::Str("dup".to_string()))]);
+
+    // Insert the first record.
+    mgr.validate_unique_for_create(&val).await.unwrap();
+    mgr.on_record_created_unique(&rid1, &val).await.unwrap();
+
+    // Second record with same value — should fail with DuplicateKey.
+    let result = mgr.validate_unique_for_create(&val).await;
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        shamir_storage::error::DbError::DuplicateKey(msg) => {
+            assert!(msg.contains("5001"), "error should mention index name");
+        }
+        other => panic!("expected DuplicateKey, got {:?}", other),
+    }
+}
