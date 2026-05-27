@@ -5,6 +5,7 @@
 //! FTS, Vector) lives behind its own `IndexBackend` impl.
 
 use crate::index2::descriptor::IndexDescriptor;
+use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
@@ -73,4 +74,39 @@ pub trait IndexBackend: Send + Sync {
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError>;
     async fn drop_all(&self) -> Result<(), IndexError>;
+
+    /// Plan ops for an insert. Default: empty vec (backends that
+    /// haven't migrated to the planner API yet rely on the old
+    /// on_insert path — will be removed in 1.1.G).
+    async fn plan_insert(
+        &self,
+        _rid: RecordId,
+        _rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        Ok(Vec::new())
+    }
+
+    async fn plan_update(
+        &self,
+        _rid: RecordId,
+        _old: &InnerValue,
+        _new: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        Ok(Vec::new())
+    }
+
+    async fn plan_delete(
+        &self,
+        _rid: RecordId,
+        _rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        Ok(Vec::new())
+    }
+
+    /// Apply in-memory-only ops (e.g. BumpFtsStats). Called by
+    /// `apply_index_ops` for ops that don't go through the Store.
+    /// Default: no-op.
+    async fn apply_in_memory(&self, _ops: &[IndexWriteOp]) -> Result<(), IndexError> {
+        Ok(())
+    }
 }
