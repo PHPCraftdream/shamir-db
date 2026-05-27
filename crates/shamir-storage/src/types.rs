@@ -270,6 +270,25 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
+    /// Return the unwrapped underlying backend, bypassing any wrapper
+    /// layers (MemBuffer, Cached).
+    ///
+    /// Default: `None` — this Store is already raw. Wrappers override
+    /// and return `Some(inner.clone())`.
+    ///
+    /// Used by the upcoming MvccStore at construction time to obtain
+    /// a write path that bypasses write-back caches: tx commits go
+    /// straight to the durable backend because durability IS the commit
+    /// point.
+    ///
+    /// Note: returns `Option<Arc<dyn Store>>` rather than always-Some
+    /// so non-wrapper backends can answer cheaply (a single None) — the
+    /// caller iterates [`fully_unwrap_store`] only when it needs the
+    /// chain-unwrapped raw store.
+    async fn raw_backend(&self) -> Option<Arc<dyn Store>> {
+        None
+    }
+
     /// Insert many records in one logical batch — for backends that
     /// expose a transactional write API, this collapses N×fsync into
     /// one. For backends that already amortise durability per write
@@ -476,6 +495,19 @@ fn default_range_filter(
             }
         }
     }
+}
+
+/// Walk the `raw_backend` chain until we hit a backend that isn't
+/// a wrapper. Useful when an unwrapper (MvccStore, GcWorker) needs
+/// a write path that no buffer / cache layer intercepts.
+///
+/// Stops at the first `None` — usually one or two hops.
+pub async fn fully_unwrap_store(store: &Arc<dyn Store>) -> Arc<dyn Store> {
+    let mut cur = Arc::clone(store);
+    while let Some(inner) = cur.raw_backend().await {
+        cur = inner;
+    }
+    cur
 }
 
 /// A trait for a repository that can manage multiple `Store` instances.

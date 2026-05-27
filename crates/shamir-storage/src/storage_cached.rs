@@ -320,6 +320,10 @@ impl Store for CachedStore {
         self.inner.apply_buffer_config(config).await
     }
 
+    async fn raw_backend(&self) -> Option<Arc<dyn Store>> {
+        Some(Arc::clone(&self.inner))
+    }
+
     /// Drain pending async writes and propagate the flush down to
     /// the inner store. Reachable through `Arc<dyn Store>` —
     /// without this override the trait dispatcher would land on
@@ -689,6 +693,25 @@ mod tests {
             collect_stream(inner.iter_stream(1000)).await.unwrap().len(),
             50
         );
+    }
+
+    #[tokio::test]
+    async fn raw_backend_unwraps_cached() {
+        let seed_key = Bytes::from_static(b"cached-seed-key");
+        let seed_val = Bytes::from_static(b"cached-seed-val");
+
+        let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        inner.set(seed_key.clone(), seed_val.clone()).await.unwrap();
+
+        let cached: Arc<dyn Store> =
+            Arc::new(CachedStore::new_sync(Arc::clone(&inner)).await.unwrap());
+
+        let raw = cached
+            .raw_backend()
+            .await
+            .expect("CachedStore returns Some");
+        // raw is the same inner — observable via the seeded value
+        assert_eq!(raw.get(seed_key).await.unwrap(), seed_val);
     }
 
     #[tokio::test]

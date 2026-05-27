@@ -568,6 +568,10 @@ impl Store for MemBufferStore {
         self.inner.apply_buffer_config(config).await
     }
 
+    async fn raw_backend(&self) -> Option<Arc<dyn Store>> {
+        Some(Arc::clone(&self.inner))
+    }
+
     /// Delegate to inner store's `transact`, then update cache + dirty
     /// state for all touched keys. The buffer layer doesn't add
     /// atomicity — that comes from the inner backend.
@@ -653,8 +657,9 @@ impl Store for MemBufferStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage_in_memory::InMemoryRepo;
-    use crate::types::{run_batch_store_tests, Repo};
+    use crate::storage_cached::CachedStore;
+    use crate::storage_in_memory::{InMemoryRepo, InMemoryStore};
+    use crate::types::{fully_unwrap_store, run_batch_store_tests, Repo};
 
     fn small_config() -> MemBufferConfig {
         MemBufferConfig {
@@ -995,5 +1000,46 @@ mod tests {
             buffered.state.dirty.is_empty(),
             "dirty must be empty after flush"
         );
+    }
+
+    #[tokio::test]
+    async fn raw_backend_unwraps_membuffer() {
+        let seed_key = Bytes::from_static(b"seed-key");
+        let seed_val = Bytes::from_static(b"seed-value");
+
+        let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        inner.set(seed_key.clone(), seed_val.clone()).await.unwrap();
+
+        let mb: Arc<dyn Store> = Arc::new(MemBufferStore::new(
+            Arc::clone(&inner),
+            MemBufferConfig::default(),
+        ));
+
+        let raw = mb.raw_backend().await.expect("MemBufferStore returns Some");
+        // raw is the same inner — observable via the seeded value
+        assert_eq!(raw.get(seed_key).await.unwrap(), seed_val);
+    }
+
+    #[tokio::test]
+    async fn fully_unwrap_drills_through_chain() {
+        let seed_key = Bytes::from_static(b"chain-key");
+        let seed_val = Bytes::from_static(b"chain-val");
+
+        // Build Cached → MemBuffer → InMemory
+        let raw: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mb: Arc<dyn Store> = Arc::new(MemBufferStore::new(
+            Arc::clone(&raw),
+            MemBufferConfig::default(),
+        ));
+        let cached: Arc<dyn Store> = Arc::new(CachedStore::new_sync(mb.clone()).await.unwrap());
+
+        let unwrapped = fully_unwrap_store(&cached).await;
+
+        // Seed via the fully-unwrapped store; the raw layer must see it
+        unwrapped
+            .set(seed_key.clone(), seed_val.clone())
+            .await
+            .unwrap();
+        assert_eq!(raw.get(seed_key).await.unwrap(), seed_val);
     }
 }
