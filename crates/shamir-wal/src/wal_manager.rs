@@ -8,13 +8,8 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 
+use crate::active_key::WalActiveKey;
 use crate::wal_entry::{WalEntry, WalOp};
-
-/// Prefix used for all WAL marker keys in `info_store`.
-const ACTIVE_PREFIX: &[u8] = b"__wal_active_";
-
-/// Length of the marker key: prefix + 8-byte big-endian txn_id.
-const ACTIVE_KEY_LEN: usize = ACTIVE_PREFIX.len() + 8;
 
 /// Manages WAL markers for one `info_store`.
 pub struct WalManager {
@@ -45,19 +40,11 @@ impl WalManager {
 
     /// Build the marker key for one txn.
     fn marker_key(txn_id: u64) -> Bytes {
-        let mut k = Vec::with_capacity(ACTIVE_KEY_LEN);
-        k.extend_from_slice(ACTIVE_PREFIX);
-        k.extend_from_slice(&txn_id.to_be_bytes());
-        Bytes::from(k)
+        WalActiveKey::new(txn_id).to_bytes()
     }
 
     fn parse_txn_id(key: &[u8]) -> Option<u64> {
-        if key.len() != ACTIVE_KEY_LEN || !key.starts_with(ACTIVE_PREFIX) {
-            return None;
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&key[ACTIVE_PREFIX.len()..]);
-        Some(u64::from_be_bytes(bytes))
+        WalActiveKey::parse(key)
     }
 
     /// Write the in-flight marker for a transaction. Caller must
@@ -130,7 +117,7 @@ impl WalManager {
     pub async fn list_inflight(&self) -> DbResult<Vec<WalEntry>> {
         use futures::StreamExt;
         let mut out: Vec<WalEntry> = Vec::new();
-        let prefix = Bytes::copy_from_slice(ACTIVE_PREFIX);
+        let prefix = WalActiveKey::scan_prefix();
         let stream = self.info_store.scan_prefix_stream(prefix, 1024);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {

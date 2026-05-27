@@ -54,8 +54,10 @@
 //! transaction). Recovery runs in O(operations_per_marker), not
 //! in O(table_size).
 
+pub mod active_key;
 pub mod wal_entry;
 pub mod wal_manager;
 
+pub use active_key::WalActiveKey;
 pub use wal_entry::{WalEntry, WalOp};
 pub use wal_manager::WalManager;
