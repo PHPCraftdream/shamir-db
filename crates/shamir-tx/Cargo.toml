@@ -13,6 +13,7 @@ shamir-types = { path = "../shamir-types" }
 shamir-storage = { path = "../shamir-storage", default-features = false }
 shamir-wal = { path = "../shamir-wal" }
 thiserror = "2.0"
+tokio = { version = "1.49.0", features = ["sync"] }
 
 [dev-dependencies]
 serde_json = "1"
