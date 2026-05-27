@@ -226,33 +226,6 @@ impl IndexBackend for FtsRankedBackend {
         Ok(())
     }
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let ops = self.plan_insert(rid, rec).await?;
-        crate::index2::apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_update(
-        &self,
-        rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
-    ) -> Result<(), IndexError> {
-        let ops = self.plan_update(rid, old, new).await?;
-        crate::index2::apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let ops = self.plan_delete(rid, rec).await?;
-        crate::index2::apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
-        for (rid, rec) in items {
-            self.on_insert(*rid, rec).await?;
-        }
-        Ok(())
-    }
-
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
             IndexQuery::Fts { tokens, mode } => {
@@ -397,6 +370,30 @@ mod tests {
         InnerValue::Map(m)
     }
 
+    async fn apply_insert(
+        backend: &FtsRankedBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) {
+        let ops = backend.plan_insert(rid, rec).await.unwrap();
+        crate::index2::apply_index_ops(&ops, store, backend)
+            .await
+            .unwrap();
+    }
+
+    async fn apply_delete(
+        backend: &FtsRankedBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) {
+        let ops = backend.plan_delete(rid, rec).await.unwrap();
+        crate::index2::apply_index_ops(&ops, store, backend)
+            .await
+            .unwrap();
+    }
+
     fn make_backend(interner: &Interner, store: Arc<dyn Store>) -> FtsRankedBackend {
         let desc = IndexDescriptor::new(
             20,
@@ -415,17 +412,13 @@ mod tests {
     async fn ranked_and_query_returns_scores() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_backend(&i, store);
+        let fts = make_backend(&i, Arc::clone(&store));
 
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         // r1 mentions "rust" 3 times → higher tf
-        fts.on_insert(r1, &make_rec(&i, "rust rust rust is great"))
-            .await
-            .unwrap();
-        fts.on_insert(r2, &make_rec(&i, "rust is ok"))
-            .await
-            .unwrap();
+        apply_insert(&fts, &store, r1, &make_rec(&i, "rust rust rust is great")).await;
+        apply_insert(&fts, &store, r2, &make_rec(&i, "rust is ok")).await;
 
         let result = fts
             .lookup(IndexQuery::Fts {
@@ -450,20 +443,14 @@ mod tests {
     async fn ranked_or_query_union() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_backend(&i, store);
+        let fts = make_backend(&i, Arc::clone(&store));
 
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         let r3 = RecordId::new();
-        fts.on_insert(r1, &make_rec(&i, "alpha beta"))
-            .await
-            .unwrap();
-        fts.on_insert(r2, &make_rec(&i, "gamma delta"))
-            .await
-            .unwrap();
-        fts.on_insert(r3, &make_rec(&i, "alpha gamma"))
-            .await
-            .unwrap();
+        apply_insert(&fts, &store, r1, &make_rec(&i, "alpha beta")).await;
+        apply_insert(&fts, &store, r2, &make_rec(&i, "gamma delta")).await;
+        apply_insert(&fts, &store, r3, &make_rec(&i, "alpha gamma")).await;
 
         let result = fts
             .lookup(IndexQuery::Fts {
@@ -487,11 +474,11 @@ mod tests {
     async fn stats_track_across_insert_delete() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_backend(&i, store);
+        let fts = make_backend(&i, Arc::clone(&store));
 
         let r1 = RecordId::new();
         let rec = make_rec(&i, "hello world foo bar");
-        fts.on_insert(r1, &rec).await.unwrap();
+        apply_insert(&fts, &store, r1, &rec).await;
 
         assert_eq!(
             fts.stats
@@ -501,7 +488,7 @@ mod tests {
         );
         assert!((fts.stats.avg_doc_len() - 4.0).abs() < 0.01);
 
-        fts.on_delete(r1, &rec).await.unwrap();
+        apply_delete(&fts, &store, r1, &rec).await;
         assert_eq!(
             fts.stats
                 .doc_count
@@ -514,23 +501,22 @@ mod tests {
     async fn longer_doc_gets_lower_score() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_backend(&i, store);
+        let fts = make_backend(&i, Arc::clone(&store));
 
         let r_short = RecordId::new();
         let r_long = RecordId::new();
         // Same tf=1 for "rust", but r_long has many more words.
-        fts.on_insert(r_short, &make_rec(&i, "rust rocks"))
-            .await
-            .unwrap();
-        fts.on_insert(
+        apply_insert(&fts, &store, r_short, &make_rec(&i, "rust rocks")).await;
+        apply_insert(
+            &fts,
+            &store,
             r_long,
             &make_rec(
                 &i,
                 "rust is just one of many many many many many words here",
             ),
         )
-        .await
-        .unwrap();
+        .await;
 
         let result = fts
             .lookup(IndexQuery::Fts {
@@ -573,7 +559,7 @@ mod tests {
                 .await
                 .unwrap();
             // Also feed into FTS so postings exist (rebuild only updates stats).
-            fts.on_insert(rid, rec).await.unwrap();
+            apply_insert(&fts, &info_store, rid, rec).await;
         }
 
         // Verify stats are correct after inserts.
@@ -695,48 +681,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equivalence_plan_apply_vs_on_insert_ranked() {
+    async fn plan_apply_round_trip_ranked() {
         let i = Interner::new();
-        let store_d: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let store_p: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let b_d = make_backend(&i, Arc::clone(&store_d));
-        let b_p = make_backend(&i, Arc::clone(&store_p));
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_backend(&i, Arc::clone(&store));
         let rec = make_rec(&i, "rust is fast and safe");
         let rid = RecordId::new();
 
-        b_d.on_insert(rid, &rec).await.unwrap();
-        let ops = b_p.plan_insert(rid, &rec).await.unwrap();
-        crate::index2::apply_index_ops(&ops, &store_p, &b_p)
+        apply_insert(&backend, &store, rid, &rec).await;
+
+        // Stats should reflect the insert
+        assert_eq!(
+            backend
+                .stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+
+        // Lookup should find the record
+        let result = backend
+            .lookup(IndexQuery::Fts {
+                tokens: vec![token_hash("rust")],
+                mode: FtsMode::AndAll,
+            })
             .await
             .unwrap();
-
-        // Compare store contents
-        let mut d = Vec::new();
-        let mut s = store_d.iter_stream(1000);
-        while let Some(b) = s.next().await {
-            d.extend(b.unwrap());
+        match result {
+            IndexResult::Ranked(ranked) => {
+                assert_eq!(ranked.len(), 1);
+                assert_eq!(ranked[0].0, rid);
+            }
+            _ => panic!("expected Ranked"),
         }
-        let mut p = Vec::new();
-        let mut s = store_p.iter_stream(1000);
-        while let Some(b) = s.next().await {
-            p.extend(b.unwrap());
-        }
-        d.sort_by(|a, b| a.0.cmp(&b.0));
-        p.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(d.len(), p.len());
-        for (a, b) in d.iter().zip(p.iter()) {
-            assert_eq!(a.0, b.0);
-            assert_eq!(a.1, b.1);
-        }
-
-        // Compare stats
-        assert_eq!(
-            b_d.stats
-                .doc_count
-                .load(std::sync::atomic::Ordering::Relaxed),
-            b_p.stats
-                .doc_count
-                .load(std::sync::atomic::Ordering::Relaxed),
-        );
     }
 }

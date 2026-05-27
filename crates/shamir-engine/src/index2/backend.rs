@@ -60,24 +60,12 @@ pub enum IndexError {
 pub trait IndexBackend: Send + Sync {
     fn descriptor(&self) -> &IndexDescriptor;
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError>;
-    async fn on_update(
-        &self,
-        rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
-    ) -> Result<(), IndexError>;
-    async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError>;
-    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError>;
-
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError>;
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError>;
     async fn drop_all(&self) -> Result<(), IndexError>;
 
-    /// Plan ops for an insert. Default: empty vec (backends that
-    /// haven't migrated to the planner API yet rely on the old
-    /// on_insert path — will be removed in 1.1.G).
+    /// Plan ops for an insert.
     async fn plan_insert(
         &self,
         _rid: RecordId,

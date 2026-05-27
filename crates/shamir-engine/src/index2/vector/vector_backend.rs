@@ -6,6 +6,7 @@
 use super::adapter::{VectorAdapter, VectorError};
 use crate::index2::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::index2::descriptor::IndexDescriptor;
+use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
@@ -70,37 +71,42 @@ impl IndexBackend for VectorBackend {
         &self.descriptor
     }
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
+    // TODO(1.2): move HNSW mutation to staging layer. Currently
+    // plan_insert/update/delete perform side-effects (adapter.upsert/delete)
+    // and return empty ops — a known compromise until Stage 1.2 lands.
+
+    async fn plan_insert(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(rec) {
             self.adapter.upsert(rid, &v).await.map_err(ve)?;
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
-    async fn on_update(
+    async fn plan_update(
         &self,
         rid: RecordId,
         _old: &InnerValue,
         new: &InnerValue,
-    ) -> Result<(), IndexError> {
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(new) {
             self.adapter.upsert(rid, &v).await.map_err(ve)?;
         } else {
             self.adapter.delete(rid).await.map_err(ve)?;
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
-    async fn on_delete(&self, rid: RecordId, _rec: &InnerValue) -> Result<(), IndexError> {
+    async fn plan_delete(
+        &self,
+        rid: RecordId,
+        _rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
         self.adapter.delete(rid).await.map_err(ve)?;
-        Ok(())
-    }
-
-    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
-        for (rid, rec) in items {
-            self.on_insert(*rid, rec).await?;
-        }
-        Ok(())
+        Ok(Vec::new())
     }
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
@@ -200,11 +206,11 @@ mod tests {
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         backend
-            .on_insert(r1, &make_rec(&i, &[1.0, 0.0, 0.0]))
+            .plan_insert(r1, &make_rec(&i, &[1.0, 0.0, 0.0]))
             .await
             .unwrap();
         backend
-            .on_insert(r2, &make_rec(&i, &[0.0, 1.0, 0.0]))
+            .plan_insert(r2, &make_rec(&i, &[0.0, 1.0, 0.0]))
             .await
             .unwrap();
 
@@ -234,10 +240,10 @@ mod tests {
 
         let r1 = RecordId::new();
         let rec = make_rec(&i, &[1.0, 0.0, 0.0]);
-        backend.on_insert(r1, &rec).await.unwrap();
+        backend.plan_insert(r1, &rec).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        backend.on_delete(r1, &rec).await.unwrap();
+        backend.plan_delete(r1, &rec).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let result = backend
