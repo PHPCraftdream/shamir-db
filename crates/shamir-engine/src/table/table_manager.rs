@@ -774,7 +774,7 @@ impl TableManager {
     /// Persists src first so the bytes are current.
     pub async fn replicate_interner_from(&self, src: &TableManager) -> DbResult<()> {
         src.interner().persist().await?;
-        let key = shamir_types::types::record_id::RecordId::system("internals").to_bytes();
+        let key = crate::meta::MetaKey::Internals.as_record_id().to_bytes();
         match src.info_store.get(key.clone()).await {
             Ok(bytes) => {
                 self.info_store.set(key, bytes).await?;

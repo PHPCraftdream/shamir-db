@@ -11,6 +11,7 @@
 //! persist call the engine already makes (and is itself a no-op when
 //! nothing changed).
 
+use crate::meta::MetaKey;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 use shamir_types::codecs::basic::bincode;
@@ -22,7 +23,7 @@ use tokio::sync::OnceCell;
 
 /// Get the system record key for storing record count
 fn count_key() -> RecordId {
-    RecordId::system("count")
+    MetaKey::Count.as_record_id()
 }
 
 /// Manages record count in a table.

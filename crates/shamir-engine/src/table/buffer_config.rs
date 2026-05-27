@@ -7,17 +7,17 @@
 //! hot-reload-style to the store stack via
 //! `Store::apply_buffer_config`.
 
+use crate::meta::MetaKey;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_membuffer::MemBufferConfig;
 use shamir_storage::types::Store;
-use shamir_types::types::record_id::RecordId;
 
 /// System record-id used to persist the per-table buffer config.
 fn buffer_config_key() -> Bytes {
-    RecordId::system("buffer_config").to_bytes()
+    MetaKey::BufferConfig.as_record_id().to_bytes()
 }
 
 /// Read the persisted buffer config for the table whose
