@@ -562,6 +562,71 @@ async fn string_prefix_does_not_match_longer_value() {
 }
 
 // ---------------------------------------------------------------------------
+// tx-aware forward-equality tests — Stage 3.4
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn lookup_range_tx_none_equals_lookup_range() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    for score in [3, 1, 7, 5, 2] {
+        let id = RecordId::new();
+        let rec = record_with_int(201, score);
+        mgr.on_record_created(&id, &rec).await.unwrap();
+    }
+
+    let a = mgr.lookup_range(101, None, None).await.unwrap();
+    let b = mgr.lookup_range_tx(101, None, None, None).await.unwrap();
+    assert_eq!(a, b);
+}
+
+#[tokio::test]
+async fn lookup_min_max_tx_none_equal_non_tx() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    for score in [50, 10, 30, 5, 20] {
+        let id = RecordId::new();
+        let rec = record_with_int(201, score);
+        mgr.on_record_created(&id, &rec).await.unwrap();
+    }
+
+    assert_eq!(
+        mgr.lookup_min(101).await.unwrap(),
+        mgr.lookup_min_tx(101, None).await.unwrap()
+    );
+    assert_eq!(
+        mgr.lookup_max(101).await.unwrap(),
+        mgr.lookup_max_tx(101, None).await.unwrap()
+    );
+}
+
+#[tokio::test]
+async fn lookup_first_last_k_tx_none_equal_non_tx() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    for score in [50, 10, 30, 5, 20, 40] {
+        let id = RecordId::new();
+        let rec = record_with_int(201, score);
+        mgr.on_record_created(&id, &rec).await.unwrap();
+    }
+
+    assert_eq!(
+        mgr.lookup_first_k(101, 3).await.unwrap(),
+        mgr.lookup_first_k_tx(101, 3, None).await.unwrap()
+    );
+    assert_eq!(
+        mgr.lookup_last_k(101, 3).await.unwrap(),
+        mgr.lookup_last_k_tx(101, 3, None).await.unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Planner (plan_record_*) tests — Stage 1.1.F
 // ---------------------------------------------------------------------------
 
