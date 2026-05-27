@@ -17,6 +17,20 @@ pub enum MetaKey {
     Wal,
     /// Active migration coordinator state.
     Migrations,
+    /// Interner state. Currently inline as RecordId::system("internals").
+    Internals,
+    /// Record counter persisted value. Inline as system("count").
+    Count,
+    /// MemBuffer config persistence. Inline as system("buffer_config").
+    BufferConfig,
+    /// SortedIndexManager registry. Inline as system("sorted_indexes").
+    SortedIndexes,
+    /// Legacy IndexManager regular-index registry.
+    /// Inline as system("indexes").
+    LegacyIndexes,
+    /// Legacy IndexManager unique-index registry.
+    /// Inline as system("indexes_unique").
+    LegacyIndexesUnique,
 }
 
 impl MetaKey {
@@ -28,6 +42,12 @@ impl MetaKey {
             MetaKey::Tables => "_m.tbl",
             MetaKey::Wal => "_m.wal",
             MetaKey::Migrations => "_m.mig",
+            MetaKey::Internals => "internals",
+            MetaKey::Count => "count",
+            MetaKey::BufferConfig => "buffer_config",
+            MetaKey::SortedIndexes => "sorted_indexes",
+            MetaKey::LegacyIndexes => "indexes",
+            MetaKey::LegacyIndexesUnique => "indexes_unique",
         }
     }
 
@@ -41,26 +61,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tags_are_short_and_distinct() {
+    fn record_ids_are_distinct() {
         let all = [
             MetaKey::Indexes,
             MetaKey::Tables,
             MetaKey::Wal,
             MetaKey::Migrations,
+            MetaKey::Internals,
+            MetaKey::Count,
+            MetaKey::BufferConfig,
+            MetaKey::SortedIndexes,
+            MetaKey::LegacyIndexes,
+            MetaKey::LegacyIndexesUnique,
         ];
-        for k in all {
-            assert!(k.tag().len() <= 12, "{:?} tag too long", k);
-        }
-        // distinct
-        let mut tags: Vec<&str> = all.iter().map(|k| k.tag()).collect();
-        tags.sort();
-        tags.dedup();
-        assert_eq!(tags.len(), all.len());
+        let mut rids: Vec<_> = all.iter().map(|k| k.as_record_id()).collect();
+        let original = rids.clone();
+        rids.sort();
+        rids.dedup();
+        assert_eq!(
+            rids.len(),
+            original.len(),
+            "all MetaKey variants must produce distinct RecordIds (no truncation collision)"
+        );
     }
 
     #[test]
     fn record_id_is_system() {
-        let rid = MetaKey::Indexes.as_record_id();
-        assert!(rid.is_system());
+        let all = [
+            MetaKey::Indexes,
+            MetaKey::Tables,
+            MetaKey::Wal,
+            MetaKey::Migrations,
+            MetaKey::Internals,
+            MetaKey::Count,
+            MetaKey::BufferConfig,
+            MetaKey::SortedIndexes,
+            MetaKey::LegacyIndexes,
+            MetaKey::LegacyIndexesUnique,
+        ];
+        for k in all {
+            assert!(
+                k.as_record_id().is_system(),
+                "{:?} must be a system record",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn tags_match_legacy_literal_encoding() {
+        // Each new MetaKey variant must produce EXACTLY the same
+        // RecordId bytes as the inline literal it replaces. Otherwise
+        // on-disk data persisted before this refactor becomes invisible.
+        assert_eq!(
+            MetaKey::Internals.as_record_id(),
+            RecordId::system("internals")
+        );
+        assert_eq!(MetaKey::Count.as_record_id(), RecordId::system("count"));
+        assert_eq!(
+            MetaKey::BufferConfig.as_record_id(),
+            RecordId::system("buffer_config")
+        );
+        assert_eq!(
+            MetaKey::SortedIndexes.as_record_id(),
+            RecordId::system("sorted_indexes")
+        );
+        assert_eq!(
+            MetaKey::LegacyIndexes.as_record_id(),
+            RecordId::system("indexes")
+        );
+        assert_eq!(
+            MetaKey::LegacyIndexesUnique.as_record_id(),
+            RecordId::system("indexes_unique")
+        );
     }
 }
