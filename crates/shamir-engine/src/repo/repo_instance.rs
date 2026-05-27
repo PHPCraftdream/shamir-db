@@ -13,6 +13,10 @@ pub struct RepoInstance {
     repo: BoxRepo,
     configs: Arc<TDashMap<String, TableConfig>>,
     tables: Arc<TDashMap<String, OnceCell<TableManager>>>,
+    /// Lazy-initialized RepoTxGate. Created on first call to `tx_gate()`.
+    tx_gate: Arc<OnceCell<Arc<shamir_tx::RepoTxGate>>>,
+    /// Lazy-initialized RepoWalManager. Created on first call to `repo_wal()`.
+    repo_wal: Arc<OnceCell<Arc<shamir_tx::RepoWalManager>>>,
 }
 
 impl Clone for RepoInstance {
@@ -21,6 +25,8 @@ impl Clone for RepoInstance {
             repo: self.repo.clone(),
             configs: Arc::clone(&self.configs),
             tables: Arc::clone(&self.tables),
+            tx_gate: Arc::clone(&self.tx_gate),
+            repo_wal: Arc::clone(&self.repo_wal),
         }
     }
 }
@@ -42,6 +48,8 @@ impl RepoInstance {
             repo,
             configs: Arc::new(configs_map),
             tables: Arc::new(tables),
+            tx_gate: Arc::new(OnceCell::new()),
+            repo_wal: Arc::new(OnceCell::new()),
         }
     }
 
@@ -123,6 +131,56 @@ impl RepoInstance {
             self.tables.remove(table_name);
         }
         removed
+    }
+
+    /// Returns the per-repo transaction gate, lazily initialising it on
+    /// first call.
+    ///
+    /// The gate is seeded from durable recovery markers stored under the
+    /// repo's `"__tx__"` info store:
+    /// - `last_committed_version` from `MetaKey::LastCommittedVersion`
+    /// - `next_tx_id` from `MetaKey::NextTxId`
+    ///
+    /// Recovery marker reads are best-effort — if absent we start from
+    /// defaults (`RepoTxGate::fresh()`).
+    pub async fn tx_gate(&self) -> DbResult<Arc<shamir_tx::RepoTxGate>> {
+        self.tx_gate
+            .get_or_try_init(|| async {
+                let info_store = self.repo.store_get("__tx__").await?;
+
+                let last_committed = crate::meta::recovery_marker::load_last_committed(&info_store)
+                    .await
+                    .unwrap_or(None)
+                    .unwrap_or(0);
+                let next_tx_id =
+                    crate::meta::recovery_marker::load_next_tx_id_snapshot(&info_store)
+                        .await
+                        .unwrap_or(None)
+                        .unwrap_or(1);
+
+                let gate = shamir_tx::RepoTxGate::new(last_committed, next_tx_id);
+                Ok::<Arc<shamir_tx::RepoTxGate>, DbError>(Arc::new(gate))
+            })
+            .await
+            .cloned()
+    }
+
+    /// Returns the per-repo WAL manager, lazily initialising it on first
+    /// call. Shares the `"__tx__"` info store with [`tx_gate`].
+    pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
+        self.repo_wal
+            .get_or_try_init(|| async {
+                let info_store = self.repo.store_get("__tx__").await?;
+                let initial_txn_id =
+                    crate::meta::recovery_marker::load_next_tx_id_snapshot(&info_store)
+                        .await
+                        .unwrap_or(None)
+                        .unwrap_or(1);
+                let mgr = shamir_tx::RepoWalManager::new(info_store, initial_txn_id);
+                Ok::<Arc<shamir_tx::RepoWalManager>, DbError>(Arc::new(mgr))
+            })
+            .await
+            .cloned()
     }
 
     // ============================================================================
