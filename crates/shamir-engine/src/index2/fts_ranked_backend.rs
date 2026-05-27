@@ -9,6 +9,7 @@ use crate::index2::bm25::{self, Bm25Params, FtsPostingValue, FtsStats};
 use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 use crate::index2::tokenizer::{self, token_hash, Tokenizer, WhitespaceTokenizer};
+use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -127,39 +128,47 @@ impl IndexBackend for FtsRankedBackend {
         &self.descriptor
     }
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
+    async fn plan_insert(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let (freq, doc_len) = self.tokenize_with_freq(rec);
         if doc_len == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
+        let mut ops = Vec::with_capacity(freq.len() + 1);
         for (th, tf) in &freq {
             let key = self.posting_key_for_token(*th, &rid);
             let pv = FtsPostingValue { tf: *tf, doc_len };
             let val = bincode::serialize(&pv).map_err(|e| IndexError::Backend(e.to_string()))?;
-            self.store
-                .set(Bytes::from(key), Bytes::from(val))
-                .await
-                .map_err(|e| IndexError::Storage(e.to_string()))?;
+            ops.push(IndexWriteOp::SetPosting {
+                key: Bytes::from(key),
+                value: Bytes::from(val),
+            });
         }
-        self.stats.on_insert(doc_len);
-        Ok(())
+        ops.push(IndexWriteOp::BumpFtsStats { doc_len, sign: 1 });
+        Ok(ops)
     }
 
-    async fn on_update(
+    async fn plan_update(
         &self,
         rid: RecordId,
         old: &InnerValue,
         new: &InnerValue,
-    ) -> Result<(), IndexError> {
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let old_set = self.tokenize_set(old);
         let (new_freq, new_doc_len) = self.tokenize_with_freq(new);
         let (_, old_doc_len) = self.tokenize_with_freq(old);
         let new_set: HashSet<u64> = new_freq.keys().copied().collect();
 
+        let mut ops = Vec::new();
         // Remove disappeared tokens.
         for &th in old_set.difference(&new_set) {
             let key = self.posting_key_for_token(th, &rid);
-            let _ = self.store.remove(Bytes::from(key)).await;
+            ops.push(IndexWriteOp::RemovePosting {
+                key: Bytes::from(key),
+            });
         }
         // Add/update all tokens in new (tf or doc_len may have changed).
         for (th, tf) in &new_freq {
@@ -169,26 +178,72 @@ impl IndexBackend for FtsRankedBackend {
                 doc_len: new_doc_len,
             };
             let val = bincode::serialize(&pv).map_err(|e| IndexError::Backend(e.to_string()))?;
-            self.store
-                .set(Bytes::from(key), Bytes::from(val))
-                .await
-                .map_err(|e| IndexError::Storage(e.to_string()))?;
+            ops.push(IndexWriteOp::SetPosting {
+                key: Bytes::from(key),
+                value: Bytes::from(val),
+            });
         }
-        self.stats.on_delete(old_doc_len);
-        self.stats.on_insert(new_doc_len);
+        ops.push(IndexWriteOp::BumpFtsStats {
+            doc_len: old_doc_len,
+            sign: -1,
+        });
+        ops.push(IndexWriteOp::BumpFtsStats {
+            doc_len: new_doc_len,
+            sign: 1,
+        });
+        Ok(ops)
+    }
+
+    async fn plan_delete(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        let (freq, doc_len) = self.tokenize_with_freq(rec);
+        let mut ops = Vec::with_capacity(freq.len() + 1);
+        for th in freq.keys() {
+            let key = self.posting_key_for_token(*th, &rid);
+            ops.push(IndexWriteOp::RemovePosting {
+                key: Bytes::from(key),
+            });
+        }
+        if doc_len > 0 {
+            ops.push(IndexWriteOp::BumpFtsStats { doc_len, sign: -1 });
+        }
+        Ok(ops)
+    }
+
+    async fn apply_in_memory(&self, ops: &[IndexWriteOp]) -> Result<(), IndexError> {
+        for op in ops {
+            if let IndexWriteOp::BumpFtsStats { doc_len, sign } = op {
+                if *sign > 0 {
+                    self.stats.on_insert(*doc_len);
+                } else {
+                    self.stats.on_delete(*doc_len);
+                }
+            }
+        }
         Ok(())
     }
 
+    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
+        let ops = self.plan_insert(rid, rec).await?;
+        crate::index2::apply_index_ops(&ops, &self.store, self).await
+    }
+
+    async fn on_update(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) -> Result<(), IndexError> {
+        let ops = self.plan_update(rid, old, new).await?;
+        crate::index2::apply_index_ops(&ops, &self.store, self).await
+    }
+
     async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let (freq, doc_len) = self.tokenize_with_freq(rec);
-        for th in freq.keys() {
-            let key = self.posting_key_for_token(*th, &rid);
-            let _ = self.store.remove(Bytes::from(key)).await;
-        }
-        if doc_len > 0 {
-            self.stats.on_delete(doc_len);
-        }
-        Ok(())
+        let ops = self.plan_delete(rid, rec).await?;
+        crate::index2::apply_index_ops(&ops, &self.store, self).await
     }
 
     async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
@@ -567,5 +622,121 @@ mod tests {
             14
         );
         assert!((fts.stats.avg_doc_len() - 3.5).abs() < 0.01); // 14/4
+    }
+
+    #[tokio::test]
+    async fn plan_insert_returns_postings_plus_bump() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let fts = make_backend(&i, Arc::clone(&store));
+        let rec = make_rec(&i, "hello world");
+        let rid = RecordId::new();
+        let ops = fts.plan_insert(rid, &rec).await.unwrap();
+        let set_count = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::SetPosting { .. }))
+            .count();
+        let bump_count = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::BumpFtsStats { sign: 1, .. }))
+            .count();
+        assert_eq!(set_count, 2); // "hello" + "world"
+        assert_eq!(bump_count, 1);
+    }
+
+    #[tokio::test]
+    async fn plan_delete_returns_removes_plus_bump_negative() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let fts = make_backend(&i, Arc::clone(&store));
+        let rec = make_rec(&i, "alpha beta");
+        let rid = RecordId::new();
+        let ops = fts.plan_delete(rid, &rec).await.unwrap();
+        let rem_count = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::RemovePosting { .. }))
+            .count();
+        let bump_neg = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::BumpFtsStats { sign: -1, .. }))
+            .count();
+        assert_eq!(rem_count, 2);
+        assert_eq!(bump_neg, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_in_memory_bumps_stats() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let fts = make_backend(&i, Arc::clone(&store));
+        let ops = vec![
+            IndexWriteOp::BumpFtsStats {
+                doc_len: 10,
+                sign: 1,
+            },
+            IndexWriteOp::BumpFtsStats {
+                doc_len: 3,
+                sign: 1,
+            },
+        ];
+        fts.apply_in_memory(&ops).await.unwrap();
+        assert_eq!(
+            fts.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            fts.stats
+                .sum_doc_len
+                .load(std::sync::atomic::Ordering::Relaxed),
+            13
+        );
+    }
+
+    #[tokio::test]
+    async fn equivalence_plan_apply_vs_on_insert_ranked() {
+        let i = Interner::new();
+        let store_d: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let store_p: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let b_d = make_backend(&i, Arc::clone(&store_d));
+        let b_p = make_backend(&i, Arc::clone(&store_p));
+        let rec = make_rec(&i, "rust is fast and safe");
+        let rid = RecordId::new();
+
+        b_d.on_insert(rid, &rec).await.unwrap();
+        let ops = b_p.plan_insert(rid, &rec).await.unwrap();
+        crate::index2::apply_index_ops(&ops, &store_p, &b_p)
+            .await
+            .unwrap();
+
+        // Compare store contents
+        let mut d = Vec::new();
+        let mut s = store_d.iter_stream(1000);
+        while let Some(b) = s.next().await {
+            d.extend(b.unwrap());
+        }
+        let mut p = Vec::new();
+        let mut s = store_p.iter_stream(1000);
+        while let Some(b) = s.next().await {
+            p.extend(b.unwrap());
+        }
+        d.sort_by(|a, b| a.0.cmp(&b.0));
+        p.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(d.len(), p.len());
+        for (a, b) in d.iter().zip(p.iter()) {
+            assert_eq!(a.0, b.0);
+            assert_eq!(a.1, b.1);
+        }
+
+        // Compare stats
+        assert_eq!(
+            b_d.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            b_p.stats
+                .doc_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
     }
 }
