@@ -799,21 +799,27 @@ mod tests {
             .await
             .unwrap();
 
-        // Spawn observer that reads both keys repeatedly
+        // Spawn observer that reads both keys repeatedly within a single
+        // `get_many` call — that uses one read_txn, so we observe an
+        // atomic snapshot. Two separate `get` calls would each open
+        // their own read_txn and could legitimately straddle the commit
+        // boundary; that's redb's documented snapshot semantics, not a
+        // transact bug.
         let obs_store = repo.store_get("transact_test").await.unwrap();
         let k1c = k1.clone();
         let k2c = k2.clone();
         let observer = tokio::spawn(async move {
             for _ in 0..50 {
-                let a = obs_store.get(k1c.clone()).await.ok();
-                let b = obs_store.get(k2c.clone()).await.ok();
-                // Either both old OR both new. Never mixed.
-                if let (Some(va), Some(vb)) = (&a, &b) {
+                let pair = obs_store
+                    .get_many(vec![k1c.clone(), k2c.clone()])
+                    .await
+                    .unwrap();
+                if let (Some(va), Some(vb)) = (&pair[0], &pair[1]) {
                     let a_new = va.as_ref() == b"new1";
                     let b_new = vb.as_ref() == b"new2";
                     assert_eq!(
                         a_new, b_new,
-                        "partial state observed: a={:?} b={:?}",
+                        "partial state observed in single snapshot: a={:?} b={:?}",
                         va, vb
                     );
                 }
