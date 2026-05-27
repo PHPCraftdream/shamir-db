@@ -1,10 +1,10 @@
 //! Interner manager for lazy loading and persistence
 
+use crate::meta::MetaKey;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 use shamir_types::codecs::basic::bincode;
 use shamir_types::core::interner::{Interner, InternerKey, UserKey};
-use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -67,7 +67,7 @@ impl InternerManager {
         interner_cell
             .get_or_init(|| async move {
                 // Load from storage
-                let internals_id = RecordId::system("internals").to_bytes();
+                let internals_id = MetaKey::Internals.as_record_id().to_bytes();
                 let inter_data = info_store.get(internals_id).await;
 
                 if let Ok(bytes) = inter_data {
@@ -95,7 +95,7 @@ impl InternerManager {
         }
 
         // Read existing
-        let internals_id = RecordId::system("internals");
+        let internals_id = MetaKey::Internals.as_record_id();
         let existing = self.info_store.get(internals_id.to_bytes()).await;
         let mut current: Vec<(InternerKey, UserKey)> = if let Ok(bytes) = existing {
             bincode::from_bytes(&bytes).unwrap_or_default()
@@ -143,7 +143,7 @@ impl InternerManager {
             return Ok(());
         }
 
-        let internals_id = RecordId::system("internals");
+        let internals_id = MetaKey::Internals.as_record_id();
         let bytes = bincode::to_bytes(&entries).map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize interner: {}", e))
         })?;
