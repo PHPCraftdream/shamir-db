@@ -43,6 +43,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use crate::meta::MetaKey;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 use shamir_types::core::sort_codec;
@@ -475,7 +476,7 @@ impl SortedIndexManager {
         let bytes = bincode::serialize(&defs).map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("sorted-index defs encode: {e}"))
         })?;
-        let sys_id = shamir_types::types::record_id::RecordId::system("sorted_indexes");
+        let sys_id = MetaKey::SortedIndexes.as_record_id();
         self.info_store
             .set(sys_id.to_bytes(), Bytes::from(bytes))
             .await?;
@@ -483,7 +484,7 @@ impl SortedIndexManager {
     }
 
     async fn load(&self) -> DbResult<()> {
-        let sys_id = shamir_types::types::record_id::RecordId::system("sorted_indexes");
+        let sys_id = MetaKey::SortedIndexes.as_record_id();
         let bytes = match self.info_store.get(sys_id.to_bytes()).await {
             Ok(b) => b,
             Err(_) => return Ok(()),

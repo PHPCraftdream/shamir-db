@@ -18,6 +18,7 @@ use crate::index::index_definition::IndexDefinition;
 use crate::index::index_info::IndexInfo;
 use crate::index::index_info_item::IndexInfoItem;
 use crate::index::index_record_key::IndexRecordKey;
+use crate::meta::MetaKey;
 use bytes::Bytes;
 use dashmap::DashMap;
 use shamir_storage::error::DbResult;
@@ -120,8 +121,8 @@ impl IndexManager {
         info_store: Arc<dyn Store>,
     ) -> Result<Self, shamir_storage::error::DbError> {
         // Ключи для хранения метаданных индексов в служебном хранилище
-        let indexes_key = RecordId::system("indexes").to_bytes();
-        let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
+        let indexes_key = MetaKey::LegacyIndexes.as_record_id().to_bytes();
+        let indexes_unique_key = MetaKey::LegacyIndexesUnique.as_record_id().to_bytes();
 
         // Загружаем обычные индексы или создаём пустую структуру
         let indexes = match info_store.get(indexes_key.clone()).await {
@@ -490,7 +491,7 @@ impl IndexManager {
     /// Сериализует напрямую без клонирования — IndexInfo::serialize конвертирует
     /// DashMap в BTreeMap внутри себя.
     async fn save_index_info(&self) -> DbResult<()> {
-        let indexes_key = RecordId::system("indexes").to_bytes();
+        let indexes_key = MetaKey::LegacyIndexes.as_record_id().to_bytes();
         let bytes = bincode::serialize(&*self.indexes)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(indexes_key, Bytes::from(bytes)).await?;
@@ -1209,7 +1210,7 @@ impl IndexManager {
 
     /// Сохраняет метаданные уникальных индексов в служебное хранилище.
     async fn save_index_info_unique(&self) -> DbResult<()> {
-        let indexes_key = RecordId::system("indexes_unique").to_bytes();
+        let indexes_key = MetaKey::LegacyIndexesUnique.as_record_id().to_bytes();
         let bytes = bincode::serialize(&*self.indexes_unique)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(indexes_key, Bytes::from(bytes)).await?;
