@@ -8,6 +8,7 @@ use crate::index2::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, Inde
 use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 use crate::index2::tokenizer::{self, token_hash, Tokenizer, WhitespaceTokenizer};
+use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -121,16 +122,69 @@ impl IndexBackend for FtsBackend {
         &self.descriptor
     }
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
+    async fn plan_insert(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let tokens = self.tokenize_record(rec);
+        let mut ops = Vec::with_capacity(tokens.len());
         for th in tokens {
             let key = self.posting_key_for_token(th, &rid);
-            self.store
-                .set(Bytes::from(key), Bytes::new())
-                .await
-                .map_err(|e| IndexError::Storage(e.to_string()))?;
+            ops.push(IndexWriteOp::SetPosting {
+                key: Bytes::from(key),
+                value: Bytes::new(),
+            });
         }
-        Ok(())
+        Ok(ops)
+    }
+
+    async fn plan_update(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        let old_tokens = self.tokenize_record(old);
+        let new_tokens = self.tokenize_record(new);
+        let mut ops = Vec::new();
+        // Remove tokens that disappeared.
+        for &th in old_tokens.difference(&new_tokens) {
+            let key = self.posting_key_for_token(th, &rid);
+            ops.push(IndexWriteOp::RemovePosting {
+                key: Bytes::from(key),
+            });
+        }
+        // Add tokens that appeared.
+        for &th in new_tokens.difference(&old_tokens) {
+            let key = self.posting_key_for_token(th, &rid);
+            ops.push(IndexWriteOp::SetPosting {
+                key: Bytes::from(key),
+                value: Bytes::new(),
+            });
+        }
+        Ok(ops)
+    }
+
+    async fn plan_delete(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        let tokens = self.tokenize_record(rec);
+        let mut ops = Vec::with_capacity(tokens.len());
+        for th in tokens {
+            let key = self.posting_key_for_token(th, &rid);
+            ops.push(IndexWriteOp::RemovePosting {
+                key: Bytes::from(key),
+            });
+        }
+        Ok(ops)
+    }
+
+    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
+        let ops = self.plan_insert(rid, rec).await?;
+        crate::index2::apply_index_ops(&ops, &self.store, self).await
     }
 
     async fn on_update(
@@ -139,31 +193,13 @@ impl IndexBackend for FtsBackend {
         old: &InnerValue,
         new: &InnerValue,
     ) -> Result<(), IndexError> {
-        let old_tokens = self.tokenize_record(old);
-        let new_tokens = self.tokenize_record(new);
-        // Remove tokens that disappeared.
-        for &th in old_tokens.difference(&new_tokens) {
-            let key = self.posting_key_for_token(th, &rid);
-            let _ = self.store.remove(Bytes::from(key)).await;
-        }
-        // Add tokens that appeared.
-        for &th in new_tokens.difference(&old_tokens) {
-            let key = self.posting_key_for_token(th, &rid);
-            self.store
-                .set(Bytes::from(key), Bytes::new())
-                .await
-                .map_err(|e| IndexError::Storage(e.to_string()))?;
-        }
-        Ok(())
+        let ops = self.plan_update(rid, old, new).await?;
+        crate::index2::apply_index_ops(&ops, &self.store, self).await
     }
 
     async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let tokens = self.tokenize_record(rec);
-        for th in tokens {
-            let key = self.posting_key_for_token(th, &rid);
-            let _ = self.store.remove(Bytes::from(key)).await;
-        }
-        Ok(())
+        let ops = self.plan_delete(rid, rec).await?;
+        crate::index2::apply_index_ops(&ops, &self.store, self).await
     }
 
     async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
@@ -423,6 +459,98 @@ mod tests {
         match r {
             IndexResult::Set(s) => assert!(s.is_empty()),
             _ => panic!("expected Set"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_insert_returns_set_postings() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_fts(&i, Arc::clone(&store));
+        let rec = make_rec(&i, "hello world hello");
+        let rid = RecordId::new();
+        let ops = backend.plan_insert(rid, &rec).await.unwrap();
+        // "hello" and "world" -> 2 unique tokens -> 2 SetPostings
+        assert_eq!(ops.len(), 2);
+        assert!(ops
+            .iter()
+            .all(|op| matches!(op, IndexWriteOp::SetPosting { .. })));
+    }
+
+    #[tokio::test]
+    async fn plan_update_returns_diff_ops() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_fts(&i, Arc::clone(&store));
+        let old_rec = make_rec(&i, "hello world");
+        let new_rec = make_rec(&i, "hello rust");
+        let rid = RecordId::new();
+        let ops = backend.plan_update(rid, &old_rec, &new_rec).await.unwrap();
+        // "world" removed, "rust" added, "hello" unchanged
+        let removes: Vec<_> = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::RemovePosting { .. }))
+            .collect();
+        let sets: Vec<_> = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::SetPosting { .. }))
+            .collect();
+        assert_eq!(removes.len(), 1); // "world"
+        assert_eq!(sets.len(), 1); // "rust"
+    }
+
+    #[tokio::test]
+    async fn plan_delete_returns_remove_for_all_postings() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_fts(&i, Arc::clone(&store));
+        let rec = make_rec(&i, "foo bar baz");
+        let rid = RecordId::new();
+        let ops = backend.plan_delete(rid, &rec).await.unwrap();
+        assert_eq!(ops.len(), 3); // 3 unique tokens
+        assert!(ops
+            .iter()
+            .all(|op| matches!(op, IndexWriteOp::RemovePosting { .. })));
+    }
+
+    #[tokio::test]
+    async fn equivalence_plan_apply_vs_direct_on_insert() {
+        let i = Interner::new();
+        let store_direct: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let store_plan: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend_direct = make_fts(&i, Arc::clone(&store_direct));
+        let backend_plan = make_fts(&i, Arc::clone(&store_plan));
+        let rec = make_rec(&i, "alpha beta gamma");
+        let rid = RecordId::new();
+
+        // Direct path (on_insert which now wraps plan+apply internally)
+        backend_direct.on_insert(rid, &rec).await.unwrap();
+
+        // Plan path
+        let ops = backend_plan.plan_insert(rid, &rec).await.unwrap();
+        crate::index2::apply_index_ops(&ops, &store_plan, &backend_plan)
+            .await
+            .unwrap();
+
+        // Both stores should have the same content
+        let mut direct_entries = Vec::new();
+        let mut stream = store_direct.iter_stream(1000);
+        while let Some(batch) = stream.next().await {
+            direct_entries.extend(batch.unwrap());
+        }
+
+        let mut plan_entries = Vec::new();
+        let mut stream = store_plan.iter_stream(1000);
+        while let Some(batch) = stream.next().await {
+            plan_entries.extend(batch.unwrap());
+        }
+
+        direct_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        plan_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(direct_entries.len(), plan_entries.len());
+        for (d, p) in direct_entries.iter().zip(plan_entries.iter()) {
+            assert_eq!(d.0, p.0, "keys must match");
+            assert_eq!(d.1, p.1, "values must match");
         }
     }
 }
