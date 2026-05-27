@@ -448,6 +448,60 @@ impl SortedIndexManager {
         Ok(out)
     }
 
+    /// tx-aware variant of [`lookup_range`].
+    ///
+    /// In sub-stage 3.4 this forwards to the non-tx method regardless
+    /// of `tx`. Future wiring (Stage 4) will route through MvccStore
+    /// for versioned range scans (`get_at(snapshot)` for each posting).
+    pub async fn lookup_range_tx(
+        &self,
+        name_interned: u64,
+        start_encoded: Option<&[u8]>,
+        end_encoded: Option<&[u8]>,
+        _tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<BTreeSet<RecordId>> {
+        self.lookup_range(name_interned, start_encoded, end_encoded)
+            .await
+    }
+
+    /// tx-aware variant of [`lookup_min`]. Same forward-only semantics.
+    pub async fn lookup_min_tx(
+        &self,
+        name_interned: u64,
+        _tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Option<RecordId>> {
+        self.lookup_min(name_interned).await
+    }
+
+    /// tx-aware variant of [`lookup_max`]. Same forward-only semantics.
+    pub async fn lookup_max_tx(
+        &self,
+        name_interned: u64,
+        _tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Option<RecordId>> {
+        self.lookup_max(name_interned).await
+    }
+
+    /// tx-aware variant of [`lookup_last_k`]. Same forward-only semantics.
+    pub async fn lookup_last_k_tx(
+        &self,
+        name_interned: u64,
+        k: usize,
+        _tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Vec<RecordId>> {
+        self.lookup_last_k(name_interned, k).await
+    }
+
+    /// tx-aware variant of [`lookup_first_k`]. Same forward-only semantics.
+    pub async fn lookup_first_k_tx(
+        &self,
+        name_interned: u64,
+        k: usize,
+        _tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<Vec<RecordId>> {
+        self.lookup_first_k(name_interned, k).await
+    }
+
     /// Build inclusive (lower, upper) physical-key bounds for one
     /// sorted-index range query.
     ///
