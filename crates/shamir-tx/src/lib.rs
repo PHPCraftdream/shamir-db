@@ -7,19 +7,24 @@
 //!
 //! ## Status
 //!
-//! **Foundation phase.** Only the lowest-level primitives are landed:
+//! **Stage 2 (in progress).** Landed primitives:
 //!
 //! - [`version_codec`] — `encode_version_key` / `decode_version_key` for
 //!   `<key>::<version_be>` physical key layout.
 //! - [`types`] — [`TxId`], [`IsolationLevel`], [`TxConflict`] basic types.
+//! - [`staging_store`] — [`StagingStore`] in-memory write buffer per tx.
+//! - [`index_write_op`] — [`IndexWriteOp`] pure-data index mutation enum.
+//! - [`repo_tx_gate`] — [`RepoTxGate`] per-repo commit serialisation + snapshots.
+//! - [`tx_context`] — [`TxContext`] per-transaction state bundle.
+//! - [`layered_interner`] — [`LayeredInterner`] two-mode interner wrapper +
+//!   [`commit_interner_overlay`] merge (Stage 2.3).
 //!
 //! Upcoming stages (see `docs/pre-transactional/`):
-//! - Stage 1: `IndexWriteOp`, `StagingStore`
-//! - Stage 2: `RepoTxGate`, `TxContext`, `LayeredInterner`
 //! - Stage 3: `MvccStore`
 //! - Stage 6: `GcWorker`, `TxReaper`
 
 pub mod index_write_op;
+pub mod layered_interner;
 pub mod repo_tx_gate;
 pub mod staging_store;
 pub mod tx_context;
@@ -27,6 +32,7 @@ pub mod types;
 pub mod version_codec;
 
 pub use index_write_op::IndexWriteOp;
+pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
 pub use repo_tx_gate::{RepoTxGate, SnapshotGuard};
 pub use staging_store::StagingStore;
 pub use tx_context::TxContext;
