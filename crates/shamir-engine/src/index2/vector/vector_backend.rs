@@ -121,6 +121,23 @@ impl IndexBackend for VectorBackend {
         }
     }
 
+    async fn lookup_tx(
+        &self,
+        query: IndexQuery,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> Result<IndexResult, IndexError> {
+        match query {
+            IndexQuery::Vector { vec, k } => {
+                let tx_id = tx.map(|t| t.tx_id);
+                let results = self.adapter.search(&vec, k, tx_id).await.map_err(ve)?;
+                Ok(IndexResult::Ranked(results))
+            }
+            _ => Err(IndexError::Backend(
+                "VectorBackend only supports Vector queries".into(),
+            )),
+        }
+    }
+
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
         let batch_size = 1000usize;
         let mut stream = source.iter_stream(batch_size);
@@ -258,6 +275,140 @@ mod tests {
             IndexResult::Ranked(ranked) => assert!(ranked.is_empty()),
             _ => panic!("expected Ranked"),
         }
+    }
+
+    #[tokio::test]
+    async fn lookup_tx_none_matches_lookup() {
+        let i = Interner::new();
+        let backend = make_backend(&i);
+
+        let r1 = RecordId::new();
+        let r2 = RecordId::new();
+        backend
+            .plan_insert(r1, &make_rec(&i, &[1.0, 0.0, 0.0]))
+            .await
+            .unwrap();
+        backend
+            .plan_insert(r2, &make_rec(&i, &[0.0, 1.0, 0.0]))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let q = IndexQuery::Vector {
+            vec: vec![1.0, 0.0, 0.0],
+            k: 2,
+        };
+        let via_lookup = backend
+            .lookup(IndexQuery::Vector {
+                vec: vec![1.0, 0.0, 0.0],
+                k: 2,
+            })
+            .await
+            .unwrap();
+        let via_tx = backend.lookup_tx(q, None).await.unwrap();
+        match (via_lookup, via_tx) {
+            (IndexResult::Ranked(a), IndexResult::Ranked(b)) => {
+                assert_eq!(a.len(), b.len());
+            }
+            _ => panic!("expected Ranked results"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lookup_tx_some_includes_staged_vector() {
+        use crate::index2::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
+        use shamir_tx::{IsolationLevel, TxContext, TxId};
+
+        let i = Interner::new();
+
+        let desc = IndexDescriptor::new(
+            31,
+            "vec_tx",
+            intern(&i, "vec_tx"),
+            SmallVec::new(),
+            IndexKind::Vector(Box::new(VectorConfig {
+                dim: 3,
+                metric: VectorMetric::Cosine,
+                backend: VectorBackendRef::InProcessHnsw {
+                    ef_construct: 200,
+                    m: 16,
+                },
+            })),
+        );
+        let adapter: Arc<dyn VectorAdapter> = Arc::new(HnswAdapter::new(
+            3,
+            VectorMetric::Cosine,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        ));
+        let backend = VectorBackend::new(desc, vec![intern(&i, "embedding")], adapter);
+
+        // Commit one vector via non-tx upsert.
+        let committed_rid = RecordId::new();
+        backend
+            .adapter
+            .upsert(committed_rid, &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+
+        // Stage another vector in tx_id=1 (very close to query).
+        let tx_id = TxId::new(1);
+        let staged_rid = RecordId::new();
+        backend
+            .adapter
+            .upsert(staged_rid, &[0.9, 0.1, 0.0], Some(tx_id))
+            .await
+            .unwrap();
+
+        // Non-tx lookup sees only committed vector.
+        let non_tx = backend
+            .lookup(IndexQuery::Vector {
+                vec: vec![1.0, 0.0, 0.0],
+                k: 2,
+            })
+            .await
+            .unwrap();
+
+        let tx = TxContext::new(tx_id, 0, 100, IsolationLevel::Snapshot);
+        let in_tx = backend
+            .lookup_tx(
+                IndexQuery::Vector {
+                    vec: vec![1.0, 0.0, 0.0],
+                    k: 2,
+                },
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+
+        let non_tx_rids: Vec<RecordId> = match non_tx {
+            IndexResult::Ranked(r) => r.into_iter().map(|(rid, _)| rid).collect(),
+            _ => panic!("expected Ranked"),
+        };
+        let in_tx_rids: Vec<RecordId> = match in_tx {
+            IndexResult::Ranked(r) => r.into_iter().map(|(rid, _)| rid).collect(),
+            _ => panic!("expected Ranked"),
+        };
+
+        assert!(
+            !non_tx_rids.contains(&staged_rid),
+            "non-tx must not see staged vector"
+        );
+        assert!(
+            in_tx_rids.contains(&staged_rid),
+            "in-tx lookup must merge staged vector: got {:?}",
+            in_tx_rids
+        );
+        assert!(
+            non_tx_rids.contains(&committed_rid),
+            "non-tx must see committed vector"
+        );
+        assert!(
+            in_tx_rids.contains(&committed_rid),
+            "in-tx must see committed vector"
+        );
     }
 
     #[tokio::test]
