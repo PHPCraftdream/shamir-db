@@ -16,3 +16,4 @@ pub mod migration;
 pub mod query;
 pub mod repo;
 pub mod table;
+pub mod tx;
