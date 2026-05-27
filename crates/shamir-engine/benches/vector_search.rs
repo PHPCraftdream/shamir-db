@@ -44,7 +44,7 @@ fn bench_vector(c: &mut Criterion) {
         let brute = rt.block_on(async {
             let a = BruteForceAdapter::new(dim as u32, VectorMetric::Cosine);
             for i in 0..n {
-                a.upsert(rid_from(i), &random_vec(dim, i as u64))
+                a.upsert(rid_from(i), &random_vec(dim, i as u64), None)
                     .await
                     .unwrap();
             }
@@ -66,7 +66,7 @@ fn bench_vector(c: &mut Criterion) {
                 },
             );
             for i in 0..n {
-                a.upsert(rid_from(i), &random_vec(dim, i as u64))
+                a.upsert(rid_from(i), &random_vec(dim, i as u64), None)
                     .await
                     .unwrap();
             }
@@ -79,7 +79,7 @@ fn bench_vector(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let q = query.clone();
                 let a = &brute;
-                async move { a.search(&q, 10).await.unwrap() }
+                async move { a.search(&q, 10, None).await.unwrap() }
             });
         });
 
@@ -87,7 +87,7 @@ fn bench_vector(c: &mut Criterion) {
             b.to_async(&rt).iter(|| {
                 let q = query.clone();
                 let a = &hnsw;
-                async move { a.search(&q, 10).await.unwrap() }
+                async move { a.search(&q, 10, None).await.unwrap() }
             });
         });
 

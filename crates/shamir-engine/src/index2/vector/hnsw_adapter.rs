@@ -74,8 +74,6 @@ impl Default for HnswConfig {
 
 pub struct HnswAdapter {
     dim: u32,
-    // Stored for potential future use in search-time distance selection
-    #[allow(dead_code)]
     metric: VectorMetric,
     ef_search: usize,
     hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
@@ -167,7 +165,6 @@ impl HnswAdapter {
         let _ = self.staged.remove_async(&tx_id).await;
     }
 
-    #[allow(dead_code)] // Called from upsert in 1.2.C
     pub(crate) async fn stage(&self, tx_id: TxId, rid: RecordId, vec: Vec<f32>) {
         // Check if this rid already exists in the committed graph —
         // if so, record the internal_id for tombstoning on commit.
@@ -187,31 +184,45 @@ impl HnswAdapter {
 
 #[async_trait]
 impl VectorAdapter for HnswAdapter {
-    async fn upsert(&self, rid: RecordId, vec: &[f32]) -> Result<(), VectorError> {
+    async fn upsert(
+        &self,
+        rid: RecordId,
+        vec: &[f32],
+        tx: Option<TxId>,
+    ) -> Result<(), VectorError> {
         if vec.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
                 got: vec.len() as u32,
             });
         }
-        // If already exists, soft-delete old and re-insert with new id.
-        if let Some(old_internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
-            let _ = self.deleted.insert_async(old_internal, ()).await;
+        match tx {
+            Some(tx_id) => {
+                self.stage(tx_id, rid, vec.to_vec()).await;
+                Ok(())
+            }
+            None => {
+                // If already exists, soft-delete old and re-insert with new id.
+                if let Some(old_internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
+                    let _ = self.deleted.insert_async(old_internal, ()).await;
+                }
+                let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+                let hnsw = Arc::clone(&self.hnsw);
+                let vec_owned = vec.to_vec();
+                tokio::task::spawn_blocking(move || {
+                    hnsw.insert((&vec_owned, internal));
+                })
+                .await
+                .map_err(|e| VectorError::Internal(e.to_string()))?;
+                let _ = self.rid_map.insert_async(internal, rid).await;
+                let _ = self.rid_to_internal.upsert_async(rid, internal).await;
+                Ok(())
+            }
         }
-        let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let hnsw = Arc::clone(&self.hnsw);
-        let vec_owned = vec.to_vec();
-        tokio::task::spawn_blocking(move || {
-            hnsw.insert((&vec_owned, internal));
-        })
-        .await
-        .map_err(|e| VectorError::Internal(e.to_string()))?;
-        let _ = self.rid_map.insert_async(internal, rid).await;
-        let _ = self.rid_to_internal.upsert_async(rid, internal).await;
-        Ok(())
     }
 
-    async fn delete(&self, rid: RecordId) -> Result<(), VectorError> {
+    async fn delete(&self, rid: RecordId, _tx: Option<TxId>) -> Result<(), VectorError> {
+        // TODO(stage 2): stage deletions for tx rollback support
         if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
             let _ = self.deleted.insert_async(internal, ()).await;
             let _ = self.rid_to_internal.remove_async(&rid).await;
@@ -219,13 +230,20 @@ impl VectorAdapter for HnswAdapter {
         Ok(())
     }
 
-    async fn search(&self, query: &[f32], k: u32) -> Result<Vec<(RecordId, f32)>, VectorError> {
+    async fn search(
+        &self,
+        query: &[f32],
+        k: u32,
+        tx: Option<TxId>,
+    ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
                 got: query.len() as u32,
             });
         }
+
+        // Search committed graph
         let hnsw = Arc::clone(&self.hnsw);
         let ef = self.ef_search;
         let overscan = (k as usize) * 2 + 10;
@@ -235,11 +253,8 @@ impl VectorAdapter for HnswAdapter {
                 .await
                 .map_err(|e| VectorError::Internal(e.to_string()))?;
 
-        let mut results = Vec::with_capacity(k as usize);
+        let mut results: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
         for n in neighbors {
-            if results.len() >= k as usize {
-                break;
-            }
             if self.deleted.contains_async(&n.d_id).await {
                 continue;
             }
@@ -247,6 +262,24 @@ impl VectorAdapter for HnswAdapter {
                 results.push((rid, n.distance));
             }
         }
+
+        // If tx active, merge with brute-force scan over staged vectors.
+        if let Some(tx_id) = tx {
+            if let Some(staged_entry) = self.staged.read_async(&tx_id, |_, v| v.clone()).await {
+                let dist = ShamirDist {
+                    metric: self.metric,
+                };
+                for sv in &staged_entry {
+                    let d = dist.eval(query, &sv.vec);
+                    results.push((sv.rid, d));
+                }
+            }
+        }
+
+        // Sort by distance ascending, truncate to k.
+        results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(k as usize);
+
         Ok(results)
     }
 
@@ -292,11 +325,20 @@ mod tests {
             },
         );
 
-        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(3), &[0.9, 0.1, 0.0]).await.unwrap();
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(2), &[0.0, 1.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(3), &[0.9, 0.1, 0.0], None)
+            .await
+            .unwrap();
 
-        let results = adapter.search(&[1.0, 0.0, 0.0], 2).await.unwrap();
+        let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, rid(1));
         assert!(results[0].1 < 0.01);
@@ -313,12 +355,12 @@ mod tests {
             },
         );
 
-        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0], None).await.unwrap();
 
-        adapter.delete(rid(1)).await.unwrap();
+        adapter.delete(rid(1), None).await.unwrap();
 
-        let results = adapter.search(&[0.0, 0.0], 10).await.unwrap();
+        let results = adapter.search(&[0.0, 0.0], 10, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, rid(2));
     }
@@ -334,10 +376,10 @@ mod tests {
             },
         );
 
-        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(1), &[10.0, 10.0]).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(1), &[10.0, 10.0], None).await.unwrap();
 
-        let results = adapter.search(&[10.0, 10.0], 1).await.unwrap();
+        let results = adapter.search(&[10.0, 10.0], 1, None).await.unwrap();
         assert_eq!(results[0].0, rid(1));
         assert!(results[0].1 < 0.01);
     }
@@ -372,13 +414,13 @@ mod tests {
         let mut vecs = Vec::with_capacity(n);
         for i in 0..n {
             let v = random_vec(dim, i as u64 + 42);
-            adapter.upsert(rid(0), &v).await.unwrap();
+            adapter.upsert(rid(0), &v, None).await.unwrap();
             // Use unique rids:
             let mut a = [0u8; 16];
             a[14] = (i >> 8) as u8;
             a[15] = (i & 0xFF) as u8;
             let r = RecordId(a);
-            adapter.upsert(r, &v).await.unwrap();
+            adapter.upsert(r, &v, None).await.unwrap();
             vecs.push((r, v));
         }
 
@@ -400,7 +442,7 @@ mod tests {
         let gt_top10: std::collections::HashSet<RecordId> =
             dists.iter().take(10).map(|(r, _)| *r).collect();
 
-        let hnsw_results = adapter.search(query, 10).await.unwrap();
+        let hnsw_results = adapter.search(query, 10, None).await.unwrap();
         let hnsw_top10: std::collections::HashSet<RecordId> =
             hnsw_results.iter().map(|(r, _)| *r).collect();
 
@@ -411,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn dim_mismatch_rejected() {
         let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
-        let err = adapter.upsert(rid(1), &[1.0, 2.0]).await.unwrap_err();
+        let err = adapter.upsert(rid(1), &[1.0, 2.0], None).await.unwrap_err();
         assert!(matches!(
             err,
             VectorError::DimMismatch {
@@ -424,15 +466,18 @@ mod tests {
     #[tokio::test]
     async fn search_dim_mismatch_rejected() {
         let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
-        adapter.upsert(rid(1), &[1.0, 2.0, 3.0]).await.unwrap();
-        let err = adapter.search(&[1.0, 2.0], 1).await.unwrap_err();
+        adapter
+            .upsert(rid(1), &[1.0, 2.0, 3.0], None)
+            .await
+            .unwrap();
+        let err = adapter.search(&[1.0, 2.0], 1, None).await.unwrap_err();
         assert!(matches!(err, VectorError::DimMismatch { .. }));
     }
 
     #[tokio::test]
     async fn empty_index_returns_empty() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-        let results = adapter.search(&[0.0, 0.0], 5).await.unwrap();
+        let results = adapter.search(&[0.0, 0.0], 5, None).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -474,10 +519,10 @@ mod tests {
     #[tokio::test]
     async fn k_larger_than_dataset() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0], None).await.unwrap();
 
-        let results = adapter.search(&[0.0, 0.0], 100).await.unwrap();
+        let results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -497,7 +542,7 @@ mod tests {
             let mut a = [0u8; 16];
             a[15] = i as u8;
             adapter
-                .upsert(RecordId(a), &random_vec(dim as usize, i as u64))
+                .upsert(RecordId(a), &random_vec(dim as usize, i as u64), None)
                 .await
                 .unwrap();
         }
@@ -508,7 +553,7 @@ mod tests {
             let a = std::sync::Arc::clone(&adapter);
             handles.push(tokio::spawn(async move {
                 let q = random_vec(dim as usize, s + 100);
-                a.search(&q, 10).await.unwrap()
+                a.search(&q, 10, None).await.unwrap()
             }));
         }
         for h in handles {
@@ -545,7 +590,7 @@ mod tests {
     #[tokio::test]
     async fn delete_nonexistent_no_error() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-        adapter.delete(rid(99)).await.unwrap();
+        adapter.delete(rid(99), None).await.unwrap();
     }
 
     #[tokio::test]
@@ -566,14 +611,14 @@ mod tests {
         adapter.stage(tx, rid(3), vec![0.0, 0.0, 1.0]).await;
 
         // Before commit — search should NOT find staged vectors
-        let before = adapter.search(&[1.0, 0.0, 0.0], 10).await.unwrap();
+        let before = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
         assert_eq!(before.len(), 0, "staged vectors not in graph before commit");
 
         // Commit
         adapter.commit_staged(tx).await.unwrap();
 
         // After commit — search should find all 3
-        let after = adapter.search(&[1.0, 0.0, 0.0], 10).await.unwrap();
+        let after = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
         assert_eq!(after.len(), 3, "all staged vectors in graph after commit");
         assert_eq!(after[0].0, rid(1)); // closest to [1,0,0]
     }
@@ -591,8 +636,14 @@ mod tests {
         let tx = TxId::new(1);
 
         // Insert 2 committed vectors
-        adapter.upsert(rid(10), &[1.0, 0.0, 0.0]).await.unwrap();
-        adapter.upsert(rid(20), &[0.0, 1.0, 0.0]).await.unwrap();
+        adapter
+            .upsert(rid(10), &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(20), &[0.0, 1.0, 0.0], None)
+            .await
+            .unwrap();
 
         // Stage 100 vectors
         for i in 0..100u8 {
@@ -605,7 +656,7 @@ mod tests {
         adapter.rollback_staged(tx).await;
 
         // Graph should still have exactly 2 committed vectors
-        let results = adapter.search(&[0.5, 0.5, 0.0], 100).await.unwrap();
+        let results = adapter.search(&[0.5, 0.5, 0.0], 100, None).await.unwrap();
         assert_eq!(results.len(), 2);
 
         // Staged buffer should be empty
@@ -633,8 +684,11 @@ mod tests {
         );
 
         // Insert a committed vector
-        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
-        let before = adapter.search(&[1.0, 0.0, 0.0], 1).await.unwrap();
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        let before = adapter.search(&[1.0, 0.0, 0.0], 1, None).await.unwrap();
         assert_eq!(before[0].0, rid(1));
 
         // Stage an update (same rid, different vector)
@@ -645,7 +699,7 @@ mod tests {
         adapter.commit_staged(tx).await.unwrap();
 
         // Search for [0,1,0] -> should find rid(1) (updated position)
-        let after = adapter.search(&[0.0, 1.0, 0.0], 1).await.unwrap();
+        let after = adapter.search(&[0.0, 1.0, 0.0], 1, None).await.unwrap();
         assert_eq!(after[0].0, rid(1));
         assert!(after[0].1 < 0.01, "should be very close to [0,1,0]");
     }
@@ -654,10 +708,13 @@ mod tests {
     async fn many_upserts_same_rid() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
         for i in 0..10 {
-            adapter.upsert(rid(1), &[i as f32, 0.0]).await.unwrap();
+            adapter
+                .upsert(rid(1), &[i as f32, 0.0], None)
+                .await
+                .unwrap();
         }
         // Only latest visible
-        let results = adapter.search(&[9.0, 0.0], 10).await.unwrap();
+        let results = adapter.search(&[9.0, 0.0], 10, None).await.unwrap();
         let matching: Vec<_> = results.iter().filter(|(r, _)| *r == rid(1)).collect();
         assert_eq!(
             matching.len(),
@@ -665,5 +722,134 @@ mod tests {
             "rid(1) should appear once after 10 upserts"
         );
         assert!(matching[0].1 < 0.5);
+    }
+
+    #[tokio::test]
+    async fn tx_upsert_stages_instead_of_inserting() {
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
+        let tx = TxId::new(1);
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], Some(tx))
+            .await
+            .unwrap();
+
+        // Non-tx search should NOT find it
+        let results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+        assert_eq!(results.len(), 0);
+
+        // In-tx search SHOULD find it
+        let results = adapter
+            .search(&[1.0, 0.0, 0.0], 10, Some(tx))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, rid(1));
+    }
+
+    #[tokio::test]
+    async fn tx_search_merges_committed_and_staged() {
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
+
+        // Insert committed vector
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+
+        // Stage another vector in tx
+        let tx = TxId::new(1);
+        adapter
+            .upsert(rid(2), &[0.9, 0.1, 0.0], Some(tx))
+            .await
+            .unwrap();
+
+        // In-tx search should find both
+        let results = adapter
+            .search(&[1.0, 0.0, 0.0], 10, Some(tx))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn tx_search_excludes_other_tx_staged() {
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
+        let tx1 = TxId::new(1);
+        let tx2 = TxId::new(2);
+
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], Some(tx1))
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(2), &[0.0, 1.0, 0.0], Some(tx2))
+            .await
+            .unwrap();
+
+        // tx1 search sees only its own staged
+        let results = adapter
+            .search(&[0.5, 0.5, 0.0], 10, Some(tx1))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, rid(1));
+
+        // tx2 search sees only its own staged
+        let results = adapter
+            .search(&[0.5, 0.5, 0.0], 10, Some(tx2))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, rid(2));
+    }
+
+    #[tokio::test]
+    async fn non_tx_search_unchanged_after_refactor() {
+        // Regression guard: existing non-tx path works exactly as before.
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::Cosine,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
+        adapter
+            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(2), &[0.0, 1.0, 0.0], None)
+            .await
+            .unwrap();
+        adapter
+            .upsert(rid(3), &[0.9, 0.1, 0.0], None)
+            .await
+            .unwrap();
+
+        let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, rid(1));
     }
 }

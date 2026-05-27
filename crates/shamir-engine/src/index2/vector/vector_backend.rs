@@ -81,7 +81,7 @@ impl IndexBackend for VectorBackend {
         rec: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(rec) {
-            self.adapter.upsert(rid, &v).await.map_err(ve)?;
+            self.adapter.upsert(rid, &v, None).await.map_err(ve)?;
         }
         Ok(Vec::new())
     }
@@ -93,9 +93,9 @@ impl IndexBackend for VectorBackend {
         new: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(new) {
-            self.adapter.upsert(rid, &v).await.map_err(ve)?;
+            self.adapter.upsert(rid, &v, None).await.map_err(ve)?;
         } else {
-            self.adapter.delete(rid).await.map_err(ve)?;
+            self.adapter.delete(rid, None).await.map_err(ve)?;
         }
         Ok(Vec::new())
     }
@@ -105,14 +105,14 @@ impl IndexBackend for VectorBackend {
         rid: RecordId,
         _rec: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        self.adapter.delete(rid).await.map_err(ve)?;
+        self.adapter.delete(rid, None).await.map_err(ve)?;
         Ok(Vec::new())
     }
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
             IndexQuery::Vector { vec, k } => {
-                let results = self.adapter.search(&vec, k).await.map_err(ve)?;
+                let results = self.adapter.search(&vec, k, None).await.map_err(ve)?;
                 Ok(IndexResult::Ranked(results))
             }
             _ => Err(IndexError::Backend(
@@ -141,7 +141,7 @@ impl IndexBackend for VectorBackend {
             }
             for chunk in items.chunks(64) {
                 for (rid, v) in chunk {
-                    self.adapter.upsert(*rid, v).await.map_err(ve)?;
+                    self.adapter.upsert(*rid, v, None).await.map_err(ve)?;
                 }
             }
         }
