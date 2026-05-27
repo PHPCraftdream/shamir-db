@@ -544,4 +544,35 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn plan_insert_writes_postings_per_token() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_fts(&i, Arc::clone(&store));
+        let rid = RecordId::new();
+        let rec = make_rec(&i, "hello world hello");
+
+        let ops = backend.plan_insert(rid, &rec).await.unwrap();
+        let set_ops = ops
+            .iter()
+            .filter(|o| matches!(o, IndexWriteOp::SetPosting { .. }))
+            .count();
+        assert_eq!(set_ops, 2, "expected exactly 2 SetPostings (hello + world)");
+
+        crate::index2::apply_index_ops(&ops, &store, &backend)
+            .await
+            .unwrap();
+
+        let stream = store.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut count = 0usize;
+        while let Some(batch) = stream.next().await {
+            count += batch.unwrap().len();
+        }
+        assert_eq!(
+            count, 2,
+            "store should hold exactly two postings after apply"
+        );
+    }
 }

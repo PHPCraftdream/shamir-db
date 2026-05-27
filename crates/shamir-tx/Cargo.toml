@@ -18,5 +18,10 @@ tokio = { version = "1.49.0", features = ["sync"] }
 
 [dev-dependencies]
 bincode = "1.3.3"
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 serde_json = "1"
 tokio = { version = "1.49.0", features = ["full", "test-util"] }
+
+[[bench]]
+name = "tx_overhead"
+harness = false
