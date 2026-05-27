@@ -56,6 +56,27 @@ pub async fn apply_index_ops(
     Ok(())
 }
 
+/// tx-aware variant of [`apply_index_ops`].
+///
+/// In the current sub-stage (3.3) this method is a thin forward to
+/// [`apply_index_ops`] regardless of `tx` value — it adds the parameter
+/// so downstream callsites can already be migrated.
+///
+/// Future wiring (Stage 4, executor):
+/// - `tx == Some(tx)` → ops appended to `tx.index_write_set` (deferred).
+/// - mvcc attached  → `SetPosting`/`RemovePosting` route through
+///   `mvcc.set_versioned`/`mvcc.delete_versioned` for versioned writes.
+pub async fn apply_index_ops_tx(
+    ops: &[IndexWriteOp],
+    store: &Arc<dyn Store>,
+    backend: &dyn IndexBackend,
+    _tx: Option<&shamir_tx::TxContext>,
+) -> Result<(), IndexError> {
+    // TODO(Stage 4): if let Some(tx) = tx { tx.index_write_set.extend(...); return Ok(()) }
+    // TODO(3.4): if mvcc attached → route through mvcc.set_versioned / delete_versioned.
+    apply_index_ops(ops, store, backend).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +255,46 @@ mod tests {
         );
         // bump called once
         assert_eq!(backend.bump_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_index_ops_tx_none_forwards() {
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = MockBackend::new();
+        let ops = vec![
+            IndexWriteOp::SetPosting {
+                key: Bytes::from_static(b"k1"),
+                value: Bytes::from_static(b"v1"),
+            },
+            IndexWriteOp::BumpFtsStats {
+                doc_len: 5,
+                sign: 1,
+            },
+        ];
+        apply_index_ops_tx(&ops, &store, &backend, None)
+            .await
+            .unwrap();
+
+        let got = store.get(Bytes::from_static(b"k1")).await.unwrap();
+        assert_eq!(got.as_ref(), b"v1");
+        assert_eq!(backend.bump_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_index_ops_tx_some_forwards() {
+        use shamir_tx::{IsolationLevel, TxContext, TxId};
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = MockBackend::new();
+        let tx = TxContext::new(TxId::new(1), 0, 42, IsolationLevel::Snapshot);
+        let ops = vec![IndexWriteOp::SetPosting {
+            key: Bytes::from_static(b"k2"),
+            value: Bytes::from_static(b"v2"),
+        }];
+        apply_index_ops_tx(&ops, &store, &backend, Some(&tx))
+            .await
+            .unwrap();
+
+        let got = store.get(Bytes::from_static(b"k2")).await.unwrap();
+        assert_eq!(got.as_ref(), b"v2");
     }
 }
