@@ -592,3 +592,137 @@ applied **to the predictions**: where measured numbers (sled bench
 in `PERF_BASELINE.md`) showed the original win estimates were off,
 the estimates here are corrected. Where new items emerged from the
 measurement (Opt O, P, Q1, Q2, R), they're added.
+
+---
+
+## Measured hotspots awaiting implementation (2026-05-27)
+
+Two items in the read pipeline have been **profiled, bench-fixtured,
+and verified as real bottlenecks**, but the implementation phase still
+remains. Bench scenarios are committed (see references below) — when
+the work lands, the same `cargo bench` invocations are the verdict.
+
+### M1. ORDER BY columnar refinement (single-column fast path)
+
+**Measurement.** `crates/shamir-engine/benches/order_by_pipeline.rs`
+and `crates/shamir-engine/examples/prof_order_by.rs` (phase isolation).
+On 100k records, 5 fields, release build:
+
+| Phase                                     | Time    |
+|-------------------------------------------|---------|
+| Pure `Vec<json::Value>` permutation       | ~1.3 ms |
+| Pre-extracted sort + permute (no lookup)  | ~5.3 ms |
+| Full `apply_order_by` (current, post-#67) | ~37 ms  |
+| Lookup + value-swap overhead              | ~30 ms  |
+
+`Value::get` lookup inside the comparator is **85 % of ORDER BY time**
+and **17 % of the whole read pipeline**. Pre-extracting sort keys
+(commit `fe1c822`) replaced the per-comparison `compare_json_values`
+with a typed `SortKey` enum and bought ~15-20 % wall-clock. The
+remaining ~6× gap is enum-tag matching + SmallVec cache pressure
+inside `compare_sort_keys`.
+
+**Implementation.** Single-column ORDER BY (the 90 % case) extracts
+into a typed columnar buffer:
+
+- `Vec<i64>`   for integer columns
+- `Vec<f64>`   for float columns
+- `Vec<&str>`  for string columns (borrow lives only during the sort phase)
+- `Vec<bool>`  for bool columns
+
+Probe the column type from the first non-null value; if mid-extract a
+heterogeneous type shows up, abort and fall back to the existing
+enum-based path. Multi-column ORDER BY keeps the enum path
+unchanged — it must not regress.
+
+**Bench scenarios** (committed in `f03118a`):
+
+- `order_by_single_column_typed/id_i64_asc_full`     — i64 path
+- `order_by_single_column_typed/score_f64_asc_full`  — f64 path
+- `order_by_single_column_typed/email_str_asc_full`  — &str path
+- `order_by_single_column_typed/active_bool_asc_full` — bool path
+- `order_by_multi_column/active_then_email_asc_full` — regression guard
+
+**Target.** ≤ 10-15 ms per single-column scenario (from ~37 ms today).
+Multi-column scenario must not regress.
+
+**Run.** `cargo bench --bench order_by_pipeline -- --quick`. **On an
+idle machine.** Numbers are noise when other workloads run in
+parallel — two implementation attempts on 2026-05-27 produced
+unreliable measurements for exactly this reason.
+
+### M2. Streaming JSON serializer — bypass intermediate `Value` tree
+
+**Measurement.** `crates/shamir-engine/examples/count_allocs_read_pipeline.rs`
+(allocator-counter on the realistic read pipeline). 100k records,
+SELECT * → ORDER BY → LIMIT 100:
+
+| Phase             | Allocations | Bytes    | % time |
+|-------------------|-------------|----------|--------|
+| `apply_select`    | 800 000     | 68.7 MB  | 61.6 % |
+| `apply_order_by`  | 800 000     | 71.8 MB  | 14.9 % |
+| `apply_pagination`| 0           | 0        | 23.6 % |
+| **Total**         | **1 600 000** | **140.5 MB** | — |
+
+`apply_select` is half the pipeline by both CPU and allocation churn.
+The dominant cost is **not** string clones (bench in commit `d037318`
+ruled them out: owned-move conversion was 1 % away from the borrow
+version, within noise). The structural overhead lives in
+`json::Map::new()` per record + `serde_json::Number::from_*` per
+numeric field + the eventual `serde_json::to_vec(&Value)` pass that
+serialises the tree all over again.
+
+**Implementation.** Add a streaming path alongside `inner_to_json_value`:
+
+```rust
+inner_to_json_writer(value: &InnerValue, interner: &Interner, writer: &mut impl io::Write)
+```
+
+Wraps `serde_json::Serializer::new(writer)` over a `Vec<u8>` /
+`BytesMut`, walks `InnerValue` once, writes bytes directly. No
+intermediate `serde_json::Value` tree. The executor picks the
+streaming path when the consumer is a byte writer (the wire codec),
+falls back to the tree when ORDER BY or DISTINCT need to inspect the
+projection in memory.
+
+**Phases.**
+
+1. Helper `inner_to_json_writer` lands alongside the old function. Not
+   wired up.
+2. Equivalence unit tests: streaming output parsed back equals
+   `inner_to_json_value`.
+3. Bench: streaming vs tree on the realistic 100k fixture.
+4. If ≥ 30 % win on the streaming scenario → wire into `apply_select`
+   when a byte writer is available. Otherwise close as not-worth-it.
+
+**Bench scenarios** (committed in `f03118a`,
+`crates/shamir-engine/benches/select_projection.rs`):
+
+- `select_all/select_all_100k`                     — current `SELECT *` projection cost
+- `select_few_fields/select_2_of_6_fields_100k`    — partial projection
+- `select_then_serialize/select_all_then_serialize_100k` — full wire path:
+  build `Vec<json::Value>` then `serde_json::to_vec`. The streaming
+  path replaces both phases and competes against this single number.
+
+**Target.** `select_then_serialize` baseline → ≥ 30 % reduction. All
+existing read-pipeline tests must stay green.
+
+**Run.** `cargo bench --bench select_projection -- --quick`. **On an
+idle machine.**
+
+### Bench-run discipline (applies to both M1 and M2)
+
+These two benches are CPU-bound and sensitive to neighbouring
+workloads on the same host. Repeated runs on 2026-05-27 showed
+±30-80 % swings when criterion samples landed during parallel work
+from another project. Before drawing conclusions:
+
+1. Close every other long-running process on the machine.
+2. Run twice in a row; the second number is the keeper (warmup +
+   filesystem cache stabilise).
+3. Cross-check against `examples/prof_order_by.rs` (phase isolation)
+   and `examples/count_allocs_read_pipeline.rs` (allocation count) —
+   these are deterministic single-process examples that don't depend
+   on criterion's sampling.
+4. If a bench number disagrees with the example numbers by more than
+   ~10 %, distrust the bench until a clean run reproduces it.
