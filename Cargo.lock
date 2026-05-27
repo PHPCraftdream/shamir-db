@@ -3413,7 +3413,9 @@ dependencies = [
 name = "shamir-tx"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "bytes",
+ "futures",
  "scc",
  "serde",
  "serde_json",
