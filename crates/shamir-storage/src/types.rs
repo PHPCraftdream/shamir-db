@@ -183,6 +183,18 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     );
 }
 
+/// A single mixed-op for `Store::transact`. Represents either a
+/// `set` or a `remove` against a `RecordKey`.
+///
+/// Used by the transactional engine layer to bundle heterogeneous
+/// writes into one atomic batch that backends with native write
+/// transactions can commit as a single unit.
+#[derive(Debug, Clone)]
+pub enum KvOp {
+    Set(RecordKey, Bytes),
+    Remove(RecordKey),
+}
+
 /// An asynchronous, key-value store trait that operates on raw bytes.
 ///
 /// This trait provides a low-level storage abstraction. It is the responsibility
@@ -300,6 +312,35 @@ pub trait Store: Send + Sync {
             out.push(self.remove(k).await?);
         }
         Ok(out)
+    }
+
+    /// Atomic mixed-op batch — either ALL ops succeed and are visible
+    /// to subsequent reads, or NONE are. The default impl applies ops
+    /// sequentially and is **NOT atomic** — disk backends with a
+    /// native write-transaction API (redb, sled, fjall, persy, nebari,
+    /// canopy) override this to give the real atomicity guarantee.
+    ///
+    /// Used by the transactional engine layer to bundle a tx commit
+    /// into one apply (data + index postings + counter updates). Empty
+    /// `ops` is a no-op.
+    ///
+    /// **Atomicity contract.** When a backend overrides this with a
+    /// transactional impl, partial state is never observable. The
+    /// default loop impl below is per-op atomic only — callers that
+    /// need true cross-op atomicity must verify their backend overrides
+    /// `transact`.
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        for op in ops {
+            match op {
+                KvOp::Set(k, v) => {
+                    let _ = self.set(k, v).await?;
+                }
+                KvOp::Remove(k) => {
+                    let _ = self.remove(k).await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns an async stream that yields batches of records.

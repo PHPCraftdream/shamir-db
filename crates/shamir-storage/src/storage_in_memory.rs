@@ -185,7 +185,7 @@ impl Store for InMemoryStore {
 mod tests {
     #![allow(deprecated)]
 
-    use super::super::types::collect_stream;
+    use super::super::types::{collect_stream, KvOp};
     use super::*;
     use futures::StreamExt;
     use shamir_types::types::value::InnerValue;
@@ -476,5 +476,67 @@ mod tests {
         // Verify all writes succeeded
         let all_records = collect_stream(store.iter_stream(1000)).await.unwrap();
         assert_eq!(all_records.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn transact_empty_ops_is_noop() {
+        let store = InMemoryStore::new();
+        store.transact(vec![]).await.unwrap();
+        // nothing should appear
+        let stream = store.iter_stream(10);
+        futures::pin_mut!(stream);
+        let mut total = 0usize;
+        while let Some(batch) = stream.next().await {
+            total += batch.unwrap().len();
+        }
+        assert_eq!(total, 0);
+    }
+
+    #[tokio::test]
+    async fn transact_applies_set_ops_in_order() {
+        let store = InMemoryStore::new();
+        let k1 = RecordKey::from(b"k1".to_vec());
+        let k2 = RecordKey::from(b"k2".to_vec());
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"v1")),
+                KvOp::Set(k2.clone(), Bytes::from_static(b"v2")),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(store.get(k1).await.unwrap(), Bytes::from_static(b"v1"));
+        assert_eq!(store.get(k2).await.unwrap(), Bytes::from_static(b"v2"));
+    }
+
+    #[tokio::test]
+    async fn transact_mixed_set_remove() {
+        let store = InMemoryStore::new();
+        let k1 = RecordKey::from(b"k1".to_vec());
+        let k2 = RecordKey::from(b"k2".to_vec());
+        let k3 = RecordKey::from(b"k3".to_vec());
+
+        // Seed state
+        store
+            .set(k1.clone(), Bytes::from_static(b"old1"))
+            .await
+            .unwrap();
+        store
+            .set(k2.clone(), Bytes::from_static(b"old2"))
+            .await
+            .unwrap();
+
+        // Mixed batch: update k1, remove k2, insert k3
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"new1")),
+                KvOp::Remove(k2.clone()),
+                KvOp::Set(k3.clone(), Bytes::from_static(b"new3")),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(store.get(k1).await.unwrap(), Bytes::from_static(b"new1"));
+        assert!(store.get(k2).await.is_err()); // removed
+        assert_eq!(store.get(k3).await.unwrap(), Bytes::from_static(b"new3"));
     }
 }
