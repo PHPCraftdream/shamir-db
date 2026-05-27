@@ -57,6 +57,9 @@
 - **[architectural-decisions.md](./architectural-decisions.md)** —
   decision log: пять архитектурных решений, которые надо
   зафиксировать **до** старта.
+- **[crate-organization.md](./crate-organization.md)** — что из
+  transactional preparation выносится в отдельные крейты
+  (`shamir-wal`, `shamir-tx`) и почему остальное остаётся в engine.
 
 ## Принципы каждого этапа
 
