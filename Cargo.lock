@@ -3278,6 +3278,7 @@ dependencies = [
  "serial_test",
  "shamir-query-types",
  "shamir-storage",
+ "shamir-tx",
  "shamir-types",
  "shamir-wal",
  "smallvec 1.15.1",
