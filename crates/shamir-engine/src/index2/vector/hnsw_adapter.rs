@@ -12,6 +12,7 @@ use crate::index2::kind::VectorMetric;
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::hnsw::Hnsw;
+use shamir_tx::TxId;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -82,6 +83,21 @@ pub struct HnswAdapter {
     rid_to_internal: scc::HashMap<RecordId, usize>,
     deleted: scc::HashMap<usize, ()>,
     next_id: AtomicUsize,
+    /// Per-tx staging buffer: vectors awaiting commit into the HNSW graph.
+    staged: scc::HashMap<TxId, Vec<StagedVector>>,
+}
+
+/// A vector staged for insertion during a transaction. Applied to the
+/// live HNSW graph only on `commit_staged`; dropped on `rollback_staged`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields read by commit_staged / rollback_staged (1.2.B)
+pub(crate) struct StagedVector {
+    pub rid: RecordId,
+    pub vec: Vec<f32>,
+    /// If this upsert replaces an existing rid in the graph, the
+    /// old internal_id is recorded here. On commit: tombstone it.
+    /// On rollback: leave it live (pre-tx state preserved).
+    pub replaces: Option<usize>,
 }
 
 impl HnswAdapter {
@@ -103,7 +119,28 @@ impl HnswAdapter {
             rid_to_internal: scc::HashMap::new(),
             deleted: scc::HashMap::new(),
             next_id: AtomicUsize::new(0),
+            staged: scc::HashMap::new(),
         }
+    }
+
+    /// Stage a vector for later commit. Does NOT insert into the HNSW
+    /// graph — the staged entry is visible only to the owning tx
+    /// (via in-tx search merge, coming in 1.2.C).
+    #[allow(dead_code)] // Called from upsert in 1.2.C
+    pub(crate) async fn stage(&self, tx_id: TxId, rid: RecordId, vec: Vec<f32>) {
+        // Check if this rid already exists in the committed graph —
+        // if so, record the internal_id for tombstoning on commit.
+        let replaces = self.rid_to_internal.read_async(&rid, |_, v| *v).await;
+
+        let entry = StagedVector { rid, vec, replaces };
+
+        // Append to per-tx buffer (create if absent).
+        self.staged
+            .entry_async(tx_id)
+            .await
+            .or_insert_with(Vec::new)
+            .get_mut()
+            .push(entry);
     }
 }
 
@@ -437,6 +474,31 @@ mod tests {
             let r = h.await.unwrap();
             assert!(!r.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn stage_pushes_into_per_tx_buffer() {
+        let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
+        let tx = TxId::new(1);
+        adapter.stage(tx, rid(1), vec![1.0, 0.0, 0.0]).await;
+        adapter.stage(tx, rid(2), vec![0.0, 1.0, 0.0]).await;
+
+        let count = adapter.staged.read_async(&tx, |_, v| v.len()).await;
+        assert_eq!(count, Some(2));
+    }
+
+    #[tokio::test]
+    async fn stage_with_different_tx_ids_isolated() {
+        let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
+        let tx1 = TxId::new(1);
+        let tx2 = TxId::new(2);
+        adapter.stage(tx1, rid(1), vec![1.0, 0.0, 0.0]).await;
+        adapter.stage(tx2, rid(2), vec![0.0, 1.0, 0.0]).await;
+
+        let c1 = adapter.staged.read_async(&tx1, |_, v| v.len()).await;
+        let c2 = adapter.staged.read_async(&tx2, |_, v| v.len()).await;
+        assert_eq!(c1, Some(1));
+        assert_eq!(c2, Some(1));
     }
 
     #[tokio::test]

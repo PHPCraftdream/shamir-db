@@ -15,6 +15,7 @@ shamir-storage = { path = "../shamir-storage", default-features = false }
 # `query::*` modules so callers see no path change.
 shamir-query-types = { path = "../shamir-query-types" }
 shamir-wal = { path = "../shamir-wal" }
+shamir-tx = { path = "../shamir-tx" }
 
 # Async / runtime
 tokio = { version = "1.49.0", features = ["full"] }
