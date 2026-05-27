@@ -2,8 +2,23 @@
 
 Пять решений, которые надо зафиксировать **до** старта Этапа 0.
 Каждое сформулировано как **проблема → выбранное решение → почему
-не иначе**. Если решение пересматривается — pull request меняет этот
-документ + перечисляет последствия.
+не иначе → как проверяется** (тесты + бенчмарки). Если решение
+пересматривается — pull request меняет этот документ + перечисляет
+последствия.
+
+## Test + bench coverage matrix
+
+| # | Decision | Correctness tests | Performance benchmarks |
+|---|---|---|---|
+| D1 | HNSW staging | `tx_upsert_then_search_sees_staged`, `tx_rollback_does_not_pollute_graph`, recall@10 stability after 1000 aborts | `hnsw_search_with_staged_size_{100,1k,10k}` (overhead vs no-staging), `hnsw_commit_staged_batch` (commit throughput) |
+| D2 | IndexWriteOp planner | `plan_then_apply_equals_direct_write` для каждого backend (FTS, FtsRanked, Functional), `apply_index_ops_atomic_batch` | `index_plan_vs_direct_overhead` на 100k inserts (target < 1% regression), `index_apply_batch_throughput` |
+| D3 | MemBuffer / tx staging separation | `non_tx_writes_go_through_membuffer`, `tx_commit_bypasses_membuffer`, `tx_writes_invisible_to_concurrent_non_tx_read` | `non_tx_write_throughput_unchanged`, `tx_commit_throughput_with_membuffer_bypass` |
+| D4 | Repo-scoped WAL marker | `cross_table_tx_atomic`, `recovery_after_crash_mid_phase_{4,5,6,7}`, `mixed_v1_v2_recovery` | `repo_wal_append_latency`, `recovery_scan_with_n_inflight_tx` |
+| D5 | `Option<&TxContext>` not generic | `non_tx_call_paths_zero_overhead` (branch coverage), `tx_call_paths_through_pipeline` | `engine_perf_non_tx_regression` (target < 2%), `read_pipeline_with_tx_context` (compare None / Some) |
+
+**Правило:** ни одно из D1-D5 не считается реализованным, пока **обе
+колонки** имеют commit'нутые tests + бенчмарки с измеренными числами
+в комментарии или task summary.
 
 ---
 
@@ -35,6 +50,30 @@ size cap (например, 10k) — beyond этого tx force-aborted с
 **Влияние на trait.** `VectorAdapter::upsert / delete / search`
 принимают `tx: Option<TxId>`. Non-tx путь (`None`) — как сейчас.
 
+**Test + bench coverage.**
+
+Correctness tests (`crates/shamir-engine/src/index2/vector/hnsw_adapter.rs::tests`):
+
+- `tx_upsert_then_search_sees_staged` — upsert в tx, search в той же
+  tx → видит staged vector с правильным distance.
+- `tx_rollback_does_not_pollute_graph` — 1000 staged inserts,
+  `rollback_staged`, затем 1000 committed inserts; assert recall@10 ≥
+  0.95 (граф чист).
+- `tx_commit_staged_makes_committed` — staged → commit → outside-tx
+  search видит как обычные точки.
+- `concurrent_tx_isolation` — две параллельные tx с overlapping
+  upserts, каждая видит только свои staged + committed (не чужие
+  staged).
+- `staged_size_cap_enforced` — попытка staged > 10k → `tx_too_large`.
+
+Benchmarks (`crates/shamir-engine/benches/hnsw_staging.rs`):
+
+- `hnsw_search_with_staged_{0,100,1k,10k}` — overhead search при
+  разных размерах staged buffer. Acceptance: 100 staged < 2× от 0.
+- `hnsw_commit_staged_batch_{100,1k}` — commit_staged throughput.
+- `hnsw_non_tx_upsert_throughput` — non-tx путь не регрессирует > 2%
+  относительно baseline без staging field.
+
 ---
 
 ## D2. Index writes: planner-возвращает-ops, executor-применяет
@@ -59,6 +98,33 @@ engine_perf верифицируют.
 **Влияние на trait.** `IndexBackend::on_insert` → `plan_insert` (и
 аналогично update/delete). `apply_index_ops(ops, store)` — top-level
 function, не trait method.
+
+**Test + bench coverage.**
+
+Correctness tests (per-backend `tests` submodule):
+
+- `plan_then_apply_equals_direct_write` — для каждого из FTS,
+  FtsRanked, Functional, SortedIndex: вызвать `plan_insert(rid, val)`
+  + `apply_index_ops(ops, &store)` и сравнить state store с прямой
+  записью через старый `on_insert`. Bit-for-bit equivalence.
+- `apply_index_ops_atomic_batch` — `apply_index_ops` через
+  `Store::transact(ops)` → concurrent observer видит либо все ops,
+  либо ни одного.
+- `plan_update_diff_minimization` — `plan_update(rid, old, new)`
+  возвращает только diff (RemovePosting для исчезнувших токенов,
+  SetPosting для появившихся), не полный re-build.
+- `plan_delete_complete_cleanup` — после `apply_index_ops(plan_delete)`
+  никаких остаточных postings для этого rid в store.
+
+Benchmarks (`crates/shamir-engine/benches/index_plan_apply.rs`):
+
+- `fts_insert_plan_vs_direct_100k` — overhead plan+apply относительно
+  direct write. Acceptance: < 1% (SmallVec[IndexWriteOp; 8] покрывает
+  99% случаев без heap).
+- `fts_batch_apply_throughput` — `apply_index_ops` на batch из 1k ops
+  через `transact`.
+- `engine_perf` regression check — read + write pipeline на 100k
+  records не теряет throughput.
 
 ---
 
@@ -88,6 +154,32 @@ commit IS the durability point. Если в production это окажется
 проблемой — отдельный optimization (например, commit batching на
 уровне executor).
 
+**Test + bench coverage.**
+
+Correctness tests:
+
+- `non_tx_writes_go_through_membuffer` — non-tx `set(k, v)` оседает
+  в MemBuffer's `dirty`, не виден в base backend до flush.
+- `tx_commit_bypasses_membuffer` — tx commit пишет напрямую в base
+  backend, обходя `dirty`. После commit `dirty` не содержит tx
+  writes; они виден в base сразу.
+- `tx_writes_invisible_to_concurrent_non_tx_read` — non-tx read во
+  время open tx читает pre-tx state (через base) — не видит tx
+  staging.
+- `mixed_tx_and_non_tx_traffic` — параллельные tx commits + non-tx
+  writes в одной таблице → state корректен, MemBuffer не «теряет»
+  non-tx writes которые конкурировали с tx commit.
+
+Benchmarks (`crates/shamir-engine/benches/membuffer_tx_separation.rs`):
+
+- `non_tx_write_throughput_baseline_vs_after_separation` — non-tx
+  путь не регрессирует > 1% (тот же код, MemBuffer не trogut).
+- `tx_commit_throughput_with_membuffer_bypass_{redb,sled,fjall}` —
+  measure cost commit с bypass per backend. Если на каком-то
+  backend > 2× медленнее non-tx → flag для отдельной оптимизации.
+- `tx_commit_amortized_latency` — для batch tx с N writes
+  среднее latency на write при commit.
+
 ---
 
 ## D4. Repo-scoped WAL marker, не table-scoped
@@ -114,6 +206,38 @@ creep. Сосуществование стабильнее.
 **Цена решения.** Recovery scan по двум WAL вместо одного. На clean
 shutdown — это пустые scans, дёшево. На dirty — оба прогоняются по
 очереди, не параллельно (избегаем гонок).
+
+**Test + bench coverage.**
+
+Correctness tests (`crates/shamir-engine/tests/transactions/repo_wal.rs`):
+
+- `cross_table_tx_atomic` — tx batch с writes в две таблицы одного
+  repo. На outside read обе таблицы либо изменены, либо нет (одна
+  точка atomic publish через `publish_committed`).
+- `recovery_after_crash_mid_phase_4` — симуляция crash после
+  `begin(WalEntryV2)`, до physical writes. Recovery на open применяет
+  ops, atomicity сохранена.
+- `recovery_after_crash_mid_phase_5` — crash в середине physical
+  writes. Recovery re-applies полный entry — idempotent.
+- `recovery_after_crash_after_commit` — crash после
+  `publish_committed` но до `wal.commit(txn_id)`. Tx видна, recovery
+  cleanup'ит residual entry.
+- `mixed_v1_v2_recovery` — recovery с per-table V1 entries И
+  repo-level V2 entries одновременно. Оба применяются корректно.
+- `inflight_listing` — `list_inflight` после нормального flow
+  возвращает пусто.
+
+Benchmarks (`crates/shamir-engine/benches/wal_recovery.rs`,
+расширяем существующий):
+
+- `repo_wal_append_latency_{small,large_payload}` — стоимость
+  записи V2 entry. Acceptance: < 5ms для batch с 1k ops (inline
+  body).
+- `recovery_scan_with_{0,10,100}_inflight_tx` — стоимость recovery
+  с разным количеством inflight tx. Должна быть линейная в кол-ве
+  entries.
+- `wal_size_amplification` — размер V2 entry для 10k inserts по 1KB.
+  Acceptance: < 11MB (overhead < 10%).
 
 ---
 
@@ -144,6 +268,34 @@ context. Два варианта:
 **Цена решения.** Один branch на каждый call. На non-tx path —
 если ветка не taken (None), branch predictor handles it cheap.
 Measure через `engine_perf.rs` — ожидаем < 1% regression.
+
+**Test + bench coverage.**
+
+Correctness tests:
+
+- `non_tx_call_paths_zero_overhead` — для каждой read/write функции
+  pipeline (TableManager::read_one, iter_stream, filter_stream,
+  IndexBackend::lookup, HnswAdapter::search) вызвать с tx=None и
+  проверить идентичность результата с pre-tx-refactor baseline.
+- `tx_call_paths_through_pipeline` — full pipeline test: tx writes
+  через executor → reads внутри той же tx видят свои writes; reads
+  вне tx видят pre-tx snapshot.
+- `option_branch_coverage` — coverage tool (через `cargo llvm-cov`)
+  подтверждает что обе ветки `if let Some(tx) = ...` покрыты тестами.
+
+Benchmarks (`crates/shamir-engine/benches/engine_perf.rs`,
+расширяем):
+
+- `non_tx_read_throughput_before_after` — regression check
+  относительно pre-refactor commit. Acceptance: < 2% regression
+  (предсказуемый branch predictor).
+- `non_tx_write_throughput_before_after` — то же на write path.
+- `tx_read_overhead_vs_non_tx` — measure overhead Some(&TxContext)
+  относительно None. Acceptance: < 15% (working_set lookup + mvcc
+  range scan vs direct get).
+- `tx_write_overhead_vs_non_tx` — write через TxContext.write_set
+  vs direct store.set. Acceptance: < 10% (один HashMap insert vs
+  один store call).
 
 ---
 
