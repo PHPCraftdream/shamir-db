@@ -18,14 +18,18 @@
 //! - [`tx_context`] — [`TxContext`] per-transaction state bundle.
 //! - [`layered_interner`] — [`LayeredInterner`] two-mode interner wrapper +
 //!   [`commit_interner_overlay`] merge (Stage 2.3).
+//! - [`repo_wal_manager`] — [`RepoWalManager`] repo-level WAL for transactional
+//!   writes, one `WalEntryV2` per tx/batch (Stage 2.4).
 //!
-//! Upcoming stages (see `docs/pre-transactional/`):
+//! Stage 2 is now **complete** (RepoTxGate + TxContext + LayeredInterner +
+//! RepoWalManager). Upcoming stages (see `docs/pre-transactional/`):
 //! - Stage 3: `MvccStore`
 //! - Stage 6: `GcWorker`, `TxReaper`
 
 pub mod index_write_op;
 pub mod layered_interner;
 pub mod repo_tx_gate;
+pub mod repo_wal_manager;
 pub mod staging_store;
 pub mod tx_context;
 pub mod types;
@@ -34,6 +38,7 @@ pub mod version_codec;
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
 pub use repo_tx_gate::{RepoTxGate, SnapshotGuard};
+pub use repo_wal_manager::RepoWalManager;
 pub use staging_store::StagingStore;
 pub use tx_context::TxContext;
 pub use types::{IsolationLevel, TxConflict, TxError, TxId};
