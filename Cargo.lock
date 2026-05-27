@@ -3415,6 +3415,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bytes",
+ "criterion",
  "futures",
  "scc",
  "serde",

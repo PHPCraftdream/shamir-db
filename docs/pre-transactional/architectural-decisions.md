@@ -10,8 +10,8 @@
 
 | # | Decision | Correctness tests | Performance benchmarks |
 |---|---|---|---|
-| D1 | HNSW staging | `tx_upsert_then_search_sees_staged`, `tx_rollback_does_not_pollute_graph`, recall@10 stability after 1000 aborts | `hnsw_search_with_staged_size_{100,1k,10k}` (overhead vs no-staging), `hnsw_commit_staged_batch` (commit throughput) |
-| D2 | IndexWriteOp planner | `plan_then_apply_equals_direct_write` для каждого backend (FTS, FtsRanked, Functional), `apply_index_ops_atomic_batch` | `index_plan_vs_direct_overhead` на 100k inserts (target < 1% regression), `index_apply_batch_throughput` |
+| D1 | HNSW staging | `tx_upsert_then_search_sees_staged`, `tx_rollback_does_not_pollute_graph`, `rollback_staged_drops_without_graph_mutation`, `commit_staged_inserts_all_into_graph`, recall@10 stability after 1000 aborts | `hnsw_search_with_staged_size_{100,1k,10k}` (overhead vs no-staging), `hnsw_commit_staged_batch` (commit throughput) |
+| D2 | IndexWriteOp planner | `plan_insert_writes_expected_postings` (Functional), `plan_insert_writes_postings_per_token` (FTS), `plan_insert_emits_bump_stats` (FtsRanked), `plan_apply_round_trip` per backend | `index_plan_vs_direct_overhead` на 100k inserts (target < 1% regression), `index_apply_batch_throughput` |
 | D3 | MemBuffer / tx staging separation | `non_tx_writes_go_through_membuffer`, `tx_commit_bypasses_membuffer`, `tx_writes_invisible_to_concurrent_non_tx_read` | `non_tx_write_throughput_unchanged`, `tx_commit_throughput_with_membuffer_bypass` |
 | D4 | Repo-scoped WAL marker | `cross_table_tx_atomic`, `recovery_after_crash_mid_phase_{4,5,6,7}`, `mixed_v1_v2_recovery` | `repo_wal_append_latency`, `recovery_scan_with_n_inflight_tx` |
 | D5 | `Option<&TxContext>` not generic | `non_tx_call_paths_zero_overhead` (branch coverage), `tx_call_paths_through_pipeline` | `engine_perf_non_tx_regression` (target < 2%), `read_pipeline_with_tx_context` (compare None / Some) |
@@ -20,6 +20,10 @@
 **Правило:** ни одно из D1-D6 не считается реализованным, пока **обе
 колонки** имеют commit'нутые tests + бенчмарки с измеренными числами
 в комментарии или task summary.
+
+Benchmark suite landed in `crates/shamir-tx/benches/tx_overhead.rs` (4 baseline
+measures — zero-overhead write, fast-path read, staging buffer, version counter).
+Stage 4+ benchmarks land alongside their implementation.
 
 ---
 

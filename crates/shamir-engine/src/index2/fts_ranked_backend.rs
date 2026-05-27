@@ -681,6 +681,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_insert_emits_bump_stats() {
+        let i = Interner::new();
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let fts = make_backend(&i, Arc::clone(&store));
+        let rid = RecordId::new();
+        let rec = make_rec(&i, "hello world");
+
+        let ops = fts.plan_insert(rid, &rec).await.unwrap();
+        let has_bump = ops
+            .iter()
+            .any(|o| matches!(o, IndexWriteOp::BumpFtsStats { .. }));
+        assert!(has_bump, "FtsRanked plan_insert must emit BumpFtsStats");
+    }
+
+    #[tokio::test]
     async fn plan_apply_round_trip_ranked() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());

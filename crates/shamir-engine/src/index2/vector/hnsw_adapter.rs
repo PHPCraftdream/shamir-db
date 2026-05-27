@@ -863,4 +863,74 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, rid(1));
     }
+
+    fn make_rid(i: u32) -> RecordId {
+        let mut a = [0u8; 16];
+        a[12..16].copy_from_slice(&i.to_be_bytes());
+        RecordId(a)
+    }
+
+    #[tokio::test]
+    async fn tx_rollback_does_not_pollute_graph() {
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::Cosine,
+            HnswConfig {
+                max_elements: 2000,
+                ef_construction: 400,
+                ef_search: 400,
+                ..Default::default()
+            },
+        );
+
+        // Commit 500 vectors via non-tx upsert.
+        for i in 0..500u32 {
+            let rid_val = make_rid(i);
+            let v = vec![1.0 + i as f32 * 1e-4, 0.0, 0.0];
+            adapter.upsert(rid_val, &v, None).await.unwrap();
+        }
+
+        let baseline_results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+        assert_eq!(baseline_results.len(), 10);
+
+        // Stage 1000 vectors in tx_id=42 — invisible to non-tx search.
+        let tx_id = TxId::new(42);
+        for i in 0..1000u32 {
+            let rid_val = make_rid(i + 1000);
+            let v = vec![0.0, 1.0 + i as f32 * 1e-4, 0.0];
+            adapter.upsert(rid_val, &v, Some(tx_id)).await.unwrap();
+        }
+
+        // Sanity: in-tx search sees staged vectors.
+        let in_tx = adapter
+            .search(&[0.0, 1.0, 0.0], 5, Some(tx_id))
+            .await
+            .unwrap();
+        assert!(!in_tx.is_empty(), "in-tx search must see staged vectors");
+
+        // Rollback.
+        adapter.rollback_staged(tx_id).await;
+
+        // After rollback: search MUST NOT see any staged vectors.
+        let after_rollback = adapter.search(&[0.0, 1.0, 0.0], 5, None).await.unwrap();
+
+        for (found_rid, _) in &after_rollback {
+            let bytes = found_rid.to_bytes();
+            let mut idx_bytes = [0u8; 4];
+            idx_bytes.copy_from_slice(&bytes[12..16]);
+            let idx = u32::from_be_bytes(idx_bytes);
+            assert!(
+                idx < 1000,
+                "rollback failed: found staged rid index {idx} after rollback"
+            );
+        }
+
+        // Sanity: committed 500-vector recall preserved.
+        let post_results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+        assert_eq!(
+            post_results.len(),
+            10,
+            "committed graph must remain searchable after rollback"
+        );
+    }
 }
