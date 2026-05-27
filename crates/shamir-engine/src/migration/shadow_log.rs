@@ -7,7 +7,7 @@ use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-const SHADOW_PREFIX: &[u8] = b"__shadow_";
+use crate::migration::shadow_key::ShadowKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ShadowOp {
@@ -45,7 +45,7 @@ impl MigrationShadowLog {
     pub async fn recover(migration_id: String, store: Arc<dyn Store>) -> DbResult<Self> {
         let prefix = Self::key_prefix_static(&migration_id);
         let mut max_lsn = 0u64;
-        let mut stream = store.scan_prefix_stream(Bytes::from(prefix), 256);
+        let mut stream = store.scan_prefix_stream(prefix, 256);
         use futures::StreamExt;
         while let Some(batch) = stream.next().await {
             for (key, _) in batch? {
@@ -102,7 +102,7 @@ impl MigrationShadowLog {
     }
 
     pub async fn read_from(&self, start_lsn: u64) -> DbResult<Vec<ShadowEntry>> {
-        let prefix = Bytes::from(self.key_prefix());
+        let prefix = self.key_prefix();
         let mut entries = Vec::new();
         let mut stream = self.store.scan_prefix_stream(prefix, 256);
         use futures::StreamExt;
@@ -122,7 +122,7 @@ impl MigrationShadowLog {
     }
 
     pub async fn purge(&self) -> DbResult<u64> {
-        let prefix = Bytes::from(self.key_prefix());
+        let prefix = self.key_prefix();
         let mut keys = Vec::new();
         let mut stream = self.store.scan_prefix_stream(prefix, 256);
         use futures::StreamExt;
@@ -138,32 +138,20 @@ impl MigrationShadowLog {
         Ok(count)
     }
 
-    fn key_prefix(&self) -> Vec<u8> {
-        Self::key_prefix_static(&self.migration_id)
+    fn key_prefix(&self) -> Bytes {
+        ShadowKey::scan_prefix(&self.migration_id)
     }
 
-    fn key_prefix_static(migration_id: &str) -> Vec<u8> {
-        let mut k = Vec::with_capacity(SHADOW_PREFIX.len() + migration_id.len() + 1);
-        k.extend_from_slice(SHADOW_PREFIX);
-        k.extend_from_slice(migration_id.as_bytes());
-        k.push(b'_');
-        k
+    fn key_prefix_static(migration_id: &str) -> Bytes {
+        ShadowKey::scan_prefix(migration_id)
     }
 
     fn entry_key(&self, lsn: u64) -> shamir_storage::types::RecordKey {
-        let prefix = self.key_prefix();
-        let mut key = Vec::with_capacity(prefix.len() + 8);
-        key.extend_from_slice(&prefix);
-        key.extend_from_slice(&lsn.to_be_bytes());
-        shamir_storage::types::RecordKey::from(key)
+        ShadowKey::new(&self.migration_id, lsn).to_record_key()
     }
 
     fn parse_lsn_from_key(key: &[u8]) -> Option<u64> {
-        if key.len() < 8 {
-            return None;
-        }
-        let lsn_bytes = &key[key.len() - 8..];
-        Some(u64::from_be_bytes(lsn_bytes.try_into().ok()?))
+        ShadowKey::parse_lsn(key)
     }
 }
 

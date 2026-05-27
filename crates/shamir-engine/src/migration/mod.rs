@@ -1,4 +1,5 @@
 pub mod coordinator;
+pub mod shadow_key;
 pub mod shadow_log;
 
 pub use coordinator::{MigrationCoordinator, MigrationPhase, MigrationState};
