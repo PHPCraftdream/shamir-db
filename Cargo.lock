@@ -3414,6 +3414,7 @@ name = "shamir-tx"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "scc",
  "serde",
  "serde_json",
  "shamir-storage",
