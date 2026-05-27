@@ -3409,6 +3409,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-tx"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
+ "shamir-storage",
+ "shamir-types",
+ "shamir-wal",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "shamir-types"
 version = "0.1.0"
 dependencies = [
