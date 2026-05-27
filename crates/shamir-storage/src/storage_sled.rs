@@ -420,6 +420,31 @@ impl Store for SledStore {
         })
     }
 
+    /// Native atomic `transact` via `sled::Batch`.
+    ///
+    /// Builds a `sled::Batch` containing all `KvOp`s, then applies it
+    /// atomically via `tree.apply_batch`. Either the entire batch is
+    /// visible or none of it.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let tree = self.tree.clone();
+        spawn_blocking(move || -> DbResult<()> {
+            let mut batch = sled::Batch::default();
+            for op in ops {
+                match op {
+                    super::types::KvOp::Set(k, v) => batch.insert(k.as_ref(), v.as_ref()),
+                    super::types::KvOp::Remove(k) => batch.remove(k.as_ref()),
+                }
+            }
+            tree.apply_batch(batch)
+                .map_err(|e| DbError::Storage(format!("SledDB apply_batch: {}", e)))
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     /// Explicit fsync. Individual writes are buffered and made durable
     /// by sled's background flusher (default: every 500 ms). Call this
     /// when an external durability boundary is needed (end of batch
@@ -646,6 +671,67 @@ mod tests {
         for key in &expected_keys {
             assert!(all_records.iter().any(|(rec_key, _)| rec_key == key));
         }
+    }
+
+    #[tokio::test]
+    async fn test_sled_transact_atomic() {
+        use super::super::types::KvOp;
+
+        let path = "./test_data/sled_transact";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+        let repo = SledRepo::new(path).unwrap();
+        let store = repo.store_get("transact_test").await.unwrap();
+
+        // Seed
+        let k1: RecordKey = Bytes::from_static(b"k1");
+        let k2: RecordKey = Bytes::from_static(b"k2");
+        store
+            .set(k1.clone(), Bytes::from_static(b"old1"))
+            .await
+            .unwrap();
+        store
+            .set(k2.clone(), Bytes::from_static(b"old2"))
+            .await
+            .unwrap();
+
+        // Spawn observer
+        let obs_store = repo.store_get("transact_test").await.unwrap();
+        let k1c = k1.clone();
+        let k2c = k2.clone();
+        let observer = tokio::spawn(async move {
+            for _ in 0..50 {
+                let a = obs_store.get(k1c.clone()).await.ok();
+                let b = obs_store.get(k2c.clone()).await.ok();
+                if let (Some(va), Some(vb)) = (&a, &b) {
+                    let a_new = va.as_ref() == b"new1";
+                    let b_new = vb.as_ref() == b"new2";
+                    assert_eq!(
+                        a_new, b_new,
+                        "partial state observed: a={:?} b={:?}",
+                        va, vb
+                    );
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        // Transact
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"new1")),
+                KvOp::Set(k2.clone(), Bytes::from_static(b"new2")),
+            ])
+            .await
+            .unwrap();
+
+        observer.await.unwrap();
+
+        assert_eq!(store.get(k1).await.unwrap().as_ref(), b"new1");
+        assert_eq!(store.get(k2).await.unwrap().as_ref(), b"new2");
+
+        fs::remove_dir_all(path).ok();
     }
 
     /// Native `iter_range_stream` on sled — exercises the

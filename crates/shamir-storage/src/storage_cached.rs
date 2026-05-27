@@ -288,6 +288,28 @@ impl Store for CachedStore {
         })
     }
 
+    /// Delegate to inner store's `transact`, then invalidate cache
+    /// entries for all touched keys. The cache layer itself doesn't
+    /// add atomicity — that comes from the inner backend.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        // Collect keys before delegating (ops is moved into inner).
+        let keys: Vec<RecordKey> = ops
+            .iter()
+            .map(|op| match op {
+                super::types::KvOp::Set(k, _) | super::types::KvOp::Remove(k) => k.clone(),
+            })
+            .collect();
+
+        self.inner.transact(ops).await?;
+
+        // Invalidate cache for affected keys so subsequent reads
+        // see the transacted state, not stale cached values.
+        for k in keys {
+            self.cache.remove(&k);
+        }
+        Ok(())
+    }
+
     /// Pass-through for buffer config: a CachedStore doesn't have
     /// its own buffer knobs but the underlying store likely does
     /// (especially when stacked Cached → MemBuffer → raw).

@@ -332,6 +332,75 @@ impl Store for PersyStore {
         .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
     }
 
+    /// Native atomic `transact` via a single Persy `Tx`.
+    ///
+    /// Mixed set + delete ops within one transaction, committed once.
+    /// If any op fails, the transaction is implicitly dropped (not
+    /// committed) — no partial state is observable.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let db = self.db.clone();
+        let table_name = self.table_name.clone();
+        let index_name = self.index_name.clone();
+        spawn_blocking(move || -> DbResult<()> {
+            let mut tx = db.begin().map_err(|e| DbError::Storage(e.to_string()))?;
+            for op in ops {
+                match op {
+                    super::types::KvOp::Set(key, value) => {
+                        let key_bytes = ByteVec::new(key.to_vec());
+                        let mut iter = tx
+                            .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+                        if let Some(persy_id_str_bytes) = iter.next() {
+                            // Existing record — update
+                            let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
+                                .map_err(|e| DbError::Codec(e.to_string()))?;
+                            let persy_id: PersyId = persy_id_str
+                                .parse()
+                                .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                            tx.update(&table_name, &persy_id, &value)
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                        } else {
+                            // New record — insert + index
+                            let persy_id = tx
+                                .insert(&table_name, &value)
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                            let val = ByteVec::new(persy_id.to_string().into_bytes());
+                            tx.put(&index_name, key_bytes, val)
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                        }
+                    }
+                    super::types::KvOp::Remove(key) => {
+                        let key_bytes = ByteVec::new(key.to_vec());
+                        let mut iter = tx
+                            .get::<ByteVec, ByteVec>(&index_name, &key_bytes)
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
+                        if let Some(persy_id_str_bytes) = iter.next() {
+                            let persy_id_str = String::from_utf8(persy_id_str_bytes.to_vec())
+                                .map_err(|e| DbError::Codec(e.to_string()))?;
+                            let persy_id: PersyId = persy_id_str
+                                .parse()
+                                .map_err(|e| DbError::Codec(format!("Invalid PersyId: {}", e)))?;
+                            tx.delete(&table_name, &persy_id)
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                            tx.remove(&index_name, key_bytes, None::<ByteVec>)
+                                .map_err(|e| DbError::Storage(e.to_string()))?;
+                        }
+                    }
+                }
+            }
+            tx.prepare()
+                .map_err(|e| DbError::Storage(e.to_string()))?
+                .commit()
+                .map_err(|e| DbError::Storage(e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| DbError::Storage(format!("Tokio join error: {}", e)))?
+    }
+
     /// Batched insert via ONE transaction containing N inserts +
     /// index puts, committed once. One fsync per batch instead of
     /// one per record — the entire reason persy's per-write cost
@@ -730,6 +799,58 @@ mod tests {
         let repo = PersyRepo::new(path).unwrap();
         let store = repo.store_get("batch").await.unwrap();
         super::super::types::run_batch_store_tests(store).await;
+    }
+
+    /// Persy transact test — verifies all ops applied via one Tx.
+    ///
+    /// Note: persy's `get()` opens a new transaction per call, so
+    /// concurrent observers are NOT guaranteed to see a consistent
+    /// snapshot across two separate get() calls. We only check
+    /// final state here (atomicity of the write commit, not
+    /// cross-read snapshot isolation).
+    #[tokio::test]
+    async fn test_persy_transact_atomic() {
+        use super::super::types::KvOp;
+
+        let path = "./test_data/persy_transact.persy";
+        if Path::new(path).exists() {
+            fs::remove_file(path).unwrap();
+        }
+        let repo = PersyRepo::new(path).unwrap();
+        let store = repo.store_get("transact_test").await.unwrap();
+
+        // Seed
+        let k1: RecordKey = Bytes::from_static(b"k1");
+        let k2: RecordKey = Bytes::from_static(b"k2");
+        let k3: RecordKey = Bytes::from_static(b"k3");
+        store
+            .set(k1.clone(), Bytes::from_static(b"old1"))
+            .await
+            .unwrap();
+        store
+            .set(k2.clone(), Bytes::from_static(b"old2"))
+            .await
+            .unwrap();
+        store
+            .set(k3.clone(), Bytes::from_static(b"to_remove"))
+            .await
+            .unwrap();
+
+        // Mixed transact: update k1, update k2, remove k3
+        store
+            .transact(vec![
+                KvOp::Set(k1.clone(), Bytes::from_static(b"new1")),
+                KvOp::Set(k2.clone(), Bytes::from_static(b"new2")),
+                KvOp::Remove(k3.clone()),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(store.get(k1).await.unwrap().as_ref(), b"new1");
+        assert_eq!(store.get(k2).await.unwrap().as_ref(), b"new2");
+        assert!(store.get(k3).await.is_err(), "k3 should be removed");
+
+        fs::remove_file(path).ok();
     }
 
     #[tokio::test]

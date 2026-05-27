@@ -568,6 +568,40 @@ impl Store for MemBufferStore {
         self.inner.apply_buffer_config(config).await
     }
 
+    /// Delegate to inner store's `transact`, then update cache + dirty
+    /// state for all touched keys. The buffer layer doesn't add
+    /// atomicity — that comes from the inner backend.
+    async fn transact(&self, ops: Vec<super::types::KvOp>) -> DbResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // Drain any pending dirty entries for the affected keys first
+        // so the inner store has a consistent view before transact.
+        self.drain_all().await?;
+
+        // Delegate to inner's native transact.
+        self.inner.transact(ops.clone()).await?;
+
+        // Update cache + dirty to reflect the transacted state.
+        let cache = self.state.cache.load();
+        for op in ops {
+            match op {
+                super::types::KvOp::Set(k, v) => {
+                    let slot = Slot::Live(v);
+                    cache.insert(k.clone(), slot).await;
+                    // Remove from dirty — inner already has it.
+                    self.state.dirty.remove(&k);
+                }
+                super::types::KvOp::Remove(k) => {
+                    cache.insert(k.clone(), Slot::Tombstone).await;
+                    // Remove from dirty — inner already has it.
+                    self.state.dirty.remove(&k);
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
         let mut keys = Vec::with_capacity(values.len());
         let cache = self.state.cache.load();
