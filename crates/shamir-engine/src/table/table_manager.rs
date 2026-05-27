@@ -352,19 +352,28 @@ impl TableManager {
 
     async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) {
         for backend in self.index2_registry.all_backends().await {
-            let _ = backend.on_insert(*rid, rec).await;
+            if let Ok(ops) = backend.plan_insert(*rid, rec).await {
+                let _ =
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
+            }
         }
     }
 
     async fn index2_on_update(&self, rid: &RecordId, old: &InnerValue, new: &InnerValue) {
         for backend in self.index2_registry.all_backends().await {
-            let _ = backend.on_update(*rid, old, new).await;
+            if let Ok(ops) = backend.plan_update(*rid, old, new).await {
+                let _ =
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
+            }
         }
     }
 
     async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) {
         for backend in self.index2_registry.all_backends().await {
-            let _ = backend.on_delete(*rid, rec).await;
+            if let Ok(ops) = backend.plan_delete(*rid, rec).await {
+                let _ =
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
+            }
         }
     }
 
@@ -874,8 +883,8 @@ impl TableManager {
     }
 
     /// Bulk-populate all index2 backends by streaming records from this
-    /// TableManager's data_store and calling `on_batch_insert` for each
-    /// batch on every registered backend.
+    /// TableManager's data_store and calling `plan_insert + apply_index_ops`
+    /// for each record on every registered backend.
     ///
     /// This creates postings in info_store **and** populates in-memory
     /// state (HNSW graph, BM25 counters, etc.). Intended for migration
@@ -904,12 +913,22 @@ impl TableManager {
             let items: Vec<(RecordId, &InnerValue)> =
                 batch.iter().map(|(rid, val)| (*rid, val)).collect();
             for backend in &backends {
-                backend.on_batch_insert(&items).await.map_err(|e| {
-                    shamir_storage::error::DbError::Internal(format!(
-                        "bulk_populate_index2 on_batch_insert failed: {}",
-                        e
-                    ))
-                })?;
+                for (rid, val) in items.iter() {
+                    let ops = backend.plan_insert(*rid, val).await.map_err(|e| {
+                        shamir_storage::error::DbError::Internal(format!(
+                            "bulk_populate_index2 plan_insert failed: {}",
+                            e
+                        ))
+                    })?;
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
+                        .await
+                        .map_err(|e| {
+                            shamir_storage::error::DbError::Internal(format!(
+                                "bulk_populate_index2 apply_index_ops failed: {}",
+                                e
+                            ))
+                        })?;
+                }
             }
         }
 

@@ -77,8 +77,6 @@ mod tests {
     use crate::index2::kind::IndexKind;
     use async_trait::async_trait;
     use shamir_storage::storage_in_memory::InMemoryStore;
-    use shamir_types::types::record_id::RecordId;
-    use shamir_types::types::value::InnerValue;
     use smallvec::SmallVec;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -108,23 +106,6 @@ mod tests {
     impl IndexBackend for MockBackend {
         fn descriptor(&self) -> &IndexDescriptor {
             &self.descriptor
-        }
-        async fn on_insert(&self, _: RecordId, _: &InnerValue) -> Result<(), IndexError> {
-            Ok(())
-        }
-        async fn on_update(
-            &self,
-            _: RecordId,
-            _: &InnerValue,
-            _: &InnerValue,
-        ) -> Result<(), IndexError> {
-            Ok(())
-        }
-        async fn on_delete(&self, _: RecordId, _: &InnerValue) -> Result<(), IndexError> {
-            Ok(())
-        }
-        async fn on_batch_insert(&self, _: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
-            Ok(())
         }
         async fn lookup(&self, _: IndexQuery) -> Result<IndexResult, IndexError> {
             Ok(IndexResult::Set(BTreeSet::new()))

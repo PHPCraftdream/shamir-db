@@ -8,7 +8,7 @@ use crate::index2::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::expr::{ExprError, IndexExpr};
 use crate::index2::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
-use crate::index2::write_ops::{apply_index_ops, IndexWriteOp};
+use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -184,33 +184,6 @@ impl IndexBackend for FunctionalBackend {
         }])
     }
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let ops = self.plan_insert(rid, rec).await?;
-        apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_update(
-        &self,
-        rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
-    ) -> Result<(), IndexError> {
-        let ops = self.plan_update(rid, old, new).await?;
-        apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let ops = self.plan_delete(rid, rec).await?;
-        apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
-        for (rid, rec) in items {
-            self.on_insert(*rid, rec).await?;
-        }
-        Ok(())
-    }
-
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
             IndexQuery::Point { keys } => {
@@ -257,7 +230,7 @@ impl IndexBackend for FunctionalBackend {
 mod tests {
     use super::*;
     use crate::index2::kind::IndexKind;
-    use crate::index2::write_ops::IndexWriteOp;
+    use crate::index2::write_ops::{apply_index_ops, IndexWriteOp};
     use shamir_storage::storage_in_memory::InMemoryStore;
     use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
     use shamir_types::types::common::new_map_wc;
@@ -282,6 +255,37 @@ mod tests {
         InnerValue::Map(m)
     }
 
+    async fn apply_insert_fn(
+        backend: &FunctionalBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) {
+        let ops = backend.plan_insert(rid, rec).await.unwrap();
+        apply_index_ops(&ops, store, backend).await.unwrap();
+    }
+
+    async fn apply_update_fn(
+        backend: &FunctionalBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) {
+        let ops = backend.plan_update(rid, old, new).await.unwrap();
+        apply_index_ops(&ops, store, backend).await.unwrap();
+    }
+
+    async fn apply_delete_fn(
+        backend: &FunctionalBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) {
+        let ops = backend.plan_delete(rid, rec).await.unwrap();
+        apply_index_ops(&ops, store, backend).await.unwrap();
+    }
+
     fn make_backend(interner: &Interner, store: Arc<dyn Store>) -> FunctionalBackend {
         let expr = IndexExpr::Lower(Box::new(IndexExpr::Trim(Box::new(IndexExpr::Field(vec![
             intern(interner, "email"),
@@ -302,11 +306,11 @@ mod tests {
     async fn insert_and_lookup() {
         let interner = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let backend = make_backend(&interner, store);
+        let backend = make_backend(&interner, Arc::clone(&store));
 
         let rid = RecordId::new();
         let rec = make_rec(&interner, "  Alice@FOO.COM  ", 30);
-        backend.on_insert(rid, &rec).await.unwrap();
+        apply_insert_fn(&backend, &store, rid, &rec).await;
 
         let lookup_val = InnerValue::Str("alice@foo.com".into());
         let hash = FunctionalBackend::hash_value(&lookup_val);
@@ -327,14 +331,14 @@ mod tests {
     async fn update_changes_posting() {
         let interner = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let backend = make_backend(&interner, store);
+        let backend = make_backend(&interner, Arc::clone(&store));
 
         let rid = RecordId::new();
         let old = make_rec(&interner, "alice@old.com", 25);
-        backend.on_insert(rid, &old).await.unwrap();
+        apply_insert_fn(&backend, &store, rid, &old).await;
 
         let new_rec = make_rec(&interner, "bob@new.com", 25);
-        backend.on_update(rid, &old, &new_rec).await.unwrap();
+        apply_update_fn(&backend, &store, rid, &old, &new_rec).await;
 
         let old_hash = FunctionalBackend::hash_value(&InnerValue::Str("alice@old.com".into()));
         let r = backend
@@ -406,50 +410,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equivalence_plan_apply_vs_direct_on_insert() {
-        use crate::index2::write_ops::apply_index_ops;
-
+    async fn plan_apply_round_trip() {
         let interner = Interner::new();
-        let store_a: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let store_b: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let backend_a = make_backend(&interner, Arc::clone(&store_a));
-        let backend_b = make_backend(&interner, Arc::clone(&store_b));
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_backend(&interner, Arc::clone(&store));
 
         let rid = RecordId::new();
         let rec = make_rec(&interner, "  Test@Example.COM  ", 42);
 
-        // Direct on_insert
-        backend_a.on_insert(rid, &rec).await.unwrap();
+        apply_insert_fn(&backend, &store, rid, &rec).await;
 
-        // plan + apply
-        let ops = backend_b.plan_insert(rid, &rec).await.unwrap();
-        apply_index_ops(&ops, &store_b, &backend_b).await.unwrap();
-
-        // Both should yield the same lookup result
         let lookup_val = InnerValue::Str("test@example.com".into());
         let hash = FunctionalBackend::hash_value(&lookup_val);
-        let query_a = IndexQuery::Point {
-            keys: smallvec::smallvec![hash.to_vec()],
-        };
-        let query_b = IndexQuery::Point {
-            keys: smallvec::smallvec![hash.to_vec()],
-        };
-
-        let res_a = backend_a.lookup(query_a).await.unwrap();
-        let res_b = backend_b.lookup(query_b).await.unwrap();
-        assert_eq!(format!("{:?}", res_a), format!("{:?}", res_b));
+        let result = backend
+            .lookup(IndexQuery::Point {
+                keys: smallvec::smallvec![hash.to_vec()],
+            })
+            .await
+            .unwrap();
+        match result {
+            IndexResult::Set(s) => assert!(s.contains(&rid)),
+            _ => panic!("expected Set"),
+        }
     }
 
     #[tokio::test]
     async fn delete_removes_posting() {
         let interner = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let backend = make_backend(&interner, store);
+        let backend = make_backend(&interner, Arc::clone(&store));
 
         let rid = RecordId::new();
         let rec = make_rec(&interner, "del@me.com", 40);
-        backend.on_insert(rid, &rec).await.unwrap();
-        backend.on_delete(rid, &rec).await.unwrap();
+        apply_insert_fn(&backend, &store, rid, &rec).await;
+        apply_delete_fn(&backend, &store, rid, &rec).await;
 
         let hash = FunctionalBackend::hash_value(&InnerValue::Str("del@me.com".into()));
         let r = backend

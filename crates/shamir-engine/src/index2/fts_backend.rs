@@ -182,33 +182,6 @@ impl IndexBackend for FtsBackend {
         Ok(ops)
     }
 
-    async fn on_insert(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let ops = self.plan_insert(rid, rec).await?;
-        crate::index2::apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_update(
-        &self,
-        rid: RecordId,
-        old: &InnerValue,
-        new: &InnerValue,
-    ) -> Result<(), IndexError> {
-        let ops = self.plan_update(rid, old, new).await?;
-        crate::index2::apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_delete(&self, rid: RecordId, rec: &InnerValue) -> Result<(), IndexError> {
-        let ops = self.plan_delete(rid, rec).await?;
-        crate::index2::apply_index_ops(&ops, &self.store, self).await
-    }
-
-    async fn on_batch_insert(&self, items: &[(RecordId, &InnerValue)]) -> Result<(), IndexError> {
-        for (rid, rec) in items {
-            self.on_insert(*rid, rec).await?;
-        }
-        Ok(())
-    }
-
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
             IndexQuery::Fts { tokens, mode } => {
@@ -286,6 +259,43 @@ mod tests {
         InnerValue::Map(m)
     }
 
+    async fn apply_insert(
+        backend: &FtsBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) {
+        let ops = backend.plan_insert(rid, rec).await.unwrap();
+        crate::index2::apply_index_ops(&ops, store, backend)
+            .await
+            .unwrap();
+    }
+
+    async fn apply_update(
+        backend: &FtsBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) {
+        let ops = backend.plan_update(rid, old, new).await.unwrap();
+        crate::index2::apply_index_ops(&ops, store, backend)
+            .await
+            .unwrap();
+    }
+
+    async fn apply_delete(
+        backend: &FtsBackend,
+        store: &Arc<dyn Store>,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) {
+        let ops = backend.plan_delete(rid, rec).await.unwrap();
+        crate::index2::apply_index_ops(&ops, store, backend)
+            .await
+            .unwrap();
+    }
+
     fn make_fts(interner: &Interner, store: Arc<dyn Store>) -> FtsBackend {
         let desc = IndexDescriptor::new(
             10,
@@ -304,16 +314,14 @@ mod tests {
     async fn and_query() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_fts(&i, store);
+        let fts = make_fts(&i, Arc::clone(&store));
 
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         let r3 = RecordId::new();
-        fts.on_insert(r1, &make_rec(&i, "hello world foo"))
-            .await
-            .unwrap();
-        fts.on_insert(r2, &make_rec(&i, "hello bar")).await.unwrap();
-        fts.on_insert(r3, &make_rec(&i, "world bar")).await.unwrap();
+        apply_insert(&fts, &store, r1, &make_rec(&i, "hello world foo")).await;
+        apply_insert(&fts, &store, r2, &make_rec(&i, "hello bar")).await;
+        apply_insert(&fts, &store, r3, &make_rec(&i, "world bar")).await;
 
         // AND("hello", "world") → only r1
         let result = fts
@@ -337,16 +345,14 @@ mod tests {
     async fn or_query() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_fts(&i, store);
+        let fts = make_fts(&i, Arc::clone(&store));
 
         let r1 = RecordId::new();
         let r2 = RecordId::new();
         let r3 = RecordId::new();
-        fts.on_insert(r1, &make_rec(&i, "hello world"))
-            .await
-            .unwrap();
-        fts.on_insert(r2, &make_rec(&i, "hello bar")).await.unwrap();
-        fts.on_insert(r3, &make_rec(&i, "baz qux")).await.unwrap();
+        apply_insert(&fts, &store, r1, &make_rec(&i, "hello world")).await;
+        apply_insert(&fts, &store, r2, &make_rec(&i, "hello bar")).await;
+        apply_insert(&fts, &store, r3, &make_rec(&i, "baz qux")).await;
 
         // OR("hello", "baz") → r1, r2, r3
         let result = fts
@@ -370,14 +376,14 @@ mod tests {
     async fn update_diff_tokens() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_fts(&i, store);
+        let fts = make_fts(&i, Arc::clone(&store));
 
         let rid = RecordId::new();
         let old = make_rec(&i, "alpha beta gamma");
-        fts.on_insert(rid, &old).await.unwrap();
+        apply_insert(&fts, &store, rid, &old).await;
 
         let new_rec = make_rec(&i, "alpha delta gamma");
-        fts.on_update(rid, &old, &new_rec).await.unwrap();
+        apply_update(&fts, &store, rid, &old, &new_rec).await;
 
         // "beta" gone
         let r = fts
@@ -423,12 +429,12 @@ mod tests {
     async fn delete_removes_all_tokens() {
         let i = Interner::new();
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let fts = make_fts(&i, store);
+        let fts = make_fts(&i, Arc::clone(&store));
 
         let rid = RecordId::new();
         let rec = make_rec(&i, "hello world");
-        fts.on_insert(rid, &rec).await.unwrap();
-        fts.on_delete(rid, &rec).await.unwrap();
+        apply_insert(&fts, &store, rid, &rec).await;
+        apply_delete(&fts, &store, rid, &rec).await;
 
         let r = fts
             .lookup(IndexQuery::Fts {
@@ -514,43 +520,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equivalence_plan_apply_vs_direct_on_insert() {
+    async fn plan_apply_round_trip() {
         let i = Interner::new();
-        let store_direct: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let store_plan: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let backend_direct = make_fts(&i, Arc::clone(&store_direct));
-        let backend_plan = make_fts(&i, Arc::clone(&store_plan));
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = make_fts(&i, Arc::clone(&store));
         let rec = make_rec(&i, "alpha beta gamma");
         let rid = RecordId::new();
 
-        // Direct path (on_insert which now wraps plan+apply internally)
-        backend_direct.on_insert(rid, &rec).await.unwrap();
+        apply_insert(&backend, &store, rid, &rec).await;
 
-        // Plan path
-        let ops = backend_plan.plan_insert(rid, &rec).await.unwrap();
-        crate::index2::apply_index_ops(&ops, &store_plan, &backend_plan)
-            .await
-            .unwrap();
-
-        // Both stores should have the same content
-        let mut direct_entries = Vec::new();
-        let mut stream = store_direct.iter_stream(1000);
-        while let Some(batch) = stream.next().await {
-            direct_entries.extend(batch.unwrap());
-        }
-
-        let mut plan_entries = Vec::new();
-        let mut stream = store_plan.iter_stream(1000);
-        while let Some(batch) = stream.next().await {
-            plan_entries.extend(batch.unwrap());
-        }
-
-        direct_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        plan_entries.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(direct_entries.len(), plan_entries.len());
-        for (d, p) in direct_entries.iter().zip(plan_entries.iter()) {
-            assert_eq!(d.0, p.0, "keys must match");
-            assert_eq!(d.1, p.1, "values must match");
+        // Verify all 3 tokens are searchable
+        for token in &["alpha", "beta", "gamma"] {
+            let result = backend
+                .lookup(IndexQuery::Fts {
+                    tokens: vec![token_hash(token)],
+                    mode: FtsMode::AndAll,
+                })
+                .await
+                .unwrap();
+            match result {
+                IndexResult::Set(s) => assert!(s.contains(&rid), "token '{token}' should match"),
+                _ => panic!("expected Set"),
+            }
         }
     }
 }
