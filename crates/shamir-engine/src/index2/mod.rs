@@ -32,6 +32,7 @@ pub mod posting_layout;
 pub mod registry;
 pub mod tokenizer;
 pub mod vector;
+pub mod write_ops;
 
 pub use actor::IndexActor;
 pub use backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
@@ -43,6 +44,7 @@ pub use kind::{
 };
 pub use posting_layout::{build_posting_key, type_tag, PostingKeyRef};
 pub use registry::IndexRegistry;
+pub use write_ops::{apply_index_ops, IndexWriteOp};
 
 #[cfg(test)]
 mod enum_sizes {
