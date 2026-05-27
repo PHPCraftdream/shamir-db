@@ -49,6 +49,7 @@ pub struct TableManager {
     /// `.await` points.
     unique_write_lock: Arc<tokio::sync::Mutex<()>>,
     index2_registry: Arc<crate::index2::IndexRegistry>,
+    mvcc_store: Option<Arc<shamir_tx::MvccStore>>,
 }
 
 /// How often the background watchdog runs a `verify` pass.
@@ -72,6 +73,7 @@ impl Clone for TableManager {
             verify_running: Arc::clone(&self.verify_running),
             unique_write_lock: Arc::clone(&self.unique_write_lock),
             index2_registry: Arc::clone(&self.index2_registry),
+            mvcc_store: self.mvcc_store.clone(),
         }
     }
 }
@@ -107,6 +109,7 @@ impl TableManager {
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
+            mvcc_store: None,
         };
 
         // Hot-load persisted buffer config (if any) and apply
@@ -205,6 +208,7 @@ impl TableManager {
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
+            mvcc_store: None,
         }
     }
 
@@ -761,6 +765,51 @@ impl TableManager {
 
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
+        self.table.get(id).await
+    }
+
+    /// Attach an MvccStore for tx-aware reads. Returns `self` so callers
+    /// can chain after `create()`. When attached, `read_one_tx(rid, Some(tx))`
+    /// reads through the MvccStore at `tx.snapshot_version`. Without an
+    /// attached MvccStore, tx-aware reads fall through to the non-tx
+    /// fast path (same as `get`).
+    pub fn with_mvcc_store(mut self, mvcc: Arc<shamir_tx::MvccStore>) -> Self {
+        self.mvcc_store = Some(mvcc);
+        self
+    }
+
+    /// tx-aware single-record read.
+    ///
+    /// - `tx == None` → same as [`get`]: direct read from main data_store.
+    /// - `tx == Some(tx)` and no `mvcc_store` attached → same as [`get`].
+    /// - `tx == Some(tx)` and `mvcc_store` attached →
+    ///   `mvcc.get_at(rid.to_bytes(), tx.snapshot_version)`:
+    ///     - `Some(bytes)` → deserialize and return.
+    ///     - `None` → `DbError::NotFound`.
+    pub async fn read_one_tx(
+        &self,
+        id: RecordId,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<InnerValue> {
+        if let (Some(tx), Some(mvcc)) = (tx, self.mvcc_store.as_ref()) {
+            let key = id.to_bytes();
+            match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
+                Some(bytes) => {
+                    return InnerValue::from_bytes(bytes).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "Failed to deserialize InnerValue: {}",
+                            e
+                        ))
+                    });
+                }
+                None => {
+                    return Err(shamir_storage::error::DbError::NotFound(format!(
+                        "record not found at snapshot {}: {:?}",
+                        tx.snapshot_version, id
+                    )));
+                }
+            }
+        }
         self.table.get(id).await
     }
 
