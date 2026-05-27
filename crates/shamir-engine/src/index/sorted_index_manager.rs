@@ -43,6 +43,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
+use crate::index2::write_ops::IndexWriteOp;
 use crate::meta::MetaKey;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
@@ -159,6 +160,112 @@ impl SortedIndexManager {
         Ok(true)
     }
 
+    // ============================================================================
+    // Planner methods — return Vec<IndexWriteOp> without side effects
+    // ============================================================================
+
+    /// Plan index entries for a newly created record.
+    pub fn plan_record_created(
+        &self,
+        record_id: &RecordId,
+        record: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
+        if self.indexes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let mut ops = Vec::new();
+        for def in &defs {
+            if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
+                let key = self.build_entry_key(def.name_interned, &encoded, record_id);
+                ops.push(IndexWriteOp::SetPosting {
+                    key,
+                    value: Bytes::new(),
+                });
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Plan index entry changes when a record is updated.
+    pub fn plan_record_updated(
+        &self,
+        record_id: &RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
+        if self.indexes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let mut ops = Vec::new();
+        for def in &defs {
+            let old_enc = extract_and_encode(old, &def.field_path)?;
+            let new_enc = extract_and_encode(new, &def.field_path)?;
+            if old_enc == new_enc {
+                continue;
+            }
+            if let Some(ref ov) = old_enc {
+                let key = self.build_entry_key(def.name_interned, ov, record_id);
+                ops.push(IndexWriteOp::RemovePosting { key });
+            }
+            if let Some(ref nv) = new_enc {
+                let key = self.build_entry_key(def.name_interned, nv, record_id);
+                ops.push(IndexWriteOp::SetPosting {
+                    key,
+                    value: Bytes::new(),
+                });
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Plan index entry removals for a deleted record.
+    pub fn plan_record_deleted(
+        &self,
+        record_id: &RecordId,
+        record: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
+        if self.indexes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let mut ops = Vec::new();
+        for def in &defs {
+            if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
+                let key = self.build_entry_key(def.name_interned, &encoded, record_id);
+                ops.push(IndexWriteOp::RemovePosting { key });
+            }
+        }
+        Ok(ops)
+    }
+
+    // ============================================================================
+    // Apply ops
+    // ============================================================================
+
+    /// Apply a slice of `IndexWriteOp` against `self.info_store`.
+    async fn apply_ops(&self, ops: &[IndexWriteOp]) -> DbResult<()> {
+        for op in ops {
+            match op {
+                IndexWriteOp::SetPosting { key, value } => {
+                    self.info_store.set(key.clone(), value.clone()).await?;
+                }
+                IndexWriteOp::RemovePosting { key } => {
+                    let _ = self.info_store.remove(key.clone()).await?;
+                }
+                IndexWriteOp::BumpFtsStats { .. } => {
+                    // Not relevant for SortedIndexManager.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ============================================================================
+    // on_record_* wrappers — plan + apply
+    // ============================================================================
+
     /// Add an index entry for a record. Called from
     /// `TableManager::insert` and `set` (create branch).
     pub async fn on_record_created(
@@ -166,18 +273,8 @@ impl SortedIndexManager {
         record_id: &RecordId,
         record: &InnerValue,
     ) -> DbResult<()> {
-        if self.indexes.is_empty() {
-            return Ok(());
-        }
-        // Snapshot definitions so we don't hold the DashMap shard.
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
-        for def in &defs {
-            if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
-                let key = self.build_entry_key(def.name_interned, &encoded, record_id);
-                self.info_store.set(key, Bytes::new()).await?;
-            }
-        }
-        Ok(())
+        let ops = self.plan_record_created(record_id, record)?;
+        self.apply_ops(&ops).await
     }
 
     /// Update entries when a record changes.
@@ -187,27 +284,8 @@ impl SortedIndexManager {
         old: &InnerValue,
         new: &InnerValue,
     ) -> DbResult<()> {
-        if self.indexes.is_empty() {
-            return Ok(());
-        }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
-        for def in &defs {
-            let old_enc = extract_and_encode(old, &def.field_path)?;
-            let new_enc = extract_and_encode(new, &def.field_path)?;
-            if old_enc == new_enc {
-                continue;
-            }
-            if let Some(ref ov) = old_enc {
-                let key = self.build_entry_key(def.name_interned, ov, record_id);
-                // Ok-value (removed entry) intentionally discarded; ? propagates errors.
-                let _ = self.info_store.remove(key).await?;
-            }
-            if let Some(ref nv) = new_enc {
-                let key = self.build_entry_key(def.name_interned, nv, record_id);
-                self.info_store.set(key, Bytes::new()).await?;
-            }
-        }
-        Ok(())
+        let ops = self.plan_record_updated(record_id, old, new)?;
+        self.apply_ops(&ops).await
     }
 
     /// Batched version of `on_record_created` — collects all entry
@@ -243,18 +321,8 @@ impl SortedIndexManager {
         record_id: &RecordId,
         record: &InnerValue,
     ) -> DbResult<()> {
-        if self.indexes.is_empty() {
-            return Ok(());
-        }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
-        for def in &defs {
-            if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
-                let key = self.build_entry_key(def.name_interned, &encoded, record_id);
-                // Ok-value (removed entry) intentionally discarded; ? propagates errors.
-                let _ = self.info_store.remove(key).await?;
-            }
-        }
-        Ok(())
+        let ops = self.plan_record_deleted(record_id, record)?;
+        self.apply_ops(&ops).await
     }
 
     /// Range lookup: return all record IDs whose indexed value is in

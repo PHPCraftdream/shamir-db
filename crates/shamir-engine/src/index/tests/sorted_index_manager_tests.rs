@@ -24,6 +24,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
+use crate::index2::write_ops::IndexWriteOp;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -558,4 +559,85 @@ async fn string_prefix_does_not_match_longer_value() {
         .unwrap();
     assert_eq!(r.len(), 1);
     assert!(r.contains(&rid_aa));
+}
+
+// ---------------------------------------------------------------------------
+// Planner (plan_record_*) tests — Stage 1.1.F
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn plan_record_created_returns_sorted_posting() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let rid = RecordId::new();
+    let rec = record_with_int(201, 42);
+    let ops = mgr.plan_record_created(&rid, &rec).unwrap();
+    assert_eq!(ops.len(), 1);
+    match &ops[0] {
+        IndexWriteOp::SetPosting { key, value } => {
+            // Key must end with record_id bytes.
+            assert_eq!(&key[key.len() - 16..], &rid.to_bytes());
+            assert!(value.is_empty());
+        }
+        other => panic!("expected SetPosting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn plan_record_deleted_returns_remove_sorted_posting() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    let rid = RecordId::new();
+    let rec = record_with_int(201, 42);
+    let ops = mgr.plan_record_deleted(&rid, &rec).unwrap();
+    assert_eq!(ops.len(), 1);
+    match &ops[0] {
+        IndexWriteOp::RemovePosting { key } => {
+            assert_eq!(&key[key.len() - 16..], &rid.to_bytes());
+        }
+        other => panic!("expected RemovePosting, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn equivalence_plan_apply_vs_direct() {
+    // Two managers on separate stores, same definition.
+    // One uses on_record_created (wrapper), the other plan + manual apply.
+    let store_a: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let store_b: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mgr_a = SortedIndexManager::new(Arc::clone(&store_a)).await.unwrap();
+    let mgr_b = SortedIndexManager::new(Arc::clone(&store_b)).await.unwrap();
+    let def = SortedIndexDefinition::new(101, vec![201]);
+    mgr_a.register(def.clone()).await.unwrap();
+    mgr_b.register(def).await.unwrap();
+
+    let rid = RecordId::new();
+    let rec = record_with_int(201, 77);
+
+    // Direct wrapper path.
+    mgr_a.on_record_created(&rid, &rec).await.unwrap();
+
+    // Plan + manual apply path.
+    let ops = mgr_b.plan_record_created(&rid, &rec).unwrap();
+    for op in &ops {
+        match op {
+            IndexWriteOp::SetPosting { key, value } => {
+                store_b.set(key.clone(), value.clone()).await.unwrap();
+            }
+            IndexWriteOp::RemovePosting { key } => {
+                let _ = store_b.remove(key.clone()).await.unwrap();
+            }
+            _ => {}
+        }
+    }
+
+    // Both stores should yield the same lookup results.
+    let r_a = mgr_a.lookup_range(101, None, None).await.unwrap();
+    let r_b = mgr_b.lookup_range(101, None, None).await.unwrap();
+    assert_eq!(r_a, r_b);
+    assert!(r_a.contains(&rid));
 }
