@@ -207,16 +207,11 @@ Documented in `docs/pre-transactional/05-executor-isolation.md`
 "Known Production Limitations" + `docs/ops/FLAKY_TESTS.md`. Not bugs —
 documented stage-cut boundaries.
 
-### 1. SSI conflict detection blind on tx writes
+### 1. ~~SSI conflict detection blind on tx writes~~ — CLOSED (5.1)
 
-`MvccStore::version_of(key)` returns `Some(0)` for keys last written
-by Phase 5 `base.transact` (bypasses `set_versioned`). Real SSI
-conflicts fire only when a non-tx `set_versioned` caller bumped a
-version — which doesn't happen in production yet.
-
-**Closure path:** Stage 5.1 — route Phase 5 writes through
-`MvccStore::set_versioned` instead of `base.transact`. History
-archival under active snapshots becomes meaningful.
+Phase 5 now routes through `MvccStore::apply_committed_ops` (5.1.a/b).
+`version_cache` is updated on tx commits. SSI conflict detection
+verified by `ssi_conflict_detected_on_concurrent_tx_writes` test (5.1.c).
 
 ### 2. Repo-level interner is placeholder
 
