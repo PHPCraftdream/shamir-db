@@ -36,6 +36,14 @@ impl StagingStore {
         }
     }
 
+    /// Borrow the base store this staging buffer wraps.
+    ///
+    /// Used by `commit_tx` Phase 5 to apply drained ops via
+    /// `base.transact(ops)` — atomic batch publish per table.
+    pub fn base(&self) -> &Arc<dyn Store> {
+        &self.base
+    }
+
     /// Read-through: staged value first, then base store.
     /// Staged `Remove` returns `NotFound` even if base has the key.
     ///

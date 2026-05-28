@@ -81,11 +81,22 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
     let entry = WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops);
     wal.begin(entry).await?;
 
-    // Phase 5: physical writes (scaffold — just drain).
+    // Phase 5a: physical data writes per table.
+    // Each StagingStore wraps a base Store (data_store of the table).
+    // Drain its ops and atomically apply via base.transact(ops).
     for (_table_id, staging) in std::mem::take(&mut tx.write_set) {
-        let _ops = staging.drain();
-        // TODO(4.D.3): apply through Store::transact / MvccStore.
+        let base: std::sync::Arc<dyn shamir_storage::types::Store> = staging.base().clone();
+        let ops = staging.drain();
+        if !ops.is_empty() {
+            base.transact(ops).await.map_err(TxError::Storage)?;
+        }
     }
+
+    // Phase 5b-d: indexes, HNSW, counters — TODO Stage 4.D.5+.
+    // index_write_set, tables_with_hnsw_staging, counter_deltas
+    // are still drained-but-unapplied; apply landing alongside the
+    // per-table data_store wiring that the executor will set up
+    // when it constructs TxContext.write_set entries.
 
     // Phase 6: publish — atomic publish-committed
     gate.publish_committed(commit_version);

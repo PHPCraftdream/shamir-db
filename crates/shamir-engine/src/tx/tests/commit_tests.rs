@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::Store;
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
@@ -98,4 +101,66 @@ async fn repo_two_concurrent_begin_tx_get_distinct_tx_ids() {
         .await
         .unwrap();
     assert_ne!(t1.tx_id, t2.tx_id, "fresh_tx_id must be monotonic");
+}
+
+#[tokio::test]
+async fn commit_phase5_applies_write_set_to_base_store() {
+    let repo = make_repo();
+
+    let mut tx = TxContext::new(TxId::new(100), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let staging = StagingStore::new(Arc::clone(&data_store));
+    staging
+        .set(Bytes::from_static(b"rid_1"), Bytes::from_static(b"payload"))
+        .await;
+    tx.write_set.insert(42, staging);
+
+    assert!(
+        data_store.get(Bytes::from_static(b"rid_1")).await.is_err(),
+        "data_store must not have the key before commit"
+    );
+
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.commit_version > 0);
+
+    let got = data_store.get(Bytes::from_static(b"rid_1")).await.unwrap();
+    assert_eq!(got, Bytes::from_static(b"payload"));
+}
+
+#[tokio::test]
+async fn commit_applies_multiple_tables_atomically() {
+    let repo = make_repo();
+    let mut tx = TxContext::new(TxId::new(200), 0, 0, IsolationLevel::Snapshot);
+
+    let s1: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let s2: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let st1 = StagingStore::new(Arc::clone(&s1));
+    st1.set(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+        .await;
+    tx.write_set.insert(1, st1);
+
+    let st2 = StagingStore::new(Arc::clone(&s2));
+    st2.set(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
+        .await;
+    tx.write_set.insert(2, st2);
+
+    let _ = commit_tx(tx, &repo).await.unwrap();
+
+    assert_eq!(
+        s1.get(Bytes::from_static(b"a")).await.unwrap(),
+        Bytes::from_static(b"1")
+    );
+    assert_eq!(
+        s2.get(Bytes::from_static(b"b")).await.unwrap(),
+        Bytes::from_static(b"2")
+    );
+}
+
+#[tokio::test]
+async fn commit_empty_write_set_still_succeeds() {
+    let repo = make_repo();
+    let tx = TxContext::new(TxId::new(300), 0, 0, IsolationLevel::Snapshot);
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.commit_version > 0);
 }
