@@ -248,6 +248,100 @@ impl TableManager {
         })
     }
 
+    /// tx-aware variant of [`execute_update`](Self::execute_update).
+    ///
+    /// Filters records by `where_clause`, merges `set` fields, then
+    /// stages each changed record via [`update_tx`](Self::update_tx).
+    /// WAL is NOT opened here — `commit_tx` Phase 4 emits one V2
+    /// entry covering the whole tx. Returns the same `WriteResult`
+    /// shape. Interner / counter persistence is **skipped** —
+    /// commit_tx handles that uniformly.
+    pub async fn execute_update_tx(
+        &self,
+        op: &UpdateOp,
+        ctx: &FilterContext<'_>,
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<WriteResult> {
+        let start = Instant::now();
+        let batch_size = 1000;
+        let interner = self.interner().get().await?;
+
+        let set_inner = json_value_to_inner(&op.set, interner)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        let set_map = match &set_inner {
+            InnerValue::Map(m) => m,
+            _ => {
+                return Err(shamir_storage::error::DbError::Validation(
+                    "UPDATE set must produce a Map".to_string(),
+                ))
+            }
+        };
+
+        let matched = if let Some(ref filter) = op.where_clause {
+            if let Some(via_index) = self.lookup_records_via_index(filter, ctx).await? {
+                via_index
+            } else {
+                let callback = compile_filter(filter, interner);
+                let mut result = Vec::new();
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result?;
+                    for (id, record) in batch {
+                        if callback.matches(&record, ctx) {
+                            result.push((id, record));
+                        }
+                    }
+                }
+                result
+            }
+        } else {
+            let mut result = Vec::new();
+            let stream = self.list_stream(batch_size);
+            futures::pin_mut!(stream);
+            while let Some(batch_result) = stream.next().await {
+                result.extend(batch_result?);
+            }
+            result
+        };
+
+        let mut affected: u64 = 0;
+        let mut result_records: Vec<json::Value> = Vec::new();
+        let return_mode = op
+            .select
+            .as_ref()
+            .map(|s| s.return_mode)
+            .unwrap_or(UpdateReturnMode::Changed);
+        let wants_records = op.select.is_some();
+
+        for (id, old_record) in &matched {
+            let new_record = merge_inner_maps(old_record, set_map);
+            let changed = &new_record != old_record;
+
+            if changed {
+                self.update_tx(*id, &new_record, Some(&mut *tx)).await?;
+                affected += 1;
+            }
+
+            if wants_records {
+                let should_include = match return_mode {
+                    UpdateReturnMode::All => true,
+                    UpdateReturnMode::Changed => changed,
+                    UpdateReturnMode::Unchanged => !changed,
+                };
+                if should_include {
+                    result_records.push(inner_to_json_value(&new_record, interner)?);
+                }
+            }
+        }
+
+        Ok(WriteResult {
+            affected,
+            records: result_records,
+            execution_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
     /// Execute a DELETE operation.
     ///
     /// Filters records by where_clause and deletes all matches.
@@ -317,6 +411,54 @@ impl TableManager {
         // Flush the counter cache (delete decremented it).
         if affected > 0 {
             self.counter().persist().await?;
+        }
+
+        Ok(WriteResult {
+            affected,
+            records: Vec::new(),
+            execution_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
+    /// tx-aware variant of [`execute_delete`](Self::execute_delete).
+    ///
+    /// Filters records by `where_clause`, stages each removal via
+    /// [`delete_tx`](Self::delete_tx). WAL is NOT opened here —
+    /// `commit_tx` Phase 4 emits one V2 entry covering the whole tx.
+    pub async fn execute_delete_tx(
+        &self,
+        op: &DeleteOp,
+        ctx: &FilterContext<'_>,
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<WriteResult> {
+        let start = Instant::now();
+        let batch_size = 1000;
+        let interner = self.interner().get().await?;
+
+        let to_delete: Vec<RecordId> =
+            if let Some(via_index) = self.lookup_records_via_index(&op.where_clause, ctx).await? {
+                via_index.into_iter().map(|(id, _)| id).collect()
+            } else {
+                let callback = compile_filter(&op.where_clause, interner);
+                let mut result = Vec::new();
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch_result) = stream.next().await {
+                    let batch = batch_result?;
+                    for (id, record) in batch {
+                        if callback.matches(&record, ctx) {
+                            result.push(id);
+                        }
+                    }
+                }
+                result
+            };
+
+        let mut affected: u64 = 0;
+        for id in to_delete {
+            if self.delete_tx(id, Some(&mut *tx)).await? {
+                affected += 1;
+            }
         }
 
         Ok(WriteResult {
@@ -410,6 +552,95 @@ impl TableManager {
         // Persist any newly interned keys
         self.interner().persist().await?;
         self.counter().persist().await?;
+
+        Ok(WriteResult {
+            affected: 1,
+            records: vec![json::Value::Object(result_obj)],
+            execution_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
+    /// tx-aware variant of [`execute_set`](Self::execute_set).
+    ///
+    /// Stage 4.D.6.c.2: mirrors the upsert semantics of
+    /// `execute_set` — locate by key fields, then either
+    /// [`update_tx`](Self::update_tx) (merge) or
+    /// [`insert_tx`](Self::insert_tx) (new record). Full parity with
+    /// `execute_set` including index fast-path; differs only in that
+    /// mutations go through tx-aware methods and interner / counter
+    /// persistence is **skipped** (commit_tx handles that uniformly).
+    pub async fn execute_set_tx(
+        &self,
+        op: &SetOp,
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<WriteResult> {
+        let start = Instant::now();
+        let batch_size = 1000;
+        let interner = self.interner().get().await?;
+
+        let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
+            json::Value::Object(map) => {
+                let mut fields = Vec::with_capacity(map.len());
+                for (k, v) in map {
+                    let key_id = match interner.touch_ind(k.as_str()) {
+                        Ok(t) => t.key().id(),
+                        Err(e) => return Err(shamir_storage::error::DbError::Codec(e.to_string())),
+                    };
+                    let inner_v = json_value_to_inner(v, interner)
+                        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                    fields.push((vec![key_id], inner_v));
+                }
+                fields
+            }
+            _ => {
+                return Err(shamir_storage::error::DbError::Validation(
+                    "SET key must be a JSON object".to_string(),
+                ))
+            }
+        };
+
+        let found = self
+            .lookup_existing_for_set(&key_fields, batch_size)
+            .await?;
+
+        let new_inner = json_value_to_inner(&op.value, interner)
+            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+
+        let (created, result_record) = if let Some((id, existing)) = found {
+            let new_map = match &new_inner {
+                InnerValue::Map(m) => m,
+                _ => {
+                    return Err(shamir_storage::error::DbError::Validation(
+                        "SET value must be a JSON object".to_string(),
+                    ))
+                }
+            };
+            let merged = merge_inner_maps(&existing, new_map);
+            self.update_tx(id, &merged, Some(&mut *tx)).await?;
+            (false, inner_to_json_value(&merged, interner)?)
+        } else {
+            let id = self.insert_tx(&new_inner, Some(&mut *tx)).await?;
+            let mut obj = match inner_to_json_value(&new_inner, interner)? {
+                json::Value::Object(m) => m,
+                other => {
+                    let mut m = json::Map::new();
+                    m.insert("_value".to_string(), other);
+                    m
+                }
+            };
+            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+            (true, json::Value::Object(obj))
+        };
+
+        let mut result_obj = match result_record {
+            json::Value::Object(m) => m,
+            other => {
+                let mut m = json::Map::new();
+                m.insert("_value".to_string(), other);
+                m
+            }
+        };
+        result_obj.insert("_created".to_string(), json::Value::Bool(created));
 
         Ok(WriteResult {
             affected: 1,

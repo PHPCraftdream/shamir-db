@@ -3,13 +3,17 @@
 
 use std::sync::Arc;
 
+use serde_json::json;
+
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::query::write::InsertOp;
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::table::TableManager;
 
 async fn make_table() -> TableManager {
@@ -231,4 +235,162 @@ async fn execute_insert_tx_empty_values() {
     let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 0);
     assert!(result.records.is_empty());
+}
+
+// ---- Stage 4.D.6.c.2: execute_update_tx / execute_delete_tx / execute_set_tx ----
+
+#[tokio::test]
+async fn execute_update_tx_stages_via_update_tx() {
+    let tbl = make_table().await;
+    let interner = tbl.interner().get().await.unwrap();
+
+    let existing = json!({ "name": "bob" });
+    let inner = shamir_types::codecs::interned::json_value_to_inner(&existing, interner).unwrap();
+    let _rid = tbl.insert(&inner).await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(50), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op = UpdateOp {
+        update: shamir_query_types::TableRef::new("t"),
+        set: json!({ "name": "alice" }),
+        where_clause: None,
+        select: None,
+    };
+
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let result = tbl.execute_update_tx(&op, &ctx, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 1);
+
+    let token = tbl.table_token();
+    assert_eq!(
+        *tx.counter_deltas.get(&token).unwrap_or(&-99),
+        0,
+        "update must not change row count"
+    );
+}
+
+#[tokio::test]
+async fn execute_update_tx_no_match_zero_affected() {
+    let tbl = make_table().await;
+
+    let mut tx = TxContext::new(TxId::new(51), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op = UpdateOp {
+        update: shamir_query_types::TableRef::new("t"),
+        set: json!({ "name": "alice" }),
+        where_clause: None,
+        select: None,
+    };
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let result = tbl.execute_update_tx(&op, &ctx, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 0);
+}
+
+#[tokio::test]
+async fn execute_delete_tx_stages_via_delete_tx() {
+    let tbl = make_table().await;
+    let _rid = tbl.insert(&InnerValue::Str("victim".into())).await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(52), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op: DeleteOp = serde_json::from_value(json!({
+        "delete_from": "t",
+        "where": { "op": "and", "filters": [] }
+    }))
+    .unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let result = tbl.execute_delete_tx(&op, &ctx, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 1);
+    assert!(result.records.is_empty());
+
+    let token = tbl.table_token();
+    assert_eq!(
+        *tx.counter_deltas.get(&token).unwrap(),
+        -1,
+        "delete must decrement counter by 1"
+    );
+}
+
+#[tokio::test]
+async fn execute_delete_tx_no_match_zero_affected() {
+    let tbl = make_table().await;
+
+    let mut tx = TxContext::new(TxId::new(53), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op: DeleteOp = serde_json::from_value(json!({
+        "delete_from": "t",
+        "where": { "op": "and", "filters": [] }
+    }))
+    .unwrap();
+
+    let interner = tbl.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let result = tbl.execute_delete_tx(&op, &ctx, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 0);
+}
+
+#[tokio::test]
+async fn execute_set_tx_insert_path() {
+    let tbl = make_table().await;
+    let mut tx = TxContext::new(TxId::new(60), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op: SetOp = serde_json::from_value(json!({
+        "set": "t",
+        "key": { "email": "a@b.c" },
+        "value": { "email": "a@b.c", "name": "alice" }
+    }))
+    .unwrap();
+
+    let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 1);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(result.records[0]["_created"], json!(true));
+
+    let token = tbl.table_token();
+    assert_eq!(*tx.counter_deltas.get(&token).unwrap(), 1);
+}
+
+#[tokio::test]
+async fn execute_set_tx_update_path() {
+    let tbl = make_table().await;
+
+    let existing = json!({ "email": "a@b.c", "name": "alice" });
+    let inner = shamir_types::codecs::interned::json_value_to_inner(
+        &existing,
+        tbl.interner().get().await.unwrap(),
+    )
+    .unwrap();
+    let _rid = tbl.insert(&inner).await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(61), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op: SetOp = serde_json::from_value(json!({
+        "set": "t",
+        "key": { "email": "a@b.c" },
+        "value": { "name": "bob" }
+    }))
+    .unwrap();
+
+    let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 1);
+    assert_eq!(result.records[0]["_created"], json!(false));
+
+    let token = tbl.table_token();
+    assert_eq!(
+        *tx.counter_deltas.get(&token).unwrap_or(&0),
+        0,
+        "update via set_tx must not change row count"
+    );
 }
