@@ -305,6 +305,7 @@ mod tests {
             wal.fresh_txn_id(),
             0,
             vec![WalOpV2::Delete {
+                table_id_interned: 0,
                 rid: RecordId::new(),
             }],
         );

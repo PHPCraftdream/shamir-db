@@ -45,13 +45,21 @@ pub enum WalOpV2 {
     /// Insert or overwrite a record. `body` is the exact bytes
     /// the data_store should hold after this op is applied.
     Put {
+        /// Interned identifier of the table this rid belongs to.
+        /// Recovery resolves the target data_store via this token
+        /// (RepoInstance::per_table_mvcc or similar lookup).
+        table_id_interned: u64,
         rid: RecordId,
         #[serde(with = "serde_bytes_bytes")]
         body: Bytes,
     },
 
     /// Delete a record.
-    Delete { rid: RecordId },
+    Delete {
+        /// Interned identifier of the table — see [`Put::table_id_interned`].
+        table_id_interned: u64,
+        rid: RecordId,
+    },
 
     /// Insert/overwrite an index posting under `(idx_id, key)`.
     ///
@@ -189,10 +197,14 @@ mod tests {
             started_at_ns: 1_234_567_890,
             ops: vec![
                 WalOpV2::Put {
+                    table_id_interned: 7,
                     rid: rid(1),
                     body: Bytes::from_static(b"hello"),
                 },
-                WalOpV2::Delete { rid: rid(2) },
+                WalOpV2::Delete {
+                    table_id_interned: 7,
+                    rid: rid(2),
+                },
                 WalOpV2::IndexPut {
                     idx_id: 11,
                     key: Bytes::from_static(b"k"),
@@ -268,6 +280,7 @@ mod tests {
         // Acceptance: encoded fits in 10KB.
         let ops: Vec<_> = (0..100u8)
             .map(|i| WalOpV2::Put {
+                table_id_interned: 0,
                 rid: rid(i),
                 body: Bytes::from(vec![b'x'; 50]),
             })

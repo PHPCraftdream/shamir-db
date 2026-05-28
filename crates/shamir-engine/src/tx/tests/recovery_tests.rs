@@ -31,6 +31,7 @@ async fn recover_v2_inflight_replays_and_removes_entries() {
         wal.fresh_txn_id(),
         repo_token(repo.name()),
         vec![WalOpV2::Put {
+            table_id_interned: 0,
             rid: RecordId(rid_bytes),
             body: bytes::Bytes::from_static(b"payload"),
         }],
