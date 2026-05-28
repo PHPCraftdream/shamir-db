@@ -6,6 +6,7 @@
 
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
@@ -55,6 +56,11 @@ pub struct TxContext {
     /// this tx. Merged into base interner on commit; dropped on abort.
     pub interner_overlay: scc::HashMap<String, u64>,
 
+    /// Next id to hand out from the overlay.  Starts at
+    /// [`OVERLAY_ID_BASE`](crate::layered_interner::OVERLAY_ID_BASE)
+    /// so overlay ids never clash with base ids.
+    pub next_overlay_id: AtomicU64,
+
     /// Per-table counter delta. Applied at commit:
     /// `counter.add(delta)` for each table.
     pub counter_deltas: HashMap<u64, i64>,
@@ -96,6 +102,7 @@ impl TxContext {
             index_write_set: Vec::new(),
             tables_with_hnsw_staging: Vec::new(),
             interner_overlay: scc::HashMap::new(),
+            next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
             counter_deltas: HashMap::new(),
             read_set: HashMap::new(),
             table_tokens: HashMap::new(),

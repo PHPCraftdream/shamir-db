@@ -14,12 +14,40 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
+use shamir_types::codecs::interned::{
+    inner_to_json_value, json_value_to_inner, json_value_to_inner_with,
+};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+
+/// Build a [`LayeredInterner`] that routes new field names to `tx.interner_overlay`.
+fn make_layered_interner<'a>(
+    base: &'a shamir_types::core::interner::Interner,
+    tx: &'a shamir_tx::TxContext,
+) -> shamir_tx::LayeredInterner<'a> {
+    shamir_tx::LayeredInterner::Layered {
+        base,
+        overlay: &tx.interner_overlay,
+        next_overlay_id: &tx.next_overlay_id,
+    }
+}
+
+/// Produce a closure that interns a field name via `layered`, returning
+/// an [`InternerKey`](shamir_types::core::interner::InternerKey).
+fn intern_via_layered<'a>(
+    layered: &'a shamir_tx::LayeredInterner<'a>,
+) -> impl Fn(
+    &str,
+) -> Result<shamir_types::core::interner::InternerKey, shamir_types::codecs::CodecError>
+       + 'a {
+    move |key: &str| {
+        let id = layered.touch_sync(key);
+        Ok(shamir_types::core::interner::InternerKey::new(id))
+    }
+}
 
 impl TableManager {
     /// Execute an INSERT operation.
@@ -85,12 +113,19 @@ impl TableManager {
         let start = Instant::now();
         let interner = self.interner().get().await?;
 
-        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
-        for value in &op.values {
-            let inner = json_value_to_inner(value, interner)
-                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-            inner_values.push(inner);
-        }
+        // Intern field names through the tx overlay, then release the
+        // immutable borrow on `tx` before the mutable `insert_tx` calls.
+        let inner_values: Vec<InnerValue> = {
+            let layered = make_layered_interner(interner, tx);
+            let intern_fn = intern_via_layered(&layered);
+            let mut vals = Vec::with_capacity(op.values.len());
+            for value in &op.values {
+                let inner = json_value_to_inner_with(value, &intern_fn)
+                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                vals.push(inner);
+            }
+            vals
+        };
 
         let mut ids: Vec<RecordId> = Vec::with_capacity(inner_values.len());
         for v in &inner_values {
@@ -266,8 +301,14 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        let set_inner = json_value_to_inner(&op.set, interner)
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+        // Intern field names through the tx overlay, then release the
+        // immutable borrow on `tx` before the mutable `update_tx` calls.
+        let set_inner = {
+            let layered = make_layered_interner(interner, tx);
+            let intern_fn = intern_via_layered(&layered);
+            json_value_to_inner_with(&op.set, &intern_fn)
+                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
+        };
         let set_map = match &set_inner {
             InnerValue::Map(m) => m,
             _ => {
@@ -578,33 +619,39 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
-            json::Value::Object(map) => {
-                let mut fields = Vec::with_capacity(map.len());
-                for (k, v) in map {
-                    let key_id = match interner.touch_ind(k.as_str()) {
-                        Ok(t) => t.key().id(),
-                        Err(e) => return Err(shamir_storage::error::DbError::Codec(e.to_string())),
-                    };
-                    let inner_v = json_value_to_inner(v, interner)
-                        .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-                    fields.push((vec![key_id], inner_v));
+        // Intern field names through the tx overlay, then release the
+        // immutable borrow on `tx` before the mutable `update_tx`/`insert_tx` calls.
+        let (key_fields, new_inner) = {
+            let layered = make_layered_interner(interner, tx);
+            let intern_fn = intern_via_layered(&layered);
+
+            let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
+                json::Value::Object(map) => {
+                    let mut fields = Vec::with_capacity(map.len());
+                    for (k, v) in map {
+                        let key_id = layered.touch_sync(k.as_str());
+                        let inner_v = json_value_to_inner_with(v, &intern_fn)
+                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                        fields.push((vec![key_id], inner_v));
+                    }
+                    fields
                 }
-                fields
-            }
-            _ => {
-                return Err(shamir_storage::error::DbError::Validation(
-                    "SET key must be a JSON object".to_string(),
-                ))
-            }
+                _ => {
+                    return Err(shamir_storage::error::DbError::Validation(
+                        "SET key must be a JSON object".to_string(),
+                    ))
+                }
+            };
+
+            let new_inner = json_value_to_inner_with(&op.value, &intern_fn)
+                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+
+            (key_fields, new_inner)
         };
 
         let found = self
             .lookup_existing_for_set(&key_fields, batch_size)
             .await?;
-
-        let new_inner = json_value_to_inner(&op.value, interner)
-            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
         let (created, result_record) = if let Some((id, existing)) = found {
             let new_map = match &new_inner {
@@ -617,10 +664,23 @@ impl TableManager {
             };
             let merged = merge_inner_maps(&existing, new_map);
             self.update_tx(id, &merged, Some(&mut *tx)).await?;
-            (false, inner_to_json_value(&merged, interner)?)
+            // Build result JSON from op.value merged onto the existing record
+            // (existing was committed before this tx → base ids only, safe to decode).
+            let mut base_obj = match inner_to_json_value(&existing, interner)? {
+                json::Value::Object(m) => m,
+                _ => json::Map::new(),
+            };
+            if let json::Value::Object(overlay) = &op.value {
+                for (k, v) in overlay {
+                    base_obj.insert(k.clone(), v.clone());
+                }
+            }
+            (false, json::Value::Object(base_obj))
         } else {
             let id = self.insert_tx(&new_inner, Some(&mut *tx)).await?;
-            let mut obj = match inner_to_json_value(&new_inner, interner)? {
+            // Build result JSON from original op.value to avoid overlay-id
+            // reverse-lookup (overlay ids are not yet in the base interner).
+            let mut obj = match op.value.clone() {
                 json::Value::Object(m) => m,
                 other => {
                     let mut m = json::Map::new();
