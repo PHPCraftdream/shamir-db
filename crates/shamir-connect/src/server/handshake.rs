@@ -147,6 +147,10 @@ impl<'a> ServerHandshake<'a> {
 
         let server_nonce = random_array::<{ limits::SERVER_NONCE_BYTES }>();
 
+        // M-tier audit M7: defense-in-depth — reject when client and
+        // server nonces coincide. See [`verify_nonces_distinct`].
+        verify_nonces_distinct(&auth_init.client_nonce, &server_nonce)?;
+
         // Effective params: real user's stored params (so SCRAM math works for them);
         // for unknown user → current defaults (spec §13.5 anti-enumeration trade-off).
         let effective_kdf = match &user_record {
@@ -276,6 +280,31 @@ impl<'a> ServerHandshake<'a> {
 
 /// Default `SESSION_MAX_AGE` per spec §7.4: 24 hours.
 pub const SESSION_MAX_AGE_NS: u64 = 24 * ns::HOUR;
+
+/// Defense-in-depth check that `client_nonce != server_nonce` (M-tier
+/// audit M7).
+///
+/// The SCRAM `auth_message` construction concatenates both nonces and
+/// both feed the HMAC inputs (`client_proof`, `server_signature`). An
+/// attacker who could force a collision — CSPRNG break, replay of a
+/// previously-observed server_nonce, or a malicious client sending its
+/// captured prior server_nonce as the new client_nonce — would weaken
+/// one layer of anti-replay.
+///
+/// Returns the same `InvalidInput` error variant that the existing
+/// all-zero nonce check produces, so call sites can treat the two
+/// defenses identically.
+pub fn verify_nonces_distinct(
+    client_nonce: &[u8; limits::CLIENT_NONCE_BYTES],
+    server_nonce: &[u8; limits::SERVER_NONCE_BYTES],
+) -> Result<()> {
+    if client_nonce[..] == server_nonce[..] {
+        return Err(Error::InvalidInput(
+            "client_nonce equals server_nonce — anti-replay defense rejected",
+        ));
+    }
+    Ok(())
+}
 
 /// Returns true iff `user_params` is weaker than `current_defaults` along any
 /// axis (memory_kb, time, parallelism). Used to drive the

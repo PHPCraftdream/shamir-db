@@ -20,7 +20,7 @@ use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
 use crate::common::crypto::{constant_time_eq, random_array, sha256};
 use crate::common::error::{Error, Result};
 use crate::common::identity::{build_identity_input, verify_identity};
-use crate::common::kdf_params::KdfParams;
+use crate::common::kdf_params::{validate_client_kdf_safe, KdfParams};
 use crate::common::scram::{build_client_proof, build_server_signature, ClientProof, DerivedKeys};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
@@ -203,8 +203,12 @@ impl ClientHandshake {
         challenge: &ServerChallenge,
         password: &mut [u8],
     ) -> Result<(ClientProof, DerivedKeys, AuthMessage)> {
-        // (1) Validate KDF params per spec §5.1.1
+        // (1) Validate KDF params per spec §5.1.1, then the outer
+        //     defense-in-depth client safety cap (M-tier audit M1).
         challenge.kdf_params.validate_client_limits()?;
+        if let Err(_msg) = validate_client_kdf_safe(&challenge.kdf_params) {
+            return Err(Error::KdfParamsRejected);
+        }
         if challenge.server_nonce.iter().all(|&b| b == 0) {
             return Err(Error::InvalidInput("server_nonce all-zero"));
         }

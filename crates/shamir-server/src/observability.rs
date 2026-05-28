@@ -112,6 +112,18 @@ pub enum ObservabilityError {
     /// process — second `spawn` call would error here in tests).
     #[error("prometheus recorder install: {0}")]
     RecorderInstall(String),
+    /// M-tier audit M5: refused to bind /metrics + friends to a
+    /// non-loopback address without an explicit opt-in. /metrics
+    /// exposes `auth_attempts_total` labelled by result, including
+    /// `locked_out` — a useful side-channel for distributed credential
+    /// probing. Operators that need a public endpoint must set
+    /// `allow_public_metrics = true` (and front it with auth at the
+    /// reverse proxy).
+    #[error(
+        "observability bind {0} is non-loopback but allow_public_metrics \
+         was not set — refusing to expose /metrics publicly"
+    )]
+    NonLoopbackBindRejected(SocketAddr),
 }
 
 /// Spawn the observability HTTP server.
@@ -129,12 +141,30 @@ pub enum ObservabilityError {
 /// gauges. Snapshotted every 5 s in the background poller. Pass `None`
 /// when no RepoTxGate is running yet; the gauges are still registered at
 /// zero so Prometheus scrapers see them from the first scrape.
+///
+/// `allow_public_metrics` — M-tier audit M5. When `false` (default for
+/// callers), a non-loopback `addr` triggers
+/// [`ObservabilityError::NonLoopbackBindRejected`] before any socket
+/// bind. /metrics exposes counters such as `auth_attempts_total{result =
+/// "locked_out"}`, which is a useful signal for an attacker probing a
+/// large user-base. Operators that need a publicly-scraped endpoint
+/// MUST opt in explicitly and front the port with reverse-proxy auth
+/// (bearer token, mTLS, or IP allowlist).
 pub async fn spawn(
     addr: SocketAddr,
     state: Arc<ObservabilityState>,
     install_recorder: bool,
     tx_metrics: Option<Arc<shamir_tx::TxMetrics>>,
+    allow_public_metrics: bool,
 ) -> Result<ObservabilityHandle, ObservabilityError> {
+    // 0. M-tier audit M5: reject non-loopback binds without explicit
+    //    opt-in. Done BEFORE the recorder install / TcpListener::bind
+    //    so a misconfigured server fails fast and doesn't briefly
+    //    expose a port.
+    if !addr.ip().is_loopback() && !allow_public_metrics {
+        return Err(ObservabilityError::NonLoopbackBindRejected(addr));
+    }
+
     // 1. Set up the Prometheus recorder (if we're allowed to install one).
     //    `install_recorder()` builds a recorder and `set_global_recorder`s
     //    it in one shot; succeeds at most once per process. Tests that
