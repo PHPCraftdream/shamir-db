@@ -500,6 +500,7 @@ async fn execute_batch_transactional_si_happy_path() {
 
     let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
     let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
         factory,
         vec![crate::table::TableConfig::new("users")],
     )

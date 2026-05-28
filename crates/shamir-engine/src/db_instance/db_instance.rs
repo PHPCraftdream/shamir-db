@@ -30,7 +30,8 @@ impl DbInstance {
         let instances: DashMap<String, RepoInstance> = DashMap::new();
         for config in configs {
             let name = config.name.clone();
-            let instance = RepoInstance::from_factory(config.factory, config.tables).await?;
+            let instance =
+                RepoInstance::from_factory(name.clone(), config.factory, config.tables).await?;
             instances.insert(name, instance);
         }
 
@@ -41,8 +42,10 @@ impl DbInstance {
 
     /// Add a new repository asynchronously
     pub async fn add_repo(&self, config: RepoConfig) -> DbResult<()> {
-        let instance = RepoInstance::from_factory(config.factory, config.tables).await?;
-        self.repos.insert(config.name, instance);
+        let name = config.name.clone();
+        let instance =
+            RepoInstance::from_factory(name.clone(), config.factory, config.tables).await?;
+        self.repos.insert(name, instance);
         Ok(())
     }
 

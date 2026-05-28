@@ -10,6 +10,7 @@ use tokio::sync::OnceCell;
 
 /// Manages a single repository and its tables
 pub struct RepoInstance {
+    name: String,
     repo: BoxRepo,
     configs: Arc<TDashMap<String, TableConfig>>,
     tables: Arc<TDashMap<String, OnceCell<TableManager>>>,
@@ -22,6 +23,7 @@ pub struct RepoInstance {
 impl Clone for RepoInstance {
     fn clone(&self) -> Self {
         Self {
+            name: self.name.clone(),
             repo: self.repo.clone(),
             configs: Arc::clone(&self.configs),
             tables: Arc::clone(&self.tables),
@@ -32,11 +34,11 @@ impl Clone for RepoInstance {
 }
 
 impl RepoInstance {
-    pub fn new(repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
-        Self::from_box_repo(repo, configs)
+    pub fn new(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
+        Self::from_box_repo(name, repo, configs)
     }
 
-    fn from_box_repo(repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
+    fn from_box_repo(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
         for cfg in configs {
             configs_map.insert(cfg.name.clone(), cfg);
@@ -45,6 +47,7 @@ impl RepoInstance {
         let tables: TDashMap<String, OnceCell<TableManager>> = new_dash_map_wc(100);
 
         Self {
+            name,
             repo,
             configs: Arc::new(configs_map),
             tables: Arc::new(tables),
@@ -56,11 +59,17 @@ impl RepoInstance {
     /// Creates a RepoInstance asynchronously from a factory.
     /// This is the preferred method as it properly handles blocking I/O.
     pub async fn from_factory(
+        name: String,
         factory: BoxRepoFactory,
         configs: Vec<TableConfig>,
     ) -> DbResult<Self> {
         let repo = factory.create().await?;
-        Ok(Self::from_box_repo(repo, configs))
+        Ok(Self::from_box_repo(name, repo, configs))
+    }
+
+    /// Repository name.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
@@ -190,8 +199,7 @@ impl RepoInstance {
     /// removes the snapshot from the active set so GC can reclaim
     /// versions older than `min_alive`.
     ///
-    /// `repo_id` in the TxContext is `0` for now — repo-level interner
-    /// is Stage 5 work. WAL entries currently carry that placeholder.
+    /// `repo_id` in the TxContext is populated via [`repo_token`].
     pub async fn begin_tx(
         &self,
         isolation: shamir_tx::IsolationLevel,
@@ -200,7 +208,8 @@ impl RepoInstance {
         let guard = gate.open_snapshot().await;
         let snapshot_version = guard.version();
         let tx_id = gate.fresh_tx_id();
-        let tx = shamir_tx::TxContext::new(tx_id, 0, snapshot_version, isolation);
+        let tx =
+            shamir_tx::TxContext::new(tx_id, repo_token(&self.name), snapshot_version, isolation);
         Ok((tx, guard))
     }
 
@@ -276,4 +285,15 @@ impl RepoInstance {
         let table = self.get_table(table_name).await?;
         table.lookup_by_index(index_name, values).await
     }
+}
+
+/// Deterministic u64 token for a repository name.
+///
+/// Stage 4: `DefaultHasher(name)` placeholder.
+/// Stage 5: real repo-level interner ID.
+pub fn repo_token(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    h.finish()
 }

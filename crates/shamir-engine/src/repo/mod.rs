@@ -6,5 +6,5 @@ pub mod repo_types;
 pub mod tests;
 
 pub use repo_config::RepoConfig;
-pub use repo_instance::RepoInstance;
+pub use repo_instance::{repo_token, RepoInstance};
 pub use repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
