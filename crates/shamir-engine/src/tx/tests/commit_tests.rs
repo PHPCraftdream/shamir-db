@@ -249,6 +249,37 @@ async fn begin_tx_populates_repo_id_from_repo_token() {
 }
 
 #[tokio::test]
+async fn commit_runs_apply_id_remap_phase_1_with_empty_overlay() {
+    // Sanity: commit with empty interner_overlay (default state)
+    // succeeds — Phase 1 is wired but no-op.
+    let repo = make_repo();
+    let (tx, _guard) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    // Verify the overlay is empty (precondition).
+    assert!(tx.interner_overlay.is_empty());
+    let outcome = repo.commit_tx(tx).await.unwrap();
+    assert!(outcome.commit_version > 0);
+}
+
+#[tokio::test]
+async fn commit_with_non_empty_overlay_proceeds_with_warning() {
+    // Until Stage 5 wires LayeredInterner, a non-empty overlay
+    // triggers the warning path but commit still succeeds with an
+    // empty remap (overlay entries are ignored).
+    use shamir_tx::{IsolationLevel, TxContext, TxId};
+
+    let repo = make_repo();
+    let tx = TxContext::new(TxId::new(900), 0, 0, IsolationLevel::Snapshot);
+    let _ = tx.interner_overlay.insert("foo".to_string(), 12345);
+
+    // Commit succeeds despite non-empty overlay (warning-only path).
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.commit_version > 0);
+}
+
+#[tokio::test]
 async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
     use bytes::Bytes;
     use shamir_storage::storage_in_memory::InMemoryStore;
