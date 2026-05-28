@@ -197,3 +197,57 @@ async fn ssi_unknown_table_conflict() {
         "read on unknown table must trigger conflict"
     );
 }
+
+#[tokio::test]
+async fn ssi_conflict_detected_on_concurrent_tx_writes() {
+    // Two SSI transactions read the same record; first commits;
+    // second must get SsiConflict because version_cache was bumped.
+    // This proves Stage 5.1 closed Known Production Limitation #1.
+    use crate::table::table_manager::table_token_for;
+    use crate::tx::CommitError;
+
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    // Pre-populate a record outside any transaction.
+    let rid = tbl
+        .insert(&InnerValue::Str("initial".into()))
+        .await
+        .unwrap();
+
+    let token = table_token_for("t");
+    let key = rid.to_bytes();
+
+    // tx1 (SSI): read the record at version 0.
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tx1.record_read(token, key.clone(), 0);
+
+    // tx2 (SSI): read the same record at version 0.
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tx2.record_read(token, key.clone(), 0);
+
+    // tx1 writes to the same record (update) and commits — bumps version_cache for key.
+    tbl.update_tx(rid, &InnerValue::Str("tx1-write".into()), Some(&mut tx1))
+        .await
+        .unwrap();
+    let o1 = repo.commit_tx(tx1).await.unwrap();
+    assert!(
+        o1.commit_version > 0,
+        "tx1 must commit with a positive version"
+    );
+
+    // tx2 writes to the same record and tries to commit — must fail with SsiConflict
+    // because the key it read (version 0) now has a higher version.
+    tbl.update_tx(rid, &InnerValue::Str("tx2-write".into()), Some(&mut tx2))
+        .await
+        .unwrap();
+    let result = repo.commit_tx(tx2).await;
+    match result {
+        Err(CommitError::SsiConflict { .. }) => {}
+        other => panic!(
+            "expected SsiConflict, got {:?}",
+            other.map(|_| "Ok").unwrap_or("Err(other)")
+        ),
+    }
+}
