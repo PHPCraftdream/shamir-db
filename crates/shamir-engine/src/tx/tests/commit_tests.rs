@@ -12,7 +12,7 @@ use crate::tx::commit_tx;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
-    RepoInstance::new(BoxRepo::InMemory(repo), Vec::new())
+    RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new())
 }
 
 #[tokio::test]
@@ -73,7 +73,7 @@ async fn repo_begin_tx_returns_valid_context() {
         .begin_tx(shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
-    assert_eq!(tx.repo_id, 0);
+    assert_ne!(tx.repo_id, 0, "repo_id must be populated from repo_token");
     assert!(tx.tx_id.0 > 0, "fresh_tx_id must allocate");
     drop(guard);
 }
@@ -236,4 +236,14 @@ async fn commit_serializable_real_provider_no_conflict_succeeds() {
 
     let outcome = commit_tx(tx, &repo).await.unwrap();
     assert!(outcome.commit_version > 0);
+}
+
+#[tokio::test]
+async fn begin_tx_populates_repo_id_from_repo_token() {
+    let repo = make_repo();
+    let (tx, _guard) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    assert_ne!(tx.repo_id, 0, "repo_id should be populated from repo_token");
 }

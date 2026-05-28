@@ -8,6 +8,7 @@ use std::sync::Arc;
 fn create_test_instance() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
     RepoInstance::new(
+        "test".into(),
         BoxRepo::InMemory(repo),
         vec![TableConfig::new("users"), TableConfig::new("orders")],
     )

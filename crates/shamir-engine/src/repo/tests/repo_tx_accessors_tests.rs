@@ -6,7 +6,7 @@ use shamir_storage::storage_in_memory::InMemoryRepo;
 
 fn create_test_instance() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
-    RepoInstance::new(BoxRepo::InMemory(repo), Vec::new())
+    RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new())
 }
 
 #[tokio::test]
@@ -44,4 +44,18 @@ async fn tx_gate_and_wal_share_info_store_via_repo() {
 
     assert!(Arc::ptr_eq(&gate2, &gate3));
     assert!(Arc::ptr_eq(&wal2, &wal3));
+}
+
+#[test]
+fn repo_name_stored() {
+    let repo = create_test_instance();
+    assert_eq!(repo.name(), "test");
+}
+
+#[test]
+fn repo_token_deterministic() {
+    let t1 = crate::repo::repo_instance::repo_token("my_repo");
+    let t2 = crate::repo::repo_instance::repo_token("my_repo");
+    assert_eq!(t1, t2);
+    assert_ne!(t1, 0);
 }
