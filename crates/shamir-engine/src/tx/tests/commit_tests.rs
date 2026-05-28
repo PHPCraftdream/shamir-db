@@ -62,3 +62,40 @@ async fn commit_two_txs_monotonic_versions() {
 
     assert!(o2.commit_version > o1.commit_version);
 }
+
+#[tokio::test]
+async fn repo_begin_tx_returns_valid_context() {
+    let repo = make_repo();
+    let (tx, guard) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    assert_eq!(tx.repo_id, 0);
+    assert!(tx.tx_id.0 > 0, "fresh_tx_id must allocate");
+    drop(guard);
+}
+
+#[tokio::test]
+async fn repo_begin_then_commit_succeeds() {
+    let repo = make_repo();
+    let (tx, _guard) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    let outcome = repo.commit_tx(tx).await.unwrap();
+    assert!(outcome.commit_version > 0);
+}
+
+#[tokio::test]
+async fn repo_two_concurrent_begin_tx_get_distinct_tx_ids() {
+    let repo = make_repo();
+    let (t1, _g1) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    let (t2, _g2) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    assert_ne!(t1.tx_id, t2.tx_id, "fresh_tx_id must be monotonic");
+}

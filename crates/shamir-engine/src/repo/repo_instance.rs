@@ -183,6 +183,39 @@ impl RepoInstance {
             .cloned()
     }
 
+    /// Open a fresh transaction on this repo.
+    ///
+    /// Returns a `(TxContext, SnapshotGuard)` pair. The guard's lifetime
+    /// must extend at least until commit (or drop = rollback) — drop
+    /// removes the snapshot from the active set so GC can reclaim
+    /// versions older than `min_alive`.
+    ///
+    /// `repo_id` in the TxContext is `0` for now — repo-level interner
+    /// is Stage 5 work. WAL entries currently carry that placeholder.
+    pub async fn begin_tx(
+        &self,
+        isolation: shamir_tx::IsolationLevel,
+    ) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
+        let gate = self.tx_gate().await?;
+        let guard = gate.open_snapshot().await;
+        let snapshot_version = guard.version();
+        let tx_id = gate.fresh_tx_id();
+        let tx = shamir_tx::TxContext::new(tx_id, 0, snapshot_version, isolation);
+        Ok((tx, guard))
+    }
+
+    /// Commit a transaction via the 7-phase commit pipeline.
+    ///
+    /// Wrapper around [`crate::tx::commit_tx`]. The free function is
+    /// the canonical implementation; this method exposes it on the
+    /// natural semantic owner.
+    pub async fn commit_tx(
+        &self,
+        tx: shamir_tx::TxContext,
+    ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
+        crate::tx::commit_tx(tx, self).await
+    }
+
     // ============================================================================
     // Index Management API (proxy to TableManager)
     // ============================================================================

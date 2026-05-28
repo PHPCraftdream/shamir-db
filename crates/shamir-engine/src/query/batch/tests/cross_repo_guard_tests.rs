@@ -23,6 +23,12 @@ impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table(&self.repo, &table_ref.table).await
     }
+
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
+        Err(shamir_storage::error::DbError::NotFound(
+            "TestResolver does not back transactional repo lookups".into(),
+        ))
+    }
 }
 
 async fn setup_resolver() -> TestResolver {
