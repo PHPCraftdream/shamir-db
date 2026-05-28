@@ -1,5 +1,7 @@
+use crate::codecs::interned::json::json_value_to_inner_with;
 use crate::codecs::interned::{inner_to_json, json_to_inner};
 use crate::core::interner::Interner;
+use crate::core::interner::InternerKey;
 use crate::types::common::new_map;
 use crate::types::value::InnerValue;
 
@@ -213,4 +215,22 @@ fn test_null_in_map_roundtrip() {
         }
         _ => panic!("Expected Map"),
     }
+}
+
+#[test]
+fn json_value_to_inner_with_custom_intern() {
+    use crate::codecs::CodecError;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let counter = AtomicU64::new(1000);
+    let intern = |_key: &str| -> Result<InternerKey, CodecError> {
+        let id = counter.fetch_add(1, Ordering::SeqCst);
+        Ok(InternerKey::new(id))
+    };
+    let json = serde_json::json!({
+        "name": "alice",
+        "age": 30
+    });
+    let inner = json_value_to_inner_with(&json, &intern).unwrap();
+    assert!(matches!(inner, InnerValue::Map(_)));
 }
