@@ -71,9 +71,24 @@ impl IndexBackend for VectorBackend {
         &self.descriptor
     }
 
-    // TODO(1.2): move HNSW mutation to staging layer. Currently
-    // plan_insert/update/delete perform side-effects (adapter.upsert/delete)
-    // and return empty ops — a known compromise until Stage 1.2 lands.
+    // HNSW mutation goes through the adapter. The non-tx variants
+    // (`plan_insert` / `plan_update` / `plan_delete`) commit to the
+    // live HNSW graph immediately; the tx-aware overrides below
+    // (`plan_insert_tx` / `plan_update_tx` / `plan_delete_tx`) route
+    // through the adapter's per-tx staging area when `tx_id == Some`,
+    // so a rolled-back tx leaves no ghost vectors on the live graph
+    // (HIGH-6).
+    //
+    // TODO(HIGH-6 follow-up): the adapter exposes `commit_staged(tx_id)`
+    // and `rollback_staged(tx_id)`, but neither is currently called
+    // from the commit/abort pipeline. As a result, staged entries
+    // accumulate in `HnswAdapter::staged` and are never drained.
+    // This is a memory leak (entries are tied to a TxId that will
+    // never be reused), not a correctness bug for ghost postings:
+    // non-tx queries only see the committed graph (see
+    // `HnswAdapter::search`). Hooking `commit_staged` /
+    // `rollback_staged` into `commit_tx` / `Drop` belongs to a
+    // subsequent stage.
 
     async fn plan_insert(
         &self,
@@ -106,6 +121,64 @@ impl IndexBackend for VectorBackend {
         _rec: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         self.adapter.delete(rid, None).await.map_err(ve)?;
+        Ok(Vec::new())
+    }
+
+    /// tx-aware insert planning (HIGH-6).
+    ///
+    /// `tx_id == Some` → adapter.upsert stages the vector under that
+    /// tx; the live HNSW graph is untouched until commit. A dropped
+    /// tx leaves the staged entry in `HnswAdapter::staged` (dead
+    /// weight, not visible to non-tx queries — see HIGH-6 follow-up
+    /// note above).
+    ///
+    /// `tx_id == None` → forwards to [`plan_insert`] (immediate
+    /// commit to the live graph).
+    async fn plan_insert_tx(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+        tx_id: Option<shamir_tx::TxId>,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        if tx_id.is_none() {
+            return self.plan_insert(rid, rec).await;
+        }
+        if let Some(v) = self.extract_vec(rec) {
+            self.adapter.upsert(rid, &v, tx_id).await.map_err(ve)?;
+        }
+        Ok(Vec::new())
+    }
+
+    /// tx-aware update planning (HIGH-6). See [`plan_insert_tx`].
+    async fn plan_update_tx(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+        tx_id: Option<shamir_tx::TxId>,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        if tx_id.is_none() {
+            return self.plan_update(rid, old, new).await;
+        }
+        if let Some(v) = self.extract_vec(new) {
+            self.adapter.upsert(rid, &v, tx_id).await.map_err(ve)?;
+        } else {
+            self.adapter.delete(rid, tx_id).await.map_err(ve)?;
+        }
+        Ok(Vec::new())
+    }
+
+    /// tx-aware delete planning (HIGH-6). See [`plan_insert_tx`].
+    async fn plan_delete_tx(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+        tx_id: Option<shamir_tx::TxId>,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        if tx_id.is_none() {
+            return self.plan_delete(rid, rec).await;
+        }
+        self.adapter.delete(rid, tx_id).await.map_err(ve)?;
         Ok(Vec::new())
     }
 

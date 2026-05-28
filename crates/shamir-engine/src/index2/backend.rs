@@ -107,6 +107,44 @@ pub trait IndexBackend: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// tx-aware planning variant of [`plan_insert`].
+    ///
+    /// Default forwards to `plan_insert` (tx-unaware). Backends that
+    /// maintain non-storage side state — e.g. `VectorBackend` with its
+    /// HNSW graph — override this to route per-tx mutations into a
+    /// per-tx staging area instead of the live structure. That way a
+    /// dropped (rolled-back) tx leaves no ghost postings on the live
+    /// state. See HIGH-6.
+    async fn plan_insert_tx(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+        _tx_id: Option<shamir_tx::TxId>,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        self.plan_insert(rid, rec).await
+    }
+
+    /// tx-aware planning variant of [`plan_update`]. See [`plan_insert_tx`].
+    async fn plan_update_tx(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+        _tx_id: Option<shamir_tx::TxId>,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        self.plan_update(rid, old, new).await
+    }
+
+    /// tx-aware planning variant of [`plan_delete`]. See [`plan_insert_tx`].
+    async fn plan_delete_tx(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+        _tx_id: Option<shamir_tx::TxId>,
+    ) -> Result<Vec<IndexWriteOp>, IndexError> {
+        self.plan_delete(rid, rec).await
+    }
+
     /// Apply in-memory-only ops (e.g. BumpFtsStats). Called by
     /// `apply_index_ops` for ops that don't go through the Store.
     /// Default: no-op.
