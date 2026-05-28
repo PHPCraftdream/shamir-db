@@ -29,6 +29,12 @@ impl TableResolver for DbTableResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table(&table_ref.repo, &table_ref.table).await
     }
+
+    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::engine::repo::RepoInstance> {
+        self.db.get_repo(repo_name).ok_or_else(|| {
+            crate::DbError::NotFound(format!("Repository '{}' not found", repo_name))
+        })
+    }
 }
 
 /// AdminExecutor that operates on ShamirDb.

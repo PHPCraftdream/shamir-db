@@ -21,6 +21,13 @@ use shamir_types::types::common::{new_map, TMap};
 #[async_trait::async_trait]
 pub trait TableResolver: Send + Sync {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager>;
+
+    /// Resolve a repository by name to its [`crate::repo::RepoInstance`].
+    ///
+    /// Used by tx-aware paths to obtain the per-repo coordinator
+    /// (gate, WAL, commit lifecycle). Cross-repo guard upstream
+    /// guarantees `repo_name` is well-defined for transactional batches.
+    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::repo::RepoInstance>;
 }
 
 /// Trait for executing admin (DDL) operations.
@@ -50,6 +57,11 @@ pub async fn execute_batch(
             return Err(BatchError::CrossRepoNotSupported { repos });
         }
     }
+
+    // Stage 4.D.4: integrate tx lifecycle once execute_query takes
+    // an Option<&mut TxContext> parameter through the read pipeline.
+    // For now `request.transactional` path keeps using non-tx semantics
+    // — cross-repo guard validated the structural prerequisite.
 
     // 1. Plan
     let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
