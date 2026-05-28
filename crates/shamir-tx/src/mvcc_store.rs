@@ -48,6 +48,13 @@ impl MvccStore {
         }
     }
 
+    /// cancel-safe: NO — multi-step state mutation. When snapshots are
+    /// active the sequence is: read old from `main`, archive to `history`,
+    /// write new to `main`, allocate version and update `version_cache`.
+    /// Cancellation between archive and main-write can leave history
+    /// containing a value while main still has the old one (or a stale
+    /// version_cache). Recovery is by caller-side retry / WAL replay.
+    ///
     /// Non-tx write. If active snapshots exist, saves the old value
     /// in history before overwriting main.
     pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<()> {
@@ -63,10 +70,20 @@ impl MvccStore {
         }
         self.main.set(key.clone(), value).await?;
         let new_v = self.gate.assign_next_version();
-        self.version_cache.entry(key).insert_entry(new_v);
+        // CRIT-2: `entry().insert_entry()` is a NO-OP on Occupied —
+        // it returns the existing entry unchanged. Use `upsert_async`
+        // so repeated writes to the same key advance the cached
+        // version monotonically.
+        self.version_cache.upsert_async(key, new_v).await;
         Ok(())
     }
 
+    /// cancel-safe: NO — multi-step state mutation; same reasoning as
+    /// `set_versioned`. Sequence is archive-old → remove from main →
+    /// allocate version and update `version_cache`. Cancellation mid-
+    /// sequence leaves the store in a partial state; caller-side retry
+    /// / WAL replay is the recovery path.
+    ///
     /// Non-tx delete. Similar to `set_versioned` — archives old value
     /// if snapshots are active.
     pub async fn delete_versioned(&self, key: Bytes) -> DbResult<()> {
@@ -80,11 +97,16 @@ impl MvccStore {
         let _ = self.main.remove(key.clone()).await;
         if !self.gate.active_snapshots_empty() {
             let new_v = self.gate.assign_next_version();
-            self.version_cache.entry(key).insert_entry(new_v);
+            // CRIT-2: see `set_versioned` for rationale.
+            self.version_cache.upsert_async(key, new_v).await;
         }
         Ok(())
     }
 
+    /// cancel-safe: yes — read-only. Fast path is a single `main.get`;
+    /// slow path is a read-only history range scan. Cancellation drops
+    /// the future with no state mutation.
+    ///
     /// Snapshot read: return the value visible at `snapshot_version`.
     ///
     /// Fast path: if version_cache says current version ≤ snapshot →
@@ -129,40 +151,74 @@ impl MvccStore {
         self.current_version(key)
     }
 
+    /// cancel-safe: NO — applies a batch of `KvOp` via multi-step
+    /// sequences (Phase 1 pre-reads, Phase 2 batched history transact,
+    /// Phase 3 batched main transact, Phase 4 version_cache updates).
+    /// Cancellation mid-batch leaves some phases applied, others not.
+    /// Recovery relies on WAL replay (commit_tx invariant).
     pub async fn apply_committed_ops(&self, ops: Vec<KvOp>, commit_version: u64) -> DbResult<()> {
-        let snapshots_active = !self.gate.active_snapshots_empty();
+        // HIGH-2: re-sample `snapshots_active` per-op inside the loop
+        // rather than once at function entry. A snapshot opening
+        // mid-apply must still see archived old values for ops that
+        // run after the snapshot's gate-insertion happens. Sampling
+        // per-op keeps the existing "no snapshots ⇒ no archive"
+        // contract without races for late-arriving snapshots.
+        //
+        // HIGH-3: batch the physical writes through `Store::transact`.
+        // Per-op `set`/`remove` collapses to a single atomic write-tx
+        // on backends that override `transact` (redb, sled, fjall,
+        // persy, nebari, canopy) — one fsync instead of N.
 
-        for op in ops {
-            match op {
-                KvOp::Set(key, value) => {
-                    if snapshots_active {
-                        if let Ok(old) = self.main.get(key.clone()).await {
-                            let cur_v = self.current_version(&key);
-                            let h_key = encode_version_key(&key, cur_v);
-                            self.history.set(h_key, old).await?;
-                        }
-                    }
-                    self.main.set(key.clone(), value).await?;
-                    self.version_cache.entry(key).insert_entry(commit_version);
-                }
-                KvOp::Remove(key) => {
-                    if snapshots_active {
-                        if let Ok(old) = self.main.get(key.clone()).await {
-                            let cur_v = self.current_version(&key);
-                            let h_key = encode_version_key(&key, cur_v);
-                            self.history.set(h_key, old).await?;
-                        }
-                    }
-                    let _ = self.main.remove(key.clone()).await;
-                    if snapshots_active {
-                        self.version_cache.entry(key).insert_entry(commit_version);
-                    }
-                }
+        // Phase 1: pre-read old values for archive. Per-op snapshot
+        // check + per-op `main.get` (can't batch — depends on per-key
+        // old value).
+        let mut history_ops: Vec<KvOp> = Vec::new();
+        for op in &ops {
+            // Re-sample per iteration so a snapshot that opens
+            // mid-loop is honoured by the remaining ops.
+            if self.gate.active_snapshots_empty() {
+                continue;
             }
+            let key = match op {
+                KvOp::Set(k, _) => k,
+                KvOp::Remove(k) => k,
+            };
+            if let Ok(old) = self.main.get(key.clone()).await {
+                let cur_v = self.current_version(key);
+                let h_key = encode_version_key(key, cur_v);
+                history_ops.push(KvOp::Set(h_key, old));
+            }
+        }
+
+        // Phase 2: one batched write to history.
+        if !history_ops.is_empty() {
+            self.history.transact(history_ops).await?;
+        }
+
+        // Phase 3: one batched write to main.
+        self.main.transact(ops.clone()).await?;
+
+        // Phase 4: update the in-memory version cache for every
+        // touched key. Uses `upsert_async` (CRIT-2): `entry().insert_entry()`
+        // is a NO-OP when the key already exists, so repeated writes
+        // to the same key silently kept the FIRST commit_version —
+        // breaking SSI conflict detection. `upsert_async` overwrites.
+        for op in ops {
+            let key = match op {
+                KvOp::Set(k, _) => k,
+                KvOp::Remove(k) => k,
+            };
+            self.version_cache.upsert_async(key, commit_version).await;
         }
         Ok(())
     }
 
+    /// cancel-safe: NO — Phase 1 scans the history stream; Phase 2
+    /// deletes per-key residuals. Cancellation during Phase 2 leaves
+    /// some entries deleted and others not. GC is idempotent — a later
+    /// `gc_below` resumes from current history state — so eventual
+    /// convergence is fine, but a single call is not atomic.
+    ///
     /// Garbage-collect history entries with version < `min_version`.
     ///
     /// For each original key, keeps the LATEST version that is still
@@ -215,6 +271,9 @@ impl MvccStore {
         Ok(deleted)
     }
 
+    /// cancel-safe: NO — delegates to `gc_below`, which is non-cancel-
+    /// safe. Idempotent on retry.
+    ///
     /// Run GC using the gate's `min_alive()` as the threshold.
     pub async fn gc(&self) -> DbResult<usize> {
         let min = self.gate.min_alive();
@@ -713,5 +772,73 @@ mod tests {
             count, 0,
             "history should stay empty without active snapshots"
         );
+    }
+
+    /// CRIT-2 regression test. Before the fix, `version_cache.entry()
+    /// .insert_entry()` was a no-op when the key was already cached,
+    /// so the second `apply_committed_ops(..., 200)` left the cached
+    /// version stuck at 100 and SSI conflict detection silently
+    /// failed.
+    #[tokio::test]
+    async fn version_cache_updates_on_repeated_writes_to_same_key() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+        let key = Bytes::from("repeated");
+
+        mvcc.apply_committed_ops(vec![KvOp::Set(key.clone(), Bytes::from("v1"))], 100)
+            .await
+            .unwrap();
+        assert_eq!(mvcc.version_of(&key), 100);
+
+        mvcc.apply_committed_ops(vec![KvOp::Set(key.clone(), Bytes::from("v2"))], 200)
+            .await
+            .unwrap();
+        // CRITICAL: must be 200, was 100 before the fix.
+        assert_eq!(
+            mvcc.version_of(&key),
+            200,
+            "version_cache must update on repeated writes"
+        );
+    }
+
+    /// HIGH-2 regression guard. Before the fix, `snapshots_active`
+    /// was sampled once at function entry; a snapshot that opened
+    /// after the sample but before the first op would silently miss
+    /// the archive. Per-op re-sampling closes that race for every
+    /// op processed after the snapshot becomes visible.
+    #[tokio::test]
+    async fn apply_committed_ops_archives_even_if_snapshot_opens_mid_call() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        // No snapshots open yet — seed an old value through the raw
+        // main store so apply will see it for archival.
+        mvcc.main
+            .set(Bytes::from("k"), Bytes::from("old"))
+            .await
+            .unwrap();
+
+        // Open a snapshot right before apply (simulates "opened just
+        // before, but after the flag would have been sampled at
+        // function entry").
+        let _g = gate.open_snapshot().await;
+
+        mvcc.apply_committed_ops(vec![KvOp::Set(Bytes::from("k"), Bytes::from("new"))], 50)
+            .await
+            .unwrap();
+
+        // History must contain "old" because the snapshot needs it.
+        let stream = mvcc.history.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut found = false;
+        while let Some(batch) = stream.next().await {
+            for (_, hv) in batch.unwrap() {
+                if hv.as_ref() == b"old" {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "old value archived for active snapshot");
     }
 }
