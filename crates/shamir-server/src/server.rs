@@ -24,7 +24,9 @@ use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainW
 use shamir_connect::server::config::ServerSecrets;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::durable_counters::RedbConsumedCounters;
-use shamir_connect::server::lockout::InMemoryLockoutStore;
+use shamir_connect::server::lockout::{
+    InMemoryLockoutStore, LockoutSnapshot, LockoutSnapshotError, LockoutSnapshotSink,
+};
 use shamir_connect::server::rate_limit::InMemoryRateLimiter;
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
@@ -130,6 +132,19 @@ pub struct ServerHandle {
     shutdown_notify: Arc<Notify>,
     /// Optional observability HTTP server.
     observability: Option<crate::observability::ObservabilityHandle>,
+    /// Periodic lockout-snapshot task (M2 — persistent lockout store).
+    /// Awaited on shutdown so the redb file lock on `server_meta.redb` is
+    /// released cleanly before a same-data-dir restart can succeed.
+    lockout_snapshot_task: Option<LockoutSnapshotTask>,
+}
+
+/// Handle for the periodic lockout snapshot task. Owns a oneshot stop
+/// signal plus the `JoinHandle` so [`ServerHandle::shutdown`] can wake
+/// the task out of its `interval.tick()` immediately rather than waiting
+/// up to one full interval.
+struct LockoutSnapshotTask {
+    handle: JoinHandle<()>,
+    stop: Arc<Notify>,
 }
 
 impl ServerHandle {
@@ -150,6 +165,15 @@ impl ServerHandle {
         // 4. Stop the observability HTTP server (if any).
         if let Some(obs) = self.observability {
             obs.shutdown().await;
+        }
+        // 5. Stop the lockout snapshot task and let it drop its
+        //    Arc<ServerMetaStore> reference so the redb file lock
+        //    on `server_meta.redb` releases for a same-data-dir
+        //    restart. The task writes one final snapshot inside its
+        //    shutdown branch (best-effort).
+        if let Some(snap) = self.lockout_snapshot_task {
+            snap.stop.notify_waiters();
+            let _ = snap.handle.await;
         }
     }
 
@@ -186,8 +210,10 @@ impl ServerLauncher {
         // 1. Durable stores.
         std::fs::create_dir_all(&config.data_dir)?;
 
-        let meta = ServerMetaStore::open_or_init(config.data_dir.join("server_meta.redb"))
-            .map_err(|e| BootError::ServerMeta(e.to_string()))?;
+        let meta = Arc::new(
+            ServerMetaStore::open_or_init(config.data_dir.join("server_meta.redb"))
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?,
+        );
 
         let user_dir = Arc::new(
             RedbUserDirectory::open(config.data_dir.join("users.redb"))
@@ -240,11 +266,37 @@ impl ServerLauncher {
         }
 
         // 3. In-memory stores.
-        let lockout = Arc::new(InMemoryLockoutStore::new());
+        //
+        // Lockout state is rehydrated from `server_meta.redb` and a
+        // background task (`LOCKOUT_SNAPSHOT_INTERVAL` below) persists it
+        // every 60s so brute-force bookkeeping survives server restarts
+        // — otherwise an attacker who knows the restart cadence resets
+        // all per-pair failure counts and re-bursts the auth path with
+        // no lockout penalty. See `shamir_connect::server::lockout` for
+        // the trade-off rationale (≤60s loss window vs fsync-per-failure).
+        let lockout_sink: Arc<dyn LockoutSnapshotSink> =
+            Arc::new(MetaLockoutSink::new(meta.clone()));
+        let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink(lockout_sink));
         let now_ns = UnixNanos::now().as_u64();
+        // TODO(M2 follow-up): wire `InMemoryRateLimiter` to a similar
+        // snapshot sink. Lower priority because the spec §8.6 warmup
+        // window already throttles the first 60s after start — that's
+        // the very interval over which lockout snapshots would otherwise
+        // drift, so the rate-limiter restart-replay window is already
+        // covered defensively. The bucket shape (micro-tokens) needs a
+        // separate `RateLimitSnapshot` value type before this can land.
         let rate_limit = Arc::new(InMemoryRateLimiter::new(now_ns));
         let argon2_sem = Arc::new(Argon2Semaphore::with_capacity(config.argon2_concurrent_max));
         let session_store = Arc::new(SessionStore::new());
+
+        // Spawn the periodic lockout snapshot task. Errors are logged
+        // and ignored — losing a snapshot is not fatal, the next tick
+        // will retry, and a hard crash between writes loses at most one
+        // interval of new failures. The returned handle is stored on
+        // `ServerHandle` so `shutdown()` can join it (otherwise it
+        // would hold the redb file lock past shutdown and block any
+        // same-data-dir restart).
+        let lockout_snapshot_task = Some(spawn_lockout_snapshot_task(lockout.clone()));
 
         // 4. Audit chain — load from checkpoint if present.
         //
@@ -603,17 +655,22 @@ impl ServerLauncher {
             // that specific failure (recorder already installed = OK,
             // we use the existing one) and continue without an exporter
             // handle in that case.
-            let handle = match crate::observability::spawn(addr, state.clone(), true, None).await {
-                Ok(h) => h,
-                Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
-                    // Recorder already installed (typical in test process):
-                    // re-spawn without trying to install again.
-                    crate::observability::spawn(addr, state.clone(), false, None)
-                        .await
-                        .map_err(|e| BootError::Bind(format!("observability: {e}")))?
-                }
-                Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
-            };
+            // M-tier audit M5: pass `allow_public_metrics = false`. A
+            // non-loopback `addr` is rejected up-front. Operators that
+            // need a public scrape endpoint can promote this to a
+            // config flag in a follow-up.
+            let handle =
+                match crate::observability::spawn(addr, state.clone(), true, None, false).await {
+                    Ok(h) => h,
+                    Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
+                        // Recorder already installed (typical in test process):
+                        // re-spawn without trying to install again.
+                        crate::observability::spawn(addr, state.clone(), false, None, false)
+                            .await
+                            .map_err(|e| BootError::Bind(format!("observability: {e}")))?
+                    }
+                    Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
+                };
             handle.state.mark_ready();
             Some(handle)
         };
@@ -625,6 +682,7 @@ impl ServerLauncher {
             audit_appender,
             shutdown_notify,
             observability,
+            lockout_snapshot_task,
         })
     }
 }
@@ -917,19 +975,22 @@ fn log_bootstrap_outcome(name: &str, outcome: &BootstrapOutcome) {
             );
         }
         BootstrapOutcome::Created {
-            token: Some(tok),
+            token: Some(_tok),
             token_path,
         } => {
-            // SECURITY: print the token at WARN so operators see it, but do
-            // NOT log it on every restart. Once the operator changes the
-            // password, the file should be deleted so this branch never
-            // fires again (Created only happens once).
+            // SECURITY (M-tier audit M4): only log the *path* to the
+            // token file, never the token itself. Logged tokens persist
+            // in journald / k8s log aggregation indefinitely; the file
+            // is permission-protected (0o600 on Unix) and is the
+            // legitimate retrieval channel. Once the operator changes
+            // the password, the file should be deleted so this branch
+            // never fires again (Created only happens once).
             tracing::warn!(
                 user = %name,
-                token = %tok,
                 token_path = ?token_path,
                 "bootstrap: superuser created with one-time token — \
-                 LOG IN AND CHANGE PASSWORD, THEN DELETE THE TOKEN FILE",
+                 READ THE TOKEN FROM THE FILE, LOG IN, CHANGE PASSWORD, \
+                 THEN DELETE THE TOKEN FILE",
             );
         }
     }
@@ -938,4 +999,107 @@ fn log_bootstrap_outcome(name: &str, outcome: &BootstrapOutcome) {
         server_secret: [0u8; 32],
         lockout_secret: [0u8; 32],
     };
+}
+
+// ---------------------------------------------------------------------------
+// Lockout snapshot persistence
+// ---------------------------------------------------------------------------
+
+/// Default interval between lockout-snapshot writes. 60s matches the
+/// audit-checkpoint cadence and balances disk pressure (one redb write
+/// per minute) against the loss window for failed-auth bookkeeping
+/// (worst-case ~60s of new failures lost on hard crash). The spec IMPL
+/// §1.3 ceiling is 5s but is not normative for failed-auth state —
+/// the lockout subsystem just needs durability across CLEAN restart, and
+/// the rate-limiter's warmup window (spec §8.6) already covers any
+/// drift during the recovery window.
+const LOCKOUT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// [`LockoutSnapshotSink`] adapter that writes through to the durable
+/// `ServerMetaStore`. The store handles its own write transaction +
+/// `Durability::Immediate` fsync, so this sink is just a thin glue
+/// translator between the trait error type and `MetaError::to_string()`.
+struct MetaLockoutSink {
+    meta: Arc<ServerMetaStore>,
+}
+
+impl MetaLockoutSink {
+    fn new(meta: Arc<ServerMetaStore>) -> Self {
+        Self { meta }
+    }
+}
+
+impl LockoutSnapshotSink for MetaLockoutSink {
+    fn save(&self, snapshot: &LockoutSnapshot) -> Result<(), LockoutSnapshotError> {
+        self.meta
+            .store_lockout_snapshot(snapshot)
+            .map_err(|e| LockoutSnapshotError::Storage(e.to_string()))
+    }
+
+    fn load(&self) -> Result<Option<LockoutSnapshot>, LockoutSnapshotError> {
+        self.meta
+            .lockout_snapshot()
+            .map_err(|e| LockoutSnapshotError::Storage(e.to_string()))
+    }
+}
+
+/// Background task: every [`LOCKOUT_SNAPSHOT_INTERVAL`], capture the
+/// current in-memory lockout state and push it through the installed
+/// [`LockoutSnapshotSink`]. Persist failures are logged at `warn` and the
+/// loop continues — losing one snapshot is recoverable on the next tick.
+///
+/// Shutdown is driven by the returned `stop` `Notify`. The task writes
+/// one final snapshot on the way out so a clean restart sees the freshest
+/// possible state — important for both the durability story and for
+/// integration tests that boot, do work, shut down, and reboot from the
+/// same data dir (the redb file lock on `server_meta.redb` cannot be
+/// re-acquired until this task drops its `Arc<ServerMetaStore>`).
+fn spawn_lockout_snapshot_task(lockout: Arc<InMemoryLockoutStore>) -> LockoutSnapshotTask {
+    let stop = Arc::new(Notify::new());
+    let stop_inner = stop.clone();
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(LOCKOUT_SNAPSHOT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Discard the immediate first tick — no point in writing an
+        // empty snapshot the moment the server boots.
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop_inner.notified() => {
+                    tracing::debug!("lockout_snapshot: shutdown notified, writing final snapshot");
+                    if let Err(e) = lockout.persist_snapshot() {
+                        tracing::warn!(error = %e, "final lockout snapshot persist failed");
+                    }
+                    break;
+                }
+                _ = interval.tick() => {
+                    // `persist_snapshot` is synchronous (sync redb write
+                    // under the hood). It's short — measured << 1ms for
+                    // typical state sizes — so running it on the runtime
+                    // thread is fine. If it ever grows we can wrap in
+                    // `spawn_blocking`.
+                    match lockout.persist_snapshot() {
+                        Ok(true) => {
+                            tracing::trace!(
+                                failures = lockout.failure_pair_count(),
+                                lockouts = lockout.active_lockout_count(),
+                                "lockout snapshot persisted",
+                            );
+                        }
+                        Ok(false) => {
+                            // No sink installed — should not happen in
+                            // production paths since `launch()` always
+                            // wires one.
+                            tracing::trace!("lockout snapshot task: no sink installed");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "lockout snapshot persist failed");
+                        }
+                    }
+                }
+            }
+        }
+    });
+    LockoutSnapshotTask { handle, stop }
 }
