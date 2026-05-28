@@ -513,6 +513,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_at_busy_history_five_versions() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("busy");
+        let mut version_at = Vec::new();
+
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+            let v = mvcc.version_of(&key);
+            version_at.push(v);
+        }
+
+        // Query at each historical version and verify we get the right value.
+        // version_at[0] was assigned when v1 was written, so get_at(version_at[0]) → v1
+        for (idx, &snap) in version_at.iter().enumerate() {
+            let result = mvcc.get_at(key.as_ref(), snap).await.unwrap();
+            let expected = format!("v{}", idx + 1);
+            assert_eq!(
+                result,
+                Some(Bytes::from(expected.clone())),
+                "at snapshot {} expected {}",
+                snap,
+                expected
+            );
+        }
+
+        // Query at version 0 (before any write) → slow path → scan [key::0, key::0] → empty → None
+        let result_before = mvcc.get_at(key.as_ref(), 0).await.unwrap();
+        assert!(
+            result_before.is_none(),
+            "no value should exist before first write"
+        );
+
+        // Query at a very high version → fast path → current (v5)
+        let result_latest = mvcc.get_at(key.as_ref(), u64::MAX - 1).await.unwrap();
+        assert_eq!(result_latest, Some(Bytes::from("v5")));
+    }
+
+    #[tokio::test]
     async fn apply_committed_ops_no_snapshots_skips_history() {
         let mvcc = make_mvcc();
 
