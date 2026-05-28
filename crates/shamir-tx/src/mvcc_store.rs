@@ -19,6 +19,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use scc::HashMap as SccHashMap;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::KvOp;
 use shamir_storage::types::Store;
 
 use crate::repo_tx_gate::RepoTxGate;
@@ -126,6 +127,40 @@ impl MvccStore {
     /// queries it to detect "another tx wrote this key since I read".
     pub fn version_of(&self, key: &[u8]) -> u64 {
         self.current_version(key)
+    }
+
+    pub async fn apply_committed_ops(&self, ops: Vec<KvOp>, commit_version: u64) -> DbResult<()> {
+        let snapshots_active = !self.gate.active_snapshots_empty();
+
+        for op in ops {
+            match op {
+                KvOp::Set(key, value) => {
+                    if snapshots_active {
+                        if let Ok(old) = self.main.get(key.clone()).await {
+                            let cur_v = self.current_version(&key);
+                            let h_key = encode_version_key(&key, cur_v);
+                            self.history.set(h_key, old).await?;
+                        }
+                    }
+                    self.main.set(key.clone(), value).await?;
+                    self.version_cache.entry(key).insert_entry(commit_version);
+                }
+                KvOp::Remove(key) => {
+                    if snapshots_active {
+                        if let Ok(old) = self.main.get(key.clone()).await {
+                            let cur_v = self.current_version(&key);
+                            let h_key = encode_version_key(&key, cur_v);
+                            self.history.set(h_key, old).await?;
+                        }
+                    }
+                    let _ = self.main.remove(key.clone()).await;
+                    if snapshots_active {
+                        self.version_cache.entry(key).insert_entry(commit_version);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Slow path: range scan history for the latest version ≤ `snapshot`.
@@ -398,5 +433,114 @@ mod tests {
             .unwrap();
         let v = mvcc.version_of(&key);
         assert!(v > 0, "version_of must reflect the assigned version");
+    }
+
+    #[tokio::test]
+    async fn apply_committed_ops_updates_version_cache() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("k_commit");
+        let ops = vec![KvOp::Set(key.clone(), Bytes::from("val"))];
+        mvcc.apply_committed_ops(ops, 42).await.unwrap();
+
+        assert_eq!(mvcc.version_of(&key), 42);
+
+        let val = mvcc.main.get(key).await.unwrap();
+        assert_eq!(val, Bytes::from("val"));
+    }
+
+    #[tokio::test]
+    async fn apply_committed_ops_archives_old_value() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("k_archive");
+        mvcc.main
+            .set(key.clone(), Bytes::from("old"))
+            .await
+            .unwrap();
+
+        let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
+        mvcc.apply_committed_ops(ops, 10).await.unwrap();
+
+        assert_eq!(
+            mvcc.main.get(key.clone()).await.unwrap(),
+            Bytes::from("new")
+        );
+
+        let stream = mvcc.history.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut found = false;
+        while let Some(batch) = stream.next().await {
+            for (_, hv) in batch.unwrap() {
+                assert_eq!(hv, Bytes::from("old"));
+                found = true;
+            }
+        }
+        assert!(found, "old value must be archived in history");
+    }
+
+    #[tokio::test]
+    async fn apply_committed_ops_remove_archives_and_deletes() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("k_del");
+        mvcc.main
+            .set(key.clone(), Bytes::from("before"))
+            .await
+            .unwrap();
+
+        let ops = vec![KvOp::Remove(key.clone())];
+        mvcc.apply_committed_ops(ops, 20).await.unwrap();
+
+        assert!(mvcc.main.get(key.clone()).await.is_err());
+
+        let stream = mvcc.history.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut found = false;
+        while let Some(batch) = stream.next().await {
+            for (_, hv) in batch.unwrap() {
+                assert_eq!(hv, Bytes::from("before"));
+                found = true;
+            }
+        }
+        assert!(found);
+    }
+
+    #[tokio::test]
+    async fn apply_committed_ops_no_snapshots_skips_history() {
+        let mvcc = make_mvcc();
+
+        let key = Bytes::from("k_nohist");
+        mvcc.main
+            .set(key.clone(), Bytes::from("old"))
+            .await
+            .unwrap();
+
+        let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
+        mvcc.apply_committed_ops(ops, 5).await.unwrap();
+
+        assert_eq!(
+            mvcc.main.get(key.clone()).await.unwrap(),
+            Bytes::from("new")
+        );
+
+        assert_eq!(mvcc.version_of(&key), 5);
+
+        let stream = mvcc.history.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut count = 0usize;
+        while let Some(batch) = stream.next().await {
+            count += batch.unwrap().len();
+        }
+        assert_eq!(
+            count, 0,
+            "history should stay empty without active snapshots"
+        );
     }
 }
