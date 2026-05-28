@@ -1,4 +1,5 @@
-//! Tests for TableManager::insert_tx (Stage 4.D.6.a).
+//! Tests for TableManager::insert_tx (Stage 4.D.6.a) and
+//! execute_insert_tx (Stage 4.D.6.c.1).
 
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use shamir_tx::{IsolationLevel, TxContext, TxId};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use crate::query::write::InsertOp;
 use crate::table::TableManager;
 
 async fn make_table() -> TableManager {
@@ -187,4 +189,46 @@ async fn set_tx_acts_as_update_tx() {
         .await
         .unwrap();
     assert!(existed);
+}
+
+// ---- Stage 4.D.6.c.1: execute_insert_tx ----
+
+#[tokio::test]
+async fn execute_insert_tx_stages_all_records() {
+    let tbl = make_table().await;
+    let mut tx = TxContext::new(TxId::new(40), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op = InsertOp {
+        insert_into: shamir_query_types::TableRef::new("t"),
+        values: vec![
+            serde_json::json!("v1"),
+            serde_json::json!("v2"),
+            serde_json::json!("v3"),
+        ],
+    };
+
+    let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 3);
+    assert_eq!(result.records.len(), 3);
+    for r in &result.records {
+        assert!(r.get("_id").is_some(), "_id must be attached");
+    }
+
+    let token = tbl.table_token();
+    assert!(tx.write_set.contains_key(&token));
+    assert_eq!(*tx.counter_deltas.get(&token).unwrap(), 3);
+}
+
+#[tokio::test]
+async fn execute_insert_tx_empty_values() {
+    let tbl = make_table().await;
+    let mut tx = TxContext::new(TxId::new(41), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let op = InsertOp {
+        insert_into: shamir_query_types::TableRef::new("t"),
+        values: vec![],
+    };
+    let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
+    assert_eq!(result.affected, 0);
+    assert!(result.records.is_empty());
 }
