@@ -149,7 +149,7 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
                 let provider = std::sync::Arc::clone(provider);
                 tx.validate_read_set(move |t, k| provider.version_of(t, k))
             }
-            None => tx.validate_read_set(|_t, _k| 0u64),
+            None => tx.validate_read_set(|_t, _k| Some(0u64)),
         };
         if let Err((_table_id, key)) = validation {
             return Err(TxError::SsiConflict { key });

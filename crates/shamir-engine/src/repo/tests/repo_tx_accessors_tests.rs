@@ -87,7 +87,7 @@ async fn create_table_context_populates_per_table_mvcc() {
         .as_ref()
         .unwrap()
         .version_of(token, &bytes::Bytes::from_static(b"unknown"));
-    assert_eq!(v, 0, "unknown key returns version 0");
+    assert_eq!(v, Some(0), "unknown key returns version 0");
 }
 
 #[tokio::test]
@@ -100,5 +100,23 @@ async fn begin_tx_snapshot_does_not_attach_provider() {
     assert!(
         tx.version_provider.is_none(),
         "SI tx must not have provider"
+    );
+}
+
+#[tokio::test]
+async fn version_provider_returns_none_for_unknown_table() {
+    let repo = make_repo();
+    // Don't create any tables — per_table_mvcc is empty.
+    let (mut tx, _g) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Serializable)
+        .await
+        .unwrap();
+    // Record a read from an unknown table.
+    tx.record_read(12345, bytes::Bytes::from_static(b"k"), 5);
+
+    let result = repo.commit_tx(tx).await;
+    assert!(
+        result.is_err(),
+        "unknown table in read_set must cause conflict"
     );
 }

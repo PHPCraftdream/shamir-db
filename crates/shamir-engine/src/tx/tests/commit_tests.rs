@@ -196,8 +196,8 @@ async fn commit_serializable_real_provider_detects_conflict() {
 
     struct ConflictProvider;
     impl VersionProvider for ConflictProvider {
-        fn version_of(&self, _t: u64, _k: &Bytes) -> u64 {
-            999
+        fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
+            Some(999)
         }
     }
 
@@ -224,8 +224,8 @@ async fn commit_serializable_real_provider_no_conflict_succeeds() {
 
     struct OkProvider;
     impl VersionProvider for OkProvider {
-        fn version_of(&self, _t: u64, _k: &Bytes) -> u64 {
-            5
+        fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
+            Some(5)
         }
     }
 
