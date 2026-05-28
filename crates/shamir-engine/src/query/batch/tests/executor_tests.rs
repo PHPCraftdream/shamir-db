@@ -3,7 +3,7 @@
 use serde_json::json;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch, BatchRequest, TableResolver};
+use crate::query::batch::{execute_batch, BatchRequest, QueryRunner, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -417,4 +417,60 @@ async fn test_request_id_echoed() {
     .unwrap();
     let resp = execute_batch(&req, &resolver, None).await.unwrap();
     assert_eq!(resp.id, json!(123));
+}
+
+// ============================================================================
+// QueryRunner struct — tx: None path
+// ============================================================================
+
+#[tokio::test]
+async fn test_query_runner_none_tx_insert_and_read() {
+    let resolver = setup_resolver().await;
+
+    // Insert via QueryRunner with tx: None
+    let insert_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [{"name": "Eve", "age": 28}]
+            }
+        }
+    }))
+    .unwrap();
+    let insert_entry = insert_req.queries.get("ins").unwrap().clone();
+    let mut runner = QueryRunner {
+        resolver: &resolver,
+        admin: None,
+        tx: None,
+    };
+    let result = runner
+        .run(
+            "ins",
+            &insert_entry,
+            &shamir_types::types::common::new_map(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
+
+    // Read via QueryRunner with tx: None
+    let read_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "q": {"from": "users"}
+        }
+    }))
+    .unwrap();
+    let read_entry = read_req.queries.get("q").unwrap().clone();
+    let mut runner = QueryRunner {
+        resolver: &resolver,
+        admin: None,
+        tx: None,
+    };
+    let result = runner
+        .run("q", &read_entry, &shamir_types::types::common::new_map())
+        .await
+        .unwrap();
+    assert_eq!(result.records.len(), 1);
 }
