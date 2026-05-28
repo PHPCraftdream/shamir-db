@@ -1,6 +1,6 @@
 //! Single-writer, snapshot-reader actor base for stateful index backends.
 //!
-//! Pattern: writes go through a `tokio::sync::mpsc::UnboundedSender`
+//! Pattern: writes go through a bounded `tokio::sync::mpsc::Sender`
 //! (lock-free MPSC). A spawned tokio task drains the channel and
 //! applies ops sequentially, updating an `ArcSwap<Snap>` snapshot.
 //! Readers grab the current snapshot with one atomic load — no locks.
@@ -14,22 +14,41 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub struct IndexActor<Op: Send + 'static, Snap: Send + Sync + 'static> {
-    write_tx: mpsc::UnboundedSender<Op>,
+    write_tx: mpsc::Sender<Op>,
     snapshot: Arc<ArcSwap<Snap>>,
     join: Option<JoinHandle<()>>,
 }
 
 impl<Op: Send + 'static, Snap: Send + Sync + 'static> IndexActor<Op, Snap> {
-    /// Spawn an actor task. `applier` is invoked once per submitted
-    /// `Op`; it receives the current snapshot handle so it can
-    /// replace it atomically via `snapshot.store(Arc::new(new))`.
-    pub fn spawn<F, Fut>(initial: Snap, mut applier: F) -> Self
+    /// Default bounded-channel capacity. §B14 bans unbounded channels
+    /// without a "provably bounded producer rate" — `apply_index_ops`
+    /// is called per write so under bulk-import load the queue could
+    /// grow without limit and OOM the server. 1024 ops × ~200 B/op
+    /// caps memory at ~200 KB while still absorbing brief bursts
+    /// before the producer blocks on backpressure.
+    pub const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
+
+    /// Spawn an actor task with the default channel capacity. See
+    /// [`Self::DEFAULT_CHANNEL_CAPACITY`] for the rationale.
+    pub fn spawn<F, Fut>(initial: Snap, applier: F) -> Self
+    where
+        F: FnMut(Op, Arc<ArcSwap<Snap>>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        Self::spawn_with_capacity(initial, Self::DEFAULT_CHANNEL_CAPACITY, applier)
+    }
+
+    /// Spawn an actor task with a custom channel capacity. `applier`
+    /// is invoked once per submitted `Op`; it receives the current
+    /// snapshot handle so it can replace it atomically via
+    /// `snapshot.store(Arc::new(new))`.
+    pub fn spawn_with_capacity<F, Fut>(initial: Snap, capacity: usize, mut applier: F) -> Self
     where
         F: FnMut(Op, Arc<ArcSwap<Snap>>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send,
     {
         let snapshot = Arc::new(ArcSwap::from(Arc::new(initial)));
-        let (write_tx, mut rx) = mpsc::unbounded_channel::<Op>();
+        let (write_tx, mut rx) = mpsc::channel::<Op>(capacity);
         let snap_for_task = snapshot.clone();
         let join = tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
@@ -43,10 +62,27 @@ impl<Op: Send + 'static, Snap: Send + Sync + 'static> IndexActor<Op, Snap> {
         }
     }
 
-    /// Submit a write op. Returns `Err` only if the actor task has
-    /// already stopped (channel closed).
-    pub fn submit(&self, op: Op) -> Result<(), mpsc::error::SendError<Op>> {
-        self.write_tx.send(op)
+    /// Submit a write op.
+    ///
+    /// Bounded MPSC channel. Producers block on `submit().await` when
+    /// the queue is full (default capacity
+    /// [`Self::DEFAULT_CHANNEL_CAPACITY`]). This is intentional
+    /// backpressure — uncapped queue growth under bulk-import load
+    /// would OOM the server. Callers that cannot tolerate blocking
+    /// should use [`Self::try_submit`] (returns `Err` on full) instead.
+    ///
+    /// Returns `Err` if the actor task has already stopped
+    /// (channel closed).
+    pub async fn submit(&self, op: Op) -> Result<(), mpsc::error::SendError<Op>> {
+        self.write_tx.send(op).await
+    }
+
+    /// Non-blocking submit. Returns `Err(TrySendError::Full)` if the
+    /// queue is at capacity, `Err(TrySendError::Closed)` if the actor
+    /// task has stopped. Use this in sync contexts where awaiting is
+    /// not an option; the caller decides how to surface backpressure.
+    pub fn try_submit(&self, op: Op) -> Result<(), mpsc::error::TrySendError<Op>> {
+        self.write_tx.try_send(op)
     }
 
     /// Lock-free snapshot read.
@@ -82,7 +118,7 @@ mod tests {
         });
 
         for i in 1..=100u64 {
-            actor.submit(i).unwrap();
+            actor.submit(i).await.unwrap();
         }
 
         // Drain the applier deterministically: shutdown closes the
@@ -100,5 +136,37 @@ mod tests {
         actor.replace_snapshot(42);
         assert_eq!(*actor.snapshot(), 42);
         actor.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn try_submit_full_returns_err() {
+        // Capacity 1 — fill it, then a second `try_submit` must fail.
+        // Use a never-resolving applier to keep the queue full.
+        let (gate_tx, mut gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut gate_tx = Some(gate_tx);
+        let actor =
+            IndexActor::<u64, AtomicU64>::spawn_with_capacity(AtomicU64::new(0), 1, move |_, _| {
+                // Block the applier on the first call only.
+                let tx = gate_tx.take();
+                async move {
+                    if let Some(tx) = tx {
+                        let _ = tx.send(());
+                        // Park forever — exits via shutdown drop.
+                        std::future::pending::<()>().await;
+                    }
+                }
+            });
+
+        // First op enters the applier and parks it.
+        actor.try_submit(1).unwrap();
+        // Wait until the applier is parked.
+        let _ = gate_rx.try_recv();
+        // Block until applier has picked up the first op. Best effort.
+        tokio::task::yield_now().await;
+        // Fill the queue.
+        actor.try_submit(2).unwrap();
+        // Now full — next try must fail with `Full`.
+        let err = actor.try_submit(3).unwrap_err();
+        assert!(matches!(err, mpsc::error::TrySendError::Full(3)));
     }
 }

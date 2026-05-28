@@ -94,6 +94,7 @@ impl VectorAdapter for BruteForceAdapter {
         }
         self.actor
             .submit(WriteOp::Upsert(rid, vec.to_vec()))
+            .await
             .map_err(|_| VectorError::Internal("actor stopped".into()))?;
         // Yield to let the actor process — not guaranteed but helps tests.
         tokio::task::yield_now().await;
@@ -103,6 +104,7 @@ impl VectorAdapter for BruteForceAdapter {
     async fn delete(&self, rid: RecordId, _tx: Option<TxId>) -> Result<(), VectorError> {
         self.actor
             .submit(WriteOp::Delete(rid))
+            .await
             .map_err(|_| VectorError::Internal("actor stopped".into()))?;
         tokio::task::yield_now().await;
         Ok(())
