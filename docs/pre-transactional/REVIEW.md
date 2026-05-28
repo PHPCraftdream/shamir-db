@@ -50,12 +50,15 @@ Stage 4 — Executor + SI/SSI         ✅ COMPLETE (transactions работаю�
             ├── 4.G                  ← closed 5 design compromises
             ├── 4.H                  ← defensive provider + bench coverage
             └── 4.F                  ← acceptance test suite
-Stage 5 — Reconciliation            ⏳ PARTIAL (Phase 5 mvcc routing pending)
+Stage 5 — Reconciliation            🔶 5.1+5.2 COMPLETE (SSI + index attribution)
+            ├── 5.1                  ✅ Phase 5 → MvccStore (SSI prod-ready)
+            ├── 5.2                  ✅ IndexWriteOp per-table token
+            └── 5.rest               ⏳ LayeredInterner wiring (deferred — no current consumer)
 Stage 6 — GC + telemetry            ⏳ PLANNED
 Stage 7 — Tests + landing           🔶 7.1 COMPLETE (crash recovery)
             ├── 7.1                  ✅ V2 WAL recovery
             ├── 7.rest               ⏳ multi-conn harness
-            └── 4.E SDK              ⏳ client builders
+            └── 4.E SDK              ✅ already wired (isolation field in BatchRequest)
 ```
 
 ---
