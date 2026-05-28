@@ -7,8 +7,9 @@ type / engine changes needed, the rule that keeps the non-transactional
 path at zero overhead, and the test scenarios that will prove the thing
 actually works under contention.
 
-Status: **analysis, no code yet.** Pre-flight document for the
-implementation sprint.
+Status: **superseded by `docs/pre-transactional/`**. The implementation
+landed across Stages 0-7 in 92+ commits. See `docs/pre-transactional/REVIEW.md`
+for the definitive state-of-the-world.
 
 ---
 

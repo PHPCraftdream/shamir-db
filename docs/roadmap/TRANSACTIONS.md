@@ -1,9 +1,11 @@
 # Transactions — Design
 
-Status: **planned, not yet implemented**. The `BatchRequest.transactional`
-flag exists in the wire schema but the executor currently ignores it and
-always returns `transaction: None`. This document is the contour for
-turning that hollow promise into reality.
+Status: **Phase A implemented** (2026-05-28). Single-batch SI/SSI
+transactions work end-to-end with crash recovery. See
+`docs/pre-transactional/REVIEW.md` for the comprehensive state snapshot.
+
+Remaining: Phase B (interactive multi-call transactions with session-
+scoped state) is a separate sprint — not started.
 
 > **Note on prior drafts.** Earlier revisions of this file proposed
 > "rely on the storage backend's native MVCC (redb / persy / canopy)".
