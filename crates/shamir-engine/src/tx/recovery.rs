@@ -126,8 +126,23 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             }
             Ok(())
         }
-        WalOpV2::InternerOverlayMerge { .. } => {
-            log::warn!("replay_v2_op: InternerOverlayMerge not yet applied (Stage 5 pending)");
+        WalOpV2::InternerOverlayMerge { entries } => {
+            // Each entry is (overlay_id, key_string). Merge into every
+            // table's base interner — recovery doesn't know which table
+            // contributed which entry, so broadcast like the initial
+            // table_id_interned=0 approach. This is safe: touch_ind is
+            // idempotent — interning a key that already exists returns
+            // the existing id.
+            for name in repo.list_table_names() {
+                if let Ok(tbl) = repo.get_table(&name).await {
+                    if let Ok(interner) = tbl.interner().get().await {
+                        for (_overlay_id, key_str) in entries {
+                            let _ = interner.touch_ind(key_str);
+                        }
+                        let _ = tbl.interner().persist().await;
+                    }
+                }
+            }
             Ok(())
         }
     }
