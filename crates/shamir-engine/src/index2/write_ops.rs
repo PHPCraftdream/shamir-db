@@ -58,22 +58,37 @@ pub async fn apply_index_ops(
 
 /// tx-aware variant of [`apply_index_ops`].
 ///
-/// In the current sub-stage (3.3) this method is a thin forward to
-/// [`apply_index_ops`] regardless of `tx` value — it adds the parameter
-/// so downstream callsites can already be migrated.
+/// - `tx == None` → behaves exactly like [`apply_index_ops`]: ops are
+///   applied immediately (`SetPosting`/`RemovePosting` go to the
+///   store; in-memory ops go to `backend.apply_in_memory`).
+/// - `tx == Some(tx)` → ops are **staged** in `tx.index_write_set`
+///   under the supplied `table_token`. Nothing is written to the
+///   store or to the backend's in-memory state. A dropped tx
+///   (rolled back) therefore leaves no postings; a committed tx
+///   applies them via the commit pipeline. See HIGH-6.
 ///
-/// Future wiring (Stage 4, executor):
-/// - `tx == Some(tx)` → ops appended to `tx.index_write_set` (deferred).
-/// - mvcc attached  → `SetPosting`/`RemovePosting` route through
-///   `mvcc.set_versioned`/`mvcc.delete_versioned` for versioned writes.
+/// `table_token` is the deterministic per-table hash (see
+/// `table_manager::table_token_for`). It is ignored when `tx == None`.
+///
+/// HIGH-6: in the current commit pipeline, Phase 5c-d is still a TODO
+/// — `tx.index_write_set` is emitted to the WAL entry (so crash
+/// recovery replays the postings) and counter deltas are applied,
+/// but `info_store.set/remove` and `backend.apply_in_memory` are NOT
+/// invoked on the happy commit path. That is a separate gap tracked
+/// against `commit.rs::commit_tx_inner` and out of scope for the
+/// staging-side fix here.
 pub async fn apply_index_ops_tx(
     ops: &[IndexWriteOp],
     store: &Arc<dyn Store>,
     backend: &dyn IndexBackend,
-    _tx: Option<&shamir_tx::TxContext>,
+    table_token: u64,
+    tx: Option<&mut shamir_tx::TxContext>,
 ) -> Result<(), IndexError> {
-    // TODO(Stage 4): if let Some(tx) = tx { tx.index_write_set.extend(...); return Ok(()) }
-    // TODO(3.4): if mvcc attached → route through mvcc.set_versioned / delete_versioned.
+    if let Some(tx) = tx {
+        tx.index_write_set
+            .extend(ops.iter().cloned().map(|op| (table_token, op)));
+        return Ok(());
+    }
     apply_index_ops(ops, store, backend).await
 }
 
@@ -271,7 +286,7 @@ mod tests {
                 sign: 1,
             },
         ];
-        apply_index_ops_tx(&ops, &store, &backend, None)
+        apply_index_ops_tx(&ops, &store, &backend, 0, None)
             .await
             .unwrap();
 
@@ -281,20 +296,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_index_ops_tx_some_forwards() {
+    async fn apply_index_ops_tx_some_stages_into_tx() {
         use shamir_tx::{IsolationLevel, TxContext, TxId};
         let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let backend = MockBackend::new();
-        let tx = TxContext::new(TxId::new(1), 0, 42, IsolationLevel::Snapshot);
-        let ops = vec![IndexWriteOp::SetPosting {
-            key: Bytes::from_static(b"k2"),
-            value: Bytes::from_static(b"v2"),
-        }];
-        apply_index_ops_tx(&ops, &store, &backend, Some(&tx))
+        let mut tx = TxContext::new(TxId::new(1), 0, 42, IsolationLevel::Snapshot);
+        let ops = vec![
+            IndexWriteOp::SetPosting {
+                key: Bytes::from_static(b"k2"),
+                value: Bytes::from_static(b"v2"),
+            },
+            IndexWriteOp::BumpFtsStats {
+                doc_len: 7,
+                sign: 1,
+            },
+        ];
+        const TBL_TOKEN: u64 = 0xdead_beef;
+        apply_index_ops_tx(&ops, &store, &backend, TBL_TOKEN, Some(&mut tx))
             .await
             .unwrap();
 
-        let got = store.get(Bytes::from_static(b"k2")).await.unwrap();
-        assert_eq!(got.as_ref(), b"v2");
+        // Nothing written to the live store / backend in tx mode.
+        assert!(store.get(Bytes::from_static(b"k2")).await.is_err());
+        assert_eq!(backend.bump_count.load(Ordering::Relaxed), 0);
+
+        // All ops appear in tx.index_write_set under the supplied token.
+        assert_eq!(tx.index_write_set.len(), 2);
+        for (tok, _) in &tx.index_write_set {
+            assert_eq!(*tok, TBL_TOKEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_index_ops_tx_drop_leaves_no_postings() {
+        // HIGH-6 regression: with tx == Some, dropping the tx without
+        // commit must NOT leave any posting in the store / in-memory
+        // backend state. Staging in `index_write_set` is RAII-cleaned
+        // because TxContext owns the vec.
+        use shamir_tx::{IsolationLevel, TxContext, TxId};
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let backend = MockBackend::new();
+        {
+            let mut tx = TxContext::new(TxId::new(99), 0, 1, IsolationLevel::Snapshot);
+            let ops = vec![
+                IndexWriteOp::SetPosting {
+                    key: Bytes::from_static(b"ghost"),
+                    value: Bytes::from_static(b"v"),
+                },
+                IndexWriteOp::BumpFtsStats {
+                    doc_len: 3,
+                    sign: 1,
+                },
+            ];
+            apply_index_ops_tx(&ops, &store, &backend, 1, Some(&mut tx))
+                .await
+                .unwrap();
+            assert_eq!(tx.index_write_set.len(), 2);
+            // tx dropped here.
+        }
+        assert!(
+            store.get(Bytes::from_static(b"ghost")).await.is_err(),
+            "rolled-back tx must not leave postings in store (HIGH-6)"
+        );
+        assert_eq!(
+            backend.bump_count.load(Ordering::Relaxed),
+            0,
+            "rolled-back tx must not bump backend in-memory state"
+        );
     }
 }
