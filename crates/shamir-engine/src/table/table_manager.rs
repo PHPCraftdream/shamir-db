@@ -297,6 +297,13 @@ impl TableManager {
         table_token_for(&self.name)
     }
 
+    /// Direct access to the underlying data_store. Used by V2 WAL
+    /// recovery to apply Put/Delete ops bypassing the indexing /
+    /// counter hooks (those replay separately).
+    pub fn data_store(&self) -> &Arc<dyn Store> {
+        self.table.data_store()
+    }
+
     /// Borrow the info_store this table writes its sidecar
     /// metadata into (counter, interner dictionary, sorted-index
     /// blob, WAL, buffer config, ...). DDL uses this directly.

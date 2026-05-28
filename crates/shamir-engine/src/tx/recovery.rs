@@ -6,18 +6,81 @@
 //!
 //! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
 
-use shamir_storage::error::{DbError, DbResult};
-use shamir_wal::{WalEntryV2, WalOpV2};
+use shamir_storage::error::DbResult;
+use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
 
 /// Replay a single WalOpV2 against the given RepoInstance.
 ///
-/// Stage 7.1.a: stubs only — emits a `log::warn!` and returns Ok.
-/// Stage 7.1.b implements actual mutation application.
-pub async fn replay_v2_op(_op: &WalOpV2, _repo: &RepoInstance) -> DbResult<()> {
-    log::warn!("replay_v2_op: stub (Stage 7.1.a) — op not actually applied");
-    Ok(())
+/// Stage 7.1.c: Put / Delete / CounterDelta are applied for real.
+/// IndexPut / IndexDel are deferred (7.1.d — need table_id_interned).
+/// InternerOverlayMerge is deferred (Stage 5 — repo-level interner).
+pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
+    match op {
+        WalOpV2::Put {
+            table_id_interned,
+            rid,
+            body,
+        } => {
+            let tbl = match repo.table_by_token(*table_id_interned).await? {
+                Some(t) => t,
+                None => {
+                    log::warn!(
+                        "replay_v2_op Put: table token {} not found in repo {}; \
+                         skipping (table may have been dropped)",
+                        table_id_interned,
+                        repo.name()
+                    );
+                    return Ok(());
+                }
+            };
+            tbl.data_store().set(rid.to_bytes(), body.clone()).await?;
+            Ok(())
+        }
+        WalOpV2::Delete {
+            table_id_interned,
+            rid,
+        } => {
+            let tbl = match repo.table_by_token(*table_id_interned).await? {
+                Some(t) => t,
+                None => {
+                    log::warn!(
+                        "replay_v2_op Delete: table token {} not found; skipping",
+                        table_id_interned
+                    );
+                    return Ok(());
+                }
+            };
+            let _ = tbl.data_store().remove(rid.to_bytes()).await;
+            Ok(())
+        }
+        WalOpV2::CounterDelta {
+            table_id_interned,
+            delta,
+        } => {
+            let tbl = match repo.table_by_token(*table_id_interned).await? {
+                Some(t) => t,
+                None => {
+                    log::warn!(
+                        "replay_v2_op CounterDelta: table token {} not found",
+                        table_id_interned
+                    );
+                    return Ok(());
+                }
+            };
+            tbl.counter().increment(*delta).await?;
+            Ok(())
+        }
+        WalOpV2::IndexPut { .. } | WalOpV2::IndexDel { .. } => {
+            log::warn!("replay_v2_op: IndexPut/IndexDel not yet applied (Stage 7.1.d pending)");
+            Ok(())
+        }
+        WalOpV2::InternerOverlayMerge { .. } => {
+            log::warn!("replay_v2_op: InternerOverlayMerge not yet applied (Stage 5 pending)");
+            Ok(())
+        }
+    }
 }
 
 /// Walk all inflight V2 WAL entries for the repo and replay each one.
@@ -43,10 +106,13 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
 /// Replay all ops in one WAL entry. Iterates ops in declared order
 /// (counter → interner → index → data per `wal_ops_from_tx` emission
 /// order, though replay order is logically commutative within one entry).
-pub async fn replay_v2_entry(entry: &WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
+pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
     for op in &entry.ops {
         replay_v2_op(op, repo).await.map_err(|e| {
-            DbError::Internal(format!("replay tx {} op failed: {}", entry.txn_id, e))
+            shamir_storage::error::DbError::Internal(format!(
+                "replay tx {} op failed: {}",
+                entry.txn_id, e
+            ))
         })?;
     }
     Ok(())

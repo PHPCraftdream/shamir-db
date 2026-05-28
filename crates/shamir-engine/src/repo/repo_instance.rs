@@ -315,6 +315,22 @@ impl RepoInstance {
         table.lookup_by_index(index_name, values).await
     }
 
+    /// Look up the table whose token matches `token`. Used by V2 WAL
+    /// recovery to resolve ops by `table_id_interned`.
+    ///
+    /// O(N tables) scan — acceptable for recovery hot path which
+    /// touches at most one entry per inflight tx.
+    pub async fn table_by_token(&self, token: u64) -> DbResult<Option<TableManager>> {
+        let names: Vec<String> = self.configs.iter().map(|e| e.key().clone()).collect();
+        for name in names {
+            if table_token_for(&name) == token {
+                let tbl = self.get_table(&name).await?;
+                return Ok(Some(tbl));
+            }
+        }
+        Ok(None)
+    }
+
     /// Run V2 WAL recovery: replay any inflight tx entries and remove
     /// their markers. Idempotent — safe to call on every open.
     /// Returns the count of recovered entries.
