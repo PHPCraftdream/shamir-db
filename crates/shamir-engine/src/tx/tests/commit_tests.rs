@@ -349,3 +349,23 @@ async fn ssi_conflict_detected_via_repo_version_provider() {
         "no conflict expected — non-tx insert doesn't bump mvcc version yet"
     );
 }
+
+#[tokio::test]
+async fn expired_tx_rejected_at_commit() {
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+
+    let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // Backdoor: set started_at to the past to simulate expiry.
+    tx.started_at = std::time::Instant::now() - std::time::Duration::from_secs(600);
+
+    let result = repo.commit_tx(tx).await;
+    assert!(result.is_err());
+    let err = format!("{}", result.unwrap_err());
+    assert!(
+        err.contains("expired"),
+        "expected expired error, got: {}",
+        err
+    );
+}
