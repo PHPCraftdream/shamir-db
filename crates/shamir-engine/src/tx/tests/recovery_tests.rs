@@ -1,4 +1,4 @@
-//! V2 recovery tests (Stage 7.1.a skeleton + 7.1.c apply logic).
+//! V2 recovery tests (Stage 7.1.a skeleton + 7.1.c–d apply logic).
 
 use std::sync::Arc;
 
@@ -187,4 +187,96 @@ async fn recover_v2_inflight_unknown_table_skips_gracefully() {
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 1);
     assert!(wal.list_inflight().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recover_v2_inflight_replays_index_put_with_table_id() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let info = tbl.info_store().clone();
+
+    let wal = repo.repo_wal().await.unwrap();
+    let token = table_token_for("t");
+
+    let key = bytes::Bytes::from_static(b"some_posting_key");
+    let value = bytes::Bytes::from_static(b"some_posting_value");
+
+    let entry = WalEntryV2::new(
+        wal.fresh_txn_id(),
+        0,
+        vec![WalOpV2::IndexPut {
+            table_id_interned: token,
+            idx_id: 0,
+            key: key.clone(),
+            value: value.clone(),
+        }],
+    );
+    wal.begin(entry).await.unwrap();
+
+    repo.recover_v2_inflight().await.unwrap();
+
+    let read_back = info.get(key).await.unwrap();
+    assert_eq!(read_back, value);
+}
+
+#[tokio::test]
+async fn recover_v2_inflight_replays_index_put_broadcast() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("a"));
+    repo.add_table(TableConfig::new("b"));
+    let ta = repo.get_table("a").await.unwrap();
+    let tb = repo.get_table("b").await.unwrap();
+
+    let wal = repo.repo_wal().await.unwrap();
+    let key = bytes::Bytes::from_static(b"broadcast_key");
+    let value = bytes::Bytes::from_static(b"broadcast_val");
+
+    let entry = WalEntryV2::new(
+        wal.fresh_txn_id(),
+        0,
+        vec![WalOpV2::IndexPut {
+            table_id_interned: 0,
+            idx_id: 0,
+            key: key.clone(),
+            value: value.clone(),
+        }],
+    );
+    wal.begin(entry).await.unwrap();
+
+    repo.recover_v2_inflight().await.unwrap();
+
+    assert_eq!(ta.info_store().get(key.clone()).await.unwrap(), value);
+    assert_eq!(tb.info_store().get(key).await.unwrap(), value);
+}
+
+#[tokio::test]
+async fn recover_v2_inflight_replays_index_del() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let info = tbl.info_store().clone();
+
+    let key = bytes::Bytes::from_static(b"doomed");
+    info.set(key.clone(), bytes::Bytes::from_static(b"val"))
+        .await
+        .unwrap();
+    assert!(info.get(key.clone()).await.is_ok());
+
+    let wal = repo.repo_wal().await.unwrap();
+    let token = table_token_for("t");
+
+    let entry = WalEntryV2::new(
+        wal.fresh_txn_id(),
+        0,
+        vec![WalOpV2::IndexDel {
+            table_id_interned: token,
+            idx_id: 0,
+            key: key.clone(),
+        }],
+    );
+    wal.begin(entry).await.unwrap();
+
+    repo.recover_v2_inflight().await.unwrap();
+    assert!(info.get(key).await.is_err(), "key removed by IndexDel");
 }

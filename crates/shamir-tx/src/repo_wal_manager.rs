@@ -280,11 +280,13 @@ mod tests {
                     rid: rid(2),
                 },
                 shamir_wal::WalOpV2::IndexPut {
+                    table_id_interned: 7,
                     idx_id: 11,
                     key: Bytes::from_static(b"idx-key"),
                     value: Bytes::from_static(b"idx-val"),
                 },
                 shamir_wal::WalOpV2::IndexDel {
+                    table_id_interned: 7,
                     idx_id: 11,
                     key: Bytes::from_static(b"idx-key-del"),
                 },

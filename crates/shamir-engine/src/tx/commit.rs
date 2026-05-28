@@ -24,11 +24,21 @@ pub enum TxError {
 /// Emitted ops in order:
 /// - CounterDelta per table.
 /// - InternerOverlayMerge (if overlay non-empty).
-/// - IndexPut / IndexDel from index_write_set (idx_id=0 placeholder
-///   per 4.G.5 invariant).
+/// - IndexPut / IndexDel from index_write_set (table_id_interned=0 broadcast
+///   marker and idx_id=0 placeholder per 4.G.5 / 7.1.d invariants).
 /// - Put / Delete from write_set snapshot (carry table_id_interned
 ///   so recovery can resolve target data_store).
 /// - BumpFtsStats is in-memory only and not serialised.
+///
+/// ## Index op table_id_interned = 0 invariant (7.1.d)
+///
+/// `IndexWriteOp` is a pure-data type with no per-table attribution.
+/// Emission uses `table_id_interned: 0` as a broadcast marker — recovery
+/// applies the posting to every table's info_store. This is safe because
+/// per-table info_stores are independent keyspaces; a posting key that
+/// doesn't match any index on a table just sits unused. Future
+/// tightening: extend `IndexWriteOp` with table_token so each op carries
+/// an exact `table_id_interned`.
 pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     let mut ops = Vec::new();
 
@@ -51,6 +61,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
         match op {
             shamir_tx::IndexWriteOp::SetPosting { key, value } => {
                 ops.push(WalOpV2::IndexPut {
+                    table_id_interned: 0, // broadcast — see 7.1.d docs
                     idx_id: 0,
                     key: key.clone(),
                     value: value.clone(),
@@ -58,6 +69,7 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
             }
             shamir_tx::IndexWriteOp::RemovePosting { key } => {
                 ops.push(WalOpV2::IndexDel {
+                    table_id_interned: 0,
                     idx_id: 0,
                     key: key.clone(),
                 });

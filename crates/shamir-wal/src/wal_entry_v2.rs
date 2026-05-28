@@ -73,6 +73,10 @@ pub enum WalOpV2 {
     ///   (b) keep this field as 0 and rely on key-prefix decode.
     /// Decision deferred to the recovery implementation.
     IndexPut {
+        /// Interned table identifier so recovery can resolve the
+        /// table's info_store. Indexes live alongside data — per-table
+        /// info_store hosts all postings.
+        table_id_interned: u64,
         idx_id: u32,
         #[serde(with = "serde_bytes_bytes")]
         key: Bytes,
@@ -84,6 +88,7 @@ pub enum WalOpV2 {
     ///
     /// Same `idx_id` invariant as [`IndexPut`](WalOpV2::IndexPut).
     IndexDel {
+        table_id_interned: u64,
         idx_id: u32,
         #[serde(with = "serde_bytes_bytes")]
         key: Bytes,
@@ -206,11 +211,13 @@ mod tests {
                     rid: rid(2),
                 },
                 WalOpV2::IndexPut {
+                    table_id_interned: 7,
                     idx_id: 11,
                     key: Bytes::from_static(b"k"),
                     value: Bytes::from_static(b"v"),
                 },
                 WalOpV2::IndexDel {
+                    table_id_interned: 7,
                     idx_id: 11,
                     key: Bytes::from_static(b"k2"),
                 },

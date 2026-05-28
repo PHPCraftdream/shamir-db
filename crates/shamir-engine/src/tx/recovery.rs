@@ -14,7 +14,8 @@ use crate::repo::RepoInstance;
 /// Replay a single WalOpV2 against the given RepoInstance.
 ///
 /// Stage 7.1.c: Put / Delete / CounterDelta are applied for real.
-/// IndexPut / IndexDel are deferred (7.1.d — need table_id_interned).
+/// Stage 7.1.d: IndexPut / IndexDel are applied (table_id_interned=0
+///   broadcasts to all tables' info_stores).
 /// InternerOverlayMerge is deferred (Stage 5 — repo-level interner).
 pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
     match op {
@@ -72,8 +73,57 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             tbl.counter().increment(*delta).await?;
             Ok(())
         }
-        WalOpV2::IndexPut { .. } | WalOpV2::IndexDel { .. } => {
-            log::warn!("replay_v2_op: IndexPut/IndexDel not yet applied (Stage 7.1.d pending)");
+        WalOpV2::IndexPut {
+            table_id_interned,
+            idx_id: _,
+            key,
+            value,
+        } => {
+            if *table_id_interned != 0 {
+                let tbl = match repo.table_by_token(*table_id_interned).await? {
+                    Some(t) => t,
+                    None => {
+                        log::warn!(
+                            "replay_v2_op IndexPut: table token {} not found",
+                            table_id_interned
+                        );
+                        return Ok(());
+                    }
+                };
+                tbl.info_store().set(key.clone(), value.clone()).await?;
+                return Ok(());
+            }
+            for name in repo.list_table_names() {
+                if let Ok(tbl) = repo.get_table(&name).await {
+                    let _ = tbl.info_store().set(key.clone(), value.clone()).await;
+                }
+            }
+            Ok(())
+        }
+        WalOpV2::IndexDel {
+            table_id_interned,
+            idx_id: _,
+            key,
+        } => {
+            if *table_id_interned != 0 {
+                let tbl = match repo.table_by_token(*table_id_interned).await? {
+                    Some(t) => t,
+                    None => {
+                        log::warn!(
+                            "replay_v2_op IndexDel: table token {} not found",
+                            table_id_interned
+                        );
+                        return Ok(());
+                    }
+                };
+                let _ = tbl.info_store().remove(key.clone()).await;
+                return Ok(());
+            }
+            for name in repo.list_table_names() {
+                if let Ok(tbl) = repo.get_table(&name).await {
+                    let _ = tbl.info_store().remove(key.clone()).await;
+                }
+            }
             Ok(())
         }
         WalOpV2::InternerOverlayMerge { .. } => {
