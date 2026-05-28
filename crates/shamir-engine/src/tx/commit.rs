@@ -125,9 +125,7 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
         );
         std::collections::HashMap::new()
     };
-    tx.apply_id_remap(&id_remap)
-        .await
-        .map_err(DbError::Codec)?;
+    tx.apply_id_remap(&id_remap).await.map_err(DbError::Codec)?;
 
     // Phase 2 (SSI only): read-set validation.
     //

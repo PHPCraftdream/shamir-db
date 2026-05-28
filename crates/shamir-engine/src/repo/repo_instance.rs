@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+use crate::table::table_manager::table_token_for;
+
 /// Manages a single repository and its tables
 pub struct RepoInstance {
     name: String,
@@ -18,6 +20,11 @@ pub struct RepoInstance {
     tx_gate: Arc<OnceCell<Arc<shamir_tx::RepoTxGate>>>,
     /// Lazy-initialized RepoWalManager. Created on first call to `repo_wal()`.
     repo_wal: Arc<OnceCell<Arc<shamir_tx::RepoWalManager>>>,
+    /// Per-table MvccStore map for SSI version provider. Populated
+    /// on demand when `create_table_context` instantiates a
+    /// TableManager — both share the same data_store reference.
+    /// Key = `table_token_for(name)` (deterministic).
+    per_table_mvcc: Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>>,
 }
 
 impl Clone for RepoInstance {
@@ -29,6 +36,7 @@ impl Clone for RepoInstance {
             tables: Arc::clone(&self.tables),
             tx_gate: Arc::clone(&self.tx_gate),
             repo_wal: Arc::clone(&self.repo_wal),
+            per_table_mvcc: Arc::clone(&self.per_table_mvcc),
         }
     }
 }
@@ -53,6 +61,7 @@ impl RepoInstance {
             tables: Arc::new(tables),
             tx_gate: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
+            per_table_mvcc: Arc::new(scc::HashMap::new()),
         }
     }
 
@@ -99,19 +108,31 @@ impl RepoInstance {
     }
 
     async fn create_table_context(&self, table_name: &str) -> DbResult<TableManager> {
-        let data_store = self
+        let data_store: Arc<dyn Store> = self
             .repo
             .store_get(format!("__data__{}", table_name))
             .await?;
-        let info_store = self
+        let info_store: Arc<dyn Store> = self
             .repo
             .store_get(format!("__info__{}", table_name))
             .await?;
+        let history_store: Arc<dyn Store> = self
+            .repo
+            .store_get(format!("__history__{}", table_name))
+            .await?;
 
-        let data_store: Arc<dyn Store> = data_store;
-        let info_store: Arc<dyn Store> = info_store;
+        let gate = self.tx_gate().await?;
+        let mvcc = Arc::new(shamir_tx::MvccStore::new(
+            Arc::clone(&data_store),
+            history_store,
+            gate,
+        ));
 
-        TableManager::create(table_name.to_string(), data_store, info_store).await
+        let token = table_token_for(table_name);
+        let _ = self.per_table_mvcc.insert(token, Arc::clone(&mvcc));
+
+        let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
+        Ok(tbl.with_mvcc_store(mvcc))
     }
 
     pub fn list_table_names(&self) -> Vec<String> {
@@ -208,8 +229,16 @@ impl RepoInstance {
         let guard = gate.open_snapshot().await;
         let snapshot_version = guard.version();
         let tx_id = gate.fresh_tx_id();
-        let tx =
+        let mut tx =
             shamir_tx::TxContext::new(tx_id, repo_token(&self.name), snapshot_version, isolation);
+
+        if isolation == shamir_tx::IsolationLevel::Serializable {
+            let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
+                per_table_mvcc: Arc::clone(&self.per_table_mvcc),
+            });
+            tx.set_version_provider(provider);
+        }
+
         Ok((tx, guard))
     }
 
