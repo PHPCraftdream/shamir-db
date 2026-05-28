@@ -163,6 +163,64 @@ impl MvccStore {
         Ok(())
     }
 
+    /// Garbage-collect history entries with version < `min_version`.
+    ///
+    /// For each original key, keeps the LATEST version that is still
+    /// < `min_version` (the "anchor" — needed so `get_at(snapshot)`
+    /// can still find it for snapshots between anchor and min_version).
+    /// All older versions of that key are removed.
+    ///
+    /// Returns the number of history entries deleted.
+    pub async fn gc_below(&self, min_version: u64) -> DbResult<usize> {
+        use crate::version_codec::decode_version_key;
+
+        // Phase 1: scan all history entries, group by original key.
+        let stream = self.history.iter_stream(256);
+        futures::pin_mut!(stream);
+
+        // Collect: original_key → Vec<(version, physical_key)>
+        let mut per_key: std::collections::HashMap<Vec<u8>, Vec<(u64, Bytes)>> =
+            std::collections::HashMap::new();
+
+        while let Some(batch) = stream.next().await {
+            for (phys_key, _value) in batch? {
+                if let Some((orig, version)) = decode_version_key(&phys_key) {
+                    if version < min_version {
+                        per_key
+                            .entry(orig.to_vec())
+                            .or_default()
+                            .push((version, phys_key));
+                    }
+                }
+            }
+        }
+
+        // Phase 2: for each key, sort by version, keep the latest (anchor),
+        // delete the rest.
+        let mut deleted = 0usize;
+        for (_orig_key, mut entries) in per_key {
+            if entries.len() <= 1 {
+                // Only one entry — it's the anchor, keep it.
+                continue;
+            }
+            entries.sort_by_key(|(v, _)| *v);
+            // Keep the last (highest version < min_version), delete the rest.
+            let to_delete = &entries[..entries.len() - 1];
+            for (_, phys_key) in to_delete {
+                let _ = self.history.remove(phys_key.clone()).await;
+                deleted += 1;
+            }
+        }
+
+        Ok(deleted)
+    }
+
+    /// Run GC using the gate's `min_alive()` as the threshold.
+    pub async fn gc(&self) -> DbResult<usize> {
+        let min = self.gate.min_alive();
+        self.gc_below(min).await
+    }
+
     /// Slow path: range scan history for the latest version ≤ `snapshot`.
     async fn scan_history_for_version(&self, key: &[u8], snapshot: u64) -> DbResult<Option<Bytes>> {
         let lo = encode_version_key(key, 0);
@@ -553,6 +611,76 @@ mod tests {
         // Query at a very high version → fast path → current (v5)
         let result_latest = mvcc.get_at(key.as_ref(), u64::MAX - 1).await.unwrap();
         assert_eq!(result_latest, Some(Bytes::from("v5")));
+    }
+
+    async fn count_history_entries(mvcc: &MvccStore) -> usize {
+        let stream = mvcc.history_store().iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut count = 0;
+        while let Some(batch) = stream.next().await {
+            count += batch.unwrap().len();
+        }
+        count
+    }
+
+    #[tokio::test]
+    async fn gc_below_removes_old_versions_keeps_anchor() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("gc_test");
+        // Write 5 versions
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        // History should have 4 entries (v1..v4 archived when v2..v5 overwrote)
+        let count_before = count_history_entries(&mvcc).await;
+        assert_eq!(count_before, 4, "should have 4 history entries");
+
+        // GC below version 3: versions < 3 in history are version_at[0] and version_at[1].
+        // Anchor = highest < 3, older one deleted.
+        let deleted = mvcc.gc_below(3).await.unwrap();
+        assert!(deleted >= 1, "should delete at least 1 old entry");
+
+        let count_after = count_history_entries(&mvcc).await;
+        assert!(count_after < count_before, "history should shrink");
+    }
+
+    #[tokio::test]
+    async fn gc_below_zero_deletes_nothing() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("gc_noop");
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+
+        let deleted = mvcc.gc_below(0).await.unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn gc_convenience_uses_min_alive() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        // No snapshots open → min_alive = last_committed = 0
+        // Write some data without snapshot (no history archived)
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v"))
+            .await
+            .unwrap();
+
+        let deleted = mvcc.gc().await.unwrap();
+        assert_eq!(deleted, 0, "nothing to GC when no history");
     }
 
     #[tokio::test]
