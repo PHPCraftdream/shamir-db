@@ -124,10 +124,16 @@ pub enum ObservabilityError {
 /// useful when multiple test instances run in the same process (recorders
 /// are global and only one can be installed). The recorder still answers
 /// `/metrics` if a previous call installed one.
+///
+/// `tx_metrics` — optional transaction metrics to bridge into Prometheus
+/// gauges. Snapshotted every 5 s in the background poller. Pass `None`
+/// when no RepoTxGate is running yet; the gauges are still registered at
+/// zero so Prometheus scrapers see them from the first scrape.
 pub async fn spawn(
     addr: SocketAddr,
     state: Arc<ObservabilityState>,
     install_recorder: bool,
+    tx_metrics: Option<Arc<shamir_tx::TxMetrics>>,
 ) -> Result<ObservabilityHandle, ObservabilityError> {
     // 1. Set up the Prometheus recorder (if we're allowed to install one).
     //    `install_recorder()` builds a recorder and `set_global_recorder`s
@@ -177,12 +183,55 @@ pub async fn spawn(
         metrics::counter!("auth_attempts_total", "result" => label).increment(0);
     }
 
+    // Tx metrics — gauges snapshotted from TxMetrics every poller cycle.
+    metrics::describe_gauge!(
+        "shamir_tx_started_total",
+        metrics::Unit::Count,
+        "Transactions started"
+    );
+    metrics::describe_gauge!(
+        "shamir_tx_committed_total",
+        metrics::Unit::Count,
+        "Transactions committed"
+    );
+    metrics::describe_gauge!(
+        "shamir_tx_aborted_ssi_total",
+        metrics::Unit::Count,
+        "SSI conflict aborts"
+    );
+    metrics::describe_gauge!(
+        "shamir_tx_aborted_expired_total",
+        metrics::Unit::Count,
+        "Expired tx aborts"
+    );
+    metrics::describe_gauge!(
+        "shamir_tx_aborted_storage_total",
+        metrics::Unit::Count,
+        "Storage error aborts"
+    );
+    metrics::describe_gauge!("shamir_gc_runs_total", metrics::Unit::Count, "GC runs");
+    metrics::describe_gauge!(
+        "shamir_gc_entries_deleted_total",
+        metrics::Unit::Count,
+        "GC entries deleted"
+    );
+
+    // Zero-touch registration so gauges appear in /metrics from first scrape.
+    metrics::gauge!("shamir_tx_started_total").set(0.0);
+    metrics::gauge!("shamir_tx_committed_total").set(0.0);
+    metrics::gauge!("shamir_tx_aborted_ssi_total").set(0.0);
+    metrics::gauge!("shamir_tx_aborted_expired_total").set(0.0);
+    metrics::gauge!("shamir_tx_aborted_storage_total").set(0.0);
+    metrics::gauge!("shamir_gc_runs_total").set(0.0);
+    metrics::gauge!("shamir_gc_entries_deleted_total").set(0.0);
+
     // 4. Background poller: refresh process metrics every 5 s. Cheap
     // (~30-50 µs of work). The first collect() is invoked synchronously
     // so /metrics returns useful data immediately.
     collector.collect();
     let shutdown = Arc::new(Notify::new());
     let shutdown_for_poller = shutdown.clone();
+    let tx_metrics_clone = tx_metrics;
     let poller_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         // Burn the immediate first tick — we already collected once.
@@ -193,6 +242,16 @@ pub async fn spawn(
                 _ = shutdown_for_poller.notified() => break,
                 _ = interval.tick() => {
                     collector.collect();
+                    if let Some(ref tx_m) = tx_metrics_clone {
+                        let snap = tx_m.snapshot();
+                        metrics::gauge!("shamir_tx_started_total").set(snap.txs_started as f64);
+                        metrics::gauge!("shamir_tx_committed_total").set(snap.txs_committed as f64);
+                        metrics::gauge!("shamir_tx_aborted_ssi_total").set(snap.txs_aborted_ssi as f64);
+                        metrics::gauge!("shamir_tx_aborted_expired_total").set(snap.txs_aborted_expired as f64);
+                        metrics::gauge!("shamir_tx_aborted_storage_total").set(snap.txs_aborted_storage as f64);
+                        metrics::gauge!("shamir_gc_runs_total").set(snap.gc_runs as f64);
+                        metrics::gauge!("shamir_gc_entries_deleted_total").set(snap.gc_entries_deleted as f64);
+                    }
                 }
             }
         }

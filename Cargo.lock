@@ -3332,6 +3332,7 @@ dependencies = [
  "shamir-query-types",
  "shamir-transport-tcp",
  "shamir-transport-ws",
+ "shamir-tx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
