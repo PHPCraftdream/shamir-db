@@ -5,7 +5,7 @@
 State-of-the-world snapshot. Captures what landed, what remains, what
 compromises were taken, and what open questions exist.
 
-**As of:** 2026-05-28 (Stage 7.1 complete).
+**As of:** 2026-05-28 (Phase A near-complete).
 
 ---
 
@@ -168,6 +168,31 @@ monotonic versions, cross-table, SSI unknown-table conflict).
 - 7.1.d: `IndexPut/IndexDel` schema + apply (broadcast for `table_id=0`).
 - 7.1.e: End-to-end crash simulation test.
 
+### Stage 5.1+5.2 — SSI production wiring (3+1 sub-stages)
+
+- 5.1.a: `MvccStore::apply_committed_ops(ops, commit_version)`.
+- 5.1.b: Phase 5 rewired through MvccStore (closes SSI blind spot).
+- 5.1.c: SSI conflict detection E2E test. **Limitation #1 CLOSED.**
+- 5.2: `index_write_set` carries `(table_token, IndexWriteOp)`.
+  WAL emission uses real table_token. **Limitation #4 CLOSED.**
+
+### Stage 6 — GC + tx lifetime + metrics (5 sub-stages)
+
+- 6.1: `MvccStore::gc_below(min_version)` — history cleanup core.
+- 6.2: `RepoInstance::run_gc()` + integration tests (GC respects active
+  snapshots).
+- 6.3: `TxContext::started_at` + `TxError::Expired` (5 min default).
+- 6.4: `RepoInstance::spawn_gc_task(interval)` — periodic background GC.
+- 6.5: `TxMetrics` atomic counters (txs started/committed/aborted, GC
+  runs/entries deleted). Zero external dependencies.
+
+### Stage 7.2+7.3 — Concurrency scenarios + Rust unit tests
+
+- 12 acceptance tests covering all 12 scenarios from §7.2 (11 as Rust
+  tests, #12 migration deferred).
+- Concurrent `assign_next_version` / `fresh_tx_id` no-duplicates tests.
+- Busy-history MvccStore `get_at` with 5 versions.
+
 ---
 
 ## 3. Архитектурные решения — quality assessment
@@ -260,9 +285,9 @@ serialized overlay entries.
 
 | Metric | Value |
 |---|---|
-| Total commits (pre-tx work) | 92 |
-| Tests workspace `--lib` | 1452+ passing, 0 failed |
-| Tx-specific tests | ~150 |
+| Total commits (pre-tx work) | 108+ |
+| Tests workspace `--lib` | 1460+ passing, 0 failed |
+| Acceptance tests (concurrency) | 12 scenarios |
 | Benchmarks (tx-related) | 14 functions across 2 crates |
 | Clippy `-D warnings` | clean |
 | `cargo fmt --all --check` | clean |
