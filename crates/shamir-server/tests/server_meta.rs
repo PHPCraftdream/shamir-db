@@ -423,3 +423,104 @@ fn meta_error_bounds() {
     fn assert_send_sync<T: Send + Sync + 'static>() {}
     assert_send_sync::<MetaError>();
 }
+
+// ---------------------------------------------------------------------------
+// Lockout snapshot round-trip (M2 — persistent lockout store).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lockout_snapshot_round_trips_through_reopen() {
+    use shamir_connect::server::lockout::{
+        FailureState, LockoutSnapshot, LockoutState, PairKey, Subnet,
+    };
+
+    let (_dir, path) = tmp_path();
+
+    // Fresh store has no snapshot yet.
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("init");
+        assert!(
+            store
+                .lockout_snapshot()
+                .expect("lockout_snapshot read")
+                .is_none(),
+            "fresh store: lockout_snapshot must be None",
+        );
+    }
+
+    // Write a snapshot, drop store (simulated crash), then reopen.
+    let key_1: PairKey = (Subnet::V4([10, 0, 1]), [0xaau8; 16]);
+    let key_2: PairKey = (
+        Subnet::V6([0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 1]),
+        [0xbbu8; 16],
+    );
+    let snap = LockoutSnapshot {
+        failures: vec![(
+            key_1,
+            FailureState {
+                count: 3,
+                last_fail_at_ns: 1_700_000_000_000_000_000,
+            },
+        )],
+        lockouts: vec![(
+            key_2,
+            LockoutState {
+                triggered_at_ns: 1_700_000_000_000_000_000,
+                duration_ns: 3_600_000_000_000,
+            },
+        )],
+        total_lockouts: 7,
+        captured_at_ns: 1_700_000_000_000_000_000,
+    };
+
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-1");
+        store
+            .store_lockout_snapshot(&snap)
+            .expect("store_lockout_snapshot");
+    }
+
+    // Reopen → snapshot must survive verbatim (msgpack round-trip).
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-2");
+        let loaded = store
+            .lockout_snapshot()
+            .expect("lockout_snapshot read")
+            .expect("snapshot must be present");
+        assert_eq!(loaded.failures.len(), 1);
+        assert_eq!(loaded.failures[0].0, key_1);
+        assert_eq!(loaded.failures[0].1.count, 3);
+        assert_eq!(
+            loaded.failures[0].1.last_fail_at_ns,
+            1_700_000_000_000_000_000
+        );
+        assert_eq!(loaded.lockouts.len(), 1);
+        assert_eq!(loaded.lockouts[0].0, key_2);
+        assert_eq!(loaded.total_lockouts, 7);
+        assert_eq!(loaded.captured_at_ns, 1_700_000_000_000_000_000);
+    }
+
+    // Overwrite with a fresher snapshot → second value wins.
+    let snap2 = LockoutSnapshot {
+        failures: vec![],
+        lockouts: vec![],
+        total_lockouts: 99,
+        captured_at_ns: 1_800_000_000_000_000_000,
+    };
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-3");
+        store
+            .store_lockout_snapshot(&snap2)
+            .expect("store_lockout_snapshot #2");
+    }
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-4");
+        let loaded = store
+            .lockout_snapshot()
+            .expect("lockout_snapshot read")
+            .expect("snapshot must be present");
+        assert_eq!(loaded.total_lockouts, 99);
+        assert!(loaded.failures.is_empty());
+        assert!(loaded.lockouts.is_empty());
+    }
+}

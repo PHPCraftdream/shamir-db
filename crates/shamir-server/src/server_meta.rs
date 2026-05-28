@@ -8,6 +8,9 @@
 //! - Ed25519 server identity seed (current + optional previous + version)
 //! - Bootstrap state (`bootstrap_token_hash`, `superuser_ever_existed`)
 //! - Audit checkpoint (`last_audit_seq`, `last_audit_hmac`)
+//! - Lockout snapshot (periodic dump of in-memory failure/lockout tables;
+//!   read on startup to rehydrate, written every 60s by a background task —
+//!   see `server::launch`)
 //! - Install / boot timestamps
 //!
 //! Layout: ONE redb table `server_meta_v1` mapping `&str` (key name) →
@@ -25,6 +28,7 @@ use shamir_connect::common::crypto::random_bytes;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::bootstrap::BootstrapState;
 use shamir_connect::server::config::ServerSecrets;
+use shamir_connect::server::lockout::LockoutSnapshot;
 use shamir_connect::server::rotation::ServerIdentityState;
 
 // ---------------------------------------------------------------------------
@@ -40,6 +44,11 @@ const KEY_IDENTITY: &str = "identity";
 const KEY_BOOTSTRAP: &str = "bootstrap";
 const KEY_AUDIT_CHECKPOINT: &str = "audit_checkpoint";
 const KEY_TIMES: &str = "times";
+/// Periodic dump of `InMemoryLockoutStore` state (spec IMPL §1.3 — failed
+/// auth bookkeeping persisted across restarts so an attacker cannot reset
+/// brute-force lockout by inducing a restart). Snapshot interval and
+/// trade-offs are documented in `shamir_connect::server::lockout`.
+const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
 
 // ---------------------------------------------------------------------------
 // Persisted blobs (one per logical chunk)
@@ -591,6 +600,22 @@ impl ServerMetaStore {
             };
             put(table, KEY_AUDIT_CHECKPOINT, &next)
         })
+    }
+
+    /// Load the last persisted lockout snapshot, if any. Returns
+    /// `Ok(None)` on fresh installs — the caller (the in-memory store)
+    /// then starts empty.
+    pub fn lockout_snapshot(&self) -> Result<Option<LockoutSnapshot>, MetaError> {
+        self.read_blob::<LockoutSnapshot>(KEY_LOCKOUT_SNAPSHOT)
+    }
+
+    /// Persist a lockout snapshot. Called every ~60 s by the background
+    /// task spawned in `server::launch` so failed-auth bookkeeping
+    /// survives restarts (worst-case loss window equals the snapshot
+    /// interval; spec IMPL §1.3 allows ≤5 s — we trade that for one
+    /// write-per-minute instead of one-write-per-failed-auth).
+    pub fn store_lockout_snapshot(&self, snapshot: &LockoutSnapshot) -> Result<(), MetaError> {
+        self.with_write_txn(|table| put(table, KEY_LOCKOUT_SNAPSHOT, snapshot))
     }
 }
 
