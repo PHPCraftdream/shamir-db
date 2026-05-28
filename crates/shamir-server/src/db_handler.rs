@@ -55,14 +55,19 @@
 //! inside `Ok(bytes)` carrying a [`DbResponse::Error`] payload with a
 //! coarse `kind` tag for clients to switch on without parsing prose.
 //!
-//! # Async bridge
+//! # Async bridge — HIGH-7
 //!
-//! `RequestHandler::handle` is sync; [`ShamirDb::execute`] is async. We
-//! bridge with `tokio::task::block_in_place` + `Handle::current().block_on`
-//! so the future is driven on the current Tokio worker without spawning
-//! a second runtime. This **requires** a multi-thread Tokio runtime — the
-//! integration tests use `#[tokio::test(flavor = "multi_thread")]` and
-//! the production server starts the multi-thread runtime in `main.rs`.
+//! `RequestHandler::handle` is sync; [`ShamirDb::execute`] is async.
+//! `crate::connection::request_loop` wraps the entire synchronous handler
+//! chain in [`tokio::task::spawn_blocking`] so the call runs on the
+//! blocking-task pool (default 512 threads) rather than parking a runtime
+//! worker for the full batch duration — without this an authenticated
+//! peer issuing slow batches from a handful of connections could starve
+//! every other connection (cap on concurrent in-flight batches was
+//! previously `#worker_threads`). Inside the blocking thread,
+//! [`run_blocking`] spawns the async DB future back onto the runtime and
+//! waits on a `std::sync::mpsc::Receiver`; the future therefore makes
+//! progress concurrently with other connections' I/O on the worker pool.
 
 use std::sync::Arc;
 
@@ -306,7 +311,20 @@ impl ShamirDbHandler {
             };
         }
 
-        match run_blocking(self.db.execute(db_name, &batch)) {
+        // `run_blocking` now requires a `'static` future (it spawns the
+        // future onto the runtime instead of driving it on the current
+        // thread). The batch is already owned (passed by value); we
+        // clone the shared `ShamirDb` Arc and own the db name string,
+        // then move them into an `async move` block that hands the batch
+        // back to us so the post-exec slow-query log and persistence
+        // registry still see the request.
+        let db = self.db.clone();
+        let db_name_owned = db_name.to_string();
+        let (batch, exec_result) = run_blocking(async move {
+            let result = db.execute(&db_name_owned, &batch).await;
+            (batch, result)
+        });
+        match exec_result {
             Ok(response) => {
                 // Slow-query logging: WARN line for batches whose total
                 // execution time exceeds the configured threshold. Useful
@@ -559,11 +577,58 @@ fn error_code(e: &BatchError) -> &'static str {
     }
 }
 
-/// Bridge an async future to a sync caller running inside a Tokio worker.
+/// Bridge an async future to a sync caller — context-agnostic.
 ///
-/// `block_in_place` lets us call `block_on` without panicking with
-/// "Cannot start a runtime from within a runtime". Requires a multi-thread
-/// runtime — single-thread (`current_thread`) flavor would also panic.
-fn run_blocking<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+/// # Why not `block_in_place + Handle::block_on`?
+///
+/// The previous implementation parked the **current Tokio worker thread**
+/// for the whole batch (HIGH-7). Combined with `max_active_connections =
+/// 10_000` and `max_execution_time_secs = 60` an authenticated peer
+/// could saturate the worker pool (default = #CPU cores) from a fraction
+/// of those connections by issuing slow batches, denying service to
+/// everyone else.
+///
+/// The new shape:
+///   1. Spawn `fut` onto the runtime via `Handle::spawn` — the future
+///      runs on a worker thread that is *free to yield* to other tasks
+///      while `db.execute` awaits internal I/O.
+///   2. The calling thread blocks on a `std::sync::mpsc` channel until
+///      the spawned task sends its result back. We use `std::sync::mpsc`
+///      instead of `tokio::sync::oneshot::blocking_recv` because the
+///      latter goes through `try_enter_blocking_region`, which panics
+///      from a runtime worker that has not been marked via
+///      `block_in_place` first — and `block_in_place` itself panics
+///      from `spawn_blocking` threads. The std primitive is OS-level
+///      and works in every context.
+///
+/// # Threading model
+///
+/// `connection::request_loop` invokes the sync handler chain inside
+/// [`tokio::task::spawn_blocking`] so this function is normally called
+/// from a **blocking-pool** thread (default cap 512). Tests that drive
+/// the handler directly from a `#[tokio::test(flavor = "multi_thread")]`
+/// task call it from a **worker** thread instead. Both paths are
+/// correct:
+///
+///   * Blocking pool → parking that thread is exactly what the pool
+///     exists for; runtime workers stay free.
+///   * Worker → the spawned future runs on a *different* worker; this
+///     thread parks on `recv()`, but the multi-thread runtime in tests
+///     (`worker_threads >= 2`) and production has spare workers, so the
+///     spawned task makes forward progress independently.
+fn run_blocking<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let handle = tokio::runtime::Handle::current();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<F::Output>(1);
+    handle.spawn(async move {
+        let out = fut.await;
+        // If the receiver was dropped (caller panicked between spawn and
+        // recv) we silently discard the result.
+        let _ = tx.send(out);
+    });
+    rx.recv()
+        .expect("run_blocking: spawned task dropped its sender — runtime shut down mid-call")
 }
