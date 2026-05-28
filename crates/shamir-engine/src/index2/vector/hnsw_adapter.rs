@@ -130,41 +130,10 @@ impl HnswAdapter {
     ///   3. Update rid_map + rid_to_internal.
     ///
     /// Idempotent: if no staged entries for this tx_id, returns Ok(()).
-    pub async fn commit_staged(&self, tx_id: TxId) -> Result<(), VectorError> {
-        let entries = match self.staged.remove_async(&tx_id).await {
-            Some((_, entries)) => entries,
-            None => return Ok(()),
-        };
-
-        for entry in entries {
-            // Tombstone the old internal_id if this was an upsert-replace.
-            if let Some(old_internal) = entry.replaces {
-                let _ = self.deleted.insert_async(old_internal, ()).await;
-            }
-
-            // Allocate new internal_id and insert into HNSW graph.
-            let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let hnsw = Arc::clone(&self.hnsw);
-            let vec_owned = entry.vec;
-            tokio::task::spawn_blocking(move || {
-                hnsw.insert((&vec_owned, internal));
-            })
-            .await
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-
-            let _ = self.rid_map.insert_async(internal, entry.rid).await;
-            let _ = self.rid_to_internal.upsert_async(entry.rid, internal).await;
-        }
-
-        Ok(())
-    }
-
-    /// Drop all staged vectors for `tx_id` without touching the HNSW graph.
-    /// The pre-tx state is fully preserved — no tombstones, no new points.
-    pub async fn rollback_staged(&self, tx_id: TxId) {
-        let _ = self.staged.remove_async(&tx_id).await;
-    }
-
+    ///
+    /// Exposed as a [`VectorAdapter`] trait method (HIGH-6) so the commit
+    /// pipeline can drive it through `Arc<dyn VectorAdapter>`; see the
+    /// `impl VectorAdapter for HnswAdapter` block below.
     pub(crate) async fn stage(&self, tx_id: TxId, rid: RecordId, vec: Vec<f32>) {
         // Check if this rid already exists in the committed graph —
         // if so, record the internal_id for tombstoning on commit.
@@ -289,6 +258,48 @@ impl VectorAdapter for HnswAdapter {
 
     fn len(&self) -> usize {
         self.next_id.load(Ordering::Relaxed) - self.deleted.len()
+    }
+
+    /// Drain all staged vectors for `tx_id` and apply them to the live
+    /// HNSW graph. For each staged entry:
+    ///   1. If `replaces` is `Some(old_internal)` → tombstone the old id.
+    ///   2. Allocate a new internal_id, spawn_blocking insert into hnsw.
+    ///   3. Update `rid_map` + `rid_to_internal`.
+    ///
+    /// Idempotent: if no staged entries for this tx_id, returns `Ok(())`.
+    async fn commit_staged(&self, tx_id: TxId) -> Result<(), VectorError> {
+        let entries = match self.staged.remove_async(&tx_id).await {
+            Some((_, entries)) => entries,
+            None => return Ok(()),
+        };
+
+        for entry in entries {
+            // Tombstone the old internal_id if this was an upsert-replace.
+            if let Some(old_internal) = entry.replaces {
+                let _ = self.deleted.insert_async(old_internal, ()).await;
+            }
+
+            // Allocate new internal_id and insert into HNSW graph.
+            let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+            let hnsw = Arc::clone(&self.hnsw);
+            let vec_owned = entry.vec;
+            tokio::task::spawn_blocking(move || {
+                hnsw.insert((&vec_owned, internal));
+            })
+            .await
+            .map_err(|e| VectorError::Internal(e.to_string()))?;
+
+            let _ = self.rid_map.insert_async(internal, entry.rid).await;
+            let _ = self.rid_to_internal.upsert_async(entry.rid, internal).await;
+        }
+
+        Ok(())
+    }
+
+    /// Drop all staged vectors for `tx_id` without touching the HNSW graph.
+    /// The pre-tx state is fully preserved — no tombstones, no new points.
+    async fn rollback_staged(&self, tx_id: TxId) {
+        let _ = self.staged.remove_async(&tx_id).await;
     }
 }
 

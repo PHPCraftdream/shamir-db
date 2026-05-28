@@ -31,4 +31,17 @@ pub trait VectorAdapter: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Promote all vectors staged under `tx_id` into the live structure
+    /// (transaction commit, HIGH-6). Default no-op: adapters that don't
+    /// maintain a per-tx staging buffer (e.g. `BruteForceAdapter`) have
+    /// nothing to commit. `HnswAdapter` overrides this.
+    async fn commit_staged(&self, _tx_id: TxId) -> Result<(), VectorError> {
+        Ok(())
+    }
+
+    /// Drop all vectors staged under `tx_id` without touching the live
+    /// structure (transaction abort / rollback, HIGH-6). Default no-op.
+    /// `HnswAdapter` overrides this.
+    async fn rollback_staged(&self, _tx_id: TxId) {}
 }

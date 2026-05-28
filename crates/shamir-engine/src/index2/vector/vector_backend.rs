@@ -79,16 +79,14 @@ impl IndexBackend for VectorBackend {
     // so a rolled-back tx leaves no ghost vectors on the live graph
     // (HIGH-6).
     //
-    // TODO(HIGH-6 follow-up): the adapter exposes `commit_staged(tx_id)`
-    // and `rollback_staged(tx_id)`, but neither is currently called
-    // from the commit/abort pipeline. As a result, staged entries
-    // accumulate in `HnswAdapter::staged` and are never drained.
-    // This is a memory leak (entries are tied to a TxId that will
-    // never be reused), not a correctness bug for ghost postings:
-    // non-tx queries only see the committed graph (see
-    // `HnswAdapter::search`). Hooking `commit_staged` /
-    // `rollback_staged` into `commit_tx` / `Drop` belongs to a
-    // subsequent stage.
+    // HIGH-6 (resolved): the adapter exposes `commit_staged(tx_id)` /
+    // `rollback_staged(tx_id)`, surfaced here via the `IndexBackend`
+    // `commit_staged_tx` / `rollback_staged_tx` overrides below. The
+    // commit pipeline (`commit::commit_tx_inner` Phase 5d) calls
+    // `commit_staged_tx` under the commit lock to promote staged
+    // vectors into the live graph; its error paths and the abort path
+    // call `rollback_staged_tx` to drain them. Non-tx queries still see
+    // only the committed graph (see `HnswAdapter::search`).
 
     async fn plan_insert(
         &self,
@@ -209,6 +207,18 @@ impl IndexBackend for VectorBackend {
                 "VectorBackend only supports Vector queries".into(),
             )),
         }
+    }
+
+    /// HIGH-6: promote staged vectors for `tx_id` into the live HNSW
+    /// graph at commit. Delegates to the adapter's `commit_staged`.
+    async fn commit_staged_tx(&self, tx_id: shamir_tx::TxId) -> Result<(), IndexError> {
+        self.adapter.commit_staged(tx_id).await.map_err(ve)
+    }
+
+    /// HIGH-6: drop staged vectors for `tx_id` on abort/rollback.
+    /// Delegates to the adapter's `rollback_staged`.
+    async fn rollback_staged_tx(&self, tx_id: shamir_tx::TxId) {
+        self.adapter.rollback_staged(tx_id).await;
     }
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
