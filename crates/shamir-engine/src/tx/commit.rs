@@ -68,9 +68,22 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
     // Phase 1: interner overlay merge → id_remap
     // TODO(Stage 5): wire repo-level interner.
 
-    // Phase 2 (SSI only): read-set validation
+    // Phase 2 (SSI only): read-set validation.
+    //
+    // For each (table_id, key) the tx read at version_seen, ensure the
+    // current committed version has not moved past it.
+    //
+    // Stage 4.D.5 wires the structural skeleton. The version_provider
+    // is currently a stub (`|_, _| 0`) because the per-table MvccStore
+    // map lives at the executor/repo layer — Stage 4.D.6 will plug it
+    // through. With a zero provider every comparison passes, so SI
+    // and Serializable behave identically in this sub-stage. The
+    // failure path is exercised in unit tests on
+    // `TxContext::validate_read_set` directly.
     if tx.isolation == IsolationLevel::Serializable {
-        // TODO(4.D.5): validate read_set against current versions.
+        if let Err((_table_id, key)) = tx.validate_read_set(|_t, _k| 0u64) {
+            return Err(TxError::SsiConflict { key });
+        }
     }
 
     // Phase 3: assign new version

@@ -105,6 +105,31 @@ impl TxContext {
         }
     }
 
+    /// Validate the read-set against current committed versions.
+    ///
+    /// For Serializable Snapshot Isolation: every key the tx read must
+    /// still be at the same version when we're about to commit. If any
+    /// key has advanced, another tx wrote there → abort with the
+    /// offending key.
+    ///
+    /// `version_provider(table_id, key) -> u64` is supplied by the
+    /// caller. Returning `0` for unknown keys is the safe default
+    /// (the read saw whatever was visible at `snapshot_version`, so
+    /// version_seen would be ≤ snapshot; current 0 ≤ version_seen
+    /// trivially passes).
+    pub fn validate_read_set<F>(&self, mut version_provider: F) -> Result<(), (u64, Bytes)>
+    where
+        F: FnMut(u64, &Bytes) -> u64,
+    {
+        for ((table_id, key), version_seen) in &self.read_set {
+            let current = version_provider(*table_id, key);
+            if current > *version_seen {
+                return Err((*table_id, key.clone()));
+            }
+        }
+        Ok(())
+    }
+
     /// Mark that a table has HNSW vectors staged under this tx.
     pub fn mark_hnsw_staging(&mut self, table_id: u64) {
         if !self.tables_with_hnsw_staging.contains(&table_id) {
@@ -248,5 +273,71 @@ mod tests {
         );
         let empty = std::collections::HashMap::new();
         tx.apply_id_remap(&empty).await.unwrap();
+    }
+
+    #[test]
+    fn validate_read_set_passes_when_versions_unchanged() {
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        tx.record_read(7, Bytes::from_static(b"k1"), 5);
+        tx.record_read(7, Bytes::from_static(b"k2"), 8);
+
+        // Provider returns same versions → no conflict.
+        let result = tx.validate_read_set(|_t, k| match k.as_ref() {
+            b"k1" => 5,
+            b"k2" => 8,
+            _ => 0,
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_read_set_detects_advance() {
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(2),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        tx.record_read(7, Bytes::from_static(b"x"), 5);
+
+        // Concurrent writer bumped version → conflict.
+        let result = tx.validate_read_set(|_, k| if k.as_ref() == b"x" { 9 } else { 0 });
+        assert!(result.is_err());
+        let (table_id, key) = result.unwrap_err();
+        assert_eq!(table_id, 7);
+        assert_eq!(key, Bytes::from_static(b"x"));
+    }
+
+    #[test]
+    fn validate_read_set_empty_passes() {
+        let tx = TxContext::new(
+            crate::types::TxId::new(3),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        let result = tx.validate_read_set(|_, _| 99u64);
+        assert!(result.is_ok(), "empty read_set must pass");
+    }
+
+    #[test]
+    fn validate_read_set_zero_provider_always_passes_si_pattern() {
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(4),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        tx.record_read(7, Bytes::from_static(b"a"), 5);
+        tx.record_read(7, Bytes::from_static(b"b"), 3);
+        // Stub provider returns 0 — used by Stage 4.D.5 scaffold.
+        // 0 <= any version_seen, so passes trivially.
+        let result = tx.validate_read_set(|_, _| 0u64);
+        assert!(result.is_ok());
     }
 }
