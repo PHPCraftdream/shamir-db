@@ -54,7 +54,12 @@ Stage 5 — Reconciliation            🔶 5.1+5.2 COMPLETE (SSI + index attribu
             ├── 5.1                  ✅ Phase 5 → MvccStore (SSI prod-ready)
             ├── 5.2                  ✅ IndexWriteOp per-table token
             └── 5.rest               ⏳ LayeredInterner wiring (deferred — no current consumer)
-Stage 6 — GC + telemetry            ⏳ PLANNED
+Stage 6 — GC + telemetry            🔶 6.1-6.4 COMPLETE (GC + tx lifetime)
+            ├── 6.1                  ✅ MvccStore::gc_below
+            ├── 6.2                  ✅ RepoInstance::run_gc + tests
+            ├── 6.3                  ✅ max-tx-lifetime (5 min default)
+            ├── 6.4                  ✅ periodic GC background task
+            └── 6.rest               ⏳ Prometheus/OTel exporter (operational)
 Stage 7 — Tests + landing           🔶 7.1 COMPLETE (crash recovery)
             ├── 7.1                  ✅ V2 WAL recovery
             ├── 7.rest               ⏳ multi-conn harness
@@ -256,7 +261,7 @@ serialized overlay entries.
 | Metric | Value |
 |---|---|
 | Total commits (pre-tx work) | 92 |
-| Tests workspace `--lib` | 1438 passing, 0 failed |
+| Tests workspace `--lib` | 1452+ passing, 0 failed |
 | Tx-specific tests | ~150 |
 | Benchmarks (tx-related) | 14 functions across 2 crates |
 | Clippy `-D warnings` | clean |
@@ -269,18 +274,17 @@ serialized overlay entries.
 
 ## 7. Ближайшие цели
 
-### Critical (production blocker)
+### Critical — NONE
 
-**Stage 5.1 — Phase 5 routes through MvccStore.set_versioned**
-Closes SSI conflict detection. Required for Serializable isolation
-to actually function in production. Estimated ~3-5 hours, 2-3
-atomized sub-stages.
+All production blockers closed:
+  - Stage 5.1 (SSI conflict detection) — DONE
+  - Crash recovery (Stage 7.1) — DONE
+  - GC (Stage 6.1-6.4) — DONE
 
 ### High (enables clients)
 
-**Stage 4.E — SDK updates**
-`shamir-client` (Rust) + `shamir-client-node` builders для `isolation`
-field. Parse new `TransactionInfo` shape. Mechanical work. ~2-3 hours.
+**Stage 4.E — SDK updates** ✅ Already wired. `BatchRequest.isolation`
+and `TransactionInfo` have been in the wire schema since Stage 4.A.
 
 ### Medium (long-tail correctness)
 
