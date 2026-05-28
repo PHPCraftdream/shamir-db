@@ -593,12 +593,12 @@ impl ServerLauncher {
             // that specific failure (recorder already installed = OK,
             // we use the existing one) and continue without an exporter
             // handle in that case.
-            let handle = match crate::observability::spawn(addr, state.clone(), true).await {
+            let handle = match crate::observability::spawn(addr, state.clone(), true, None).await {
                 Ok(h) => h,
                 Err(crate::observability::ObservabilityError::RecorderInstall(_)) => {
                     // Recorder already installed (typical in test process):
                     // re-spawn without trying to install again.
-                    crate::observability::spawn(addr, state.clone(), false)
+                    crate::observability::spawn(addr, state.clone(), false, None)
                         .await
                         .map_err(|e| BootError::Bind(format!("observability: {e}")))?
                 }
