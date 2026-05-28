@@ -524,3 +524,104 @@ fn lockout_snapshot_round_trips_through_reopen() {
         assert!(loaded.lockouts.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rate-limit snapshot round-trip (M2 follow-up — persistent rate limiter).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ratelimit_snapshot_round_trips_through_reopen() {
+    use shamir_connect::server::lockout::Subnet;
+    use shamir_connect::server::rate_limit::{
+        InMemoryRateLimiter, RateDecision, RateLimiter, WARMUP_WINDOW_NS,
+    };
+
+    let (_dir, path) = tmp_path();
+
+    // Fresh store has no rate-limit snapshot yet.
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("init");
+        assert!(
+            store
+                .ratelimit_snapshot()
+                .expect("ratelimit_snapshot read")
+                .is_none(),
+            "fresh store: ratelimit_snapshot must be None",
+        );
+    }
+
+    // Drain a subnet's bucket, snapshot it, and store via the meta store.
+    // Anchor at real wall-clock so the snapshot's `captured_at_ns`
+    // (stamped with `UnixNanos::now()`) shares a clock with the bucket
+    // timestamps — matching production, where the idle-GC check on restore
+    // must not discard a freshly-drained bucket.
+    let subnet = Subnet::V4([10, 0, 1]);
+    let boot = shamir_connect::common::time::UnixNanos::now().as_u64();
+    let now = boot + WARMUP_WINDOW_NS + 1; // past warmup → 10/sec
+    let snap = {
+        let limiter = InMemoryRateLimiter::new(boot);
+        for _ in 0..10 {
+            assert_eq!(limiter.check(subnet, now), RateDecision::Allowed);
+        }
+        // 11th throttled → bucket drained.
+        assert!(matches!(
+            limiter.check(subnet, now),
+            RateDecision::RateLimited { .. }
+        ));
+        limiter.snapshot()
+    };
+    assert_eq!(snap.buckets.len(), 1);
+
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-1");
+        store
+            .store_ratelimit_snapshot(&snap)
+            .expect("store_ratelimit_snapshot");
+    }
+
+    // Reopen → snapshot survives the msgpack round-trip, and rehydrating
+    // it into a fresh limiter keeps the drained subnet throttled (no free
+    // refill across the simulated downtime).
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-2");
+        let loaded = store
+            .ratelimit_snapshot()
+            .expect("ratelimit_snapshot read")
+            .expect("snapshot must be present");
+        assert_eq!(loaded.buckets.len(), 1);
+
+        let boot_at = now + 3600 * 1_000_000_000; // long downtime
+        let limiter = InMemoryRateLimiter::with_snapshot(loaded, boot_at);
+        assert_eq!(limiter.tracked_subnets(), 1);
+        // At the boot instant the depleted bucket stays throttled — the
+        // downtime granted no free refill (refill clock re-anchored to
+        // boot).
+        assert!(
+            matches!(
+                limiter.check(subnet, boot_at),
+                RateDecision::RateLimited { .. }
+            ),
+            "restored drained bucket must not refill across downtime",
+        );
+    }
+
+    // Overwrite with a fresher (empty) snapshot → second value wins.
+    let snap2 = {
+        let limiter = InMemoryRateLimiter::new(0);
+        limiter.snapshot()
+    };
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-3");
+        store
+            .store_ratelimit_snapshot(&snap2)
+            .expect("store_ratelimit_snapshot #2");
+    }
+    {
+        let store = ServerMetaStore::open_or_init(&path).expect("reopen-4");
+        let loaded = store
+            .ratelimit_snapshot()
+            .expect("ratelimit_snapshot read")
+            .expect("snapshot must be present");
+        assert!(loaded.buckets.is_empty());
+    }
+}

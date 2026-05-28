@@ -27,7 +27,9 @@ use shamir_connect::server::durable_counters::RedbConsumedCounters;
 use shamir_connect::server::lockout::{
     InMemoryLockoutStore, LockoutSnapshot, LockoutSnapshotError, LockoutSnapshotSink,
 };
-use shamir_connect::server::rate_limit::InMemoryRateLimiter;
+use shamir_connect::server::rate_limit::{
+    InMemoryRateLimiter, RateLimitSnapshot, RateLimitSnapshotError, RateLimitSnapshotSink,
+};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
 
@@ -132,17 +134,19 @@ pub struct ServerHandle {
     shutdown_notify: Arc<Notify>,
     /// Optional observability HTTP server.
     observability: Option<crate::observability::ObservabilityHandle>,
-    /// Periodic lockout-snapshot task (M2 — persistent lockout store).
-    /// Awaited on shutdown so the redb file lock on `server_meta.redb` is
-    /// released cleanly before a same-data-dir restart can succeed.
-    lockout_snapshot_task: Option<LockoutSnapshotTask>,
+    /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
+    /// state). One 60s tick persists BOTH the lockout store and the
+    /// rate-limiter buckets. Awaited on shutdown so the redb file lock on
+    /// `server_meta.redb` is released cleanly before a same-data-dir
+    /// restart can succeed.
+    meta_snapshot_task: Option<MetaSnapshotTask>,
 }
 
-/// Handle for the periodic lockout snapshot task. Owns a oneshot stop
-/// signal plus the `JoinHandle` so [`ServerHandle::shutdown`] can wake
-/// the task out of its `interval.tick()` immediately rather than waiting
-/// up to one full interval.
-struct LockoutSnapshotTask {
+/// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
+/// `JoinHandle` so [`ServerHandle::shutdown`] can wake the task out of its
+/// `interval.tick()` immediately rather than waiting up to one full
+/// interval.
+struct MetaSnapshotTask {
     handle: JoinHandle<()>,
     stop: Arc<Notify>,
 }
@@ -166,12 +170,12 @@ impl ServerHandle {
         if let Some(obs) = self.observability {
             obs.shutdown().await;
         }
-        // 5. Stop the lockout snapshot task and let it drop its
+        // 5. Stop the meta-snapshot task and let it drop its
         //    Arc<ServerMetaStore> reference so the redb file lock
         //    on `server_meta.redb` releases for a same-data-dir
-        //    restart. The task writes one final snapshot inside its
-        //    shutdown branch (best-effort).
-        if let Some(snap) = self.lockout_snapshot_task {
+        //    restart. The task writes one final lockout + rate-limit
+        //    snapshot inside its shutdown branch (best-effort).
+        if let Some(snap) = self.meta_snapshot_task {
             snap.stop.notify_waiters();
             let _ = snap.handle.await;
         }
@@ -278,25 +282,34 @@ impl ServerLauncher {
             Arc::new(MetaLockoutSink::new(meta.clone()));
         let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink(lockout_sink));
         let now_ns = UnixNanos::now().as_u64();
-        // TODO(M2 follow-up): wire `InMemoryRateLimiter` to a similar
-        // snapshot sink. Lower priority because the spec §8.6 warmup
-        // window already throttles the first 60s after start — that's
-        // the very interval over which lockout snapshots would otherwise
-        // drift, so the rate-limiter restart-replay window is already
-        // covered defensively. The bucket shape (micro-tokens) needs a
-        // separate `RateLimitSnapshot` value type before this can land.
-        let rate_limit = Arc::new(InMemoryRateLimiter::new(now_ns));
+        // Rate-limit buckets are persisted by the SAME periodic task as
+        // lockout (one 60s tick writes both). On boot the depleted-bucket
+        // state is rehydrated conservatively: token levels survive but each
+        // bucket's refill clock is re-anchored to `now_ns`, so the downtime
+        // grants no free refill (the secure direction). The §8.6 warmup
+        // window (re-armed from `now_ns`) layers extra throttling on top
+        // for the first 60s. See `shamir_connect::server::rate_limit`.
+        let rate_limit_sink: Arc<dyn RateLimitSnapshotSink> =
+            Arc::new(MetaRateLimitSink::new(meta.clone()));
+        let rate_limit = Arc::new(InMemoryRateLimiter::with_snapshot_sink(
+            rate_limit_sink,
+            now_ns,
+        ));
         let argon2_sem = Arc::new(Argon2Semaphore::with_capacity(config.argon2_concurrent_max));
         let session_store = Arc::new(SessionStore::new());
 
-        // Spawn the periodic lockout snapshot task. Errors are logged
-        // and ignored — losing a snapshot is not fatal, the next tick
-        // will retry, and a hard crash between writes loses at most one
-        // interval of new failures. The returned handle is stored on
-        // `ServerHandle` so `shutdown()` can join it (otherwise it
-        // would hold the redb file lock past shutdown and block any
+        // Spawn the periodic meta-snapshot task. One 60s tick persists
+        // BOTH the lockout store and the rate-limiter buckets. Errors are
+        // logged and ignored — losing a snapshot is not fatal, the next
+        // tick will retry, and a hard crash between writes loses at most
+        // one interval of new state. The returned handle is stored on
+        // `ServerHandle` so `shutdown()` can join it (otherwise it would
+        // hold the redb file lock past shutdown and block any
         // same-data-dir restart).
-        let lockout_snapshot_task = Some(spawn_lockout_snapshot_task(lockout.clone()));
+        let meta_snapshot_task = Some(spawn_meta_snapshot_task(
+            lockout.clone(),
+            rate_limit.clone(),
+        ));
 
         // 4. Audit chain — load from checkpoint if present.
         //
@@ -682,7 +695,7 @@ impl ServerLauncher {
             audit_appender,
             shutdown_notify,
             observability,
-            lockout_snapshot_task,
+            meta_snapshot_task,
         })
     }
 }
@@ -1043,18 +1056,49 @@ impl LockoutSnapshotSink for MetaLockoutSink {
     }
 }
 
+/// [`RateLimitSnapshotSink`] adapter that writes through to the durable
+/// `ServerMetaStore` — the rate-limiter analogue of [`MetaLockoutSink`].
+struct MetaRateLimitSink {
+    meta: Arc<ServerMetaStore>,
+}
+
+impl MetaRateLimitSink {
+    fn new(meta: Arc<ServerMetaStore>) -> Self {
+        Self { meta }
+    }
+}
+
+impl RateLimitSnapshotSink for MetaRateLimitSink {
+    fn save(&self, snapshot: &RateLimitSnapshot) -> Result<(), RateLimitSnapshotError> {
+        self.meta
+            .store_ratelimit_snapshot(snapshot)
+            .map_err(|e| RateLimitSnapshotError::Storage(e.to_string()))
+    }
+
+    fn load(&self) -> Result<Option<RateLimitSnapshot>, RateLimitSnapshotError> {
+        self.meta
+            .ratelimit_snapshot()
+            .map_err(|e| RateLimitSnapshotError::Storage(e.to_string()))
+    }
+}
+
 /// Background task: every [`LOCKOUT_SNAPSHOT_INTERVAL`], capture the
-/// current in-memory lockout state and push it through the installed
-/// [`LockoutSnapshotSink`]. Persist failures are logged at `warn` and the
-/// loop continues — losing one snapshot is recoverable on the next tick.
+/// current in-memory lockout state AND rate-limiter buckets and push them
+/// through their installed sinks. One tick persists both — no second
+/// timer, single shutdown drain. Persist failures are logged at `warn` and
+/// the loop continues — losing one snapshot is recoverable on the next
+/// tick.
 ///
-/// Shutdown is driven by the returned `stop` `Notify`. The task writes
-/// one final snapshot on the way out so a clean restart sees the freshest
-/// possible state — important for both the durability story and for
-/// integration tests that boot, do work, shut down, and reboot from the
-/// same data dir (the redb file lock on `server_meta.redb` cannot be
+/// Shutdown is driven by the returned `stop` `Notify`. The task writes one
+/// final snapshot of each on the way out so a clean restart sees the
+/// freshest possible state — important for both the durability story and
+/// for integration tests that boot, do work, shut down, and reboot from
+/// the same data dir (the redb file lock on `server_meta.redb` cannot be
 /// re-acquired until this task drops its `Arc<ServerMetaStore>`).
-fn spawn_lockout_snapshot_task(lockout: Arc<InMemoryLockoutStore>) -> LockoutSnapshotTask {
+fn spawn_meta_snapshot_task(
+    lockout: Arc<InMemoryLockoutStore>,
+    rate_limit: Arc<InMemoryRateLimiter>,
+) -> MetaSnapshotTask {
     let stop = Arc::new(Notify::new());
     let stop_inner = stop.clone();
     let handle = tokio::spawn(async move {
@@ -1067,9 +1111,12 @@ fn spawn_lockout_snapshot_task(lockout: Arc<InMemoryLockoutStore>) -> LockoutSna
             tokio::select! {
                 biased;
                 _ = stop_inner.notified() => {
-                    tracing::debug!("lockout_snapshot: shutdown notified, writing final snapshot");
+                    tracing::debug!("meta_snapshot: shutdown notified, writing final snapshots");
                     if let Err(e) = lockout.persist_snapshot() {
                         tracing::warn!(error = %e, "final lockout snapshot persist failed");
+                    }
+                    if let Err(e) = rate_limit.persist_snapshot() {
+                        tracing::warn!(error = %e, "final rate-limit snapshot persist failed");
                     }
                     break;
                 }
@@ -1091,15 +1138,29 @@ fn spawn_lockout_snapshot_task(lockout: Arc<InMemoryLockoutStore>) -> LockoutSna
                             // No sink installed — should not happen in
                             // production paths since `launch()` always
                             // wires one.
-                            tracing::trace!("lockout snapshot task: no sink installed");
+                            tracing::trace!("meta snapshot task: no lockout sink installed");
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "lockout snapshot persist failed");
+                        }
+                    }
+                    match rate_limit.persist_snapshot() {
+                        Ok(true) => {
+                            tracing::trace!(
+                                subnets = rate_limit.tracked_subnets(),
+                                "rate-limit snapshot persisted",
+                            );
+                        }
+                        Ok(false) => {
+                            tracing::trace!("meta snapshot task: no rate-limit sink installed");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "rate-limit snapshot persist failed");
                         }
                     }
                 }
             }
         }
     });
-    LockoutSnapshotTask { handle, stop }
+    MetaSnapshotTask { handle, stop }
 }
