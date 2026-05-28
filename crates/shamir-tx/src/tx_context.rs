@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
+use crate::version_provider::VersionProvider;
 use crate::IndexWriteOp;
 
 /// Per-transaction state bundle.
@@ -66,6 +67,12 @@ pub struct TxContext {
     /// entries. Used at commit time to look up table names for WAL
     /// emission and interner merge (Stage 5).
     pub table_tokens: HashMap<u64, String>,
+
+    /// Optional version provider for SSI read-set validation.
+    /// When `None`, commit_tx Phase 2 falls back to a stub provider
+    /// `|_, _| 0` that trivially passes — Snapshot and Serializable
+    /// behave identically.
+    pub version_provider: Option<std::sync::Arc<dyn VersionProvider>>,
 }
 
 impl TxContext {
@@ -87,6 +94,7 @@ impl TxContext {
             counter_deltas: HashMap::new(),
             read_set: HashMap::new(),
             table_tokens: HashMap::new(),
+            version_provider: None,
         }
     }
 
@@ -159,6 +167,16 @@ impl TxContext {
         if !self.tables_with_hnsw_staging.contains(&table_id) {
             self.tables_with_hnsw_staging.push(table_id);
         }
+    }
+
+    /// Attach a version provider used by commit_tx Phase 2 for SSI
+    /// validation. Returns `&mut Self` for builder-style chaining.
+    pub fn set_version_provider(
+        &mut self,
+        provider: std::sync::Arc<dyn VersionProvider>,
+    ) -> &mut Self {
+        self.version_provider = Some(provider);
+        self
     }
 
     /// Apply an overlay-id → base-id remap across all staged writes.
@@ -398,5 +416,35 @@ mod tests {
         let s = tx.ensure_table_staging(42, "users", base);
         assert!(s.is_empty());
         assert_eq!(tx.write_set.len(), 1, "should reuse, not duplicate");
+    }
+
+    #[test]
+    fn set_version_provider_attaches_to_tx() {
+        use crate::version_provider::VersionProvider;
+
+        struct MyProvider;
+        impl VersionProvider for MyProvider {
+            fn version_of(&self, _t: u64, _k: &bytes::Bytes) -> u64 {
+                42
+            }
+        }
+
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        assert!(tx.version_provider.is_none());
+
+        tx.set_version_provider(std::sync::Arc::new(MyProvider));
+        assert!(tx.version_provider.is_some());
+
+        let v = tx
+            .version_provider
+            .as_ref()
+            .unwrap()
+            .version_of(0, &bytes::Bytes::from_static(b"k"));
+        assert_eq!(v, 42);
     }
 }

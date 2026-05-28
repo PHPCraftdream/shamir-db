@@ -187,3 +187,53 @@ async fn commit_serializable_with_read_set_passes_zero_provider_scaffold() {
     let outcome = commit_tx(tx, &repo).await.unwrap();
     assert!(outcome.commit_version > 0);
 }
+
+#[tokio::test]
+async fn commit_serializable_real_provider_detects_conflict() {
+    use bytes::Bytes;
+    use shamir_tx::{IsolationLevel, TxContext, TxId, VersionProvider};
+    use std::sync::Arc;
+
+    struct ConflictProvider;
+    impl VersionProvider for ConflictProvider {
+        fn version_of(&self, _t: u64, _k: &Bytes) -> u64 {
+            999
+        }
+    }
+
+    let repo = make_repo();
+    let mut tx = TxContext::new(TxId::new(700), 0, 10, IsolationLevel::Serializable);
+    tx.record_read(7, Bytes::from_static(b"k"), 5);
+    tx.set_version_provider(Arc::new(ConflictProvider));
+
+    let result = commit_tx(tx, &repo).await;
+    assert!(result.is_err(), "real provider with conflict must abort");
+    match result.unwrap_err() {
+        crate::tx::CommitError::SsiConflict { key } => {
+            assert_eq!(key, Bytes::from_static(b"k"));
+        }
+        e => panic!("expected SsiConflict, got {:?}", e),
+    }
+}
+
+#[tokio::test]
+async fn commit_serializable_real_provider_no_conflict_succeeds() {
+    use bytes::Bytes;
+    use shamir_tx::{IsolationLevel, TxContext, TxId, VersionProvider};
+    use std::sync::Arc;
+
+    struct OkProvider;
+    impl VersionProvider for OkProvider {
+        fn version_of(&self, _t: u64, _k: &Bytes) -> u64 {
+            5
+        }
+    }
+
+    let repo = make_repo();
+    let mut tx = TxContext::new(TxId::new(701), 0, 10, IsolationLevel::Serializable);
+    tx.record_read(7, Bytes::from_static(b"k"), 5);
+    tx.set_version_provider(Arc::new(OkProvider));
+
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.commit_version > 0);
+}
