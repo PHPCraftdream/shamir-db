@@ -271,6 +271,18 @@ impl TableManager {
         &self.table
     }
 
+    /// Stable u64 identifier for this table, used as key in
+    /// `TxContext.write_set` and `counter_deltas`.
+    ///
+    /// Stage 4 implementation: deterministic hash of `self.name`.
+    /// Stage 5 will replace with real repo-level interner ID.
+    pub fn table_token(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.name.hash(&mut h);
+        h.finish()
+    }
+
     /// Borrow the info_store this table writes its sidecar
     /// metadata into (counter, interner dictionary, sorted-index
     /// blob, WAL, buffer config, ...). DDL uses this directly.
@@ -379,6 +391,60 @@ impl TableManager {
                     crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
             }
         }
+    }
+
+    /// Collect index ops from all index2 backends for an insert.
+    /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
+    async fn plan_insert_ops(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Vec<shamir_tx::IndexWriteOp> {
+        let mut all_ops = Vec::new();
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_insert(rid, rec).await {
+                all_ops.extend(ops);
+            }
+        }
+        all_ops
+    }
+
+    /// tx-aware insert.
+    ///
+    /// - `tx == None` → delegates to existing [`insert`].
+    /// - `tx == Some` → stages data + index ops + counter delta in
+    ///   TxContext. No physical writes. commit_tx Phase 5 applies.
+    ///
+    /// Simplified for Stage 4.D.6.a: only handles index2 plan ops.
+    /// Legacy IndexManager / SortedIndexManager tx-aware hooks land
+    /// in Stage 4.D.6.b.
+    pub async fn insert_tx(
+        &self,
+        value: &InnerValue,
+        tx: Option<&mut shamir_tx::TxContext>,
+    ) -> DbResult<RecordId> {
+        let Some(tx) = tx else {
+            return self.insert(value).await;
+        };
+
+        let rid = RecordId::new();
+
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+
+        let index_ops = self.plan_insert_ops(rid, value).await;
+
+        let staging = tx.ensure_table_staging(
+            self.table_token(),
+            &self.name,
+            self.table.data_store().clone(),
+        );
+        staging.set(rid.to_bytes(), bytes).await;
+        tx.index_write_set.extend(index_ops);
+        tx.bump_counter(self.table_token(), 1);
+
+        Ok(rid)
     }
 
     /// Register a new sorted (B-tree-by-value) index over a single
