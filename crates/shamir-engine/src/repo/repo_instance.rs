@@ -81,6 +81,12 @@ impl RepoInstance {
         &self.name
     }
 
+    /// Per-table MvccStore map used by the commit pipeline to route
+    /// data writes through version-aware storage.
+    pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>> {
+        &self.per_table_mvcc
+    }
+
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         let cell = self
             .tables

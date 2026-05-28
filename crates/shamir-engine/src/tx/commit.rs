@@ -181,13 +181,26 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
     wal.begin(entry).await?;
 
     // Phase 5a: physical data writes per table.
-    // Each StagingStore wraps a base Store (data_store of the table).
-    // Drain its ops and atomically apply via base.transact(ops).
-    for (_table_id, staging) in std::mem::take(&mut tx.write_set) {
+    // Route through MvccStore when available so version_cache stays
+    // current for SSI conflict detection. Fall back to direct
+    // base.transact for tables not yet registered in per_table_mvcc.
+    for (table_id, staging) in std::mem::take(&mut tx.write_set) {
         let base: std::sync::Arc<dyn shamir_storage::types::Store> = staging.base().clone();
         let ops = staging.drain();
-        if !ops.is_empty() {
-            base.transact(ops).await.map_err(TxError::Storage)?;
+        if ops.is_empty() {
+            continue;
+        }
+        let mvcc_found = repo
+            .per_table_mvcc()
+            .read_async(&table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
+            .await;
+        match mvcc_found {
+            Some(mvcc) => {
+                mvcc.apply_committed_ops(ops, commit_version).await?;
+            }
+            None => {
+                base.transact(ops).await.map_err(TxError::Storage)?;
+            }
         }
     }
 
