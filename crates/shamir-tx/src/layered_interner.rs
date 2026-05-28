@@ -64,6 +64,38 @@ impl<'a> LayeredInterner<'a> {
         }
     }
 
+    /// Sync version of [`touch`] for use in sync code paths
+    /// (e.g., `json_value_to_inner_layered`).
+    ///
+    /// Uses `scc::HashMap::entry` (sync) instead of `entry_async`.
+    pub fn touch_sync(&self, key: &str) -> u64 {
+        match self {
+            Self::Direct(base) => base
+                .touch_ind(key)
+                .expect("Interner::touch_ind is infallible for valid input")
+                .key()
+                .id(),
+            Self::Layered {
+                base,
+                overlay,
+                next_overlay_id,
+            } => {
+                if let Some(ik) = base.get_ind(key) {
+                    return ik.id();
+                }
+                let entry = overlay.entry(key.to_string());
+                use scc::hash_map::Entry::{Occupied, Vacant};
+                match entry {
+                    Occupied(oe) => *oe.get(),
+                    Vacant(ve) => {
+                        let id = next_overlay_id.fetch_add(1, Ordering::SeqCst);
+                        *ve.insert_entry(id).get()
+                    }
+                }
+            }
+        }
+    }
+
     /// Lookup without allocating an id.
     ///
     /// * `Direct` → `base.get_ind`.
@@ -153,6 +185,31 @@ mod tests {
             overlay,
             next_overlay_id: next,
         }
+    }
+
+    #[test]
+    fn touch_sync_same_as_async() {
+        let base = Interner::new();
+        let overlay = SccHashMap::new();
+        let next = AtomicU64::new(OVERLAY_ID_BASE);
+        let li = make_layered(&base, &overlay, &next);
+
+        let id = li.touch_sync("sync_key");
+        assert!(id >= OVERLAY_ID_BASE);
+
+        // Same key returns same id
+        let id2 = li.touch_sync("sync_key");
+        assert_eq!(id, id2);
+    }
+
+    #[test]
+    fn touch_sync_direct_returns_base_id() {
+        let base = Interner::new();
+        let li = LayeredInterner::Direct(&base);
+        let id = li.touch_sync("hello");
+        assert!(id < OVERLAY_ID_BASE);
+        let got = base.get_ind("hello").expect("should exist in base");
+        assert_eq!(got.id(), id);
     }
 
     #[tokio::test]

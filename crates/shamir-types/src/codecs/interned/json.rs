@@ -5,7 +5,7 @@
 
 use crate::codecs::interned::common::{deintern_key, intern_string_key};
 use crate::codecs::CodecError;
-use crate::core::interner::Interner;
+use crate::core::interner::{Interner, InternerKey};
 use crate::types::common::new_map;
 use crate::types::value::{InnerValue, Value};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
@@ -113,11 +113,18 @@ impl Serialize for InternedRef<'_> {
     }
 }
 
-/// Converts serde_json::Value to InnerValue, interning all string keys
-pub fn json_value_to_inner(
+/// Converts serde_json::Value to InnerValue using a custom key-interning
+/// function.
+///
+/// This allows callers to plug in a `LayeredInterner` or any other
+/// interning strategy without depending on the `Interner` type directly.
+pub fn json_value_to_inner_with<F>(
     json_value: &json::Value,
-    interner: &Interner,
-) -> Result<InnerValue, CodecError> {
+    intern_key: &F,
+) -> Result<InnerValue, CodecError>
+where
+    F: Fn(&str) -> Result<InternerKey, CodecError>,
+{
     match json_value {
         json::Value::Null => Ok(InnerValue::Null),
         json::Value::Bool(b) => Ok(InnerValue::Bool(*b)),
@@ -141,20 +148,28 @@ pub fn json_value_to_inner(
         json::Value::Array(arr) => {
             let converted: Result<Vec<InnerValue>, CodecError> = arr
                 .iter()
-                .map(|v| json_value_to_inner(v, interner))
+                .map(|v| json_value_to_inner_with(v, intern_key))
                 .collect();
             Ok(InnerValue::List(converted?))
         }
         json::Value::Object(obj) => {
             let mut converted = new_map();
             for (key_str, val) in obj {
-                let interned_key = intern_string_key(interner, key_str)?;
-                let converted_val = json_value_to_inner(val, interner)?;
+                let interned_key = intern_key(key_str)?;
+                let converted_val = json_value_to_inner_with(val, intern_key)?;
                 converted.insert(interned_key, converted_val);
             }
             Ok(InnerValue::Map(converted))
         }
     }
+}
+
+/// Converts serde_json::Value to InnerValue, interning all string keys
+pub fn json_value_to_inner(
+    json_value: &json::Value,
+    interner: &Interner,
+) -> Result<InnerValue, CodecError> {
+    json_value_to_inner_with(json_value, &|key| intern_string_key(interner, key))
 }
 
 /// Converts InnerValue to serde_json::Value, de-interning all keys
