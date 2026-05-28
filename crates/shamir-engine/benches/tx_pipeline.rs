@@ -1,11 +1,17 @@
-//! Stage 4.D.6 pipeline benchmarks.
+//! Stage 4.D.6 / 4.H pipeline benchmarks.
 //!
-//! Measures D5 obligation: tx overhead vs non-tx baseline, plus
-//! commit_tx phase timing.
+//! Measures:
+//! - `bench_insert_tx_vs_non_tx` — single-record tx vs non-tx (D5).
+//! - `bench_batch_insert_pipeline` — N-record execute_batch tx vs non-tx (D5).
+//! - `bench_commit_tx_phase_breakdown` — scenario-isolated phase
+//!   costs: baseline empty, Phase 2 SSI scaling, Phase 5 write
+//!   scaling across 1 vs N tables.
+//! - `bench_provider_overhead` — stub vs real VersionProvider for
+//!   SSI read-set validation; delta = MvccStore lookup overhead.
 
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use shamir_engine::query::batch::{
     execute_batch, BatchOp, BatchRequest, QueryEntry, TableResolver,
 };
@@ -129,9 +135,155 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_commit_tx_phase_breakdown(c: &mut Criterion) {
+    let mut group = c.benchmark_group("commit_tx/phases");
+    let rt = rt();
+    let repo = make_repo();
+    rt.block_on(repo.get_table("bench_table")).unwrap();
+
+    // Baseline: empty Tx (Phase 3 + 4 + 6 + 7 fixed overhead).
+    group.bench_function("baseline_empty", |b| {
+        b.to_async(&rt).iter(|| {
+            let repo = repo.clone();
+            async move {
+                let (tx, _g) = repo
+                    .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+                    .await
+                    .unwrap();
+                let _ = repo.commit_tx(tx).await.unwrap();
+            }
+        });
+    });
+
+    // Phase 2 scaling: Serializable with N read_set entries.
+    // No-conflict provider → walks all entries successfully.
+    for &n in &[10usize, 100, 1000] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_function(BenchmarkId::new("ssi_validate", n), |b| {
+            b.to_async(&rt).iter(|| {
+                let repo = repo.clone();
+                async move {
+                    let (mut tx, _g) = repo
+                        .begin_tx(shamir_tx::IsolationLevel::Serializable)
+                        .await
+                        .unwrap();
+                    let table_id = shamir_engine::table::table_token_for("bench_table");
+                    for i in 0..n {
+                        tx.record_read(table_id, bytes::Bytes::from(format!("k{i}")), 0);
+                    }
+                    let _ = repo.commit_tx(tx).await.unwrap();
+                }
+            });
+        });
+    }
+
+    // Phase 5 scaling: write N keys into 1 table vs 5 tables.
+    for table_count in [1usize, 5] {
+        for i in 0..table_count {
+            let name = format!("phase5_tbl_{i}");
+            if !repo.has_table(&name) {
+                repo.add_table(TableConfig::new(name.clone()));
+                rt.block_on(repo.get_table(&name)).unwrap();
+            }
+        }
+
+        let n = 100usize;
+        group.throughput(Throughput::Elements((n * table_count) as u64));
+        group.bench_function(
+            BenchmarkId::new("write_100_keys", format!("{table_count}_tables")),
+            |b| {
+                b.to_async(&rt).iter(|| {
+                    let repo = repo.clone();
+                    async move {
+                        let (mut tx, _g) = repo
+                            .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+                            .await
+                            .unwrap();
+                        for i in 0..table_count {
+                            let tbl = repo.get_table(&format!("phase5_tbl_{i}")).await.unwrap();
+                            for _ in 0..n {
+                                let _ = tbl
+                                    .insert_tx(&InnerValue::Str("v".into()), Some(&mut tx))
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                        let _ = repo.commit_tx(tx).await.unwrap();
+                    }
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_provider_overhead(c: &mut Criterion) {
+    use shamir_tx::VersionProvider;
+
+    let mut group = c.benchmark_group("commit_tx/provider_overhead");
+    let rt = rt();
+
+    let real_repo = make_repo();
+    rt.block_on(real_repo.get_table("bench_table")).unwrap();
+    let stub_repo = make_repo();
+    rt.block_on(stub_repo.get_table("bench_table")).unwrap();
+
+    /// Always Some(0) — minimum-cost mock.
+    struct StubAlwaysZero;
+    impl VersionProvider for StubAlwaysZero {
+        fn version_of(&self, _: u64, _: &bytes::Bytes) -> Option<u64> {
+            Some(0)
+        }
+    }
+
+    for &n in &[100usize, 1000] {
+        group.throughput(Throughput::Elements(n as u64));
+
+        group.bench_function(BenchmarkId::new("stub_provider", n), |b| {
+            b.to_async(&rt).iter(|| {
+                let repo = stub_repo.clone();
+                async move {
+                    let (mut tx, _g) = repo
+                        .begin_tx(shamir_tx::IsolationLevel::Serializable)
+                        .await
+                        .unwrap();
+                    tx.set_version_provider(Arc::new(StubAlwaysZero));
+                    let table_id = shamir_engine::table::table_token_for("bench_table");
+                    for i in 0..n {
+                        tx.record_read(table_id, bytes::Bytes::from(format!("k{i}")), 0);
+                    }
+                    let _ = repo.commit_tx(tx).await.unwrap();
+                }
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("real_provider", n), |b| {
+            b.to_async(&rt).iter(|| {
+                let repo = real_repo.clone();
+                async move {
+                    let (mut tx, _g) = repo
+                        .begin_tx(shamir_tx::IsolationLevel::Serializable)
+                        .await
+                        .unwrap();
+                    let table_id = shamir_engine::table::table_token_for("bench_table");
+                    for i in 0..n {
+                        tx.record_read(table_id, bytes::Bytes::from(format!("k{i}")), 0);
+                    }
+                    let _ = repo.commit_tx(tx).await.unwrap();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_tx_vs_non_tx,
-    bench_batch_insert_pipeline
+    bench_batch_insert_pipeline,
+    bench_commit_tx_phase_breakdown,
+    bench_provider_overhead
 );
 criterion_main!(benches);
