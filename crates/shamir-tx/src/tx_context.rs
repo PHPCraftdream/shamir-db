@@ -126,19 +126,21 @@ impl TxContext {
     /// key has advanced, another tx wrote there → abort with the
     /// offending key.
     ///
-    /// `version_provider(table_id, key) -> u64` is supplied by the
-    /// caller. Returning `0` for unknown keys is the safe default
-    /// (the read saw whatever was visible at `snapshot_version`, so
-    /// version_seen would be ≤ snapshot; current 0 ≤ version_seen
-    /// trivially passes).
+    /// `version_provider(table_id, key) -> Option<u64>` is supplied by
+    /// the caller. `None` = unknown table → conflict. `Some(0)` is the
+    /// safe default for registered tables where the key has never been
+    /// written (0 <= any version_seen → passes).
     pub fn validate_read_set<F>(&self, mut version_provider: F) -> Result<(), (u64, Bytes)>
     where
-        F: FnMut(u64, &Bytes) -> u64,
+        F: FnMut(u64, &Bytes) -> Option<u64>,
     {
         for ((table_id, key), version_seen) in &self.read_set {
-            let current = version_provider(*table_id, key);
-            if current > *version_seen {
-                return Err((*table_id, key.clone()));
+            match version_provider(*table_id, key) {
+                None => return Err((*table_id, key.clone())),
+                Some(current) if current > *version_seen => {
+                    return Err((*table_id, key.clone()));
+                }
+                Some(_) => {}
             }
         }
         Ok(())
@@ -330,9 +332,9 @@ mod tests {
 
         // Provider returns same versions → no conflict.
         let result = tx.validate_read_set(|_t, k| match k.as_ref() {
-            b"k1" => 5,
-            b"k2" => 8,
-            _ => 0,
+            b"k1" => Some(5),
+            b"k2" => Some(8),
+            _ => Some(0),
         });
         assert!(result.is_ok());
     }
@@ -348,7 +350,8 @@ mod tests {
         tx.record_read(7, Bytes::from_static(b"x"), 5);
 
         // Concurrent writer bumped version → conflict.
-        let result = tx.validate_read_set(|_, k| if k.as_ref() == b"x" { 9 } else { 0 });
+        let result =
+            tx.validate_read_set(|_, k| if k.as_ref() == b"x" { Some(9) } else { Some(0) });
         assert!(result.is_err());
         let (table_id, key) = result.unwrap_err();
         assert_eq!(table_id, 7);
@@ -363,7 +366,7 @@ mod tests {
             10,
             crate::types::IsolationLevel::Serializable,
         );
-        let result = tx.validate_read_set(|_, _| 99u64);
+        let result = tx.validate_read_set(|_, _| Some(99u64));
         assert!(result.is_ok(), "empty read_set must pass");
     }
 
@@ -377,9 +380,9 @@ mod tests {
         );
         tx.record_read(7, Bytes::from_static(b"a"), 5);
         tx.record_read(7, Bytes::from_static(b"b"), 3);
-        // Stub provider returns 0 — used by Stage 4.D.5 scaffold.
+        // Stub provider returns Some(0) — used by Stage 4.D.5 scaffold.
         // 0 <= any version_seen, so passes trivially.
-        let result = tx.validate_read_set(|_, _| 0u64);
+        let result = tx.validate_read_set(|_, _| Some(0u64));
         assert!(result.is_ok());
     }
 
@@ -424,8 +427,8 @@ mod tests {
 
         struct MyProvider;
         impl VersionProvider for MyProvider {
-            fn version_of(&self, _t: u64, _k: &bytes::Bytes) -> u64 {
-                42
+            fn version_of(&self, _t: u64, _k: &bytes::Bytes) -> Option<u64> {
+                Some(42)
             }
         }
 
@@ -445,6 +448,24 @@ mod tests {
             .as_ref()
             .unwrap()
             .version_of(0, &bytes::Bytes::from_static(b"k"));
-        assert_eq!(v, 42);
+        assert_eq!(v, Some(42));
+    }
+
+    #[test]
+    fn validate_read_set_unknown_table_returns_conflict() {
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(10),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        tx.record_read(99, Bytes::from_static(b"key"), 5);
+
+        // Provider returns None for table_id 99 → conflict.
+        let result = tx.validate_read_set(|_, _| None);
+        assert!(result.is_err());
+        let (table_id, key) = result.unwrap_err();
+        assert_eq!(table_id, 99);
+        assert_eq!(key, Bytes::from_static(b"key"));
     }
 }

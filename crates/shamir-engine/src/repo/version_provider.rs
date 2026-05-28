@@ -8,9 +8,10 @@ pub struct RepoVersionProvider {
 }
 
 impl VersionProvider for RepoVersionProvider {
-    fn version_of(&self, table_id: u64, key: &Bytes) -> u64 {
+    fn version_of(&self, table_id: u64, key: &Bytes) -> Option<u64> {
         self.per_table_mvcc
             .read(&table_id, |_, mvcc| mvcc.version_of(key.as_ref()))
-            .unwrap_or(0)
+        // Returns None when table_id not in per_table_mvcc map
+        // — propagates as conflict in validate_read_set.
     }
 }
