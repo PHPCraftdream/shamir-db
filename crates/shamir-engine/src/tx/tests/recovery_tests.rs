@@ -294,8 +294,19 @@ async fn recover_v2_inflight_replays_index_del() {
     assert!(info.get(key).await.is_err(), "key removed by IndexDel");
 }
 
+// Renamed from `crash_simulation_inflight_recovery_replays_full_state`.
+//
+// NOTE: this test does NOT simulate a real crash at the storage/fsync
+// layer. It constructs the in-memory state a *real* crash *would*
+// leave behind (an inflight WAL marker over a shared `Arc<InMemoryRepo>`)
+// by injecting the marker directly, then drops the original
+// `RepoInstance` and rebuilds a fresh one over the same underlying
+// storage. That exercises the recovery replay logic — which is the
+// useful coverage here — but it does not validate crash atomicity at
+// the storage layer; that requires a subprocess-kill harness
+// (TODO Stage 7.rest).
 #[tokio::test]
-async fn crash_simulation_inflight_recovery_replays_full_state() {
+async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     use crate::repo::repo_token;
 
     // Shared underlying repo so "restart" sees the same persisted state.
@@ -310,9 +321,9 @@ async fn crash_simulation_inflight_recovery_replays_full_state() {
     repo1.add_table(TableConfig::new("t"));
     let _tbl1 = repo1.get_table("t").await.unwrap();
 
-    // Phase B: simulate a crash mid-commit_tx: write a V2 WAL entry
-    // with two Put ops + counter delta, but DON'T call wal.commit(txn_id)
-    // so the marker stays inflight.
+    // Phase B: simulate the in-memory state of a crash mid-commit_tx:
+    // write a V2 WAL entry with two Put ops + counter delta, but
+    // DON'T call wal.commit(txn_id) so the marker stays inflight.
     let wal = repo1.repo_wal().await.unwrap();
     let token = table_token_for("t");
     let txn_id = wal.fresh_txn_id();
@@ -358,10 +369,11 @@ async fn crash_simulation_inflight_recovery_replays_full_state() {
         assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
     }
 
-    // === RESTART ===
-    // Phase C: drop repo1 (simulates process exit; the underlying
-    // Arc<InMemoryRepo> survives because we kept a clone). Construct
-    // repo2 over the same underlying storage.
+    // === SIMULATED RESTART ===
+    // Phase C: drop repo1 — this models *only* the in-memory side of
+    // a restart (the underlying Arc<InMemoryRepo> is kept alive via
+    // the clone we hold). Real crash atomicity at the storage/fsync
+    // layer is not exercised here; see the test-level doc comment.
     drop(repo1);
 
     let repo2 = RepoInstance::new(

@@ -16,26 +16,40 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
   });
 
   // --- SI Happy Path ---
+  // Two-batch shape: the first batch commits the insert in a tx; the
+  // second batch reads outside any tx. Doing read-after-insert inside
+  // ONE batch is not equivalent — queries in a batch are not ordered
+  // (the read could observe the pre-insert state), so a single-batch
+  // test that asserted on the read would be racy.
   test('SI: transactional insert + read returns committed data', async () => {
-    const resp = await client.execute(db, {
-      id: 'tx-si-1',
+    const ins = await client.execute(db, {
+      id: 'tx-si-1-ins',
       transactional: true,
       queries: {
         ins: {
           insert_into: 'items',
           values: [{ name: 'widget', qty: 10 }],
         },
-        read: {
-          from: 'items',
-        },
       },
     });
-    assert(resp.transaction, 'transaction info present');
-    assertEq(resp.transaction.status, 'committed');
-    assert(resp.transaction.tx_id > 0, 'tx_id is positive');
-    assert(resp.transaction.commit_version > 0, 'commit_version is positive');
-    // Insert should have produced records.
-    assert(resp.results.ins.records.length >= 1, 'at least 1 inserted');
+    assert(ins.transaction, 'transaction info present');
+    assertEq(ins.transaction.status, 'committed');
+    assert(ins.transaction.tx_id > 0, 'tx_id is positive');
+    assert(ins.transaction.commit_version > 0, 'commit_version is positive');
+    assert(ins.results.ins.records.length >= 1, 'at least 1 inserted');
+
+    // Read in a separate batch — after commit, the inserted record
+    // MUST be visible (CRIT-3 regression guard at the protocol layer).
+    const readResp = await client.execute(db, {
+      id: 'tx-si-1-read',
+      queries: {
+        read: { from: 'items' },
+      },
+    });
+    const recs = readResp.results.read.records;
+    assert(recs.length >= 1, 'tx-committed insert visible in post-commit read');
+    const names = recs.map(r => r.name);
+    assert(names.includes('widget'), 'inserted record visible by content');
   });
 
   // --- Commit is durable (read-after-commit) ---

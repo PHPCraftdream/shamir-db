@@ -70,8 +70,16 @@ async fn abort_path_drop_tx_no_side_effects() {
     assert!(tbl.get(r1).await.is_err(), "aborted tx must leave no trace");
 }
 
+// Renamed from `read_after_write_inside_tx` — the previous version
+// accepted EITHER `Ok` or `Err` for the post-write read, which made
+// the assertion vacuous. The honest contract today is: `read_one_tx`
+// goes through MvccStore at `tx.snapshot_version` and does NOT merge
+// the tx's own `write_set`, so a record staged inside the same tx is
+// invisible to the tx itself. This is the read-your-own-writes gap
+// tracked for a future stage; once write_set merging lands, this test
+// should be renamed back and assert `Ok` with the staged value.
 #[tokio::test]
-async fn read_after_write_inside_tx() {
+async fn read_inside_tx_sees_committed_but_not_own_staged_writes() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
@@ -84,39 +92,36 @@ async fn read_after_write_inside_tx() {
 
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
 
-    // Insert inside tx.
+    // Insert inside tx — staged in write_set, NOT in main store.
     let new_rid = tbl
         .insert_tx(&InnerValue::Str("new-in-tx".into()), Some(&mut tx))
         .await
         .unwrap();
 
-    // Read the pre-existing record through tx (should still work — it's in main store).
-    // read_one_tx with tx routes through mvcc (attached via 4.G.4).
-    // With MvccStore: current_version = 0 (non-tx insert) <= snapshot = u64::MAX -> fast path -> main.get.
+    // Pre-existing record (committed before snapshot) MUST be visible.
+    // read_one_tx routes through MvccStore; current_version = 0
+    // (non-tx insert), snapshot = u64::MAX → fast path → main.get.
     let pre = tbl.read_one_tx(existing_rid, Some(&tx)).await.unwrap();
-    assert!(matches!(pre, InnerValue::Str(s) if s == "pre-existing"));
+    assert!(
+        matches!(pre, InnerValue::Str(ref s) if s == "pre-existing"),
+        "committed record must be visible inside tx, got {:?}",
+        pre
+    );
 
-    // Read the NEW record (staged in write_set) — NOTE: read_one_tx
-    // currently does NOT check write_set (that's Stage 5 wiring).
-    // So this read goes to mvcc.get_at -> main store -> NotFound
-    // (the write hasn't been committed yet).
-    // This is a KNOWN limitation: read-after-write for staged
-    // records doesn't work until read_one_tx merges with write_set.
-    // Assert the current (honest) behaviour:
+    // Staged record MUST be invisible: read_one_tx does not merge
+    // write_set. This is the documented gap (read-your-own-writes
+    // not yet implemented). Assert the actual behaviour, not "either".
     let staged = tbl.read_one_tx(new_rid, Some(&tx)).await;
-    // This will be Err(NotFound) because write_set merge isn't wired.
-    // TODO(Stage 5): this should return Ok(InnerValue::Str("new-in-tx")).
-    // For now, just document that we know:
-    if let Ok(val) = staged {
-        // If somehow it works (future fix landed), great:
-        assert!(matches!(val, InnerValue::Str(s) if s == "new-in-tx"));
-    }
-    // else: expected behaviour at Stage 4 — not a failure.
+    assert!(
+        matches!(staged, Err(shamir_storage::error::DbError::NotFound(_))),
+        "staged write must be invisible to its own tx (write_set merge unwired), got {:?}",
+        staged
+    );
 
     let outcome = repo.commit_tx(tx).await.unwrap();
     assert!(outcome.commit_version > 0);
 
-    // After commit: both visible.
+    // After commit: both visible to direct (non-tx) reads.
     let _ = tbl.get(existing_rid).await.unwrap();
     let _ = tbl.get(new_rid).await.unwrap();
 }
@@ -515,4 +520,119 @@ async fn ssi_write_skew_one_aborts() {
             other.map(|_| "Ok").unwrap_or("Err(other)")
         ),
     }
+}
+
+/// Quick-win 1 from audit Section D — explicitly verify counter advances.
+/// CRIT-3 regression guard at the integration level.
+#[tokio::test]
+async fn counter_advances_after_tx_commit() {
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.insert_tx(&InnerValue::Str("a".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    tbl.insert_tx(&InnerValue::Str("b".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    tbl.insert_tx(&InnerValue::Str("c".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    repo.commit_tx(tx).await.unwrap();
+
+    assert_eq!(
+        tbl.counter().get().await.unwrap(),
+        3,
+        "counter must reflect 3 committed inserts"
+    );
+}
+
+/// Quick-win 2 — restart preserves version state.
+/// CRIT-1 regression guard at the integration level.
+#[tokio::test]
+async fn version_monotonic_across_restart() {
+    let underlying = Arc::new(InMemoryRepo::new());
+
+    // Phase 1: commit 5 txs.
+    let repo1 = RepoInstance::new(
+        "test".into(),
+        BoxRepo::InMemory(Arc::clone(&underlying)),
+        Vec::new(),
+    );
+    repo1.add_table(crate::table::TableConfig::new("t"));
+    let _tbl = repo1.get_table("t").await.unwrap();
+    let mut last_v_before = 0u64;
+    for _ in 0..5 {
+        let (tx, _g) = repo1.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let outcome = repo1.commit_tx(tx).await.unwrap();
+        last_v_before = outcome.commit_version;
+    }
+    assert!(last_v_before >= 5);
+    drop(repo1);
+
+    // Phase 2: fresh repo over same underlying.
+    let repo2 = RepoInstance::new("test".into(), BoxRepo::InMemory(underlying), Vec::new());
+    repo2.add_table(crate::table::TableConfig::new("t"));
+    let _tbl = repo2.get_table("t").await.unwrap();
+    let (tx, _g) = repo2.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let outcome = repo2.commit_tx(tx).await.unwrap();
+
+    assert!(
+        outcome.commit_version > last_v_before,
+        "post-restart version {} must be > pre-restart {}",
+        outcome.commit_version,
+        last_v_before
+    );
+}
+
+/// Quick-win 3 — concurrent SSI storm (Section D #3).
+/// Coordinated by a Barrier so all txs hit commit at the same time.
+#[tokio::test]
+async fn concurrent_ssi_storm_exactly_one_wins() {
+    use tokio::sync::Barrier;
+
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let rid = tbl.insert(&InnerValue::Int(0)).await.unwrap();
+    let token = crate::table::table_manager::table_token_for("t");
+
+    let n = 20;
+    let barrier = Arc::new(Barrier::new(n));
+    let mut handles = Vec::new();
+
+    for i in 0..n {
+        let r = repo.clone();
+        let t = tbl.clone();
+        let b = barrier.clone();
+        let key = rid.to_bytes();
+        handles.push(tokio::spawn(async move {
+            let (mut tx, _g) = r.begin_tx(IsolationLevel::Serializable).await.unwrap();
+            tx.record_read(token, key, 0);
+            t.update_tx(rid, &InnerValue::Int(i as i64), Some(&mut tx))
+                .await
+                .unwrap();
+            b.wait().await;
+            r.commit_tx(tx).await
+        }));
+    }
+
+    let mut ok_count = 0;
+    let mut err_count = 0;
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(_) => ok_count += 1,
+            Err(_) => err_count += 1,
+        }
+    }
+
+    // Under SSI, exactly one should win; rest conflict.
+    assert_eq!(
+        ok_count, 1,
+        "exactly one tx must commit (got {} ok, {} err)",
+        ok_count, err_count
+    );
+    assert_eq!(err_count, n - 1);
 }

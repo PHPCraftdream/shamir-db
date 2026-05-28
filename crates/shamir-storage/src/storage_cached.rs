@@ -714,26 +714,30 @@ mod tests {
         assert_eq!(raw.get(seed_key).await.unwrap(), seed_val);
     }
 
+    // Renamed from `test_cached_async_mode_crash_simulation` — no
+    // crash is simulated. The test verifies that the async-mode cache
+    // may lag the inner store before `flush()` and that all writes
+    // are durable in the inner store after `flush()` completes.
     #[tokio::test]
-    async fn test_cached_async_mode_crash_simulation() {
+    async fn test_cached_async_mode_persists_after_flush() {
         let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
         let cached = CachedStore::new_async(inner.clone()).await.unwrap();
 
-        // Write data
+        // Write data.
         for i in 0..5 {
             let key = format!("key_{}", i);
             let value = Bytes::from(key.clone());
             cached.set(key.into(), value).await.unwrap();
         }
 
-        // Data is in cache
+        // Data is in cache.
         assert_eq!(cached.cache_size(), 5);
 
-        // But may not be fully written to inner yet
+        // Inner store may lag (async writes).
         let inner_count = collect_stream(inner.iter_stream(1000)).await.unwrap().len();
-        assert!(inner_count <= 5); // May be less due to async writes
+        assert!(inner_count <= 5);
 
-        // After flush, all should be in inner
+        // After flush all writes are durable in the inner store.
         cached.flush().await.unwrap();
         assert_eq!(
             collect_stream(inner.iter_stream(1000)).await.unwrap().len(),

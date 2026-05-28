@@ -325,8 +325,17 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
     assert!(del_found, "expected WalOpV2::Delete for staged Remove");
 }
 
+// Renamed from `ssi_conflict_detected_via_repo_version_provider` —
+// the previous name implied conflict detection but the assertion (and
+// reality) is the opposite: a non-tx insert does not bump the per-key
+// version_cache, so an SSI tx that records a read at v=0 still passes
+// validation because the provider returns 0 (no entry → 0 ≤ 0).
+//
+// Wiring non-tx writes through MvccStore so they bump version_cache is
+// tracked as HIGH-4; once that lands this test should flip its
+// assertion to expect `CommitError::SsiConflict` and be renamed back.
 #[tokio::test]
-async fn ssi_conflict_detected_via_repo_version_provider() {
+async fn ssi_no_conflict_when_only_non_tx_writes_predate_snapshot() {
     use crate::table::TableConfig;
     use shamir_tx::IsolationLevel;
 
@@ -346,7 +355,7 @@ async fn ssi_conflict_detected_via_repo_version_provider() {
     let outcome = repo.commit_tx(tx).await;
     assert!(
         outcome.is_ok(),
-        "no conflict expected — non-tx insert doesn't bump mvcc version yet"
+        "no conflict expected — non-tx insert doesn't bump mvcc version yet (HIGH-4)"
     );
 }
 
