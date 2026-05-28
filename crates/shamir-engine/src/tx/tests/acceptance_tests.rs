@@ -356,3 +356,60 @@ async fn snapshot_stable_during_concurrent_tx_commits() {
         final_val
     );
 }
+
+/// Scenario #4: Write skew — doctor on-call.
+/// Two SSI transactions each read both records (doctor1, doctor2 = on_call).
+/// Each decides to go off-call. Under SSI, one should get SsiConflict
+/// because both read the same pair of records that the other modified.
+#[tokio::test]
+async fn ssi_write_skew_one_aborts() {
+    use crate::table::table_manager::table_token_for;
+    use crate::tx::CommitError;
+
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("doctors"));
+    let tbl = repo.get_table("doctors").await.unwrap();
+
+    // Insert two on-call doctors.
+    let d1 = tbl
+        .insert(&InnerValue::Str("on_call".into()))
+        .await
+        .unwrap();
+    let d2 = tbl
+        .insert(&InnerValue::Str("on_call".into()))
+        .await
+        .unwrap();
+
+    let token = table_token_for("doctors");
+
+    // tx_a (SSI): reads both doctors, plans to set d1 = off_call.
+    let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tx_a.record_read(token, d1.to_bytes(), 0);
+    tx_a.record_read(token, d2.to_bytes(), 0);
+    tbl.update_tx(d1, &InnerValue::Str("off_call".into()), Some(&mut tx_a))
+        .await
+        .unwrap();
+
+    // tx_b (SSI): reads both doctors, plans to set d2 = off_call.
+    let (mut tx_b, _gb) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tx_b.record_read(token, d1.to_bytes(), 0);
+    tx_b.record_read(token, d2.to_bytes(), 0);
+    tbl.update_tx(d2, &InnerValue::Str("off_call".into()), Some(&mut tx_b))
+        .await
+        .unwrap();
+
+    // tx_a commits first — succeeds.
+    let r_a = repo.commit_tx(tx_a).await;
+    assert!(r_a.is_ok(), "tx_a should commit");
+
+    // tx_b commits second — should fail because d1's version was bumped
+    // by tx_a's commit (tx_b read d1 at version 0, now it's higher).
+    let r_b = repo.commit_tx(tx_b).await;
+    match r_b {
+        Err(CommitError::SsiConflict { .. }) => {}
+        other => panic!(
+            "tx_b must abort with SsiConflict — write skew detected by SSI, got {:?}",
+            other.map(|_| "Ok").unwrap_or("Err(other)")
+        ),
+    }
+}
