@@ -234,6 +234,80 @@ fn distinct_repos(queries: &[Query]) -> HashSet<String> {
 | **4.D.3** | `afe9f81` | `TableResolver::resolve_repo` + `RepoInstance::begin_tx / commit_tx` facade |
 | **4.D.4** | `8131f2c` | Phase 5 actual physical writes: `base.transact(staging.drain())` per table |
 | **4.D.5** | `6985f04` | SSI skeleton: `MvccStore::version_of`, `TxContext::validate_read_set(provider)`, Phase 2 wired with stub provider `\|_, _\| 0` |
+| **4.D.6.a** | `cb92331` | `TableManager::insert_tx` + `table_token()` + `TxContext::ensure_table_staging` |
+| **4.D.6.b** | `2a2dad8` | `update_tx` / `delete_tx` / `set_tx` + `StagedMutation` extract |
+| **4.D.6.c.1** | `1e859de` | `execute_insert_tx` parallel wrapper |
+| **4.D.6.c.2** | `b1854e2` | `execute_update_tx` / `execute_delete_tx` / `execute_set_tx` |
+| **4.D.6.c.3** | `a4aa6c4` | `QueryRunner<'a>` struct refactor + tx-aware dispatch |
+| **4.D.6.d** | `2316d7b` | `execute_batch` tx mode wiring + SI happy-path E2E test |
+| **4.D.6.e** | `f4e65e9` | `VersionProvider` trait + SSI provider injection hook |
+| **4.G.1** | `81c99fc` | `repo_token(name)` deterministic ID + `RepoInstance::name()` — closes compromise 1 |
+| **4.G.2** | `ba36a13` | `StagingStore::snapshot_ops` + WAL entry contains Put/Delete data ops — closes critical crash-safety gap |
+| **4.G.3** | `f422a9b` | `commit_tx` Phase 1 wired safely with empty overlay (no-op until Stage 5 LayeredInterner integration) |
+| **4.G.4** | `803a4c2` | `RepoInstance::per_table_mvcc` + `RepoVersionProvider` auto-attached for Serializable — closes compromise 5 |
+| **4.G.5/6/7** | (this commit) | `idx_id` invariant doc + `tx_pipeline.rs` bench suite + known limitations section |
+
+## Known Production Limitations (post-Stage 4)
+
+Несмотря на closed compromises in Stage 4.G, два residual gaps
+известны и закрываются в Stage 5+:
+
+### 1. tx writes do not bump MvccStore versions
+
+Commit phase 5 applies write_set via `base.transact(drain)` directly
+on the data_store, bypassing `MvccStore::set_versioned`. Consequence:
+`MvccStore::version_of(key)` returns `0` for keys last written by
+tx-mode mutations.
+
+Impact:
+- SSI conflict detection (Stage 4.D.5 + 4.G.4) cannot fire on
+  tx-written keys — version stays at 0 forever from the mvcc map's
+  perspective.
+- History store stays empty for tx writes — no snapshot reads on
+  old versions of tx-written rows.
+
+Fix path (Stage 5+): route Phase 5 writes through
+`MvccStore::set_versioned` instead of `base.transact`. Requires
+careful interaction with history archival under active snapshots.
+
+### 2. Recovery code for V2 WAL entries not implemented
+
+`WalEntryV2` now contains all tx ops (data Put/Delete, index ops,
+counter delta, interner overlay) — self-contained per 4.G.2. But
+recovery code that reads these entries on repo open and replays
+them does not exist yet.
+
+Impact:
+- Crash mid-commit_tx (between Phase 4 begin and Phase 7 commit)
+  leaves an inflight WAL V2 entry that nobody applies on next open.
+- Tx writes WILL be lost on such a crash even though the entry is
+  durable.
+
+Fix path (Stage 7): write V2 recovery loop in `RepoInstance::open`
+or equivalent that lists inflight V2 entries, applies their ops,
+removes the marker.
+
+### 3. `idx_id: 0` placeholder in WAL IndexPut/IndexDel
+
+See `WalOpV2::IndexPut` doc comment — recovery decodes `idx_id` from
+the posting key prefix (existing invariant). Either keeps as-is or
+threads through `IndexWriteOp` in Stage 5 — decision at recovery
+implementation time.
+
+### 4. Repo-level interner not yet present
+
+`tx.repo_id` and WAL entry `repo_id_interned` use `repo_token(name)`
+(DefaultHasher) instead of a real interned ID. Same for
+`table_id_interned` via `table_token`. Stage 5 reconciliation swaps
+to real interner — only the value source changes, struct shapes
+remain stable.
+
+### 5. `tx.interner_overlay` not populated
+
+LayeredInterner integration with TableManager / executor not landed —
+overlay stays empty in all production flows. `commit_tx` Phase 1
+runs `apply_id_remap` with empty remap (no-op safe wire). Stage 5
+populates overlay through tx-aware interning paths.
 
 ### Remaining
 

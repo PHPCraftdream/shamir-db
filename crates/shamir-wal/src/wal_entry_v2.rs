@@ -53,7 +53,17 @@ pub enum WalOpV2 {
     /// Delete a record.
     Delete { rid: RecordId },
 
-    /// Insert/overwrite an index posting under (idx_id, key).
+    /// Insert/overwrite an index posting under `(idx_id, key)`.
+    ///
+    /// **`idx_id` invariant (Stage 4):** currently emitted as `0` by
+    /// `commit_tx`'s `wal_ops_from_tx` because `shamir_tx::IndexWriteOp`
+    /// (the pure-data type) doesn't carry index identity. Recovery
+    /// code (Stage 7) can decode `idx_id` from the `key` byte prefix:
+    /// posting keys are layout `[idx_id_be: 4 bytes][rest_of_key]`.
+    /// Stage 5 reconciliation may either:
+    ///   (a) thread `idx_id` through `IndexWriteOp` and emit it here,
+    ///   (b) keep this field as 0 and rely on key-prefix decode.
+    /// Decision deferred to the recovery implementation.
     IndexPut {
         idx_id: u32,
         #[serde(with = "serde_bytes_bytes")]
@@ -63,6 +73,8 @@ pub enum WalOpV2 {
     },
 
     /// Remove an index posting.
+    ///
+    /// Same `idx_id` invariant as [`IndexPut`](WalOpV2::IndexPut).
     IndexDel {
         idx_id: u32,
         #[serde(with = "serde_bytes_bytes")]

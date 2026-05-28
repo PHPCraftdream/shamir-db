@@ -36,6 +36,32 @@ sibling case.
 
 ---
 
+## Known Production Limitations
+
+Not flaky tests — these are documented limitations of the current
+stage cuts. Listed here for visibility alongside test stability
+notes.
+
+### tx commits do not produce crash-safe data writes (4.G.2 partial)
+
+`WalEntryV2` now contains the data ops (4.G.2 closed the emission
+side), but recovery code that reads V2 entries on open and replays
+them is not yet implemented. A crash between commit_tx Phase 4 and
+Phase 7 will lose tx writes despite the durable WAL marker.
+
+Tracking: Stage 7 of `docs/pre-transactional/` plan.
+
+### SSI conflict detection blind to tx-mode writes
+
+`MvccStore::version_of` returns 0 for keys last written via Phase 5
+`base.transact` (bypasses `set_versioned`). Real SSI conflict
+detection fires only for keys touched by non-tx `set_versioned`
+callers, which don't exist in production yet.
+
+Tracking: Stage 5 — route Phase 5 writes through MvccStore.
+
+---
+
 ## Resolved
 
 ### `recall_at_10_on_1k_vectors` + `dot_product_metric_normalized`
