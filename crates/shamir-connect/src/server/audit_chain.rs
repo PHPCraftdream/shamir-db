@@ -361,15 +361,44 @@ pub fn encode_details_canonical(
 }
 
 /// Wrap an `AuditChain` so each `append` ALSO calls the appender.
+///
+/// The chain is held behind an `Arc` so the writer and the scheduler
+/// (which periodically calls `checkpoint_now`) share a single mutable
+/// chain state. Without this share both sides would otherwise operate
+/// on independent `AuditChain` instances — producing a split-brain
+/// where audit events advance one chain while the truncation-defence
+/// checkpoint persists the *other* chain's (empty) state. See
+/// `audit_writer_and_checkpoint_share_chain_state` for the invariant.
 pub struct AuditChainWriter {
-    chain: AuditChain,
+    chain: Arc<AuditChain>,
     appender: Arc<dyn AuditAppender>,
 }
 
 impl AuditChainWriter {
-    /// Construct.
+    /// Construct from an owned chain. Backwards-compatible convenience:
+    /// wraps the supplied chain in an `Arc` internally. Callers that need
+    /// to share the chain with the scheduler (the production path) MUST
+    /// use [`Self::new_with_shared`] instead.
     pub fn new(chain: AuditChain, appender: Arc<dyn AuditAppender>) -> Self {
+        Self {
+            chain: Arc::new(chain),
+            appender,
+        }
+    }
+
+    /// Construct from a *shared* chain. The same `Arc<AuditChain>` MUST
+    /// also be handed to the scheduler so `checkpoint_now` observes the
+    /// state mutated by `append`.
+    pub fn new_with_shared(chain: Arc<AuditChain>, appender: Arc<dyn AuditAppender>) -> Self {
         Self { chain, appender }
+    }
+
+    /// Snapshot of the shared chain handle — useful when the writer
+    /// was built with [`Self::new`] but the caller now needs the same
+    /// chain reference for an external checkpoint task. Returns a clone
+    /// of the internal `Arc`.
+    pub fn chain(&self) -> Arc<AuditChain> {
+        Arc::clone(&self.chain)
     }
 
     /// Append + appender.append + appender.checkpoint (every 1000 entries).
@@ -569,6 +598,102 @@ mod tests {
         let next = append_event(&c2, 100);
         assert_eq!(next.seq, 6);
         assert_eq!(next.prev_hmac, prev_hmac);
+    }
+
+    /// Regression for the audit-chain split-brain (CRIT-4).
+    ///
+    /// Before the fix `AuditChainWriter` owned a private `AuditChain`
+    /// while the scheduler checkpointed a separate `Arc<AuditChain>`.
+    /// Every append advanced the writer's private chain; the
+    /// scheduler's checkpoint snapshotted an empty companion. This
+    /// test pins the invariant that the writer and the scheduler MUST
+    /// observe the same chain state when constructed via
+    /// `new_with_shared`.
+    #[derive(Default)]
+    struct CountingAppender {
+        appends: std::sync::Mutex<Vec<AuditEntry>>,
+        checkpoints: std::sync::Mutex<Vec<(u64, [u8; 32])>>,
+    }
+    impl AuditAppender for CountingAppender {
+        fn append_entry(&self, entry: &AuditEntry) {
+            self.appends.lock().unwrap().push(entry.clone());
+        }
+        fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) {
+            self.checkpoints
+                .lock()
+                .unwrap()
+                .push((next_seq, *prev_hmac));
+        }
+    }
+
+    #[test]
+    fn audit_writer_and_checkpoint_share_chain_state() {
+        // Build a shared chain via the same path server.rs uses.
+        let shared = Arc::new(AuditChain::new(key()));
+        let appender = Arc::new(CountingAppender::default()) as Arc<dyn AuditAppender>;
+        let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
+
+        // Append an event through the writer.
+        let entry = writer.append(
+            "auth_success",
+            "tcp",
+            "alice",
+            "192.0.2.0/24",
+            [0u8; 8],
+            "ok",
+            vec![],
+            42,
+        );
+        assert_eq!(entry.seq, 1);
+
+        // Snapshot/checkpoint via the *same* shared chain — must see
+        // the appended event.
+        let (next_seq, prev_hmac) = shared.checkpoint();
+        assert_eq!(
+            next_seq, 2,
+            "checkpoint must reflect the appended event (next_seq == last_seq + 1)"
+        );
+        assert_eq!(
+            prev_hmac, entry.hmac,
+            "checkpoint hmac must match the appended entry's hmac"
+        );
+    }
+
+    /// Pins the restart-continuity invariant: when the writer is
+    /// constructed from a chain that was loaded from a checkpoint,
+    /// its first append continues numbering instead of restarting at
+    /// `seq = 1`.
+    #[test]
+    fn audit_writer_continues_seq_after_restart_checkpoint() {
+        // Simulate the "prior run": fill some entries and snapshot.
+        let prior = AuditChain::new(key());
+        for i in 0..7 {
+            append_event(&prior, i);
+        }
+        let (next_seq, prev_hmac) = prior.checkpoint();
+        assert_eq!(next_seq, 8);
+
+        // "Restart": rebuild the shared chain from the checkpoint,
+        // hand it to a fresh writer.
+        let shared = Arc::new(AuditChain::from_checkpoint(key(), next_seq, prev_hmac));
+        let appender = Arc::new(CountingAppender::default()) as Arc<dyn AuditAppender>;
+        let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
+
+        let first_after_restart = writer.append(
+            "auth_success",
+            "tcp",
+            "alice",
+            "192.0.2.0/24",
+            [0u8; 8],
+            "ok",
+            vec![],
+            999,
+        );
+        assert_eq!(
+            first_after_restart.seq, 8,
+            "writer must continue numbering at previous_last_seq + 1 = 8 after restart"
+        );
+        assert_eq!(first_after_restart.prev_hmac, prev_hmac);
     }
 
     #[test]

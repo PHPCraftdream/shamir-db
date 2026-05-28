@@ -247,6 +247,16 @@ impl ServerLauncher {
         let session_store = Arc::new(SessionStore::new());
 
         // 4. Audit chain — load from checkpoint if present.
+        //
+        // CRITICAL: the writer (used by every connection task to emit
+        // audit events) and the scheduler (which periodically persists
+        // the truncation-defence checkpoint) MUST share a single chain
+        // state. Constructing two independent `AuditChain` instances
+        // here produces a split-brain — appends advance one chain while
+        // the checkpoint snapshots the other (empty) one, so audit.log
+        // restarts at seq=1 on every reboot. See
+        // `audit_writer_and_checkpoint_share_chain_state` for the
+        // regression test.
         let ack = meta
             .audit_chain_key()
             .map_err(|e| BootError::ServerMeta(e.to_string()))?;
@@ -254,8 +264,8 @@ impl ServerLauncher {
             Some((seq, hmac)) => Arc::new(AuditChain::from_checkpoint(ack, seq, hmac)),
             None => Arc::new(AuditChain::new(ack)),
         };
-        let audit_writer = Arc::new(AuditChainWriter::new(
-            AuditChain::new(ack),
+        let audit_writer = Arc::new(AuditChainWriter::new_with_shared(
+            audit_chain.clone(),
             audit_appender.clone() as Arc<dyn AuditAppender>,
         ));
 
