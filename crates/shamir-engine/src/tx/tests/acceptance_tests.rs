@@ -357,6 +357,109 @@ async fn snapshot_stable_during_concurrent_tx_commits() {
     );
 }
 
+/// Scenario #5: Counter race under SI — lost updates expected.
+/// N transactions each open a snapshot (all see counter=0), each writes 1.
+/// Under SI last-writer-wins, all commits succeed but the final value is 1,
+/// not N — some increments are lost.
+#[tokio::test]
+async fn si_counter_race_lost_updates() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    // Initial counter = 0
+    let rid = tbl.insert(&InnerValue::Int(0)).await.unwrap();
+
+    let n = 10_i64;
+
+    // Open all txs first (all see counter=0), then write and commit sequentially.
+    let mut txs = Vec::new();
+    for _ in 0..n {
+        let (tx, g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        txs.push((tx, g));
+    }
+
+    // Each tx "reads" 0, writes 1 (0 + 1).
+    for (tx, _g) in &mut txs {
+        tbl.update_tx(rid, &InnerValue::Int(1), Some(tx))
+            .await
+            .unwrap();
+    }
+
+    // Commit all — all succeed under SI.
+    let mut all_ok = true;
+    for (tx, _g) in txs {
+        if repo.commit_tx(tx).await.is_err() {
+            all_ok = false;
+        }
+    }
+    assert!(all_ok, "all SI txs should commit");
+
+    // Final value = 1 (last writer wins, all wrote 1).
+    let val = tbl.get(rid).await.unwrap();
+    assert!(
+        matches!(val, InnerValue::Int(1)),
+        "all txs wrote 1, last writer wins — final = 1, not {n}"
+    );
+}
+
+/// Scenario #3: Phantom protection via snapshot isolation.
+/// tx1 opens snapshot, then another tx inserts a new record and commits.
+/// The new record ("phantom") must NOT be visible at tx1's snapshot version.
+#[tokio::test]
+async fn snapshot_prevents_phantom_reads() {
+    use crate::table::table_manager::table_token_for;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    // Insert initial record via tx0.
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let existing = tbl
+        .insert_tx(&InnerValue::Str("existing".into()), Some(&mut tx0))
+        .await
+        .unwrap();
+    repo.commit_tx(tx0).await.unwrap();
+    drop(_g0);
+
+    // tx1 opens snapshot — sees "existing".
+    let (tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let snap = tx1.snapshot_version;
+
+    // tx2 inserts a new "phantom" record and commits.
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let phantom = tbl
+        .insert_tx(&InnerValue::Str("phantom".into()), Some(&mut tx2))
+        .await
+        .unwrap();
+    repo.commit_tx(tx2).await.unwrap();
+    drop(_g2);
+
+    // At tx1's snapshot, "existing" should be visible, "phantom" should NOT.
+    let token = table_token_for("t");
+    let mvcc = repo
+        .per_table_mvcc()
+        .read_async(&token, |_, m| std::sync::Arc::clone(m))
+        .await
+        .unwrap();
+
+    let existing_val = mvcc.get_at(&existing.to_bytes(), snap).await.unwrap();
+    assert!(
+        existing_val.is_some(),
+        "existing record must be visible at snapshot"
+    );
+
+    let phantom_val = mvcc.get_at(&phantom.to_bytes(), snap).await.unwrap();
+    assert!(
+        phantom_val.is_none(),
+        "phantom record must NOT be visible at tx1's snapshot"
+    );
+
+    drop(tx1);
+    drop(_g1);
+}
+
 /// Scenario #4: Write skew — doctor on-call.
 /// Two SSI transactions each read both records (doctor1, doctor2 = on_call).
 /// Each decides to go off-call. Under SSI, one should get SsiConflict
