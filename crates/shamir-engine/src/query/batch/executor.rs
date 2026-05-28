@@ -299,6 +299,9 @@ async fn execute_transactional(
                     let reason = match commit_err {
                         crate::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
                         crate::tx::CommitError::Storage(e) => format!("storage: {}", e),
+                        crate::tx::CommitError::Expired { elapsed, max } => {
+                            format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
+                        }
                     };
                     let info = shamir_query_types::batch::TransactionInfo::aborted(tx_id, reason);
                     Ok((new_map(), Some(info)))

@@ -11,12 +11,19 @@ pub struct TxOutcome {
     pub commit_version: u64,
 }
 
+const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300); // 5 min
+
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
     #[error("storage: {0}")]
     Storage(#[from] DbError),
     #[error("ssi conflict on key {key:?}")]
     SsiConflict { key: bytes::Bytes },
+    #[error("tx expired: elapsed {elapsed:?} > max {max:?}")]
+    Expired {
+        elapsed: std::time::Duration,
+        max: std::time::Duration,
+    },
 }
 
 /// Build WalOpV2 ops from a TxContext for inclusion in the V2 WAL entry.
@@ -102,6 +109,13 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 }
 
 pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
+    if tx.is_expired(DEFAULT_MAX_TX_LIFETIME) {
+        return Err(TxError::Expired {
+            elapsed: tx.elapsed(),
+            max: DEFAULT_MAX_TX_LIFETIME,
+        });
+    }
+
     let gate = repo.tx_gate().await?;
     let wal = repo.repo_wal().await?;
 

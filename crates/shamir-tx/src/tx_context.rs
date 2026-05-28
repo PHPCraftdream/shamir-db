@@ -74,6 +74,10 @@ pub struct TxContext {
     /// `|_, _| 0` that trivially passes — Snapshot and Serializable
     /// behave identically.
     pub version_provider: Option<std::sync::Arc<dyn VersionProvider>>,
+
+    /// Wall-clock instant when this transaction was opened.
+    /// Used for max-lifetime enforcement at commit time.
+    pub started_at: std::time::Instant,
 }
 
 impl TxContext {
@@ -96,7 +100,18 @@ impl TxContext {
             read_set: HashMap::new(),
             table_tokens: HashMap::new(),
             version_provider: None,
+            started_at: std::time::Instant::now(),
         }
+    }
+
+    /// How long this transaction has been open.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.started_at.elapsed()
+    }
+
+    /// Whether this transaction has exceeded the given max lifetime.
+    pub fn is_expired(&self, max_lifetime: std::time::Duration) -> bool {
+        self.started_at.elapsed() > max_lifetime
     }
 
     /// True if the tx has no pending writes / index ops / staging at all.
