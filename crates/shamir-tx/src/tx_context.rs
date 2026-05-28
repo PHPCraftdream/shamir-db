@@ -41,9 +41,10 @@ pub struct TxContext {
     /// Each `StagingStore` buffers set/remove ops for that table.
     pub write_set: HashMap<u64, StagingStore>,
 
-    /// Accumulated index write ops across all tables. Applied
-    /// atomically during commit (via `apply_index_ops`).
-    pub index_write_set: Vec<IndexWriteOp>,
+    /// Accumulated index write ops across all tables, with per-op table
+    /// attribution. Each entry is `(table_token, op)`. Applied atomically
+    /// during commit (via `apply_index_ops`).
+    pub index_write_set: Vec<(u64, IndexWriteOp)>,
 
     /// Per-table HNSW staged vector info. Key = table name (interned).
     /// The actual staged vectors live inside `HnswAdapter::staged` — this
