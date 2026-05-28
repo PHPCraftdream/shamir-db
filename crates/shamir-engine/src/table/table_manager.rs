@@ -499,25 +499,86 @@ impl TableManager {
         all_ops
     }
 
+    /// HIGH-6: collect legacy `IndexManager` (regular + unique) and
+    /// `SortedIndexManager` posting ops for a tx insert. These ops use
+    /// the *exact* physical key layout the non-tx readers expect
+    /// (`lookup_by_index` / `check_unique_constraint` / `lookup_range`),
+    /// so applying them at commit time produces postings indistinguishable
+    /// from the non-tx `on_record_created` path. The unique ops do NOT
+    /// validate — validation runs separately at stage time in `insert_tx`.
+    async fn plan_legacy_insert_ops(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
+        let mut ops = self.index_manager.plan_record_created(&rid, rec).await?;
+        ops.extend(
+            self.index_manager
+                .plan_record_created_unique(&rid, rec)
+                .await?,
+        );
+        ops.extend(self.sorted_indexes.plan_record_created(&rid, rec)?);
+        Ok(ops)
+    }
+
+    /// HIGH-6: legacy + sorted posting ops for a tx update.
+    async fn plan_legacy_update_ops(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
+        let mut ops = self
+            .index_manager
+            .plan_record_updated(&rid, old, new)
+            .await?;
+        ops.extend(
+            self.index_manager
+                .plan_record_updated_unique(&rid, old, new)
+                .await?,
+        );
+        ops.extend(self.sorted_indexes.plan_record_updated(&rid, old, new)?);
+        Ok(ops)
+    }
+
+    /// HIGH-6: legacy + sorted posting ops for a tx delete.
+    async fn plan_legacy_delete_ops(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+    ) -> DbResult<Vec<shamir_tx::IndexWriteOp>> {
+        let mut ops = self.index_manager.plan_record_deleted(&rid, old).await?;
+        ops.extend(
+            self.index_manager
+                .plan_record_deleted_unique(&rid, old)
+                .await?,
+        );
+        ops.extend(self.sorted_indexes.plan_record_deleted(&rid, old)?);
+        Ok(ops)
+    }
+
     /// tx-aware insert.
     ///
     /// - `tx == None` → delegates to existing [`insert`].
     /// - `tx == Some` → stages data + index ops + counter delta in
     ///   TxContext. No physical writes. commit_tx Phase 5 applies.
     ///
-    /// Simplified for 4.D.6.a: only handles index2 plan ops.
+    /// HIGH-6: legacy `IndexManager` (regular + unique) and
+    /// `SortedIndexManager` posting writes ARE now staged into
+    /// `tx.index_write_set` via [`plan_legacy_insert_ops`]. The planners
+    /// emit `IndexWriteOp`s carrying the exact physical key layout the
+    /// non-tx readers expect, so the commit pipeline applies them
+    /// atomically and a dropped tx leaves no ghost postings. Unique-index
+    /// validation runs at stage time below (read-only `validate_unique_for_create`)
+    /// to reject duplicates early.
     ///
-    /// HIGH-6: legacy `IndexManager` / `SortedIndexManager` are NOT
-    /// routed through tx staging here — the non-tx side hooks
-    /// (`on_record_created` etc.) are deliberately not called, so a
-    /// rolled-back tx leaves no ghost postings there, but a committed
-    /// tx also produces no postings on the legacy/sorted indexes for
-    /// records inserted via `insert_tx`. The legacy paths are still
-    /// exclusively driven by the non-tx [`insert`] / [`set`] /
-    /// [`delete`] methods. A full fix requires legacy-index `*_tx`
-    /// hooks plus a wiring change at the executor — out of scope for
-    /// HIGH-6's staging-side cleanup. See also the FTS-ranked
-    /// in-memory stats gap below.
+    /// KNOWN GAP (tx-concurrent unique violation): stage-time validation
+    /// reads committed state only. Two concurrent txs inserting the same
+    /// unique value both pass validation, then both commit → constraint
+    /// violated. The non-tx path serialises via `unique_write_lock`;
+    /// closing this for the tx path needs commit-time unique reconciliation
+    /// (read-set validation on the unique posting key) which lives in the
+    /// commit pipeline — out of scope here. TODO.
     ///
     /// HIGH-6: index2 `plan_insert_tx` IS called with `tx.tx_id`, so
     /// stateful backends (e.g. `VectorBackend`) route the mutation
@@ -542,12 +603,18 @@ impl TableManager {
 
         let rid = RecordId::new();
 
+        // HIGH-6: stage-time unique validation (read-only against
+        // committed state). Catches the common single-writer duplicate;
+        // the tx-concurrent gap is documented on the method doc.
+        self.index_manager.validate_unique_for_create(value).await?;
+
         let bytes = value.to_bytes().map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
 
         let tx_id = Some(tx.tx_id);
-        let index_ops = self.plan_insert_ops(rid, value, tx_id).await;
+        let mut index_ops = self.plan_insert_ops(rid, value, tx_id).await;
+        index_ops.extend(self.plan_legacy_insert_ops(rid, value).await?);
 
         self.stage_mutation(
             StagedMutation {
@@ -587,15 +654,33 @@ impl TableManager {
 
         let old = self.read_one_tx(id, Some(&*tx)).await.ok();
 
+        // HIGH-6: stage-time unique validation (read-only). For an
+        // existing record this excludes the record itself; for a fresh
+        // insert it behaves like create-validation.
+        match &old {
+            Some(old_val) => {
+                self.index_manager
+                    .validate_unique_for_update(&id, old_val, value)
+                    .await?
+            }
+            None => self.index_manager.validate_unique_for_create(value).await?,
+        }
+
         let bytes = value.to_bytes().map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
 
         let tx_id = Some(tx.tx_id);
-        let (index_ops, counter_delta) = match &old {
+        let (mut index_ops, counter_delta) = match &old {
             Some(old_val) => (self.plan_update_ops(id, old_val, value, tx_id).await, 0_i64),
             None => (self.plan_insert_ops(id, value, tx_id).await, 1_i64),
         };
+        match &old {
+            Some(old_val) => {
+                index_ops.extend(self.plan_legacy_update_ops(id, old_val, value).await?)
+            }
+            None => index_ops.extend(self.plan_legacy_insert_ops(id, value).await?),
+        }
 
         self.stage_mutation(
             StagedMutation {
@@ -632,7 +717,8 @@ impl TableManager {
         };
 
         let tx_id = Some(tx.tx_id);
-        let index_ops = self.plan_delete_ops(id, &old, tx_id).await;
+        let mut index_ops = self.plan_delete_ops(id, &old, tx_id).await;
+        index_ops.extend(self.plan_legacy_delete_ops(id, &old).await?);
 
         self.stage_mutation(
             StagedMutation {

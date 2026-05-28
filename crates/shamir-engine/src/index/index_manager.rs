@@ -575,6 +575,110 @@ impl IndexManager {
         Ok(ops)
     }
 
+    /// Single-record planner for unique-index postings on create.
+    ///
+    /// Mirrors [`plan_records_created_unique_batch`] for the one-record
+    /// case (the tx insert path). Emits one
+    /// `SetPosting { key: index_key (25b), value: record_id }` per unique
+    /// index whose paths the record satisfies — the exact physical layout
+    /// `add_unique_entry` / `check_unique_constraint` read back.
+    ///
+    /// Does NOT validate uniqueness — the caller must run
+    /// [`validate_unique_for_create`] first (at stage time, under the tx
+    /// staging path). See the tx-concurrent unique gap documented on
+    /// `TableManager::insert_tx`.
+    pub async fn plan_record_created_unique(
+        &self,
+        record_id: &RecordId,
+        value: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
+        if !self.has_unique_indexes() {
+            return Ok(Vec::new());
+        }
+        let mut ops = Vec::new();
+        for def in self.indexes_unique.iter() {
+            if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                let index_key = Self::build_index_key(true, def.name_interned, &values).to_bytes();
+                ops.push(IndexWriteOp::SetPosting {
+                    key: index_key,
+                    value: Bytes::copy_from_slice(record_id.as_bytes()),
+                });
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Single-record planner for unique-index posting changes on update.
+    ///
+    /// Mirrors [`on_record_updated_unique`] as a planner: for each unique
+    /// index, remove the old `(value)` posting and set the new one when
+    /// the indexed value changed. Does NOT validate — caller runs
+    /// [`validate_unique_for_update`] first.
+    pub async fn plan_record_updated_unique(
+        &self,
+        record_id: &RecordId,
+        old_value: &InnerValue,
+        new_value: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
+        if !self.has_unique_indexes() {
+            return Ok(Vec::new());
+        }
+        let mut ops = Vec::new();
+        for def in self.indexes_unique.iter() {
+            let old_values = Self::extract_index_values(old_value, &def.paths);
+            let new_values = Self::extract_index_values(new_value, &def.paths);
+            match (old_values, new_values) {
+                (None, None) => {}
+                (None, Some(new)) => {
+                    let key = Self::build_index_key(true, def.name_interned, &new).to_bytes();
+                    ops.push(IndexWriteOp::SetPosting {
+                        key,
+                        value: Bytes::copy_from_slice(record_id.as_bytes()),
+                    });
+                }
+                (Some(old), None) => {
+                    let key = Self::build_index_key(true, def.name_interned, &old).to_bytes();
+                    ops.push(IndexWriteOp::RemovePosting { key });
+                }
+                (Some(old), Some(new)) => {
+                    if old != new {
+                        let old_key =
+                            Self::build_index_key(true, def.name_interned, &old).to_bytes();
+                        ops.push(IndexWriteOp::RemovePosting { key: old_key });
+                        let new_key =
+                            Self::build_index_key(true, def.name_interned, &new).to_bytes();
+                        ops.push(IndexWriteOp::SetPosting {
+                            key: new_key,
+                            value: Bytes::copy_from_slice(record_id.as_bytes()),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(ops)
+    }
+
+    /// Single-record planner for unique-index posting removals on delete.
+    ///
+    /// Mirrors [`on_record_deleted_unique`] as a planner.
+    pub async fn plan_record_deleted_unique(
+        &self,
+        _record_id: &RecordId,
+        old_value: &InnerValue,
+    ) -> DbResult<Vec<IndexWriteOp>> {
+        if !self.has_unique_indexes() {
+            return Ok(Vec::new());
+        }
+        let mut ops = Vec::new();
+        for def in self.indexes_unique.iter() {
+            if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
+                let key = Self::build_index_key(true, def.name_interned, &values).to_bytes();
+                ops.push(IndexWriteOp::RemovePosting { key });
+            }
+        }
+        Ok(ops)
+    }
+
     /// Обработчик события обновления записи.
     ///
     /// Обновляет индексы при изменении записи:
