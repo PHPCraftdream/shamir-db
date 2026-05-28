@@ -86,6 +86,13 @@ impl RepoTxGate {
         self.last_committed_version.load(Ordering::Acquire)
     }
 
+    /// cancel-safe: yes — single `scc::HashMap::insert_async` is CAS-
+    /// based and either completes or leaves the map unchanged on
+    /// cancellation. If the future is dropped after insertion but before
+    /// returning the guard, the snapshot entry leaks (no Drop runs);
+    /// since callers always await this to completion or never call it,
+    /// in practice this is cancel-safe.
+    ///
     /// Register a snapshot at the current `last_committed` version and
     /// return a RAII guard. On drop the snapshot is removed.
     pub async fn open_snapshot(&self) -> SnapshotGuard {
@@ -97,6 +104,10 @@ impl RepoTxGate {
         }
     }
 
+    /// cancel-safe: yes — single `tokio::sync::Mutex::lock().await`,
+    /// which is documented cancel-safe (`drop` of the future releases
+    /// the wait without acquiring the lock).
+    ///
     /// Lock the commit gate. Returns a tokio `MutexGuard`.
     pub async fn commit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.commit_mutex.lock().await
