@@ -220,15 +220,74 @@ fn distinct_repos(queries: &[Query]) -> HashSet<String> {
 - Cross-table internal: tx batch с queries на 2 table внутри repo →
   atomicity сохраняется.
 
-## Порядок работы
+## Порядок работы (atomized sub-stages)
 
-1. `parse_isolation` + wire-format на стороне executor (0.5 дня).
-2. Cross-repo guard + tests (0.5 дня).
-3. Commit phase 1-7 step-by-step с unit tests (2 дня).
-4. SI integration test (0.5 дня).
-5. SSI read-set tracking + validation (1 день).
-6. SDK update (Rust client + Node SDK для wire response shape)
-   (0.5 дня).
+### Landed
+
+| Sub-stage | Commit | Summary |
+|---|---|---|
+| **4.A** | `7a16400` | `BatchRequest.isolation: Option<String>` + expanded `TransactionInfo { tx_id, status, reason, snapshot_version, commit_version }` + helpers |
+| **4.B** | `83fee0e` | `TxContext::apply_id_remap` + `StagingStore::rewrite_set_bytes` — overlay-id → base-id rewrite in staged record bytes |
+| **4.C** | `4059c81` | Cross-repo guard: `distinct_repos` helper + `BatchError::CrossRepoNotSupported` + executor check |
+| **4.D.1** | `7f00341` | `RepoInstance::tx_gate() / repo_wal()` lazy OnceCell accessors with recovery-marker seeding |
+| **4.D.2** | `a20b926` | `commit_tx` 7-phase scaffold (phases 3/4/6/7 wired, phases 1/2/5 TODO stubs) |
+| **4.D.3** | `afe9f81` | `TableResolver::resolve_repo` + `RepoInstance::begin_tx / commit_tx` facade |
+| **4.D.4** | `8131f2c` | Phase 5 actual physical writes: `base.transact(staging.drain())` per table |
+| **4.D.5** | `6985f04` | SSI skeleton: `MvccStore::version_of`, `TxContext::validate_read_set(provider)`, Phase 2 wired with stub provider `\|_, _\| 0` |
+
+### Remaining
+
+**4.D.6 — Write pipeline tx-aware (5 sub-stages)**
+
+The largest remaining piece: mutation methods must route through
+`TxContext` when `tx.is_some()`. Decomposed into:
+
+| Sub-stage | Scope | Notes |
+|---|---|---|
+| **4.D.6.a** | `TableManager::insert_tx(value, tx)` | Stage data in `tx.write_set[table_hash]`, accumulate index ops via existing `plan_insert`, bump `counter_deltas`, stage HNSW. `table_id_interned` = `fxhash(self.name)` placeholder (Stage 5 replaces with repo-level interner). Non-tx ⇒ current `insert`. |
+| **4.D.6.b** | `update_tx`, `delete_tx`, `set_tx` | Same pattern as insert_tx for remaining mutation types. |
+| **4.D.6.c** | `execute_query_tx` parallel dispatch path | New function alongside `execute_query`. Routes each `BatchOp` through `_tx` methods. Wire into `execute_batch` when `request.transactional`. |
+| **4.D.6.d** | SI happy-path integration test | Full end-to-end: `repo.begin_tx(SI)` → 3 inserts via `insert_tx` → `commit_tx` → outside observer reads via `table.get` → sees all 3. Also test read-after-write inside tx (via `read_one_tx`). |
+| **4.D.6.e** | SSI real version provider | Build `HashMap<u64, Arc<MvccStore>>` per-table map during commit. Plug into Phase 2 `validate_read_set` instead of stub `\|_, _\| 0`. Test: T1 reads X, T2 writes X + commit, T1 tries commit → `SsiConflict`. |
+
+Key design decisions for 4.D.6:
+
+- **`table_id_interned` placeholder.** No repo-level interner yet
+  (Stage 5). Use `fxhash(table_name)` for deterministic u64 mapping.
+  Stage 5 replaces with real interner ID — only the keying changes,
+  not the structure.
+
+- **`execute_query_tx` as parallel path.** Don't modify existing
+  `execute_query` signature — add a parallel function. Zero risk to
+  non-tx flows. Convergence into one function (with
+  `Option<&mut TxContext>`) deferred to Stage 5 reconciliation.
+
+- **`read_one_tx` enhanced.** Currently forwards to `table.get`.
+  Stage 4.D.6.d wires: (1) check `tx.write_set[table].get(rid)`
+  first, (2) fall through to `mvcc.get_at(snapshot)` or `table.get`.
+
+**4.E — SDK updates**
+
+| Sub-stage | Scope |
+|---|---|
+| **4.E.1** | Rust client (`shamir-client`): update `BatchRequest` builder for `isolation` field + parse new `TransactionInfo` response shape |
+| **4.E.2** | Node.js client (`shamir-client-node`): same wire-format updates in napi bindings |
+
+Depends on: 4.D.6.c (executor wiring) — wire format is landed (4.A)
+but useless until the server actually commits transactions.
+
+**4.F — Acceptance integration tests**
+
+| Test | Verifies |
+|---|---|
+| **SI happy path** | 5 writes + 1 read → commit → outside observer reads all 5 |
+| **Abort path** | 2 writes + error on 3rd → outside observer sees none |
+| **Read-after-write** | tx inserts X, same tx reads X → sees staged value |
+| **SI lost update** | T1 writes X, T2 writes X → both commit → last writer wins |
+| **SSI conflict** | T1 reads X, T2 writes X + commits, T1 tries commit → `tx_conflict` |
+| **Cross-table internal** | tx batch writes to 2 tables in same repo → atomic (both or neither visible) |
+
+Depends on: 4.D.6.d (SI integration) + 4.D.6.e (SSI provider).
 
 **Не делаем здесь:**
 - Не пишем GC (Этап 6).

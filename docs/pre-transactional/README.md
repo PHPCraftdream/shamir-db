@@ -80,6 +80,21 @@
   решение не считается «реализованным» — даже если код компилируется
   и существующие тесты зелёные.
 
+## Progress
+
+| Stage | Status | Summary |
+|---|---|---|
+| **0. Foundations** (9 sub-stages) | ✅ Complete | MetaKey enum, typed keys, recovery markers, Store::transact + native overrides, raw_backend, WalEntryV2 inline body, dual-version list_inflight |
+| **1. Write isolation** (1.1A-G + 1.2A-C + 1.3) | ✅ Complete | IndexWriteOp planner API on all 6 backends, HNSW staged buffer + commit/rollback + in-tx search merge, StagingStore per-tx buffer |
+| **2. Per-repo coordinator** (2.1-2.4) | ✅ Complete | RepoTxGate, TxContext, LayeredInterner (overlay+commit merge+id remap), RepoWalManager (V2 entries, V1 coexistence) |
+| **3. MvccStore + read pipeline** (3.1-3.4) | ✅ Complete | MvccStore (main+history, zero-overhead, version_cache, get_at), tx-aware surface on TableManager / IndexBackend / VectorBackend / SortedIndexManager / apply_index_ops |
+| **4. Executor + SI/SSI** (4.A-4.D.5) | 🔶 In progress | Wire-format (4.A), apply_id_remap (4.B), cross-repo guard (4.C), RepoInstance tx lifecycle (4.D.1-3), Phase 5 physical writes (4.D.4), SSI validation skeleton (4.D.5). **Remaining:** 4.D.6 write pipeline wiring (5 sub-stages), 4.E SDK, 4.F acceptance tests |
+| **5. Reconciliation** | ⏳ Planned | MemBuffer bypass, migration coordinator, audit log, watchdog |
+| **6. GC + telemetry** | ⏳ Planned | GC worker, metrics, max-tx-lifetime cap |
+| **7. Tests + landing** | ⏳ Planned | Multi-connection e2e harness, 12 concurrent scenarios, wire format, docs |
+
+Total landed: **~70 commits**, **~1350 workspace tests** (all green), **4 criterion benchmarks** in `shamir-tx`.
+
 ## Estimate
 
 ~6-7 недель сфокусированной работы для всех семи этапов. После них
