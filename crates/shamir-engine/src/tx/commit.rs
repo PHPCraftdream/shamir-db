@@ -81,7 +81,18 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
     // failure path is exercised in unit tests on
     // `TxContext::validate_read_set` directly.
     if tx.isolation == IsolationLevel::Serializable {
-        if let Err((_table_id, key)) = tx.validate_read_set(|_t, _k| 0u64) {
+        // Phase 2: SSI read-set validation.
+        // Uses tx.version_provider if set; otherwise stub `|_, _| 0`
+        // (Snapshot-equivalent behaviour). Real provider wiring to
+        // per-table MvccStore lands with Stage 5 reconciliation.
+        let validation = match tx.version_provider.as_ref() {
+            Some(provider) => {
+                let provider = std::sync::Arc::clone(provider);
+                tx.validate_read_set(move |t, k| provider.version_of(t, k))
+            }
+            None => tx.validate_read_set(|_t, _k| 0u64),
+        };
+        if let Err((_table_id, key)) = validation {
             return Err(TxError::SsiConflict { key });
         }
     }

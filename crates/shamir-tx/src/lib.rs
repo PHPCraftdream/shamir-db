@@ -40,6 +40,7 @@ pub mod staging_store;
 pub mod tx_context;
 pub mod types;
 pub mod version_codec;
+pub mod version_provider;
 
 pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
@@ -51,3 +52,4 @@ pub use staging_store::StagingStore;
 pub use tx_context::TxContext;
 pub use types::{IsolationLevel, TxConflict, TxError, TxId};
 pub use version_codec::{decode_version_key, encode_version_key};
+pub use version_provider::VersionProvider;
