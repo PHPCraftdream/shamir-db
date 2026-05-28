@@ -61,6 +61,11 @@ pub struct TxContext {
     /// when `isolation == Serializable`. Validated at commit:
     /// `current_version(key)` must equal `version_seen`, else abort.
     pub read_set: HashMap<(u64, Bytes), u64>,
+
+    /// Token → original table name. Populated alongside `write_set`
+    /// entries. Used at commit time to look up table names for WAL
+    /// emission and interner merge (Stage 5).
+    pub table_tokens: HashMap<u64, String>,
 }
 
 impl TxContext {
@@ -81,6 +86,7 @@ impl TxContext {
             interner_overlay: scc::HashMap::new(),
             counter_deltas: HashMap::new(),
             read_set: HashMap::new(),
+            table_tokens: HashMap::new(),
         }
     }
 
@@ -128,6 +134,24 @@ impl TxContext {
             }
         }
         Ok(())
+    }
+
+    /// Get-or-create a StagingStore for the given table token.
+    ///
+    /// Also records the human-readable table name in `table_tokens`
+    /// so commit-time WAL emission can look it up.
+    pub fn ensure_table_staging(
+        &mut self,
+        token: u64,
+        name: &str,
+        base: std::sync::Arc<dyn shamir_storage::types::Store>,
+    ) -> &mut crate::staging_store::StagingStore {
+        self.table_tokens
+            .entry(token)
+            .or_insert_with(|| name.to_string());
+        self.write_set
+            .entry(token)
+            .or_insert_with(|| crate::staging_store::StagingStore::new(base))
     }
 
     /// Mark that a table has HNSW vectors staged under this tx.
@@ -339,5 +363,40 @@ mod tests {
         // 0 <= any version_seen, so passes trivially.
         let result = tx.validate_read_set(|_, _| 0u64);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_table_staging_creates_new() {
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use shamir_storage::types::Store;
+
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Snapshot,
+        );
+        let base: std::sync::Arc<dyn Store> = std::sync::Arc::new(InMemoryStore::new());
+        let staging = tx.ensure_table_staging(42, "users", base);
+        assert!(staging.is_empty());
+        assert_eq!(tx.table_tokens.get(&42), Some(&"users".to_string()));
+    }
+
+    #[test]
+    fn ensure_table_staging_returns_same() {
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use shamir_storage::types::Store;
+
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Snapshot,
+        );
+        let base: std::sync::Arc<dyn Store> = std::sync::Arc::new(InMemoryStore::new());
+        let _ = tx.ensure_table_staging(42, "users", base.clone());
+        let s = tx.ensure_table_staging(42, "users", base);
+        assert!(s.is_empty());
+        assert_eq!(tx.write_set.len(), 1, "should reuse, not duplicate");
     }
 }
