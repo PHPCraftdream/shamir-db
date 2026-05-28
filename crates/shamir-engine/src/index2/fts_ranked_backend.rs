@@ -213,6 +213,28 @@ impl IndexBackend for FtsRankedBackend {
         Ok(ops)
     }
 
+    /// Apply BM25 doc-length aggregates (`BumpFtsStats`) to the live
+    /// in-memory `stats`.
+    ///
+    /// ## Why these stats are NOT WAL-durable (by design, not a gap)
+    ///
+    /// `BumpFtsStats` is a *derived* aggregate — `doc_count` and
+    /// `sum_doc_len` are fully reconstructible from the durable postings
+    /// (which DO go through the WAL as `IndexPut`/`IndexDel`). It is
+    /// therefore deliberately excluded from `wal_ops_from_tx`, for the
+    /// same reason `CounterDelta` replay is skipped in
+    /// `recovery::replay_v2_op`: replaying a derived value alongside its
+    /// already-replayed source would double-count.
+    ///
+    /// The authoritative recovery path is `rebuild()` (below), which
+    /// re-derives `stats` from the data store on open. This keeps the
+    /// aggregate provably consistent with the postings at all times —
+    /// see `rebuild_restores_stats_from_data_store` for the guarantee.
+    ///
+    /// (A future cold-start optimisation could persist a `stats`
+    /// snapshot — mirroring the lockout / rate-limiter snapshots — to
+    /// skip the full rebuild scan on large tables. That is an
+    /// optimisation, not a correctness fix.)
     async fn apply_in_memory(&self, ops: &[IndexWriteOp]) -> Result<(), IndexError> {
         for op in ops {
             if let IndexWriteOp::BumpFtsStats { doc_len, sign } = op {
