@@ -438,14 +438,22 @@ impl TableManager {
 
     /// Collect index ops from all index2 backends for an insert.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
+    ///
+    /// `tx_id` is forwarded to each backend's `plan_insert_tx` so
+    /// backends that maintain non-storage state (e.g. `VectorBackend`'s
+    /// HNSW graph) can route the mutation into a per-tx staging area
+    /// instead of the live structure (HIGH-6). Stateless backends
+    /// (FTS / functional / btree) fall through to `plan_insert` via
+    /// the default trait impl.
     async fn plan_insert_ops(
         &self,
         rid: RecordId,
         rec: &InnerValue,
+        tx_id: Option<shamir_tx::TxId>,
     ) -> Vec<shamir_tx::IndexWriteOp> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_insert(rid, rec).await {
+            if let Ok(ops) = backend.plan_insert_tx(rid, rec, tx_id).await {
                 all_ops.extend(ops);
             }
         }
@@ -454,15 +462,18 @@ impl TableManager {
 
     /// Collect index ops from all index2 backends for an update.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
+    ///
+    /// See [`plan_insert_ops`] for the `tx_id` parameter.
     async fn plan_update_ops(
         &self,
         rid: RecordId,
         old: &InnerValue,
         new: &InnerValue,
+        tx_id: Option<shamir_tx::TxId>,
     ) -> Vec<shamir_tx::IndexWriteOp> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_update(rid, old, new).await {
+            if let Ok(ops) = backend.plan_update_tx(rid, old, new, tx_id).await {
                 all_ops.extend(ops);
             }
         }
@@ -471,14 +482,17 @@ impl TableManager {
 
     /// Collect index ops from all index2 backends for a delete.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
+    ///
+    /// See [`plan_insert_ops`] for the `tx_id` parameter.
     async fn plan_delete_ops(
         &self,
         rid: RecordId,
         rec: &InnerValue,
+        tx_id: Option<shamir_tx::TxId>,
     ) -> Vec<shamir_tx::IndexWriteOp> {
         let mut all_ops = Vec::new();
         for backend in self.index2_registry.all_backends().await {
-            if let Ok(ops) = backend.plan_delete(rid, rec).await {
+            if let Ok(ops) = backend.plan_delete_tx(rid, rec, tx_id).await {
                 all_ops.extend(ops);
             }
         }
@@ -492,8 +506,31 @@ impl TableManager {
     ///   TxContext. No physical writes. commit_tx Phase 5 applies.
     ///
     /// Simplified for 4.D.6.a: only handles index2 plan ops.
-    /// Legacy IndexManager / SortedIndexManager tx-aware hooks land
-    /// in Stage 4.D.6.b.
+    ///
+    /// HIGH-6: legacy `IndexManager` / `SortedIndexManager` are NOT
+    /// routed through tx staging here — the non-tx side hooks
+    /// (`on_record_created` etc.) are deliberately not called, so a
+    /// rolled-back tx leaves no ghost postings there, but a committed
+    /// tx also produces no postings on the legacy/sorted indexes for
+    /// records inserted via `insert_tx`. The legacy paths are still
+    /// exclusively driven by the non-tx [`insert`] / [`set`] /
+    /// [`delete`] methods. A full fix requires legacy-index `*_tx`
+    /// hooks plus a wiring change at the executor — out of scope for
+    /// HIGH-6's staging-side cleanup. See also the FTS-ranked
+    /// in-memory stats gap below.
+    ///
+    /// HIGH-6: index2 `plan_insert_tx` IS called with `tx.tx_id`, so
+    /// stateful backends (e.g. `VectorBackend`) route the mutation
+    /// into per-tx staging on the underlying adapter; their stateless
+    /// peers (FTS / functional / btree) emit only `IndexWriteOp`s
+    /// which are accumulated in `tx.index_write_set` and applied at
+    /// commit time. `commit_tx` Phase 5c-d application of those ops
+    /// is still TODO (see `commit.rs::commit_tx_inner` Phase 5b-d
+    /// notes) — meaning a successful commit currently does NOT apply
+    /// the staged postings via the happy path (crash recovery does
+    /// because the ops are emitted into the WAL entry). That is a
+    /// separate gap from rollback correctness, which HIGH-6 addresses
+    /// here.
     pub async fn insert_tx(
         &self,
         value: &InnerValue,
@@ -509,7 +546,8 @@ impl TableManager {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
 
-        let index_ops = self.plan_insert_ops(rid, value).await;
+        let tx_id = Some(tx.tx_id);
+        let index_ops = self.plan_insert_ops(rid, value, tx_id).await;
 
         self.stage_mutation(
             StagedMutation {
@@ -534,6 +572,9 @@ impl TableManager {
     ///
     /// Returns `true` if a record was already present (semantically
     /// matches existing `set`).
+    ///
+    /// HIGH-6: see `insert_tx` for the staging contract and the
+    /// commit-time application gap.
     pub async fn update_tx(
         &self,
         id: RecordId,
@@ -550,9 +591,10 @@ impl TableManager {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
 
+        let tx_id = Some(tx.tx_id);
         let (index_ops, counter_delta) = match &old {
-            Some(old_val) => (self.plan_update_ops(id, old_val, value).await, 0_i64),
-            None => (self.plan_insert_ops(id, value).await, 1_i64),
+            Some(old_val) => (self.plan_update_ops(id, old_val, value, tx_id).await, 0_i64),
+            None => (self.plan_insert_ops(id, value, tx_id).await, 1_i64),
         };
 
         self.stage_mutation(
@@ -573,6 +615,9 @@ impl TableManager {
     /// `tx == None` → existing `delete`.
     /// `tx == Some` → reads old value, plans delete ops, stages
     /// Remove. Returns `true` if a record was present.
+    ///
+    /// HIGH-6: see `insert_tx` for the staging contract and the
+    /// commit-time application gap.
     pub async fn delete_tx(
         &self,
         id: RecordId,
@@ -586,7 +631,8 @@ impl TableManager {
             return Ok(false);
         };
 
-        let index_ops = self.plan_delete_ops(id, &old).await;
+        let tx_id = Some(tx.tx_id);
+        let index_ops = self.plan_delete_ops(id, &old, tx_id).await;
 
         self.stage_mutation(
             StagedMutation {
@@ -693,8 +739,23 @@ impl TableManager {
         // 1. Validate unique indexes BEFORE write
         self.index_manager.validate_unique_for_create(value).await?;
 
-        // 2. Write to table
-        let id = self.table.insert(value).await?;
+        // 2. Write to table. Route through MvccStore (SSI / version cache
+        //    + history archival under active snapshots) when one is
+        //    attached; otherwise fall back to a direct data_store write.
+        //    Pre-generating the RecordId here lets us use the keyed
+        //    `set_versioned` path instead of `Table::insert`'s auto-key
+        //    `data_store.insert`. The MvccStore writes to `main` (same
+        //    physical layout as direct `set`), so observers reading via
+        //    `data_store.get` see the new record identically.
+        let id = RecordId::new();
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+        if let Some(mvcc) = &self.mvcc_store {
+            mvcc.set_versioned(id.to_bytes(), bytes).await?;
+        } else {
+            self.table.data_store().set(id.to_bytes(), bytes).await?;
+        }
         self.counter.increment(1).await?;
 
         // 3. Update indexes AFTER write
@@ -760,8 +821,32 @@ impl TableManager {
             }
         }
 
-        // 2. One batched data-store write.
-        let ids = self.table.insert_many(values).await?;
+        // 2. Data-store write. When an MvccStore is attached, route each
+        //    record through `set_versioned` so `version_cache` and history
+        //    archival stay consistent with non-tx writes. This trades the
+        //    backend's atomic `insert_many` transaction for per-record
+        //    writes — acceptable for the surgical HIGH-4 first cut; a
+        //    follow-up can add `MvccStore::set_versioned_many` for the
+        //    batched fast path. Without an MvccStore we keep the legacy
+        //    batched path (one transaction = one fsync on backends that
+        //    override `insert_many`).
+        let ids: Vec<RecordId> = if let Some(mvcc) = &self.mvcc_store {
+            let mut out = Vec::with_capacity(values.len());
+            for v in values {
+                let rid = RecordId::new();
+                let bytes = v.to_bytes().map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "Failed to serialize InnerValue: {}",
+                        e
+                    ))
+                })?;
+                mvcc.set_versioned(rid.to_bytes(), bytes).await?;
+                out.push(rid);
+            }
+            out
+        } else {
+            self.table.insert_many(values).await?
+        };
 
         // 3. Open a WAL marker — records the record_ids we just
         //    inserted so that crash recovery can scope its check
@@ -830,7 +915,20 @@ impl TableManager {
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         // Get old value before deletion for index cleanup
         let old_value = self.table.get(id).await.ok();
-        let removed = self.table.delete(id).await?;
+        // Route through MvccStore when attached so the old bytes are
+        // archived to history under active snapshots and `version_cache`
+        // is bumped. `delete_versioned` returns `()`; we treat the
+        // pre-read as the source of truth for "removed".
+        let removed = if let Some(mvcc) = &self.mvcc_store {
+            if old_value.is_some() {
+                mvcc.delete_versioned(id.to_bytes()).await?;
+                true
+            } else {
+                false
+            }
+        } else {
+            self.table.delete(id).await?
+        };
         if removed {
             self.counter.increment(-1).await?;
             if let Some(ref old) = old_value {
@@ -875,8 +973,21 @@ impl TableManager {
             self.index_manager.validate_unique_for_create(value).await?;
         }
 
-        // 2. Write to table
-        let created = self.table.set(id, value).await?;
+        // 2. Write to table. Route through MvccStore when attached so
+        //    `version_cache` is updated for SSI conflict detection and
+        //    the old bytes are archived to history under active snapshots.
+        //    `created` is derived from the pre-read above (same semantics
+        //    as the previous `self.table.set` which internally did the
+        //    same exists-check).
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+        let created = old_value.is_none();
+        if let Some(mvcc) = &self.mvcc_store {
+            mvcc.set_versioned(id.to_bytes(), bytes).await?;
+        } else {
+            self.table.data_store().set(id.to_bytes(), bytes).await?;
+        }
 
         // 3. Update indexes AFTER write
         if created {
