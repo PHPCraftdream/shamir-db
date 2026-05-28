@@ -18,11 +18,13 @@
 //!   Non-tx queries (`adapter.search(_, _, None)`) still see only the
 //!   committed graph and therefore do not surface the staged vector.
 //!   Verified end-to-end below.
-//! * Legacy `IndexManager` / `SortedIndexManager` — NOT routed through
-//!   `insert_tx` at all. A `lookup_by_index(...)` after a committed
-//!   `insert_tx` finds nothing (separate gap). Documented + asserted
-//!   in `legacy_index_not_routed_through_insert_tx` so the contract
-//!   is explicit and a future cutover will trip the test.
+//! * Legacy `IndexManager` / `SortedIndexManager` — NOW routed through
+//!   `insert_tx` / `update_tx` / `delete_tx`. The legacy/sorted planners
+//!   emit `IndexWriteOp`s into `tx.index_write_set` carrying the exact
+//!   physical key scheme the readers expect; a committed tx applies them
+//!   (Phase 5c-d), a dropped tx discards them. Asserted in
+//!   `legacy_index_routed_through_insert_tx_on_commit` here and in
+//!   `legacy_index_tx_tests`.
 //! * Commit-time apply for `tx.index_write_set` ops
 //!   (`commit.rs::commit_tx_inner` Phase 5c-d) — still TODO. A
 //!   committed tx does NOT write to `info_store` / `apply_in_memory`
@@ -166,22 +168,19 @@ async fn dropped_tx_vector_index_leaves_no_postings() {
     }
 }
 
-/// HIGH-6 contract guard: legacy `IndexManager` (`tbl.create_index` →
-/// `tbl.lookup_by_index`) is NOT wired into `insert_tx`. The test
-/// records the *current* contract: legacy lookups after a committed
-/// `insert_tx` find nothing, because the legacy hooks
-/// (`on_record_created` / `on_record_updated` / `on_record_deleted`)
-/// are only fired by the non-tx `insert` / `set` / `delete` paths.
+/// HIGH-6 (closed): legacy `IndexManager` (`tbl.create_index` →
+/// `tbl.lookup_by_index`) IS now wired into `insert_tx`. The posting
+/// writes are staged into `tx.index_write_set` by `insert_tx` (via the
+/// legacy planners) and applied to `info_store` by the commit pipeline
+/// (Phase 5c-d). A committed `insert_tx` therefore makes the record
+/// findable through the legacy secondary index — the gap this test
+/// originally documented is closed.
 ///
-/// This is a tracked gap — fixing it requires tx-aware variants on
-/// `IndexManager` plus a routing change in `TableManager::insert_tx`.
-/// Out of scope for HIGH-6's per-table staging cleanup.
-///
-/// When the gap is fixed, flip the assertions: a committed `insert_tx`
-/// should make the record findable; a dropped `insert_tx` should
-/// leave the legacy index empty.
+/// (Rollback safety — a dropped `insert_tx` leaving the legacy index
+/// empty — is asserted separately in
+/// `legacy_index_tx_tests::dropped_tx_no_secondary_postings`.)
 #[tokio::test]
-async fn legacy_index_not_routed_through_insert_tx() {
+async fn legacy_index_routed_through_insert_tx_on_commit() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
@@ -204,25 +203,24 @@ async fn legacy_index_not_routed_through_insert_tx() {
 
     // Insert via tx and COMMIT (not rollback).
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-    let _ = tbl
+    let rid = tbl
         .insert_tx(&make_record(name_key_id, "alice"), Some(&mut tx))
         .await
         .unwrap();
     let _ = repo.commit_tx(tx).await.unwrap();
 
-    // Legacy lookup. Documented current behaviour: empty result
-    // because `insert_tx` does not invoke `IndexManager` hooks.
-    // (Trivially also rolled-back insert_tx leaves it empty.)
+    // Legacy lookup. Post-HIGH-6: the staged posting is applied at
+    // commit, so the record is findable via the legacy index.
     let hits = tbl
         .lookup_by_index("by_name", &[InnerValue::Str("alice".into())])
         .await
         .unwrap();
     assert!(
-        hits.is_empty(),
-        "HIGH-6 GAP: insert_tx is not routed through legacy IndexManager. \
-         When this gap is fixed, this assertion will flip to expect Some(rid). \
-         Current result: {:?}",
-        hits
+        hits.contains(&rid),
+        "HIGH-6 (closed): committed insert_tx must populate the legacy \
+         IndexManager posting; got {:?}, rid {:?}",
+        hits,
+        rid
     );
 }
 
