@@ -252,10 +252,96 @@ The largest remaining piece: mutation methods must route through
 
 Key design decisions for 4.D.6:
 
-- **`table_id_interned` placeholder.** No repo-level interner yet
-  (Stage 5). Use `fxhash(table_name)` for deterministic u64 mapping.
-  Stage 5 replaces with real interner ID — only the keying changes,
-  not the structure.
+### D7. `table_token()` accessor for table identity
+
+**Problem.** `TxContext.write_set: HashMap<u64, StagingStore>` is keyed
+by interned table id. But repo-level interner is Stage 5. TableManager
+knows only `name: String`.
+
+**Solution.** `TableManager::table_token() -> u64` accessor. Stage 4
+implementation = `fxhash(self.name)`. Stage 5 swap to
+`LayeredInterner.touch(self.name).id()` — callsites stable.
+
+`TxContext` gains `table_tokens: HashMap<u64, String>` (token → name)
+and a helper `ensure_table_staging(token, name, base) -> &mut StagingStore`
+that populates both maps simultaneously.
+
+```rust
+impl TxContext {
+    pub fn ensure_table_staging(
+        &mut self, token: u64, name: &str, base: Arc<dyn Store>,
+    ) -> &mut StagingStore {
+        self.table_tokens.entry(token).or_insert_with(|| name.to_string());
+        self.write_set.entry(token).or_insert_with(|| StagingStore::new(base))
+    }
+}
+```
+
+### D8. `StagedMutation` value object for mutation types
+
+**Problem.** 4 mutation types × tx-aware logic = ~600 lines of
+copy-paste (stage data, plan index ops, bump counter, stage HNSW).
+
+**Solution.** Extract `StagedMutation { data_op, index_ops, counter_delta }`
+struct + `TableManager::stage_mutation(rid, m, tx)` helper. Each
+`*_tx` method becomes ~20 lines: compute effect → stage.
+
+```rust
+struct StagedMutation {
+    data_op: KvOp,                // Set or Remove
+    index_ops: Vec<IndexWriteOp>, // from plan_insert/update/delete
+    counter_delta: i64,           // +1 insert, -1 delete, 0 update
+}
+
+impl TableManager {
+    async fn stage_mutation(&self, m: StagedMutation, tx: &mut TxContext) -> DbResult<()> {
+        let staging = tx.ensure_table_staging(
+            self.table_token(), self.name(), self.table.data_store().clone(),
+        );
+        match m.data_op {
+            KvOp::Set(k, v) => staging.set(k, v).await,
+            KvOp::Remove(k) => staging.remove(k).await,
+        }
+        tx.index_write_set.extend(m.index_ops);
+        tx.bump_counter(self.table_token(), m.counter_delta);
+        Ok(())
+    }
+}
+```
+
+Total ~150 lines for all 4 mutation types instead of 600.
+
+### D9. `QueryRunner` struct for tx-aware dispatch
+
+**Problem.** `execute_query` is a free function without tx parameter.
+Adding `Option<&mut TxContext>` touches dozens of callsites. Parallel
+`execute_query_tx` function duplicates the entire dispatcher.
+
+**Solution.** `QueryRunner<'a>` struct that encapsulates
+`resolver + admin + tx: Option<&mut TxContext>`. The existing free
+function becomes a thin wrapper `QueryRunner { tx: None }.run(op)`.
+Tx mode: `QueryRunner { tx: Some(&mut ctx) }.run(op)`.
+
+```rust
+pub struct QueryRunner<'a> {
+    pub resolver: &'a dyn TableResolver,
+    pub admin: Option<&'a dyn AdminExecutor>,
+    pub tx: Option<&'a mut TxContext>,
+}
+
+impl<'a> QueryRunner<'a> {
+    pub async fn run(&mut self, op: &BatchOp, ...) -> Result<QueryResult, BatchError> {
+        // dispatch — tx-aware methods when self.tx.is_some()
+    }
+}
+```
+
+Existing `execute_query(query, resolver, admin)` becomes:
+```rust
+QueryRunner { resolver, admin, tx: None }.run(&query.op, ...).await
+```
+
+No callsite changes. tx state encapsulated. Refactor, not duplication.
 
 - **`execute_query_tx` as parallel path.** Don't modify existing
   `execute_query` signature — add a parallel function. Zero risk to
