@@ -2,6 +2,7 @@ use shamir_storage::error::DbError;
 use shamir_tx::{IsolationLevel, TxContext};
 use shamir_wal::{WalEntryV2, WalOpV2};
 
+use crate::meta::recovery_marker::{save_last_committed, save_next_tx_id_snapshot};
 use crate::repo::RepoInstance;
 
 #[derive(Debug, Clone)]
@@ -26,6 +27,11 @@ pub enum TxError {
     },
 }
 
+/// cancel-safe: yes — read-only over `&TxContext`. The only `.await`
+/// is `interner_overlay.scan_async` which is itself cancel-safe (the
+/// borrowed map is untouched on drop); the rest is in-memory iteration.
+/// No external state mutation happens here.
+///
 /// Build WalOpV2 ops from a TxContext for inclusion in the V2 WAL entry.
 ///
 /// Emitted ops in order:
@@ -108,6 +114,12 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     ops
 }
 
+/// cancel-safe: NO — Phase 4 (WAL begin) and Phase 5 (data writes)
+/// must complete together. Cancellation between Phase 4 and Phase 7
+/// leaves an inflight WAL marker that recovery will replay; ops are
+/// idempotent at the data layer so recovery is safe, but the caller
+/// observes neither success nor a clean abort. Treat as non-cancel-safe
+/// at the API boundary.
 pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
     match commit_tx_inner(tx, repo).await {
         Ok(outcome) => Ok(outcome),
@@ -198,9 +210,17 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     // Phase 3: assign new version
     let commit_version = gate.assign_next_version();
 
-    // Phase 4: write WAL entry
+    // Phase 4: write WAL entry.
+    //
+    // HIGH-5: stamp the assigned `commit_version` onto the entry
+    // BEFORE persisting it. Recovery sorts inflight entries by
+    // `commit_version` so multi-tx replay matches the original
+    // commit pipeline's order; `txn_id` (the `WalActiveKey` byte
+    // order) is not a safe proxy because tx allocation and commit
+    // ordering are independent.
     let wal_ops = wal_ops_from_tx(&tx).await;
-    let entry = WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops);
+    let entry =
+        WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     wal.begin(entry).await?;
 
     // Phase 5a: physical data writes per table.
@@ -227,14 +247,65 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         }
     }
 
-    // Phase 5b-d: indexes, HNSW, counters — TODO Stage 4.D.5+.
-    // index_write_set, tables_with_hnsw_staging, counter_deltas
-    // are still drained-but-unapplied; apply landing alongside the
-    // per-table data_store wiring that the executor will set up
-    // when it constructs TxContext.write_set entries.
+    // Phase 5b: counter deltas (CRIT-3).
+    //
+    // `tx.counter_deltas` is already serialised into the WAL entry
+    // by `wal_ops_from_tx` (above). The happy-path commit must also
+    // apply it in-memory so callers can observe the new count
+    // without waiting for recovery — without this step
+    // `tbl.counter().get()` would still return the pre-commit
+    // value after a successful tx.
+    //
+    // Recovery idempotency: the matching replay branch in
+    // `recovery::replay_v2_op` for `WalOpV2::CounterDelta` is
+    // intentionally SKIPPED at recovery time — see the comment on
+    // that branch. Counter persistence is best-effort; the durable
+    // `last_committed_version` marker written below in Phase 6.5
+    // is the authoritative MVCC milestone, and a per-tx
+    // counter-applied marker is overkill for an at-most-by-one
+    // drift on the metric counter.
+    for (table_id, delta) in &tx.counter_deltas {
+        if let Some(tbl) = repo.table_by_token(*table_id).await? {
+            tbl.counter().increment(*delta).await?;
+        }
+    }
+
+    // Phase 5c-d: indexes, HNSW — TODO Stage 4.D.5+.
+    // index_write_set and tables_with_hnsw_staging are still
+    // drained-but-unapplied; apply landing alongside the per-table
+    // data_store wiring that the executor will set up when it
+    // constructs TxContext.write_set entries.
 
     // Phase 6: publish — atomic publish-committed
     gate.publish_committed(commit_version);
+
+    // Phase 6.5: persist recovery markers (CRIT-1).
+    //
+    // Write `last_committed_version` + `next_tx_id` to the repo's
+    // `__tx__` info_store BEFORE Phase 7 removes the WAL marker.
+    //
+    // Ordering rationale:
+    //
+    // - Markers BEFORE wal.commit:
+    //     If markers succeed but `wal.commit` fails, the WAL entry
+    //     stays inflight and recovery re-applies it. Data writes
+    //     are idempotent (Put/Delete/IndexPut/IndexDel are
+    //     last-write-wins) and counter replay is intentionally
+    //     skipped (see `recovery::replay_v2_op`).
+    //
+    // - Markers AFTER publish_committed:
+    //     The in-memory `last_committed_version` is the source of
+    //     truth at runtime; the persisted copy only matters across
+    //     restarts. Writing it post-publish keeps the in-memory
+    //     advancement uncoupled from durability latency.
+    //
+    // The inverse order (wal.commit before markers) is unsafe: a
+    // crash between the two would clear the WAL marker yet leave
+    // `last_committed_version` stale on disk, so the MVCC counter
+    // would rewind on restart → version-monotonicity violation.
+    let info_store = repo.tx_info_store().await?;
+    save_last_committed(&info_store, commit_version).await?;
+    save_next_tx_id_snapshot(&info_store, gate.peek_next_tx_id()).await?;
 
     // Phase 7: WAL cleanup
     wal.commit(tx.tx_id.0).await?;
