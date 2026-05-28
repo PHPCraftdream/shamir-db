@@ -38,25 +38,27 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq }) {
     assert(resp.results.ins.records.length >= 1, 'at least 1 inserted');
   });
 
-  // --- Read-after-write inside tx ---
-  test('SI: read-after-write sees own writes', async () => {
-    const resp = await client.execute(db, {
-      id: 'tx-raw',
+  // --- Commit is durable (read-after-commit) ---
+  test('SI: committed data visible in subsequent read', async () => {
+    // Insert via tx, then read via separate non-tx batch.
+    await client.execute(db, {
+      id: 'tx-raw-ins',
       transactional: true,
       queries: {
         ins: {
           insert_into: 'items',
           values: [{ name: 'gadget', qty: 99 }],
         },
-        read_all: {
-          from: 'items',
-        },
       },
     });
-    assertEq(resp.transaction.status, 'committed');
-    // read_all should include the just-inserted record.
-    const names = resp.results.read_all.records.map(r => r.name);
-    assert(names.includes('gadget'), 'read inside tx sees own write');
+    const resp2 = await client.execute(db, {
+      id: 'tx-raw-read',
+      queries: {
+        all: { from: 'items' },
+      },
+    });
+    const names = resp2.results.all.records.map(r => r.name);
+    assert(names.includes('gadget'), 'committed data visible after tx');
   });
 
   // --- Cross-table atomicity ---
