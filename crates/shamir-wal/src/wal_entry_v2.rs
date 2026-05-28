@@ -121,6 +121,18 @@ mod serde_bytes_bytes {
 
 /// One transactional WAL entry — a list of `WalOpV2`s that must
 /// be applied atomically on recovery.
+///
+/// `commit_version` carries the MVCC commit version this tx was
+/// assigned in Phase 3 of `commit_tx`. Recovery sorts inflight
+/// entries by this field so multi-tx replay applies them in the
+/// same order the original commit pipeline did — `txn_id` (the
+/// `WalActiveKey` byte order) is NOT a safe proxy because
+/// `txn_id != commit_version`.
+///
+/// Entries authored before Stage 7.1's HIGH-5 fix carry
+/// `commit_version = 0`; mixed-version corpora sort the legacy
+/// entries first which preserves the lexical-key behaviour
+/// callers had under the previous scheme.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WalEntryV2 {
     pub txn_id: u64,
@@ -128,10 +140,22 @@ pub struct WalEntryV2 {
     /// fields in `WalOpV2::Put.body`.
     pub repo_id_interned: u64,
     pub started_at_ns: u64,
+    /// MVCC commit version assigned in commit Phase 3. Zero when
+    /// unset (legacy entries / hand-built test fixtures that don't
+    /// care about replay order).
+    #[serde(default)]
+    pub commit_version: u64,
     pub ops: Vec<WalOpV2>,
 }
 
 impl WalEntryV2 {
+    /// Construct an entry with `commit_version = 0` — callers that
+    /// know their version (the commit pipeline) should set it via
+    /// [`with_commit_version`](Self::with_commit_version) or
+    /// assign the public field after construction. Recovery does
+    /// not require `commit_version != 0` but replay order is
+    /// undefined across legacy and newly-versioned entries when
+    /// both kinds are mixed.
     pub fn new(txn_id: u64, repo_id_interned: u64, ops: Vec<WalOpV2>) -> Self {
         let started_at_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -141,8 +165,18 @@ impl WalEntryV2 {
             txn_id,
             repo_id_interned,
             started_at_ns,
+            commit_version: 0,
             ops,
         }
+    }
+
+    /// Builder-style setter for `commit_version`. Used by the
+    /// commit pipeline to stamp the MVCC version assigned in
+    /// Phase 3 onto the entry before
+    /// [`shamir_tx::RepoWalManager::begin`] persists it.
+    pub fn with_commit_version(mut self, commit_version: u64) -> Self {
+        self.commit_version = commit_version;
+        self
     }
 
     /// Encode as `[magic][version][bincode body]`.
@@ -200,6 +234,7 @@ mod tests {
             txn_id: 42,
             repo_id_interned: 7,
             started_at_ns: 1_234_567_890,
+            commit_version: 123,
             ops: vec![
                 WalOpV2::Put {
                     table_id_interned: 7,

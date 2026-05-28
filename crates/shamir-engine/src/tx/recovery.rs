@@ -11,6 +11,13 @@ use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
 
+/// cancel-safe: NO — multi-step state mutation. Each branch issues a
+/// table lookup followed by one or more store writes (and the broadcast
+/// branches loop across tables). Cancellation mid-broadcast leaves the
+/// store in a partially-applied state; data-layer ops are idempotent so
+/// a subsequent re-replay converges, but the caller cannot rely on
+/// atomicity at this boundary.
+///
 /// Replay a single WalOpV2 against the given RepoInstance.
 ///
 /// Stage 7.1.c: Put / Delete / CounterDelta are applied for real.
@@ -57,20 +64,30 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
             Ok(())
         }
         WalOpV2::CounterDelta {
-            table_id_interned,
-            delta,
+            table_id_interned: _,
+            delta: _,
         } => {
-            let tbl = match repo.table_by_token(*table_id_interned).await? {
-                Some(t) => t,
-                None => {
-                    log::warn!(
-                        "replay_v2_op CounterDelta: table token {} not found",
-                        table_id_interned
-                    );
-                    return Ok(());
-                }
-            };
-            tbl.counter().increment(*delta).await?;
+            // CRIT-3 idempotency (Option A):
+            //
+            // The happy-path commit (`commit::commit_tx_inner` Phase 5b)
+            // now applies counter deltas in-memory BEFORE writing the
+            // WAL commit marker. If the marker survives a crash mid-
+            // Phase 7, the in-memory counter has already advanced —
+            // replaying the delta here would double-count.
+            //
+            // Skipping the replay accepts a worst-case drift of one
+            // tx-worth of counter delta when the crash falls between
+            // Phase 5b (counter applied in RAM) and Phase 6.5 (marker
+            // persistence). On restart the in-memory `RecordCounter`
+            // re-hydrates from the info_store, which only reflects
+            // whatever was durably persisted before the crash. The
+            // authoritative durability is `last_committed_version`
+            // (Phase 6.5) — the record counter is a metric.
+            //
+            // The cleaner Option B (write a per-tx "counter-applied"
+            // marker that recovery checks) is not worth the I/O for
+            // an at-most-by-one drift on a counter that the doctor
+            // already reconciles by full data-store scan.
             Ok(())
         }
         WalOpV2::IndexPut {
@@ -148,13 +165,34 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
     }
 }
 
+/// cancel-safe: NO — iterates inflight entries, replaying each then
+/// removing its WAL marker. Cancellation between `replay_v2_entry` and
+/// `wal.commit` leaves a replayed entry whose marker still exists;
+/// the next recovery will replay it again. Replay ops are idempotent
+/// at the data layer so eventual convergence is fine, but the function
+/// itself is not safe to drop mid-flight as a single atomic step.
+///
 /// Walk all inflight V2 WAL entries for the repo and replay each one.
 /// Marker is removed on successful replay (per-entry).
+///
+/// HIGH-5: entries are sorted by `commit_version` ascending before
+/// replay so the order in which post-crash recovery applies multi-tx
+/// state matches the order the original commit pipeline assigned.
+/// `wal.list_inflight()` returns entries in `WalActiveKey`
+/// (txn_id big-endian) byte order, but txn_id and commit_version
+/// are allocated independently — two concurrent transactions can
+/// commit out of txn_id order. Without this sort, last-write-wins
+/// ops (Put/IndexPut) would resolve to the wrong final value.
+///
+/// Legacy entries written before HIGH-5 carry `commit_version = 0`;
+/// they sort first, preserving the previous lexical-key behaviour
+/// on mixed-version corpora.
 ///
 /// Called from `RepoInstance::recover_v2_inflight`.
 pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
     let wal = repo.repo_wal().await?;
-    let entries = wal.list_inflight().await?;
+    let mut entries = wal.list_inflight().await?;
+    entries.sort_by_key(|e| e.commit_version);
     let count = entries.len();
 
     for entry in entries {
@@ -168,6 +206,11 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
     Ok(count)
 }
 
+/// cancel-safe: NO — iterates ops in the entry, applying each one via
+/// `replay_v2_op`. Cancellation mid-entry leaves the entry partially
+/// applied; ops are idempotent at the data layer so re-replay converges,
+/// but mid-flight cancellation is not atomic.
+///
 /// Replay all ops in one WAL entry. Iterates ops in declared order
 /// (counter → interner → index → data per `wal_ops_from_tx` emission
 /// order, though replay order is logically commutative within one entry).

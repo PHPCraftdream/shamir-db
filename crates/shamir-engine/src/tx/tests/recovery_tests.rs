@@ -142,7 +142,13 @@ async fn recover_v2_inflight_replays_delete_removes_from_data_store() {
 }
 
 #[tokio::test]
-async fn recover_v2_inflight_replays_counter_delta_increments() {
+async fn recover_v2_inflight_skips_counter_delta_replay() {
+    // CRIT-3 Option A: counter deltas are applied in the happy-path
+    // commit (`commit::commit_tx_inner` Phase 5b) and intentionally
+    // SKIPPED by recovery to avoid double-counting after a marker-
+    // survived crash. Recovery still consumes the WAL entry and
+    // removes the marker; data ops in the same entry replay normally
+    // (none here, the test is counter-only).
     let repo = make_repo();
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
@@ -163,7 +169,14 @@ async fn recover_v2_inflight_replays_counter_delta_increments() {
     repo.recover_v2_inflight().await.unwrap();
 
     let after = tbl.counter().get().await.unwrap();
-    assert_eq!(after as i64 - before as i64, 5);
+    assert_eq!(
+        after, before,
+        "recovery must NOT replay CounterDelta — happy-path commit owns it"
+    );
+    assert!(
+        wal.list_inflight().await.unwrap().is_empty(),
+        "marker still removed even when CounterDelta replay is a no-op"
+    );
 }
 
 #[tokio::test]
@@ -371,8 +384,15 @@ async fn crash_simulation_inflight_recovery_replays_full_state() {
     assert_eq!(count, 1);
 
     // === VERIFY ===
-    // Post-recovery: data present in main store, counter incremented,
-    // WAL clean.
+    // Post-recovery: data present in main store; WAL clean.
+    //
+    // Counter is intentionally NOT applied by recovery — see CRIT-3
+    // Option A in `recovery::replay_v2_op`'s CounterDelta branch.
+    // The happy-path commit (which never ran in this crash
+    // simulation) applies the counter in-memory in Phase 5b before
+    // persisting markers in Phase 6.5. A crash before those steps
+    // means the counter stays at its pre-tx value; data is still
+    // recovered from the WAL.
     let tbl_post = repo2.get_table("t").await.unwrap();
 
     let v_a = tbl_post.get(rid_a).await.unwrap();
@@ -380,7 +400,13 @@ async fn crash_simulation_inflight_recovery_replays_full_state() {
     assert!(matches!(v_a, InnerValue::Str(ref s) if s == "alice"));
     assert!(matches!(v_b, InnerValue::Str(ref s) if s == "bob"));
 
-    assert_eq!(tbl_post.counter().get().await.unwrap(), 2);
+    assert_eq!(
+        tbl_post.counter().get().await.unwrap(),
+        0,
+        "CRIT-3 Option A: recovery skips CounterDelta replay; \
+         counter only advances in the happy-path commit, which \
+         never ran in this crash simulation"
+    );
 
     assert!(
         wal2.list_inflight().await.unwrap().is_empty(),
@@ -392,5 +418,70 @@ async fn crash_simulation_inflight_recovery_replays_full_state() {
     // not double-apply.
     let count2 = repo2.recover_v2_inflight().await.unwrap();
     assert_eq!(count2, 0);
-    assert_eq!(tbl_post.counter().get().await.unwrap(), 2);
+    assert_eq!(tbl_post.counter().get().await.unwrap(), 0);
+}
+
+// HIGH-5: replay must apply entries in `commit_version` order even
+// when `txn_id` (the WAL active-key sort order) and `commit_version`
+// disagree. Construct two inflight entries that write the same rid:
+// a "newer" tx (commit_version = 2) with a low txn_id and an "older"
+// tx (commit_version = 1) with a high txn_id. Lexical (txn_id) order
+// would replay the older tx LAST and the data store would observe
+// the wrong final value. With the sort-by-commit_version fix the
+// final value must reflect the higher commit_version.
+#[tokio::test]
+async fn recover_v2_inflight_replays_in_commit_version_order() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let token = table_token_for("t");
+
+    let wal = repo.repo_wal().await.unwrap();
+
+    let mut rid_bytes = [0u8; 16];
+    rid_bytes[15] = 7;
+    let rid = RecordId(rid_bytes);
+
+    let body_newer = InnerValue::Str("newer".into()).to_bytes().unwrap();
+    let body_older = InnerValue::Str("older".into()).to_bytes().unwrap();
+
+    // Older tx (commit_version = 1) given a LARGER txn_id so lexical
+    // order over WalActiveKey would replay it LAST — overwriting the
+    // newer value if we relied on txn_id sort.
+    let entry_older = WalEntryV2::new(
+        100,
+        0,
+        vec![WalOpV2::Put {
+            table_id_interned: token,
+            rid,
+            body: body_older,
+        }],
+    )
+    .with_commit_version(1);
+
+    let entry_newer = WalEntryV2::new(
+        1,
+        0,
+        vec![WalOpV2::Put {
+            table_id_interned: token,
+            rid,
+            body: body_newer,
+        }],
+    )
+    .with_commit_version(2);
+
+    wal.begin(entry_older).await.unwrap();
+    wal.begin(entry_newer).await.unwrap();
+
+    let count = repo.recover_v2_inflight().await.unwrap();
+    assert_eq!(count, 2);
+
+    let read_back = tbl.get(rid).await.unwrap();
+    assert!(
+        matches!(read_back, InnerValue::Str(ref s) if s == "newer"),
+        "expected sort-by-commit_version to leave 'newer' as the final \
+         value (commit_version=2 must apply after commit_version=1), \
+         got {:?}",
+        read_back
+    );
 }

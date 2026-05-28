@@ -41,6 +41,10 @@ impl RepoWalManager {
         self.next_txn_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// cancel-safe: yes — single `info_store.set` after an in-memory
+    /// encode. Cancellation either lands the marker durably (storage's
+    /// own cancel-safety contract) or drops the future before the write.
+    ///
     /// Write a V2 entry under its `WalActiveKey`.
     ///
     /// This is the intent marker — if a crash happens before
@@ -53,6 +57,10 @@ impl RepoWalManager {
         Ok(())
     }
 
+    /// cancel-safe: yes — single `info_store.remove`. Idempotent: a
+    /// cancelled remove either lands or doesn't; re-issuing it converges
+    /// (a missing key is a no-op).
+    ///
     /// Remove the marker — tx writes have landed durably. Idempotent.
     pub async fn commit(&self, txn_id: u64) -> DbResult<()> {
         let _ = self
@@ -72,6 +80,9 @@ impl RepoWalManager {
         })
     }
 
+    /// cancel-safe: yes — read-only prefix stream over `info_store`.
+    /// Cancellation drops the stream with no state mutation.
+    ///
     /// List V2 entries that survived a crash (no commit marker removed).
     ///
     /// Scans all `WalActiveKey` entries, sniffs V2 magic, decodes.
@@ -269,6 +280,7 @@ mod tests {
             txn_id: 999,
             repo_id_interned: 42,
             started_at_ns: 1_000_000,
+            commit_version: 17,
             ops: vec![
                 shamir_wal::WalOpV2::Put {
                     table_id_interned: 0,

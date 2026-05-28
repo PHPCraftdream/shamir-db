@@ -387,3 +387,90 @@ async fn tx_metrics_track_commit_and_abort() {
     assert!(snap.txs_committed >= 1);
     assert_eq!(snap.txs_aborted_ssi, 0);
 }
+
+// CRIT-1 regression test: recovery markers must survive a repo restart.
+//
+// The previous implementation only bumped the in-memory
+// `last_committed_version` AtomicU64 in Phase 6 — on reopen the gate
+// seeded from `MetaKey::LastCommittedVersion` (unset) → 0, so MVCC
+// version monotonicity broke. Phase 6.5 in `commit_tx_inner` now
+// persists both markers; this test exercises the round trip across
+// drop+rebuild of `RepoInstance` over the same underlying `InMemoryRepo`.
+#[tokio::test]
+async fn last_committed_version_persists_across_restart() {
+    let underlying = Arc::new(InMemoryRepo::new());
+    let repo1 = RepoInstance::new(
+        "test".into(),
+        BoxRepo::InMemory(Arc::clone(&underlying)),
+        Vec::new(),
+    );
+    repo1.add_table(crate::table::TableConfig::new("t"));
+
+    // Commit a few txs so commit_version advances past 0.
+    for i in 0..3i64 {
+        let (mut tx, _g) = repo1
+            .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+        let tbl = repo1.get_table("t").await.unwrap();
+        tbl.insert_tx(
+            &shamir_types::types::value::InnerValue::Int(i),
+            Some(&mut tx),
+        )
+        .await
+        .unwrap();
+        repo1.commit_tx(tx).await.unwrap();
+    }
+    let last_v_pre = repo1.tx_gate().await.unwrap().last_committed();
+    assert!(
+        last_v_pre > 0,
+        "pre-restart gate must have advanced past zero"
+    );
+
+    drop(repo1);
+
+    let repo2 = RepoInstance::new("test".into(), BoxRepo::InMemory(underlying), Vec::new());
+    repo2.add_table(crate::table::TableConfig::new("t"));
+    let last_v_post = repo2.tx_gate().await.unwrap().last_committed();
+    assert_eq!(
+        last_v_post, last_v_pre,
+        "last_committed_version must survive restart (CRIT-1)"
+    );
+}
+
+// CRIT-3 regression test: the happy-path commit must advance the
+// table counter in memory so callers see post-commit data without
+// waiting for recovery. Previously Phase 5b was a TODO and the WAL
+// `CounterDelta` op was only applied during crash replay.
+#[tokio::test]
+async fn commit_tx_advances_table_counter() {
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let before = tbl.counter().get().await.unwrap();
+
+    let (mut tx, _g) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    tbl.insert_tx(
+        &shamir_types::types::value::InnerValue::Int(1),
+        Some(&mut tx),
+    )
+    .await
+    .unwrap();
+    tbl.insert_tx(
+        &shamir_types::types::value::InnerValue::Int(2),
+        Some(&mut tx),
+    )
+    .await
+    .unwrap();
+    repo.commit_tx(tx).await.unwrap();
+
+    let after = tbl.counter().get().await.unwrap();
+    assert_eq!(
+        after - before,
+        2,
+        "counter must reflect committed inserts (CRIT-3)"
+    );
+}

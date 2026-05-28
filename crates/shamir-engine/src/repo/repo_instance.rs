@@ -69,6 +69,10 @@ impl RepoInstance {
         }
     }
 
+    /// cancel-safe: yes — single `factory.create().await`; cancellation
+    /// before completion drops any half-constructed repo with no
+    /// externally observable state change.
+    ///
     /// Creates a RepoInstance asynchronously from a factory.
     /// This is the preferred method as it properly handles blocking I/O.
     pub async fn from_factory(
@@ -96,6 +100,10 @@ impl RepoInstance {
         &self.tx_metrics
     }
 
+    /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
+    /// inside the init closure, the cell remains empty so subsequent
+    /// calls retry; no partial table is exposed. The clone of the cell
+    /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         let cell = self
             .tables
@@ -178,6 +186,23 @@ impl RepoInstance {
         removed
     }
 
+    /// Returns the repo's transactional info_store under the
+    /// `"__tx__"` namespace.
+    ///
+    /// Shared with [`tx_gate`](Self::tx_gate) and
+    /// [`repo_wal`](Self::repo_wal). The commit pipeline writes
+    /// recovery markers (`MetaKey::LastCommittedVersion`,
+    /// `MetaKey::NextTxId`) here in Phase 6.5 (see
+    /// `crate::tx::commit`) so a clean restart can seed the gate
+    /// without scanning every active WAL marker.
+    pub(crate) async fn tx_info_store(&self) -> DbResult<Arc<dyn Store>> {
+        self.repo.store_get("__tx__").await
+    }
+
+    /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
+    /// cancellation occurs during init, the cell remains uninitialised
+    /// and the next caller retries. Returned Arc clone is in-memory.
+    ///
     /// Returns the per-repo transaction gate, lazily initialising it on
     /// first call.
     ///
@@ -210,6 +235,10 @@ impl RepoInstance {
             .cloned()
     }
 
+    /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
+    /// cancellation occurs during init, the cell remains uninitialised
+    /// and the next caller retries. Returned Arc clone is in-memory.
+    ///
     /// Returns the per-repo WAL manager, lazily initialising it on first
     /// call. Shares the `"__tx__"` info store with [`tx_gate`].
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
@@ -228,6 +257,14 @@ impl RepoInstance {
             .cloned()
     }
 
+    /// cancel-safe: yes — bumps a tx-start counter (atomic), opens a
+    /// snapshot (single scc insert under the hood) and returns. If the
+    /// caller is dropped mid-await before receiving the guard, the
+    /// stack-local guard is dropped which removes the snapshot from the
+    /// active set. The only persistent footprint is an atomic counter
+    /// increment in `tx_metrics`; tx-ids/version-counters drift safely
+    /// (monotonic, no reuse).
+    ///
     /// Open a fresh transaction on this repo.
     ///
     /// Returns a `(TxContext, SnapshotGuard)` pair. The guard's lifetime
@@ -258,6 +295,10 @@ impl RepoInstance {
         Ok((tx, guard))
     }
 
+    /// cancel-safe: NO — delegates to [`crate::tx::commit_tx`] whose
+    /// Phase 4–7 sequence must complete atomically. See `commit_tx` in
+    /// `tx/commit.rs` for the full rationale.
+    ///
     /// Commit a transaction via the 7-phase commit pipeline.
     ///
     /// Wrapper around [`crate::tx::commit_tx`]. The free function is
@@ -274,6 +315,12 @@ impl RepoInstance {
     // Index Management API (proxy to TableManager)
     // ============================================================================
 
+    /// cancel-safe: NO — multi-step state mutation. Looks up the table
+    /// (one await) then calls `table.create_index` which itself performs
+    /// catalogue updates and persistence. Partial cancellation can leave
+    /// the index in an inconsistent state; recovery is at the caller's
+    /// discretion.
+    ///
     /// Create a regular index on a table.
     pub async fn create_index(
         &self,
@@ -285,6 +332,10 @@ impl RepoInstance {
         table.create_index(index_name, paths).await
     }
 
+    /// cancel-safe: NO — same shape as `create_index`. Catalogue and
+    /// persistence updates inside `table.create_unique_index` are not
+    /// atomic across cancellation.
+    ///
     /// Create a unique index on a table.
     pub async fn create_unique_index(
         &self,
@@ -296,30 +347,45 @@ impl RepoInstance {
         table.create_unique_index(index_name, paths).await
     }
 
+    /// cancel-safe: NO — multi-step state mutation: lookup table then
+    /// delete catalogue entries and persisted index data. Partial
+    /// cancellation may leave orphaned index state.
+    ///
     /// Drop a regular index from a table.
     pub async fn drop_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         let table = self.get_table(table_name).await?;
         table.drop_index(index_name).await
     }
 
+    /// cancel-safe: NO — same shape as `drop_index`. Partial cancellation
+    /// may leave orphaned unique-index state.
+    ///
     /// Drop a unique index from a table.
     pub async fn drop_unique_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         let table = self.get_table(table_name).await?;
         table.drop_unique_index(index_name).await
     }
 
+    /// cancel-safe: yes — read-only: looks up the table and queries
+    /// existence. No state mutation; cancellation drops the query.
+    ///
     /// Check if a regular index exists on a table.
     pub async fn index_exists(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         let table = self.get_table(table_name).await?;
         Ok(table.index_exists(index_name).await)
     }
 
+    /// cancel-safe: yes — read-only existence query. No state mutation.
+    ///
     /// Check if a unique index exists on a table.
     pub async fn unique_index_exists(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         let table = self.get_table(table_name).await?;
         Ok(table.unique_index_exists(index_name).await)
     }
 
+    /// cancel-safe: yes — read-only lookup. Cancellation drops the query
+    /// future with no state mutation.
+    ///
     /// Look up records by index value.
     pub async fn lookup_by_index(
         &self,
@@ -331,6 +397,11 @@ impl RepoInstance {
         table.lookup_by_index(index_name, values).await
     }
 
+    /// cancel-safe: yes — read-only iteration over configured table
+    /// names and a single `get_table` call. Cancellation leaves no
+    /// state mutated (apart from the cancel-safe `get_table` OnceCell
+    /// init).
+    ///
     /// Look up the table whose token matches `token`. Used by V2 WAL
     /// recovery to resolve ops by `table_id_interned`.
     ///
@@ -347,6 +418,11 @@ impl RepoInstance {
         Ok(None)
     }
 
+    /// cancel-safe: NO — delegates to `recover_inflight_v2` which iterates
+    /// entries and replays each one then removes its WAL marker. Mid-
+    /// flight cancellation leaves the recovery sequence partially applied;
+    /// ops are idempotent so re-invoking is safe.
+    ///
     /// Run V2 WAL recovery: replay any inflight tx entries and remove
     /// their markers. Idempotent — safe to call on every open.
     /// Returns the count of recovered entries.
@@ -388,6 +464,11 @@ impl RepoInstance {
         (handle, shutdown)
     }
 
+    /// cancel-safe: NO — multi-table iteration with per-table GC.
+    /// Partial cancellation leaves some tables GC'd, others not; the
+    /// per-table `gc()` is itself a multi-step scan+delete sequence.
+    /// Idempotent on retry (deletes by version threshold).
+    ///
     /// Run garbage collection on all tables' history stores.
     ///
     /// Deletes old versions no longer needed by any active snapshot.
