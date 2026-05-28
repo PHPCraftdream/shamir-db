@@ -70,6 +70,52 @@ impl TableManager {
         })
     }
 
+    /// tx-aware variant of [`execute_insert`](Self::execute_insert).
+    ///
+    /// Stages each insert through [`insert_tx`](Self::insert_tx) — no
+    /// physical writes until `commit_tx` Phase 5. Returns the same
+    /// `WriteResult` shape (records with `_id`, affected count).
+    /// Interner / counter persistence is **skipped** — commit_tx
+    /// handles that uniformly for all staged mutations.
+    pub async fn execute_insert_tx(
+        &self,
+        op: &InsertOp,
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<WriteResult> {
+        let start = Instant::now();
+        let interner = self.interner().get().await?;
+
+        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
+        for value in &op.values {
+            let inner = json_value_to_inner(value, interner)
+                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+            inner_values.push(inner);
+        }
+
+        let mut ids: Vec<RecordId> = Vec::with_capacity(inner_values.len());
+        for v in &inner_values {
+            let id = self.insert_tx(v, Some(&mut *tx)).await?;
+            ids.push(id);
+        }
+
+        let mut records = Vec::with_capacity(op.values.len());
+        for (value, id) in op.values.iter().zip(ids.iter()) {
+            let mut obj = match value {
+                json::Value::Object(map) => map.clone(),
+                _ => json::Map::new(),
+            };
+            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+            records.push(json::Value::Object(obj));
+        }
+
+        let affected = records.len() as u64;
+        Ok(WriteResult {
+            affected,
+            records,
+            execution_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
     /// Execute an UPDATE operation.
     ///
     /// Filters records by where_clause, merges `set` fields into each
