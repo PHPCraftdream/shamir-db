@@ -75,6 +75,21 @@ impl StagingStore {
         let _ = self.writes.upsert_async(k, StagedOp::Remove).await;
     }
 
+    /// Snapshot of all staged ops without consuming.
+    ///
+    /// Used by `commit_tx` Phase 4 to emit data ops into the WAL
+    /// entry, separate from Phase 5's `drain()` that actually applies
+    /// them. Must be called under `RepoTxGate::commit_lock` — caller
+    /// guarantees no concurrent writers.
+    pub fn snapshot_ops(&self) -> Vec<KvOp> {
+        let mut ops = Vec::new();
+        self.writes.scan(|k, v| match v {
+            StagedOp::Set(bytes) => ops.push(KvOp::Set(k.clone(), bytes.clone())),
+            StagedOp::Remove => ops.push(KvOp::Remove(k.clone())),
+        });
+        ops
+    }
+
     /// Drain all staged writes into a `Vec<KvOp>` suitable for
     /// `Store::transact`. Consumes `self`.
     ///
@@ -246,5 +261,26 @@ mod tests {
         assert_eq!(staging.len(), 1);
         staging.set(k.clone(), Bytes::from_static(b"v2")).await;
         assert_eq!(staging.len(), 1); // same key, still 1
+    }
+
+    #[tokio::test]
+    async fn snapshot_ops_does_not_consume() {
+        let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let staging = StagingStore::new(base);
+        staging
+            .set(
+                RecordKey::from(Bytes::from_static(b"k1")),
+                Bytes::from_static(b"v1"),
+            )
+            .await;
+        staging
+            .remove(RecordKey::from(Bytes::from_static(b"k2")))
+            .await;
+
+        let snapshot1 = staging.snapshot_ops();
+        let snapshot2 = staging.snapshot_ops();
+        assert_eq!(snapshot1.len(), 2);
+        assert_eq!(snapshot2.len(), 2, "snapshot_ops must NOT consume");
+        assert_eq!(staging.len(), 2);
     }
 }

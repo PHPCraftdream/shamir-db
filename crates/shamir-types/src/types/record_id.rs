@@ -63,6 +63,13 @@ impl RecordId {
     pub fn to_bytes(&self) -> Bytes {
         Bytes::copy_from_slice(&self.0)
     }
+
+    /// Construct a `RecordId` from a byte slice. Returns `None` if the
+    /// slice isn't exactly 16 bytes.
+    pub fn try_from_bytes(b: &[u8]) -> Option<Self> {
+        let arr: [u8; 16] = b.try_into().ok()?;
+        Some(Self(arr))
+    }
 }
 
 impl Default for RecordId {
