@@ -314,6 +314,13 @@ impl RepoInstance {
         let table = self.get_table(table_name).await?;
         table.lookup_by_index(index_name, values).await
     }
+
+    /// Run V2 WAL recovery: replay any inflight tx entries and remove
+    /// their markers. Idempotent — safe to call on every open.
+    /// Returns the count of recovered entries.
+    pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
+        crate::tx::recovery::recover_inflight_v2(self).await
+    }
 }
 
 /// Deterministic u64 token for a repository name.
