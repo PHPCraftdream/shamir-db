@@ -16,6 +16,7 @@ use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
 use shamir_connect::common::time::UnixNanos;
+use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::admin::UserDirectory;
@@ -295,7 +296,13 @@ async fn run_handshake<F: Framer>(
     //    Real clients send auth_init within a single RTT (~50 ms typically).
     //    The default ceiling of 5 s is comfortably above network jitter +
     //    TLS handshake overhead while still cutting attackers off quickly.
-    let read_fut = framer.read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf);
+    //
+    //    HIGH-1: bound by `MAX_PRE_AUTH_FRAME` (4 KiB per spec §8), NOT
+    //    the post-auth 16 MiB ceiling. A real `auth_init` is ~80 bytes;
+    //    an unauthenticated peer must not be able to make the server
+    //    allocate 16 MiB per connection — 10 000 concurrent attackers
+    //    would otherwise demand ~160 GiB of pre-auth memory.
+    let read_fut = framer.read_frame_into(MAX_PRE_AUTH_FRAME, frame_buf);
     match tokio::time::timeout(ctx.auth_init_timeout, read_fut).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
@@ -410,8 +417,11 @@ async fn run_handshake<F: Framer>(
     }
 
     // 5. Read client_proof (Argon2id ran on the client side, ~2s).
+    //    Still pre-auth → `MAX_PRE_AUTH_FRAME` ceiling (HIGH-1). Real
+    //    proof bytes are ~40; the 16 MiB post-auth ceiling MUST NOT be
+    //    reachable before the proof is verified.
     if framer
-        .read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
+        .read_frame_into(MAX_PRE_AUTH_FRAME, frame_buf)
         .await
         .is_err()
     {
@@ -600,6 +610,24 @@ async fn run_handshake<F: Framer>(
     Ok(auth_ok.session_id)
 }
 
+/// Outcome of one `spawn_blocking` dispatch — pre-serialised bytes (so
+/// the worker thread can immediately call `write_frame_into` without
+/// holding any references into the request buffer) plus a "break after
+/// writing" flag for the §7.5 session_invalidated / session_expired
+/// paths.
+enum DispatchOutput {
+    /// Reply bytes to write to the wire; keep looping afterwards.
+    Reply(Vec<u8>),
+    /// Reply bytes to write to the wire; then break the request loop.
+    /// Used for `session_invalidated` (already removed from store) and
+    /// `session_expired` so an attacker that resends keeps wasting a
+    /// fresh connection rather than reusing this one.
+    ReplyAndBreak(Vec<u8>),
+    /// Nothing usable to write (encode failure on the error envelope) —
+    /// just continue the loop.
+    Skip,
+}
+
 async fn request_loop<F: Framer>(
     ctx: &ConnectionContext,
     framer: &mut F,
@@ -607,16 +635,6 @@ async fn request_loop<F: Framer>(
     write_scratch: &mut Vec<u8>,
     sid: [u8; 32],
 ) {
-    let user_dir = ctx.user_dir.clone();
-    let lookup_tib = move |uid: &[u8; 16]| -> u64 {
-        // Spec §7.5 NORMATIVE: each request runs through this fast read so
-        // changes to the user record (role updates, kickSession,
-        // password change) invalidate live sessions on the next request.
-        // Reverse-lookup from `user_id` → username → UserRecord uses the
-        // secondary index maintained inside `RedbUserDirectory::insert`.
-        user_dir.tickets_invalid_before_ns_by_user_id(uid)
-    };
-
     loop {
         match framer
             .read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
@@ -625,71 +643,133 @@ async fn request_loop<F: Framer>(
             Ok(()) => {}
             Err(_) => break, // client closed
         }
-        let view = match RequestEnvelopeView::from_msgpack(frame_buf) {
-            Ok(v) => v,
-            Err(_) => {
-                // Malformed envelope — emit generic error envelope back.
-                let err = ErrorEnvelope::new(None, "invalid_envelope");
-                if let Ok(bytes) = err.to_msgpack() {
-                    let _ = framer.write_frame_into(&bytes, write_scratch).await;
-                }
-                continue;
-            }
-        };
-        // Dispatch. dispatch_request_view runs §7.5 validity check.
-        let handler_ref: &dyn RequestHandler = ctx.handler.as_ref();
-        // dispatch_request_view requires `H: RequestHandler` which `dyn` does
-        // not satisfy directly — wrap in a thin newtype that implements
-        // the trait by delegation.
-        struct DynRef<'a>(&'a dyn RequestHandler);
-        impl<'a> RequestHandler for DynRef<'a> {
-            fn handle(
-                &self,
-                session: &shamir_connect::server::session::Session,
-                req: &[u8],
-            ) -> std::result::Result<Vec<u8>, String> {
-                self.0.handle(session, req)
-            }
-        }
-        let dyn_handler = DynRef(handler_ref);
-        let outcome =
-            match dispatch_request_view(&view, &ctx.session_store, &lookup_tib, &dyn_handler) {
-                Ok(o) => o,
+
+        // HIGH-7: dispatch the synchronous handler chain on the
+        // blocking-task pool so workers aren't parked for the full batch
+        // duration. The previous shape (`block_in_place + block_on`
+        // inside `db_handler::run_blocking`) capped concurrent in-flight
+        // batches at `#worker_threads` — with `max_active_connections =
+        // 10_000` and `max_execution_time_secs = 60` an authenticated
+        // peer could DoS the worker pool from a few connections.
+        //
+        // The `spawn_blocking` thread parses the envelope, runs §7.5
+        // session validity, invokes the application handler, and
+        // pre-serialises the reply bytes. We move `frame_buf` into the
+        // closure via `std::mem::take` so the borrow checker is
+        // satisfied and restore it after the join — keeps the
+        // per-connection allocation reuse from Optim #1 / #7.
+        let owned_buf = std::mem::take(frame_buf);
+        let handler = ctx.handler.clone();
+        let session_store = ctx.session_store.clone();
+        let user_dir_for_lookup = ctx.user_dir.clone();
+
+        let join = tokio::task::spawn_blocking(move || -> (Vec<u8>, DispatchOutput) {
+            let view = match RequestEnvelopeView::from_msgpack(&owned_buf) {
+                Ok(v) => v,
                 Err(_) => {
-                    // Internal error — best-effort error envelope.
-                    let err = ErrorEnvelope::new(view.request_id, "internal_error");
-                    if let Ok(bytes) = err.to_msgpack() {
-                        let _ = framer.write_frame_into(&bytes, write_scratch).await;
-                    }
-                    continue;
+                    // Malformed envelope — emit generic error envelope back.
+                    let err = ErrorEnvelope::new(None, "invalid_envelope");
+                    let out = match err.to_msgpack() {
+                        Ok(b) => DispatchOutput::Reply(b),
+                        Err(_) => DispatchOutput::Skip,
+                    };
+                    return (owned_buf, out);
                 }
             };
-        let reply_bytes = match outcome {
-            DispatchOutcome::Response(resp) => match resp.to_msgpack() {
-                Ok(b) => b,
-                Err(_) => continue,
-            },
-            DispatchOutcome::Error(err) => {
-                let invalidated =
-                    err.error == "session_invalidated" || err.error == "session_expired";
-                let bytes = match err.to_msgpack() {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let _ = framer.write_frame_into(&bytes, write_scratch).await;
-                if invalidated {
-                    // §7.5 has already removed the session; close the loop.
-                    break;
+
+            let lookup_tib = move |uid: &[u8; 16]| -> u64 {
+                // Spec §7.5 NORMATIVE: each request runs through this
+                // fast read so changes to the user record (role updates,
+                // kickSession, password change) invalidate live sessions
+                // on the next request. Reverse-lookup from `user_id` →
+                // username → UserRecord uses the secondary index
+                // maintained inside `RedbUserDirectory::insert`.
+                user_dir_for_lookup.tickets_invalid_before_ns_by_user_id(uid)
+            };
+
+            // dispatch_request_view requires `H: RequestHandler` which
+            // `dyn` does not satisfy directly — wrap in a thin newtype
+            // that implements the trait by delegation.
+            struct DynRef<'a>(&'a dyn RequestHandler);
+            impl<'a> RequestHandler for DynRef<'a> {
+                fn handle(
+                    &self,
+                    session: &shamir_connect::server::session::Session,
+                    req: &[u8],
+                ) -> std::result::Result<Vec<u8>, String> {
+                    self.0.handle(session, req)
                 }
-                continue;
+            }
+            let dyn_handler = DynRef(handler.as_ref());
+
+            let outcome =
+                match dispatch_request_view(&view, &session_store, lookup_tib, &dyn_handler) {
+                    Ok(o) => o,
+                    Err(_) => {
+                        // Internal error — best-effort error envelope.
+                        let err = ErrorEnvelope::new(view.request_id, "internal_error");
+                        let out = match err.to_msgpack() {
+                            Ok(b) => DispatchOutput::Reply(b),
+                            Err(_) => DispatchOutput::Skip,
+                        };
+                        return (owned_buf, out);
+                    }
+                };
+
+            let out = match outcome {
+                DispatchOutcome::Response(resp) => match resp.to_msgpack() {
+                    Ok(b) => DispatchOutput::Reply(b),
+                    Err(_) => DispatchOutput::Skip,
+                },
+                DispatchOutcome::Error(err) => {
+                    let invalidated =
+                        err.error == "session_invalidated" || err.error == "session_expired";
+                    match err.to_msgpack() {
+                        Ok(b) => {
+                            if invalidated {
+                                DispatchOutput::ReplyAndBreak(b)
+                            } else {
+                                DispatchOutput::Reply(b)
+                            }
+                        }
+                        Err(_) => DispatchOutput::Skip,
+                    }
+                }
+            };
+            (owned_buf, out)
+        });
+
+        // Wait for the blocking dispatch to complete. If the join
+        // panicked (handler bug, OOM in serialiser, etc.) close the
+        // connection.
+        let (returned_buf, dispatch) = match join.await {
+            Ok(t) => t,
+            Err(_join_err) => {
+                tracing::warn!("dispatch task join failed; closing connection");
+                break;
             }
         };
-        if framer
-            .write_frame_into(&reply_bytes, write_scratch)
-            .await
-            .is_err()
-        {
-            break;
+        // Restore the per-connection scratch buffer so the next
+        // iteration reuses the same allocation (Optim #1).
+        *frame_buf = returned_buf;
+
+        // Apply the dispatch outcome.
+        match dispatch {
+            DispatchOutput::Skip => continue,
+            DispatchOutput::Reply(bytes) => {
+                if framer
+                    .write_frame_into(&bytes, write_scratch)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            DispatchOutput::ReplyAndBreak(bytes) => {
+                let _ = framer.write_frame_into(&bytes, write_scratch).await;
+                // §7.5 has already removed the session; close the loop.
+                break;
+            }
         }
     }
     let _ = sid;
@@ -801,3 +881,43 @@ impl ConnectionContext {
 // To keep the file compilable, the struct definition above MUST list
 // `identity_keypair_inner` — so we patch by editing the struct above
 // rather than duplicating it here.
+
+#[cfg(test)]
+mod tests {
+    use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
+    use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
+
+    // HIGH-1 compile-time invariants: pin the pre-auth frame ceiling at
+    // the spec §8 value and prove it stays strictly below the post-auth
+    // ceiling the request loop uses. `const` assertions trip at compile
+    // time so a future spec edit that weakens either bound fails the
+    // build, not just the test suite.
+    const _: () = assert!(
+        MAX_PRE_AUTH_FRAME == 4 * 1024,
+        "MAX_PRE_AUTH_FRAME must equal 4 KiB per spec §8",
+    );
+    const _: () = assert!(
+        MAX_PRE_AUTH_FRAME < MAX_FRAME_SIZE_DEFAULT,
+        "pre-auth ceiling must be strictly smaller than post-auth ceiling",
+    );
+
+    /// HIGH-1 regression: `run_handshake` must read pre-auth frames with
+    /// the 4 KiB ceiling, not the post-auth 16 MiB ceiling. The compile-
+    /// time `const` asserts above pin the constants; this runtime test
+    /// surfaces a human-readable failure when the bounds are tightened
+    /// or loosened in the future, and additionally documents the
+    /// resource-exhaustion budget.
+    #[test]
+    fn pre_auth_frame_budget_is_safe_for_ten_thousand_unauth_peers() {
+        // Defense-in-depth: 10 000 concurrent unauthenticated peers
+        // multiplied by the pre-auth cap must stay well under
+        // commodity-server RAM. 10 000 × 4 KiB = 40 MiB, vs. the
+        // 10 000 × 16 MiB = ~160 GiB that the old shape allowed.
+        let max_unauth_memory = MAX_PRE_AUTH_FRAME.saturating_mul(10_000);
+        assert!(
+            max_unauth_memory < 128 * 1024 * 1024,
+            "pre-auth cap × 10k connections should be under 128 MiB; got {}",
+            max_unauth_memory,
+        );
+    }
+}
