@@ -95,6 +95,25 @@ async fn gc_respects_active_snapshot() {
     let _deleted2 = repo.run_gc().await.unwrap();
 }
 
+#[tokio::test]
+async fn spawn_gc_task_runs_and_stops() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let _tbl = repo.get_table("t").await.unwrap();
+
+    let (handle, shutdown) = repo.spawn_gc_task(std::time::Duration::from_millis(50));
+
+    // Let it run a couple of cycles.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Signal shutdown.
+    shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Task should finish within one more interval.
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+    assert!(result.is_ok(), "GC task should stop after shutdown signal");
+}
+
 /// GC on a repo with no writes is a no-op.
 #[tokio::test]
 async fn gc_empty_repo_is_noop() {

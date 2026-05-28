@@ -344,6 +344,40 @@ impl RepoInstance {
         crate::tx::recovery::recover_inflight_v2(self).await
     }
 
+    /// Spawn a background task that runs GC periodically.
+    ///
+    /// Returns a `tokio::task::JoinHandle` and an `Arc<AtomicBool>` shutdown flag.
+    /// Set the flag to `true` to stop the task gracefully.
+    ///
+    /// The task runs `run_gc()` every `interval`, logging results.
+    pub fn spawn_gc_task(
+        &self,
+        interval: std::time::Duration,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let repo = self.clone();
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                match repo.run_gc().await {
+                    Ok(0) => {} // nothing to do, stay quiet
+                    Ok(n) => log::debug!("GC cleaned {n} history entries"),
+                    Err(e) => log::warn!("GC error: {e}"),
+                }
+            }
+        });
+
+        (handle, shutdown)
+    }
+
     /// Run garbage collection on all tables' history stores.
     ///
     /// Deletes old versions no longer needed by any active snapshot.
