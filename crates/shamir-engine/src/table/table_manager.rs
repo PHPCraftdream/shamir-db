@@ -429,7 +429,9 @@ impl TableManager {
             KvOp::Set(k, v) => staging.set(k, v).await,
             KvOp::Remove(k) => staging.remove(k).await,
         }
-        tx.index_write_set.extend(m.index_ops);
+        let token = self.table_token();
+        tx.index_write_set
+            .extend(m.index_ops.into_iter().map(|op| (token, op)));
         tx.bump_counter(self.table_token(), m.counter_delta);
         Ok(())
     }

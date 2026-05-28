@@ -232,15 +232,11 @@ runs with empty remap (no-op).
 **Closure path:** Stage 5 — interning paths produce overlay entries
 that Phase 1 merges.
 
-### 4. Index ops use `table_id_interned: 0` broadcast emission
+### 4. ~~Index ops use `table_id_interned: 0` broadcast emission~~ — CLOSED (5.2)
 
-`tx.index_write_set` is `Vec<IndexWriteOp>` without per-op table
-attribution. Emission honestly uses `0` as broadcast marker; recovery
-replays the posting to every table's info_store. Harmless because
-posting keys are independent per-table keyspaces.
-
-**Closure path:** Stage 5 — extend `IndexWriteOp` with table token,
-update emission to be precise.
+`tx.index_write_set` now carries `(table_token, IndexWriteOp)` tuples.
+WAL emission uses the real table_token instead of broadcast `0`.
+Recovery routes index ops to the correct table's info_store.
 
 ### 5. WAL `InternerOverlayMerge` not replayed
 
