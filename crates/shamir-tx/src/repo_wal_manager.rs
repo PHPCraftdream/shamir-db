@@ -119,6 +119,7 @@ mod tests {
             txn_id,
             0,
             vec![shamir_wal::WalOpV2::Put {
+                table_id_interned: 0,
                 rid: rid(1),
                 body: Bytes::from_static(b"hello"),
             }],
@@ -270,10 +271,14 @@ mod tests {
             started_at_ns: 1_000_000,
             ops: vec![
                 shamir_wal::WalOpV2::Put {
+                    table_id_interned: 0,
                     rid: rid(1),
                     body: Bytes::from_static(b"record-body"),
                 },
-                shamir_wal::WalOpV2::Delete { rid: rid(2) },
+                shamir_wal::WalOpV2::Delete {
+                    table_id_interned: 0,
+                    rid: rid(2),
+                },
                 shamir_wal::WalOpV2::IndexPut {
                     idx_id: 11,
                     key: Bytes::from_static(b"idx-key"),

@@ -302,12 +302,25 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
 
     let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
 
-    let put_found = ops
-        .iter()
-        .any(|op| matches!(op, WalOpV2::Put { rid, .. } if *rid == rid_set));
-    let del_found = ops
-        .iter()
-        .any(|op| matches!(op, WalOpV2::Delete { rid } if *rid == rid_del));
+    let put_found = ops.iter().any(|op| {
+        matches!(
+            op,
+            WalOpV2::Put {
+                rid,
+                table_id_interned,
+                ..
+            } if *rid == rid_set && *table_id_interned == 7
+        )
+    });
+    let del_found = ops.iter().any(|op| {
+        matches!(
+            op,
+            WalOpV2::Delete {
+                rid,
+                table_id_interned,
+            } if *rid == rid_del && *table_id_interned == 7
+        )
+    });
     assert!(put_found, "expected WalOpV2::Put for staged Set");
     assert!(del_found, "expected WalOpV2::Delete for staged Remove");
 }
