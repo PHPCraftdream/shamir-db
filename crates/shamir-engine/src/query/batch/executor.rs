@@ -58,20 +58,21 @@ pub async fn execute_batch(
         }
     }
 
-    // Stage 4.D.4: integrate tx lifecycle once execute_query takes
-    // an Option<&mut TxContext> parameter through the read pipeline.
-    // For now `request.transactional` path keeps using non-tx semantics
-    // — cross-repo guard validated the structural prerequisite.
-
     // 1. Plan
     let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
 
     // 2. Validate: all referenced tables exist (skip admin ops)
     validate_tables(&request.queries, resolver).await?;
 
-    // 3. Execute stages
     let mut plan = plan;
-    let all_results = execute_plan(&mut plan, &request.queries, resolver, admin).await?;
+
+    // 3. Execute — branch on transactional.
+    let (all_results, tx_info) = if request.transactional {
+        execute_transactional(request, &mut plan, resolver, admin).await?
+    } else {
+        let r = execute_plan(&mut plan, &request.queries, resolver, admin).await?;
+        (r, None)
+    };
 
     // 4. Filter results for response
     let results = filter_results(all_results, request);
@@ -83,7 +84,7 @@ pub async fn execute_batch(
         results,
         execution_plan: std::mem::take(&mut plan.stages),
         execution_time_us: elapsed.as_micros() as u64,
-        transaction: None,
+        transaction: tx_info,
     })
 }
 
@@ -181,6 +182,130 @@ async fn execute_plan(
     }
 
     Ok(all_results)
+}
+
+/// tx-aware variant of [`execute_plan`].
+///
+/// Uses `QueryRunner` with `Some(&mut tx)` so each mutation routes
+/// through `execute_*_tx`. Reads still flow through the standard
+/// read methods (tx-aware reads land alongside SSI / Stage 4.F).
+async fn execute_plan_tx(
+    plan: &mut BatchPlan,
+    queries: &TMap<String, QueryEntry>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    tx: &mut shamir_tx::TxContext,
+) -> Result<TMap<String, QueryResult>, BatchError> {
+    let mut all_results: TMap<String, QueryResult> = new_map();
+
+    for stage in &plan.stages {
+        for alias in stage {
+            let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
+                alias: alias.clone(),
+                message: "Query entry not found".to_string(),
+            })?;
+
+            let deps = plan.dependencies.get(alias);
+            let resolved_refs = build_resolved_refs(&all_results, deps);
+
+            let mut runner = QueryRunner {
+                resolver,
+                admin,
+                tx: Some(&mut *tx),
+            };
+            let result = runner.run(alias, entry, &resolved_refs).await?;
+            all_results.insert(alias.clone(), result);
+        }
+    }
+
+    Ok(all_results)
+}
+
+/// Open a tx, execute the plan inside it, commit (or propagate abort).
+///
+/// Returns the per-query results AND the populated TransactionInfo
+/// (committed or aborted with reason).
+async fn execute_transactional(
+    request: &BatchRequest,
+    plan: &mut BatchPlan,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+) -> Result<
+    (
+        TMap<String, QueryResult>,
+        Option<shamir_query_types::batch::TransactionInfo>,
+    ),
+    BatchError,
+> {
+    // Determine target repo (cross-repo guard already enforced single).
+    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    let repo_name = repos.into_iter().next().unwrap_or_default();
+
+    if repo_name.is_empty() {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: "transactional batch has no data ops to target a repo".into(),
+        });
+    }
+
+    let repo = resolver
+        .resolve_repo(&repo_name)
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("resolve_repo({}): {}", repo_name, e),
+        })?;
+
+    // Parse isolation.
+    let iso = match request.isolation.as_deref() {
+        Some("serializable") => shamir_tx::IsolationLevel::Serializable,
+        _ => shamir_tx::IsolationLevel::Snapshot,
+    };
+
+    let (mut tx, _guard) = repo
+        .begin_tx(iso)
+        .await
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("begin_tx: {}", e),
+        })?;
+    let _snapshot_version = tx.snapshot_version;
+    let tx_id = tx.tx_id.0;
+
+    // Execute plan in tx mode.
+    let plan_result = execute_plan_tx(plan, &request.queries, resolver, admin, &mut tx).await;
+
+    match plan_result {
+        Err(plan_err) => {
+            // Drop tx without commit = RAII rollback. Build aborted info.
+            let info = shamir_query_types::batch::TransactionInfo::aborted(
+                tx_id,
+                format!("{:?}", plan_err),
+            );
+            Ok((new_map(), Some(info)))
+        }
+        Ok(results) => {
+            // Commit.
+            match repo.commit_tx(tx).await {
+                Ok(outcome) => {
+                    let info = shamir_query_types::batch::TransactionInfo::committed(
+                        outcome.tx_id,
+                        outcome.snapshot_version,
+                        outcome.commit_version,
+                    );
+                    Ok((results, Some(info)))
+                }
+                Err(commit_err) => {
+                    let reason = match commit_err {
+                        crate::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
+                        crate::tx::CommitError::Storage(e) => format!("storage: {}", e),
+                    };
+                    let info = shamir_query_types::batch::TransactionInfo::aborted(tx_id, reason);
+                    Ok((new_map(), Some(info)))
+                }
+            }
+        }
+    }
 }
 
 /// Build resolved_refs map containing only the declared dependencies.

@@ -474,3 +474,70 @@ async fn test_query_runner_none_tx_insert_and_read() {
         .unwrap();
     assert_eq!(result.records.len(), 1);
 }
+
+// ============================================================================
+// execute_batch — transactional SI happy path
+// ============================================================================
+
+struct TxTestResolver {
+    repo: crate::repo::RepoInstance,
+}
+
+#[async_trait::async_trait]
+impl TableResolver for TxTestResolver {
+    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        self.repo.get_table(&table_ref.table).await
+    }
+
+    async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
+        Ok(self.repo.clone())
+    }
+}
+
+#[tokio::test]
+async fn execute_batch_transactional_si_happy_path() {
+    use futures::StreamExt;
+
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let request: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "transactional": true,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "alice"},
+                    {"name": "bob"}
+                ]
+            }
+        },
+        "return_all": true
+    }))
+    .unwrap();
+
+    let response = execute_batch(&request, &resolver, None).await.unwrap();
+
+    let info = response.transaction.expect("transaction info present");
+    assert_eq!(info.status, "committed");
+    assert!(info.tx_id > 0);
+    assert!(info.commit_version.unwrap_or(0) > 0);
+
+    // Outside the tx, observer reads see the committed records.
+    let tbl = repo.get_table("users").await.unwrap();
+    let stream = tbl.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(batch) = stream.next().await {
+        count += batch.unwrap().len();
+    }
+    assert_eq!(count, 2, "outside observer must see 2 committed records");
+}
