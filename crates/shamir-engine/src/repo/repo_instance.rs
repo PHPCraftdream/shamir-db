@@ -343,6 +343,26 @@ impl RepoInstance {
     pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
         crate::tx::recovery::recover_inflight_v2(self).await
     }
+
+    /// Run garbage collection on all tables' history stores.
+    ///
+    /// Deletes old versions no longer needed by any active snapshot.
+    /// Safe to call concurrently with reads/writes — GC only touches
+    /// versions below `min_alive`, which no snapshot can read.
+    ///
+    /// Returns total number of history entries deleted across all tables.
+    pub async fn run_gc(&self) -> DbResult<usize> {
+        let mut stores: Vec<Arc<shamir_tx::MvccStore>> = Vec::new();
+        self.per_table_mvcc
+            .scan_async(|_, mvcc| stores.push(Arc::clone(mvcc)))
+            .await;
+
+        let mut total = 0usize;
+        for mvcc in stores {
+            total += mvcc.gc().await?;
+        }
+        Ok(total)
+    }
 }
 
 /// Deterministic u64 token for a repository name.
