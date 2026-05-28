@@ -16,11 +16,19 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_membuffer::MemBufferConfig;
-use shamir_storage::types::Store;
+use shamir_storage::types::{KvOp, Store};
 use shamir_types::core::interner::TouchInd;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::WalManager;
+
+/// Bundled mutation effect for one record. Built by *_tx methods,
+/// applied by `stage_mutation` to a TxContext.
+struct StagedMutation {
+    data_op: KvOp,
+    index_ops: Vec<shamir_tx::IndexWriteOp>,
+    counter_delta: i64,
+}
 
 pub struct TableManager {
     name: String,
@@ -393,6 +401,26 @@ impl TableManager {
         }
     }
 
+    /// Apply a staged mutation to the TxContext.
+    async fn stage_mutation(
+        &self,
+        m: StagedMutation,
+        tx: &mut shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        let staging = tx.ensure_table_staging(
+            self.table_token(),
+            &self.name,
+            self.table.data_store().clone(),
+        );
+        match m.data_op {
+            KvOp::Set(k, v) => staging.set(k, v).await,
+            KvOp::Remove(k) => staging.remove(k).await,
+        }
+        tx.index_write_set.extend(m.index_ops);
+        tx.bump_counter(self.table_token(), m.counter_delta);
+        Ok(())
+    }
+
     /// Collect index ops from all index2 backends for an insert.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     async fn plan_insert_ops(
@@ -409,13 +437,46 @@ impl TableManager {
         all_ops
     }
 
+    /// Collect index ops from all index2 backends for an update.
+    /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
+    async fn plan_update_ops(
+        &self,
+        rid: RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) -> Vec<shamir_tx::IndexWriteOp> {
+        let mut all_ops = Vec::new();
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_update(rid, old, new).await {
+                all_ops.extend(ops);
+            }
+        }
+        all_ops
+    }
+
+    /// Collect index ops from all index2 backends for a delete.
+    /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
+    async fn plan_delete_ops(
+        &self,
+        rid: RecordId,
+        rec: &InnerValue,
+    ) -> Vec<shamir_tx::IndexWriteOp> {
+        let mut all_ops = Vec::new();
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_delete(rid, rec).await {
+                all_ops.extend(ops);
+            }
+        }
+        all_ops
+    }
+
     /// tx-aware insert.
     ///
     /// - `tx == None` → delegates to existing [`insert`].
     /// - `tx == Some` → stages data + index ops + counter delta in
     ///   TxContext. No physical writes. commit_tx Phase 5 applies.
     ///
-    /// Simplified for Stage 4.D.6.a: only handles index2 plan ops.
+    /// Simplified for 4.D.6.a: only handles index2 plan ops.
     /// Legacy IndexManager / SortedIndexManager tx-aware hooks land
     /// in Stage 4.D.6.b.
     pub async fn insert_tx(
@@ -435,16 +496,105 @@ impl TableManager {
 
         let index_ops = self.plan_insert_ops(rid, value).await;
 
-        let staging = tx.ensure_table_staging(
-            self.table_token(),
-            &self.name,
-            self.table.data_store().clone(),
-        );
-        staging.set(rid.to_bytes(), bytes).await;
-        tx.index_write_set.extend(index_ops);
-        tx.bump_counter(self.table_token(), 1);
+        self.stage_mutation(
+            StagedMutation {
+                data_op: KvOp::Set(rid.to_bytes(), bytes),
+                index_ops,
+                counter_delta: 1,
+            },
+            tx,
+        )
+        .await?;
 
         Ok(rid)
+    }
+
+    /// tx-aware update.
+    ///
+    /// `tx == None` → existing `set` (since `update` is currently
+    /// internal helper; `set` is the public surface).
+    /// `tx == Some` → reads old value via `read_one_tx` (write_set or
+    /// main store), plans diff index ops via `plan_update`, stages
+    /// the new bytes.
+    ///
+    /// Returns `true` if a record was already present (semantically
+    /// matches existing `set`).
+    pub async fn update_tx(
+        &self,
+        id: RecordId,
+        value: &InnerValue,
+        tx: Option<&mut shamir_tx::TxContext>,
+    ) -> DbResult<bool> {
+        let Some(tx) = tx else {
+            return self.set(id, value).await;
+        };
+
+        let old = self.read_one_tx(id, Some(&*tx)).await.ok();
+
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+
+        let (index_ops, counter_delta) = match &old {
+            Some(old_val) => (self.plan_update_ops(id, old_val, value).await, 0_i64),
+            None => (self.plan_insert_ops(id, value).await, 1_i64),
+        };
+
+        self.stage_mutation(
+            StagedMutation {
+                data_op: KvOp::Set(id.to_bytes(), bytes),
+                index_ops,
+                counter_delta,
+            },
+            tx,
+        )
+        .await?;
+
+        Ok(old.is_some())
+    }
+
+    /// tx-aware delete.
+    ///
+    /// `tx == None` → existing `delete`.
+    /// `tx == Some` → reads old value, plans delete ops, stages
+    /// Remove. Returns `true` if a record was present.
+    pub async fn delete_tx(
+        &self,
+        id: RecordId,
+        tx: Option<&mut shamir_tx::TxContext>,
+    ) -> DbResult<bool> {
+        let Some(tx) = tx else {
+            return self.delete(id).await;
+        };
+
+        let Some(old) = self.read_one_tx(id, Some(&*tx)).await.ok() else {
+            return Ok(false);
+        };
+
+        let index_ops = self.plan_delete_ops(id, &old).await;
+
+        self.stage_mutation(
+            StagedMutation {
+                data_op: KvOp::Remove(id.to_bytes()),
+                index_ops,
+                counter_delta: -1,
+            },
+            tx,
+        )
+        .await?;
+
+        Ok(true)
+    }
+
+    /// tx-aware insert-or-update by RecordId. Alias of [`update_tx`]
+    /// — same semantics in tx mode.
+    pub async fn set_tx(
+        &self,
+        id: RecordId,
+        value: &InnerValue,
+        tx: Option<&mut shamir_tx::TxContext>,
+    ) -> DbResult<bool> {
+        self.update_tx(id, value, tx).await
     }
 
     /// Register a new sorted (B-tree-by-value) index over a single

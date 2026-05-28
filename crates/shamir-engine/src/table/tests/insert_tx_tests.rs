@@ -5,6 +5,7 @@ use std::sync::Arc;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::table::TableManager;
@@ -74,4 +75,116 @@ async fn table_token_is_deterministic() {
     let t2 = tbl.table_token();
     assert_eq!(t1, t2, "table_token must be deterministic");
     assert_ne!(t1, 0);
+}
+
+// ---- Stage 4.D.6.b: update_tx / delete_tx / set_tx ----
+
+#[tokio::test]
+async fn update_tx_none_delegates_to_set() {
+    let tbl = make_table().await;
+    let rid = tbl.insert(&InnerValue::Str("v1".into())).await.unwrap();
+    let existed = tbl
+        .update_tx(rid, &InnerValue::Str("v2".into()), None)
+        .await
+        .unwrap();
+    assert!(
+        !existed,
+        "update_tx(None) delegates to set; set returns created=false for existing"
+    );
+    let v = tbl.get(rid).await.unwrap();
+    if let InnerValue::Str(s) = v {
+        assert_eq!(s, "v2");
+    } else {
+        panic!("expected Str");
+    }
+}
+
+#[tokio::test]
+async fn update_tx_some_stages_diff_index_ops() {
+    let tbl = make_table().await;
+    let rid = tbl.insert(&InnerValue::Str("v1".into())).await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(10), 0, u64::MAX, IsolationLevel::Snapshot);
+    let existed = tbl
+        .update_tx(rid, &InnerValue::Str("v2".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    assert!(existed);
+
+    // Main store still has v1 (staged update not applied yet).
+    let direct = tbl.get(rid).await.unwrap();
+    if let InnerValue::Str(s) = direct {
+        assert_eq!(s, "v1", "main store must not be modified before commit");
+    }
+
+    // counter_delta = 0 for update.
+    let token = tbl.table_token();
+    assert_eq!(*tx.counter_deltas.get(&token).unwrap_or(&-1), 0);
+}
+
+#[tokio::test]
+async fn update_tx_some_on_missing_id_acts_as_insert() {
+    let tbl = make_table().await;
+    let mut tx = TxContext::new(TxId::new(11), 0, u64::MAX, IsolationLevel::Snapshot);
+    let id = RecordId::new();
+    let existed = tbl
+        .update_tx(id, &InnerValue::Str("new".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    assert!(!existed, "missing id → existed=false");
+
+    // counter_delta = 1 since this acts as insert.
+    let token = tbl.table_token();
+    assert_eq!(*tx.counter_deltas.get(&token).unwrap(), 1);
+}
+
+#[tokio::test]
+async fn delete_tx_none_delegates_to_delete() {
+    let tbl = make_table().await;
+    let rid = tbl.insert(&InnerValue::Str("v".into())).await.unwrap();
+    let removed = tbl.delete_tx(rid, None).await.unwrap();
+    assert!(removed);
+    assert!(tbl.get(rid).await.is_err());
+}
+
+#[tokio::test]
+async fn delete_tx_some_stages_remove() {
+    let tbl = make_table().await;
+    let rid = tbl.insert(&InnerValue::Str("v".into())).await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(20), 0, u64::MAX, IsolationLevel::Snapshot);
+    let removed = tbl.delete_tx(rid, Some(&mut tx)).await.unwrap();
+    assert!(removed);
+
+    // Main store still has the record (staged remove not applied).
+    let _ = tbl.get(rid).await.unwrap();
+
+    let token = tbl.table_token();
+    assert_eq!(*tx.counter_deltas.get(&token).unwrap(), -1);
+}
+
+#[tokio::test]
+async fn delete_tx_some_on_missing_id_returns_false() {
+    let tbl = make_table().await;
+    let mut tx = TxContext::new(TxId::new(21), 0, u64::MAX, IsolationLevel::Snapshot);
+    let id = RecordId::new();
+    let removed = tbl.delete_tx(id, Some(&mut tx)).await.unwrap();
+    assert!(!removed);
+
+    // No counter delta — nothing was staged.
+    let token = tbl.table_token();
+    assert!(!tx.counter_deltas.contains_key(&token));
+}
+
+#[tokio::test]
+async fn set_tx_acts_as_update_tx() {
+    let tbl = make_table().await;
+    let rid = tbl.insert(&InnerValue::Str("orig".into())).await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(30), 0, u64::MAX, IsolationLevel::Snapshot);
+    let existed = tbl
+        .set_tx(rid, &InnerValue::Str("new".into()), Some(&mut tx))
+        .await
+        .unwrap();
+    assert!(existed);
 }
