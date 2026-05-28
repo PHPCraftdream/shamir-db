@@ -280,3 +280,117 @@ async fn recover_v2_inflight_replays_index_del() {
     repo.recover_v2_inflight().await.unwrap();
     assert!(info.get(key).await.is_err(), "key removed by IndexDel");
 }
+
+#[tokio::test]
+async fn crash_simulation_inflight_recovery_replays_full_state() {
+    use crate::repo::repo_token;
+
+    // Shared underlying repo so "restart" sees the same persisted state.
+    let underlying = Arc::new(InMemoryRepo::new());
+
+    // Phase A: original repo opens, adds a table, has counter at 0.
+    let repo1 = RepoInstance::new(
+        "crash_test".into(),
+        BoxRepo::InMemory(Arc::clone(&underlying)),
+        Vec::new(),
+    );
+    repo1.add_table(TableConfig::new("t"));
+    let _tbl1 = repo1.get_table("t").await.unwrap();
+
+    // Phase B: simulate a crash mid-commit_tx: write a V2 WAL entry
+    // with two Put ops + counter delta, but DON'T call wal.commit(txn_id)
+    // so the marker stays inflight.
+    let wal = repo1.repo_wal().await.unwrap();
+    let token = table_token_for("t");
+    let txn_id = wal.fresh_txn_id();
+
+    let mut rid_a_bytes = [0u8; 16];
+    rid_a_bytes[15] = 1;
+    let rid_a = RecordId(rid_a_bytes);
+    let mut rid_b_bytes = [0u8; 16];
+    rid_b_bytes[15] = 2;
+    let rid_b = RecordId(rid_b_bytes);
+
+    let body_a = InnerValue::Str("alice".into()).to_bytes().unwrap();
+    let body_b = InnerValue::Str("bob".into()).to_bytes().unwrap();
+
+    let entry = WalEntryV2::new(
+        txn_id,
+        repo_token(repo1.name()),
+        vec![
+            WalOpV2::Put {
+                table_id_interned: token,
+                rid: rid_a,
+                body: body_a,
+            },
+            WalOpV2::Put {
+                table_id_interned: token,
+                rid: rid_b,
+                body: body_b,
+            },
+            WalOpV2::CounterDelta {
+                table_id_interned: token,
+                delta: 2,
+            },
+        ],
+    );
+    wal.begin(entry).await.unwrap();
+
+    // Pre-recovery state: data not visible, counter is 0, marker exists.
+    {
+        let tbl_pre = repo1.get_table("t").await.unwrap();
+        assert!(tbl_pre.get(rid_a).await.is_err(), "data not yet applied");
+        assert!(tbl_pre.get(rid_b).await.is_err());
+        assert_eq!(tbl_pre.counter().get().await.unwrap(), 0);
+        assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
+    }
+
+    // === RESTART ===
+    // Phase C: drop repo1 (simulates process exit; the underlying
+    // Arc<InMemoryRepo> survives because we kept a clone). Construct
+    // repo2 over the same underlying storage.
+    drop(repo1);
+
+    let repo2 = RepoInstance::new(
+        "crash_test".into(),
+        BoxRepo::InMemory(Arc::clone(&underlying)),
+        Vec::new(),
+    );
+    repo2.add_table(TableConfig::new("t"));
+
+    // Sanity: repo2's WAL sees the inflight entry from before.
+    let wal2 = repo2.repo_wal().await.unwrap();
+    assert_eq!(
+        wal2.list_inflight().await.unwrap().len(),
+        1,
+        "inflight WAL entry must survive restart"
+    );
+
+    // Phase D: run recovery.
+    let count = repo2.recover_v2_inflight().await.unwrap();
+    assert_eq!(count, 1);
+
+    // === VERIFY ===
+    // Post-recovery: data present in main store, counter incremented,
+    // WAL clean.
+    let tbl_post = repo2.get_table("t").await.unwrap();
+
+    let v_a = tbl_post.get(rid_a).await.unwrap();
+    let v_b = tbl_post.get(rid_b).await.unwrap();
+    assert!(matches!(v_a, InnerValue::Str(ref s) if s == "alice"));
+    assert!(matches!(v_b, InnerValue::Str(ref s) if s == "bob"));
+
+    assert_eq!(tbl_post.counter().get().await.unwrap(), 2);
+
+    assert!(
+        wal2.list_inflight().await.unwrap().is_empty(),
+        "WAL marker removed after recovery"
+    );
+
+    // === IDEMPOTENT RE-RUN ===
+    // Running recovery again should be a no-op (zero entries) and
+    // not double-apply.
+    let count2 = repo2.recover_v2_inflight().await.unwrap();
+    assert_eq!(count2, 0);
+    assert_eq!(tbl_post.counter().get().await.unwrap(), 2);
+}
