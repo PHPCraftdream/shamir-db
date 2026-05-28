@@ -204,6 +204,11 @@ impl TxContext {
         self
     }
 
+    /// cancel-safe: NO — iterates `write_set` and invokes
+    /// `rewrite_set_bytes` on each per-table StagingStore. Cancellation
+    /// mid-iteration leaves a subset of tables remapped and the rest
+    /// holding overlay ids — the tx must be aborted on error / cancel.
+    ///
     /// Apply an overlay-id → base-id remap across all staged writes.
     ///
     /// Called during commit phase 1, immediately after

@@ -115,6 +115,12 @@ impl StagingStore {
         self.writes.is_empty()
     }
 
+    /// cancel-safe: NO — iterates the staged keys (snapshot via
+    /// `scan_async`) then invokes `update_async` per key. Cancellation
+    /// mid-iteration leaves some staged values rewritten and others not,
+    /// breaking the invariant that all overlay ids are remapped. Caller
+    /// must abort the tx on cancellation (drop the StagingStore).
+    ///
     /// Rewrite all staged `Set` values via a byte transform.
     ///
     /// Used by `TxContext::apply_id_remap` during commit phase 1 to

@@ -31,6 +31,13 @@ pub enum LayeredInterner<'a> {
 }
 
 impl<'a> LayeredInterner<'a> {
+    /// cancel-safe: yes — `Direct` path is sync (`touch_ind`). `Layered`
+    /// path uses a single `overlay.entry_async`; either the entry insert
+    /// completes or the future is dropped with the map unchanged. The
+    /// `fetch_add` on `next_overlay_id` only executes on the vacant
+    /// branch after `entry_async` resolves, so cancellation cannot leak
+    /// an allocated overlay id.
+    ///
     /// Return the id for `key`, allocating if necessary.
     ///
     /// * `Direct` → `base.touch_ind`.
@@ -96,6 +103,10 @@ impl<'a> LayeredInterner<'a> {
         }
     }
 
+    /// cancel-safe: yes — read-only lookup. `Direct` branch is sync;
+    /// `Layered` branch issues at most one `overlay.read_async` which
+    /// performs no state mutation.
+    ///
     /// Lookup without allocating an id.
     ///
     /// * `Direct` → `base.get_ind`.
@@ -140,6 +151,13 @@ impl<'a> LayeredInterner<'a> {
     }
 }
 
+/// cancel-safe: NO — `overlay.scan_async` builds a pending list, then
+/// the loop calls `base.touch_ind` (sync, mutating) per entry while
+/// building `remap`. Cancellation mid-loop leaves base with a subset of
+/// merged ids and the caller without a complete remap; the partial
+/// merge is harmless (touch_ind is idempotent) but the function must
+/// be re-run under the same commit_mutex to obtain a usable remap.
+///
 /// Atomically merge `overlay` into `base`.
 ///
 /// Must be called under `RepoTxGate::commit_mutex` — no internal
