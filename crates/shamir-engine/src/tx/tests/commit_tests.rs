@@ -369,3 +369,21 @@ async fn expired_tx_rejected_at_commit() {
         err
     );
 }
+
+#[tokio::test]
+async fn tx_metrics_track_commit_and_abort() {
+    let repo = make_repo();
+    repo.add_table(crate::table::TableConfig::new("t"));
+
+    // Start + commit a tx.
+    let (tx, _g) = repo
+        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    repo.commit_tx(tx).await.unwrap();
+
+    let snap = repo.tx_metrics().snapshot();
+    assert!(snap.txs_started >= 1);
+    assert!(snap.txs_committed >= 1);
+    assert_eq!(snap.txs_aborted_ssi, 0);
+}
