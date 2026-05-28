@@ -74,4 +74,19 @@ mod tests {
         let id2 = bincode::from_bytes::<RecordId>(&bytes).unwrap();
         assert_eq!(id2.0, id.0);
     }
+
+    #[test]
+    fn try_from_bytes_round_trip() {
+        let rid = RecordId::new();
+        let bytes = rid.to_bytes();
+        let restored = RecordId::try_from_bytes(&bytes).unwrap();
+        assert_eq!(rid, restored);
+    }
+
+    #[test]
+    fn try_from_bytes_wrong_length_returns_none() {
+        assert!(RecordId::try_from_bytes(&[0u8; 15]).is_none());
+        assert!(RecordId::try_from_bytes(&[0u8; 17]).is_none());
+        assert!(RecordId::try_from_bytes(&[]).is_none());
+    }
 }

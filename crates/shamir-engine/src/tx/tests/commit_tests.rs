@@ -247,3 +247,36 @@ async fn begin_tx_populates_repo_id_from_repo_token() {
         .unwrap();
     assert_ne!(tx.repo_id, 0, "repo_id should be populated from repo_token");
 }
+
+#[tokio::test]
+async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
+    use bytes::Bytes;
+    use shamir_storage::storage_in_memory::InMemoryStore;
+    use shamir_storage::types::Store;
+    use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
+    use shamir_types::types::record_id::RecordId;
+    use shamir_wal::WalOpV2;
+
+    let mut tx = TxContext::new(TxId::new(801), 0, 0, IsolationLevel::Snapshot);
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let staging = StagingStore::new(data);
+
+    let rid_set = RecordId::new();
+    let rid_del = RecordId::new();
+    staging
+        .set(rid_set.to_bytes(), Bytes::from_static(b"v"))
+        .await;
+    staging.remove(rid_del.to_bytes()).await;
+    tx.write_set.insert(7, staging);
+
+    let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
+
+    let put_found = ops
+        .iter()
+        .any(|op| matches!(op, WalOpV2::Put { rid, .. } if *rid == rid_set));
+    let del_found = ops
+        .iter()
+        .any(|op| matches!(op, WalOpV2::Delete { rid } if *rid == rid_del));
+    assert!(put_found, "expected WalOpV2::Put for staged Set");
+    assert!(del_found, "expected WalOpV2::Delete for staged Remove");
+}

@@ -19,6 +19,19 @@ pub enum TxError {
     SsiConflict { key: bytes::Bytes },
 }
 
+/// Build WalOpV2 ops from a TxContext for inclusion in the V2 WAL entry.
+///
+/// Phase 4 of commit_tx calls this BEFORE Phase 5 drain. The data
+/// ops from write_set are SNAPSHOTTED (clone), not drained — drain
+/// remains in Phase 5 where the actual `base.transact` happens.
+/// This makes the WAL entry self-contained for crash recovery.
+///
+/// - counter_deltas → CounterDelta per table.
+/// - interner_overlay → InternerOverlayMerge.
+/// - index_write_set → IndexPut / IndexDel (idx_id=0 — Stage 5 wires
+///   real interned idx_id; for now key prefix carries it).
+/// - write_set → Put / Delete via snapshot_ops().
+/// - BumpFtsStats is in-memory only and not serialised.
 pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     let mut ops = Vec::new();
 
@@ -53,6 +66,29 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
                 });
             }
             shamir_tx::IndexWriteOp::BumpFtsStats { .. } => {}
+        }
+    }
+
+    // Phase 4 data ops: snapshot each per-table StagingStore (no
+    // consume — drain happens in Phase 5). This makes the WAL entry
+    // self-contained: recovery can replay tx data writes without
+    // needing the (still-staged) StagingStore around.
+    for staging in tx.write_set.values() {
+        for kv_op in staging.snapshot_ops() {
+            match kv_op {
+                shamir_storage::types::KvOp::Set(k, v) => {
+                    if let Some(rid) = shamir_types::types::record_id::RecordId::try_from_bytes(&k)
+                    {
+                        ops.push(WalOpV2::Put { rid, body: v });
+                    }
+                }
+                shamir_storage::types::KvOp::Remove(k) => {
+                    if let Some(rid) = shamir_types::types::record_id::RecordId::try_from_bytes(&k)
+                    {
+                        ops.push(WalOpV2::Delete { rid });
+                    }
+                }
+            }
         }
     }
 
