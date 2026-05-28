@@ -311,3 +311,28 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
     assert!(put_found, "expected WalOpV2::Put for staged Set");
     assert!(del_found, "expected WalOpV2::Delete for staged Remove");
 }
+
+#[tokio::test]
+async fn ssi_conflict_detected_via_repo_version_provider() {
+    use crate::table::TableConfig;
+    use shamir_tx::IsolationLevel;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("users"));
+    let tbl = repo.get_table("users").await.unwrap();
+    let rid = tbl
+        .insert(&shamir_types::types::value::InnerValue::Str("v".into()))
+        .await
+        .unwrap();
+
+    let (mut tx, _g) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+
+    let token = crate::table::table_manager::table_token_for("users");
+    tx.record_read(token, rid.to_bytes(), 0);
+
+    let outcome = repo.commit_tx(tx).await;
+    assert!(
+        outcome.is_ok(),
+        "no conflict expected — non-tx insert doesn't bump mvcc version yet"
+    );
+}

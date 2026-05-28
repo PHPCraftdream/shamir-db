@@ -15,7 +15,7 @@ pub mod tests;
 pub use interner_manager::InternerManager;
 pub use record_counter::RecordCounter;
 pub use table_config::TableConfig;
-pub use table_manager::TableManager;
+pub use table_manager::{table_token_for, TableManager};
 
 #[cfg(test)]
 pub use table::Table;

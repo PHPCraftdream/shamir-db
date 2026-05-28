@@ -30,6 +30,15 @@ struct StagedMutation {
     counter_delta: i64,
 }
 
+/// Compute the deterministic token for a table name.
+/// Same hash as `TableManager::table_token` (instance method).
+pub fn table_token_for(name: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    h.finish()
+}
+
 pub struct TableManager {
     name: String,
     table: Arc<Table>,
@@ -285,10 +294,7 @@ impl TableManager {
     /// Stage 4 implementation: deterministic hash of `self.name`.
     /// Stage 5 will replace with real repo-level interner ID.
     pub fn table_token(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        self.name.hash(&mut h);
-        h.finish()
+        table_token_for(&self.name)
     }
 
     /// Borrow the info_store this table writes its sidecar
