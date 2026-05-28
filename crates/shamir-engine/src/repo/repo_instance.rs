@@ -25,6 +25,8 @@ pub struct RepoInstance {
     /// TableManager — both share the same data_store reference.
     /// Key = `table_token_for(name)` (deterministic).
     per_table_mvcc: Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>>,
+    /// Atomic tx telemetry counters.
+    tx_metrics: Arc<shamir_tx::TxMetrics>,
 }
 
 impl Clone for RepoInstance {
@@ -37,6 +39,7 @@ impl Clone for RepoInstance {
             tx_gate: Arc::clone(&self.tx_gate),
             repo_wal: Arc::clone(&self.repo_wal),
             per_table_mvcc: Arc::clone(&self.per_table_mvcc),
+            tx_metrics: Arc::clone(&self.tx_metrics),
         }
     }
 }
@@ -62,6 +65,7 @@ impl RepoInstance {
             tx_gate: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
             per_table_mvcc: Arc::new(scc::HashMap::new()),
+            tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
         }
     }
 
@@ -85,6 +89,11 @@ impl RepoInstance {
     /// data writes through version-aware storage.
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>> {
         &self.per_table_mvcc
+    }
+
+    /// Atomic transaction telemetry counters.
+    pub fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
+        &self.tx_metrics
     }
 
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
@@ -231,6 +240,7 @@ impl RepoInstance {
         &self,
         isolation: shamir_tx::IsolationLevel,
     ) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
+        self.tx_metrics.on_tx_start();
         let gate = self.tx_gate().await?;
         let guard = gate.open_snapshot().await;
         let snapshot_version = guard.version();
@@ -395,6 +405,7 @@ impl RepoInstance {
         for mvcc in stores {
             total += mvcc.gc().await?;
         }
+        self.tx_metrics.on_gc_run(total);
         Ok(total)
     }
 }

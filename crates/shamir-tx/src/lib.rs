@@ -33,6 +33,7 @@
 pub mod id_remap;
 pub mod index_write_op;
 pub mod layered_interner;
+pub mod metrics;
 pub mod mvcc_store;
 pub mod repo_tx_gate;
 pub mod repo_wal_manager;
@@ -45,6 +46,7 @@ pub mod version_provider;
 pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
+pub use metrics::{TxMetrics, TxMetricsSnapshot};
 pub use mvcc_store::MvccStore;
 pub use repo_tx_gate::{RepoTxGate, SnapshotGuard};
 pub use repo_wal_manager::RepoWalManager;

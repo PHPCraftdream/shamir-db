@@ -108,8 +108,20 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
     ops
 }
 
-pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
+pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
+    match commit_tx_inner(tx, repo).await {
+        Ok(outcome) => Ok(outcome),
+        Err(TxError::Storage(e)) => {
+            repo.tx_metrics().on_tx_aborted_storage();
+            Err(TxError::Storage(e))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
     if tx.is_expired(DEFAULT_MAX_TX_LIFETIME) {
+        repo.tx_metrics().on_tx_aborted_expired();
         return Err(TxError::Expired {
             elapsed: tx.elapsed(),
             max: DEFAULT_MAX_TX_LIFETIME,
@@ -172,6 +184,7 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
             None => tx.validate_read_set(|_t, _k| Some(0u64)),
         };
         if let Err((_table_id, key)) = validation {
+            repo.tx_metrics().on_tx_aborted_ssi();
             return Err(TxError::SsiConflict { key });
         }
     }
@@ -219,6 +232,8 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
 
     // Phase 7: WAL cleanup
     wal.commit(tx.tx_id.0).await?;
+
+    repo.tx_metrics().on_tx_committed();
 
     Ok(TxOutcome {
         tx_id: tx.tx_id.0,
