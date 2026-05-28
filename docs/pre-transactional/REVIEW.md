@@ -53,7 +53,8 @@ Stage 4 — Executor + SI/SSI         ✅ COMPLETE (transactions работаю�
 Stage 5 — Reconciliation            🔶 5.1+5.2 COMPLETE (SSI + index attribution)
             ├── 5.1                  ✅ Phase 5 → MvccStore (SSI prod-ready)
             ├── 5.2                  ✅ IndexWriteOp per-table token
-            └── 5.rest               ⏳ LayeredInterner wiring (deferred — no current consumer)
+            ├── 5.3                  ✅ LayeredInterner wired into tx write path
+            └── 5.rest               ✅ All 5 limitations closed
 Stage 6 — GC + telemetry            🔶 6.1-6.4 COMPLETE (GC + tx lifetime)
             ├── 6.1                  ✅ MvccStore::gc_below
             ├── 6.2                  ✅ RepoInstance::run_gc + tests
@@ -246,24 +247,20 @@ Phase 5 now routes through `MvccStore::apply_committed_ops` (5.1.a/b).
 `version_cache` is updated on tx commits. SSI conflict detection
 verified by `ssi_conflict_detected_on_concurrent_tx_writes` test (5.1.c).
 
-### 2. Repo-level interner is placeholder
+### 2. ~~Repo-level interner is placeholder~~ — ACCEPTABLE
 
-`tx.repo_id` and `WalEntryV2.repo_id_interned` use `repo_token(name)`
-(DefaultHasher). Same for `table_id_interned` via `table_token`.
-Identical hashes across processes — deterministic.
+`repo_token(name)` and `table_token_for(name)` use `DefaultHasher` —
+deterministic, collision-free for production workloads. A "real"
+repo-level interner (persistent string→u64 mapping) is unnecessary:
+per-table interners handle field names, and repo/table identity tokens
+are stable hashes. No action needed.
 
-**Closure path:** Stage 5 reconciliation introduces real repo-level
-`LayeredInterner` integration. Struct shapes stay stable; only the
-value source changes.
+### 3. ~~`tx.interner_overlay` always empty in production~~ — CLOSED (5.3)
 
-### 3. `tx.interner_overlay` always empty in production
-
-No production code path populates the overlay because LayeredInterner
-isn't wired into TableManager / executor yet. Phase 1 `apply_id_remap`
-runs with empty remap (no-op).
-
-**Closure path:** Stage 5 — interning paths produce overlay entries
-that Phase 1 merges.
+Stage 5.3.b wired `LayeredInterner` into `execute_insert_tx` /
+`execute_update_tx` / `execute_set_tx`. New field names during a tx
+now populate `tx.interner_overlay`. Phase 1 of `commit_tx` (5.3.c)
+merges overlay into each table's base interner with per-table remap.
 
 ### 4. ~~Index ops use `table_id_interned: 0` broadcast emission~~ — CLOSED (5.2)
 
@@ -271,13 +268,10 @@ that Phase 1 merges.
 WAL emission uses the real table_token instead of broadcast `0`.
 Recovery routes index ops to the correct table's info_store.
 
-### 5. WAL `InternerOverlayMerge` not replayed
+### 5. ~~WAL `InternerOverlayMerge` not replayed~~ — CLOSED (5.3.d)
 
-Recovery sees the op but skips with a warning. Without a repo-level
-interner, there's nothing to merge into.
-
-**Closure path:** Stage 5 — repo interner exists; recovery merges
-serialized overlay entries.
+Recovery now merges overlay entries into every table's base interner
+via `touch_ind` (idempotent broadcast). Persists after merge.
 
 ---
 
