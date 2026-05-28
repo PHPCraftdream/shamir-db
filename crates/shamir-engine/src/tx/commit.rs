@@ -101,8 +101,33 @@ pub async fn commit_tx(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutco
 
     let _lock = gate.commit_lock().await;
 
-    // Phase 1: interner overlay merge → id_remap
-    // TODO(Stage 5): wire repo-level interner.
+    // Phase 1: interner overlay merge → id remap.
+    //
+    // Currently `tx.interner_overlay` stays empty in production flow
+    // because the LayeredInterner integration that populates it lives
+    // in Stage 5 reconciliation. The wire below runs the no-op safe
+    // path: empty overlay → empty remap → apply_id_remap is a free
+    // walk over write_set with no mutations. This locks in the
+    // structural call site so Stage 5 just needs to populate the
+    // overlay upstream.
+    let id_remap: std::collections::HashMap<u64, u64> = if tx.interner_overlay.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        // TODO(Stage 5): once we have a repo-level interner, call
+        // commit_interner_overlay(repo_interner, &tx.interner_overlay)
+        // to merge and obtain the real overlay_id → base_id remap.
+        // For now: log a warning and proceed with empty remap to
+        // surface the regression if some code path starts populating
+        // the overlay without the merge step.
+        log::warn!(
+            "commit_tx: tx.interner_overlay is non-empty but Stage 5 wiring is not landed; \
+             ignoring overlay entries (Stage 5 will plug commit_interner_overlay here)"
+        );
+        std::collections::HashMap::new()
+    };
+    tx.apply_id_remap(&id_remap)
+        .await
+        .map_err(DbError::Codec)?;
 
     // Phase 2 (SSI only): read-set validation.
     //
