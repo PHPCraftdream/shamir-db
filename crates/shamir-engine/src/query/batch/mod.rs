@@ -143,7 +143,9 @@ mod executor;
 // DTOs, the topological planner, and the `$query` reference parser are
 // all pure-data and live in `shamir-query-types::batch` — re-exported
 // here so callers keep using `shamir_db::query::batch::*` paths.
-pub use executor::{execute_batch, execute_batch_with_permissions, AdminExecutor, TableResolver};
+pub use executor::{
+    execute_batch, execute_batch_with_permissions, AdminExecutor, QueryRunner, TableResolver,
+};
 pub use shamir_query_types::batch::{
     BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,
     QueryEntry, QueryPath, QueryReference, ReferenceParseError, TransactionInfo,

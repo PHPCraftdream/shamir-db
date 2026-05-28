@@ -199,7 +199,134 @@ fn build_resolved_refs(
     refs
 }
 
+/// Encapsulates per-query execution context — resolver, admin, and
+/// optional transaction state.
+///
+/// In non-tx mode (`tx == None`) runs exactly like the original free
+/// function `execute_single`. In tx mode (`tx == Some(&mut TxContext)`)
+/// each mutation routes through tx-aware methods (`execute_*_tx`).
+///
+/// Per design decision D9 in
+/// `docs/pre-transactional/05-executor-isolation.md`.
+pub struct QueryRunner<'a> {
+    pub resolver: &'a dyn TableResolver,
+    pub admin: Option<&'a dyn AdminExecutor>,
+    pub tx: Option<&'a mut shamir_tx::TxContext>,
+}
+
+impl<'a> QueryRunner<'a> {
+    /// Execute a single query entry.
+    ///
+    /// Dispatches by `BatchOp` variant. When `self.tx.is_some()`,
+    /// mutation ops (Insert/Update/Delete/Set) route through
+    /// `TableManager::execute_*_tx`; read and admin ops are
+    /// unchanged.
+    pub async fn run(
+        &mut self,
+        alias: &str,
+        entry: &QueryEntry,
+        resolved_refs: &TMap<String, QueryResult>,
+    ) -> Result<QueryResult, BatchError> {
+        // Admin ops — delegate to AdminExecutor (no tx).
+        if entry.op.is_admin() {
+            return match self.admin {
+                Some(executor) => executor.execute_admin(&entry.op).await,
+                None => Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: "Admin operations not supported in this context".to_string(),
+                }),
+            };
+        }
+
+        let table_ref = entry.op.table_ref().unwrap();
+        let table = self
+            .resolver
+            .resolve(table_ref)
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: alias.to_string(),
+                message: e.to_string(),
+            })?;
+
+        let interner = table
+            .interner()
+            .get()
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: alias.to_string(),
+                message: e.to_string(),
+            })?;
+
+        let ctx = FilterContext::new(interner, resolved_refs);
+
+        match &entry.op {
+            BatchOp::Read(query) => {
+                table
+                    .read(query, &ctx)
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                    })
+            }
+
+            BatchOp::Insert(op) => {
+                let wr = match self.tx.as_deref_mut() {
+                    Some(tx) => table.execute_insert_tx(op, tx).await,
+                    None => table.execute_insert(op).await,
+                }
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: e.to_string(),
+                })?;
+                Ok(write_result_to_query_result(wr))
+            }
+
+            BatchOp::Update(op) => {
+                let wr = match self.tx.as_deref_mut() {
+                    Some(tx) => table.execute_update_tx(op, &ctx, tx).await,
+                    None => table.execute_update(op, &ctx).await,
+                }
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: e.to_string(),
+                })?;
+                Ok(write_result_to_query_result(wr))
+            }
+
+            BatchOp::Delete(op) => {
+                let wr = match self.tx.as_deref_mut() {
+                    Some(tx) => table.execute_delete_tx(op, &ctx, tx).await,
+                    None => table.execute_delete(op, &ctx).await,
+                }
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: e.to_string(),
+                })?;
+                Ok(write_result_to_query_result(wr))
+            }
+
+            BatchOp::Set(op) => {
+                let wr = match self.tx.as_deref_mut() {
+                    Some(tx) => table.execute_set_tx(op, tx).await,
+                    None => table.execute_set(op).await,
+                }
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: e.to_string(),
+                })?;
+                Ok(write_result_to_query_result(wr))
+            }
+
+            // Admin ops are handled before this match via is_admin() check
+            _ => unreachable!("Admin ops should have been handled earlier"),
+        }
+    }
+}
+
 /// Execute a single query/operation entry.
+///
+/// Thin wrapper around [`QueryRunner`] with `tx: None`.
 async fn execute_single(
     alias: &str,
     entry: &QueryEntry,
@@ -207,93 +334,12 @@ async fn execute_single(
     admin: Option<&dyn AdminExecutor>,
     resolved_refs: &TMap<String, QueryResult>,
 ) -> Result<QueryResult, BatchError> {
-    // Admin ops — delegate to AdminExecutor
-    if entry.op.is_admin() {
-        return match admin {
-            Some(executor) => executor.execute_admin(&entry.op).await,
-            None => Err(BatchError::QueryError {
-                alias: alias.to_string(),
-                message: "Admin operations not supported in this context".to_string(),
-            }),
-        };
-    }
-
-    let table_ref = entry.op.table_ref().unwrap();
-    let table = resolver
-        .resolve(table_ref)
-        .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: e.to_string(),
-        })?;
-
-    let interner = table
-        .interner()
-        .get()
-        .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: e.to_string(),
-        })?;
-
-    let ctx = FilterContext::new(interner, resolved_refs);
-
-    match &entry.op {
-        BatchOp::Read(query) => table
-            .read(query, &ctx)
-            .await
-            .map_err(|e| BatchError::QueryError {
-                alias: alias.to_string(),
-                message: e.to_string(),
-            }),
-
-        BatchOp::Insert(op) => {
-            let wr = table
-                .execute_insert(op)
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                })?;
-            Ok(write_result_to_query_result(wr))
-        }
-
-        BatchOp::Update(op) => {
-            let wr = table
-                .execute_update(op, &ctx)
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                })?;
-            Ok(write_result_to_query_result(wr))
-        }
-
-        BatchOp::Delete(op) => {
-            let wr = table
-                .execute_delete(op, &ctx)
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                })?;
-            Ok(write_result_to_query_result(wr))
-        }
-
-        BatchOp::Set(op) => {
-            let wr = table
-                .execute_set(op)
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                })?;
-            Ok(write_result_to_query_result(wr))
-        }
-
-        // Admin ops are handled before this match via is_admin() check
-        _ => unreachable!("Admin ops should have been handled earlier"),
-    }
+    let mut runner = QueryRunner {
+        resolver,
+        admin,
+        tx: None,
+    };
+    runner.run(alias, entry, resolved_refs).await
 }
 
 /// Convert WriteResult to QueryResult for BatchResponse compatibility.
