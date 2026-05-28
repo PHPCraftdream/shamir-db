@@ -251,3 +251,108 @@ async fn ssi_conflict_detected_on_concurrent_tx_writes() {
         ),
     }
 }
+
+/// Scenario #1: Two SI transactions write the same key.
+/// Both commit successfully (SI allows lost updates — last writer wins).
+#[tokio::test]
+async fn si_lost_update_last_writer_wins() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    let rid = tbl
+        .insert(&InnerValue::Str("original".into()))
+        .await
+        .unwrap();
+
+    // tx1 and tx2 both SI
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+
+    // Both write to the same record
+    tbl.update_tx(rid, &InnerValue::Str("tx1_val".into()), Some(&mut tx1))
+        .await
+        .unwrap();
+    tbl.update_tx(rid, &InnerValue::Str("tx2_val".into()), Some(&mut tx2))
+        .await
+        .unwrap();
+
+    // Both commit — SI allows this (last writer wins)
+    repo.commit_tx(tx1).await.unwrap();
+    repo.commit_tx(tx2).await.unwrap();
+
+    // Final value = tx2's write (it committed last)
+    let val = tbl.get(rid).await.unwrap();
+    assert!(
+        matches!(val, InnerValue::Str(ref s) if s == "tx2_val"),
+        "expected tx2_val, got {:?}",
+        val
+    );
+}
+
+/// Scenario #7: Snapshot holds stable view while concurrent tx commits happen.
+#[tokio::test]
+async fn snapshot_stable_during_concurrent_tx_commits() {
+    use crate::table::table_manager::table_token_for;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+
+    // Insert v1 via tx0 — establishes baseline.
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid = tbl
+        .insert_tx(&InnerValue::Str("v1".into()), Some(&mut tx0))
+        .await
+        .unwrap();
+    repo.commit_tx(tx0).await.unwrap();
+    drop(_g0);
+
+    // tx1 opens snapshot AFTER v1 is committed.
+    let (tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let snap = tx1.snapshot_version;
+
+    // tx2 overwrites to v2.
+    let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.update_tx(rid, &InnerValue::Str("v2".into()), Some(&mut tx2))
+        .await
+        .unwrap();
+    repo.commit_tx(tx2).await.unwrap();
+    drop(_g2);
+
+    // tx3 overwrites to v3.
+    let (mut tx3, _g3) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.update_tx(rid, &InnerValue::Str("v3".into()), Some(&mut tx3))
+        .await
+        .unwrap();
+    repo.commit_tx(tx3).await.unwrap();
+    drop(_g3);
+
+    // tx1's snapshot should still see v1 (its snapshot predates tx2/tx3 commits).
+    let token = table_token_for("t");
+    let key = rid.to_bytes();
+    let mvcc = repo
+        .per_table_mvcc()
+        .read_async(&token, |_, m| std::sync::Arc::clone(m))
+        .await
+        .unwrap();
+    let val = mvcc.get_at(&key, snap).await.unwrap();
+    assert!(val.is_some(), "v1 should be visible at tx1's snapshot");
+    let inner = InnerValue::from_bytes(val.unwrap()).unwrap();
+    assert!(
+        matches!(inner, InnerValue::Str(ref s) if s == "v1"),
+        "tx1 snapshot should see v1, got {:?}",
+        inner
+    );
+
+    drop(tx1);
+    drop(_g1);
+
+    // After all tx have committed, current value should be v3.
+    let final_val = tbl.get(rid).await.unwrap();
+    assert!(
+        matches!(final_val, InnerValue::Str(ref s) if s == "v3"),
+        "expected v3, got {:?}",
+        final_val
+    );
+}
