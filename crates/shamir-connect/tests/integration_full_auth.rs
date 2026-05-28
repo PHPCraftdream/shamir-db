@@ -337,6 +337,24 @@ fn rejects_all_zero_client_nonce() {
 }
 
 #[test]
+fn verify_nonces_distinct_rejects_equal_nonces() {
+    // M-tier audit M7 defense-in-depth: equal client/server nonces must
+    // be rejected to avoid weakening the SCRAM anti-replay invariant.
+    use shamir_connect::server::handshake::verify_nonces_distinct;
+    let nonce = [0x33u8; 32];
+    let res = verify_nonces_distinct(&nonce, &nonce);
+    assert!(res.is_err(), "equal nonces must be rejected");
+}
+
+#[test]
+fn verify_nonces_distinct_accepts_different_nonces() {
+    use shamir_connect::server::handshake::verify_nonces_distinct;
+    let cn = [0x33u8; 32];
+    let sn = [0x44u8; 32];
+    verify_nonces_distinct(&cn, &sn).expect("differing nonces must be accepted");
+}
+
+#[test]
 fn client_pin_mismatch_after_auth_ok_aborts() {
     // Server signs with one Ed25519 key; client has a different pin.
     let username = "alice";

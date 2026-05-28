@@ -152,3 +152,33 @@ async fn endpoints_return_expected_codes_and_content() {
 
     handle.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refuses_non_loopback_bind_without_opt_in() {
+    // M-tier audit M5: spawning the observability HTTP server on a
+    // non-loopback address without explicit `allow_public_metrics`
+    // must fail before any port is bound. /metrics exposes lockout
+    // counters that are useful signal for a distributed attacker.
+    use shamir_server::observability::{spawn, ObservabilityError, ObservabilityState};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let state = ObservabilityState::new();
+    // Pick a non-loopback address — `0.0.0.0` is the obvious case but
+    // it's also the canonical wildcard so a corresponding `bind` would
+    // succeed if we let it. The guard must trip BEFORE the bind.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+    let res = spawn(addr, state, false, None, false).await;
+    match res {
+        Err(ObservabilityError::NonLoopbackBindRejected(rejected)) => {
+            assert_eq!(
+                rejected.ip(),
+                addr.ip(),
+                "rejected addr must be the one we passed"
+            );
+        }
+        other => panic!(
+            "expected NonLoopbackBindRejected, got {:?}",
+            other.as_ref().err()
+        ),
+    }
+}

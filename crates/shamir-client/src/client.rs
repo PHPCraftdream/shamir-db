@@ -216,13 +216,21 @@ impl Client {
 
         let success = hs
             .process_auth_ok(&auth_ok, &derived, &auth_message, |pin| {
-                *pin_for_cb.lock().unwrap() = Some(*pin);
+                // §B2 audit: poison-tolerant — the mutex is local to
+                // this stack frame, so any poison can only originate
+                // from a panic in this scope; recovering the inner
+                // value is sound and lets the handshake complete its
+                // error path cleanly rather than double-panicking.
+                let mut guard = pin_for_cb
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *guard = Some(*pin);
             })
             .map_err(|e| ClientError::Handshake(e.to_string()))?;
 
         let pinned_hash = pin_capture
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .expect("either trusted_pin pre-set or TOFU callback fired");
 
         Ok(Self {
