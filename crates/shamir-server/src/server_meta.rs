@@ -29,6 +29,7 @@ use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::bootstrap::BootstrapState;
 use shamir_connect::server::config::ServerSecrets;
 use shamir_connect::server::lockout::LockoutSnapshot;
+use shamir_connect::server::rate_limit::RateLimitSnapshot;
 use shamir_connect::server::rotation::ServerIdentityState;
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,13 @@ const KEY_TIMES: &str = "times";
 /// brute-force lockout by inducing a restart). Snapshot interval and
 /// trade-offs are documented in `shamir_connect::server::lockout`.
 const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
+/// Periodic dump of `InMemoryRateLimiter` token buckets (M2 follow-up).
+/// Persisted alongside the lockout snapshot by the same 60s background
+/// task so per-subnet rate-limit state survives restarts and an attacker
+/// cannot reset depleted buckets by inducing a restart. Rehydration is
+/// conservative (no free refill across downtime) — see
+/// `shamir_connect::server::rate_limit`.
+const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
 
 // ---------------------------------------------------------------------------
 // Persisted blobs (one per logical chunk)
@@ -616,6 +624,22 @@ impl ServerMetaStore {
     /// write-per-minute instead of one-write-per-failed-auth).
     pub fn store_lockout_snapshot(&self, snapshot: &LockoutSnapshot) -> Result<(), MetaError> {
         self.with_write_txn(|table| put(table, KEY_LOCKOUT_SNAPSHOT, snapshot))
+    }
+
+    /// Load the last persisted rate-limit snapshot, if any. Returns
+    /// `Ok(None)` on fresh installs — the caller (the in-memory limiter)
+    /// then starts empty.
+    pub fn ratelimit_snapshot(&self) -> Result<Option<RateLimitSnapshot>, MetaError> {
+        self.read_blob::<RateLimitSnapshot>(KEY_RATELIMIT_SNAPSHOT)
+    }
+
+    /// Persist a rate-limit snapshot. Called every ~60 s by the same
+    /// background task that snapshots lockout (see `server::launch`) so
+    /// per-subnet bucket state survives restarts (worst-case loss window
+    /// equals the snapshot interval; the spec §8.6 warmup window covers any
+    /// drift during the recovery interval).
+    pub fn store_ratelimit_snapshot(&self, snapshot: &RateLimitSnapshot) -> Result<(), MetaError> {
+        self.with_write_txn(|table| put(table, KEY_RATELIMIT_SNAPSHOT, snapshot))
     }
 }
 
