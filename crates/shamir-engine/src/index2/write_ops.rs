@@ -56,6 +56,61 @@ pub async fn apply_index_ops(
     Ok(())
 }
 
+/// Apply a batch of staged index ops at transaction commit time
+/// (commit pipeline Phase 5c).
+///
+/// `tx.index_write_set` accumulates `IndexWriteOp`s **without** index-id
+/// attribution (only a per-op `table_token`). At commit we therefore:
+///
+/// - `SetPosting` / `RemovePosting` → applied directly to the table's
+///   `info_store` (the same physical store every index2 backend writes
+///   its postings into — see `TableManager::create`). This is exactly
+///   what V2 WAL recovery does for `IndexPut` / `IndexDel`
+///   (`recovery::replay_v2_op`), so re-applying after a happy-path
+///   commit is idempotent (`set`/`remove` are last-write-wins).
+///
+/// - `BumpFtsStats` → broadcast to **all** of the table's index2
+///   backends via `apply_in_memory`. Only the FTS-ranked backend
+///   reacts (its `apply_in_memory` matches `BumpFtsStats`); every other
+///   backend's default impl is a no-op. Broadcasting is necessary
+///   because the op carries no idx_id to pinpoint the owning backend.
+///   `BumpFtsStats` is in-memory only and is **not** serialised to the
+///   WAL (`wal_ops_from_tx` skips it), so crash recovery rebuilds these
+///   counters via `rebuild()` on open rather than replaying them.
+pub async fn apply_index_ops_at_commit(
+    ops: &[IndexWriteOp],
+    info_store: &Arc<dyn Store>,
+    backends: &[Arc<dyn IndexBackend>],
+) -> Result<(), IndexError> {
+    let mut in_memory_ops: Vec<IndexWriteOp> = Vec::new();
+
+    for op in ops {
+        match op {
+            IndexWriteOp::SetPosting { key, value } => {
+                info_store
+                    .set(key.clone(), value.clone())
+                    .await
+                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+            }
+            IndexWriteOp::RemovePosting { key } => {
+                let _ = info_store
+                    .remove(key.clone())
+                    .await
+                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+            }
+            other => in_memory_ops.push(other.clone()),
+        }
+    }
+
+    if !in_memory_ops.is_empty() {
+        for backend in backends {
+            backend.apply_in_memory(&in_memory_ops).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// tx-aware variant of [`apply_index_ops`].
 ///
 /// - `tx == None` → behaves exactly like [`apply_index_ops`]: ops are
@@ -70,13 +125,11 @@ pub async fn apply_index_ops(
 /// `table_token` is the deterministic per-table hash (see
 /// `table_manager::table_token_for`). It is ignored when `tx == None`.
 ///
-/// HIGH-6: in the current commit pipeline, Phase 5c-d is still a TODO
-/// — `tx.index_write_set` is emitted to the WAL entry (so crash
-/// recovery replays the postings) and counter deltas are applied,
-/// but `info_store.set/remove` and `backend.apply_in_memory` are NOT
-/// invoked on the happy commit path. That is a separate gap tracked
-/// against `commit.rs::commit_tx_inner` and out of scope for the
-/// staging-side fix here.
+/// HIGH-6: staged ops are applied on the happy commit path by
+/// `commit::commit_tx_inner` Phase 5c via [`apply_index_ops_at_commit`],
+/// and replayed on crash recovery via `recovery::replay_v2_op`
+/// (`IndexPut` / `IndexDel`). A dropped/aborted tx leaves no postings
+/// because `index_write_set` is owned by the `TxContext` (RAII drop).
 pub async fn apply_index_ops_tx(
     ops: &[IndexWriteOp],
     store: &Arc<dyn Store>,

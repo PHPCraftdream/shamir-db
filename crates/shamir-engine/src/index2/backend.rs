@@ -151,4 +151,16 @@ pub trait IndexBackend: Send + Sync {
     async fn apply_in_memory(&self, _ops: &[IndexWriteOp]) -> Result<(), IndexError> {
         Ok(())
     }
+
+    /// Promote any per-tx staged side state for `tx_id` into the live
+    /// structure at transaction commit (commit pipeline Phase 5d,
+    /// HIGH-6). Default no-op — only backends that maintain non-storage
+    /// staging (e.g. `VectorBackend`'s HNSW graph) override this.
+    async fn commit_staged_tx(&self, _tx_id: shamir_tx::TxId) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    /// Drop any per-tx staged side state for `tx_id` on transaction
+    /// abort / rollback (HIGH-6). Default no-op. See [`commit_staged_tx`].
+    async fn rollback_staged_tx(&self, _tx_id: shamir_tx::TxId) {}
 }
