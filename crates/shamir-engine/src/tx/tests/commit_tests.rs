@@ -164,3 +164,26 @@ async fn commit_empty_write_set_still_succeeds() {
     let outcome = commit_tx(tx, &repo).await.unwrap();
     assert!(outcome.commit_version > 0);
 }
+
+#[tokio::test]
+async fn commit_serializable_with_empty_read_set_succeeds() {
+    use shamir_tx::{IsolationLevel, TxContext, TxId};
+    let repo = make_repo();
+    let tx = TxContext::new(TxId::new(500), 0, 0, IsolationLevel::Serializable);
+    // empty read_set + zero provider → passes Phase 2.
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.commit_version > 0);
+}
+
+#[tokio::test]
+async fn commit_serializable_with_read_set_passes_zero_provider_scaffold() {
+    // Until Stage 4.D.6 plugs in a real version provider, the scaffold
+    // uses `|_, _| 0`. Any tx with non-empty read_set still passes
+    // commit because 0 ≤ version_seen trivially.
+    use shamir_tx::{IsolationLevel, TxContext, TxId};
+    let repo = make_repo();
+    let mut tx = TxContext::new(TxId::new(501), 0, 0, IsolationLevel::Serializable);
+    tx.record_read(7, Bytes::from_static(b"key"), 5);
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.commit_version > 0);
+}

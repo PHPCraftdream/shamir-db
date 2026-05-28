@@ -118,6 +118,16 @@ impl MvccStore {
         self.version_cache.read(&key_bytes, |_, v| *v).unwrap_or(0)
     }
 
+    /// Public accessor: current committed version for `key`, or `0` if
+    /// the key has never been written through this store.
+    ///
+    /// Used by SSI read-set validation (Stage 4.D.5+) — the caller
+    /// captures this value when reading inside a tx, then commit re-
+    /// queries it to detect "another tx wrote this key since I read".
+    pub fn version_of(&self, key: &[u8]) -> u64 {
+        self.current_version(key)
+    }
+
     /// Slow path: range scan history for the latest version ≤ `snapshot`.
     async fn scan_history_for_version(&self, key: &[u8], snapshot: u64) -> DbResult<Option<Bytes>> {
         let lo = encode_version_key(key, 0);
@@ -368,5 +378,25 @@ mod tests {
         // Verify that main_store() returns the same Arc
         assert!(Arc::ptr_eq(&main, mvcc.main_store()));
         assert!(Arc::ptr_eq(&history, mvcc.history_store()));
+    }
+
+    #[tokio::test]
+    async fn version_of_returns_zero_for_unknown_key() {
+        let mvcc = make_mvcc();
+        let v = mvcc.version_of(b"never_written");
+        assert_eq!(v, 0);
+    }
+
+    #[tokio::test]
+    async fn version_of_returns_cached_version_after_versioned_set() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+        let key = Bytes::from("kx");
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let v = mvcc.version_of(&key);
+        assert!(v > 0, "version_of must reflect the assigned version");
     }
 }
