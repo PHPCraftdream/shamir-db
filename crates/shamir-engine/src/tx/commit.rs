@@ -218,14 +218,66 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         }
     }
 
-    // Phase 2.6: authoritative unique re-validation under commit_lock.
+    // Phase 2.5 (HIGH-A): acquire each unique table's `unique_write_lock`
+    // and HOLD it across Phase 2.6 → 5c.
+    //
+    // The problem this closes: `commit_lock` (held since the top of this fn)
+    // only serialises *committers*. Non-tx `insert` / `set` / `delete` take a
+    // DIFFERENT mutex — the per-table `unique_write_lock` — and never touch
+    // `commit_lock`. So without this step a non-tx unique write could claim or
+    // overwrite the same unique posting in the window between this tx's Phase
+    // 2.6 re-check and its Phase 5c posting write, producing a duplicate
+    // unique value + corrupted index. Acquiring the same per-table lock the
+    // non-tx path uses makes the tx's "check unique key free → write posting"
+    // atomic against every non-tx unique writer to that table.
+    //
+    // Lock ordering / ABBA-freedom (§B9):
+    //   - This committer holds `commit_lock(repo)` FIRST, then acquires the
+    //     per-table `unique_write_lock`s. The per-table locks are acquired in
+    //     a deterministic order (distinct tokens sorted ascending) so the
+    //     ordering is documented and future-proof even though `commit_lock`
+    //     already guarantees a single committer at a time.
+    //   - A non-tx writer holds at most ONE `unique_write_lock` and NEVER
+    //     waits on `commit_lock` or a second `unique_write_lock`. So its lock
+    //     set can never form the back-edge of a cycle with a committer's set.
+    //   - Two committers are mutually excluded by `commit_lock`, so only one
+    //     ever holds any `unique_write_lock` at a time.
+    //   Therefore no ABBA cycle is possible.
+    //
+    // We use `lock_owned()` so the guards can be collected into a `Vec`
+    // without borrow-lifetime entanglement (each `OwnedMutexGuard` owns its
+    // `Arc<Mutex<()>>`). Tables without unique guards are untouched — the
+    // non-unique commit path keeps the lock-free fast path.
+    //
+    // Perf trade: holding these locks across Phases 3/4/5a/5b/5c serialises
+    // non-tx unique writes to the affected tables against this commit for the
+    // duration of the commit's data/index writes. That is exactly the
+    // correctness requirement (the Phase 2.6 guard must stay decisive through
+    // the posting write); the cost is bounded to tables that actually carry
+    // unique guards in this tx, and only against *unique* writers (non-unique
+    // writers never take this lock).
+    let mut unique_tokens: Vec<u64> = tx.unique_guards.iter().map(|g| g.table_token).collect();
+    unique_tokens.sort_unstable();
+    unique_tokens.dedup();
+    let mut uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>> =
+        Vec::with_capacity(unique_tokens.len());
+    for token in &unique_tokens {
+        if let Some(tbl) = repo.table_by_token(*token).await? {
+            uwl_guards.push(tbl.unique_write_lock().lock_owned().await);
+        }
+    }
+
+    // Phase 2.6: authoritative unique re-validation under commit_lock +
+    // per-table unique_write_lock (held since Phase 2.5).
     //
     // Stage-time `validate_unique_*` is optimistic — it reads pre-commit
     // state, so two concurrent txs claiming the same unique value both
     // pass it. `commit_lock` (held since the top of this fn) serialises
-    // committers, so re-checking the claimed keys here is decisive: no
-    // other committer can interleave between this check and the Phase 5
-    // data/index writes that publish the postings.
+    // committers, and the per-table `unique_write_lock`s (Phase 2.5) exclude
+    // non-tx unique writers, so re-checking the claimed keys here is decisive
+    // against ALL writers: no committer AND no non-tx writer can interleave
+    // between this check and the Phase 5 data/index writes that publish the
+    // postings.
     //
     // The unique key is deterministic in the value, so a byte-equal
     // `info_store.get(index_key)` settles ownership:
@@ -350,6 +402,14 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             }
         }
     }
+
+    // HIGH-A: release the per-table unique_write_lock guards now that the
+    // unique postings are published (Phase 5c done). The window the Phase 2.6
+    // guard had to dominate — re-check → posting write — is closed, so a non-tx
+    // unique writer may resume. Phases 5d/6/6.5/7 (HNSW promote, publish,
+    // recovery markers, WAL cleanup) do not touch unique postings, so holding
+    // the locks past here would only add contention.
+    drop(uwl_guards);
 
     // Phase 5d: promote HNSW staged vectors into the live graph (HIGH-6).
     //
