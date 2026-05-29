@@ -25,6 +25,14 @@ pub struct RepoInstance {
     /// TableManager — both share the same data_store reference.
     /// Key = `table_token_for(name)` (deterministic).
     per_table_mvcc: Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>>,
+    /// Reverse index `table_token_for(name) → name`, maintained at table
+    /// *registration* time (`from_box_repo` + `add_table`), independent of
+    /// whether the table has been instantiated yet. Lets `table_by_token`
+    /// resolve a token in O(1) instead of scanning every config and
+    /// re-hashing its name under the per-repo `commit_lock` (III.1). The
+    /// token is a pure function of the name, so this is just a
+    /// pre-computed inverse of that function.
+    token_names: Arc<scc::HashMap<u64, String>>,
     /// Atomic tx telemetry counters.
     tx_metrics: Arc<shamir_tx::TxMetrics>,
 }
@@ -39,6 +47,7 @@ impl Clone for RepoInstance {
             tx_gate: Arc::clone(&self.tx_gate),
             repo_wal: Arc::clone(&self.repo_wal),
             per_table_mvcc: Arc::clone(&self.per_table_mvcc),
+            token_names: Arc::clone(&self.token_names),
             tx_metrics: Arc::clone(&self.tx_metrics),
         }
     }
@@ -51,7 +60,9 @@ impl RepoInstance {
 
     fn from_box_repo(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
+        let token_names: scc::HashMap<u64, String> = scc::HashMap::new();
         for cfg in configs {
+            register_token(&token_names, &cfg.name);
             configs_map.insert(cfg.name.clone(), cfg);
         }
 
@@ -65,6 +76,7 @@ impl RepoInstance {
             tx_gate: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
             per_table_mvcc: Arc::new(scc::HashMap::new()),
+            token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
         }
     }
@@ -172,7 +184,12 @@ impl RepoInstance {
 
     /// Register a new table in the repository.
     /// The table is lazily created on first access via get_table().
+    ///
+    /// Also records `table_token_for(name) → name` in the reverse index so
+    /// `table_by_token` resolves in O(1) (III.1). Re-registering an already
+    /// known name is idempotent.
     pub fn add_table(&self, config: TableConfig) {
+        register_token(&self.token_names, &config.name);
         self.configs.insert(config.name.clone(), config);
     }
 
@@ -182,6 +199,14 @@ impl RepoInstance {
         let removed = self.configs.remove(table_name).is_some();
         if removed {
             self.tables.remove(table_name);
+            // Drop the reverse-index entry only if it still points at the
+            // table we removed. A (astronomically unlikely) token collision
+            // could have left another name's mapping in place; never evict
+            // someone else's mapping.
+            let token = table_token_for(table_name);
+            let _ = self
+                .token_names
+                .remove_if(&token, |existing| existing.as_str() == table_name);
         }
         removed
     }
@@ -437,25 +462,34 @@ impl RepoInstance {
         table.lookup_by_index(index_name, values).await
     }
 
-    /// cancel-safe: yes — read-only iteration over configured table
-    /// names and a single `get_table` call. Cancellation leaves no
-    /// state mutated (apart from the cancel-safe `get_table` OnceCell
-    /// init).
+    /// cancel-safe: yes — one `scc::HashMap` read plus a single
+    /// `get_table` call. Cancellation leaves no state mutated (apart from
+    /// the cancel-safe `get_table` OnceCell init).
     ///
     /// Look up the table whose token matches `token`. Used by V2 WAL
-    /// recovery to resolve ops by `table_id_interned`.
+    /// recovery to resolve ops by `table_id_interned`, and by the commit
+    /// pipeline (Phases 1, 2.6, 5b–5d) while holding the per-repo
+    /// `commit_lock`.
     ///
-    /// O(N tables) scan — acceptable for recovery hot path which
-    /// touches at most one entry per inflight tx.
+    /// O(1) (III.1): resolves through the `token_names` reverse index that
+    /// `add_table` maintains, instead of scanning every config and
+    /// re-hashing its name. The old O(N) scan grew the serialized
+    /// critical section linearly with schema size. `add_table` and
+    /// `remove_table` keep `token_names` in lock-step with `configs`, so a
+    /// resolved name always still has a config; `get_table` re-validates
+    /// against `configs` inside its init closure regardless.
     pub async fn table_by_token(&self, token: u64) -> DbResult<Option<TableManager>> {
-        let names: Vec<String> = self.configs.iter().map(|e| e.key().clone()).collect();
-        for name in names {
-            if table_token_for(&name) == token {
+        let name = self
+            .token_names
+            .read_async(&token, |_, name| name.clone())
+            .await;
+        match name {
+            Some(name) => {
                 let tbl = self.get_table(&name).await?;
-                return Ok(Some(tbl));
+                Ok(Some(tbl))
             }
+            None => Ok(None),
         }
-        Ok(None)
     }
 
     /// cancel-safe: NO — delegates to `recover_inflight_v2` which iterates
@@ -540,4 +574,35 @@ pub fn repo_token(name: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.hash(&mut h);
     h.finish()
+}
+
+/// Record `table_token_for(name) → name` in the reverse index, detecting
+/// the two non-trivial cases explicitly:
+///
+/// * **Idempotent re-registration** — the same name added twice (e.g.
+///   `create_table` issued twice, or catalogue reload over an existing
+///   config). The existing entry already equals `name`, so this is a
+///   no-op.
+/// * **Token collision** — two *distinct* names that hash to the same
+///   `u64` token. With a 64-bit `DefaultHasher` over table names this is
+///   astronomically unlikely, but if it ever happens we keep the FIRST
+///   registration (do not clobber a live mapping) and log a warning so the
+///   situation is visible instead of silently corrupting `table_by_token`
+///   for the first table. The second table is then unresolvable by token —
+///   the caller should rename it.
+fn register_token(token_names: &scc::HashMap<u64, String>, name: &str) {
+    let token = table_token_for(name);
+    if let Err((_, attempted)) = token_names.insert(token, name.to_string()) {
+        // Key already present — inspect the existing mapping.
+        let existing = token_names.read(&token, |_, n| n.clone());
+        if existing.as_deref() != Some(attempted.as_str()) {
+            log::warn!(
+                "repo_instance: table token collision on {} — keeping '{}', \
+                 refusing '{}'; the latter is unresolvable by token",
+                token,
+                existing.as_deref().unwrap_or("<unknown>"),
+                attempted
+            );
+        }
+    }
 }

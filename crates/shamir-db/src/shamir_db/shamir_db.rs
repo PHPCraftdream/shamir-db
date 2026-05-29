@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
-use crate::engine::table::TableManager;
+use crate::engine::table::{TableConfig, TableManager};
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -74,6 +74,11 @@ impl ShamirDb {
 
         // Load existing repositories and register them
         let repo_records = shamir.system_store.load_repositories().await?;
+        // Load the per-repo table catalogue once (I.2). Each repo's tables
+        // must be re-created BEFORE recovery so V2 crash-recovery's
+        // `table_by_token` resolves and Put/Delete/Index ops actually replay
+        // for disk-backed repos.
+        let table_records = shamir.system_store.load_tables().await?;
         for record in &repo_records {
             let db_name = record["db_name"].as_str().unwrap_or_default();
             let repo_name = record["repo_name"].as_str().unwrap_or_default();
@@ -86,8 +91,27 @@ impl ShamirDb {
             if let Some(db) = shamir.get_db(db_name) {
                 let factory = Self::factory_from_meta(engine, path);
                 if let Some(factory) = factory {
-                    // Load table configs for this repo (tables will be loaded lazily)
-                    let config = RepoConfig::new(repo_name, factory);
+                    // I.2: re-attach the repo WITH its persisted table
+                    // catalogue, so the tables exist (and the token→name
+                    // reverse index is populated) BEFORE recovery runs.
+                    // Previously this passed an empty table list, so a
+                    // disk-backed repo's tables didn't exist on restart and
+                    // V2 recovery's `table_by_token` resolved nothing —
+                    // Put/Delete/Index replay was silently skipped.
+                    let mut config = RepoConfig::new(repo_name, factory);
+                    for trec in &table_records {
+                        if trec["db_name"].as_str() == Some(db_name)
+                            && trec["repo_name"].as_str() == Some(repo_name)
+                        {
+                            if let Some(table_name) = trec["table_name"].as_str() {
+                                let mut tcfg = TableConfig::new(table_name);
+                                if trec["enable_indexes"].as_bool().unwrap_or(false) {
+                                    tcfg = tcfg.with_indexes();
+                                }
+                                config = config.add_table(tcfg);
+                            }
+                        }
+                    }
                     if let Err(e) = db.add_repo(config).await {
                         log::warn!(
                             "shamir_db::init: failed to attach repo '{}/{}' ({}): {}",
@@ -242,6 +266,14 @@ impl ShamirDb {
         let repo_name = config.name.clone();
         let storage_type = Self::extract_storage_type(&config.factory);
         let path = Self::extract_path(&config.factory);
+        // Capture the inline table list before `config` is moved into
+        // `db.add_repo`, so the per-repo table catalogue can be persisted
+        // alongside the repo record (I.2).
+        let inline_tables: Vec<(String, bool)> = config
+            .tables
+            .iter()
+            .map(|t| (t.name.clone(), t.enable_indexes))
+            .collect();
 
         db.add_repo(config).await?;
 
@@ -276,7 +308,102 @@ impl ShamirDb {
             );
         }
 
+        // Persist the inline table catalogue so these tables are re-created
+        // on the next open (I.2). Best-effort per table, matching the
+        // repo-record persistence above.
+        for (table_name, enable_indexes) in &inline_tables {
+            if let Err(e) = self
+                .system_store
+                .save_table(db_name, &repo_name, table_name, *enable_indexes)
+                .await
+            {
+                log::warn!(
+                    "shamir_db::add_repo: failed to persist table catalogue '{}/{}/{}': {}",
+                    db_name,
+                    repo_name,
+                    table_name,
+                    e
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Create a table in a repo and persist it to the table catalogue so it
+    /// survives a restart (I.2).
+    ///
+    /// Delegates to [`DbInstance::create_table`] (the same path that lazily
+    /// instantiates the `TableManager` on first access) and then records the
+    /// table in the system store. Persistence is best-effort: a failed
+    /// catalogue write is logged, not propagated, mirroring `add_repo`.
+    pub async fn add_table(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        enable_indexes: bool,
+    ) -> DbResult<()> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+
+        let mut config = TableConfig::new(table_name);
+        if enable_indexes {
+            config = config.with_indexes();
+        }
+        db.get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?
+            .add_table(config);
+
+        if let Err(e) = self
+            .system_store
+            .save_table(db_name, repo_name, table_name, enable_indexes)
+            .await
+        {
+            log::warn!(
+                "shamir_db::add_table: failed to persist table catalogue '{}/{}/{}': {}",
+                db_name,
+                repo_name,
+                table_name,
+                e
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Drop a table from a repo and remove it from the table catalogue.
+    /// Returns whether the table existed in the running instance.
+    pub async fn drop_table(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<bool> {
+        let db = self
+            .get_db(db_name)
+            .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let removed = db.drop_table(repo_name, table_name)?;
+
+        // Always clear the catalogue entry (idempotent), even if the
+        // in-memory table was already gone, so a stale record can't
+        // resurrect the table on the next open.
+        if let Err(e) = self
+            .system_store
+            .remove_table(db_name, repo_name, table_name)
+            .await
+        {
+            log::warn!(
+                "shamir_db::drop_table: failed to remove table catalogue '{}/{}/{}': {}",
+                db_name,
+                repo_name,
+                table_name,
+                e
+            );
+        }
+
+        Ok(removed)
     }
 
     fn extract_storage_type(factory: &BoxRepoFactory) -> String {

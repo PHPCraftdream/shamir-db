@@ -18,6 +18,10 @@ const SYSTEM_REPO: &str = "system";
 /// System store tables
 const TABLE_DATABASES: &str = "databases";
 const TABLE_REPOSITORIES: &str = "repositories";
+/// Per-repo table catalogue: one record per user table so the table
+/// list survives a restart and crash-recovery can resolve `table_by_token`
+/// for disk-backed repos (I.2).
+const TABLE_TABLES: &str = "tables";
 const TABLE_SETTINGS: &str = "settings";
 const TABLE_USERS: &str = "users";
 const TABLE_ROLES: &str = "roles";
@@ -50,6 +54,7 @@ impl SystemStore {
         let repo_config = RepoConfig::new(SYSTEM_REPO, factory)
             .add_table(TableConfig::new(TABLE_DATABASES))
             .add_table(TableConfig::new(TABLE_REPOSITORIES))
+            .add_table(TableConfig::new(TABLE_TABLES))
             .add_table(TableConfig::new(TABLE_SETTINGS))
             .add_table(TableConfig::new(TABLE_USERS))
             .add_table(TableConfig::new(TABLE_ROLES));
@@ -139,6 +144,11 @@ impl SystemStore {
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
+        // DDL must be durable immediately: flush the MemBuffer-wrapped
+        // store so a crash right after the admin op can't lose (or, for
+        // removes, resurrect) the catalogue entry. DDL is rare → the
+        // fsync cost is irrelevant.
+        table.data_store().flush().await?;
         Ok(())
     }
 
@@ -164,6 +174,8 @@ impl SystemStore {
             },
         };
         table.execute_delete(&op, &ctx).await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
         Ok(())
     }
 
@@ -174,6 +186,93 @@ impl SystemStore {
         let refs = crate::types::common::new_map();
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_REPOSITORIES);
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records)
+    }
+
+    // ========================================================================
+    // Table catalogue (per-repo table list — I.2)
+    // ========================================================================
+
+    /// Persist one table's catalogue entry. Keyed by
+    /// `(db_name, repo_name, table_name)` so re-saving the same table is an
+    /// idempotent upsert. `enable_indexes` is the only other field of
+    /// `TableConfig`, so the record carries enough to faithfully re-create
+    /// the table on open.
+    pub async fn save_table(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        enable_indexes: bool,
+    ) -> DbResult<()> {
+        let record = json!({
+            "db_name": db_name,
+            "repo_name": repo_name,
+            "table_name": table_name,
+            "enable_indexes": enable_indexes,
+        });
+        let table = self.table(TABLE_TABLES).await?;
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_TABLES),
+            key: json!({
+                "db_name": db_name,
+                "repo_name": repo_name,
+                "table_name": table_name,
+            }),
+            value: record,
+        };
+        table.execute_set(&op).await?;
+        table.interner().persist().await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Remove one table's catalogue entry.
+    pub async fn remove_table(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<()> {
+        let table = self.table(TABLE_TABLES).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_TABLES),
+            where_clause: crate::query::filter::Filter::And {
+                filters: vec![
+                    crate::query::filter::Filter::Eq {
+                        field: vec!["db_name".to_string()],
+                        value: crate::query::filter::FilterValue::String(db_name.to_string()),
+                    },
+                    crate::query::filter::Filter::Eq {
+                        field: vec!["repo_name".to_string()],
+                        value: crate::query::filter::FilterValue::String(repo_name.to_string()),
+                    },
+                    crate::query::filter::Filter::Eq {
+                        field: vec!["table_name".to_string()],
+                        value: crate::query::filter::FilterValue::String(table_name.to_string()),
+                    },
+                ],
+            },
+        };
+        table.execute_delete(&op, &ctx).await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Load every persisted table-catalogue record (across all repos). The
+    /// caller filters by `db_name` / `repo_name`.
+    pub async fn load_tables(&self) -> DbResult<Vec<serde_json::Value>> {
+        let table = self.table(TABLE_TABLES).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_TABLES);
         let result = table.read(&query, &ctx).await?;
         Ok(result.records)
     }

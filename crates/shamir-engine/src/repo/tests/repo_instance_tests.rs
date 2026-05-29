@@ -1,5 +1,6 @@
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
+use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::value::InnerValue;
@@ -210,6 +211,89 @@ async fn test_repo_instance_index_isolation_between_tables() {
         .index_exists("orders", "user_id_idx")
         .await
         .unwrap());
+}
+
+// ============================================================================
+// III.1 — table_by_token O(1) resolution
+// ============================================================================
+
+#[tokio::test]
+async fn table_by_token_is_constant_time_and_correct() {
+    // Register many tables, both via the constructor and via add_table,
+    // then assert every one resolves through the reverse index to the
+    // correct TableManager, and an unknown token returns None cleanly.
+    let repo = Arc::new(InMemoryRepo::new());
+    let initial: Vec<TableConfig> = (0..50)
+        .map(|i| TableConfig::new(format!("tbl_init_{i}")))
+        .collect();
+    let instance = RepoInstance::new("tt".into(), BoxRepo::InMemory(repo), initial);
+
+    // A batch added dynamically after construction.
+    for i in 0..50 {
+        instance.add_table(TableConfig::new(format!("tbl_dyn_{i}")));
+    }
+
+    // Every registered name resolves by its deterministic token to itself.
+    for i in 0..50 {
+        for prefix in ["tbl_init_", "tbl_dyn_"] {
+            let name = format!("{prefix}{i}");
+            let token = table_token_for(&name);
+            let resolved = instance
+                .table_by_token(token)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("token for '{name}' did not resolve"));
+            assert_eq!(resolved.name(), name);
+        }
+    }
+
+    // A token that no table owns resolves to None (not an error, no panic).
+    let bogus = table_token_for("table_that_was_never_registered");
+    assert!(instance.table_by_token(bogus).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn table_by_token_drops_with_remove_table() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let instance = RepoInstance::new(
+        "tt".into(),
+        BoxRepo::InMemory(repo),
+        vec![TableConfig::new("alpha"), TableConfig::new("beta")],
+    );
+
+    let alpha_token = table_token_for("alpha");
+    assert!(instance
+        .table_by_token(alpha_token)
+        .await
+        .unwrap()
+        .is_some());
+
+    // After removing the config, the token must no longer resolve — a
+    // stale reverse-index entry must not resurrect a dropped table.
+    assert!(instance.remove_table("alpha"));
+    assert!(instance
+        .table_by_token(alpha_token)
+        .await
+        .unwrap()
+        .is_none());
+
+    // The sibling table is unaffected.
+    let beta_token = table_token_for("beta");
+    let beta = instance.table_by_token(beta_token).await.unwrap().unwrap();
+    assert_eq!(beta.name(), "beta");
+}
+
+#[tokio::test]
+async fn add_table_twice_is_idempotent_for_token_lookup() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let instance = RepoInstance::new("tt".into(), BoxRepo::InMemory(repo), vec![]);
+
+    instance.add_table(TableConfig::new("dup"));
+    instance.add_table(TableConfig::new("dup"));
+
+    let token = table_token_for("dup");
+    let resolved = instance.table_by_token(token).await.unwrap().unwrap();
+    assert_eq!(resolved.name(), "dup");
 }
 
 #[tokio::test]
