@@ -15,13 +15,25 @@ fn make_repo() -> RepoInstance {
     RepoInstance::new("test".into(), BoxRepo::InMemory(repo), Vec::new())
 }
 
+// C6 empty-tx fast-path: an empty tx no longer assigns a version or writes
+// the WAL. It commits as a pure in-memory no-op, reporting
+// `commit_version == snapshot_version` and `Complete`. (Was: asserted a
+// fresh `commit_version > 0`; that pre-C6 contract is now covered by the
+// non-empty commit tests, e.g. `commit_phase5_applies_write_set_to_base_store`.)
 #[tokio::test]
 async fn commit_empty_tx_succeeds() {
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
     let outcome = commit_tx(tx, &repo).await.unwrap();
     assert_eq!(outcome.tx_id, 1);
-    assert!(outcome.commit_version > 0, "version must be assigned");
+    assert_eq!(
+        outcome.commit_version, outcome.snapshot_version,
+        "empty fast-path pins commit_version to the snapshot version"
+    );
+    assert!(
+        outcome.materialized(),
+        "empty fast-path has nothing to materialize → Complete"
+    );
 }
 
 #[tokio::test]
@@ -30,10 +42,23 @@ async fn commit_advances_last_committed() {
     let gate = repo.tx_gate().await.unwrap();
     let before = gate.last_committed();
 
-    let tx = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
+    // A non-empty tx (one staged write) so it crosses the commit point and
+    // advances `last_committed`. An empty tx now takes the C6 fast-path and
+    // intentionally does NOT advance the version (see `commit_empty_tx_succeeds`).
+    let mut tx = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let staging = StagingStore::new(Arc::clone(&data_store));
+    staging
+        .set(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
+        .await;
+    tx.write_set.insert(2, staging);
     let outcome = commit_tx(tx, &repo).await.unwrap();
 
     let after = gate.last_committed();
+    assert!(
+        outcome.commit_version > before,
+        "non-empty commit advances version"
+    );
     assert!(after >= outcome.commit_version);
     assert!(after >= before);
 }
@@ -43,7 +68,16 @@ async fn commit_writes_then_clears_wal_entry() {
     let repo = make_repo();
     let wal = repo.repo_wal().await.unwrap();
 
-    let tx = TxContext::new(TxId::new(3), 0, 0, IsolationLevel::Snapshot);
+    // Non-empty: an empty tx now takes the C6 fast-path and never writes the
+    // WAL at all, so it could not exercise Phase 7 cleanup. Stage a write so
+    // Phase 4 writes the marker and Phase 7 must remove it.
+    let mut tx = TxContext::new(TxId::new(3), 0, 0, IsolationLevel::Snapshot);
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let staging = StagingStore::new(Arc::clone(&data_store));
+    staging
+        .set(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
+        .await;
+    tx.write_set.insert(3, staging);
     let _ = commit_tx(tx, &repo).await.unwrap();
 
     let inflight = wal.list_inflight().await.unwrap();
@@ -57,10 +91,24 @@ async fn commit_writes_then_clears_wal_entry() {
 async fn commit_two_txs_monotonic_versions() {
     let repo = make_repo();
 
-    let tx1 = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
+    // Both txs stage a write so each crosses the commit point and assigns a
+    // version (empty txs now fast-path without consuming a version — C6).
+    let staged = |k: &'static [u8]| {
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let s = StagingStore::new(data_store);
+        let kb = Bytes::from_static(k);
+        async move {
+            s.set(kb, Bytes::from_static(b"v")).await;
+            s
+        }
+    };
+
+    let mut tx1 = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
+    tx1.write_set.insert(10, staged(b"k1").await);
     let o1 = commit_tx(tx1, &repo).await.unwrap();
 
-    let tx2 = TxContext::new(TxId::new(11), 0, 0, IsolationLevel::Snapshot);
+    let mut tx2 = TxContext::new(TxId::new(11), 0, 0, IsolationLevel::Snapshot);
+    tx2.write_set.insert(11, staged(b"k2").await);
     let o2 = commit_tx(tx2, &repo).await.unwrap();
 
     assert!(o2.commit_version > o1.commit_version);
@@ -85,8 +133,11 @@ async fn repo_begin_then_commit_succeeds() {
         .begin_tx(shamir_tx::IsolationLevel::Snapshot)
         .await
         .unwrap();
+    // An empty begin→commit takes the C6 fast-path: it commits as a no-op
+    // with `commit_version == snapshot_version` (no version burned).
     let outcome = repo.commit_tx(tx).await.unwrap();
-    assert!(outcome.commit_version > 0);
+    assert_eq!(outcome.commit_version, outcome.snapshot_version);
+    assert!(outcome.materialized());
 }
 
 #[tokio::test]
@@ -161,8 +212,10 @@ async fn commit_applies_multiple_tables_atomically() {
 async fn commit_empty_write_set_still_succeeds() {
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(300), 0, 0, IsolationLevel::Snapshot);
+    // C6: empty tx commits via the fast-path (no version, no WAL).
     let outcome = commit_tx(tx, &repo).await.unwrap();
-    assert!(outcome.commit_version > 0);
+    assert_eq!(outcome.commit_version, outcome.snapshot_version);
+    assert!(outcome.materialized());
 }
 
 #[tokio::test]
@@ -170,22 +223,26 @@ async fn commit_serializable_with_empty_read_set_succeeds() {
     use shamir_tx::{IsolationLevel, TxContext, TxId};
     let repo = make_repo();
     let tx = TxContext::new(TxId::new(500), 0, 0, IsolationLevel::Serializable);
-    // empty read_set + zero provider → passes Phase 2.
+    // empty read_set + zero provider → passes Phase 2, then the empty
+    // op-set takes the C6 fast-path (no version, no WAL).
     let outcome = commit_tx(tx, &repo).await.unwrap();
-    assert!(outcome.commit_version > 0);
+    assert_eq!(outcome.commit_version, outcome.snapshot_version);
+    assert!(outcome.materialized());
 }
 
 #[tokio::test]
 async fn commit_serializable_with_read_set_passes_zero_provider_scaffold() {
     // Until Stage 4.D.6 plugs in a real version provider, the scaffold
-    // uses `|_, _| 0`. Any tx with non-empty read_set still passes
-    // commit because 0 ≤ version_seen trivially.
+    // uses `|_, _| 0`. A tx with a non-empty read_set but NO writes still
+    // passes Phase 2 (0 ≤ version_seen trivially), then takes the C6
+    // read-only fast-path (read_set is not gated by `is_empty`).
     use shamir_tx::{IsolationLevel, TxContext, TxId};
     let repo = make_repo();
     let mut tx = TxContext::new(TxId::new(501), 0, 0, IsolationLevel::Serializable);
     tx.record_read(7, Bytes::from_static(b"key"), 5);
     let outcome = commit_tx(tx, &repo).await.unwrap();
-    assert!(outcome.commit_version > 0);
+    assert_eq!(outcome.commit_version, outcome.snapshot_version);
+    assert!(outcome.materialized());
 }
 
 #[tokio::test]
@@ -234,8 +291,12 @@ async fn commit_serializable_real_provider_no_conflict_succeeds() {
     tx.record_read(7, Bytes::from_static(b"k"), 5);
     tx.set_version_provider(Arc::new(OkProvider));
 
+    // Read-only Serializable tx, SSI validation passes (no conflict) → C6
+    // fast-path. `commit_version` pins to the snapshot version (10).
     let outcome = commit_tx(tx, &repo).await.unwrap();
-    assert!(outcome.commit_version > 0);
+    assert_eq!(outcome.commit_version, outcome.snapshot_version);
+    assert_eq!(outcome.commit_version, 10);
+    assert!(outcome.materialized());
 }
 
 #[tokio::test]
@@ -259,8 +320,10 @@ async fn commit_runs_apply_id_remap_phase_1_with_empty_overlay() {
         .unwrap();
     // Verify the overlay is empty (precondition).
     assert!(tx.interner_overlay.is_empty());
+    // Empty tx → C6 fast-path (no version assigned).
     let outcome = repo.commit_tx(tx).await.unwrap();
-    assert!(outcome.commit_version > 0);
+    assert_eq!(outcome.commit_version, outcome.snapshot_version);
+    assert!(outcome.materialized());
 }
 
 #[tokio::test]
@@ -481,5 +544,150 @@ async fn commit_tx_advances_table_counter() {
         after - before,
         2,
         "counter must reflect committed inserts (CRIT-3)"
+    );
+}
+
+// ===========================================================================
+// C6 — empty-tx fast-path
+//
+// A tx that staged nothing durable (read-only Serializable txs, or any tx
+// whose write_set / index_write_set / staged_vectors / counter_deltas /
+// interner_overlay are all empty) commits as a pure in-memory no-op: it does
+// NOT assign a new MVCC version and does NOT write the WAL. The fast-path
+// sits AFTER Phase 2 SSI validation, so a read-only Serializable tx that read
+// stale data still ABORTS with `SsiConflict` (the version-assign + WAL +
+// publish are the only steps skipped, never the SSI check).
+// ===========================================================================
+
+/// An empty tx burns no MVCC version. Proven behaviourally: commit a
+/// non-empty tx (version V), then an empty tx, then another non-empty tx —
+/// the second non-empty tx must get exactly V+1, not V+2. If the empty tx
+/// had gone through the full pipeline it would have consumed a version and
+/// the delta would be 2.
+#[tokio::test]
+async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
+    let repo = make_repo();
+    let wal = repo.repo_wal().await.unwrap();
+
+    let staged = |k: &'static [u8]| {
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let s = StagingStore::new(data_store);
+        async move {
+            s.set(Bytes::from_static(k), Bytes::from_static(b"v")).await;
+            s
+        }
+    };
+
+    // Real tx #1 → assigns version V.
+    let mut tx1 = TxContext::new(TxId::new(6001), 0, 0, IsolationLevel::Snapshot);
+    tx1.write_set.insert(6001, staged(b"k1").await);
+    let v1 = commit_tx(tx1, &repo).await.unwrap().commit_version;
+    assert!(v1 > 0);
+
+    // Empty tx → fast-path: commit_version pinned to snapshot (0), no WAL.
+    let snap_before = repo.tx_gate().await.unwrap().last_committed();
+    let empty = TxContext::new(TxId::new(6002), 0, snap_before, IsolationLevel::Snapshot);
+    let out = commit_tx(empty, &repo).await.unwrap();
+    assert_eq!(
+        out.commit_version, snap_before,
+        "empty fast-path pins commit_version to the snapshot version"
+    );
+    assert!(out.materialized(), "empty fast-path is Complete");
+    assert_eq!(
+        repo.tx_gate().await.unwrap().last_committed(),
+        snap_before,
+        "empty fast-path must NOT advance last_committed (nothing published)"
+    );
+    assert!(
+        wal.list_inflight().await.unwrap().is_empty(),
+        "empty fast-path must write no WAL entry"
+    );
+
+    // Real tx #2 → must get V+1 (the empty tx consumed nothing).
+    let mut tx3 = TxContext::new(TxId::new(6003), 0, 0, IsolationLevel::Snapshot);
+    tx3.write_set.insert(6003, staged(b"k3").await);
+    let v2 = commit_tx(tx3, &repo).await.unwrap().commit_version;
+    assert_eq!(
+        v2,
+        v1 + 1,
+        "the empty tx must not have consumed a version (expected {}, got {})",
+        v1 + 1,
+        v2
+    );
+}
+
+/// A read-only Serializable tx whose read-set does NOT conflict passes SSI
+/// validation and then takes the empty fast-path: it commits without a WAL
+/// write and pins `commit_version` to the snapshot version.
+#[tokio::test]
+async fn read_only_serializable_no_conflict_fast_paths() {
+    use shamir_tx::VersionProvider;
+
+    struct OkProvider;
+    impl VersionProvider for OkProvider {
+        fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
+            // Equal to the version the tx read → no conflict.
+            Some(5)
+        }
+    }
+
+    let repo = make_repo();
+    let wal = repo.repo_wal().await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(6100), 0, 7, IsolationLevel::Serializable);
+    tx.record_read(7, Bytes::from_static(b"k"), 5);
+    tx.set_version_provider(Arc::new(OkProvider));
+
+    let out = commit_tx(tx, &repo).await.unwrap();
+    assert_eq!(
+        out.commit_version, 7,
+        "read-only fast-path pins commit_version to the snapshot version"
+    );
+    assert!(out.materialized());
+    assert!(
+        wal.list_inflight().await.unwrap().is_empty(),
+        "read-only fast-path must write no WAL entry"
+    );
+}
+
+/// CRITICAL C6 invariant: the empty fast-path must NOT swallow an SSI
+/// conflict. A read-only Serializable tx with a STALE read (a concurrent
+/// committer advanced the key past what the tx saw) must still ABORT —
+/// proving the fast-path sits AFTER Phase 2 validation, not before it.
+#[tokio::test]
+async fn read_only_serializable_with_conflict_still_aborts() {
+    use shamir_tx::VersionProvider;
+
+    struct ConflictProvider;
+    impl VersionProvider for ConflictProvider {
+        fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
+            // Far above what the tx read → SSI conflict.
+            Some(999)
+        }
+    }
+
+    let repo = make_repo();
+    let wal = repo.repo_wal().await.unwrap();
+
+    let mut tx = TxContext::new(TxId::new(6200), 0, 10, IsolationLevel::Serializable);
+    tx.record_read(7, Bytes::from_static(b"k"), 5);
+    tx.set_version_provider(Arc::new(ConflictProvider));
+
+    let result = commit_tx(tx, &repo).await;
+    match result {
+        Err(crate::tx::CommitError::SsiConflict { key }) => {
+            assert_eq!(key, Bytes::from_static(b"k"));
+        }
+        other => panic!(
+            "a read-only SSI tx with a stale read must abort with SsiConflict, \
+             not fast-path to success; got {:?}",
+            other.map(|o| o.commit_version).map_err(|_| "Err(other)")
+        ),
+    }
+
+    // The abort happened in Phase 2, before any WAL write.
+    assert!(
+        wal.list_inflight().await.unwrap().is_empty(),
+        "a pre-commit SSI abort leaves no WAL entry"
     );
 }

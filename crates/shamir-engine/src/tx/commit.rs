@@ -19,6 +19,26 @@ use crate::repo::RepoInstance;
 /// [`Deferred`](MaterializationState::Deferred). A `Deferred` outcome is
 /// NOT an abort — the version is published and the data WILL appear
 /// (idempotently) via recovery.
+///
+/// CONSISTENCY HONESTY (audit MED, by-design I.3 trade-off — be precise,
+/// not reassuring): a `Deferred` outcome is *restart-bounded eventually
+/// consistent*, NOT immediately consistent. Phase 6 (`publish_committed`)
+/// ALWAYS runs, so the MVCC version is published the instant the WAL entry
+/// is durable — but the projections that back that version (per-table data
+/// → main, per-table index → info) may be only PARTIALLY applied across the
+/// tables/indexes the tx touched. A single multi-table tx that defers can
+/// leave table A's new rows materialized while table B's failed: a
+/// concurrent reader opening a snapshot AFTER the publish sees A's new value
+/// and B's OLD value AT THE SAME committed version — a genuine cross-table /
+/// data-vs-index inconsistency. It is NOT reconciled online (there is no
+/// background reconciler); it persists until the next `recover_v2_inflight`
+/// (`RepoInstance::recover_v2_inflight`) on repo open replays the one
+/// inflight WAL entry — which carries ALL the tx's ops, every table — and
+/// converges every projection. What is still guaranteed even while
+/// deferred: a single-key read via `MvccStore::get_at` is never byte-torn
+/// (each key is whole-value last-write-wins), and the version floor is
+/// monotonic. What lags: cross-table atomicity and data-vs-index agreement,
+/// until recovery runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaterializationState {
     /// All projections applied inline; WAL marker removed (Phase 7 ran).
@@ -26,6 +46,15 @@ pub enum MaterializationState {
     /// At least one projection sub-phase failed after the commit point.
     /// WAL marker left inflight; recovery is the materialization
     /// guarantor on the next open.
+    ///
+    /// Multi-table caveat (restart-bounded eventual consistency): when a
+    /// tx spanned several tables/indexes, the deferral may be PARTIAL —
+    /// some tables materialized inline, others not. The published version
+    /// is therefore cross-table-inconsistent until the next
+    /// `recover_v2_inflight` replays the inflight WAL entry and reconciles
+    /// every table. Single-key reads stay byte-intact throughout; only
+    /// cross-table / data-vs-index consistency lags. See the type-level
+    /// doc above for the full statement.
     Deferred,
 }
 
@@ -157,6 +186,25 @@ pub enum TxError {
 /// the failure is treated as persistent → deferral.
 #[cfg(test)]
 pub(crate) static FAIL_PHASE_5C_TX_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only injection (audit MED multi-table deferral): when
+/// [`FAIL_PHASE_5A_TX_ID`] matches the committing tx AND
+/// [`FAIL_PHASE_5A_TABLE_TOKEN`] matches the table being applied, Phase 5a
+/// (`apply_data_batch`) returns a synthetic storage error for THAT TABLE
+/// ONLY. Keyed by `(table_token, tx_id)` — unlike [`FAIL_PHASE_5C_TX_ID`]
+/// which fires for every table of the tx — so a test can fail the SECOND
+/// table's data write while the first commits cleanly, producing the
+/// partial cross-table materialization the audit flagged. Persisted across
+/// the bounded retry so the failure is treated as persistent → deferral.
+/// Both registers must be non-zero to arm; a zero token disarms.
+#[cfg(test)]
+pub(crate) static FAIL_PHASE_5A_TX_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Companion table-token selector for [`FAIL_PHASE_5A_TX_ID`]. See its doc.
+#[cfg(test)]
+pub(crate) static FAIL_PHASE_5A_TABLE_TOKEN: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Test-only injection: when set to a non-zero tx_id, the post-lock HNSW
@@ -311,6 +359,12 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
 /// best-effort and NEVER aborts: a projection failure is logged and
 /// deferred to recovery, the version is still published, and the tx is
 /// reported COMMITTED (with `MaterializationState::Deferred`).
+///
+/// C6 empty-tx fast-path: when `pre_commit` returns `Ok(None)` (the tx
+/// staged nothing durable, after SSI validation passed) this function
+/// short-circuits — no version assigned, no WAL write, no publish — and
+/// returns `Ok(TxOutcome { commit_version: snapshot_version, materialization:
+/// Complete, .. })`.
 async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
     if tx.is_expired(DEFAULT_MAX_TX_LIFETIME) {
         repo.tx_metrics().on_tx_aborted_expired();
@@ -327,13 +381,37 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
 
     // === Pre-commit (Phases 1–4): real aborts live here ===
     //
-    // Returns `(commit_version, uwl_guards)` on a *successful* Phase 4
+    // Returns `Some((commit_version, uwl_guards))` on a *successful* Phase 4
     // (the commit point). Any failure before that is a clean abort —
-    // nothing durable, locks released by RAII on the `Err` return.
+    // nothing durable, locks released by RAII on the `Err` return. Returns
+    // `None` for the C6 empty-tx fast-path (SSI already validated inside
+    // `pre_commit`; nothing durable to do).
     let PreCommit {
         commit_version,
         uwl_guards,
-    } = pre_commit(&mut tx, repo, gate.as_ref(), wal.as_ref()).await?;
+    } = match pre_commit(&mut tx, repo, gate.as_ref(), wal.as_ref()).await? {
+        Some(pc) => pc,
+        None => {
+            // C6 empty-tx fast-path. SSI read-set validation (Phase 2) has
+            // already run inside `pre_commit`, so a read-only Serializable
+            // tx with a conflict has already returned `Err` above. Here the
+            // tx staged nothing durable: skip Phase 3 (assign_next_version),
+            // Phase 4 (`wal.begin`), and all of `materialize` (publish +
+            // markers + wal.commit). No version is consumed, no WAL write
+            // occurs. Report COMMITTED with `commit_version` pinned to the
+            // tx's snapshot version and materialization `Complete` (there
+            // were no projections to materialize). Counts as a committed tx
+            // for metrics, consistent with the full path.
+            repo.tx_metrics().on_tx_committed();
+            drop(commit_guard);
+            return Ok(TxOutcome {
+                tx_id: tx.tx_id.0,
+                snapshot_version: tx.snapshot_version,
+                commit_version: tx.snapshot_version,
+                materialization: MaterializationState::Complete,
+            });
+        }
+    };
 
     // === Commit point crossed: the WAL entry is durable. ===
     //
@@ -464,15 +542,25 @@ struct PreCommit {
 /// commit point is a *successful* `wal.begin`; the caller treats any
 /// `Err` from this function as an abort.
 ///
-/// Returns `(commit_version, uwl_guards)`. The guards are returned (not
-/// dropped) so [`materialize`] can hold them across Phase 5c and release
-/// them once the unique postings are published.
+/// Returns `Some((commit_version, uwl_guards))` on a successful Phase 4.
+/// The guards are returned (not dropped) so [`materialize`] can hold them
+/// across Phase 5c and release them once the unique postings are published.
+///
+/// Returns `Ok(None)` for the C6 empty-tx fast-path: a tx that staged
+/// nothing durable (no writes / index ops / vectors / counter deltas /
+/// interner overlay). The SSI read-set validation (Phase 2) has ALREADY
+/// run by that point, so a read-only Serializable tx that read stale data
+/// still aborts with `Err` — the fast-path only skips the work that has no
+/// effect for an empty op set: version assignment (Phase 3), the durable
+/// `wal.begin` (Phase 4), and everything downstream. `commit_tx_inner`
+/// turns `None` into an `Ok(TxOutcome)` whose `commit_version` is the tx's
+/// snapshot version and whose materialization is `Complete`.
 async fn pre_commit(
     tx: &mut TxContext,
     repo: &RepoInstance,
     gate: &RepoTxGate,
     wal: &RepoWalManager,
-) -> Result<PreCommit, TxError> {
+) -> Result<Option<PreCommit>, TxError> {
     // Phase 1: interner overlay merge → per-table id remap.
     //
     // Each table has its own Interner. The tx overlay is a shared
@@ -524,6 +612,29 @@ async fn pre_commit(
             repo.tx_metrics().on_tx_aborted_ssi();
             return Err(TxError::SsiConflict { key });
         }
+    }
+
+    // === C6: empty-tx fast-path ===
+    //
+    // A tx that staged nothing durable (read-only Serializable txs, or any
+    // tx whose write_set / index_write_set / staged_vectors / counter_deltas
+    // / interner_overlay are all empty) has no commit point to cross: there
+    // is nothing to assign a version for, nothing to write to the WAL, and
+    // nothing to publish. Short-circuit BEFORE Phase 3 (assign_next_version)
+    // and Phase 4 (the durable `wal.begin`) so an empty commit is a pure
+    // in-memory no-op — no monotonic version is burned and no fsync is paid.
+    //
+    // ORDERING IS LOAD-BEARING: this sits AFTER the Phase 2 SSI block above.
+    // A read-only Serializable tx still records reads, and its read_set must
+    // still be validated against current committed versions — a read-only
+    // tx that observed stale data MUST abort (returned as `Err` above), not
+    // silently fast-path to success. `is_empty()` deliberately does NOT gate
+    // on `read_set` (read-only ⇒ fast-path-eligible) nor on `unique_guards`
+    // (a guard only ever accompanies a staged write, so an empty `write_set`
+    // already implies no guards). Phase 2.5/2.6 (unique re-validation) are
+    // skipped only because they are no-ops with no guards.
+    if tx.is_empty() {
+        return Ok(None);
     }
 
     // Phase 2.5 (HIGH-A): acquire each unique table's `unique_write_lock`
@@ -640,10 +751,10 @@ async fn pre_commit(
     // materialize the whole tx (data + index). All-or-nothing.
     maybe_crash("phase4", repo).await;
 
-    Ok(PreCommit {
+    Ok(Some(PreCommit {
         commit_version,
         uwl_guards,
-    })
+    }))
 }
 
 /// cancel-safe: NO, and it does NOT need to be — by the time this runs
@@ -662,6 +773,18 @@ async fn pre_commit(
 ///
 /// Phase 6 (`publish_committed`) ALWAYS runs — the version is committed
 /// regardless of whether the projections landed inline.
+///
+/// MULTI-TABLE DEFERRAL IS PARTIAL (audit MED, by-design): the Phase 5a
+/// (data) and Phase 5c (index) loops below iterate per table, each with its
+/// own bounded retry. A failure on ONE table flips `ok` but does NOT halt
+/// the other tables — so a tx touching tables A and B can materialize A
+/// inline and leave B for recovery, yet `publish_committed` still publishes
+/// the single shared `commit_version`. The result is a cross-table /
+/// data-vs-index inconsistency that is *restart-bounded eventually
+/// consistent*: it is reconciled only when the next `recover_v2_inflight`
+/// replays the one inflight WAL entry (which carries every table's ops).
+/// There is no online reconciler. This is honest, not reassuring — see
+/// [`MaterializationState::Deferred`] for the reader-visible contract.
 async fn materialize(
     tx: &mut TxContext,
     repo: &RepoInstance,
@@ -682,7 +805,14 @@ async fn materialize(
     let data_batches = collect_data_batches(tx);
     for (table_id, base, ops) in data_batches {
         if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_data_batch(repo, table_id, base.clone(), ops.clone(), commit_version)
+            apply_data_batch(
+                repo,
+                table_id,
+                base.clone(),
+                ops.clone(),
+                commit_version,
+                tx_id,
+            )
         })
         .await
         {
@@ -904,7 +1034,26 @@ async fn apply_data_batch(
     base: std::sync::Arc<dyn shamir_storage::types::Store>,
     ops: Vec<shamir_storage::types::KvOp>,
     commit_version: u64,
+    _tx_id: u64,
 ) -> Result<(), DbError> {
+    // Test-only failure injection (audit MED): simulate a persistent Phase
+    // 5a storage error for a SPECIFIC `(table_token, tx_id)` so a tx writing
+    // several tables can have exactly its second table's data write fail —
+    // the partial cross-table materialization the audit flagged. Both
+    // registers must match; armed via `FAIL_PHASE_5A_TX_ID` +
+    // `FAIL_PHASE_5A_TABLE_TOKEN`.
+    #[cfg(test)]
+    {
+        use std::sync::atomic::Ordering::SeqCst;
+        let armed_tx = FAIL_PHASE_5A_TX_ID.load(SeqCst);
+        let armed_token = FAIL_PHASE_5A_TABLE_TOKEN.load(SeqCst);
+        if _tx_id != 0 && armed_tx == _tx_id && armed_token == table_id {
+            return Err(DbError::Internal(format!(
+                "injected Phase 5a (data) failure for tx {_tx_id} table {table_id}"
+            )));
+        }
+    }
+
     let mvcc_found = repo
         .per_table_mvcc()
         .read_async(&table_id, |_, mvcc| std::sync::Arc::clone(mvcc))
