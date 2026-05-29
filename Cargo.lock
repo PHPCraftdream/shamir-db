@@ -3434,7 +3434,6 @@ dependencies = [
 name = "shamir-types"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "base-x",
  "bincode",
