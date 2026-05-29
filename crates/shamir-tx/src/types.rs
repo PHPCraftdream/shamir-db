@@ -1,7 +1,6 @@
-//! Basic transactional types — IDs, isolation levels, error types.
+//! Basic transactional types — IDs and isolation levels.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// Monotonic per-repo transaction identifier.
 ///
@@ -33,46 +32,15 @@ impl std::fmt::Display for TxId {
 ///   commits last-writer-wins (no read-set validation). Default.
 /// - [`Serializable`] — same as snapshot, plus read-set validation
 ///   at commit: if any key the tx read has been overwritten by a
-///   concurrent tx after the snapshot was taken, the commit aborts
-///   with [`TxConflict`]. Client is expected to retry.
+///   concurrent tx after the snapshot was taken, the commit aborts.
+///   Client is expected to retry. (The engine-side commit pipeline
+///   surfaces this via `shamir_engine::tx::commit::TxError::SsiConflict`.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationLevel {
     #[default]
     Snapshot,
     Serializable,
-}
-
-/// SSI-only conflict: a key the tx read at `snapshot_version` was
-/// overwritten by a concurrent committed tx at `winner_version`
-/// before this tx could commit.
-#[derive(Debug, Clone, Error)]
-#[error("tx conflict on key (snapshot v={snapshot_version}, winner v={winner_version})")]
-pub struct TxConflict {
-    pub snapshot_version: u64,
-    pub winner_version: u64,
-    pub key_hint: Option<bytes::Bytes>,
-}
-
-/// Top-level error type for the transactional layer. Boundary
-/// transcripts cross into [`shamir_storage::error::DbError`] via
-/// `From` impl; engine code typically converts on entry.
-#[derive(Debug, Error)]
-pub enum TxError {
-    #[error("tx conflict: {0}")]
-    Conflict(#[from] TxConflict),
-
-    #[error("tx aborted: {0}")]
-    Aborted(String),
-
-    #[error("tx too large: {ops} ops exceeds limit {limit}")]
-    TooLarge { ops: usize, limit: usize },
-
-    #[error("storage error: {0}")]
-    Storage(#[from] shamir_storage::error::DbError),
-
-    #[error("cross-repo tx not supported")]
-    CrossRepoNotSupported,
 }
 
 #[cfg(test)]
@@ -106,17 +74,5 @@ mod tests {
     #[test]
     fn isolation_level_default_is_snapshot() {
         assert_eq!(IsolationLevel::default(), IsolationLevel::Snapshot);
-    }
-
-    #[test]
-    fn tx_conflict_display_includes_versions() {
-        let c = TxConflict {
-            snapshot_version: 5,
-            winner_version: 10,
-            key_hint: None,
-        };
-        let s = format!("{c}");
-        assert!(s.contains("snapshot v=5"));
-        assert!(s.contains("winner v=10"));
     }
 }
