@@ -290,10 +290,17 @@ async fn execute_transactional(
             // Commit.
             match repo.commit_tx(tx).await {
                 Ok(outcome) => {
+                    // Thread the commit's materialization state to the
+                    // client. `Complete` → materialized=true (projections
+                    // applied inline); `Deferred` → materialized=false (the
+                    // commit is durable via its WAL entry, but projection
+                    // was deferred to crash-recovery). A `Deferred` outcome
+                    // is still COMMITTED — see `MaterializationState`.
                     let info = shamir_query_types::batch::TransactionInfo::committed(
                         outcome.tx_id,
                         outcome.snapshot_version,
                         outcome.commit_version,
+                        outcome.materialized(),
                     );
                     Ok((results, Some(info)))
                 }
