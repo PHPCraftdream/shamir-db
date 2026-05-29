@@ -380,6 +380,24 @@ impl TableManager {
         &self.index2_registry
     }
 
+    /// Clone the handle to this table's unique-write serialisation lock.
+    ///
+    /// HIGH-A — closing the non-tx ↔ tx-commit unique race. Non-tx
+    /// `insert` / `set` / `delete` take this `tokio::sync::Mutex` around their
+    /// validate-then-write-then-index window (see those methods). The tx
+    /// commit pipeline (`commit_tx_inner` Phase 2.6 → 5c) acquires the SAME
+    /// lock for every table that has unique guards, so a tx's unique
+    /// re-check and its posting write are atomic against any concurrent non-tx
+    /// unique writer to that table. Before this, the two paths used different
+    /// mutexes (`unique_write_lock` vs the per-repo `commit_lock`), so a non-tx
+    /// writer could claim/overwrite a unique key in the gap between the tx's
+    /// Phase 2.6 check and its Phase 5c write — duplicate unique values and a
+    /// corrupted posting. Returns the `Arc` (cloned) so the caller holds the
+    /// exact same mutex instance the non-tx path locks.
+    pub fn unique_write_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.unique_write_lock)
+    }
+
     /// Borrow the table's sorted-index manager — used by the planner
     /// for range / order / min queries, and by DDL when a
     /// `create_index { sorted: true }` op lands.
@@ -1239,44 +1257,97 @@ impl TableManager {
 
     /// tx-aware streaming variant of [`list_stream`].
     ///
-    /// In the current sub-stage (3.2.B) this method is a thin forward to
-    /// [`list_stream`] regardless of `tx` value — it adds the parameter so
-    /// downstream callsites can already be migrated and tested.
+    /// Forwards to [`list_stream`] for the actual data, then — when `tx` is
+    /// `Some` and the tx is Serializable — records each *materialised*
+    /// record's key into the read-set (HIGH-C). The yielded batches are
+    /// byte-for-byte the same as [`list_stream`]; recording is a pure
+    /// side-effect threaded lazily through the stream, so the lazy-yield
+    /// contract is preserved (a consumer that stops early only records the
+    /// keys it actually pulled).
     ///
-    /// Wiring to merge staged writes from `tx.write_set` and to read
-    /// through `mvcc_store` lands in subsequent sub-stages.
+    /// Streaming-scan SSI scope: this records the keys the scan *yields*. It
+    /// does NOT install predicate / range locks, so phantom inserts into the
+    /// scanned range by a concurrent tx are not detected — full SSI predicate
+    /// locking over a stream is a known harder problem and out of scope here.
+    /// Point reads ([`read_one_tx`]) and materialised scan reads are covered.
     pub fn list_stream_tx<'a>(
         &'a self,
-        _tx: Option<&'a shamir_tx::TxContext>,
+        tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
-        self.list_stream(batch_size)
+        let inner = self.list_stream(batch_size);
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        Self::record_scan_reads(inner, tx, token, mvcc)
     }
 
     /// tx-aware streaming variant of [`filter_stream`].
     ///
-    /// Same forward-only semantics as [`list_stream_tx`] in stage 3.2.B.
+    /// Same materialised-read SSI recording as [`list_stream_tx`]: each
+    /// record that survives the filter and is yielded gets recorded into the
+    /// read-set (Serializable only). Same streaming-scan SSI scope note.
     pub async fn filter_stream_tx<'a>(
         &'a self,
-        _tx: Option<&'a shamir_tx::TxContext>,
+        tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
     ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
-        self.filter_stream(batch_size, filter, ctx).await
+        let inner = self.filter_stream(batch_size, filter, ctx).await?;
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        Ok(Self::record_scan_reads(inner, tx, token, mvcc))
     }
 
     /// tx-aware streaming variant of [`filter_stream_with_callback`].
     ///
-    /// Same forward-only semantics as [`list_stream_tx`] in stage 3.2.B.
+    /// Same materialised-read SSI recording as [`list_stream_tx`].
     pub fn filter_stream_with_callback_tx<'a>(
         &'a self,
-        _tx: Option<&'a shamir_tx::TxContext>,
+        tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
         callback: &'a dyn FilterCallback,
         ctx: &'a FilterContext<'a>,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
-        self.filter_stream_with_callback(batch_size, callback, ctx)
+        let inner = self.filter_stream_with_callback(batch_size, callback, ctx);
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        Self::record_scan_reads(inner, tx, token, mvcc)
+    }
+
+    /// Wrap a record stream so that, for a Serializable tx, each yielded
+    /// record's key is recorded into the read-set at the version observed
+    /// when it is pulled. The wrapper is transparent: it yields exactly what
+    /// the inner stream yields, in the same order. For `tx == None` or a
+    /// non-Serializable tx it adds no per-record work beyond a single
+    /// up-front isolation check (the `version_of` lookup and recording are
+    /// skipped entirely). `mvcc` is `None` → version `0` (conservative
+    /// default, see [`read_one_tx`]).
+    fn record_scan_reads<'a, S>(
+        inner: S,
+        tx: Option<&'a shamir_tx::TxContext>,
+        token: u64,
+        mvcc: Option<Arc<shamir_tx::MvccStore>>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a
+    where
+        S: futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a,
+    {
+        // Only Serializable txs track reads; everything else is a pass-through
+        // so the non-SSI scan path pays nothing per record.
+        let recording_tx = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable);
+        async_stream::stream! {
+            futures::pin_mut!(inner);
+            while let Some(batch_result) = inner.next().await {
+                if let (Ok(batch), Some(tx)) = (&batch_result, recording_tx) {
+                    for (rid, _) in batch {
+                        let key = rid.to_bytes();
+                        let version = mvcc.as_ref().map_or(0, |m| m.version_of(key.as_ref()));
+                        tx.record_read_shared(token, key, version);
+                    }
+                }
+                yield batch_result;
+            }
+        }
     }
 
     /// Get a record by RecordId
@@ -1302,27 +1373,60 @@ impl TableManager {
     ///   `mvcc.get_at(rid.to_bytes(), tx.snapshot_version)`:
     ///     - `Some(bytes)` → deserialize and return.
     ///     - `None` → `DbError::NotFound`.
+    ///
+    /// HIGH-C — SSI read tracking. When `tx` is `Some`, the key and the
+    /// version observed at read time are recorded into the tx's read-set via
+    /// [`record_read_shared`](shamir_tx::TxContext::record_read_shared) (a
+    /// no-op under Snapshot isolation, so callers pay nothing there). This is
+    /// what makes Serializable isolation actually detect write-skew: commit
+    /// Phase 2 re-checks every recorded key's current committed version, and
+    /// aborts if any advanced past the version seen here. Before this wiring,
+    /// `record_read` was reachable only from unit tests, so the read-set was
+    /// always empty in production and Serializable silently degraded to
+    /// Snapshot.
+    ///
+    /// The version is sourced from the table's `MvccStore::version_of` (the
+    /// same handle the `RepoVersionProvider` queries at commit, so the
+    /// captured and re-checked versions are directly comparable). When no
+    /// `MvccStore` is attached we record version `0` — the conservative
+    /// default: `0 <= any current version`, so an unwritten / untracked key
+    /// never spuriously conflicts, while a later real write still surfaces.
+    ///
+    /// `record_read_shared` takes `&self` (interior-mutable read-set) — this
+    /// is why the read-set can be populated through the existing
+    /// `Option<&TxContext>` signature without forcing a `&mut` borrow that
+    /// would ripple into every call site.
     pub async fn read_one_tx(
         &self,
         id: RecordId,
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<InnerValue> {
-        if let (Some(tx), Some(mvcc)) = (tx, self.mvcc_store.as_ref()) {
+        if let Some(tx) = tx {
             let key = id.to_bytes();
-            match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
-                Some(bytes) => {
-                    return InnerValue::from_bytes(bytes).map_err(|e| {
-                        shamir_storage::error::DbError::Codec(format!(
-                            "Failed to deserialize InnerValue: {}",
-                            e
-                        ))
-                    });
-                }
-                None => {
-                    return Err(shamir_storage::error::DbError::NotFound(format!(
-                        "record not found at snapshot {}: {:?}",
-                        tx.snapshot_version, id
-                    )));
+            // Capture the version at read time, then record the SSI read
+            // dependency. No-op for Snapshot isolation.
+            let version = self
+                .mvcc_store
+                .as_ref()
+                .map_or(0, |mvcc| mvcc.version_of(key.as_ref()));
+            tx.record_read_shared(self.table_token(), key.clone(), version);
+
+            if let Some(mvcc) = self.mvcc_store.as_ref() {
+                match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
+                    Some(bytes) => {
+                        return InnerValue::from_bytes(bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize InnerValue: {}",
+                                e
+                            ))
+                        });
+                    }
+                    None => {
+                        return Err(shamir_storage::error::DbError::NotFound(format!(
+                            "record not found at snapshot {}: {:?}",
+                            tx.snapshot_version, id
+                        )));
+                    }
                 }
             }
         }

@@ -95,7 +95,19 @@ pub struct TxContext {
     /// SSI read-set: `(table_id, key) → version_seen`. Only populated
     /// when `isolation == Serializable`. Validated at commit:
     /// `current_version(key)` must equal `version_seen`, else abort.
-    pub read_set: HashMap<(u64, Bytes), u64>,
+    ///
+    /// `scc::HashMap` (not `std::HashMap`) so [`record_read`](Self::record_read)
+    /// can take `&self` instead of `&mut self`. This is load-bearing for
+    /// HIGH-C: the engine's tx-aware point read `TableManager::read_one_tx`
+    /// holds the tx by shared reference (`Option<&TxContext>`) — the executor
+    /// reborrows `&*tx` from a `&mut TxContext` — so an `&mut`-taking
+    /// `record_read` could not be called from inside the read path without a
+    /// signature break rippling into out-of-crate call sites. Interior
+    /// mutability lets `read_one_tx` populate the read-set in place, which is
+    /// what makes Serializable isolation actually detect write-skew (before
+    /// this, `record_read` was wired only from unit tests, so the read-set
+    /// was always empty in production and SSI silently degraded to Snapshot).
+    pub read_set: scc::HashMap<(u64, Bytes), u64>,
 
     /// Token → original table name. Populated alongside `write_set`
     /// entries. Used at commit time to look up table names for WAL
@@ -141,7 +153,7 @@ impl TxContext {
             interner_overlay: scc::HashMap::new(),
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
             counter_deltas: HashMap::new(),
-            read_set: HashMap::new(),
+            read_set: scc::HashMap::new(),
             table_tokens: HashMap::new(),
             version_provider: None,
             started_at: std::time::Instant::now(),
@@ -179,9 +191,48 @@ impl TxContext {
     }
 
     /// Record a read for SSI validation (only if Serializable).
+    ///
+    /// `&mut self` overload, kept for existing call sites that hold the tx
+    /// mutably (tests, benches, manually-driven read tracking). Delegates to
+    /// [`record_read_shared`](Self::record_read_shared); both write the same
+    /// interior-mutable `read_set`.
     pub fn record_read(&mut self, table_id: u64, key: Bytes, version: u64) {
+        self.record_read_shared(table_id, key, version);
+    }
+
+    /// Record a read for SSI validation (only if Serializable), taking
+    /// `&self` via interior mutability (`read_set` is an `scc::HashMap`).
+    ///
+    /// This is the entry point the engine's tx-aware read path uses:
+    /// `TableManager::read_one_tx` holds the tx by shared reference
+    /// (`Option<&TxContext>`), so it cannot call the `&mut self` overload.
+    /// Wiring this in is what makes Serializable isolation actually populate
+    /// the read-set in production (HIGH-C) — previously `record_read` was
+    /// reachable only from unit tests, so `read_set` was always empty at
+    /// commit and SSI silently degraded to Snapshot isolation.
+    ///
+    /// No-op under Snapshot isolation.
+    ///
+    /// **First-read-wins**: the version recorded for a key is the one observed
+    /// at the *first* read; a later re-read of the same key does NOT overwrite
+    /// it. This is the load-bearing SSI semantic. Versions are monotonic, so
+    /// the first read captures the lowest (earliest) version the tx ever saw —
+    /// the conservative bound for conflict detection. Overwriting with a newer
+    /// version (last-write-wins, the previous `HashMap::insert` behaviour, fine
+    /// only while reads were recorded once from unit tests) would mask a real
+    /// conflict: e.g. an update's internal old-value read runs AFTER a
+    /// concurrent committer bumped the key, and last-write-wins would re-record
+    /// the key at the post-commit version, defeating the abort.
+    pub fn record_read_shared(&self, table_id: u64, key: Bytes, version: u64) {
         if self.isolation == IsolationLevel::Serializable {
-            self.read_set.insert((table_id, key), version);
+            use scc::hash_map::Entry::{Occupied, Vacant};
+            match self.read_set.entry((table_id, key)) {
+                // First-read-wins: keep the earliest observed version.
+                Occupied(_) => {}
+                Vacant(ve) => {
+                    ve.insert_entry(version);
+                }
+            }
         }
     }
 
@@ -200,16 +251,28 @@ impl TxContext {
     where
         F: FnMut(u64, &Bytes) -> Option<u64>,
     {
-        for ((table_id, key), version_seen) in &self.read_set {
+        // `scc::HashMap::scan` is a synchronous visitor `FnMut(&K, &V)` that
+        // cannot early-return; capture the first conflict and report it after
+        // the scan. Iteration order is unspecified (it was already with
+        // `std::HashMap`), so which key surfaces on a multi-key conflict is
+        // not contractual — callers test single-key scenarios.
+        let mut conflict: Option<(u64, Bytes)> = None;
+        self.read_set.scan(|(table_id, key), version_seen| {
+            if conflict.is_some() {
+                return;
+            }
             match version_provider(*table_id, key) {
-                None => return Err((*table_id, key.clone())),
+                None => conflict = Some((*table_id, key.clone())),
                 Some(current) if current > *version_seen => {
-                    return Err((*table_id, key.clone()));
+                    conflict = Some((*table_id, key.clone()));
                 }
                 Some(_) => {}
             }
+        });
+        match conflict {
+            Some(c) => Err(c),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Get-or-create a StagingStore for the given table token.
