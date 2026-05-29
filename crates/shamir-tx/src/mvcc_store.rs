@@ -136,9 +136,19 @@ impl MvccStore {
 
     /// Look up the latest committed version for `key` in the in-memory cache.
     /// Returns 0 if the key is not cached (meaning "initial / no version tracked").
+    ///
+    /// III.2: probes the cache with the raw `&[u8]` — no `Bytes` allocation.
+    /// `scc 2.x`'s `HashMap::read<Q>` is bounded by `Q: Equivalent<K> + Hash`
+    /// (scc's vendored `equivalent` trait), and scc ships the blanket impl
+    /// `impl<Q, K> Equivalent<K> for Q where Q: Eq, K: Borrow<Q>`. Since
+    /// `bytes::Bytes: Borrow<[u8]>` and `[u8]: Eq`, `[u8]: Equivalent<Bytes>`
+    /// holds, so `&[u8]` is an accepted probe key. The lookup hash matches
+    /// because `<Bytes as Hash>` delegates to `self.as_slice().hash(..)`,
+    /// i.e. it is byte-identical to `<[u8] as Hash>`. Net effect: the
+    /// previous `Bytes::copy_from_slice(key)` heap-alloc+copy on every probe
+    /// (one per `get_at`, one per `version_of` read-set entry) is gone.
     fn current_version(&self, key: &[u8]) -> u64 {
-        let key_bytes = Bytes::copy_from_slice(key);
-        self.version_cache.read(&key_bytes, |_, v| *v).unwrap_or(0)
+        self.version_cache.read(key, |_, v| *v).unwrap_or(0)
     }
 
     /// Public accessor: current committed version for `key`, or `0` if
@@ -241,10 +251,11 @@ impl MvccStore {
     }
 
     /// cancel-safe: NO — Phase 1 scans the history stream; Phase 2
-    /// deletes per-key residuals. Cancellation during Phase 2 leaves
-    /// some entries deleted and others not. GC is idempotent — a later
-    /// `gc_below` resumes from current history state — so eventual
-    /// convergence is fine, but a single call is not atomic.
+    /// deletes per-key residuals; Phase 3 prunes the version cache.
+    /// Cancellation during Phase 2/3 leaves some entries deleted and
+    /// others not. GC is idempotent — a later `gc_below` resumes from
+    /// current history/cache state — so eventual convergence is fine,
+    /// but a single call is not atomic.
     ///
     /// Garbage-collect history entries with version < `min_version`.
     ///
@@ -252,6 +263,14 @@ impl MvccStore {
     /// < `min_version` (the "anchor" — needed so `get_at(snapshot)`
     /// can still find it for snapshots between anchor and min_version).
     /// All older versions of that key are removed.
+    ///
+    /// III.3: also prunes `version_cache`. The eviction threshold is the
+    /// gate's `min_alive()` (the oldest live snapshot, or `last_committed`
+    /// if none) — deliberately NOT the `min_version` argument, which only
+    /// governs *history* GC and may be set higher than `min_alive` by a
+    /// caller (a higher threshold would wrongly evict cache entries that a
+    /// still-live snapshot below `min_version` needs to route to history).
+    /// See [`Self::prune_version_cache`] for the full visibility argument.
     ///
     /// Returns the number of history entries deleted.
     pub async fn gc_below(&self, min_version: u64) -> DbResult<usize> {
@@ -295,7 +314,61 @@ impl MvccStore {
             }
         }
 
+        // Phase 3: prune the in-memory version cache (III.3). Uses the
+        // gate's `min_alive()`, independent of the `min_version` history
+        // threshold (see `prune_version_cache` for why).
+        self.prune_version_cache().await;
+
         Ok(deleted)
+    }
+
+    /// cancel-safe: yes — a single `scc::HashMap::retain_async`. The map
+    /// is only ever pruned to a strict subset of itself; dropping the
+    /// future mid-scan leaves some redundant entries un-evicted, which a
+    /// later GC reclaims. No partial state can violate correctness.
+    ///
+    /// III.3: evict `version_cache` entries whose cached version is
+    /// `< min_alive`, where `min_alive = gate.min_alive()` (the oldest
+    /// live snapshot, or `last_committed` when no snapshot is open).
+    /// Without this, the cache grows unbounded over the repo's lifetime —
+    /// `apply_committed_ops` / `set_versioned` / `delete_versioned` upsert
+    /// every touched key and nothing ever removes them.
+    ///
+    /// MVCC-visibility invariant (why `< min_alive` is safe):
+    ///
+    /// `get_at(key, snapshot)` reads `cur_v = current_version(key)` and,
+    /// if `cur_v <= snapshot`, returns `main.get(key)` (fast path);
+    /// otherwise it scans history for the newest version `<= snapshot`.
+    /// The cache entry only matters when it forces the *slow* path, i.e.
+    /// for snapshots `< cur_v`. Evicting an entry makes `current_version`
+    /// return `0`, so every snapshot takes the fast path and reads `main`.
+    ///
+    /// An entry with `cv < min_alive` satisfies `cv < min_alive <= s` for
+    /// *every* live snapshot `s` (no snapshot is older than `min_alive`).
+    /// Thus `cv <= s` already held for all of them — they were *already*
+    /// on the fast path. After eviction `0 <= s` still routes them to the
+    /// fast path and `main` still holds the key's current value (version
+    /// `cv`), so the returned value is identical. The only thing forgotten
+    /// is the version *number*, and it was needed solely to force a
+    /// history scan for snapshots below `cv` — none of which exist. Hence
+    /// the prune is value-preserving for all live readers.
+    ///
+    /// Conversely, evicting entries with `cv >= min_alive` would be unsafe:
+    /// a live snapshot `s` with `min_alive <= s < cv` legitimately needs
+    /// the slow path (its visible value lives in history, archived when
+    /// the value advanced to `cv`); forgetting `cv` would route it to the
+    /// fast path and hand it the wrong (newer) `main` value. That is why
+    /// the threshold is `min_alive` and not the (possibly larger)
+    /// `min_version` history-GC argument.
+    ///
+    /// `retain_async` keeps entries for which the predicate returns `true`,
+    /// so we keep `*v >= min_alive` and drop the rest. A key re-written
+    /// after this prune simply re-populates its entry via the next upsert.
+    async fn prune_version_cache(&self) {
+        let min_alive = self.gate.min_alive();
+        self.version_cache
+            .retain_async(|_key, v| *v >= min_alive)
+            .await;
     }
 
     /// cancel-safe: NO — delegates to `gc_below`, which is non-cancel-
@@ -867,5 +940,294 @@ mod tests {
             }
         }
         assert!(found, "old value archived for active snapshot");
+    }
+
+    // ----------------------------------------------------------------
+    // III.2 — alloc-free `current_version` borrow-probe.
+    // ----------------------------------------------------------------
+
+    /// The borrow-based probe (`read(key: &[u8], ..)`) must locate entries
+    /// inserted under arbitrary-length `Bytes` keys — not just the 16-byte
+    /// RecordId case — confirming `[u8]: Equivalent<Bytes>` resolves and the
+    /// hashes line up for any key length (incl. SSI keys that aren't 16 bytes).
+    #[tokio::test]
+    async fn version_of_borrow_probe_matches_arbitrary_length_keys() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        // Short (3-byte), long (40-byte), and empty keys.
+        let short = Bytes::from_static(b"abc");
+        let long = Bytes::from(vec![7u8; 40]);
+        let empty = Bytes::new();
+
+        mvcc.set_versioned(short.clone(), Bytes::from("s"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(long.clone(), Bytes::from("l"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(empty.clone(), Bytes::from("e"))
+            .await
+            .unwrap();
+
+        // `version_of` takes `&[u8]`; the probe must find each entry.
+        assert!(
+            mvcc.version_of(short.as_ref()) > 0,
+            "3-byte key must be found via borrow-probe"
+        );
+        assert!(
+            mvcc.version_of(long.as_ref()) > 0,
+            "40-byte key must be found via borrow-probe"
+        );
+        assert!(
+            mvcc.version_of(empty.as_ref()) > 0,
+            "empty key must be found via borrow-probe"
+        );
+        // A never-written key still returns 0.
+        assert_eq!(mvcc.version_of(b"missing"), 0);
+    }
+
+    // ----------------------------------------------------------------
+    // III.3 — GC prunes stale version_cache entries.
+    // ----------------------------------------------------------------
+
+    /// Core eviction: keys whose cached version is `< min_alive` are dropped
+    /// (so `version_of` returns 0) while the current value in `main` — and
+    /// therefore `get_at` — stays correct. A key at/above `min_alive` is
+    /// NOT evicted.
+    #[tokio::test]
+    async fn gc_evicts_stale_version_cache_entries() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        // Keep one snapshot open the whole time so writes go through the
+        // versioned (history-archiving) path and populate version_cache.
+        let _guard = gate.open_snapshot().await;
+
+        // Two "old" keys, written early (low versions).
+        let old_a = Bytes::from("old_a");
+        let old_b = Bytes::from("old_b");
+        mvcc.set_versioned(old_a.clone(), Bytes::from("a_val"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(old_b.clone(), Bytes::from("b_val"))
+            .await
+            .unwrap();
+        let v_old_a = mvcc.version_of(&old_a);
+        let v_old_b = mvcc.version_of(&old_b);
+        assert!(v_old_a > 0 && v_old_b > 0);
+
+        // A "fresh" key written at a high version.
+        let fresh = Bytes::from("fresh");
+        // Advance the version counter so `fresh` lands well above the olds.
+        for _ in 0..10 {
+            gate.assign_next_version();
+        }
+        mvcc.set_versioned(fresh.clone(), Bytes::from("f_val"))
+            .await
+            .unwrap();
+        let v_fresh = mvcc.version_of(&fresh);
+        assert!(v_fresh > v_old_a && v_fresh > v_old_b);
+
+        // Cache currently holds all three.
+        assert_eq!(mvcc.version_cache.len(), 3);
+
+        // Advance min_alive to sit strictly above the old keys but at/below
+        // the fresh key. With the snapshot still open at version 0, min_alive
+        // would be 0 — so drop it first, then publish a committed marker so
+        // min_alive == last_committed.
+        let min_alive_target = v_old_b + 1; // > both olds, <= v_fresh
+        assert!(min_alive_target <= v_fresh);
+        drop(_guard); // no live snapshots → min_alive == last_committed
+        gate.publish_committed(min_alive_target);
+        assert_eq!(gate.min_alive(), min_alive_target);
+
+        // GC. The history threshold here is irrelevant to cache pruning,
+        // which always uses min_alive.
+        mvcc.gc().await.unwrap();
+
+        // Old keys (cv < min_alive) evicted → version_of == 0.
+        assert_eq!(
+            mvcc.version_of(&old_a),
+            0,
+            "stale old_a should be evicted from version_cache"
+        );
+        assert_eq!(
+            mvcc.version_of(&old_b),
+            0,
+            "stale old_b should be evicted from version_cache"
+        );
+        // Fresh key (cv >= min_alive) retained.
+        assert_eq!(
+            mvcc.version_of(&fresh),
+            v_fresh,
+            "fresh key (cv >= min_alive) must NOT be evicted"
+        );
+        assert_eq!(mvcc.version_cache.len(), 1, "cache should have shrunk to 1");
+
+        // CURRENT values in main are still correct after eviction. With the
+        // entries gone, get_at takes the fast path and reads main.
+        let snap = min_alive_target + 100;
+        assert_eq!(
+            mvcc.get_at(old_a.as_ref(), snap).await.unwrap(),
+            Some(Bytes::from("a_val")),
+            "evicting the cache entry must not change the current value"
+        );
+        assert_eq!(
+            mvcc.get_at(old_b.as_ref(), snap).await.unwrap(),
+            Some(Bytes::from("b_val"))
+        );
+        assert_eq!(
+            mvcc.get_at(fresh.as_ref(), snap).await.unwrap(),
+            Some(Bytes::from("f_val"))
+        );
+    }
+
+    /// Boundary: a key whose cached version equals `min_alive` is retained
+    /// (the rule is strict `<`, not `<=`).
+    #[tokio::test]
+    async fn gc_keeps_version_cache_entry_at_min_alive_boundary() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("boundary");
+        mvcc.set_versioned(key.clone(), Bytes::from("v"))
+            .await
+            .unwrap();
+        let cv = mvcc.version_of(&key);
+        assert!(cv > 0);
+
+        // Set min_alive EXACTLY to cv: entry must survive (cv >= min_alive).
+        drop(guard);
+        gate.publish_committed(cv);
+        assert_eq!(gate.min_alive(), cv);
+
+        mvcc.gc().await.unwrap();
+
+        assert_eq!(
+            mvcc.version_of(&key),
+            cv,
+            "entry at the min_alive boundary must be retained (strict < eviction)"
+        );
+    }
+
+    /// The dangerous case the invariant protects: an entry is NOT evicted
+    /// while a live snapshot below its version still needs the history value.
+    /// We open a snapshot between v1 and v2, advance last_committed, run GC,
+    /// and confirm (a) the entry survives (a live snapshot is older than its
+    /// version), and (b) `get_at` at that old snapshot STILL returns the
+    /// archived v1 from history — the MVCC visibility contract holds.
+    #[tokio::test]
+    async fn gc_preserves_visibility_for_live_snapshot_below_cached_version() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        // Bootstrap snapshot at v0 — activates the versioned write-path for
+        // the v1 write (so version_cache gets populated). Dropped once the
+        // real reader is open, so it does not drag min_alive below v1.
+        let bootstrap = gate.open_snapshot().await;
+
+        let key = Bytes::from("vis");
+
+        // v1 committed.
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let v1 = mvcc.version_of(&key);
+
+        // Publish v1 so a snapshot can open AT v1, then open it: this snapshot
+        // is the live reader that still needs v1 after v2 lands.
+        gate.publish_committed(v1);
+        let reader_snap = gate.open_snapshot().await;
+        assert_eq!(reader_snap.version(), v1);
+        // Now drop the v0 bootstrap so the reader at v1 is the oldest snapshot.
+        drop(bootstrap);
+
+        // v2 overwrites; v1 is archived to history (the reader snapshot at v1
+        // is still active).
+        mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+        let v2 = mvcc.version_of(&key);
+        assert!(v2 > v1);
+
+        // Advance last_committed past v2. But the live reader snapshot pins
+        // min_alive down to v1, so the cache entry (cv == v2) is NOT < v1
+        // and must NOT be evicted.
+        gate.publish_committed(v2 + 50);
+        assert_eq!(
+            gate.min_alive(),
+            v1,
+            "live reader snapshot must pin min_alive to v1"
+        );
+
+        mvcc.gc().await.unwrap();
+
+        // Entry retained (cv == v2 >= min_alive == v1).
+        assert_eq!(
+            mvcc.version_of(&key),
+            v2,
+            "entry needed by a live snapshot below its version must survive GC"
+        );
+
+        // Visibility contract: the live snapshot at v1 still sees v1 (slow
+        // path, because cur_v (v2) > snapshot (v1) → scan history).
+        assert_eq!(
+            mvcc.get_at(key.as_ref(), reader_snap.version())
+                .await
+                .unwrap(),
+            Some(Bytes::from("v1")),
+            "snapshot below the cached version must still read the archived v1"
+        );
+
+        // And a snapshot at/after v2 sees v2 (fast path → main).
+        assert_eq!(
+            mvcc.get_at(key.as_ref(), v2).await.unwrap(),
+            Some(Bytes::from("v2"))
+        );
+    }
+
+    /// Even after an entry is legitimately evicted, a (hypothetical) read at
+    /// an OLD snapshot below the real version is still answered correctly,
+    /// BECAUSE eviction only ever happens once no such live snapshot exists.
+    /// This test exercises the "evict, then read at the boundary snapshot"
+    /// path to prove the fast-path fallback returns main's current value
+    /// (the post-eviction contract) rather than a stale/incorrect one.
+    #[tokio::test]
+    async fn gc_evicted_key_read_at_boundary_snapshot_returns_main() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("evict_then_read");
+        // Two versions: v1 archived, v2 in main.
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+        let v2 = mvcc.version_of(&key);
+
+        // Move min_alive strictly above v2 (no live snapshots), making the
+        // entry redundant: every surviving/ future snapshot is >= min_alive
+        // > v2, so none can observe v1.
+        drop(guard);
+        gate.publish_committed(v2 + 1);
+        assert_eq!(gate.min_alive(), v2 + 1);
+
+        mvcc.gc().await.unwrap();
+        assert_eq!(mvcc.version_of(&key), 0, "redundant entry evicted");
+
+        // A read at exactly min_alive (the lowest a fresh snapshot could be)
+        // takes the fast path and returns main's current value v2 — correct,
+        // since no snapshot this old or older can legitimately exist below v2.
+        assert_eq!(
+            mvcc.get_at(key.as_ref(), v2 + 1).await.unwrap(),
+            Some(Bytes::from("v2")),
+            "post-eviction read returns current main value via fast path"
+        );
     }
 }
