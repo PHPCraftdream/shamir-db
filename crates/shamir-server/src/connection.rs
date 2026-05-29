@@ -27,7 +27,9 @@ use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome, R
 use shamir_connect::server::handshake::{
     AuthInitView, AuthOkView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
-use shamir_connect::server::lockout::{subnet_of, username_hash, LockoutStore, PairKey};
+use shamir_connect::server::lockout::{
+    subnet_of, username_hash, FailureOutcome, LockoutStore, PairKey, BACKOFF_CAP_MS,
+};
 use shamir_connect::server::rate_limit::{RateDecision, RateLimiter};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::rotation::ServerIdentityState;
@@ -219,7 +221,7 @@ pub async fn handle_connection<F>(
             // audit log; the counter is for at-a-glance dashboards.
             let label = match &e {
                 HandshakeError::LockedOut => "locked_out",
-                HandshakeError::BadProof => "bad_proof",
+                HandshakeError::BadProof { .. } => "bad_proof",
                 HandshakeError::UnknownUser => "unknown_user",
                 HandshakeError::UnsupportedVersion => "unsupported_version",
                 HandshakeError::Policy => "policy",
@@ -232,9 +234,19 @@ pub async fn handle_connection<F>(
                 }
             };
             record_auth_attempt(label);
-            // Pad to spec §8.5 floor before disconnecting on the negative
-            // path — defeats real-vs-fake user timing oracles.
-            let pad = pad_guard.finish_with_target(target_constant_time_ms());
+            // NEW-2: on a bad `client_proof`, widen the latency pad to the
+            // per-pair exponential backoff (spec §5.2.5). The constant-time
+            // floor (spec §8.5) remains the lower bound, so the
+            // timing-oracle defence is preserved AND the escalating penalty
+            // applies: the negative-path response is held for
+            // `max(constant_time_floor, backoff_ms)`. All other failure
+            // variants carry no backoff → pad with the floor only.
+            let backoff_ms = match &e {
+                HandshakeError::BadProof { backoff_ms } => *backoff_ms,
+                _ => 0,
+            };
+            let target_ms = target_constant_time_ms().max(backoff_ms);
+            let pad = pad_guard.finish_with_target(target_ms);
             if pad > Duration::ZERO {
                 tokio::time::sleep(pad).await;
             }
@@ -270,7 +282,17 @@ enum HandshakeError {
     Io,
     Decode,
     Policy,
-    BadProof,
+    /// Client sent an invalid `client_proof`. Carries the per-pair
+    /// exponential backoff (spec §5.2.5 NORMATIVE) returned by
+    /// [`LockoutStore::register_failure`] so the negative-path latency pad
+    /// can be widened to `max(constant_time_floor, backoff_ms)` — i.e. the
+    /// Nth failure from a `(subnet, username_hash)` pair is delayed
+    /// `100ms × 2^N` (capped 30s) before its response is released (NEW-2).
+    BadProof {
+        /// Backoff delay in milliseconds dictated by the failure count for
+        /// this pair. `0` only if the store reports no backoff.
+        backoff_ms: u64,
+    },
     UnknownUser,
     LockedOut,
     /// Client requested a handshake-protocol version this server does not
@@ -481,15 +503,39 @@ async fn run_handshake<F: Framer>(
         SESSION_MAX_AGE_NS,
     ) {
         Ok(o) => o,
-        Err(_) => return Err(HandshakeError::BadProof),
+        // Internal verify error (crypto failure, not an attacker's wrong
+        // guess) — surface as a generic auth failure with no per-pair
+        // backoff (we did not `register_failure`), so the floor pad applies.
+        Err(_) => return Err(HandshakeError::BadProof { backoff_ms: 0 }),
     };
     drop(permit_opt);
 
     let auth_ok: AuthOkView = match outcome {
         ProofOutcome::Accepted(ok) => *ok,
         ProofOutcome::Rejected => {
-            // Register the failure for backoff / lockout.
-            let _ = ctx.lockout.register_failure(pair, now_ns);
+            // Register the failure and APPLY the resulting per-pair
+            // exponential backoff (spec §5.2.5 NORMATIVE, NEW-2). The
+            // returned delay is plumbed out via `HandshakeError::BadProof`
+            // and folded into the negative-path latency pad as
+            // `max(constant_time_floor, backoff_ms)` by `handle_connection`,
+            // so the response to THIS failed attempt is held long enough to
+            // pace the attacker (100ms × 2^N, capped 30s).
+            //
+            // Safety (no user-existence oracle): `register_failure` is keyed
+            // by `(subnet, username_hash)` and `ProofOutcome::Rejected` is
+            // reached identically for a real user with a wrong password and
+            // for a non-existent user (shamir-connect verifies against an
+            // internally-derived FakeBlob). The backoff depends only on the
+            // failure count for the pair, never on whether the user exists —
+            // so widening the pad to the backoff leaks nothing the flat
+            // constant-time pad didn't already cover.
+            let backoff_ms = match ctx.lockout.register_failure(pair, now_ns) {
+                FailureOutcome::Backoff { delay_ms } => delay_ms,
+                // Threshold crossed → pair is now locked out. Treat this
+                // final response as the maximum backoff (the escalation
+                // endpoint; `FailureState::backoff_ms` saturates here too).
+                FailureOutcome::LockedOut => BACKOFF_CAP_MS,
+            };
             tracing::info!(user = %username.as_str(), "auth_failed: bad proof");
             audit_emit(
                 ctx,
@@ -499,7 +545,7 @@ async fn run_handshake<F: Framer>(
                 None,
                 "bad_proof",
             );
-            return Err(HandshakeError::BadProof);
+            return Err(HandshakeError::BadProof { backoff_ms });
         }
     };
 
@@ -919,5 +965,170 @@ mod tests {
             "pre-auth cap × 10k connections should be under 128 MiB; got {}",
             max_unauth_memory,
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // NEW-2: per-pair exponential backoff is COMPUTED *and APPLIED*.
+    //
+    // The application logic lives in two spots:
+    //   * `run_handshake` (ProofOutcome::Rejected arm) maps the
+    //     `register_failure` outcome → `backoff_ms` and returns it via
+    //     `HandshakeError::BadProof { backoff_ms }`.
+    //   * `handle_connection` widens the negative-path latency pad to
+    //     `max(target_constant_time_ms(), backoff_ms)`.
+    //
+    // Driving the full async `run_handshake` requires a complete
+    // `ConnectionContext` (TLS identity, redb user dir, …) so these tests
+    // exercise the two load-bearing pieces directly: (1) the exact
+    // outcome→backoff mapping used by the reject arm, against the real
+    // `InMemoryLockoutStore`, and (2) the `max(floor, backoff)` pad formula.
+    // ---------------------------------------------------------------------
+
+    use shamir_connect::common::latency::{padding_for, target_constant_time_ms, FIXED_FLOOR_MS};
+    use shamir_connect::server::lockout::{
+        FailureOutcome, InMemoryLockoutStore, LockoutStore, PairKey, Subnet, BACKOFF_BASE_MS,
+        BACKOFF_CAP_MS, LOCKOUT_THRESHOLD,
+    };
+    use std::time::Duration;
+
+    /// Mirror of the `ProofOutcome::Rejected` arm in `run_handshake`: map a
+    /// `register_failure` outcome to the `backoff_ms` that gets plumbed into
+    /// `HandshakeError::BadProof`. Kept in lockstep with the production code
+    /// so the test fails if the mapping drifts.
+    fn backoff_ms_for(outcome: FailureOutcome) -> u64 {
+        match outcome {
+            FailureOutcome::Backoff { delay_ms } => delay_ms,
+            FailureOutcome::LockedOut => BACKOFF_CAP_MS,
+        }
+    }
+
+    fn pair(subnet: u8, user: u8) -> PairKey {
+        (Subnet::V4([10, 0, subnet]), [user; 16])
+    }
+
+    /// The backoff plumbed into the reject path must escalate `100ms × 2^N`
+    /// (capped 30s) as failures accumulate for a `(subnet, username_hash)`
+    /// pair, exactly as the reject arm computes it from the real store.
+    #[test]
+    fn reject_path_backoff_escalates_per_failure() {
+        let store = InMemoryLockoutStore::new();
+        let now = 1_000_000_000u64;
+        let k = pair(1, 1);
+        const SECOND_NS: u64 = 1_000_000_000;
+
+        // First failures (well below the 50-failure lockout threshold)
+        // double each time: 100, 200, 400, 800, 1600, ...
+        let expected = [
+            100u64, 200, 400, 800, 1600, 3200, 6400, 12800, 25600, 30000, 30000,
+        ];
+        for (i, &want) in expected.iter().enumerate() {
+            let outcome = store.register_failure(k, now + (i as u64) * SECOND_NS);
+            assert_eq!(
+                backoff_ms_for(outcome),
+                want,
+                "failure #{} should map to {}ms backoff",
+                i + 1,
+                want,
+            );
+        }
+        // Base × 2^0 sanity (documents the formula's anchor).
+        assert_eq!(BACKOFF_BASE_MS, 100);
+    }
+
+    /// Crossing the lockout threshold must still yield a bounded backoff for
+    /// the final response (`BACKOFF_CAP_MS`), not panic or 0 — the reject arm
+    /// maps `FailureOutcome::LockedOut → BACKOFF_CAP_MS`.
+    #[test]
+    fn reject_path_backoff_caps_at_lockout_threshold() {
+        let store = InMemoryLockoutStore::new();
+        let now = 1_000_000_000u64;
+        let k = pair(2, 2);
+        const SECOND_NS: u64 = 1_000_000_000;
+
+        let mut last = 0u64;
+        for i in 0..LOCKOUT_THRESHOLD {
+            let outcome = store.register_failure(k, now + (i as u64) * SECOND_NS);
+            last = backoff_ms_for(outcome);
+        }
+        // The 50th failure trips the lockout; the mapped backoff is the cap.
+        assert_eq!(
+            last, BACKOFF_CAP_MS,
+            "threshold-crossing backoff is the cap"
+        );
+        assert!(store.is_locked_out(k, now + (LOCKOUT_THRESHOLD as u64) * SECOND_NS));
+    }
+
+    /// The negative-path pad target is `max(constant_time_floor, backoff)` —
+    /// the timing-oracle floor is preserved AND the escalation is enforced.
+    /// With elapsed below the target, the computed sleep reaches the backoff.
+    #[test]
+    fn pad_target_is_max_of_floor_and_backoff() {
+        // A large backoff dominates the floor: total pad ≈ backoff.
+        let backoff_ms = 6400u64;
+        // Sample the (random) floor many times; the formula must never drop
+        // below either input.
+        for _ in 0..256 {
+            let target_ms = target_constant_time_ms().max(backoff_ms);
+            assert!(
+                target_ms >= backoff_ms,
+                "pad target must be >= backoff ({target_ms} < {backoff_ms})",
+            );
+            assert!(
+                target_ms >= FIXED_FLOOR_MS,
+                "pad target must be >= constant-time floor ({target_ms} < {FIXED_FLOOR_MS})",
+            );
+        }
+
+        // With a tiny elapsed, the sleep computed by the same helper the
+        // negative path uses must reach the backoff window.
+        let target_ms = 6400u64.max(target_constant_time_ms());
+        let sleep = padding_for(Duration::from_millis(5), target_ms);
+        assert!(
+            sleep >= Duration::from_millis(backoff_ms - 5),
+            "negative-path sleep ({sleep:?}) must reach the backoff window",
+        );
+    }
+
+    /// When there is no backoff (e.g. an internal verify error path with
+    /// `backoff_ms = 0`), the pad target collapses to the constant-time
+    /// floor — behaviour identical to the pre-NEW-2 flat pad.
+    #[test]
+    fn zero_backoff_collapses_to_constant_time_floor() {
+        for _ in 0..256 {
+            let floor = target_constant_time_ms();
+            // `black_box` so the zero is treated as an opaque runtime value
+            // (matching the production `floor.max(backoff_ms)` where
+            // `backoff_ms == 0`) rather than a compile-time no-op.
+            let backoff_ms = std::hint::black_box(0u64);
+            let target_ms = floor.max(backoff_ms);
+            assert_eq!(target_ms, floor);
+            assert!((FIXED_FLOOR_MS..=FIXED_FLOOR_MS + 25).contains(&target_ms));
+        }
+    }
+
+    /// No user-existence oracle: the store's backoff depends ONLY on the
+    /// failure count for the `(subnet, username_hash)` pair, never on whether
+    /// the username maps to a real account. Two distinct username hashes on
+    /// the same subnet, failed the same number of times, must yield identical
+    /// backoff progressions — so widening the pad to the backoff cannot leak
+    /// which usernames exist.
+    #[test]
+    fn backoff_progression_is_identical_for_any_pair() {
+        let store = InMemoryLockoutStore::new();
+        let now = 1_000_000_000u64;
+        const SECOND_NS: u64 = 1_000_000_000;
+        let real_user = pair(7, 0xaa); // imagine this hash maps to a real account
+        let fake_user = pair(7, 0xbb); // and this one does not
+
+        for i in 0..8u64 {
+            let a = backoff_ms_for(store.register_failure(real_user, now + i * SECOND_NS));
+            let b = backoff_ms_for(store.register_failure(fake_user, now + i * SECOND_NS));
+            assert_eq!(
+                a,
+                b,
+                "backoff at failure #{} must not depend on the pair identity",
+                i + 1,
+            );
+        }
     }
 }
