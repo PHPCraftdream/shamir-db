@@ -386,6 +386,76 @@ async fn test_migration_unknown_id() {
 }
 
 // ============================================================================
+// CreateUser stores an Argon2id hash, never the plaintext password
+// ============================================================================
+
+#[tokio::test]
+async fn test_create_user_hashes_password_at_rest() {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::Argon2;
+
+    let shamir = setup_shamir().await;
+    let plaintext = "correct horse battery staple";
+
+    // Create a user through the wire-facing batch path.
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "cu": {
+                "create_user": "alice",
+                "password": plaintext,
+                "roles": ["readonly"]
+            }
+        }
+    }))
+    .unwrap();
+    shamir.execute("testdb", &req).await.unwrap();
+
+    // Read the raw record straight from the system-store `users` table
+    // (the `list users` path strips `password_hash`, so we go direct).
+    let table = shamir.system_store().users_table().await.unwrap();
+    let interner = table.interner().get().await.unwrap();
+    let refs = crate::types::common::new_map();
+    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+    let query =
+        crate::query::read::ReadQuery::new("users").filter(crate::query::filter::Filter::Eq {
+            field: vec!["name".to_string()],
+            value: crate::query::filter::FilterValue::String("alice".to_string()),
+        });
+    let result = table.read(&query, &ctx).await.unwrap();
+    assert_eq!(result.records.len(), 1, "alice must be stored");
+
+    let stored = result.records[0]["password_hash"].as_str().unwrap();
+
+    // The stored value must NOT be the plaintext.
+    assert_ne!(
+        stored, plaintext,
+        "password must not be stored in plaintext"
+    );
+
+    // It must be a self-describing Argon2id PHC string.
+    assert!(
+        stored.starts_with("$argon2id$"),
+        "expected an Argon2id PHC string, got {stored}"
+    );
+
+    // It must verify against the original password and reject a wrong one.
+    let parsed = PasswordHash::new(stored).expect("stored hash must parse as PHC");
+    assert!(
+        Argon2::default()
+            .verify_password(plaintext.as_bytes(), &parsed)
+            .is_ok(),
+        "stored hash must verify against the original password"
+    );
+    assert!(
+        Argon2::default()
+            .verify_password(b"wrong password", &parsed)
+            .is_err(),
+        "stored hash must reject a wrong password"
+    );
+}
+
+// ============================================================================
 // Error: unknown repo
 // ============================================================================
 

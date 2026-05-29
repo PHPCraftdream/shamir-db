@@ -403,9 +403,17 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateUser(op) => {
+                // Hash the password at rest with Argon2id (PHC string).
+                // This `users.password_hash` field is RBAC/admin metadata,
+                // NOT a live-auth credential — the wire login path is
+                // SCRAM-Argon2id in `shamir-connect` over StoredKey /
+                // ServerKey, which never reads this field. Hashing here is
+                // defense-in-depth for the at-rest secret; no verify-side
+                // change is required.
+                let password_hash = hash_password(&op.password).map_err(|e| err(e.to_string()))?;
                 let user = crate::query::auth::User {
                     name: op.create_user.clone(),
-                    password_hash: op.password.clone(), // TODO: hash properly
+                    password_hash,
                     roles: op.roles.clone(),
                     profile: op.profile.clone(),
                 };
@@ -918,6 +926,27 @@ fn apply_patch(
     if let Some(v) = patch.flush_batch_size {
         cfg.flush_batch_size = v;
     }
+}
+
+/// Hash a plaintext password into an Argon2id PHC string for at-rest
+/// storage in the `users` table. Salt is drawn from the OS CSPRNG
+/// (`OsRng`) per a fresh 16-byte `SaltString`; params are the `argon2`
+/// crate defaults (Argon2id, v0x13). Returns the self-describing PHC
+/// string (`$argon2id$v=19$m=...$<salt>$<hash>`), which embeds the salt
+/// and params so verification needs no side-channel state.
+///
+/// NOTE: this field is admin/RBAC metadata, not the live-auth
+/// credential — wire login is SCRAM-Argon2id in `shamir-connect`. No
+/// verify site reads `users.password_hash`, so hashing here is purely
+/// defense-in-depth at rest.
+fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use argon2::Argon2;
+    use rand::rngs::OsRng;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default().hash_password(password.as_bytes(), &salt)?;
+    Ok(hash.to_string())
 }
 
 fn admin_result(data: serde_json::Value) -> QueryResult {
