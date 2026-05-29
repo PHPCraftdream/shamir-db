@@ -8,7 +8,6 @@ use crate::index2::descriptor::IndexDescriptor;
 use crate::index2::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use shamir_storage::types::Store;
-use shamir_tx::TxContext;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
@@ -68,15 +67,18 @@ pub trait IndexBackend: Send + Sync {
 
     /// tx-aware lookup variant.
     ///
-    /// In the current sub-stage (3.2.C) the default implementation
-    /// forwards to [`lookup`] and ignores the `tx` parameter. Backends
-    /// that want to merge committed postings with in-tx staged index
-    /// writes will override this method in later sub-stages (see
-    /// docs/pre-transactional/04-mvcc-store.md §3.2 / §3.3).
+    /// `staged_vectors` is the calling tx's own un-committed vectors for
+    /// this table (`TxContext::staged_vectors_for(token)`), resolved by
+    /// the caller which knows the table token. The default impl forwards
+    /// to [`lookup`] and ignores it; only `VectorBackend` overrides this
+    /// to merge the staged vectors into a similarity search so an in-tx
+    /// query sees its own writes (HIGH-6). Non-vector backends stage
+    /// their postings in `tx.index_write_set` and have nothing to merge
+    /// here.
     async fn lookup_tx(
         &self,
         query: IndexQuery,
-        _tx: Option<&TxContext>,
+        _staged_vectors: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<IndexResult, IndexError> {
         self.lookup(query).await
     }
@@ -111,10 +113,11 @@ pub trait IndexBackend: Send + Sync {
     ///
     /// Default forwards to `plan_insert` (tx-unaware). Backends that
     /// maintain non-storage side state — e.g. `VectorBackend` with its
-    /// HNSW graph — override this to route per-tx mutations into a
-    /// per-tx staging area instead of the live structure. That way a
-    /// dropped (rolled-back) tx leaves no ghost postings on the live
-    /// state. See HIGH-6.
+    /// HNSW graph — override this so a `Some(tx_id)` call does NOT touch
+    /// the live structure: the vector itself is staged into the tx via
+    /// [`staged_vector`] / `TxContext::stage_vector` and promoted at
+    /// commit. That way a dropped (rolled-back) tx leaves no ghost state
+    /// on the live structure. See HIGH-6.
     async fn plan_insert_tx(
         &self,
         rid: RecordId,
@@ -152,15 +155,23 @@ pub trait IndexBackend: Send + Sync {
         Ok(())
     }
 
-    /// Promote any per-tx staged side state for `tx_id` into the live
-    /// structure at transaction commit (commit pipeline Phase 5d,
-    /// HIGH-6). Default no-op — only backends that maintain non-storage
-    /// staging (e.g. `VectorBackend`'s HNSW graph) override this.
-    async fn commit_staged_tx(&self, _tx_id: shamir_tx::TxId) -> Result<(), IndexError> {
-        Ok(())
+    /// Extract the vector this backend would stage for `rec`, if any.
+    ///
+    /// The executor calls this on the tx-aware write path and routes the
+    /// returned vector into `TxContext::staged_vectors` (HIGH-6). Default
+    /// `None` — only `VectorBackend` extracts its embedding field; every
+    /// other backend stages its state as `IndexWriteOp`s instead.
+    async fn staged_vector(&self, _rid: RecordId, _rec: &InnerValue) -> Option<Vec<f32>> {
+        None
     }
 
-    /// Drop any per-tx staged side state for `tx_id` on transaction
-    /// abort / rollback (HIGH-6). Default no-op. See [`commit_staged_tx`].
-    async fn rollback_staged_tx(&self, _tx_id: shamir_tx::TxId) {}
+    /// Promote the tx's staged vectors for this table into the live
+    /// structure at commit (commit pipeline Phase 5d, HIGH-6). `vecs` is
+    /// the tx's `staged_vectors` slice for the owning table. Default
+    /// no-op — only `VectorBackend` overrides it to feed the HNSW graph.
+    /// Abort needs no counterpart: a dropped tx discards `staged_vectors`
+    /// by RAII, so the live structure is never touched until commit.
+    async fn apply_staged_vectors(&self, _vecs: &[(RecordId, Vec<f32>)]) -> Result<(), IndexError> {
+        Ok(())
+    }
 }

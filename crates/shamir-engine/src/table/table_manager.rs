@@ -460,6 +460,24 @@ impl TableManager {
         all_ops
     }
 
+    /// HIGH-6: route any HNSW vectors carried by `rec` into the tx's own
+    /// `staged_vectors` buffer instead of the live graph. Each vector
+    /// backend extracts its embedding (`IndexBackend::staged_vector`);
+    /// the `(rid, vec)` pair lands under this table's token. Promoted
+    /// into the graph atomically at commit (Phase 5d), discarded by RAII
+    /// on abort. Stateless backends return `None` and contribute nothing.
+    ///
+    /// The tx-aware `plan_*_tx` methods deliberately leave the live graph
+    /// untouched (no-op for `Some(tx)`), so this is the sole staging path.
+    async fn stage_vectors(&self, rid: RecordId, rec: &InnerValue, tx: &mut shamir_tx::TxContext) {
+        let token = self.table_token();
+        for backend in self.index2_registry.all_backends().await {
+            if let Some(v) = backend.staged_vector(rid, rec).await {
+                tx.stage_vector(token, rid, v);
+            }
+        }
+    }
+
     /// Collect index ops from all index2 backends for an update.
     /// Does NOT apply — ops go into tx.index_write_set for deferred apply.
     ///
@@ -580,18 +598,13 @@ impl TableManager {
     /// (read-set validation on the unique posting key) which lives in the
     /// commit pipeline — out of scope here. TODO.
     ///
-    /// HIGH-6: index2 `plan_insert_tx` IS called with `tx.tx_id`, so
-    /// stateful backends (e.g. `VectorBackend`) route the mutation
-    /// into per-tx staging on the underlying adapter; their stateless
-    /// peers (FTS / functional / btree) emit only `IndexWriteOp`s
-    /// which are accumulated in `tx.index_write_set` and applied at
-    /// commit time. `commit_tx` Phase 5c-d application of those ops
-    /// is still TODO (see `commit.rs::commit_tx_inner` Phase 5b-d
-    /// notes) — meaning a successful commit currently does NOT apply
-    /// the staged postings via the happy path (crash recovery does
-    /// because the ops are emitted into the WAL entry). That is a
-    /// separate gap from rollback correctness, which HIGH-6 addresses
-    /// here.
+    /// HIGH-6: stateful HNSW vectors are routed tx-locally — the index2
+    /// `plan_insert_tx` is a no-op on the live graph for a tx, and
+    /// [`stage_vectors`] buffers the embedding in `tx.staged_vectors`.
+    /// Stateless peers (FTS / functional / btree) emit `IndexWriteOp`s
+    /// accumulated in `tx.index_write_set`. A successful commit applies
+    /// both (`commit_tx` Phase 5c for postings, Phase 5d for vectors); a
+    /// dropped tx discards both by RAII.
     pub async fn insert_tx(
         &self,
         value: &InnerValue,
@@ -615,6 +628,9 @@ impl TableManager {
         let tx_id = Some(tx.tx_id);
         let mut index_ops = self.plan_insert_ops(rid, value, tx_id).await;
         index_ops.extend(self.plan_legacy_insert_ops(rid, value).await?);
+
+        // HIGH-6: stage HNSW vectors tx-locally (not into the live graph).
+        self.stage_vectors(rid, value, tx).await;
 
         self.stage_mutation(
             StagedMutation {
@@ -681,6 +697,10 @@ impl TableManager {
             }
             None => index_ops.extend(self.plan_legacy_insert_ops(id, value).await?),
         }
+
+        // HIGH-6: stage the new vector tx-locally (apply_committed_vectors
+        // upsert-replaces the prior committed entry at commit time).
+        self.stage_vectors(id, value, tx).await;
 
         self.stage_mutation(
             StagedMutation {

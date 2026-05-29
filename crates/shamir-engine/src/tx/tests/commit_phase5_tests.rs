@@ -4,18 +4,18 @@
 //!  * Part A — applies `tx.index_write_set` postings to the table's
 //!    `info_store` so index2 (FTS) queries surface the record after a
 //!    committed `insert_tx` (Phase 5c, `apply_index_ops_at_commit`).
-//!  * Part B — promotes HNSW staged vectors into the live graph under
-//!    the commit lock so a non-tx vector search finds them (Phase 5d,
-//!    `commit_staged_tx`).
-//!  * Part C — drains the per-tx HNSW staging buffer on abort/rollback
-//!    via `rollback_staged_tx` (the same method `commit_tx`'s error
-//!    path drives), so an aborted tx leaves no staged vectors behind.
+//!  * Part B — promotes the tx's staged vectors into the live graph
+//!    under the commit lock so a non-tx vector search finds them
+//!    (Phase 5d, `apply_staged_vectors`).
+//!  * Part C — RAII: an aborted (dropped) tx leaves no staged vectors
+//!    behind, because they live inside the `TxContext::staged_vectors`
+//!    and vanish with the tx — the live graph was never touched.
 
 use std::sync::Arc;
 
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_tx::{IsolationLevel, TxContext};
+use shamir_tx::IsolationLevel;
 use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
@@ -24,6 +24,7 @@ use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
 use crate::index2::tokenizer::token_hash;
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
+use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 
 fn make_repo() -> RepoInstance {
@@ -147,7 +148,8 @@ async fn committed_tx_index_postings_visible() {
 
 /// Part B: a vector staged via `insert_tx` and committed must be
 /// findable via a NON-tx vector search — proving Phase 5d promoted the
-/// staged vector from `HnswAdapter::staged` into the live HNSW graph.
+/// tx's staged vector (`TxContext::staged_vectors`) into the live HNSW
+/// graph via `apply_staged_vectors`.
 #[tokio::test]
 async fn committed_tx_hnsw_vector_searchable() {
     let repo = make_repo();
@@ -188,7 +190,7 @@ async fn committed_tx_hnsw_vector_searchable() {
     repo.commit_tx(tx).await.unwrap();
     drop(guard);
 
-    // Let the spawn_blocking HNSW insert (in commit_staged) settle.
+    // Let the spawn_blocking HNSW insert (in apply_staged_vectors) settle.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let post = backend
@@ -213,12 +215,10 @@ async fn committed_tx_hnsw_vector_searchable() {
     }
 }
 
-/// Part C: aborting a tx that staged an HNSW vector must drain the
-/// per-tx staging buffer. We drive `rollback_staged_tx` — exactly the
-/// method `commit_tx`'s error path (and the `commit_tx` wrapper) calls
-/// on every abort — and confirm an in-tx vector search no longer
-/// surfaces the staged vector (the staged buffer is empty), while the
-/// live graph was never touched.
+/// Part C: aborting (dropping) a tx that staged an HNSW vector leaves no
+/// trace — the staged vector lived inside `TxContext::staged_vectors` and
+/// vanished with the tx (RAII). The live graph was never touched, so a
+/// non-tx search finds nothing.
 #[tokio::test]
 async fn aborted_tx_hnsw_staged_cleaned() {
     let repo = make_repo();
@@ -228,70 +228,164 @@ async fn aborted_tx_hnsw_staged_cleaned() {
 
     let emb_id = field_id(&tbl, "embedding").await;
     let name_id = field_id(&tbl, "vec_idx").await;
+    let token = table_token_for("vecs");
     let backend = tbl
         .index2_registry()
         .get_by_name(name_id)
         .await
         .expect("vec_idx must be registered");
 
-    let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
-    let tx_id = tx.tx_id;
-    let rid = tbl
-        .insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
-        .await
-        .unwrap();
+    let rid = {
+        let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let rid = tbl
+            .insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
+            .await
+            .unwrap();
 
-    // The staged vector IS visible to an in-tx search before abort
-    // (the adapter merges the per-tx buffer in `search(_, _, Some)`).
-    let in_tx_before = {
-        let probe = TxContext::new(tx_id, 0, tx.snapshot_version, IsolationLevel::Snapshot);
+        // The staged vector IS visible to an in-tx search before abort:
+        // resolve the tx's own staged slice and merge it in the lookup.
         let res = backend
             .lookup_tx(
                 IndexQuery::Vector {
                     vec: vec![1.0, 0.0, 0.0],
                     k: 10,
                 },
-                Some(&probe),
+                tx.staged_vectors_for(token),
             )
             .await
             .unwrap();
-        match res {
+        let in_tx_before = match res {
             IndexResult::Ranked(hits) => hits.iter().any(|(r, _)| *r == rid),
             _ => panic!("expected Ranked"),
-        }
+        };
+        assert!(
+            in_tx_before,
+            "staged vector must be visible to an in-tx search before abort"
+        );
+
+        // Abort: just drop the tx. No explicit rollback call — RAII.
+        drop(tx);
+        drop(guard);
+        rid
     };
-    assert!(
-        in_tx_before,
-        "staged vector must be visible to an in-tx search before abort"
-    );
 
-    // Abort: drive the exact rollback the commit_tx error path uses.
-    backend.rollback_staged_tx(tx_id).await;
-    drop(tx);
-    drop(guard);
+    // The live graph was never touched: a non-tx search finds nothing.
+    let post = backend
+        .lookup(IndexQuery::Vector {
+            vec: vec![1.0, 0.0, 0.0],
+            k: 10,
+        })
+        .await
+        .unwrap();
+    match post {
+        IndexResult::Ranked(hits) => {
+            assert!(
+                !hits.iter().any(|(r, _)| *r == rid),
+                "aborted tx must leave no vector in the live graph (HIGH-6 Part C); got {:?}",
+                hits.iter().map(|(r, _)| *r).collect::<Vec<_>>()
+            );
+        }
+        _ => panic!("expected Ranked"),
+    }
+}
 
-    // After rollback the staged buffer is empty: an in-tx search with
-    // the same tx_id no longer surfaces the vector, and the live graph
-    // (non-tx search) was never touched.
-    let probe = TxContext::new(tx_id, 0, 100, IsolationLevel::Snapshot);
-    let in_tx_after = backend
+/// RAII guarantee, stated directly: stage a vector into a `TxContext`,
+/// drop the tx without commit, and confirm (a) the live graph never saw
+/// it and (b) nothing lingers — `staged_vectors` was owned by the tx, so
+/// the drop freed it. Since staging is now tx-local, the "no lingering
+/// buffer" half is structurally guaranteed; we assert the live-graph
+/// cleanliness via a search.
+#[tokio::test]
+async fn dropped_tx_staged_vectors_freed_via_raii() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op()).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let name_id = field_id(&tbl, "vec_idx").await;
+    let token = table_token_for("vecs");
+    let backend = tbl
+        .index2_registry()
+        .get_by_name(name_id)
+        .await
+        .expect("vec_idx must be registered");
+
+    let rid = {
+        let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let rid = tbl
+            .insert_tx(&vec_record(emb_id, &[0.0, 1.0, 0.0]), Some(&mut tx))
+            .await
+            .unwrap();
+        // The vector lives in the tx, keyed by this table's token.
+        assert_eq!(
+            tx.staged_vectors_for(token).map(<[_]>::len),
+            Some(1),
+            "vector must be staged inside the TxContext"
+        );
+        drop(tx); // RAII: staged_vectors freed, no commit.
+        drop(guard);
+        rid
+    };
+
+    let post = backend
+        .lookup(IndexQuery::Vector {
+            vec: vec![0.0, 1.0, 0.0],
+            k: 10,
+        })
+        .await
+        .unwrap();
+    match post {
+        IndexResult::Ranked(hits) => assert!(
+            !hits.iter().any(|(r, _)| *r == rid),
+            "dropped tx must never reach the live graph (RAII); got {:?}",
+            hits.iter().map(|(r, _)| *r).collect::<Vec<_>>()
+        ),
+        _ => panic!("expected Ranked"),
+    }
+}
+
+/// In-tx read-your-own-writes for vectors: stage a vector, then search
+/// WITHIN the same tx (threading `tx.staged_vectors_for(token)` into the
+/// lookup) and find it. Proves the staged-slice wiring of `lookup_tx`.
+#[tokio::test]
+async fn in_tx_search_sees_own_staged_vector() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("vecs"));
+    let tbl = repo.get_table("vecs").await.unwrap();
+    tbl.create_index_v2(&vector_index_op()).await.unwrap();
+
+    let emb_id = field_id(&tbl, "embedding").await;
+    let name_id = field_id(&tbl, "vec_idx").await;
+    let token = table_token_for("vecs");
+    let backend = tbl
+        .index2_registry()
+        .get_by_name(name_id)
+        .await
+        .expect("vec_idx must be registered");
+
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid = tbl
+        .insert_tx(&vec_record(emb_id, &[1.0, 0.0, 0.0]), Some(&mut tx))
+        .await
+        .unwrap();
+
+    let res = backend
         .lookup_tx(
             IndexQuery::Vector {
                 vec: vec![1.0, 0.0, 0.0],
                 k: 10,
             },
-            Some(&probe),
+            tx.staged_vectors_for(token),
         )
         .await
         .unwrap();
-    match in_tx_after {
-        IndexResult::Ranked(hits) => {
-            assert!(
-                !hits.iter().any(|(r, _)| *r == rid),
-                "aborted tx must leave no staged HNSW vector (HIGH-6 Part C); got {:?}",
-                hits.iter().map(|(r, _)| *r).collect::<Vec<_>>()
-            );
-        }
+    match res {
+        IndexResult::Ranked(hits) => assert!(
+            hits.iter().any(|(r, _)| *r == rid),
+            "in-tx search must see the tx's own staged vector; got {:?}",
+            hits.iter().map(|(r, _)| *r).collect::<Vec<_>>()
+        ),
         _ => panic!("expected Ranked"),
     }
 }

@@ -120,70 +120,22 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// idempotent at the data layer so recovery is safe, but the caller
 /// observes neither success nor a clean abort. Treat as non-cancel-safe
 /// at the API boundary.
+///
+/// Thin metrics-only wrapper around [`commit_tx_inner`]: it records the
+/// `on_tx_aborted_storage` metric on any storage-layer abort and is
+/// otherwise transparent. There is NOTHING to do for HNSW staging on
+/// abort — staged vectors live inside the `TxContext` (`staged_vectors`)
+/// and vanish when the tx is dropped on the `Err` return below. That is
+/// the RAII win: no per-tx buffer outlives the `TxContext`, so no
+/// broadcast drain is needed (HIGH-6).
 pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
-    // HIGH-6 (Part C): capture the HNSW staging footprint BEFORE `tx` is
-    // moved into the inner commit. On any abort (Expired / SsiConflict /
-    // Storage error / Phase 5d failure) we must drain the per-tx HNSW
-    // staging buffers so a failed commit doesn't leak staged vectors
-    // (tied to a TxId that is never reused). A clean happy-path commit
-    // empties the buffers in Phase 5d, so the post-commit rollback below
-    // is a cheap no-op (`remove_async` on an absent key).
-    let tx_id = tx.tx_id;
-    let hnsw_tokens = touched_table_tokens(&tx);
-
     match commit_tx_inner(tx, repo).await {
         Ok(outcome) => Ok(outcome),
         Err(e) => {
-            rollback_hnsw_staging_tokens(tx_id, &hnsw_tokens, repo).await;
             if let TxError::Storage(_) = &e {
                 repo.tx_metrics().on_tx_aborted_storage();
             }
             Err(e)
-        }
-    }
-}
-
-/// Collect every table token the tx touched: data writes, staged index
-/// ops, counter deltas, and any explicitly-marked HNSW staging. The
-/// commit pipeline broadcasts `commit_staged_tx` / `rollback_staged_tx`
-/// to these tables' index2 backends (HIGH-6 Phase 5d / abort).
-///
-/// We cannot rely on `tx.tables_with_hnsw_staging` alone: the executor
-/// path that stages vectors (`TableManager::insert_tx` →
-/// `plan_insert_tx`) routes the vector into the adapter's per-tx buffer
-/// but does not currently populate `mark_hnsw_staging`. Driving the
-/// commit/rollback off the full touched-table set is robust regardless:
-/// `commit_staged`/`rollback_staged` are no-ops when a backend has no
-/// staged entries for this `tx_id`.
-fn touched_table_tokens(tx: &TxContext) -> Vec<u64> {
-    let mut tokens: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    tokens.extend(tx.write_set.keys().copied());
-    tokens.extend(tx.index_write_set.iter().map(|(t, _)| *t));
-    tokens.extend(tx.counter_deltas.keys().copied());
-    tokens.extend(tx.tables_with_hnsw_staging.iter().copied());
-    tokens.into_iter().collect()
-}
-
-/// HIGH-6 (Part C): drain the HNSW per-tx staging buffers for the given
-/// tables. Used on every commit error path (and by the begin_tx caller's
-/// explicit abort, if it routes through `commit_tx`). Each
-/// `rollback_staged_tx` is a no-op for non-vector backends and for
-/// vector backends whose buffer was already drained on commit.
-///
-/// RAII note: `TxContext` has no async Drop (Rust `Drop` is sync and the
-/// HNSW buffer lives behind an `scc::HashMap` keyed by `TxId` on the
-/// adapter, not inside the `TxContext`). A tx that is simply dropped
-/// without ever calling `commit_tx` therefore still leaks its HNSW
-/// staging. The mitigations are: (1) `commit_tx` always drains on abort
-/// via this helper; (2) callers funnel abort through `commit_tx` rather
-/// than a bare drop. A future fully-RAII fix would require a sync
-/// drain primitive on the adapter or a tokio runtime handle in Drop.
-async fn rollback_hnsw_staging_tokens(tx_id: shamir_tx::TxId, tokens: &[u64], repo: &RepoInstance) {
-    for token in tokens {
-        if let Ok(Some(tbl)) = repo.table_by_token(*token).await {
-            for backend in tbl.index2_registry().all_backends().await {
-                backend.rollback_staged_tx(tx_id).await;
-            }
         }
     }
 }
@@ -280,14 +232,6 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     wal.begin(entry).await?;
 
-    // Snapshot the touched-table set BEFORE Phase 5a drains
-    // `tx.write_set`. Phase 5d broadcasts `commit_staged_tx` to these
-    // tables' index2 backends to promote any HNSW vectors staged under
-    // this tx (HIGH-6). See `touched_table_tokens` for why this is
-    // derived from the full footprint rather than
-    // `tx.tables_with_hnsw_staging`.
-    let hnsw_candidate_tokens = touched_table_tokens(&tx);
-
     // Phase 5a: physical data writes per table.
     // Route through MvccStore when available so version_cache stays
     // current for SSI conflict detection. Fall back to direct
@@ -379,19 +323,27 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     // Must run INSIDE the commit critical section (we still hold
     // `_lock`) so the promotion is atomic with the rest of the commit:
     // no concurrent committer can interleave between the data writes and
-    // the vector-graph promotion. `commit_staged_tx` is a no-op for
-    // every backend except `VectorBackend`, whose adapter drains its
-    // per-tx staging buffer.
+    // the vector-graph promotion.
+    //
+    // The footprint is now PRECISE — we iterate exactly the tables the tx
+    // staged vectors into (`tx.staged_vectors`), keyed by table token. No
+    // broadcast over the whole touched-table set is needed because the tx
+    // knows its own vector footprint. `apply_staged_vectors` is a no-op
+    // for every backend except `VectorBackend`. Phase 5a only drained
+    // `tx.write_set`, so `tx.staged_vectors` is intact here.
     //
     // On error here we have published nothing yet (publish happens in
-    // Phase 6). The `commit_tx` wrapper drains any remaining staging on
-    // the Err return — see `rollback_hnsw_staging_tokens`.
-    for token in &hnsw_candidate_tokens {
+    // Phase 6); returning `Err` drops `tx`, discarding `staged_vectors`
+    // by RAII — nothing to clean up.
+    for (token, vecs) in &tx.staged_vectors {
+        if vecs.is_empty() {
+            continue;
+        }
         if let Some(tbl) = repo.table_by_token(*token).await? {
             for backend in tbl.index2_registry().all_backends().await {
-                backend.commit_staged_tx(tx.tx_id).await.map_err(|e| {
+                backend.apply_staged_vectors(vecs).await.map_err(|e| {
                     TxError::Storage(DbError::Internal(format!(
-                        "hnsw commit_staged at commit: {e}"
+                        "hnsw apply_staged_vectors at commit: {e}"
                     )))
                 })?;
             }
