@@ -26,12 +26,15 @@
 //!   `legacy_index_routed_through_insert_tx_on_commit` here and in
 //!   `legacy_index_tx_tests`.
 //! * Commit-time apply for `tx.index_write_set` ops
-//!   (`commit.rs::commit_tx_inner` Phase 5c-d) — still TODO. A
-//!   committed tx does NOT write to `info_store` / `apply_in_memory`
-//!   on the happy path; crash recovery handles it because the ops
-//!   are emitted into the WAL entry by `wal_ops_from_tx`. That is a
-//!   downstream gap, independent of the rollback correctness HIGH-6
-//!   addresses.
+//!   (`commit.rs::commit_tx_inner` Phase 5c-d) — DONE. On the happy
+//!   path a committed tx applies its staged postings to `info_store`
+//!   (and broadcasts BumpFtsStats to the live backends) via
+//!   `apply_index_ops_at_commit`, so the record is findable through
+//!   the index immediately after commit — asserted by
+//!   `legacy_index_routed_through_insert_tx_on_commit` here. The same
+//!   ops are also emitted into the WAL entry by `wal_ops_from_tx`, so
+//!   crash recovery re-applies them idempotently if the process dies
+//!   between the WAL begin and commit markers.
 
 use std::sync::Arc;
 

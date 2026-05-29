@@ -19,8 +19,14 @@ use crate::TxId;
 
 /// Per-repo transactional synchronisation point.
 pub struct RepoTxGate {
-    /// Serialises the commit phase. Only held for the ~5ms critical
-    /// section (assign version → validate → write → publish).
+    /// Serialises the commit phase. Held across the whole critical
+    /// section: pre-commit (interner-overlay merge → SSI validation →
+    /// unique re-check → WAL begin), then data + index materialization
+    /// (Phase 5a data writes + Phase 5c index writes), publish, durable
+    /// markers, and WAL cleanup — it is released only after
+    /// `materialize` returns. The per-vector HNSW promote runs OUTSIDE
+    /// the lock (post-`materialize`). So the section is O(rows + index
+    /// postings) of storage work, not a fixed wall-clock budget.
     /// `tokio::sync::Mutex` because the guard lives across `.await`.
     commit_mutex: tokio::sync::Mutex<()>,
 
@@ -108,7 +114,12 @@ impl RepoTxGate {
     /// which is documented cancel-safe (`drop` of the future releases
     /// the wait without acquiring the lock).
     ///
-    /// Lock the commit gate. Returns a tokio `MutexGuard`.
+    /// Lock the commit gate. Returns a tokio `MutexGuard`. The guard is
+    /// held across the entire critical section — pre-commit
+    /// (interner-overlay merge / SSI validation / unique re-check / WAL
+    /// begin) + data and index materialization + publish + durable
+    /// markers + WAL cleanup — and dropped only after `materialize`, so
+    /// the post-lock per-vector HNSW promote runs unserialised.
     pub async fn commit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.commit_mutex.lock().await
     }
