@@ -40,6 +40,7 @@ log         = "0.4"            # log!/info!/warn! macros across the facade
 async-trait = "0.1.81"         # AdminExecutor / TableResolver trait impls
 rmp-serde   = "1.3.0"          # facade encodes audit / system-store records
 rand        = "0.8.5"          # facade rng for record-id allocation
+argon2      = "0.5"            # hash users.password_hash at rest (PHC string)
 
 # Legacy network / TLS module (`db/net/*`) — kept compiling so the
 # obsolete code doesn't bit-rot before its planned deletion.

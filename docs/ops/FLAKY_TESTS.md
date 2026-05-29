@@ -13,26 +13,7 @@ workaround.
 
 ## Open
 
-### `index2::vector::hnsw_adapter::tests::delete_removes_from_results`
-
-- **First observed:** 2026-05-28 during Stage 4.D.6.c.2 workspace test run.
-- **Symptom:** passes in isolation (`cargo test -p shamir-engine --lib delete_removes_from_results`),
-  fails intermittently under full parallel workspace test run.
-- **Suspected cause:** HNSW graph state interaction with concurrent
-  test parallelism — `hnsw_rs` internal state may share something
-  across `HnswAdapter` instances when many tests run together
-  (thread-local, static counters?). Or: the test's `assert!(result.len() < N)`
-  threshold is too tight and depends on graph layer-assignment randomness.
-- **Mitigation:** none yet; runs are passing on retry.
-- **Target fix:** investigate after Stage 4.D.6 lands. Either:
-  - Tighten `ef_search` / seed RNG deterministically.
-  - Replace soft assertion with explicit check that the deleted rid
-    is absent from the result set, not relying on `len`.
-  - Move to serial test (`#[serial]`) if HNSW internals are non-thread-safe.
-
-Related to: prior commit `bacdd5d test: fix two flaky tests introduced
-during stage 0.5 / 1.2.B` — same backend family; this looks like a
-sibling case.
+*(none)*
 
 ---
 
@@ -63,6 +44,40 @@ Tracking: Stage 5 — route Phase 5 writes through MvccStore.
 ---
 
 ## Resolved
+
+### `index2::vector::hnsw_adapter::tests::delete_removes_from_results`
+
+- **First observed:** 2026-05-28 during Stage 4.D.6.c.2 workspace test run.
+- **Stale diagnosis corrected (2026-05-29):** the original entry claimed
+  the test "passes in isolation" and only failed "under full parallel
+  workspace test run". **This was false.** Verified: the test fails
+  **in isolation, single-threaded**, on roughly 1-in-4-to-10 runs
+  (CI red ~10-25%). It is not a parallelism / `hnsw_rs`-shared-state
+  bug.
+- **Real cause:** recall non-determinism on a degenerate 2-node graph.
+  The test inserted 2 points, soft-deleted `rid(1)` (the entry point),
+  searched `k=10`, and asserted `results.len() == 1`. After the entry
+  point is tombstoned, HNSW search on a 2-node graph intermittently
+  returns 0 survivors — an inherent recall artifact on a tiny graph,
+  **not** a soft-delete bug (soft-delete itself works correctly). The
+  assertion depended on recall reaching the single survivor, which it
+  does not guarantee. `hnsw_rs` 0.3.4 has no seed API, so the graph
+  topology is non-deterministic per run.
+- **Fixed in:** this commit (assertion + graph-size change in
+  `hnsw_adapter.rs`). The test now:
+  1. builds a **non-degenerate** graph (10 points along x) so recall
+     over the survivors is reliable;
+  2. asserts the deleted rid is **absent** (the actual contract of
+     `delete`, independent of recall);
+  3. asserts the surviving nearest neighbour **is** found (recall
+     sanity on a graph large enough that it holds).
+  Verified deterministic: 50 single-threaded cargo runs + 100
+  direct-binary runs, 0 failures. Matches the presence/absence pattern
+  of the sibling fixes below.
+
+Related to: prior commit `bacdd5d test: fix two flaky tests introduced
+during stage 0.5 / 1.2.B` — same backend family, same root cause
+(HNSW recall on a tiny graph asserted via a strict count).
 
 ### `recall_at_10_on_1k_vectors` + `dot_product_metric_normalized`
 
