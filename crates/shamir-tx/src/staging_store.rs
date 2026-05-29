@@ -19,6 +19,19 @@ enum StagedOp {
     Remove,
 }
 
+/// Result of a targeted per-key staging probe ([`StagingStore::staged_op`]).
+///
+/// Reports *only* what this tx has staged for the key, never touching the
+/// base store: a staged set (`Set`), a staged remove (`Removed`), or — when
+/// the variant is absent from the return — nothing staged for this key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StagedKind {
+    /// The tx staged a value for this key (read-your-own-write).
+    Set(Bytes),
+    /// The tx staged a remove for this key (read-your-own-delete).
+    Removed,
+}
+
 /// Per-transaction staging buffer with read-through semantics.
 ///
 /// Created at tx begin, consumed at commit (via `drain`), or dropped
@@ -58,6 +71,40 @@ impl StagingStore {
             };
         }
         self.base.get(k).await
+    }
+
+    /// Targeted, alloc-free probe of this tx's own staging for `key`.
+    ///
+    /// Unlike [`get`], this consults **only** the local staging map and
+    /// never falls through to the base store, and it distinguishes a
+    /// staged `Remove` ([`StagedKind::Removed`]) from "nothing staged"
+    /// (`None`). It is the per-key counterpart of [`snapshot_ops`]: callers
+    /// that need to overlay staging for a single key (e.g. point reads doing
+    /// read-your-own-writes) use this instead of allocating + cloning the
+    /// whole op vector and linearly scanning it.
+    ///
+    /// Returns:
+    ///   - `Some(StagedKind::Set(bytes))` — the tx staged this value;
+    ///   - `Some(StagedKind::Removed)`    — the tx staged a remove;
+    ///   - `None`                         — the key is not staged in this tx
+    ///     (caller should fall through to the snapshot base).
+    ///
+    /// Alloc-free probe: `key` is borrowed as `&[u8]` and matched directly
+    /// against the `Bytes`-keyed map via `scc::HashMap::read`. scc 2.x's
+    /// `read<Q>` is bounded by `Q: Equivalent<K> + Hash`, and scc ships the
+    /// blanket `impl<Q, K> Equivalent<K> for Q where Q: Eq, K: Borrow<Q>`;
+    /// since `bytes::Bytes: Borrow<[u8]>` and `[u8]: Eq`, `&[u8]` is an
+    /// accepted probe key, and `<Bytes as Hash>` is byte-identical to
+    /// `<[u8] as Hash>`, so the lookup hash lines up for any key length. No
+    /// `Bytes` is allocated to probe (mirrors the III.2 `current_version`
+    /// fix); the only allocation is the O(1) refcount bump when cloning the
+    /// staged `Bytes` into a returned `Set`. Probe key length is arbitrary —
+    /// not restricted to 16-byte record ids.
+    pub fn staged_op(&self, key: &[u8]) -> Option<StagedKind> {
+        self.writes.read(key, |_, v| match v {
+            StagedOp::Set(b) => StagedKind::Set(b.clone()),
+            StagedOp::Remove => StagedKind::Removed,
+        })
     }
 
     /// Stage a set (creates or overwrites).
@@ -267,6 +314,95 @@ mod tests {
         assert_eq!(staging.len(), 1);
         staging.set(k.clone(), Bytes::from_static(b"v2")).await;
         assert_eq!(staging.len(), 1); // same key, still 1
+    }
+
+    #[tokio::test]
+    async fn staged_op_returns_set_for_staged_value() {
+        let base = mem_store();
+        let staging = StagingStore::new(base);
+        let k: RecordKey = Bytes::from_static(b"k1");
+        staging.set(k.clone(), Bytes::from_static(b"v1")).await;
+
+        assert_eq!(
+            staging.staged_op(k.as_ref()),
+            Some(StagedKind::Set(Bytes::from_static(b"v1")))
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_op_returns_removed_for_staged_remove() {
+        // Even when the base store has the key, a staged Remove reports
+        // Removed (and never consults the base — that is `get`'s job).
+        let base = mem_store();
+        let k: RecordKey = Bytes::from_static(b"k1");
+        base.set(k.clone(), Bytes::from_static(b"original"))
+            .await
+            .unwrap();
+
+        let staging = StagingStore::new(base);
+        staging.remove(k.clone()).await;
+
+        assert_eq!(staging.staged_op(k.as_ref()), Some(StagedKind::Removed));
+    }
+
+    #[tokio::test]
+    async fn staged_op_returns_none_when_not_staged_even_if_base_has_key() {
+        // `staged_op` reports ONLY this tx's staging; a key that lives only
+        // in the base is `None` (no fall-through), unlike `get`.
+        let base = mem_store();
+        let k: RecordKey = Bytes::from_static(b"k1");
+        base.set(k.clone(), Bytes::from_static(b"from_base"))
+            .await
+            .unwrap();
+
+        let staging = StagingStore::new(base);
+        assert_eq!(staging.staged_op(k.as_ref()), None);
+    }
+
+    #[tokio::test]
+    async fn staged_op_reflects_last_write_wins() {
+        let base = mem_store();
+        let staging = StagingStore::new(base);
+        let k: RecordKey = Bytes::from_static(b"k1");
+
+        staging.set(k.clone(), Bytes::from_static(b"v")).await;
+        staging.remove(k.clone()).await;
+        assert_eq!(staging.staged_op(k.as_ref()), Some(StagedKind::Removed));
+
+        staging.set(k.clone(), Bytes::from_static(b"again")).await;
+        assert_eq!(
+            staging.staged_op(k.as_ref()),
+            Some(StagedKind::Set(Bytes::from_static(b"again")))
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_op_borrow_probe_matches_arbitrary_length_keys() {
+        // The probe takes `&[u8]`; it must find staged entries regardless of
+        // key length (NOT restricted to 16-byte record ids) and allocate no
+        // `Bytes` to look up.
+        let base = mem_store();
+        let staging = StagingStore::new(base);
+
+        let short: RecordKey = Bytes::from_static(b"ab"); // 2 bytes
+        let long: RecordKey = Bytes::from_static(b"this-key-is-forty-bytes-long-padding-here"); // > 16
+        let empty: RecordKey = Bytes::from_static(b""); // 0 bytes
+
+        staging.set(short.clone(), Bytes::from_static(b"s")).await;
+        staging.remove(long.clone()).await;
+        staging.set(empty.clone(), Bytes::from_static(b"e")).await;
+
+        assert_eq!(
+            staging.staged_op(short.as_ref()),
+            Some(StagedKind::Set(Bytes::from_static(b"s")))
+        );
+        assert_eq!(staging.staged_op(long.as_ref()), Some(StagedKind::Removed));
+        assert_eq!(
+            staging.staged_op(empty.as_ref()),
+            Some(StagedKind::Set(Bytes::from_static(b"e")))
+        );
+        // A never-staged key of yet another length is still None.
+        assert_eq!(staging.staged_op(b"never-staged-key".as_ref()), None);
     }
 
     #[tokio::test]
