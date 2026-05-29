@@ -306,6 +306,20 @@ impl RepoInstance {
     ///
     /// Returns the per-repo WAL manager, lazily initialising it on first
     /// call. Shares the `"__tx__"` info store with [`tx_gate`].
+    ///
+    /// The `next_txn_id` counter is seeded from
+    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)` — the txn_id
+    /// mirror of the CRIT-B version floor in [`tx_gate`]. The persisted
+    /// `NextTxId` snapshot is written only periodically, so after a crash
+    /// it can lag the txn_id of an *inflight* (uncommitted, uncleaned) V2
+    /// WAL entry. Seeding solely from the snapshot would let
+    /// `fresh_txn_id()` re-issue an id the crashed-and-about-to-be-
+    /// recovered entry already used → two WAL entries sharing one txn_id.
+    /// We pre-scan the inflight entries (the same `list_inflight()`
+    /// recovery runs) and floor the counter above their max. Best-effort:
+    /// a WAL read error falls back to the snapshot rather than blocking
+    /// construction — recovery (which propagates errors) runs separately
+    /// on the open path.
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
         self.repo_wal
             .get_or_try_init(|| async {
@@ -316,6 +330,18 @@ impl RepoInstance {
                         .unwrap_or(None)
                         .unwrap_or(1);
                 let mgr = shamir_tx::RepoWalManager::new(info_store, initial_txn_id);
+
+                // Floor the counter above any inflight txn_id (mirror of the
+                // version-floor pre-scan in `tx_gate`). `repo_wal` is the
+                // cell that *builds* the manager, so we scan through the
+                // just-constructed `mgr` rather than re-entering this cell
+                // via `max_inflight_commit_version`.
+                if let Ok(entries) = mgr.list_inflight().await {
+                    if let Some(max_txn_id) = entries.iter().map(|e| e.txn_id).max() {
+                        mgr.seed_floor_at_least(max_txn_id + 1);
+                    }
+                }
+
                 Ok::<Arc<shamir_tx::RepoWalManager>, DbError>(Arc::new(mgr))
             })
             .await
@@ -360,9 +386,14 @@ impl RepoInstance {
         Ok((tx, guard))
     }
 
-    /// cancel-safe: NO — delegates to [`crate::tx::commit_tx`] whose
-    /// Phase 4–7 sequence must complete atomically. See `commit_tx` in
-    /// `tx/commit.rs` for the full rationale.
+    /// cancel-safe: partial — delegates to [`crate::tx::commit_tx`], whose
+    /// commit point is a *successful* Phase 4 `wal.begin` (the durable WAL
+    /// entry IS the commit), not the completion of the whole pipeline. A
+    /// cancellation BEFORE that point is a clean abort — nothing durable.
+    /// A cancellation AT/AFTER it leaves the tx COMMITTED: the inflight WAL
+    /// marker is replayed idempotently by recovery on the next open, which
+    /// reconciles materialization (I.3). See `commit_tx` in `tx/commit.rs`
+    /// for the full rationale.
     ///
     /// Commit a transaction via the 7-phase commit pipeline.
     ///
