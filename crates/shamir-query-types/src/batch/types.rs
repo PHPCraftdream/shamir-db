@@ -507,16 +507,44 @@ pub struct TransactionInfo {
     /// Committed version (null when aborted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_version: Option<u64>,
+
+    /// Whether the commit's projections (data → main store, counters,
+    /// secondary indexes, HNSW graph) materialized inline on the commit
+    /// path.
+    ///
+    /// - `true` (the common case): every projection landed before the
+    ///   response — the committed version is fully observable now.
+    /// - `false`: the commit is durable (its WAL entry IS the commit),
+    ///   but at least one projection was deferred to crash-recovery,
+    ///   which re-applies it idempotently on the next open. The data
+    ///   WILL appear — this is restart-bounded eventual consistency, not
+    ///   an abort.
+    ///
+    /// Only meaningful when `status == "committed"`. Defaults to `true`
+    /// so payloads serialized before this field existed (and clients
+    /// that omit it) deserialize to the fully-materialized common case.
+    #[serde(default = "default_materialized")]
+    pub materialized: bool,
+}
+
+fn default_materialized() -> bool {
+    true
 }
 
 impl TransactionInfo {
-    pub fn committed(tx_id: u64, snapshot_version: u64, commit_version: u64) -> Self {
+    pub fn committed(
+        tx_id: u64,
+        snapshot_version: u64,
+        commit_version: u64,
+        materialized: bool,
+    ) -> Self {
         Self {
             tx_id,
             status: "committed".into(),
             reason: None,
             snapshot_version: Some(snapshot_version),
             commit_version: Some(commit_version),
+            materialized,
         }
     }
 
@@ -527,6 +555,9 @@ impl TransactionInfo {
             reason: Some(reason.into()),
             snapshot_version: None,
             commit_version: None,
+            // Aborted txs never materialize; default is irrelevant to the
+            // client because `status` already disambiguates.
+            materialized: true,
         }
     }
 
@@ -824,14 +855,16 @@ mod tests {
 
     #[test]
     fn transaction_info_committed_roundtrip() {
-        let info = TransactionInfo::committed(42, 100, 105);
+        let info = TransactionInfo::committed(42, 100, 105, true);
         assert!(info.is_committed());
         assert_eq!(info.tx_id, 42);
         assert_eq!(info.snapshot_version, Some(100));
         assert_eq!(info.commit_version, Some(105));
+        assert!(info.materialized);
 
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["status"], "committed");
+        assert_eq!(json["materialized"], true);
         assert!(json.get("reason").is_none()); // skip_serializing_if
     }
 
@@ -844,5 +877,41 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["status"], "aborted");
         assert_eq!(json["reason"], "tx_conflict");
+    }
+
+    #[test]
+    fn transaction_info_deferred_materialization_roundtrip() {
+        // A committed-but-deferred outcome must report materialized=false
+        // and round-trip the flag through serde.
+        let info = TransactionInfo::committed(9, 200, 201, false);
+        assert!(info.is_committed());
+        assert!(!info.materialized);
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["status"], "committed");
+        assert_eq!(json["materialized"], false);
+
+        let back: TransactionInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(back, info);
+        assert!(!back.materialized);
+    }
+
+    #[test]
+    fn transaction_info_missing_materialized_defaults_true() {
+        // Backward-compat: a payload serialized before `materialized`
+        // existed (field absent) must deserialize to the fully-applied
+        // common case (materialized=true), not a deferred commit.
+        let json = serde_json::json!({
+            "tx_id": 5,
+            "status": "committed",
+            "snapshot_version": 100,
+            "commit_version": 105
+        });
+        let info: TransactionInfo = serde_json::from_value(json).unwrap();
+        assert!(info.is_committed());
+        assert!(
+            info.materialized,
+            "absent `materialized` field must default to true"
+        );
     }
 }
