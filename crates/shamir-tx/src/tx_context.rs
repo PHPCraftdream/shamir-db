@@ -8,6 +8,8 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
+use shamir_types::types::record_id::RecordId;
+
 use crate::staging_store::StagingStore;
 use crate::types::{IsolationLevel, TxId};
 use crate::version_provider::VersionProvider;
@@ -18,7 +20,7 @@ use crate::IndexWriteOp;
 /// Holds all mutable state accumulated during a transaction:
 /// - **write_set** — per-table `StagingStore` buffers (set/remove ops).
 /// - **index_write_set** — accumulated `IndexWriteOp`s across all tables.
-/// - **tables_with_hnsw_staging** — which tables have HNSW vectors staged.
+/// - **staged_vectors** — per-table HNSW vectors awaiting commit.
 /// - **interner_overlay** — new `(key_name → id)` mappings for this tx.
 /// - **counter_deltas** — per-table row-count adjustments.
 /// - **read_set** — SSI read tracking `(table_id, key) → version_seen`.
@@ -47,10 +49,13 @@ pub struct TxContext {
     /// during commit (via `apply_index_ops`).
     pub index_write_set: Vec<(u64, IndexWriteOp)>,
 
-    /// Per-table HNSW staged vector info. Key = table name (interned).
-    /// The actual staged vectors live inside `HnswAdapter::staged` — this
-    /// field just tracks which tables have HNSW staging to commit/rollback.
-    pub tables_with_hnsw_staging: Vec<u64>,
+    /// Per-table HNSW staged vectors. Key = table token (interned table
+    /// name). Each entry is a `(RecordId, embedding)` pair routed here by
+    /// the executor instead of into the live HNSW graph. Promoted into the
+    /// graph atomically at commit (Phase 5d); discarded by RAII drop on
+    /// abort — exactly like every other tx-local field. This is the home
+    /// for vector staging: nothing lives outside the `TxContext` anymore.
+    pub staged_vectors: HashMap<u64, Vec<(RecordId, Vec<f32>)>>,
 
     /// Interner overlay: new `(key_name → id)` mappings created during
     /// this tx. Merged into base interner on commit; dropped on abort.
@@ -100,7 +105,7 @@ impl TxContext {
             isolation,
             write_set: HashMap::new(),
             index_write_set: Vec::new(),
-            tables_with_hnsw_staging: Vec::new(),
+            staged_vectors: HashMap::new(),
             interner_overlay: scc::HashMap::new(),
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
             counter_deltas: HashMap::new(),
@@ -125,7 +130,7 @@ impl TxContext {
     pub fn is_empty(&self) -> bool {
         self.write_set.is_empty()
             && self.index_write_set.is_empty()
-            && self.tables_with_hnsw_staging.is_empty()
+            && self.staged_vectors.is_empty()
             && self.interner_overlay.is_empty()
             && self.counter_deltas.is_empty()
     }
@@ -187,11 +192,22 @@ impl TxContext {
             .or_insert_with(|| crate::staging_store::StagingStore::new(base))
     }
 
-    /// Mark that a table has HNSW vectors staged under this tx.
-    pub fn mark_hnsw_staging(&mut self, table_id: u64) {
-        if !self.tables_with_hnsw_staging.contains(&table_id) {
-            self.tables_with_hnsw_staging.push(table_id);
-        }
+    /// Stage an HNSW vector under this tx for the given table token.
+    ///
+    /// The pair is buffered tx-locally and applied to the live graph at
+    /// commit (Phase 5d). A dropped/aborted tx discards it (RAII) — the
+    /// live graph is never touched until commit.
+    pub fn stage_vector(&mut self, table_token: u64, rid: RecordId, vec: Vec<f32>) {
+        self.staged_vectors
+            .entry(table_token)
+            .or_default()
+            .push((rid, vec));
+    }
+
+    /// Vectors staged under this tx for `table_token`, for in-tx search
+    /// merge. `None` when the table has no staged vectors.
+    pub fn staged_vectors_for(&self, table_token: u64) -> Option<&[(RecordId, Vec<f32>)]> {
+        self.staged_vectors.get(&table_token).map(Vec::as_slice)
     }
 
     /// Attach a version provider used by commit_tx Phase 2 for SSI
@@ -270,12 +286,16 @@ mod tests {
     }
 
     #[test]
-    fn mark_hnsw_staging_deduplicates() {
+    fn stage_vector_buffers_per_table() {
         let mut ctx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
-        ctx.mark_hnsw_staging(10);
-        ctx.mark_hnsw_staging(10);
-        ctx.mark_hnsw_staging(20);
-        assert_eq!(ctx.tables_with_hnsw_staging.len(), 2);
+        ctx.stage_vector(10, RecordId([0u8; 16]), vec![1.0, 0.0]);
+        ctx.stage_vector(10, RecordId([1u8; 16]), vec![0.0, 1.0]);
+        ctx.stage_vector(20, RecordId([2u8; 16]), vec![1.0, 1.0]);
+
+        assert_eq!(ctx.staged_vectors_for(10).map(<[_]>::len), Some(2));
+        assert_eq!(ctx.staged_vectors_for(20).map(<[_]>::len), Some(1));
+        assert_eq!(ctx.staged_vectors_for(30), None);
+        assert!(!ctx.is_empty(), "staged vectors make the tx non-empty");
     }
 
     #[test]

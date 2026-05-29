@@ -12,7 +12,6 @@ use crate::index2::kind::VectorMetric;
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::hnsw::Hnsw;
-use shamir_tx::TxId;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -81,20 +80,6 @@ pub struct HnswAdapter {
     rid_to_internal: scc::HashMap<RecordId, usize>,
     deleted: scc::HashMap<usize, ()>,
     next_id: AtomicUsize,
-    /// Per-tx staging buffer: vectors awaiting commit into the HNSW graph.
-    staged: scc::HashMap<TxId, Vec<StagedVector>>,
-}
-
-/// A vector staged for insertion during a transaction. Applied to the
-/// live HNSW graph only on `commit_staged`; dropped on `rollback_staged`.
-#[derive(Debug, Clone)]
-pub(crate) struct StagedVector {
-    pub rid: RecordId,
-    pub vec: Vec<f32>,
-    /// If this upsert replaces an existing rid in the graph, the
-    /// old internal_id is recorded here. On commit: tombstone it.
-    /// On rollback: leave it live (pre-tx state preserved).
-    pub replaces: Option<usize>,
 }
 
 impl HnswAdapter {
@@ -116,82 +101,37 @@ impl HnswAdapter {
             rid_to_internal: scc::HashMap::new(),
             deleted: scc::HashMap::new(),
             next_id: AtomicUsize::new(0),
-            staged: scc::HashMap::new(),
         }
-    }
-
-    /// Stage a vector for later commit. Does NOT insert into the HNSW
-    /// graph — the staged entry is visible only to the owning tx
-    /// (via in-tx search merge, coming in 1.2.C).
-    /// Drain all staged vectors for `tx_id` and apply them to the live
-    /// HNSW graph. For each staged entry:
-    ///   1. If `replaces` is Some(old_internal) -> tombstone the old id.
-    ///   2. Allocate a new internal_id, spawn_blocking insert into hnsw.
-    ///   3. Update rid_map + rid_to_internal.
-    ///
-    /// Idempotent: if no staged entries for this tx_id, returns Ok(()).
-    ///
-    /// Exposed as a [`VectorAdapter`] trait method (HIGH-6) so the commit
-    /// pipeline can drive it through `Arc<dyn VectorAdapter>`; see the
-    /// `impl VectorAdapter for HnswAdapter` block below.
-    pub(crate) async fn stage(&self, tx_id: TxId, rid: RecordId, vec: Vec<f32>) {
-        // Check if this rid already exists in the committed graph —
-        // if so, record the internal_id for tombstoning on commit.
-        let replaces = self.rid_to_internal.read_async(&rid, |_, v| *v).await;
-
-        let entry = StagedVector { rid, vec, replaces };
-
-        // Append to per-tx buffer (create if absent).
-        self.staged
-            .entry_async(tx_id)
-            .await
-            .or_insert_with(Vec::new)
-            .get_mut()
-            .push(entry);
     }
 }
 
 #[async_trait]
 impl VectorAdapter for HnswAdapter {
-    async fn upsert(
-        &self,
-        rid: RecordId,
-        vec: &[f32],
-        tx: Option<TxId>,
-    ) -> Result<(), VectorError> {
+    async fn upsert(&self, rid: RecordId, vec: &[f32]) -> Result<(), VectorError> {
         if vec.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
                 expected: self.dim,
                 got: vec.len() as u32,
             });
         }
-        match tx {
-            Some(tx_id) => {
-                self.stage(tx_id, rid, vec.to_vec()).await;
-                Ok(())
-            }
-            None => {
-                // If already exists, soft-delete old and re-insert with new id.
-                if let Some(old_internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
-                    let _ = self.deleted.insert_async(old_internal, ()).await;
-                }
-                let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
-                let hnsw = Arc::clone(&self.hnsw);
-                let vec_owned = vec.to_vec();
-                tokio::task::spawn_blocking(move || {
-                    hnsw.insert((&vec_owned, internal));
-                })
-                .await
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
-                let _ = self.rid_map.insert_async(internal, rid).await;
-                let _ = self.rid_to_internal.upsert_async(rid, internal).await;
-                Ok(())
-            }
+        // If already exists, soft-delete old and re-insert with new id.
+        if let Some(old_internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
+            let _ = self.deleted.insert_async(old_internal, ()).await;
         }
+        let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let hnsw = Arc::clone(&self.hnsw);
+        let vec_owned = vec.to_vec();
+        tokio::task::spawn_blocking(move || {
+            hnsw.insert((&vec_owned, internal));
+        })
+        .await
+        .map_err(|e| VectorError::Internal(e.to_string()))?;
+        let _ = self.rid_map.insert_async(internal, rid).await;
+        let _ = self.rid_to_internal.upsert_async(rid, internal).await;
+        Ok(())
     }
 
-    async fn delete(&self, rid: RecordId, _tx: Option<TxId>) -> Result<(), VectorError> {
-        // TODO(stage 2): stage deletions for tx rollback support
+    async fn delete(&self, rid: RecordId) -> Result<(), VectorError> {
         if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
             let _ = self.deleted.insert_async(internal, ()).await;
             let _ = self.rid_to_internal.remove_async(&rid).await;
@@ -203,7 +143,7 @@ impl VectorAdapter for HnswAdapter {
         &self,
         query: &[f32],
         k: u32,
-        tx: Option<TxId>,
+        staged: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<Vec<(RecordId, f32)>, VectorError> {
         if query.len() as u32 != self.dim {
             return Err(VectorError::DimMismatch {
@@ -232,16 +172,15 @@ impl VectorAdapter for HnswAdapter {
             }
         }
 
-        // If tx active, merge with brute-force scan over staged vectors.
-        if let Some(tx_id) = tx {
-            if let Some(staged_entry) = self.staged.read_async(&tx_id, |_, v| v.clone()).await {
-                let dist = ShamirDist {
-                    metric: self.metric,
-                };
-                for sv in &staged_entry {
-                    let d = dist.eval(query, &sv.vec);
-                    results.push((sv.rid, d));
-                }
+        // Merge the caller's own un-committed staged vectors (in-tx search)
+        // via a brute-force scan — they are not in the committed graph.
+        if let Some(staged) = staged {
+            let dist = ShamirDist {
+                metric: self.metric,
+            };
+            for (rid, vec) in staged {
+                let d = dist.eval(query, vec);
+                results.push((*rid, d));
             }
         }
 
@@ -258,48 +197,6 @@ impl VectorAdapter for HnswAdapter {
 
     fn len(&self) -> usize {
         self.next_id.load(Ordering::Relaxed) - self.deleted.len()
-    }
-
-    /// Drain all staged vectors for `tx_id` and apply them to the live
-    /// HNSW graph. For each staged entry:
-    ///   1. If `replaces` is `Some(old_internal)` → tombstone the old id.
-    ///   2. Allocate a new internal_id, spawn_blocking insert into hnsw.
-    ///   3. Update `rid_map` + `rid_to_internal`.
-    ///
-    /// Idempotent: if no staged entries for this tx_id, returns `Ok(())`.
-    async fn commit_staged(&self, tx_id: TxId) -> Result<(), VectorError> {
-        let entries = match self.staged.remove_async(&tx_id).await {
-            Some((_, entries)) => entries,
-            None => return Ok(()),
-        };
-
-        for entry in entries {
-            // Tombstone the old internal_id if this was an upsert-replace.
-            if let Some(old_internal) = entry.replaces {
-                let _ = self.deleted.insert_async(old_internal, ()).await;
-            }
-
-            // Allocate new internal_id and insert into HNSW graph.
-            let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
-            let hnsw = Arc::clone(&self.hnsw);
-            let vec_owned = entry.vec;
-            tokio::task::spawn_blocking(move || {
-                hnsw.insert((&vec_owned, internal));
-            })
-            .await
-            .map_err(|e| VectorError::Internal(e.to_string()))?;
-
-            let _ = self.rid_map.insert_async(internal, entry.rid).await;
-            let _ = self.rid_to_internal.upsert_async(entry.rid, internal).await;
-        }
-
-        Ok(())
-    }
-
-    /// Drop all staged vectors for `tx_id` without touching the HNSW graph.
-    /// The pre-tx state is fully preserved — no tombstones, no new points.
-    async fn rollback_staged(&self, tx_id: TxId) {
-        let _ = self.staged.remove_async(&tx_id).await;
     }
 }
 
@@ -336,18 +233,9 @@ mod tests {
             },
         );
 
-        adapter
-            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
-            .await
-            .unwrap();
-        adapter
-            .upsert(rid(2), &[0.0, 1.0, 0.0], None)
-            .await
-            .unwrap();
-        adapter
-            .upsert(rid(3), &[0.9, 0.1, 0.0], None)
-            .await
-            .unwrap();
+        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(3), &[0.9, 0.1, 0.0]).await.unwrap();
 
         let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -366,10 +254,10 @@ mod tests {
             },
         );
 
-        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
-        adapter.upsert(rid(2), &[1.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
 
-        adapter.delete(rid(1), None).await.unwrap();
+        adapter.delete(rid(1)).await.unwrap();
 
         let results = adapter.search(&[0.0, 0.0], 10, None).await.unwrap();
         assert_eq!(results.len(), 1);
@@ -387,8 +275,8 @@ mod tests {
             },
         );
 
-        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
-        adapter.upsert(rid(1), &[10.0, 10.0], None).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(1), &[10.0, 10.0]).await.unwrap();
 
         let results = adapter.search(&[10.0, 10.0], 1, None).await.unwrap();
         assert_eq!(results[0].0, rid(1));
@@ -425,13 +313,13 @@ mod tests {
         let mut vecs = Vec::with_capacity(n);
         for i in 0..n {
             let v = random_vec(dim, i as u64 + 42);
-            adapter.upsert(rid(0), &v, None).await.unwrap();
+            adapter.upsert(rid(0), &v).await.unwrap();
             // Use unique rids:
             let mut a = [0u8; 16];
             a[14] = (i >> 8) as u8;
             a[15] = (i & 0xFF) as u8;
             let r = RecordId(a);
-            adapter.upsert(r, &v, None).await.unwrap();
+            adapter.upsert(r, &v).await.unwrap();
             vecs.push((r, v));
         }
 
@@ -464,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn dim_mismatch_rejected() {
         let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
-        let err = adapter.upsert(rid(1), &[1.0, 2.0], None).await.unwrap_err();
+        let err = adapter.upsert(rid(1), &[1.0, 2.0]).await.unwrap_err();
         assert!(matches!(
             err,
             VectorError::DimMismatch {
@@ -477,10 +365,7 @@ mod tests {
     #[tokio::test]
     async fn search_dim_mismatch_rejected() {
         let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
-        adapter
-            .upsert(rid(1), &[1.0, 2.0, 3.0], None)
-            .await
-            .unwrap();
+        adapter.upsert(rid(1), &[1.0, 2.0, 3.0]).await.unwrap();
         let err = adapter.search(&[1.0, 2.0], 1, None).await.unwrap_err();
         assert!(matches!(err, VectorError::DimMismatch { .. }));
     }
@@ -530,8 +415,8 @@ mod tests {
     #[tokio::test]
     async fn k_larger_than_dataset() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-        adapter.upsert(rid(1), &[0.0, 0.0], None).await.unwrap();
-        adapter.upsert(rid(2), &[1.0, 0.0], None).await.unwrap();
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
 
         let results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -553,7 +438,7 @@ mod tests {
             let mut a = [0u8; 16];
             a[15] = i as u8;
             adapter
-                .upsert(RecordId(a), &random_vec(dim as usize, i as u64), None)
+                .upsert(RecordId(a), &random_vec(dim as usize, i as u64))
                 .await
                 .unwrap();
         }
@@ -574,38 +459,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stage_pushes_into_per_tx_buffer() {
-        let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
-        let tx = TxId::new(1);
-        adapter.stage(tx, rid(1), vec![1.0, 0.0, 0.0]).await;
-        adapter.stage(tx, rid(2), vec![0.0, 1.0, 0.0]).await;
-
-        let count = adapter.staged.read_async(&tx, |_, v| v.len()).await;
-        assert_eq!(count, Some(2));
-    }
-
-    #[tokio::test]
-    async fn stage_with_different_tx_ids_isolated() {
-        let adapter = HnswAdapter::new(3, VectorMetric::L2, HnswConfig::default());
-        let tx1 = TxId::new(1);
-        let tx2 = TxId::new(2);
-        adapter.stage(tx1, rid(1), vec![1.0, 0.0, 0.0]).await;
-        adapter.stage(tx2, rid(2), vec![0.0, 1.0, 0.0]).await;
-
-        let c1 = adapter.staged.read_async(&tx1, |_, v| v.len()).await;
-        let c2 = adapter.staged.read_async(&tx2, |_, v| v.len()).await;
-        assert_eq!(c1, Some(1));
-        assert_eq!(c2, Some(1));
-    }
-
-    #[tokio::test]
     async fn delete_nonexistent_no_error() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-        adapter.delete(rid(99), None).await.unwrap();
+        adapter.delete(rid(99)).await.unwrap();
     }
 
     #[tokio::test]
-    async fn commit_staged_inserts_all_into_graph() {
+    async fn search_merges_staged_slice() {
+        // The committed graph holds rid(1); the caller passes its own
+        // un-committed vector (rid(2), very close to the query) as a
+        // staged slice. `search` must brute-force-merge it so an in-tx
+        // query sees both. This is the path the executor drives from
+        // `TxContext::staged_vectors_for(token)`.
         let adapter = HnswAdapter::new(
             3,
             VectorMetric::L2,
@@ -614,88 +479,77 @@ mod tests {
                 ..Default::default()
             },
         );
-        let tx = TxId::new(1);
+        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
 
-        // Stage 3 vectors
-        adapter.stage(tx, rid(1), vec![1.0, 0.0, 0.0]).await;
-        adapter.stage(tx, rid(2), vec![0.0, 1.0, 0.0]).await;
-        adapter.stage(tx, rid(3), vec![0.0, 0.0, 1.0]).await;
+        let staged = vec![(rid(2), vec![0.9, 0.1, 0.0])];
 
-        // Before commit — search should NOT find staged vectors
+        // Without the staged slice: only the committed vector.
+        let committed_only = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
+        let committed_rids: std::collections::HashSet<_> =
+            committed_only.iter().map(|(r, _)| *r).collect();
+        assert!(committed_rids.contains(&rid(1)));
+        assert!(
+            !committed_rids.contains(&rid(2)),
+            "staged vector must be invisible without the slice"
+        );
+
+        // With the staged slice: both surface.
+        let merged = adapter
+            .search(&[1.0, 0.0, 0.0], 10, Some(&staged))
+            .await
+            .unwrap();
+        let merged_rids: std::collections::HashSet<_> = merged.iter().map(|(r, _)| *r).collect();
+        assert!(
+            merged_rids.contains(&rid(1)),
+            "committed vector still found"
+        );
+        assert!(merged_rids.contains(&rid(2)), "staged vector merged in");
+    }
+
+    #[tokio::test]
+    async fn apply_committed_vectors_inserts_all_into_graph() {
+        let adapter = HnswAdapter::new(
+            3,
+            VectorMetric::L2,
+            HnswConfig {
+                max_elements: 100,
+                ..Default::default()
+            },
+        );
+
+        // Before apply — search finds nothing.
         let before = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
-        assert_eq!(before.len(), 0, "staged vectors not in graph before commit");
+        assert_eq!(before.len(), 0, "graph empty before apply");
 
-        // Commit
-        adapter.commit_staged(tx).await.unwrap();
+        // Apply a committed batch (what commit Phase 5d feeds in).
+        let batch = vec![
+            (rid(1), vec![1.0, 0.0, 0.0]),
+            (rid(2), vec![0.0, 1.0, 0.0]),
+            (rid(3), vec![0.0, 0.0, 1.0]),
+        ];
+        adapter.apply_committed_vectors(&batch).await.unwrap();
 
-        // After commit — search should at least find the closest vector
-        // (rid(1) which is the query itself). HNSW on a 3-point graph
-        // with random layer assignment can occasionally miss points;
-        // we assert the closest is present and graph is non-empty.
+        // After apply — the closest vector (rid 1 = the query) is findable.
         let after = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
         assert!(
             !after.is_empty(),
-            "graph must have at least one committed vector after commit_staged"
+            "graph must hold committed vectors after apply"
         );
         let labels: std::collections::HashSet<_> = after.iter().map(|(r, _)| *r).collect();
         assert!(
             labels.contains(&rid(1)),
-            "closest staged vector (rid 1) must be findable; got {:?}",
-            after
+            "closest applied vector (rid 1) must be findable; got {after:?}"
         );
     }
 
     #[tokio::test]
-    async fn rollback_staged_drops_without_graph_mutation() {
-        let adapter = HnswAdapter::new(
-            3,
-            VectorMetric::L2,
-            HnswConfig {
-                max_elements: 1000,
-                ..Default::default()
-            },
-        );
-        let tx = TxId::new(1);
-
-        // Insert 2 committed vectors
-        adapter
-            .upsert(rid(10), &[1.0, 0.0, 0.0], None)
-            .await
-            .unwrap();
-        adapter
-            .upsert(rid(20), &[0.0, 1.0, 0.0], None)
-            .await
-            .unwrap();
-
-        // Stage 100 vectors
-        for i in 0..100u8 {
-            adapter
-                .stage(tx, rid(i), vec![0.1 * i as f32, 0.0, 0.0])
-                .await;
-        }
-
-        // Rollback
-        adapter.rollback_staged(tx).await;
-
-        // Graph should still have exactly 2 committed vectors
-        let results = adapter.search(&[0.5, 0.5, 0.0], 100, None).await.unwrap();
-        assert_eq!(results.len(), 2);
-
-        // Staged buffer should be empty
-        let count = adapter.staged.read_async(&tx, |_, v| v.len()).await;
-        assert_eq!(count, None, "staged buffer cleared after rollback");
-    }
-
-    #[tokio::test]
-    async fn commit_staged_idempotent_on_empty() {
+    async fn apply_committed_vectors_empty_is_noop() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
-        let tx = TxId::new(99);
-        // No staged entries for this tx
-        adapter.commit_staged(tx).await.unwrap(); // should not panic
+        adapter.apply_committed_vectors(&[]).await.unwrap(); // must not panic
     }
 
     #[tokio::test]
-    async fn commit_staged_handles_replace() {
+    async fn apply_committed_vectors_handles_replace() {
         let adapter = HnswAdapter::new(
             3,
             VectorMetric::L2,
@@ -705,22 +559,18 @@ mod tests {
             },
         );
 
-        // Insert a committed vector
-        adapter
-            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
-            .await
-            .unwrap();
+        // A committed vector at [1,0,0].
+        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
         let before = adapter.search(&[1.0, 0.0, 0.0], 1, None).await.unwrap();
         assert_eq!(before[0].0, rid(1));
 
-        // Stage an update (same rid, different vector)
-        let tx = TxId::new(1);
-        adapter.stage(tx, rid(1), vec![0.0, 1.0, 0.0]).await;
+        // Apply a committed batch that replaces rid(1) with a new vector.
+        adapter
+            .apply_committed_vectors(&[(rid(1), vec![0.0, 1.0, 0.0])])
+            .await
+            .unwrap();
 
-        // Commit
-        adapter.commit_staged(tx).await.unwrap();
-
-        // Search for [0,1,0] -> should find rid(1) (updated position)
+        // Search for [0,1,0] -> should find rid(1) (updated position).
         let after = adapter.search(&[0.0, 1.0, 0.0], 1, None).await.unwrap();
         assert_eq!(after[0].0, rid(1));
         assert!(after[0].1 < 0.01, "should be very close to [0,1,0]");
@@ -730,10 +580,7 @@ mod tests {
     async fn many_upserts_same_rid() {
         let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
         for i in 0..10 {
-            adapter
-                .upsert(rid(1), &[i as f32, 0.0], None)
-                .await
-                .unwrap();
+            adapter.upsert(rid(1), &[i as f32, 0.0]).await.unwrap();
         }
         // Only latest visible
         let results = adapter.search(&[9.0, 0.0], 10, None).await.unwrap();
@@ -747,106 +594,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tx_upsert_stages_instead_of_inserting() {
-        let adapter = HnswAdapter::new(
-            3,
-            VectorMetric::L2,
-            HnswConfig {
-                max_elements: 100,
-                ..Default::default()
-            },
-        );
-        let tx = TxId::new(1);
-        adapter
-            .upsert(rid(1), &[1.0, 0.0, 0.0], Some(tx))
-            .await
-            .unwrap();
-
-        // Non-tx search should NOT find it
-        let results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
-        assert_eq!(results.len(), 0);
-
-        // In-tx search SHOULD find it
-        let results = adapter
-            .search(&[1.0, 0.0, 0.0], 10, Some(tx))
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, rid(1));
-    }
-
-    #[tokio::test]
-    async fn tx_search_merges_committed_and_staged() {
-        let adapter = HnswAdapter::new(
-            3,
-            VectorMetric::L2,
-            HnswConfig {
-                max_elements: 100,
-                ..Default::default()
-            },
-        );
-
-        // Insert committed vector
-        adapter
-            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
-            .await
-            .unwrap();
-
-        // Stage another vector in tx
-        let tx = TxId::new(1);
-        adapter
-            .upsert(rid(2), &[0.9, 0.1, 0.0], Some(tx))
-            .await
-            .unwrap();
-
-        // In-tx search should find both
-        let results = adapter
-            .search(&[1.0, 0.0, 0.0], 10, Some(tx))
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn tx_search_excludes_other_tx_staged() {
-        let adapter = HnswAdapter::new(
-            3,
-            VectorMetric::L2,
-            HnswConfig {
-                max_elements: 100,
-                ..Default::default()
-            },
-        );
-        let tx1 = TxId::new(1);
-        let tx2 = TxId::new(2);
-
-        adapter
-            .upsert(rid(1), &[1.0, 0.0, 0.0], Some(tx1))
-            .await
-            .unwrap();
-        adapter
-            .upsert(rid(2), &[0.0, 1.0, 0.0], Some(tx2))
-            .await
-            .unwrap();
-
-        // tx1 search sees only its own staged
-        let results = adapter
-            .search(&[0.5, 0.5, 0.0], 10, Some(tx1))
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, rid(1));
-
-        // tx2 search sees only its own staged
-        let results = adapter
-            .search(&[0.5, 0.5, 0.0], 10, Some(tx2))
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, rid(2));
-    }
-
-    #[tokio::test]
     async fn non_tx_search_unchanged_after_refactor() {
         // Regression guard: existing non-tx path works exactly as before.
         let adapter = HnswAdapter::new(
@@ -857,91 +604,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        adapter
-            .upsert(rid(1), &[1.0, 0.0, 0.0], None)
-            .await
-            .unwrap();
-        adapter
-            .upsert(rid(2), &[0.0, 1.0, 0.0], None)
-            .await
-            .unwrap();
-        adapter
-            .upsert(rid(3), &[0.9, 0.1, 0.0], None)
-            .await
-            .unwrap();
+        adapter.upsert(rid(1), &[1.0, 0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[0.0, 1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(3), &[0.9, 0.1, 0.0]).await.unwrap();
 
         let results = adapter.search(&[1.0, 0.0, 0.0], 2, None).await.unwrap();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, rid(1));
-    }
-
-    fn make_rid(i: u32) -> RecordId {
-        let mut a = [0u8; 16];
-        a[12..16].copy_from_slice(&i.to_be_bytes());
-        RecordId(a)
-    }
-
-    #[tokio::test]
-    async fn tx_rollback_does_not_pollute_graph() {
-        let adapter = HnswAdapter::new(
-            3,
-            VectorMetric::Cosine,
-            HnswConfig {
-                max_elements: 2000,
-                ef_construction: 400,
-                ef_search: 400,
-                ..Default::default()
-            },
-        );
-
-        // Commit 500 vectors via non-tx upsert.
-        for i in 0..500u32 {
-            let rid_val = make_rid(i);
-            let v = vec![1.0 + i as f32 * 1e-4, 0.0, 0.0];
-            adapter.upsert(rid_val, &v, None).await.unwrap();
-        }
-
-        let baseline_results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
-        assert_eq!(baseline_results.len(), 10);
-
-        // Stage 1000 vectors in tx_id=42 — invisible to non-tx search.
-        let tx_id = TxId::new(42);
-        for i in 0..1000u32 {
-            let rid_val = make_rid(i + 1000);
-            let v = vec![0.0, 1.0 + i as f32 * 1e-4, 0.0];
-            adapter.upsert(rid_val, &v, Some(tx_id)).await.unwrap();
-        }
-
-        // Sanity: in-tx search sees staged vectors.
-        let in_tx = adapter
-            .search(&[0.0, 1.0, 0.0], 5, Some(tx_id))
-            .await
-            .unwrap();
-        assert!(!in_tx.is_empty(), "in-tx search must see staged vectors");
-
-        // Rollback.
-        adapter.rollback_staged(tx_id).await;
-
-        // After rollback: search MUST NOT see any staged vectors.
-        let after_rollback = adapter.search(&[0.0, 1.0, 0.0], 5, None).await.unwrap();
-
-        for (found_rid, _) in &after_rollback {
-            let bytes = found_rid.to_bytes();
-            let mut idx_bytes = [0u8; 4];
-            idx_bytes.copy_from_slice(&bytes[12..16]);
-            let idx = u32::from_be_bytes(idx_bytes);
-            assert!(
-                idx < 1000,
-                "rollback failed: found staged rid index {idx} after rollback"
-            );
-        }
-
-        // Sanity: committed 500-vector recall preserved.
-        let post_results = adapter.search(&[1.0, 0.0, 0.0], 10, None).await.unwrap();
-        assert_eq!(
-            post_results.len(),
-            10,
-            "committed graph must remain searchable after rollback"
-        );
     }
 }

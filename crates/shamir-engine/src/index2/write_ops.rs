@@ -277,15 +277,16 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_tx_some_forwards_to_lookup() {
-        use shamir_tx::{IsolationLevel, TxContext, TxId};
+        use shamir_types::types::record_id::RecordId;
         let backend = MockBackend::new();
-        let tx = TxContext::new(TxId::new(1), 0, 42, IsolationLevel::Snapshot);
+        // Non-vector backends ignore the staged slice and forward to lookup.
+        let staged: Vec<(RecordId, Vec<f32>)> = Vec::new();
         let res = backend
             .lookup_tx(
                 IndexQuery::Point {
                     keys: SmallVec::new(),
                 },
-                Some(&tx),
+                Some(&staged),
             )
             .await
             .unwrap();

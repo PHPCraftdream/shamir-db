@@ -13,11 +13,11 @@
 //!   `apply_index_ops_tx_drop_leaves_no_postings` unit test in
 //!   `index2/write_ops.rs`.
 //! * `index2::VectorBackend` (HNSW / brute-force) — `plan_insert_tx`
-//!   now threads `tx.tx_id` into the adapter, so per-tx vectors land
-//!   in `HnswAdapter::staged` rather than the committed graph.
-//!   Non-tx queries (`adapter.search(_, _, None)`) still see only the
-//!   committed graph and therefore do not surface the staged vector.
-//!   Verified end-to-end below.
+//!   is a no-op on the live graph for a tx; the executor stages the
+//!   vector tx-locally in `TxContext::staged_vectors` instead of the
+//!   committed graph. Non-tx queries (`adapter.search(_, _, None)`)
+//!   still see only the committed graph and therefore do not surface
+//!   the staged vector. Verified end-to-end below.
 //! * Legacy `IndexManager` / `SortedIndexManager` — NOW routed through
 //!   `insert_tx` / `update_tx` / `delete_tx`. The legacy/sorted planners
 //!   emit `IndexWriteOp`s into `tx.index_write_set` carrying the exact
@@ -124,7 +124,7 @@ async fn dropped_tx_vector_index_leaves_no_postings() {
             .await
             .unwrap();
         // The vector should be present in the tx's staged view (via
-        // HnswAdapter::staged) but invisible to non-tx queries.
+        // TxContext::staged_vectors) but invisible to non-tx queries.
         drop(tx);
         drop(guard);
         rid

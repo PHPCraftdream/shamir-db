@@ -73,20 +73,20 @@ impl IndexBackend for VectorBackend {
 
     // HNSW mutation goes through the adapter. The non-tx variants
     // (`plan_insert` / `plan_update` / `plan_delete`) commit to the
-    // live HNSW graph immediately; the tx-aware overrides below
-    // (`plan_insert_tx` / `plan_update_tx` / `plan_delete_tx`) route
-    // through the adapter's per-tx staging area when `tx_id == Some`,
-    // so a rolled-back tx leaves no ghost vectors on the live graph
-    // (HIGH-6).
+    // live HNSW graph immediately. The tx-aware overrides below
+    // (`plan_insert_tx` / `plan_update_tx` / `plan_delete_tx`) do NOT
+    // touch the live graph when `tx_id == Some`: the executor instead
+    // extracts the vector via [`staged_vector`] and buffers it in
+    // `TxContext::staged_vectors`, so a rolled-back tx leaves no ghost
+    // vectors on the live graph (HIGH-6).
     //
-    // HIGH-6 (resolved): the adapter exposes `commit_staged(tx_id)` /
-    // `rollback_staged(tx_id)`, surfaced here via the `IndexBackend`
-    // `commit_staged_tx` / `rollback_staged_tx` overrides below. The
-    // commit pipeline (`commit::commit_tx_inner` Phase 5d) calls
-    // `commit_staged_tx` under the commit lock to promote staged
-    // vectors into the live graph; its error paths and the abort path
-    // call `rollback_staged_tx` to drain them. Non-tx queries still see
-    // only the committed graph (see `HnswAdapter::search`).
+    // HIGH-6 (resolved, fully RAII): staged vectors live inside the
+    // `TxContext` (tx-local state), not on the adapter. The commit
+    // pipeline (`commit::commit_tx` Phase 5d) calls
+    // `apply_staged_vectors` under the commit lock to promote the tx's
+    // staged vectors into the live graph. Abort needs no counterpart —
+    // a dropped tx discards `staged_vectors` by RAII. Non-tx queries
+    // still see only the committed graph (see `HnswAdapter::search`).
 
     async fn plan_insert(
         &self,
@@ -94,7 +94,7 @@ impl IndexBackend for VectorBackend {
         rec: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(rec) {
-            self.adapter.upsert(rid, &v, None).await.map_err(ve)?;
+            self.adapter.upsert(rid, &v).await.map_err(ve)?;
         }
         Ok(Vec::new())
     }
@@ -106,9 +106,9 @@ impl IndexBackend for VectorBackend {
         new: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if let Some(v) = self.extract_vec(new) {
-            self.adapter.upsert(rid, &v, None).await.map_err(ve)?;
+            self.adapter.upsert(rid, &v).await.map_err(ve)?;
         } else {
-            self.adapter.delete(rid, None).await.map_err(ve)?;
+            self.adapter.delete(rid).await.map_err(ve)?;
         }
         Ok(Vec::new())
     }
@@ -118,17 +118,16 @@ impl IndexBackend for VectorBackend {
         rid: RecordId,
         _rec: &InnerValue,
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        self.adapter.delete(rid, None).await.map_err(ve)?;
+        self.adapter.delete(rid).await.map_err(ve)?;
         Ok(Vec::new())
     }
 
     /// tx-aware insert planning (HIGH-6).
     ///
-    /// `tx_id == Some` → adapter.upsert stages the vector under that
-    /// tx; the live HNSW graph is untouched until commit. A dropped
-    /// tx leaves the staged entry in `HnswAdapter::staged` (dead
-    /// weight, not visible to non-tx queries — see HIGH-6 follow-up
-    /// note above).
+    /// `tx_id == Some` → no-op here: the live HNSW graph is left
+    /// untouched. The executor stages the vector itself via
+    /// [`staged_vector`] → `TxContext::stage_vector`, so a dropped
+    /// (rolled-back) tx leaves no trace (RAII).
     ///
     /// `tx_id == None` → forwards to [`plan_insert`] (immediate
     /// commit to the live graph).
@@ -140,9 +139,6 @@ impl IndexBackend for VectorBackend {
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         if tx_id.is_none() {
             return self.plan_insert(rid, rec).await;
-        }
-        if let Some(v) = self.extract_vec(rec) {
-            self.adapter.upsert(rid, &v, tx_id).await.map_err(ve)?;
         }
         Ok(Vec::new())
     }
@@ -158,11 +154,6 @@ impl IndexBackend for VectorBackend {
         if tx_id.is_none() {
             return self.plan_update(rid, old, new).await;
         }
-        if let Some(v) = self.extract_vec(new) {
-            self.adapter.upsert(rid, &v, tx_id).await.map_err(ve)?;
-        } else {
-            self.adapter.delete(rid, tx_id).await.map_err(ve)?;
-        }
         Ok(Vec::new())
     }
 
@@ -176,8 +167,14 @@ impl IndexBackend for VectorBackend {
         if tx_id.is_none() {
             return self.plan_delete(rid, rec).await;
         }
-        self.adapter.delete(rid, tx_id).await.map_err(ve)?;
         Ok(Vec::new())
+    }
+
+    /// HIGH-6: hand the executor this record's embedding so it can stage
+    /// it tx-locally (`TxContext::stage_vector`). `None` when the record
+    /// carries no vector at this backend's field path.
+    async fn staged_vector(&self, _rid: RecordId, rec: &InnerValue) -> Option<Vec<f32>> {
+        self.extract_vec(rec)
     }
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
@@ -195,12 +192,15 @@ impl IndexBackend for VectorBackend {
     async fn lookup_tx(
         &self,
         query: IndexQuery,
-        tx: Option<&shamir_tx::TxContext>,
+        staged_vectors: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<IndexResult, IndexError> {
         match query {
             IndexQuery::Vector { vec, k } => {
-                let tx_id = tx.map(|t| t.tx_id);
-                let results = self.adapter.search(&vec, k, tx_id).await.map_err(ve)?;
+                let results = self
+                    .adapter
+                    .search(&vec, k, staged_vectors)
+                    .await
+                    .map_err(ve)?;
                 Ok(IndexResult::Ranked(results))
             }
             _ => Err(IndexError::Backend(
@@ -209,16 +209,10 @@ impl IndexBackend for VectorBackend {
         }
     }
 
-    /// HIGH-6: promote staged vectors for `tx_id` into the live HNSW
-    /// graph at commit. Delegates to the adapter's `commit_staged`.
-    async fn commit_staged_tx(&self, tx_id: shamir_tx::TxId) -> Result<(), IndexError> {
-        self.adapter.commit_staged(tx_id).await.map_err(ve)
-    }
-
-    /// HIGH-6: drop staged vectors for `tx_id` on abort/rollback.
-    /// Delegates to the adapter's `rollback_staged`.
-    async fn rollback_staged_tx(&self, tx_id: shamir_tx::TxId) {
-        self.adapter.rollback_staged(tx_id).await;
+    /// HIGH-6: promote the tx's staged vectors for this table into the
+    /// live HNSW graph at commit. Delegates to the adapter.
+    async fn apply_staged_vectors(&self, vecs: &[(RecordId, Vec<f32>)]) -> Result<(), IndexError> {
+        self.adapter.apply_committed_vectors(vecs).await.map_err(ve)
     }
 
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
@@ -241,7 +235,7 @@ impl IndexBackend for VectorBackend {
             }
             for chunk in items.chunks(64) {
                 for (rid, v) in chunk {
-                    self.adapter.upsert(*rid, v, None).await.map_err(ve)?;
+                    self.adapter.upsert(*rid, v).await.map_err(ve)?;
                 }
             }
         }
@@ -400,7 +394,6 @@ mod tests {
     #[tokio::test]
     async fn lookup_tx_some_includes_staged_vector() {
         use crate::index2::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
-        use shamir_tx::{IsolationLevel, TxContext, TxId};
 
         let i = Interner::new();
 
@@ -432,18 +425,14 @@ mod tests {
         let committed_rid = RecordId::new();
         backend
             .adapter
-            .upsert(committed_rid, &[1.0, 0.0, 0.0], None)
+            .upsert(committed_rid, &[1.0, 0.0, 0.0])
             .await
             .unwrap();
 
-        // Stage another vector in tx_id=1 (very close to query).
-        let tx_id = TxId::new(1);
+        // The tx's own staged vector (what the executor buffers in
+        // `TxContext::staged_vectors_for(token)`), very close to query.
         let staged_rid = RecordId::new();
-        backend
-            .adapter
-            .upsert(staged_rid, &[0.9, 0.1, 0.0], Some(tx_id))
-            .await
-            .unwrap();
+        let staged: Vec<(RecordId, Vec<f32>)> = vec![(staged_rid, vec![0.9, 0.1, 0.0])];
 
         // Non-tx lookup sees only committed vector.
         let non_tx = backend
@@ -454,14 +443,14 @@ mod tests {
             .await
             .unwrap();
 
-        let tx = TxContext::new(tx_id, 0, 100, IsolationLevel::Snapshot);
+        // tx-aware lookup gets the staged slice threaded in by the caller.
         let in_tx = backend
             .lookup_tx(
                 IndexQuery::Vector {
                     vec: vec![1.0, 0.0, 0.0],
                     k: 2,
                 },
-                Some(&tx),
+                Some(&staged),
             )
             .await
             .unwrap();
@@ -481,8 +470,7 @@ mod tests {
         );
         assert!(
             in_tx_rids.contains(&staged_rid),
-            "in-tx lookup must merge staged vector: got {:?}",
-            in_tx_rids
+            "in-tx lookup must merge staged vector: got {in_tx_rids:?}"
         );
         assert!(
             non_tx_rids.contains(&committed_rid),
