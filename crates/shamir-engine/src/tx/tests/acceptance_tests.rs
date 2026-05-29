@@ -70,16 +70,14 @@ async fn abort_path_drop_tx_no_side_effects() {
     assert!(tbl.get(r1).await.is_err(), "aborted tx must leave no trace");
 }
 
-// Renamed from `read_after_write_inside_tx` — the previous version
-// accepted EITHER `Ok` or `Err` for the post-write read, which made
-// the assertion vacuous. The honest contract today is: `read_one_tx`
-// goes through MvccStore at `tx.snapshot_version` and does NOT merge
-// the tx's own `write_set`, so a record staged inside the same tx is
-// invisible to the tx itself. This is the read-your-own-writes gap
-// tracked for a future stage; once write_set merging lands, this test
-// should be renamed back and assert `Ok` with the staged value.
+// I.4 read-your-own-writes (point read). `read_one_tx` now overlays the
+// tx's own `write_set` (StagingStore) on top of the snapshot base: a
+// record staged inside the tx is visible to a later read in that same tx.
+// A committed-before-snapshot record (not staged) still reads through to
+// the snapshot. Previously this test asserted the broken behaviour
+// (staged write invisible to its own tx); it now asserts the fix.
 #[tokio::test]
-async fn read_inside_tx_sees_committed_but_not_own_staged_writes() {
+async fn read_inside_tx_sees_committed_and_own_staged_writes() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("users"));
     let tbl = repo.get_table("users").await.unwrap();
@@ -98,9 +96,8 @@ async fn read_inside_tx_sees_committed_but_not_own_staged_writes() {
         .await
         .unwrap();
 
-    // Pre-existing record (committed before snapshot) MUST be visible.
-    // read_one_tx routes through MvccStore; current_version = 0
-    // (non-tx insert), snapshot = u64::MAX → fast path → main.get.
+    // Pre-existing record (committed before snapshot, not staged) MUST be
+    // visible — falls through the staging overlay to the snapshot base.
     let pre = tbl.read_one_tx(existing_rid, Some(&tx)).await.unwrap();
     assert!(
         matches!(pre, InnerValue::Str(ref s) if s == "pre-existing"),
@@ -108,13 +105,11 @@ async fn read_inside_tx_sees_committed_but_not_own_staged_writes() {
         pre
     );
 
-    // Staged record MUST be invisible: read_one_tx does not merge
-    // write_set. This is the documented gap (read-your-own-writes
-    // not yet implemented). Assert the actual behaviour, not "either".
-    let staged = tbl.read_one_tx(new_rid, Some(&tx)).await;
+    // Staged record MUST be visible to its own tx (read-your-own-writes).
+    let staged = tbl.read_one_tx(new_rid, Some(&tx)).await.unwrap();
     assert!(
-        matches!(staged, Err(shamir_storage::error::DbError::NotFound(_))),
-        "staged write must be invisible to its own tx (write_set merge unwired), got {:?}",
+        matches!(staged, InnerValue::Str(ref s) if s == "new-in-tx"),
+        "staged write must be visible to its own tx (I.4), got {:?}",
         staged
     );
 

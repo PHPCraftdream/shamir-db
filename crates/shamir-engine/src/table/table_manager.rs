@@ -971,17 +971,19 @@ impl TableManager {
             }
         }
 
-        // 2. Data-store write. When an MvccStore is attached, route each
-        //    record through `set_versioned` so `version_cache` and history
-        //    archival stay consistent with non-tx writes. This trades the
-        //    backend's atomic `insert_many` transaction for per-record
-        //    writes — acceptable for the surgical HIGH-4 first cut; a
-        //    follow-up can add `MvccStore::set_versioned_many` for the
-        //    batched fast path. Without an MvccStore we keep the legacy
-        //    batched path (one transaction = one fsync on backends that
-        //    override `insert_many`).
+        // 2. Data-store write. When an MvccStore is attached, route the
+        //    whole batch through `set_versioned_many` (III.4) so
+        //    `version_cache` and history archival stay consistent with
+        //    non-tx writes WHILE collapsing the main writes into a single
+        //    `Store::transact` — one fsync instead of N on backends that
+        //    override `transact`. The previous per-record `set_versioned`
+        //    loop re-introduced the N× fsync amplification this path now
+        //    avoids. Without an MvccStore we keep the legacy batched path
+        //    (one transaction = one fsync on backends that override
+        //    `insert_many`).
         let ids: Vec<RecordId> = if let Some(mvcc) = &self.mvcc_store {
-            let mut out = Vec::with_capacity(values.len());
+            let mut ids = Vec::with_capacity(values.len());
+            let mut items = Vec::with_capacity(values.len());
             for v in values {
                 let rid = RecordId::new();
                 let bytes = v.to_bytes().map_err(|e| {
@@ -990,10 +992,11 @@ impl TableManager {
                         e
                     ))
                 })?;
-                mvcc.set_versioned(rid.to_bytes(), bytes).await?;
-                out.push(rid);
+                items.push((rid.to_bytes(), bytes));
+                ids.push(rid);
             }
-            out
+            mvcc.set_versioned_many(items).await?;
+            ids
         } else {
             self.table.insert_many(values).await?
         };
@@ -1374,6 +1377,36 @@ impl TableManager {
     ///     - `Some(bytes)` → deserialize and return.
     ///     - `None` → `DbError::NotFound`.
     ///
+    /// I.4 — read-your-own-writes. Before consulting the snapshot base, the
+    /// tx's own staging overlay (`tx.write_set[token]`, the `StagingStore`
+    /// holding this tx's un-committed set/remove ops) is checked for `key`:
+    ///   - staged `Set(bytes)` → return the staged value (read-your-own-write);
+    ///   - staged `Remove`     → return `NotFound` (read-your-own-delete);
+    ///   - not staged          → fall through to `get_at(snapshot)` (the base).
+    ///
+    /// This makes a write performed earlier in the same tx visible to a later
+    /// read in that tx — the fundamental tx-semantics guarantee — and is
+    /// isolation-independent (applies to both Snapshot and Serializable). It
+    /// also makes repeated in-tx updates of the same record index-correct:
+    /// `update_tx`/`delete_tx` read the *staged* prior value as "old" when
+    /// computing index diffs, so a second update of a key staged earlier in
+    /// the same tx diffs against what the tx actually staged, not the base.
+    ///
+    /// The staging overlay is classified via `StagingStore::snapshot_ops()`
+    /// (the only public per-op accessor): a key has at most one staged op
+    /// (last-write-wins), and `bytes::Bytes` clones are O(1) refcount bumps,
+    /// so the scan is cheap and only runs when this table actually has staged
+    /// writes. A targeted per-key staging peek would let us skip building the
+    /// op vec entirely — follow-up, gated on touching `staging_store.rs`.
+    ///
+    /// Scope: this is the *point-read* overlay. The streaming scans
+    /// ([`list_stream_tx`] / [`filter_stream_tx`] /
+    /// [`filter_stream_with_callback_tx`]) do NOT yet merge the tx's own
+    /// staged inserts/deletes/updates into the yielded records — streaming
+    /// read-your-own-writes (inject staged inserts, drop staged deletes,
+    /// override staged updates, all while preserving the lazy-yield + SSI
+    /// recording contract) is a larger change tracked as a follow-up.
+    ///
     /// HIGH-C — SSI read tracking. When `tx` is `Some`, the key and the
     /// version observed at read time are recorded into the tx's read-set via
     /// [`record_read_shared`](shamir_tx::TxContext::record_read_shared) (a
@@ -1410,6 +1443,34 @@ impl TableManager {
                 .as_ref()
                 .map_or(0, |mvcc| mvcc.version_of(key.as_ref()));
             tx.record_read_shared(self.table_token(), key.clone(), version);
+
+            // I.4 read-your-own-writes: the tx's own staging overlay wins
+            // over the snapshot base. A key has at most one staged op
+            // (last-write-wins in StagingStore); `snapshot_ops` clones are
+            // O(1) Bytes refcount bumps. Only the table's own staged writes
+            // are scanned (guarded by the write_set lookup), so a tx that
+            // never wrote this table pays nothing.
+            if let Some(staging) = tx.write_set.get(&self.table_token()) {
+                for op in staging.snapshot_ops() {
+                    match op {
+                        KvOp::Set(k, v) if k.as_ref() == key.as_ref() => {
+                            return InnerValue::from_bytes(v).map_err(|e| {
+                                shamir_storage::error::DbError::Codec(format!(
+                                    "Failed to deserialize InnerValue: {}",
+                                    e
+                                ))
+                            });
+                        }
+                        KvOp::Remove(k) if k.as_ref() == key.as_ref() => {
+                            return Err(shamir_storage::error::DbError::NotFound(format!(
+                                "record staged-removed in tx: {:?}",
+                                id
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+            }
 
             if let Some(mvcc) = self.mvcc_store.as_ref() {
                 match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
