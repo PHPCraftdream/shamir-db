@@ -91,3 +91,49 @@ async fn filter_stream_with_callback_tx_forwards() {
     assert_eq!(baseline.len(), via_tx.len());
     assert_eq!(baseline.len(), 4);
 }
+
+/// KNOWN LIMITATION guard (C8): streaming scans do NOT overlay the tx's own
+/// `write_set`, so a record staged inside a tx is INVISIBLE to an in-tx
+/// stream until commit (only point reads — `read_one_tx` — do
+/// read-your-own-writes). This test stages an insert and asserts the staged
+/// record is ABSENT from `list_stream_tx(Some(&tx))`, pinning the *current*
+/// documented behaviour.
+///
+/// When streaming read-your-own-writes is implemented, this test must FLIP:
+/// the staged record becomes expected-present (and `list_stream_tx` should
+/// then yield `n + 1` records). The assertions below will fail at that point,
+/// forcing a deliberate update rather than letting the new behaviour ship as
+/// a silent regression.
+#[tokio::test]
+async fn list_stream_tx_does_not_see_staged_insert() {
+    let (tbl, ids) = make_table_with_n_records(3).await;
+    let mut tx = make_tx(123);
+
+    // Stage an insert inside the tx (populates tx.write_set for this table).
+    let staged = tbl
+        .insert_tx(&InnerValue::Str("staged-only".into()), Some(&mut tx))
+        .await
+        .unwrap();
+
+    // The streamed scan forwards to the committed data store and does NOT
+    // overlay staging, so it yields exactly the pre-staged committed set.
+    let streamed = collect_stream(tbl.list_stream_tx(Some(&tx), 2)).await;
+
+    assert_eq!(
+        streamed.len(),
+        ids.len(),
+        "streaming scan must yield only committed records (no read-your-own-writes)"
+    );
+    assert!(
+        streamed.iter().all(|(rid, _)| *rid != staged),
+        "the staged-but-uncommitted insert must be ABSENT from the in-tx stream \
+         (current limitation: scans do not overlay tx.write_set)"
+    );
+    // Cross-check via the point-read path, which DOES overlay staging: the
+    // same record is visible there (read-your-own-writes), proving the
+    // divergence is the streaming path's limitation, not a lost write.
+    assert!(
+        tbl.read_one_tx(staged, Some(&tx)).await.is_ok(),
+        "read_one_tx must see the tx's own staged insert (point-read RYOW holds)"
+    );
+}

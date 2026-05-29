@@ -1273,6 +1273,18 @@ impl TableManager {
     /// scanned range by a concurrent tx are not detected — full SSI predicate
     /// locking over a stream is a known harder problem and out of scope here.
     /// Point reads ([`read_one_tx`]) and materialised scan reads are covered.
+    ///
+    /// KNOWN LIMITATION — no read-your-own-writes for scans. Streaming scans
+    /// do NOT overlay the tx's own `write_set`: a record this tx staged
+    /// (inserted/updated/deleted but not yet committed) is **invisible** to an
+    /// in-tx stream — a staged insert is absent, a staged delete still appears,
+    /// a staged update yields the committed value. Only point reads
+    /// ([`read_one_tx`]) overlay staging (read-your-own-writes). A staged
+    /// change becomes visible to a scan only after commit. Full streaming RYOW
+    /// (inject staged inserts, drop staged deletes, override staged updates,
+    /// all while preserving the lazy-yield + SSI recording contract) is a
+    /// follow-up. The `list_stream_tx_does_not_see_staged_insert` test pins
+    /// this current behaviour so the limitation cannot regress silently.
     pub fn list_stream_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -1288,7 +1300,9 @@ impl TableManager {
     ///
     /// Same materialised-read SSI recording as [`list_stream_tx`]: each
     /// record that survives the filter and is yielded gets recorded into the
-    /// read-set (Serializable only). Same streaming-scan SSI scope note.
+    /// read-set (Serializable only). Same streaming-scan SSI scope note, and
+    /// the same KNOWN LIMITATION: scans do NOT overlay the tx `write_set`
+    /// (no read-your-own-writes for scans — see [`list_stream_tx`]).
     pub async fn filter_stream_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -1304,7 +1318,9 @@ impl TableManager {
 
     /// tx-aware streaming variant of [`filter_stream_with_callback`].
     ///
-    /// Same materialised-read SSI recording as [`list_stream_tx`].
+    /// Same materialised-read SSI recording as [`list_stream_tx`], and the
+    /// same KNOWN LIMITATION: scans do NOT overlay the tx `write_set` (no
+    /// read-your-own-writes for scans — see [`list_stream_tx`]).
     pub fn filter_stream_with_callback_tx<'a>(
         &'a self,
         tx: Option<&'a shamir_tx::TxContext>,
@@ -1392,12 +1408,19 @@ impl TableManager {
     /// computing index diffs, so a second update of a key staged earlier in
     /// the same tx diffs against what the tx actually staged, not the base.
     ///
-    /// The staging overlay is classified via `StagingStore::snapshot_ops()`
-    /// (the only public per-op accessor): a key has at most one staged op
-    /// (last-write-wins), and `bytes::Bytes` clones are O(1) refcount bumps,
-    /// so the scan is cheap and only runs when this table actually has staged
-    /// writes. A targeted per-key staging peek would let us skip building the
-    /// op vec entirely — follow-up, gated on touching `staging_store.rs`.
+    /// The staging overlay is classified via
+    /// [`StagingStore::staged_op`](shamir_tx::staging_store::StagingStore::staged_op):
+    /// a targeted, alloc-free per-key probe (a single `scc::HashMap::read`
+    /// borrow-probe with `&[u8]`, no `Bytes` allocation and no fall-through to
+    /// the base store). A key has at most one staged op (last-write-wins), and
+    /// the staged `Bytes` clone on a `Set` hit is an O(1) refcount bump. This
+    /// is O(1) per read and allocates nothing when the key is not staged — it
+    /// replaces the former `snapshot_ops()` path, which allocated a fresh
+    /// `Vec<KvOp>` and cloned every staged op for the table on *every* read,
+    /// then linearly scanned it for one key (O(N) per read for a tx that
+    /// staged N rows). Semantics are unchanged: the probe only runs when this
+    /// table has staged writes (guarded by the `write_set` lookup), so a tx
+    /// that never wrote this table still pays nothing.
     ///
     /// Scope: this is the *point-read* overlay. The streaming scans
     /// ([`list_stream_tx`] / [`filter_stream_tx`] /
@@ -1445,30 +1468,29 @@ impl TableManager {
             tx.record_read_shared(self.table_token(), key.clone(), version);
 
             // I.4 read-your-own-writes: the tx's own staging overlay wins
-            // over the snapshot base. A key has at most one staged op
-            // (last-write-wins in StagingStore); `snapshot_ops` clones are
-            // O(1) Bytes refcount bumps. Only the table's own staged writes
-            // are scanned (guarded by the write_set lookup), so a tx that
-            // never wrote this table pays nothing.
+            // over the snapshot base. A targeted per-key probe (alloc-free,
+            // no fall-through to base): staged Set → return the staged value,
+            // staged Remove → NotFound, not staged → fall through to the
+            // snapshot base below. Only the table's own staging is probed
+            // (guarded by the write_set lookup), so a tx that never wrote this
+            // table pays nothing.
             if let Some(staging) = tx.write_set.get(&self.table_token()) {
-                for op in staging.snapshot_ops() {
-                    match op {
-                        KvOp::Set(k, v) if k.as_ref() == key.as_ref() => {
-                            return InnerValue::from_bytes(v).map_err(|e| {
-                                shamir_storage::error::DbError::Codec(format!(
-                                    "Failed to deserialize InnerValue: {}",
-                                    e
-                                ))
-                            });
-                        }
-                        KvOp::Remove(k) if k.as_ref() == key.as_ref() => {
-                            return Err(shamir_storage::error::DbError::NotFound(format!(
-                                "record staged-removed in tx: {:?}",
-                                id
-                            )));
-                        }
-                        _ => {}
+                match staging.staged_op(key.as_ref()) {
+                    Some(shamir_tx::staging_store::StagedKind::Set(v)) => {
+                        return InnerValue::from_bytes(v).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize InnerValue: {}",
+                                e
+                            ))
+                        });
                     }
+                    Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                        return Err(shamir_storage::error::DbError::NotFound(format!(
+                            "record staged-removed in tx: {:?}",
+                            id
+                        )));
+                    }
+                    None => {}
                 }
             }
 
