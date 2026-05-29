@@ -557,10 +557,16 @@ async fn version_monotonic_across_restart() {
         Vec::new(),
     );
     repo1.add_table(crate::table::TableConfig::new("t"));
-    let _tbl = repo1.get_table("t").await.unwrap();
+    let tbl = repo1.get_table("t").await.unwrap();
     let mut last_v_before = 0u64;
-    for _ in 0..5 {
-        let (tx, _g) = repo1.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    for i in 0..5i64 {
+        // Each tx stages a write so it crosses the commit point and assigns a
+        // version. Empty txs now take the C6 fast-path and intentionally do
+        // NOT advance the version, which would defeat this monotonicity check.
+        let (mut tx, _g) = repo1.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        tbl.insert_tx(&InnerValue::Int(i), Some(&mut tx))
+            .await
+            .unwrap();
         let outcome = repo1.commit_tx(tx).await.unwrap();
         last_v_before = outcome.commit_version;
     }
@@ -570,8 +576,11 @@ async fn version_monotonic_across_restart() {
     // Phase 2: fresh repo over same underlying.
     let repo2 = RepoInstance::new("test".into(), BoxRepo::InMemory(underlying), Vec::new());
     repo2.add_table(crate::table::TableConfig::new("t"));
-    let _tbl = repo2.get_table("t").await.unwrap();
-    let (tx, _g) = repo2.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let tbl = repo2.get_table("t").await.unwrap();
+    let (mut tx, _g) = repo2.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.insert_tx(&InnerValue::Int(42), Some(&mut tx))
+        .await
+        .unwrap();
     let outcome = repo2.commit_tx(tx).await.unwrap();
 
     assert!(

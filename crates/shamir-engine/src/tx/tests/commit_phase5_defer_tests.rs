@@ -30,7 +30,9 @@ use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::commit::{MaterializationState, FAIL_PHASE_5C_TX_ID};
+use crate::tx::commit::{
+    MaterializationState, FAIL_PHASE_5A_TABLE_TOKEN, FAIL_PHASE_5A_TX_ID, FAIL_PHASE_5C_TX_ID,
+};
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -52,6 +54,17 @@ const INJECT_TX_ID: u64 = 7_000_001;
 /// no poisoning, and clippy-clean across the await. Contention is bounded
 /// to the two injecting tests.
 static PHASE_5C_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Serialises the arm → commit → reset window of the multi-table Phase 5a
+/// injection test. `FAIL_PHASE_5A_TX_ID` / `FAIL_PHASE_5A_TABLE_TOKEN` are a
+/// process-wide pair; the guard must span the commit `.await` (the registers
+/// are read during materialization). Only one test arms them today, so
+/// contention is nil — the lock is future-proofing against a second armer.
+static PHASE_5A_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Sentinel tx_id for the multi-table Phase 5a injection test (kept far
+/// above gate-allocated ids so the process-global register can't collide).
+const MULTI_TABLE_INJECT_TX_ID: u64 = 7_000_010;
 
 /// Decisive proof of Vector I.3: a Phase-5 sub-phase failure that occurs
 /// AFTER the commit point (successful Phase 4 `wal.begin`) is reported as
@@ -269,5 +282,160 @@ async fn deferred_materialization_increments_metric() {
         after - before,
         1,
         "a deferred materialization must increment txs_materialization_deferred exactly once"
+    );
+}
+
+/// Audit MED (multi-table partial materialization → restart-bounded eventual
+/// consistency). A SINGLE tx writes TWO tables. The SECOND table's Phase 5a
+/// (data) write is injected to fail (`FAIL_PHASE_5A_*`, keyed by
+/// `(table_token, tx_id)`), while the first table's data + index land inline.
+/// This proves the cross-table inconsistency the audit flagged and that
+/// recovery reconciles it (previously only single-table reconciliation was
+/// tested):
+///
+///  (a) the commit returns `Ok(Deferred)` — NOT an abort (the WAL entry is
+///      durable, so the tx is COMMITTED even though table B didn't land);
+///  (b) one inflight WAL marker survives (Phase 7 skipped);
+///  (c) BEFORE recovery the two tables are OBSERVABLY split at the SAME
+///      committed version — table A's data + index posting are present,
+///      table B's data is ABSENT (the audit's "A's new value + B's old
+///      value");
+///  (d) AFTER `recover_v2_inflight` BOTH tables are consistent — table B's
+///      data lands via WAL `Put` replay, table A is unchanged, marker cleaned.
+///
+/// `current_thread` flavor keeps the whole commit on one task/thread so the
+/// process-global injection register pair is observed deterministically.
+#[tokio::test(flavor = "current_thread")]
+async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("a"));
+    repo.add_table(TableConfig::new("b"));
+    // get_table registers each table's MvccStore in `per_table_mvcc`, so
+    // Phase 5a routes data writes through `apply_committed_ops` (where the
+    // injection seam lives).
+    let tbl_a = repo.get_table("a").await.unwrap();
+    let tbl_b = repo.get_table("b").await.unwrap();
+    let token_a = table_token_for("a");
+    let token_b = table_token_for("b");
+
+    // Table A: a data record + an index posting (both must materialize
+    // inline — A is NOT injected to fail).
+    let rid_a = RecordId::new();
+    let body_a = InnerValue::Str("table-a-row".into()).to_bytes().unwrap();
+    let staging_a = StagingStore::new(Arc::clone(tbl_a.data_store()));
+    staging_a.set(rid_a.to_bytes(), body_a).await;
+    let posting_a_key = Bytes::from_static(b"table_a_posting_key");
+    let posting_a_val = Bytes::from_static(b"table_a_posting_value");
+
+    // Table B: a data record ONLY. Its Phase 5a write is the one we fail, so
+    // table B ends up entirely unmaterialized (no leaked index posting to
+    // muddy the "B not materialized" assertion).
+    let rid_b = RecordId::new();
+    let body_b = InnerValue::Str("table-b-row".into()).to_bytes().unwrap();
+    let staging_b = StagingStore::new(Arc::clone(tbl_b.data_store()));
+    staging_b.set(rid_b.to_bytes(), body_b).await;
+
+    let mut tx = TxContext::new(
+        TxId::new(MULTI_TABLE_INJECT_TX_ID),
+        0,
+        0,
+        IsolationLevel::Snapshot,
+    );
+    tx.write_set.insert(token_a, staging_a);
+    tx.write_set.insert(token_b, staging_b);
+    tx.index_write_set.push((
+        token_a,
+        IndexWriteOp::SetPosting {
+            key: posting_a_key.clone(),
+            value: posting_a_val.clone(),
+        },
+    ));
+
+    // Arm a Phase 5a failure for EXACTLY (this tx, table B), commit, then
+    // disarm. The lock serialises the arm→commit→reset window.
+    let inject_guard = PHASE_5A_INJECT_LOCK.lock().await;
+    FAIL_PHASE_5A_TX_ID.store(MULTI_TABLE_INJECT_TX_ID, Ordering::SeqCst);
+    FAIL_PHASE_5A_TABLE_TOKEN.store(token_b, Ordering::SeqCst);
+    let outcome = repo.commit_tx(tx).await;
+    FAIL_PHASE_5A_TX_ID.store(0, Ordering::SeqCst);
+    FAIL_PHASE_5A_TABLE_TOKEN.store(0, Ordering::SeqCst);
+    drop(inject_guard);
+
+    // (a) COMMITTED with Deferred — table B's data write failed AFTER the
+    //     commit point, so the tx is committed but materialization deferred.
+    let outcome = outcome.expect("a partial multi-table failure must NOT abort the tx");
+    assert_eq!(
+        outcome.materialization,
+        MaterializationState::Deferred,
+        "a failed second-table Phase 5a must defer materialization (not abort)"
+    );
+
+    // (b) One inflight WAL marker (Phase 7 skipped because `ok=false`).
+    let wal = repo.repo_wal().await.unwrap();
+    let inflight = wal.list_inflight().await.unwrap();
+    assert_eq!(
+        inflight.len(),
+        1,
+        "deferral must leave the WAL marker inflight"
+    );
+    assert_eq!(inflight[0].txn_id, MULTI_TABLE_INJECT_TX_ID);
+
+    // (c) BEFORE recovery: the cross-table split is observable at the same
+    //     committed version. Table A fully materialized; table B's data absent.
+    let a_row = tbl_a
+        .get(rid_a)
+        .await
+        .expect("table A data must be materialized inline (A was not injected)");
+    assert!(
+        matches!(a_row, InnerValue::Str(ref s) if s == "table-a-row"),
+        "table A row must be its committed value, got {a_row:?}"
+    );
+    assert_eq!(
+        tbl_a
+            .info_store()
+            .get(posting_a_key.clone())
+            .await
+            .expect("table A index posting must be materialized inline"),
+        posting_a_val,
+        "table A index posting must land inline (Phase 5c ran for A)"
+    );
+    assert!(
+        tbl_b.get(rid_b).await.is_err(),
+        "table B data MUST be absent before recovery — this is the cross-table \
+         inconsistency: a reader sees A's new row + B's missing row at the same \
+         committed version (audit MED)"
+    );
+
+    // (d) AFTER recovery: BOTH tables consistent. Recovery replays the one
+    //     inflight WAL entry, which carries every table's ops (Put(A), Put(B),
+    //     IndexPut(A)), so table B's data lands and table A is unchanged.
+    let count = repo.recover_v2_inflight().await.unwrap();
+    assert_eq!(count, 1, "recovery must replay the one inflight entry");
+
+    let b_row = tbl_b
+        .get(rid_b)
+        .await
+        .expect("recovery must materialize table B's data (Put replay)");
+    assert!(
+        matches!(b_row, InnerValue::Str(ref s) if s == "table-b-row"),
+        "recovered table B row must match the committed value, got {b_row:?}"
+    );
+    // Table A unchanged and still consistent.
+    let a_row_after = tbl_a.get(rid_a).await.unwrap();
+    assert!(matches!(a_row_after, InnerValue::Str(ref s) if s == "table-a-row"));
+    assert_eq!(
+        tbl_a.info_store().get(posting_a_key).await.unwrap(),
+        posting_a_val
+    );
+
+    // Marker cleaned; a second recovery pass is a no-op.
+    assert!(
+        wal.list_inflight().await.unwrap().is_empty(),
+        "recovery must remove the WAL marker after reconciliation"
+    );
+    assert_eq!(
+        repo.recover_v2_inflight().await.unwrap(),
+        0,
+        "second recovery pass must be a no-op"
     );
 }
