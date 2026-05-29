@@ -99,11 +99,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateTable(op) => {
-                let db = self
-                    .shamir
-                    .get_db(&self.db_name)
-                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
-                db.create_table(&op.repo, &op.create_table)
+                // Route through ShamirDb so the table is persisted to the
+                // catalogue and survives a restart (I.2).
+                self.shamir
+                    .add_table(&self.db_name, &op.repo, &op.create_table, false)
+                    .await
                     .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(
                     json!({"created_table": op.create_table, "repo": op.repo}),
@@ -111,12 +111,10 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropTable(op) => {
-                let db = self
+                let removed = self
                     .shamir
-                    .get_db(&self.db_name)
-                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
-                let removed = db
-                    .drop_table(&op.repo, &op.drop_table)
+                    .drop_table(&self.db_name, &op.repo, &op.drop_table)
+                    .await
                     .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(
                     json!({"dropped_table": op.drop_table, "existed": removed}),
