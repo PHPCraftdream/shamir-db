@@ -70,6 +70,7 @@
 //! progress concurrently with other connections' I/O on the worker pool.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
@@ -91,8 +92,15 @@ use shamir_connect::server::user_record::UserRecord;
 use zeroize::Zeroizing;
 
 use crate::tables_registry::TablesRegistry;
+use crate::tx_registry::{InteractiveTx, TxRegistry, TxRegistryError};
 use crate::user_directory::RedbUserDirectory;
 use crate::version::check_query_lang;
+
+/// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
+/// how long any one open tx can pin MVCC GC, even if a client keeps it busy.
+/// Mirrors the engine's `DEFAULT_MAX_TX_LIFETIME` (5 min); the commit path's
+/// own `is_expired` check is the final backstop.
+const INTERACTIVE_TX_MAX_LIFETIME: Duration = Duration::from_secs(300);
 
 // --------------------------------------------------------------------------
 // Wire schema
@@ -184,6 +192,10 @@ pub struct ShamirDbHandler {
     slow_query: SlowQueryConfig,
     /// Server-side hard caps on per-batch resources.
     query_limits: QueryLimitsCap,
+    /// Phase B — registry of open interactive (multi-call) transactions,
+    /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
+    /// one dispatch finds the tx a prior `TxBegin` parked.
+    tx_registry: Arc<TxRegistry>,
 }
 
 impl ShamirDbHandler {
@@ -195,6 +207,7 @@ impl ShamirDbHandler {
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
+            tx_registry: Arc::new(TxRegistry::new()),
         }
     }
 
@@ -205,6 +218,7 @@ impl ShamirDbHandler {
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
+            tx_registry: Arc::new(TxRegistry::new()),
         }
     }
 
@@ -244,6 +258,22 @@ impl RequestHandler for ShamirDbHandler {
                 password,
                 roles,
             } => self.create_scram_user(session, name, password, roles),
+
+            // --- Phase B: interactive (multi-call) transactions ---
+            DbRequest::TxBegin {
+                query_version,
+                db,
+                repo,
+                isolation,
+            } => self.tx_begin(session, query_version, &db, &repo, isolation),
+            DbRequest::TxExecute {
+                query_version,
+                db,
+                tx_handle,
+                batch,
+            } => self.tx_execute(session, query_version, &db, tx_handle, batch),
+            DbRequest::TxCommit { db, tx_handle } => self.tx_commit(session, &db, tx_handle),
+            DbRequest::TxRollback { db, tx_handle } => self.tx_rollback(session, &db, tx_handle),
         };
 
         rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
@@ -350,6 +380,278 @@ impl ShamirDbHandler {
                 message: e.to_string(),
             },
         }
+    }
+
+    /// Phase B BEGIN — open an interactive tx, park it in the registry bound
+    /// to this session, reply with the minted handle + snapshot version.
+    fn tx_begin(
+        &self,
+        session: &Session,
+        query_version: u32,
+        db_name: &str,
+        repo_name: &str,
+        isolation: Option<String>,
+    ) -> DbResponse {
+        if let Err(e) = check_query_lang(query_version) {
+            return DbResponse::Error {
+                code: "unsupported_query_version".into(),
+                message: e.to_string(),
+            };
+        }
+        let iso = isolation.unwrap_or_else(|| "snapshot".to_string());
+
+        let db = self.db.clone();
+        let db_name_owned = db_name.to_string();
+        let repo_owned = repo_name.to_string();
+        let iso_for_begin = iso.clone();
+        let begin = run_blocking(async move {
+            db.tx_begin(&db_name_owned, &repo_owned, &iso_for_begin)
+                .await
+        });
+        let (tx, guard) = match begin {
+            Ok(pair) => pair,
+            Err(e) => {
+                return DbResponse::Error {
+                    code: error_code(&e).to_string(),
+                    message: e.to_string(),
+                }
+            }
+        };
+
+        let handle = tx.tx_id.0;
+        let snapshot_version = tx.snapshot_version;
+        let it = InteractiveTx::new(
+            tx,
+            guard,
+            session.session_id,
+            session.user_id,
+            db_name.to_string(),
+            repo_name.to_string(),
+            INTERACTIVE_TX_MAX_LIFETIME,
+        );
+        match self.tx_registry.register(handle, it) {
+            // On reject the just-opened tx (`it`) drops = RAII rollback.
+            Err(TxRegistryError::TxAlreadyOpen) => DbResponse::Error {
+                code: "tx_already_open".into(),
+                message: "session already has an open transaction".into(),
+            },
+            Err(_) => DbResponse::Error {
+                code: "tx_error".into(),
+                message: "could not register transaction".into(),
+            },
+            Ok(_) => DbResponse::TxOpened {
+                tx_handle: handle,
+                snapshot_version,
+                isolation: iso,
+            },
+        }
+    }
+
+    /// Phase B EXECUTE — run one batch inside an open interactive tx (no
+    /// commit). Applies the same per-batch gates as [`Self::execute`]
+    /// (version, limits cap, admin, destructive-HMAC), then threads the
+    /// parked `TxContext` through the engine glue.
+    fn tx_execute(
+        &self,
+        session: &Session,
+        query_version: u32,
+        db_name: &str,
+        tx_handle: u64,
+        mut batch: BatchRequest,
+    ) -> DbResponse {
+        if let Err(e) = check_query_lang(query_version) {
+            return DbResponse::Error {
+                code: "unsupported_query_version".into(),
+                message: e.to_string(),
+            };
+        }
+
+        // Server-side cap on per-batch resources (mirror `execute`).
+        batch.limits.max_result_size = batch
+            .limits
+            .max_result_size
+            .min(self.query_limits.max_result_size_bytes);
+        batch.limits.max_execution_time_secs = batch
+            .limits
+            .max_execution_time_secs
+            .min(self.query_limits.max_execution_time_secs);
+        batch.limits.max_queries = batch
+            .limits
+            .max_queries
+            .min(self.query_limits.max_queries_per_batch);
+
+        // Admin / auth gate.
+        if !session.permissions.is_superuser {
+            for (alias, entry) in &batch.queries {
+                if entry.op.is_admin() {
+                    return DbResponse::Error {
+                        code: "permission_denied".into(),
+                        message: format!("query '{}' requires superuser (admin/auth op)", alias),
+                    };
+                }
+            }
+        }
+
+        // Destructive-op HMAC gate (same "did you mean it" guard as `execute`).
+        if let Err((alias, code, message)) = check_destructive_hmacs(session, db_name, &batch) {
+            return DbResponse::Error {
+                code: code.into(),
+                message: format!("query '{}': {}", alias, message),
+            };
+        }
+
+        // Look up the handle and verify it belongs to this session.
+        let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
+            Ok(it) => it,
+            Err(TxRegistryError::TxNotFound) => {
+                return DbResponse::Error {
+                    code: "tx_not_found".into(),
+                    message: format!("no open transaction for handle {}", tx_handle),
+                }
+            }
+            Err(_) => {
+                return DbResponse::Error {
+                    code: "tx_forbidden".into(),
+                    message: "transaction handle does not belong to this session".into(),
+                }
+            }
+        };
+
+        // The handle is pinned to one (db, repo); every TxExecute must match.
+        if it.db() != db_name {
+            return DbResponse::Error {
+                code: "tx_wrong_db".into(),
+                message: format!("handle pinned to db '{}', got '{}'", it.db(), db_name),
+            };
+        }
+        for r in shamir_query_types::batch::distinct_repos(&batch.queries) {
+            if r != it.repo() {
+                return DbResponse::Error {
+                    code: "tx_wrong_repo".into(),
+                    message: format!(
+                        "TxExecute targets repo '{}' but the handle is pinned to '{}'",
+                        r,
+                        it.repo()
+                    ),
+                };
+            }
+        }
+
+        let db = self.db.clone();
+        let db_name_owned = db_name.to_string();
+        let it_for_exec = Arc::clone(&it);
+        let exec = run_blocking(async move {
+            let mut guard = it_for_exec.ctx().lock().await;
+            match guard.as_mut() {
+                Some(tx) => {
+                    let r = db.tx_execute(&db_name_owned, &batch, tx).await;
+                    if r.is_ok() {
+                        it_for_exec.bump_activity();
+                    }
+                    r
+                }
+                None => Err(BatchError::QueryError {
+                    alias: String::new(),
+                    message: "transaction is already committed or rolled back".into(),
+                }),
+            }
+        });
+        match exec {
+            Ok(response) => DbResponse::TxBatch { response },
+            Err(e) => DbResponse::Error {
+                code: error_code(&e).to_string(),
+                message: e.to_string(),
+            },
+        }
+    }
+
+    /// Phase B COMMIT — remove the handle from the registry, run the Phase-A
+    /// commit pipeline on its `TxContext`, reply with the `TransactionInfo`.
+    /// The owning `Arc` (and thus the `SnapshotGuard`) is held alive until
+    /// commit returns, so the MVCC snapshot stays pinned through commit.
+    fn tx_commit(&self, session: &Session, db_name: &str, tx_handle: u64) -> DbResponse {
+        let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
+            Ok(it) => it,
+            Err(TxRegistryError::TxNotFound) => {
+                return DbResponse::Error {
+                    code: "tx_not_found".into(),
+                    message: format!("no open transaction for handle {}", tx_handle),
+                }
+            }
+            Err(_) => {
+                return DbResponse::Error {
+                    code: "tx_forbidden".into(),
+                    message: "transaction handle does not belong to this session".into(),
+                }
+            }
+        };
+        if it.db() != db_name {
+            return DbResponse::Error {
+                code: "tx_wrong_db".into(),
+                message: format!("handle pinned to db '{}', got '{}'", it.db(), db_name),
+            };
+        }
+
+        // Remove first: no concurrent TxExecute can find the handle once we
+        // start committing.
+        self.tx_registry.remove(tx_handle);
+
+        let db = self.db.clone();
+        let db_name_owned = db_name.to_string();
+        let repo = it.repo().to_string();
+        let it_for_commit = Arc::clone(&it);
+        let commit = run_blocking(async move {
+            let tx = it_for_commit.ctx().lock().await.take();
+            match tx {
+                Some(tx) => db.tx_commit(&db_name_owned, &repo, tx).await,
+                None => Err(BatchError::QueryError {
+                    alias: String::new(),
+                    message: "transaction is already committed or rolled back".into(),
+                }),
+            }
+            // `it_for_commit` (holding the SnapshotGuard) drops here, AFTER
+            // commit returned — the snapshot stayed pinned through commit.
+        });
+        // Drop our remaining ref now that commit is done.
+        drop(it);
+        match commit {
+            Ok(transaction) => DbResponse::TxCommitted { transaction },
+            Err(e) => DbResponse::Error {
+                code: error_code(&e).to_string(),
+                message: e.to_string(),
+            },
+        }
+    }
+
+    /// Phase B ROLLBACK — remove the handle and drop the parked tx (RAII
+    /// rollback, no storage side effects).
+    fn tx_rollback(&self, session: &Session, db_name: &str, tx_handle: u64) -> DbResponse {
+        let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
+            Ok(it) => it,
+            Err(TxRegistryError::TxNotFound) => {
+                return DbResponse::Error {
+                    code: "tx_not_found".into(),
+                    message: format!("no open transaction for handle {}", tx_handle),
+                }
+            }
+            Err(_) => {
+                return DbResponse::Error {
+                    code: "tx_forbidden".into(),
+                    message: "transaction handle does not belong to this session".into(),
+                }
+            }
+        };
+        if it.db() != db_name {
+            return DbResponse::Error {
+                code: "tx_wrong_db".into(),
+                message: format!("handle pinned to db '{}', got '{}'", it.db(), db_name),
+            };
+        }
+        self.tx_registry.remove(tx_handle);
+        // Last ref drops here → InteractiveTx drops → TxContext drops (RAII
+        // rollback) and the SnapshotGuard releases the GC pin.
+        drop(it);
+        DbResponse::TxRolledBack { tx_handle }
     }
 
     /// Walk through `batch.queries` and record CreateTable/DropTable ops in

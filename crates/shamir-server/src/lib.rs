@@ -28,5 +28,6 @@ pub mod server;
 pub mod server_meta;
 pub mod tables_registry;
 pub mod tls;
+pub mod tx_registry;
 pub mod user_directory;
 pub mod version;

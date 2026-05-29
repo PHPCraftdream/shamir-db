@@ -3,7 +3,10 @@
 use serde_json::json;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch, BatchRequest, QueryRunner, TableResolver};
+use crate::query::batch::{
+    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, BatchRequest,
+    QueryRunner, TableResolver,
+};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -877,5 +880,169 @@ async fn ssi_write_skew_no_record_no_conflict_through_execute_batch() {
         "with no recorded read, a concurrent writer must NOT conflict the reader; \
          got status={:?} reason={:?}",
         info.status, info.reason
+    );
+}
+
+// ============================================================================
+// Phase B — interactive (multi-call) transaction glue
+//
+// The engine-side primitives `open_interactive_tx` / `execute_in_open_tx` /
+// `commit_interactive_tx` let a `TxContext` outlive a single batch: the
+// server parks it between client round-trips and drives several EXECUTEs
+// against it before COMMIT. These tests exercise that lifetime directly
+// against a `RepoInstance` (no wire), the way the Phase-A acceptance suite
+// does. See `docs/roadmap/PHASE_B_INTERACTIVE_TX.md` §5/§9.2.
+//
+// NOTE on RYOW: read-your-own-writes within an open tx is a POINT-read
+// property (`read_one_tx` overlays staging); a full-table scan
+// (`{"from": ...}`) projects the committed snapshot and intentionally does
+// NOT overlay uncommitted staging (the documented streaming-RYOW limit). So
+// these tests assert the load-bearing Phase-B guarantee — state ACCUMULATES
+// across EXECUTE calls and commits together (or rolls back as a whole) —
+// rather than scan-visibility of an uncommitted write.
+// ============================================================================
+
+#[tokio::test]
+async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
+    use futures::StreamExt;
+
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // BEGIN — mint the interactive tx + its snapshot guard (the server would
+    // park both in its registry; here the test holds them).
+    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+
+    // EXECUTE #1 — stage the first insert. The tx stays OPEN, so the response
+    // carries no commit outcome.
+    let call1: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "alice"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let r1 = execute_in_open_tx(&call1, &resolver, None, &mut tx)
+        .await
+        .unwrap();
+    assert!(
+        r1.transaction.is_none(),
+        "tx is still open after EXECUTE #1 — no per-call commit outcome"
+    );
+
+    // A separate observer must NOT see the uncommitted staged write
+    // (snapshot isolation — nothing is durable before COMMIT).
+    let tbl = repo.get_table("users").await.unwrap();
+    {
+        let stream = tbl.list_stream(64);
+        futures::pin_mut!(stream);
+        let mut count = 0usize;
+        while let Some(b) = stream.next().await {
+            count += b.unwrap().len();
+        }
+        assert_eq!(count, 0, "outside observer sees nothing before commit");
+    }
+
+    // EXECUTE #2 — stage a second insert into the SAME open tx.
+    let call2: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "bob"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let r2 = execute_in_open_tx(&call2, &resolver, None, &mut tx)
+        .await
+        .unwrap();
+    assert!(r2.transaction.is_none(), "tx still open after EXECUTE #2");
+
+    // COMMIT — both calls' writes land together at one commit version.
+    let outcome = commit_interactive_tx(&repo, tx).await.unwrap();
+    assert!(outcome.commit_version > 0, "commit assigns a version");
+    // The snapshot guard is released only AFTER commit returned.
+    drop(guard);
+
+    // Both records, staged across two SEPARATE EXECUTE calls, are visible.
+    let stream = tbl.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(b) = stream.next().await {
+        count += b.unwrap().len();
+    }
+    assert_eq!(
+        count, 2,
+        "both writes staged across two EXECUTE calls must commit together"
+    );
+}
+
+#[tokio::test]
+async fn interactive_tx_rollback_discards_staged_writes() {
+    use futures::StreamExt;
+
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+
+    let call: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "ghost"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    execute_in_open_tx(&call, &resolver, None, &mut tx)
+        .await
+        .unwrap();
+
+    // ROLLBACK = drop the parked tx (RAII rollback, no storage side effects),
+    // then release the snapshot.
+    drop(tx);
+    drop(guard);
+
+    // Nothing was committed — a fresh scan sees no records.
+    let tbl = repo.get_table("users").await.unwrap();
+    let stream = tbl.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(b) = stream.next().await {
+        count += b.unwrap().len();
+    }
+    assert_eq!(
+        count, 0,
+        "a rolled-back interactive tx must leave nothing durable"
     );
 }
