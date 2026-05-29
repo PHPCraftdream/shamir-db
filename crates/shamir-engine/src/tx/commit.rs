@@ -51,6 +51,82 @@ impl TxOutcome {
 
 const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300); // 5 min
 
+/// Test-only crash-injection seam for the real crash-recovery harness
+/// (`crates/shamir-engine/tests/crash_recovery.rs`, Vector II.1).
+///
+/// At each labelled point in the commit pipeline the harness can force a
+/// HARD process death to prove atomicity around the Phase-4 commit point:
+/// a crash *before* Phase 4 leaves nothing durable (clean abort); a crash
+/// *at/after* Phase 4 but before Phase 7 leaves an inflight WAL marker
+/// that recovery replays idempotently (all-or-nothing materialization).
+///
+/// Why `std::process::abort()` and not `panic!`:
+///   `panic!` UNWINDS the stack — it runs every `Drop` impl on the way
+///   out, which would flush `MemBuffer`/`Cached` write-backs, drop
+///   storage handles cleanly, and let `RAII` guards release. That is a
+///   *graceful* shutdown, the exact opposite of a crash. `process::abort`
+///   raises `SIGABRT` immediately: no unwind, no `Drop`, no flush — the
+///   closest in-process analog to `kill -9`. The on-disk state left
+///   behind is therefore a genuine torn-mid-commit image, which is what
+///   the recovery contract must survive.
+///
+/// Durability of the on-disk image (the `repo` argument):
+///   The crash is real, but for the recovery contract to be *meaningful*
+///   the WAL entry written in Phase 4 (and the Phase-5 row writes for the
+///   later seams) must already be on disk when the process dies. Several
+///   backends — redb's `Store::set` among them — use a deferred-fsync
+///   write mode where rows become crash-durable only on an explicit
+///   `flush()` (or, in production, on the MemBuffer flush tick). To model
+///   a backend whose WAL/data writes are *synchronously* durable (the
+///   durability mode the recovery guarantee assumes), every seam AT or
+///   AFTER the commit point flushes the repo's shared store before
+///   aborting. Because all of a repo's stores (WAL `__tx__`, per-table
+///   `__data__`/`__info__`) share one backend handle (e.g. one redb
+///   `Database`), a single `flush()` makes the entire pending image
+///   durable. This flush is NOT a graceful shutdown: it is `fsync`, not
+///   `Drop` — no buffers are drained through destructors, no guards
+///   release, no in-memory tx state is reconciled. The `pre_commit` seam
+///   deliberately does NOT flush: it fires BEFORE the WAL entry exists,
+///   so the disk must show nothing tx-related (clean abort).
+///
+/// Gating (zero cost in production):
+///   The whole hook is `#[cfg(debug_assertions)]`. In a normal
+///   `--release` build `debug_assertions` is off, so `maybe_crash`
+///   compiles to the empty `#[inline(always)]` twin below — dead code,
+///   no env read, no branch, the `repo`/`phase` args unused. Tests build
+///   in debug, where the hook is live but still a NO-OP unless
+///   `SHAMIR_TEST_CRASH_AFTER` is set to a matching phase label. With no
+///   env var present every existing test pays at most one `env::var` miss
+///   per seam and never crashes or flushes.
+///
+/// Phase labels: `pre_commit`, `phase4`, `phase5a`, `phase5c`, `phase6`,
+/// `phase6_5`, `phase7`.
+#[cfg(debug_assertions)]
+async fn maybe_crash(phase: &str, repo: &RepoInstance) {
+    let Ok(target) = std::env::var("SHAMIR_TEST_CRASH_AFTER") else {
+        return;
+    };
+    if target != phase {
+        return;
+    }
+    // AT/AFTER the commit point: make the pending on-disk image durable
+    // (fsync, NOT a graceful drain) so the killed process leaves a real
+    // torn-mid-commit state the reopened repo must recover. `pre_commit`
+    // skips this — nothing tx-related should be durable yet.
+    if phase != "pre_commit" {
+        if let Ok(store) = repo.tx_info_store().await {
+            let _ = store.flush().await;
+        }
+    }
+    // HARD crash: no unwind, no Drop, no in-memory reconciliation.
+    std::process::abort();
+}
+
+/// Release twin: the crash seam does not exist outside debug builds.
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+async fn maybe_crash(_phase: &str, _repo: &RepoInstance) {}
+
 /// Bounded inline retry budget for a post-commit materialization
 /// sub-phase. A few attempts absorb transient storage hiccups; a
 /// persistent failure falls through to deferral (recovery re-applies the
@@ -432,6 +508,11 @@ async fn pre_commit(
         }
     }
 
+    // Crash seam (test-only): a HARD crash here is BEFORE the commit
+    // point — staging is dropped, no WAL entry exists, locks release by
+    // RAII. Recovery must find nothing → clean abort.
+    maybe_crash("pre_commit", repo).await;
+
     // Phase 3: assign new version
     let commit_version = gate.assign_next_version();
 
@@ -450,6 +531,12 @@ async fn pre_commit(
     let entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     wal.begin(entry).await?;
+
+    // Crash seam (test-only): a HARD crash here is AT the commit point —
+    // the WAL entry is durable but no projection (5a..6.5) ran and Phase
+    // 7 cleanup never happens. Recovery must find the inflight entry and
+    // materialize the whole tx (data + index). All-or-nothing.
+    maybe_crash("phase4", repo).await;
 
     Ok(PreCommit {
         commit_version,
@@ -501,6 +588,11 @@ async fn materialize(
             ok = false;
         }
     }
+
+    // Crash seam (test-only): data (5a) is on disk but the index (5c) is
+    // not, the version is unpublished, and Phase 7 has not run. The
+    // inflight WAL marker survives → recovery replays the full entry.
+    maybe_crash("phase5a", repo).await;
 
     // Phase 5b: counter deltas (CRIT-3).
     //
@@ -571,6 +663,11 @@ async fn materialize(
         }
     }
 
+    // Crash seam (test-only): both data (5a) and index (5c) are on disk
+    // but the version is still unpublished and Phase 7 has not run. The
+    // inflight WAL marker survives → recovery re-applies idempotently.
+    maybe_crash("phase5c", repo).await;
+
     // HIGH-A: release the per-table unique_write_lock guards now that the
     // unique postings are published (Phase 5c done). The window the Phase
     // 2.6 guard had to dominate — re-check → posting write — is closed, so
@@ -615,6 +712,11 @@ async fn materialize(
     // whether the projections above landed inline.
     gate.publish_committed(commit_version);
 
+    // Crash seam (test-only): version published in-memory but lost with
+    // the process; markers (6.5) not yet persisted and Phase 7 not run.
+    // The inflight WAL marker survives → recovery materializes the tx.
+    maybe_crash("phase6", repo).await;
+
     // Phase 6.5: persist recovery markers (CRIT-1).
     //
     // Write `last_committed_version` + `next_tx_id` to the repo's
@@ -649,6 +751,12 @@ async fn materialize(
         ok = false;
     }
 
+    // Crash seam (test-only): everything (data, index, markers) is on
+    // disk but Phase 7 has NOT removed the WAL marker. The inflight
+    // marker survives → recovery re-applies the (already-present) entry
+    // idempotently and cleans the marker.
+    maybe_crash("phase6_5", repo).await;
+
     // Phase 7: WAL cleanup — ONLY on full materialization. If any
     // projection deferred, leave the marker inflight so recovery
     // re-applies the entry on the next open.
@@ -659,6 +767,11 @@ async fn materialize(
                  commit_version {commit_version}: {e}; marker left inflight for recovery"
             );
             ok = false;
+        } else {
+            // Crash seam (test-only): Phase 7 done — the WAL marker is
+            // gone and the tx is fully materialized. A HARD crash here
+            // leaves a clean committed state; recovery is a no-op.
+            maybe_crash("phase7", repo).await;
         }
     } else {
         log::warn!(
