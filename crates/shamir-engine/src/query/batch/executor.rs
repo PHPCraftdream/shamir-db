@@ -187,8 +187,10 @@ async fn execute_plan(
 /// tx-aware variant of [`execute_plan`].
 ///
 /// Uses `QueryRunner` with `Some(&mut tx)` so each mutation routes
-/// through `execute_*_tx`. Reads still flow through the standard
-/// read methods (tx-aware reads land alongside SSI / Stage 4.F).
+/// through `execute_*_tx`. Reads route through `TableManager::read_tx`
+/// with a shared `&TxContext` (Vector I.1), so a Serializable batch's
+/// SELECT populates the read-set and SSI write-skew detection is live
+/// end-to-end through this wire path.
 async fn execute_plan_tx(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
@@ -392,13 +394,22 @@ impl<'a> QueryRunner<'a> {
 
         match &entry.op {
             BatchOp::Read(query) => {
-                table
-                    .read(query, &ctx)
-                    .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: alias.to_string(),
-                        message: e.to_string(),
-                    })
+                // Vector I.1: in a transactional batch route the read through
+                // `read_tx` with a SHARED `&TxContext` so the SELECT records
+                // into the read-set (Serializable → SSI write-skew detection
+                // goes live end-to-end). `as_deref()` reborrows the runner's
+                // `&mut TxContext` as `&TxContext`; the read branch never also
+                // holds the `&mut`, and queries within a stage run sequentially
+                // (no read/write aliasing over the same tx). Non-tx batches
+                // keep the original zero-overhead `read` path.
+                match self.tx.as_deref() {
+                    Some(tx) => table.read_tx(query, &ctx, Some(tx)).await,
+                    None => table.read(query, &ctx).await,
+                }
+                .map_err(|e| BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: e.to_string(),
+                })
             }
 
             BatchOp::Insert(op) => {

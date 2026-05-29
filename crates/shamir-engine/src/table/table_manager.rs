@@ -1433,6 +1433,92 @@ impl TableManager {
         self.table.get(id).await
     }
 
+    /// tx-aware read-query execution (Vector I.1).
+    ///
+    /// The wire `execute_batch` path dispatches `BatchOp::Read` here when a
+    /// `transactional` batch is in flight, so a Serializable batch's SELECT
+    /// populates the tx read-set and SSI write-skew detection becomes live
+    /// end-to-end. Without this the executor called [`read`] directly with no
+    /// tx, leaving `read_set` empty and Serializable silently degraded to
+    /// Snapshot (the last unwired hop after HIGH-C wired the point/stream
+    /// `*_tx` read APIs).
+    ///
+    /// The returned [`QueryResult`] is **byte-for-byte** [`read`]'s output —
+    /// this method calls [`read`] for the authoritative result and treats the
+    /// read-set recording as a pure side-effect. It does NOT change snapshot
+    /// visibility of the scan: like the existing `execute_plan_tx` reads, the
+    /// projection still observes live committed state (snapshot-visible scans
+    /// are a separate, harder change confined to the read pipeline).
+    ///
+    /// Cost model:
+    /// - `tx == None` → exactly [`read`], no extra work (non-tx reads are not
+    ///   regressed).
+    /// - `tx == Some(Snapshot)` → exactly [`read`]; `record_read_shared` is a
+    ///   no-op off Serializable, so we skip the recording scan entirely.
+    /// - `tx == Some(Serializable)` → [`read`] plus one recording pass over the
+    ///   records matching the query's WHERE (via the existing tx-aware streams,
+    ///   which record each yielded key at its observed version). This is the
+    ///   only path that pays for SSI tracking.
+    ///
+    /// SSI scope: the recording pass walks every record matching the WHERE
+    /// filter (or the whole table when there is no WHERE), so it records the
+    /// keys the query logically reads. It records by point key only — it does
+    /// NOT install predicate / range locks, so a concurrent tx inserting a NEW
+    /// row into the scanned predicate (a phantom) is not detected. For a query
+    /// with pagination/limit it conservatively records the full matching set
+    /// rather than just the returned page (over-recording is SSI-safe: it can
+    /// only ever add a conflict, never miss one).
+    pub async fn read_tx(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<crate::query::read::QueryResult> {
+        // Only a Serializable tx records reads; for everything else the
+        // recording pass is pure overhead, so dispatch straight to `read`.
+        let recording = tx
+            .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
+            .is_some();
+        if recording {
+            self.record_query_reads(query, ctx, tx).await?;
+        }
+        self.read(query, ctx).await
+    }
+
+    /// Record SSI read dependencies for `query` into the tx read-set.
+    ///
+    /// Reuses the existing tx-aware scan streams ([`filter_stream_tx`] /
+    /// [`list_stream_tx`]) purely for their per-record recording side-effect:
+    /// draining the stream records each matching record's key at the version
+    /// observed when it is pulled. The yielded batches are discarded — only the
+    /// read-set mutation matters here. Caller guarantees `tx` is `Some` and
+    /// Serializable (the streams self-gate, but we never reach here otherwise).
+    async fn record_query_reads(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<()> {
+        let batch_size = 1000;
+        match query.r#where.as_ref() {
+            Some(filter) => {
+                let stream = self.filter_stream_tx(tx, batch_size, filter, ctx).await?;
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    batch?;
+                }
+            }
+            None => {
+                let stream = self.list_stream_tx(tx, batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    batch?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ============================================================================
     // Migration support — index2 cutover
     // ============================================================================
