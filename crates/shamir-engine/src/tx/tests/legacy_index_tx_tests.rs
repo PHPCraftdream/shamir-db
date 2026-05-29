@@ -303,3 +303,118 @@ async fn staged_keys_match_non_tx_planner_output() {
         "sanity: expected at least the regular + sorted postings"
     );
 }
+
+/// THE decisive test: two SI txs claim the SAME unique value. Both pass
+/// stage-time `validate_unique_for_create` (neither has committed, so the
+/// committed posting does not exist for either). We then commit tx_a (Ok)
+/// and commit tx_b — the commit_lock Phase 2.6 re-validation sees tx_a's
+/// posting and aborts tx_b with `UniqueViolation`. Exactly one record ends
+/// up owning the unique value.
+///
+/// Ordering is load-bearing: stage_a, stage_b, commit_a, commit_b. If we
+/// committed a BEFORE staging b, b's stage-time check would already catch
+/// it — that would not exercise the commit-time guard at all.
+#[tokio::test]
+async fn concurrent_tx_unique_violation_one_aborts() {
+    use crate::tx::CommitError;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    // Stage BOTH txs fully before committing either. Both pass stage-time
+    // validate_unique_for_create (committed state is empty for both).
+    let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid_a = tbl
+        .insert_tx(&record_with_str(email_field, "x@y"), Some(&mut tx_a))
+        .await
+        .expect("tx_a stage-time validate must pass");
+
+    let (mut tx_b, _gb) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let _rid_b = tbl
+        .insert_tx(&record_with_str(email_field, "x@y"), Some(&mut tx_b))
+        .await
+        .expect("tx_b stage-time validate must ALSO pass (neither committed yet)");
+
+    // Both recorded a unique guard for the byte-identical key.
+    assert_eq!(tx_a.unique_guards.len(), 1, "tx_a must record one guard");
+    assert_eq!(tx_b.unique_guards.len(), 1, "tx_b must record one guard");
+    assert_eq!(
+        tx_a.unique_guards[0].index_key, tx_b.unique_guards[0].index_key,
+        "concurrent claims on the same unique value must target the byte-identical key"
+    );
+
+    // Commit tx_a → Ok (posting lands in info_store).
+    repo.commit_tx(tx_a).await.expect("tx_a commits cleanly");
+
+    // Commit tx_b → UniqueViolation (Phase 2.6 sees tx_a's posting).
+    let res_b = repo.commit_tx(tx_b).await;
+    assert!(
+        matches!(res_b, Err(CommitError::UniqueViolation { .. })),
+        "tx_b must abort with UniqueViolation under commit_lock; got {:?}",
+        res_b
+    );
+
+    // Exactly one record owns the unique value — and it is tx_a's.
+    let owner = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("x@y".into())])
+        .await
+        .unwrap();
+    assert_eq!(
+        owner,
+        Some(rid_a),
+        "the unique value must resolve to exactly tx_a's record"
+    );
+
+    // Metric incremented.
+    assert_eq!(
+        repo.tx_metrics().snapshot().txs_aborted_unique,
+        1,
+        "the aborted tx must bump the unique-abort metric"
+    );
+}
+
+/// An update that re-writes the SAME unique value it already owns is not a
+/// self-conflict: Phase 2.6 sees `existing == owner` and commits fine.
+#[tokio::test]
+async fn tx_update_to_own_unique_value_is_not_violation() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    tbl.create_unique_index("by_email", &["email"])
+        .await
+        .unwrap();
+    let email_id = key_id(&tbl, "by_email").await;
+    let email_field = key_id(&tbl, "email").await;
+
+    // Insert + commit a record owning "u@v".
+    let (mut tx0, _g0) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let rid = tbl
+        .insert_tx(&record_with_str(email_field, "u@v"), Some(&mut tx0))
+        .await
+        .unwrap();
+    repo.commit_tx(tx0).await.expect("initial insert commits");
+
+    // Update the SAME rid re-writing the SAME unique value.
+    let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl.update_tx(rid, &record_with_str(email_field, "u@v"), Some(&mut tx1))
+        .await
+        .expect("update_tx stage-time validate (self-write) must pass");
+    repo.commit_tx(tx1)
+        .await
+        .expect("update re-writing own unique value must commit (owner == rid)");
+
+    // The value still resolves to the same record.
+    let owner = tbl
+        .index_manager()
+        .lookup_by_unique_index(email_id, &[InnerValue::Str("u@v".into())])
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(rid), "self-update must keep ownership");
+}

@@ -1025,6 +1025,30 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Deterministic unique-index keys this `value` would claim.
+    ///
+    /// For every unique index whose paths the value fully populates,
+    /// returns the BYTE-IDENTICAL key that `check_unique_constraint`
+    /// (and `add_unique_entry`) read/write — i.e.
+    /// `build_index_key(true, name_interned, values).to_bytes()`. The
+    /// tx commit path records these as `UniqueGuard`s and re-validates
+    /// them under `commit_lock`, closing the tx-concurrent unique hole.
+    ///
+    /// Returns an empty vec when there are no unique indexes or the
+    /// value populates none of them.
+    pub fn unique_keys_for(&self, value: &InnerValue) -> Vec<Bytes> {
+        if !self.has_unique_indexes() {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        for def in self.indexes_unique.iter() {
+            if let Some(values) = Self::extract_index_values(value, &def.paths) {
+                keys.push(Self::build_index_key(true, def.name_interned, &values).to_bytes());
+            }
+        }
+        keys
+    }
+
     /// Проверяет, существует ли запись с данным значением в уникальном индексе.
     ///
     /// # Возвращает

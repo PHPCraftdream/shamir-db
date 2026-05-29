@@ -20,6 +20,8 @@ pub enum TxError {
     Storage(#[from] DbError),
     #[error("ssi conflict on key {key:?}")]
     SsiConflict { key: bytes::Bytes },
+    #[error("unique constraint violated on key {key:?}")]
+    UniqueViolation { key: bytes::Bytes },
     #[error("tx expired: elapsed {elapsed:?} > max {max:?}")]
     Expired {
         elapsed: std::time::Duration,
@@ -213,6 +215,37 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         if let Err((_table_id, key)) = validation {
             repo.tx_metrics().on_tx_aborted_ssi();
             return Err(TxError::SsiConflict { key });
+        }
+    }
+
+    // Phase 2.6: authoritative unique re-validation under commit_lock.
+    //
+    // Stage-time `validate_unique_*` is optimistic — it reads pre-commit
+    // state, so two concurrent txs claiming the same unique value both
+    // pass it. `commit_lock` (held since the top of this fn) serialises
+    // committers, so re-checking the claimed keys here is decisive: no
+    // other committer can interleave between this check and the Phase 5
+    // data/index writes that publish the postings.
+    //
+    // The unique key is deterministic in the value, so a byte-equal
+    // `info_store.get(index_key)` settles ownership:
+    //   - NotFound          → key free                 → OK
+    //   - Some == our owner  → update self-write        → OK
+    //   - Some != our owner  → another record owns it   → abort
+    for g in &tx.unique_guards {
+        if let Some(tbl) = repo.table_by_token(g.table_token).await? {
+            match tbl.info_store().get(g.index_key.clone()).await {
+                Ok(existing) => {
+                    if existing.as_ref() != g.owner.as_bytes().as_slice() {
+                        repo.tx_metrics().on_tx_aborted_unique();
+                        return Err(TxError::UniqueViolation {
+                            key: g.index_key.clone(),
+                        });
+                    }
+                }
+                Err(DbError::NotFound(_)) => {} // key free → OK
+                Err(e) => return Err(TxError::Storage(e)),
+            }
         }
     }
 

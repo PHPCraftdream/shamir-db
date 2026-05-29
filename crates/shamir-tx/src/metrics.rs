@@ -10,6 +10,7 @@ pub struct TxMetrics {
     pub txs_aborted_ssi: AtomicU64,
     pub txs_aborted_expired: AtomicU64,
     pub txs_aborted_storage: AtomicU64,
+    pub txs_aborted_unique: AtomicU64,
     pub gc_runs: AtomicU64,
     pub gc_entries_deleted: AtomicU64,
 }
@@ -39,6 +40,10 @@ impl TxMetrics {
         self.txs_aborted_storage.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn on_tx_aborted_unique(&self) {
+        self.txs_aborted_unique.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn on_gc_run(&self, entries_deleted: usize) {
         self.gc_runs.fetch_add(1, Ordering::Relaxed);
         self.gc_entries_deleted
@@ -53,6 +58,7 @@ impl TxMetrics {
             txs_aborted_ssi: self.txs_aborted_ssi.load(Ordering::Relaxed),
             txs_aborted_expired: self.txs_aborted_expired.load(Ordering::Relaxed),
             txs_aborted_storage: self.txs_aborted_storage.load(Ordering::Relaxed),
+            txs_aborted_unique: self.txs_aborted_unique.load(Ordering::Relaxed),
             gc_runs: self.gc_runs.load(Ordering::Relaxed),
             gc_entries_deleted: self.gc_entries_deleted.load(Ordering::Relaxed),
         }
@@ -66,6 +72,7 @@ pub struct TxMetricsSnapshot {
     pub txs_aborted_ssi: u64,
     pub txs_aborted_expired: u64,
     pub txs_aborted_storage: u64,
+    pub txs_aborted_unique: u64,
     pub gc_runs: u64,
     pub gc_entries_deleted: u64,
 }
