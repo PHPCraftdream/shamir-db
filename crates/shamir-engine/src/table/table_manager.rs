@@ -590,13 +590,14 @@ impl TableManager {
     /// validation runs at stage time below (read-only `validate_unique_for_create`)
     /// to reject duplicates early.
     ///
-    /// KNOWN GAP (tx-concurrent unique violation): stage-time validation
-    /// reads committed state only. Two concurrent txs inserting the same
-    /// unique value both pass validation, then both commit → constraint
-    /// violated. The non-tx path serialises via `unique_write_lock`;
-    /// closing this for the tx path needs commit-time unique reconciliation
-    /// (read-set validation on the unique posting key) which lives in the
-    /// commit pipeline — out of scope here. TODO.
+    /// tx-concurrent unique violation: stage-time validation reads
+    /// committed state only, so two concurrent txs inserting the same
+    /// unique value both pass it. The hole is now closed by recording a
+    /// `UniqueGuard` per claimed unique key here; `commit_tx` Phase 2.6
+    /// re-validates each guard under `commit_lock` (the same
+    /// serialisation point the non-tx path gets from `unique_write_lock`).
+    /// The unique key is deterministic in the value, so the commit-time
+    /// `info_store.get(index_key)` settles ownership byte-for-byte.
     ///
     /// HIGH-6: stateful HNSW vectors are routed tx-locally — the index2
     /// `plan_insert_tx` is a no-op on the live graph for a tx, and
@@ -617,9 +618,22 @@ impl TableManager {
         let rid = RecordId::new();
 
         // HIGH-6: stage-time unique validation (read-only against
-        // committed state). Catches the common single-writer duplicate;
-        // the tx-concurrent gap is documented on the method doc.
+        // committed state). Optimistic fast-reject for the common
+        // single-writer duplicate; the tx-concurrent case is settled by
+        // the commit-time guard below.
         self.index_manager.validate_unique_for_create(value).await?;
+
+        // Record a UniqueGuard per unique key this value claims, so
+        // commit_tx Phase 2.6 re-validates it under commit_lock (closes
+        // the two-concurrent-txs hole). The recorded key is byte-identical
+        // to what check_unique_constraint reads at commit time.
+        for index_key in self.index_manager.unique_keys_for(value) {
+            tx.record_unique_guard(shamir_tx::UniqueGuard {
+                table_token: self.table_token(),
+                index_key,
+                owner: rid,
+            });
+        }
 
         let bytes = value.to_bytes().map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
@@ -680,6 +694,18 @@ impl TableManager {
                     .await?
             }
             None => self.index_manager.validate_unique_for_create(value).await?,
+        }
+
+        // Record a UniqueGuard per unique key the NEW value claims, owner
+        // = the rid being updated. commit_tx Phase 2.6 re-validates under
+        // commit_lock; an update re-writing its own value sees
+        // `existing == owner` and is not a self-conflict.
+        for index_key in self.index_manager.unique_keys_for(value) {
+            tx.record_unique_guard(shamir_tx::UniqueGuard {
+                table_token: self.table_token(),
+                index_key,
+                owner: id,
+            });
         }
 
         let bytes = value.to_bytes().map_err(|e| {

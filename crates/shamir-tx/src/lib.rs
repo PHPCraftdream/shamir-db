@@ -51,7 +51,7 @@ pub use mvcc_store::MvccStore;
 pub use repo_tx_gate::{RepoTxGate, SnapshotGuard};
 pub use repo_wal_manager::RepoWalManager;
 pub use staging_store::StagingStore;
-pub use tx_context::TxContext;
+pub use tx_context::{TxContext, UniqueGuard};
 pub use types::{IsolationLevel, TxConflict, TxError, TxId};
 pub use version_codec::{decode_version_key, encode_version_key};
 pub use version_provider::VersionProvider;

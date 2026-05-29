@@ -15,6 +15,28 @@ use crate::types::{IsolationLevel, TxId};
 use crate::version_provider::VersionProvider;
 use crate::IndexWriteOp;
 
+/// A promise this tx makes about a unique-index posting: at stage time
+/// the deterministic unique key `index_key` was free (or owned by this
+/// tx's `owner`). Re-validated under `commit_lock` (closes the
+/// tx-concurrent unique-violation hole) — two concurrent txs claiming
+/// the same value produce the BYTE-IDENTICAL `index_key`, so a single
+/// `info_store.get(index_key)` settles ownership decisively.
+///
+/// Layer note: `index_key` is built engine-side
+/// (`build_index_key(true, name, values).to_bytes()`) and handed in as
+/// raw `Bytes`; shamir-tx stays ignorant of how the key is composed.
+#[derive(Debug, Clone)]
+pub struct UniqueGuard {
+    /// Owning table token (engine `table_token()`), used to resolve the
+    /// table's `info_store` at commit time.
+    pub table_token: u64,
+    /// The deterministic 25-byte unique-index key this tx intends to own.
+    pub index_key: Bytes,
+    /// The rid claiming the value. An update re-writing its own value is
+    /// not a self-conflict (`existing == owner` → OK).
+    pub owner: RecordId,
+}
+
 /// Per-transaction state bundle.
 ///
 /// Holds all mutable state accumulated during a transaction:
@@ -89,6 +111,16 @@ pub struct TxContext {
     /// Wall-clock instant when this transaction was opened.
     /// Used for max-lifetime enforcement at commit time.
     pub started_at: std::time::Instant,
+
+    /// Unique-index guards recorded at stage time, re-validated under
+    /// `commit_lock` (closes the tx-concurrent unique-violation hole).
+    /// Each entry: the deterministic unique-index key this tx intends to
+    /// own, plus the owning rid (so an update re-writing its own value is
+    /// not a self-conflict). Discarded by RAII on abort like all other
+    /// tx-local state. Not gated in [`is_empty`](Self::is_empty): a guard
+    /// only ever accompanies a staged write, so it is never the sole
+    /// occupant of the tx.
+    pub unique_guards: Vec<UniqueGuard>,
 }
 
 impl TxContext {
@@ -113,7 +145,13 @@ impl TxContext {
             table_tokens: HashMap::new(),
             version_provider: None,
             started_at: std::time::Instant::now(),
+            unique_guards: Vec::new(),
         }
+    }
+
+    /// Record a unique-index guard for commit-time re-validation.
+    pub fn record_unique_guard(&mut self, g: UniqueGuard) {
+        self.unique_guards.push(g);
     }
 
     /// How long this transaction has been open.
