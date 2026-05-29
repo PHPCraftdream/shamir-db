@@ -78,6 +78,85 @@ impl MvccStore {
         Ok(())
     }
 
+    /// cancel-safe: NO — multi-step state mutation. The no-snapshot fast
+    /// path is a single `main.transact`, but the snapshot-active path runs
+    /// the same archive → main-write → version_cache sequence as
+    /// [`set_versioned`], batched: per-key old-value pre-reads, one history
+    /// `transact`, one main `transact`, then per-key `version_cache`
+    /// updates. Cancellation mid-sequence leaves the store partial; recovery
+    /// is caller-side retry / WAL replay.
+    ///
+    /// Batched non-tx write of many `(key, value)` pairs — the bulk-load
+    /// twin of [`set_versioned`]. III.4: a non-tx `insert_many` that loops
+    /// per-record `set_versioned` issues N separate write-transactions on
+    /// disk backends (N× fsync amplification). This collapses the main
+    /// writes into a single `Store::transact`, which is one atomic write-tx
+    /// (one fsync) on backends that override `transact` (redb, sled, fjall,
+    /// persy, nebari, canopy).
+    ///
+    /// Semantics match calling [`set_versioned`] once per pair, in order:
+    /// - **No active snapshots** (fast path): forward straight to
+    ///   `main.transact(Set ops)`; `version_cache` is left untouched
+    ///   (exactly like `set_versioned`'s fast path — no versioned read can
+    ///   observe these writes while no snapshot is open).
+    /// - **Snapshots active**: archive any existing old value per key into
+    ///   history, write all news to main in one `transact`, and assign a
+    ///   fresh monotonic version per key in `version_cache` (one version per
+    ///   record, identical to the per-record loop). The snapshot flag is
+    ///   re-sampled per key for the archive decision (HIGH-2): a snapshot
+    ///   that opens mid-batch is honoured for the keys processed after it.
+    ///
+    /// Empty `items` is a no-op.
+    pub async fn set_versioned_many(&self, items: Vec<(Bytes, Bytes)>) -> DbResult<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+
+        // Fast path: no snapshots → one atomic batch to main, no history,
+        // no version_cache churn.
+        if self.gate.active_snapshots_empty() {
+            let ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
+            return self.main.transact(ops).await;
+        }
+
+        // Snapshot-active path. Phase 1: per-key archive pre-reads. Like
+        // `apply_committed_ops`, the old-value read can't be batched (it
+        // depends on each key's current main value), and the snapshot flag
+        // is re-sampled per key so a snapshot opening mid-batch is honoured.
+        let mut history_ops: Vec<KvOp> = Vec::new();
+        for (key, _value) in &items {
+            if self.gate.active_snapshots_empty() {
+                continue;
+            }
+            if let Ok(old) = self.main.get(key.clone()).await {
+                let cur_v = self.current_version(key);
+                let h_key = encode_version_key(key, cur_v);
+                history_ops.push(KvOp::Set(h_key, old));
+            }
+        }
+
+        // Phase 2: one batched write to history.
+        if !history_ops.is_empty() {
+            self.history.transact(history_ops).await?;
+        }
+
+        // Phase 3: one batched write to main.
+        let main_ops: Vec<KvOp> = items
+            .iter()
+            .map(|(k, v)| KvOp::Set(k.clone(), v.clone()))
+            .collect();
+        self.main.transact(main_ops).await?;
+
+        // Phase 4: assign a fresh monotonic version per key (one version per
+        // record, matching the per-record `set_versioned` loop) and upsert
+        // it into the cache (CRIT-2: `upsert_async` advances monotonically).
+        for (key, _value) in items {
+            let new_v = self.gate.assign_next_version();
+            self.version_cache.upsert_async(key, new_v).await;
+        }
+        Ok(())
+    }
+
     /// cancel-safe: NO — multi-step state mutation; same reasoning as
     /// `set_versioned`. Sequence is archive-old → remove from main →
     /// allocate version and update `version_cache`. Cancellation mid-
@@ -1229,5 +1308,127 @@ mod tests {
             Some(Bytes::from("v2")),
             "post-eviction read returns current main value via fast path"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // III.4 — `set_versioned_many` batched bulk write.
+    // ----------------------------------------------------------------
+
+    /// Fast path (no active snapshots): a batch of N pairs lands in `main`
+    /// in one shot, leaving history empty and the version_cache untouched
+    /// (no versioned read can observe these writes while no snapshot is
+    /// open) — mirroring `set_versioned`'s fast path. The single
+    /// `main.transact` collapses what was N per-record write-txs; an exact
+    /// "one transact" assertion would need a counting `Store`, which
+    /// `shamir-tx` can't build without an `async_trait` dev-dep, so we
+    /// assert the observable fast-path side-effects instead.
+    #[tokio::test]
+    async fn set_versioned_many_batches_no_snapshot() {
+        let mvcc = make_mvcc();
+
+        let n = 50u32;
+        let items: Vec<(Bytes, Bytes)> = (0..n)
+            .map(|i| {
+                (
+                    Bytes::copy_from_slice(&i.to_be_bytes()),
+                    Bytes::from(format!("val{i}")),
+                )
+            })
+            .collect();
+        mvcc.set_versioned_many(items).await.unwrap();
+
+        // Every record is present in main with the right value.
+        for i in 0..n {
+            let k = Bytes::copy_from_slice(&i.to_be_bytes());
+            assert_eq!(
+                mvcc.main.get(k).await.unwrap(),
+                Bytes::from(format!("val{i}"))
+            );
+        }
+
+        // History stayed empty (no snapshots → no archival).
+        let stream = mvcc.history.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut hist = 0usize;
+        while let Some(batch) = stream.next().await {
+            hist += batch.unwrap().len();
+        }
+        assert_eq!(hist, 0, "fast path must not archive to history");
+
+        // version_cache untouched on the fast path.
+        assert_eq!(
+            mvcc.version_cache.len(),
+            0,
+            "fast path must not populate version_cache"
+        );
+    }
+
+    /// Snapshot-active path: an existing old value is archived to history,
+    /// the new values land in main, and every key gets a fresh monotonic
+    /// version in the cache (one version per record, like the per-record
+    /// `set_versioned` loop it replaces).
+    #[tokio::test]
+    async fn set_versioned_many_with_snapshot_archives_and_versions() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        // Seed an existing value for one of the keys (will be archived).
+        let k0 = Bytes::from("k0");
+        mvcc.main
+            .set(k0.clone(), Bytes::from("old0"))
+            .await
+            .unwrap();
+
+        let items: Vec<(Bytes, Bytes)> = vec![
+            (k0.clone(), Bytes::from("new0")),
+            (Bytes::from("k1"), Bytes::from("v1")),
+            (Bytes::from("k2"), Bytes::from("v2")),
+        ];
+        mvcc.set_versioned_many(items).await.unwrap();
+
+        // All news present in main.
+        assert_eq!(
+            mvcc.main.get(k0.clone()).await.unwrap(),
+            Bytes::from("new0")
+        );
+        assert_eq!(
+            mvcc.main.get(Bytes::from("k1")).await.unwrap(),
+            Bytes::from("v1")
+        );
+        assert_eq!(
+            mvcc.main.get(Bytes::from("k2")).await.unwrap(),
+            Bytes::from("v2")
+        );
+
+        // The pre-existing old0 was archived to history.
+        let stream = mvcc.history.iter_stream(64);
+        futures::pin_mut!(stream);
+        let mut found_old = false;
+        while let Some(batch) = stream.next().await {
+            for (_, hv) in batch.unwrap() {
+                if hv.as_ref() == b"old0" {
+                    found_old = true;
+                }
+            }
+        }
+        assert!(
+            found_old,
+            "pre-existing value must be archived under snapshot"
+        );
+
+        // Every key got a positive version in the cache.
+        assert!(mvcc.version_of(&k0) > 0);
+        assert!(mvcc.version_of(b"k1") > 0);
+        assert!(mvcc.version_of(b"k2") > 0);
+        assert_eq!(mvcc.version_cache.len(), 3);
+    }
+
+    /// Empty input is a no-op (no panic, no writes).
+    #[tokio::test]
+    async fn set_versioned_many_empty_is_noop() {
+        let mvcc = make_mvcc();
+        mvcc.set_versioned_many(Vec::new()).await.unwrap();
+        assert_eq!(mvcc.version_cache.len(), 0);
     }
 }
