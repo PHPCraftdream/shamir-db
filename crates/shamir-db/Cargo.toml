@@ -3,6 +3,7 @@ name = "shamir-db"
 version = "0.1.0"
 edition = "2021"
 description = "ShamirDB facade — re-exports types/storage/engine/query and provides ShamirDb + SystemStore."
+license = "MIT OR Apache-2.0"
 
 [features]
 # Cascade backend feature flags from shamir-storage / shamir-engine all
