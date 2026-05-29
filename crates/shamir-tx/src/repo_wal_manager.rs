@@ -41,6 +41,26 @@ impl RepoWalManager {
         self.next_txn_id.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Raise the txn_id floor to at least `floor`, returning the value the
+    /// counter now sits at (`>= floor`).
+    ///
+    /// Recovery seam: the constructor seeds `next_txn_id` from the durable
+    /// `NextTxId` snapshot, which is persisted only periodically and so can
+    /// lag the txn_id of an *inflight* (uncommitted, uncleaned) WAL entry
+    /// left by a crash. Re-seeding the counter solely from the stale
+    /// snapshot would let [`fresh_txn_id`](Self::fresh_txn_id) hand out an
+    /// id a crashed-and-about-to-be-recovered entry already used — two WAL
+    /// entries sharing one txn_id (a diagnostic/correctness hazard, the
+    /// txn_id mirror of the CRIT-B version-floor problem). The open path
+    /// computes `max_inflight_txn_id + 1` and floors the counter here so
+    /// every subsequently issued id is strictly greater than any inflight
+    /// entry's. Monotonic `fetch_max` — idempotent and safe to call before
+    /// any id is handed out.
+    pub fn seed_floor_at_least(&self, floor: u64) -> u64 {
+        let prev = self.next_txn_id.fetch_max(floor, Ordering::Relaxed);
+        prev.max(floor)
+    }
+
     /// cancel-safe: yes — single `info_store.set` after an in-memory
     /// encode. Cancellation either lands the marker durably (storage's
     /// own cancel-safety contract) or drops the future before the write.
@@ -234,6 +254,30 @@ mod tests {
         let c = mgr.fresh_txn_id();
         assert!(a < b, "{a} should be < {b}");
         assert!(b < c, "{b} should be < {c}");
+    }
+
+    #[tokio::test]
+    async fn seed_floor_raises_counter_and_is_monotonic() {
+        let store = make_store();
+        // Constructor seed = 1000 (see `make_manager`).
+        let mgr = make_manager(&store);
+
+        // A floor below the current seed is a no-op: the counter does not
+        // rewind, and the next id stays at the seed.
+        assert_eq!(mgr.seed_floor_at_least(10), 1000);
+        assert_eq!(mgr.fresh_txn_id(), 1000);
+
+        // A floor above the current value raises it; the next id clears it.
+        assert_eq!(mgr.seed_floor_at_least(5000), 5000);
+        let next = mgr.fresh_txn_id();
+        assert_eq!(
+            next, 5000,
+            "next id must equal the raised floor, got {next}"
+        );
+        assert!(
+            mgr.fresh_txn_id() > 5000,
+            "subsequent ids stay strictly above the floor"
+        );
     }
 
     #[tokio::test]

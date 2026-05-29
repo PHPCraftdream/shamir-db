@@ -36,6 +36,68 @@ async fn repo_wal_initializes_lazy() {
     );
 }
 
+/// txn_id recovery floor (mirror of the CRIT-B version-floor test
+/// `recovery_advances_gate_past_replayed_commit_version`): an inflight V2
+/// WAL entry left by a crash carries a txn_id the periodic `NextTxId`
+/// snapshot may not yet cover. After a "restart" the freshly-seeded
+/// `RepoWalManager` must hand out an id strictly greater than that inflight
+/// txn_id, never reusing it.
+#[tokio::test]
+async fn repo_wal_seeds_txn_id_floor_above_inflight() {
+    use shamir_wal::{WalEntryV2, WalOpV2};
+
+    let underlying = Arc::new(InMemoryRepo::new());
+
+    // Seed a high inflight txn_id WITHOUT committing (no `wal.commit`), as a
+    // crash between commit Phase 4 and Phase 7 leaves behind. Use a throwaway
+    // RepoInstance over the shared storage and drop it (models the in-memory
+    // side of a restart; the marker survives in `underlying`).
+    const HIGH_TXN_ID: u64 = 5_000;
+    {
+        let seed = RepoInstance::new(
+            "r".into(),
+            BoxRepo::InMemory(Arc::clone(&underlying)),
+            Vec::new(),
+        );
+        let wal = seed.repo_wal().await.unwrap();
+        let entry = WalEntryV2::new(
+            HIGH_TXN_ID,
+            crate::repo::repo_instance::repo_token(seed.name()),
+            vec![WalOpV2::Put {
+                table_id_interned: crate::table::table_manager::table_token_for("t"),
+                rid: {
+                    let mut a = [0u8; 16];
+                    a[15] = 1;
+                    shamir_types::types::record_id::RecordId(a)
+                },
+                body: bytes::Bytes::from_static(b"x"),
+            }],
+        );
+        wal.begin(entry).await.unwrap();
+        drop(seed);
+    }
+
+    // === SIMULATED RESTART: fresh RepoInstance over the same storage ===
+    let repo = RepoInstance::new(
+        "r".into(),
+        BoxRepo::InMemory(Arc::clone(&underlying)),
+        Vec::new(),
+    );
+
+    // The inflight entry survived the "restart".
+    let wal = repo.repo_wal().await.unwrap();
+    assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
+
+    // The decisive assertion: the next id must clear the inflight txn_id —
+    // no reuse. (The persisted `NextTxId` snapshot was never written here, so
+    // without the inflight pre-scan the seed would default to 1 and collide.)
+    let next = wal.fresh_txn_id();
+    assert!(
+        next > HIGH_TXN_ID,
+        "fresh_txn_id must exceed the inflight txn_id ({HIGH_TXN_ID}), got {next}"
+    );
+}
+
 #[tokio::test]
 async fn tx_gate_and_wal_share_info_store_via_repo() {
     let instance = create_test_instance();

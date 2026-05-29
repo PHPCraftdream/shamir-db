@@ -456,6 +456,155 @@ async fn test_create_user_hashes_password_at_rest() {
 }
 
 // ============================================================================
+// CreateRepo via the wire/execute path persists the repo to the catalogue
+// ============================================================================
+
+/// Re-open the system store, retrying briefly while the previous session's
+/// store still holds the redb file lock (the MemBuffer-wrapped store releases
+/// the lock a few ms after the owning `ShamirDb` is dropped). Mirrors the
+/// helper in `system_metadata_tests`.
+async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
+    use crate::shamir_db::SystemStoreConfig;
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone())).await {
+            Ok(shamir) => return shamir,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    ShamirDb::init(SystemStoreConfig::Redb(sys_path))
+        .await
+        .expect("system store still locked after retries")
+}
+
+/// A repo created through the wire/execute `CreateRepo` op must be persisted
+/// to the system-store catalogue and re-attached after a restart — symmetry
+/// with `CreateTable` (which already routed through the persisting
+/// `ShamirDb::add_table`).
+///
+/// The executor only accepts the `in_memory` engine for wire DDL, so the
+/// repo's *data* legitimately does not survive a process restart; what must
+/// survive is the catalogue *record* (re-attached as a fresh empty repo). The
+/// system store itself is disk-backed (redb) so the record is durable across
+/// the drop/reinit. Before this fix `CreateRepo` called the in-memory-only
+/// `DbInstance::add_repo`, so the record was absent on restart.
+#[tokio::test]
+async fn create_repo_via_execute_persists_to_catalogue() {
+    use crate::shamir_db::SystemStoreConfig;
+
+    let sys_dir = tempfile::tempdir().unwrap();
+    let sys_path = sys_dir.path().join("system.redb");
+
+    // === Session 1: create a repo via the wire/execute CreateRepo op ===
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("production").await;
+
+        let req: BatchRequest = serde_json::from_value(json!({
+            "id": 1,
+            "queries": {
+                "cr": {
+                    "create_repo": "events_repo",
+                    "engine": "in_memory",
+                    "tables": [
+                        "events"
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let resp = shamir.execute("production", &req).await.unwrap();
+        assert_eq!(resp.results["cr"].records[0]["created_repo"], "events_repo");
+
+        // Persisted to the catalogue immediately (not just in-memory).
+        let repos = shamir.system_store().load_repositories().await.unwrap();
+        assert!(
+            repos
+                .iter()
+                .any(|r| r["repo_name"] == "events_repo" && r["db_name"] == "production"),
+            "CreateRepo must persist the repo record to the system store"
+        );
+        // Its inline table is persisted too.
+        let tables = shamir.system_store().load_tables().await.unwrap();
+        assert!(
+            tables.iter().any(|t| t["db_name"] == "production"
+                && t["repo_name"] == "events_repo"
+                && t["table_name"] == "events"),
+            "CreateRepo must persist the inline table catalogue"
+        );
+    }
+
+    // === Session 2: re-init over the SAME system store ===
+    let shamir = reinit_with_retry(sys_path).await;
+    let db = shamir.get_db("production").expect("db restored");
+    assert!(
+        db.has_repo("events_repo"),
+        "repo created via execute must be re-attached from the catalogue after restart"
+    );
+    assert!(
+        db.has_table("events_repo", "events"),
+        "the repo's inline table must be restored after restart"
+    );
+}
+
+/// A repo dropped through the wire/execute `DropRepo` op must be removed from
+/// the catalogue and must NOT resurrect after a restart — symmetry with
+/// `CreateRepo`.
+#[tokio::test]
+async fn drop_repo_via_execute_clears_catalogue() {
+    use crate::shamir_db::SystemStoreConfig;
+
+    let sys_dir = tempfile::tempdir().unwrap();
+    let sys_path = sys_dir.path().join("system.redb");
+
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Redb(sys_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("production").await;
+
+        let create: BatchRequest = serde_json::from_value(json!({
+            "id": 1,
+            "queries": {
+                "cr": {
+                    "create_repo": "scratch_repo",
+                    "engine": "in_memory",
+                    "tables": []
+                }
+            }
+        }))
+        .unwrap();
+        shamir.execute("production", &create).await.unwrap();
+
+        let drop: BatchRequest = serde_json::from_value(json!({
+            "id": 2,
+            "queries": {
+                "dr": {
+                    "drop_repo": "scratch_repo"
+                }
+            }
+        }))
+        .unwrap();
+        let resp = shamir.execute("production", &drop).await.unwrap();
+        assert_eq!(resp.results["dr"].records[0]["existed"], true);
+
+        let repos = shamir.system_store().load_repositories().await.unwrap();
+        assert!(
+            !repos.iter().any(|r| r["repo_name"] == "scratch_repo"),
+            "DropRepo must remove the repo record from the system store"
+        );
+    }
+
+    let shamir = reinit_with_retry(sys_path).await;
+    let db = shamir.get_db("production").expect("db restored");
+    assert!(
+        !db.has_repo("scratch_repo"),
+        "dropped repo must not resurrect after restart"
+    );
+}
+
+// ============================================================================
 // Error: unknown repo
 // ============================================================================
 

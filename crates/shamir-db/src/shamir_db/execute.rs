@@ -65,11 +65,6 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateRepo(op) => {
-                let db = self
-                    .shamir
-                    .get_db(&self.db_name)
-                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
-
                 let factory = match op.engine.as_str() {
                     "in_memory" => BoxRepoFactory::in_memory(),
                     engine => return Err(err(format!(
@@ -83,16 +78,24 @@ impl AdminExecutor for ShamirAdminExecutor {
                     config = config.add_table(TableConfig::new(table_name));
                 }
 
-                db.add_repo(config).await.map_err(|e| err(e.to_string()))?;
+                // Route through ShamirDb so the repo record and its inline
+                // table catalogue are persisted to the system store and
+                // survive a restart (symmetry with CreateTable, I.2). For an
+                // in-memory engine only the catalogue record is durable — the
+                // repo's data legitimately does not survive a process restart;
+                // a re-attach on the next open creates a fresh empty repo.
+                self.shamir
+                    .add_repo(&self.db_name, config)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(json!({"created_repo": op.create_repo})))
             }
 
             BatchOp::DropRepo(op) => {
-                let db = self
-                    .shamir
-                    .get_db(&self.db_name)
-                    .ok_or_else(|| err(format!("Database '{}' not found", self.db_name)))?;
-                let removed = db.remove_repo(&op.drop_repo).await;
+                // Route through ShamirDb so the repo's catalogue record is
+                // removed from the system store and the repo does not
+                // resurrect on the next open (symmetry with CreateRepo).
+                let removed = self.shamir.remove_repo(&self.db_name, &op.drop_repo).await;
                 Ok(admin_result(
                     json!({"dropped_repo": op.drop_repo, "existed": removed}),
                 ))
