@@ -114,11 +114,44 @@ impl VectorAdapter for HnswAdapter {
                 got: vec.len() as u32,
             });
         }
-        // If already exists, soft-delete old and re-insert with new id.
-        if let Some(old_internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
-            let _ = self.deleted.insert_async(old_internal, ()).await;
-        }
+
+        // D12: claim the rid slot atomically. Two concurrent upserts for the
+        // SAME rid (reachable since III.5 moved HNSW promote outside
+        // `commit_lock` — two committers can promote the same record at
+        // once) must NOT both leave a LIVE graph node. The non-atomic
+        // read-tombstone-then-reassign of the old code let both upserts
+        // observe "no old internal", allocate distinct internals i1/i2,
+        // insert both into the graph, and then race the final reassignment —
+        // the loser's internal stayed un-tombstoned, so the rid surfaced
+        // TWICE in search (and `len()` skewed) until the next rebuild-on-open.
+        //
+        // `entry_async` serialises the slot: the second upsert blocks on the
+        // bucket entry until the first has published its internal, then sees
+        // it as the "old" occupant and tombstones it. The transition
+        // (read old → tombstone in `deleted` → write new internal) is done
+        // entirely synchronously while the entry is held, so it is atomic
+        // per rid. The CPU-bound graph insert (`spawn_blocking`) runs AFTER
+        // the entry is released — we never hold the scc entry across an
+        // `.await` (would violate the lock-across-await invariant), and
+        // tombstoning the loser's internal does not depend on its graph
+        // insert having completed: it is in `deleted` before it can ever be
+        // observed live (search filters `deleted` before resolving `rid_map`).
         let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+        {
+            use scc::hash_map::Entry::{Occupied, Vacant};
+            match self.rid_to_internal.entry_async(rid).await {
+                Occupied(mut occ) => {
+                    let old_internal = *occ.get();
+                    // Tombstone the previous (or concurrently-serialised) internal.
+                    let _ = self.deleted.insert(old_internal, ());
+                    *occ.get_mut() = internal;
+                }
+                Vacant(vac) => {
+                    vac.insert_entry(internal);
+                }
+            }
+        } // scc entry guard dropped here — NOT held across the await below.
+
         let hnsw = Arc::clone(&self.hnsw);
         let vec_owned = vec.to_vec();
         tokio::task::spawn_blocking(move || {
@@ -127,7 +160,6 @@ impl VectorAdapter for HnswAdapter {
         .await
         .map_err(|e| VectorError::Internal(e.to_string()))?;
         let _ = self.rid_map.insert_async(internal, rid).await;
-        let _ = self.rid_to_internal.upsert_async(rid, internal).await;
         Ok(())
     }
 
@@ -617,6 +649,109 @@ mod tests {
             "rid(1) should appear once after 10 upserts"
         );
         assert!(matching[0].1 < 0.5);
+    }
+
+    /// D12: two concurrent `upsert(SAME rid, different vec)` must leave the
+    /// rid mapped to EXACTLY ONE live internal — never two. This is the race
+    /// reachable since III.5 moved HNSW promote outside `commit_lock` (two
+    /// committers promoting the same record concurrently).
+    ///
+    /// Against the OLD non-atomic read-tombstone-reassign, both upserts read
+    /// "no old internal", allocate i1/i2, insert both into the graph, and the
+    /// loser's internal stays un-tombstoned — so the rid surfaces twice in
+    /// search and `len()` over-counts. The `entry_async` slot-claim fixes it:
+    /// the second upsert serialises on the bucket entry, sees the first's
+    /// internal as "old", and tombstones it.
+    ///
+    /// We drive many barrier-synced iterations to surface the interleaving,
+    /// and assert the invariant two ways: (a) directly on adapter state — the
+    /// count of live (non-tombstoned) internals mapped to the rid is exactly
+    /// 1, which is recall-independent and the decisive old-vs-new
+    /// discriminator; and (b) end-to-end via search on a non-degenerate graph
+    /// — the rid appears at most once.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn upsert_same_rid_concurrent_no_duplicate() {
+        use std::sync::Arc as StdArc;
+        use tokio::sync::Barrier;
+
+        let dim = 4usize;
+        // Each iteration is a fresh adapter so the race window is clean and
+        // any single failure is decisive. Enough iterations to reliably
+        // surface the interleaving on the racy code.
+        for iter in 0..40u64 {
+            let adapter = StdArc::new(HnswAdapter::new(
+                dim as u32,
+                VectorMetric::L2,
+                HnswConfig {
+                    max_elements: 1000,
+                    ..Default::default()
+                },
+            ));
+
+            // Populate a non-degenerate graph with unrelated rids so search
+            // recall over survivors is reliable (the same rationale as
+            // `delete_removes_from_results`). rid bytes start at 10 so they
+            // never collide with the contended rid (1).
+            for j in 0..12u8 {
+                adapter
+                    .upsert(rid(10 + j), &random_vec(dim, iter * 100 + j as u64))
+                    .await
+                    .unwrap();
+            }
+
+            let target = rid(1);
+            let vec_a = vec![1.0f32, 0.0, 0.0, 0.0];
+            let vec_b = vec![0.0f32, 1.0, 0.0, 0.0];
+
+            // Two tasks race an upsert of the SAME rid, synced at the barrier
+            // so both enter the critical section as close together as the
+            // runtime allows.
+            let barrier = StdArc::new(Barrier::new(2));
+            let mut handles = Vec::new();
+            for v in [vec_a.clone(), vec_b.clone()] {
+                let a = StdArc::clone(&adapter);
+                let b = StdArc::clone(&barrier);
+                handles.push(tokio::spawn(async move {
+                    b.wait().await;
+                    a.upsert(target, &v).await.unwrap();
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            // (a) Direct state invariant (recall-independent): exactly one
+            //     internal mapped to `target` is live (present in rid_map and
+            //     NOT tombstoned). The old racy path leaves two.
+            let mut live_internals = 0usize;
+            adapter
+                .rid_map
+                .scan_async(|internal, mapped_rid| {
+                    if *mapped_rid == target && !adapter.deleted.contains(internal) {
+                        live_internals += 1;
+                    }
+                })
+                .await;
+            assert_eq!(
+                live_internals, 1,
+                "iter {iter}: rid must map to exactly ONE live internal after \
+                 two concurrent upserts; found {live_internals} (D12 duplicate-rid race)"
+            );
+
+            // (b) End-to-end: the rid appears AT MOST once in a top-k search
+            //     near either staged vector. (Recall may legitimately miss it
+            //     on a tiny random graph, but it must never appear twice.)
+            for q in [&vec_a, &vec_b] {
+                let results = adapter.search(q, 16, None).await.unwrap();
+                let occurrences = results.iter().filter(|(r, _)| *r == target).count();
+                assert!(
+                    occurrences <= 1,
+                    "iter {iter}: rid surfaced {occurrences} times in search — \
+                     duplicate live graph node (D12); results={results:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
