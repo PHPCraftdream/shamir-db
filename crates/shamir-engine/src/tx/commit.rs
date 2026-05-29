@@ -159,6 +159,17 @@ pub enum TxError {
 pub(crate) static FAIL_PHASE_5C_TX_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// Test-only injection: when set to a non-zero tx_id, the post-lock HNSW
+/// promote (Phase 5d, `apply_vector_batch`) returns a synthetic error for
+/// the matching tx. Used by `commit_phase5_tests` to prove III.5: a failed
+/// promote AFTER `commit_lock` release + Phase 7 does NOT defer the tx
+/// (data + index already committed under the lock; the WAL marker is gone;
+/// the graph reconciles via rebuild-on-open). Persisted across the bounded
+/// retry so the failure is treated as persistent.
+#[cfg(test)]
+pub(crate) static FAIL_VECTOR_PROMOTE_TX_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// cancel-safe: yes — read-only over `&TxContext`. The only `.await`
 /// is `interner_overlay.scan_async` which is itself cancel-safe (the
 /// borrowed map is untouched on drop); the rest is in-memory iteration.
@@ -268,10 +279,11 @@ pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
 /// become `Ok(TxOutcome { materialization: Deferred, .. })`. So every
 /// `Err(TxError::Storage)` reaching this wrapper is by construction a
 /// PRE-commit abort, and `on_tx_aborted_storage` correctly counts only
-/// those. Deferred materialization is observable via
-/// `TxOutcome::materialization` (a dedicated `TxMetrics` counter would
-/// live in the out-of-scope `shamir-tx` crate; deferral is logged via
-/// `log::warn!` in `materialize` and surfaced on the outcome instead).
+/// those. Deferred materialization is observable three ways:
+/// `TxOutcome::materialization`, the `log::warn!` emitted in `materialize`,
+/// and the `TxMetrics::txs_materialization_deferred` counter
+/// (`on_tx_materialization_deferred`, fired in `commit_tx_inner` when
+/// `materialize` returns `Deferred`).
 ///
 /// There is NOTHING to do for HNSW staging on a pre-commit abort —
 /// staged vectors live inside the `TxContext` (`staged_vectors`) and
@@ -311,7 +323,7 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     let gate = repo.tx_gate().await?;
     let wal = repo.repo_wal().await?;
 
-    let _lock = gate.commit_lock().await;
+    let commit_guard = gate.commit_lock().await;
 
     // === Pre-commit (Phases 1–4): real aborts live here ===
     //
@@ -327,6 +339,13 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     //
     // From here there is NO abort — only materialization. Failures are
     // logged + deferred to recovery; the version is still published.
+    //
+    // `materialize` now runs Phases 5a (data) → 5b (counter) → 5c (index)
+    // → 6 (publish) → 6.5 (markers) → 7 (wal.commit) — every projection
+    // that determines visibility or removes the WAL marker, all UNDER
+    // `commit_lock`. It NO LONGER promotes HNSW vectors: that derived,
+    // rebuildable read-accelerator is moved out of the critical section
+    // below (III.5).
     let materialization = materialize(
         &mut tx,
         repo,
@@ -338,6 +357,29 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     .await;
 
     repo.tx_metrics().on_tx_committed();
+    if materialization == MaterializationState::Deferred {
+        repo.tx_metrics().on_tx_materialization_deferred();
+    }
+
+    // === III.5: release `commit_lock` BEFORE the HNSW promote. ===
+    //
+    // Everything that determines visibility (data → main, counter, index
+    // → info), publishes the version, persists recovery markers, and
+    // removes the WAL marker has already run under the lock. The HNSW
+    // graph is a DERIVED read-accelerator — the vectors are already in
+    // `main` (Phase 5a + WAL) and the graph is re-derived from
+    // `data_store` by `VectorBackend::rebuild` on open. Promoting it does
+    // NOT need the commit gate for correctness, and for bulk vector
+    // commits the promote does unbounded work (brute_force's bounded-actor
+    // `submit().await`, HNSW's per-vector `spawn_blocking`) that would
+    // otherwise stall ALL other committers. Drop the guard here so other
+    // committers proceed while this tx promotes its vectors.
+    drop(commit_guard);
+
+    // Phase 5d (moved): promote staged HNSW vectors into the live graph,
+    // OUTSIDE `commit_lock` and AFTER Phase 7 (wal.commit). A failure here
+    // does NOT mark the tx Deferred — see `promote_vectors`.
+    promote_vectors(&tx, repo, commit_version).await;
 
     Ok(TxOutcome {
         tx_id: tx.tx_id.0,
@@ -345,6 +387,66 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         commit_version,
         materialization,
     })
+}
+
+/// cancel-safe: NO, and it does NOT need to be — by the time this runs the
+/// tx is fully COMMITTED *and* materialized (Phases 5a/5c published the
+/// data + index under `commit_lock`, Phase 7 removed the WAL marker). This
+/// promotes the tx's staged HNSW vectors (`tx.staged_vectors`) into the
+/// live graph OUTSIDE the commit critical section (III.5).
+///
+/// Why this runs after the lock is dropped:
+///   The HNSW graph is a DERIVED read-accelerator, not a source of truth.
+///   The vectors themselves are already durable in `main` (Phase 5a + the
+///   Phase 4 WAL entry); the graph is re-derived from the data store by
+///   `VectorBackend::rebuild` (`index2/vector/vector_backend.rs`) on open.
+///   So the promote determines no visibility a committer must serialise on,
+///   and — for bulk vector commits — its unbounded work (the brute-force
+///   adapter's bounded-actor `submit().await`, the HNSW adapter's
+///   per-vector `spawn_blocking`) must not run under `commit_lock`, where
+///   it would stall every other committer (audit MED).
+///
+/// Why a failure here is NOT `MaterializationState::Deferred`:
+///   The Deferred contract is "a visibility-bearing projection didn't land
+///   inline, so the inflight WAL marker is the recovery guarantor." But
+///   HNSW is NOT replayed from the WAL — vectors are not serialised as
+///   `IndexPut`; they are derived. Phase 7 has ALREADY removed the marker
+///   (data + index committed and materialized under the lock), so there is
+///   no marker to lean on and nothing for recovery to replay for the
+///   graph. A failed post-lock promote simply means the in-memory graph
+///   lags the data until the next `rebuild()` on open reconciles it —
+///   exactly the derived-projection contract. We therefore log a warning
+///   and leave `materialization` untouched (`Complete`).
+async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_version: u64) {
+    let tx_id = tx.tx_id.0;
+
+    // We iterate exactly the tables the tx staged vectors into
+    // (`tx.staged_vectors`), keyed by table token. `apply_staged_vectors`
+    // is a no-op for every backend except `VectorBackend`. Phase 5a only
+    // drained `tx.write_set`, so `tx.staged_vectors` is intact here.
+    let vector_batches = tx
+        .staged_vectors
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(t, v)| (*t, v.clone()))
+        .collect::<Vec<_>>();
+    for (token, vecs) in vector_batches {
+        if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+            apply_vector_batch(repo, token, vecs.clone(), tx_id)
+        })
+        .await
+        {
+            // NOT Deferred: data + index already committed and materialized
+            // under the lock; the WAL marker is gone (Phase 7). The graph
+            // reconciles via `VectorBackend::rebuild` on the next open.
+            log::warn!(
+                "commit_tx Phase 5d (hnsw promote, post-lock) failed for tx {tx_id} \
+                 commit_version {commit_version} table {token}: {e}; the live graph \
+                 lags until rebuild-on-open reconciles it (tx stays COMMITTED + \
+                 materialized — NOT deferred)"
+            );
+        }
+    }
 }
 
 /// Outcome of [`pre_commit`]: the assigned MVCC commit version plus the
@@ -546,14 +648,17 @@ async fn pre_commit(
 
 /// cancel-safe: NO, and it does NOT need to be — by the time this runs
 /// the tx is already COMMITTED (Phase 4 succeeded). It applies the WAL
-/// entry's projections (data → main, counter, index → info, HNSW graph),
-/// publishes the version, persists recovery markers, and removes the WAL
-/// marker. NONE of these may abort the tx: a sub-phase failure is logged
-/// and the WAL marker is left inflight so recovery re-applies the entry
-/// on the next open (recovery is the materialization guarantor —
-/// `Put`/`Delete`/`IndexPut`/`IndexDel` are last-write-wins, counter
-/// replay is intentionally skipped, HNSW is rebuilt on open). Returns the
-/// observed [`MaterializationState`].
+/// entry's visibility-bearing projections (data → main, counter, index →
+/// info), publishes the version, persists recovery markers, and removes
+/// the WAL marker. It does NOT promote HNSW vectors — that derived,
+/// rebuild-on-open read-accelerator moved OUT of the commit critical
+/// section (III.5): `commit_tx_inner` drops `commit_lock` after Phase 7
+/// and then calls `promote_vectors`. NONE of the projections here may
+/// abort the tx: a sub-phase failure is logged and the WAL marker is left
+/// inflight so recovery re-applies the entry on the next open (recovery is
+/// the materialization guarantor — `Put`/`Delete`/`IndexPut`/`IndexDel`
+/// are last-write-wins, counter replay is intentionally skipped, HNSW is
+/// rebuilt on open). Returns the observed [`MaterializationState`].
 ///
 /// Phase 6 (`publish_committed`) ALWAYS runs — the version is committed
 /// regardless of whether the projections landed inline.
@@ -671,41 +776,21 @@ async fn materialize(
     // HIGH-A: release the per-table unique_write_lock guards now that the
     // unique postings are published (Phase 5c done). The window the Phase
     // 2.6 guard had to dominate — re-check → posting write — is closed, so
-    // a non-tx unique writer may resume. Phases 5d/6/6.5/7 do not touch
-    // unique postings, so holding the locks past here would only add
-    // contention. Released even on a deferred Phase 5c: recovery re-applies
-    // the postings, and a stuck guard would only block non-tx writers.
+    // a non-tx unique writer may resume. Phases 6/6.5/7 (and the post-lock
+    // HNSW promote) do not touch unique postings, so holding the locks past
+    // here would only add contention. Released even on a deferred Phase 5c:
+    // recovery re-applies the postings, and a stuck guard would only block
+    // non-tx writers.
     drop(uwl_guards);
 
-    // Phase 5d: promote HNSW staged vectors into the live graph (HIGH-6).
-    //
-    // We iterate exactly the tables the tx staged vectors into
-    // (`tx.staged_vectors`), keyed by table token. `apply_staged_vectors`
-    // is a no-op for every backend except `VectorBackend`. Phase 5a only
-    // drained `tx.write_set`, so `tx.staged_vectors` is intact here.
-    //
-    // Recovery note: HNSW is rebuilt from the materialized data on open, so
-    // a deferred Phase 5d is reconciled once recovery replays the data ops
-    // and the graph is rebuilt — no per-vector WAL replay is needed.
-    let vector_batches = tx
-        .staged_vectors
-        .iter()
-        .filter(|(_, v)| !v.is_empty())
-        .map(|(t, v)| (*t, v.clone()))
-        .collect::<Vec<_>>();
-    for (token, vecs) in vector_batches {
-        if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_batch(repo, token, vecs.clone())
-        })
-        .await
-        {
-            log::warn!(
-                "commit_tx materialization Phase 5d (hnsw) failed for tx {tx_id} \
-                 commit_version {commit_version} table {token}: {e}; deferring to recovery"
-            );
-            ok = false;
-        }
-    }
+    // Phase 5d (HNSW promote) is NO LONGER here. It moved OUT of the
+    // commit critical section: `commit_tx_inner` drops `commit_lock` after
+    // Phase 7 below and then calls `promote_vectors` (III.5). HNSW is a
+    // derived read-accelerator (vectors are already in `main` via Phase 5a
+    // + the WAL entry; the graph is rebuilt from the data store on open),
+    // so its unbounded per-vector work must not stall other committers
+    // under the gate, and a failed promote does NOT defer the tx — see
+    // `promote_vectors`.
 
     // Phase 6: publish — atomic publish-committed. ALWAYS runs: the
     // version IS committed (the WAL entry is durable) regardless of
@@ -856,12 +941,26 @@ async fn apply_index_batch(
     Ok(())
 }
 
-/// Promote one table's staged HNSW vectors into the live graph (Phase 5d).
+/// Promote one table's staged HNSW vectors into the live graph (Phase 5d,
+/// post-lock — see [`promote_vectors`]).
 async fn apply_vector_batch(
     repo: &RepoInstance,
     token: u64,
     vecs: Vec<(shamir_types::types::record_id::RecordId, Vec<f32>)>,
+    _tx_id: u64,
 ) -> Result<(), DbError> {
+    // Test-only failure injection: simulate a persistent post-lock HNSW
+    // promote error for a specific tx so the III.5 contract (a failed
+    // promote after the lock + Phase 7 does NOT defer the tx) can be
+    // exercised in-process. Armed via `FAIL_VECTOR_PROMOTE_TX_ID`.
+    #[cfg(test)]
+    if _tx_id != 0 && FAIL_VECTOR_PROMOTE_TX_ID.load(std::sync::atomic::Ordering::SeqCst) == _tx_id
+    {
+        return Err(DbError::Internal(format!(
+            "injected Phase 5d (hnsw promote) failure for tx {_tx_id}"
+        )));
+    }
+
     if let Some(tbl) = repo.table_by_token(token).await? {
         for backend in tbl.index2_registry().all_backends().await {
             backend.apply_staged_vectors(&vecs).await.map_err(|e| {

@@ -42,6 +42,17 @@ fn make_repo() -> RepoInstance {
 /// process-global injection register can't collide with a parallel test.
 const INJECT_TX_ID: u64 = 7_000_001;
 
+/// Serialises the arm → commit → reset window of every test that drives
+/// `FAIL_PHASE_5C_TX_ID`. That injection register is a single process-wide
+/// `AtomicU64`; two such tests running on parallel runner threads would
+/// otherwise clobber each other's arm (one test's unconditional `store(0)`
+/// reset lands inside the other's commit window), making the Deferred path
+/// flaky. The guard must span the commit `.await` (the register is read
+/// during materialization), so this is `tokio::sync::Mutex` — async-aware,
+/// no poisoning, and clippy-clean across the await. Contention is bounded
+/// to the two injecting tests.
+static PHASE_5C_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Decisive proof of Vector I.3: a Phase-5 sub-phase failure that occurs
 /// AFTER the commit point (successful Phase 4 `wal.begin`) is reported as
 /// COMMITTED-with-deferred-materialization, and recovery reconciles the
@@ -82,10 +93,13 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
     ));
 
     // Arm the Phase 5c failure for exactly this tx, then commit. Reset the
-    // register immediately after so no later test is affected.
+    // register immediately after so no later test is affected. The lock
+    // serialises this window against any other `FAIL_PHASE_5C_TX_ID` armer.
+    let inject_guard = PHASE_5C_INJECT_LOCK.lock().await;
     FAIL_PHASE_5C_TX_ID.store(INJECT_TX_ID, Ordering::SeqCst);
     let outcome = repo.commit_tx(tx).await;
     FAIL_PHASE_5C_TX_ID.store(0, Ordering::SeqCst);
+    drop(inject_guard);
 
     // (1) COMMITTED, not aborted — this is the bug fix. Old code returned
     //     Err here because Phase 5c propagated via `?`.
@@ -189,5 +203,71 @@ async fn pre_commit_failure_aborts_and_leaves_nothing() {
     assert!(
         wal.list_inflight().await.unwrap().is_empty(),
         "a pre-commit abort must leave no inflight WAL marker"
+    );
+}
+
+/// Metric (I.3 follow-up): a deferred materialization bumps the dedicated
+/// `TxMetrics::txs_materialization_deferred` counter exactly once. We reuse
+/// the Phase 5c failure injection to drive a `Deferred` outcome and assert
+/// the counter delta — proving `commit_tx_inner` fires
+/// `on_tx_materialization_deferred()` when (and only when) `materialize`
+/// reports `Deferred`.
+///
+/// `current_thread` flavor keeps the commit on one task/thread so the armed
+/// injection register is observed deterministically (and the fresh-repo
+/// metric snapshot is uncontended).
+#[tokio::test(flavor = "current_thread")]
+async fn deferred_materialization_increments_metric() {
+    const METRIC_INJECT_TX_ID: u64 = 7_000_002;
+
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let token = table_token_for("t");
+
+    let rid = RecordId::new();
+    let body = InnerValue::Str("deferred-metric".into())
+        .to_bytes()
+        .unwrap();
+    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body).await;
+
+    let mut tx = TxContext::new(
+        TxId::new(METRIC_INJECT_TX_ID),
+        0,
+        0,
+        IsolationLevel::Snapshot,
+    );
+    tx.write_set.insert(token, staging);
+    tx.index_write_set.push((
+        token,
+        IndexWriteOp::SetPosting {
+            key: Bytes::from_static(b"metric_posting_key"),
+            value: Bytes::from_static(b"metric_posting_value"),
+        },
+    ));
+
+    let before = repo.tx_metrics().snapshot().txs_materialization_deferred;
+
+    // Serialise the arm → commit → reset window against the other
+    // `FAIL_PHASE_5C_TX_ID` armer (see `PHASE_5C_INJECT_LOCK`).
+    let inject_guard = PHASE_5C_INJECT_LOCK.lock().await;
+    FAIL_PHASE_5C_TX_ID.store(METRIC_INJECT_TX_ID, Ordering::SeqCst);
+    let outcome = repo.commit_tx(tx).await;
+    FAIL_PHASE_5C_TX_ID.store(0, Ordering::SeqCst);
+    drop(inject_guard);
+
+    let outcome = outcome.expect("post-commit Phase 5c failure must NOT abort the tx");
+    assert_eq!(
+        outcome.materialization,
+        MaterializationState::Deferred,
+        "the injected Phase 5c failure must produce a Deferred outcome"
+    );
+
+    let after = repo.tx_metrics().snapshot().txs_materialization_deferred;
+    assert_eq!(
+        after - before,
+        1,
+        "a deferred materialization must increment txs_materialization_deferred exactly once"
     );
 }
