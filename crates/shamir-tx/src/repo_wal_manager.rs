@@ -83,19 +83,24 @@ impl RepoWalManager {
     ///
     /// Remove the marker — tx writes have landed durably. Idempotent.
     pub async fn commit(&self, txn_id: u64) -> DbResult<()> {
-        let _ = self
-            .info_store
+        self.info_store
             .remove(WalActiveKey::new(txn_id).to_bytes())
             .await?;
         Ok(())
     }
 
     /// Fire-and-forget commit. Returns a [`tokio::task::JoinHandle`].
+    ///
+    /// NOTE: not currently used by the commit path — `commit_tx` removes
+    /// the marker synchronously via [`commit`](Self::commit). Kept as the
+    /// V2 mirror of [`shamir_wal::WalManager::commit_async`] for a future
+    /// non-blocking commit option; presently exercised only by its unit
+    /// test (`commit_async_removes_marker`).
     pub fn commit_async(&self, txn_id: u64) -> tokio::task::JoinHandle<DbResult<()>> {
         let info_store = self.info_store.clone();
         let key = WalActiveKey::new(txn_id).to_bytes();
         tokio::spawn(async move {
-            let _ = info_store.remove(key).await?;
+            info_store.remove(key).await?;
             Ok(())
         })
     }

@@ -6,7 +6,7 @@
 //!
 //! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
 
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
@@ -60,7 +60,15 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                     return Ok(());
                 }
             };
-            let _ = tbl.data_store().remove(rid.to_bytes()).await;
+            // Delete-replay is idempotent: a key already gone (the delete
+            // landed before the crash, or the record never existed) is
+            // benign and must not fail recovery. But a genuine storage
+            // I/O error must propagate — swallowing it would report a
+            // successful replay having NOT applied the delete.
+            match tbl.data_store().remove(rid.to_bytes()).await {
+                Ok(_) | Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
             Ok(())
         }
         WalOpV2::CounterDelta {
@@ -133,12 +141,25 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                         return Ok(());
                     }
                 };
-                let _ = tbl.info_store().remove(key.clone()).await;
+                // Idempotent like Delete: a missing posting is benign,
+                // but a real storage error must propagate rather than be
+                // swallowed as a phantom success.
+                match tbl.info_store().remove(key.clone()).await {
+                    Ok(_) | Err(DbError::NotFound(_)) => {}
+                    Err(e) => return Err(e),
+                }
                 return Ok(());
             }
+            // Broadcast (table_id_interned == 0): the same key is removed
+            // from every table's info_store. Most tables never held it, so
+            // NotFound is the expected norm and benign — but a genuine I/O
+            // error on any table propagates.
             for name in repo.list_table_names() {
                 if let Ok(tbl) = repo.get_table(&name).await {
-                    let _ = tbl.info_store().remove(key.clone()).await;
+                    match tbl.info_store().remove(key.clone()).await {
+                        Ok(_) | Err(DbError::NotFound(_)) => {}
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Ok(())
