@@ -80,7 +80,10 @@ impl ShamirDb {
             let engine = record["engine"].as_str().unwrap_or("in_memory");
             let path = record["path"].as_str();
 
-            if let Some(db) = shamir.dbs.get(db_name) {
+            // Clone the `DbInstance` out of the registry (cheap Arc) so we
+            // do NOT hold the DashMap shard guard across the `add_repo` /
+            // recovery awaits below.
+            if let Some(db) = shamir.get_db(db_name) {
                 let factory = Self::factory_from_meta(engine, path);
                 if let Some(factory) = factory {
                     // Load table configs for this repo (tables will be loaded lazily)
@@ -93,6 +96,27 @@ impl ShamirDb {
                             engine,
                             e
                         );
+                        continue;
+                    }
+
+                    // CRIT-A: run V2 WAL crash recovery on the OPEN path,
+                    // BEFORE the server accepts requests. A crash between
+                    // commit Phase 4 (`wal.begin`) and Phase 7
+                    // (`wal.commit`) leaves a durable inflight `WalEntryV2`;
+                    // without this replay the committed tx data is silently
+                    // lost on restart. A recovery failure is propagated
+                    // (not swallowed) — a repo that cannot recover must not
+                    // serve.
+                    if let Some(repo) = db.get_repo(repo_name) {
+                        let recovered = repo.recover_v2_inflight().await?;
+                        if recovered > 0 {
+                            log::info!(
+                                "recovered {} inflight transactions for repo '{}/{}'",
+                                recovered,
+                                db_name,
+                                repo_name
+                            );
+                        }
                     }
                 }
             }
@@ -209,9 +233,10 @@ impl ShamirDb {
     }
 
     pub async fn add_repo(&self, db_name: &str, config: RepoConfig) -> DbResult<()> {
+        // Owned clone (cheap Arc) — never hold the DashMap shard guard
+        // across the `add_repo` / recovery awaits below.
         let db = self
-            .dbs
-            .get(db_name)
+            .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
 
         let repo_name = config.name.clone();
@@ -219,6 +244,23 @@ impl ShamirDb {
         let path = Self::extract_path(&config.factory);
 
         db.add_repo(config).await?;
+
+        // CRIT-A: run V2 WAL crash recovery before the repo is reachable
+        // by callers. For a freshly created repo `list_inflight` is empty
+        // so this is a cheap no-op; for a *re-attached* on-disk repo it
+        // replays any inflight tx left by a prior crash. Recovery failure
+        // is propagated — a repo that cannot recover must not be served.
+        if let Some(repo) = db.get_repo(&repo_name) {
+            let recovered = repo.recover_v2_inflight().await?;
+            if recovered > 0 {
+                log::info!(
+                    "recovered {} inflight transactions for repo '{}/{}'",
+                    recovered,
+                    db_name,
+                    repo_name
+                );
+            }
+        }
 
         // Persist to system store
         if let Err(e) = self

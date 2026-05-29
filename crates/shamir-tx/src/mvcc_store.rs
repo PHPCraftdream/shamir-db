@@ -151,6 +151,33 @@ impl MvccStore {
         self.current_version(key)
     }
 
+    /// cancel-safe: yes — a single `version_cache.upsert_async`, which is
+    /// CAS-based and either lands or leaves the map unchanged on cancel.
+    ///
+    /// Seed the in-memory version cache for a recovered key.
+    ///
+    /// V2 WAL recovery (`crate`-external; see
+    /// `shamir_engine::tx::recovery`) replays a committed tx by writing
+    /// the record body directly to the backing `main` store, bypassing
+    /// [`apply_committed_ops`]. That keeps `main` correct but leaves
+    /// `version_cache` empty, so a later `get_at(key, snap)` for a
+    /// snapshot *below* `commit_version` would take the fast path
+    /// (`current_version == 0 ≤ snap`) and return the recovered (latest)
+    /// value instead of scanning history.
+    ///
+    /// In the bootstrap-recovery scenario this is harmless (no snapshot
+    /// survives a restart and every fresh snapshot opens at
+    /// `≥ last_committed ≥ commit_version`), but seeding the cache keeps
+    /// `version_of`/`get_at` consistent for any post-recovery reader and
+    /// for SSI conflict detection if the recovered key is immediately
+    /// re-written inside a new transaction.
+    ///
+    /// `upsert_async` (not `insert`) so a re-replay of the same key
+    /// advances monotonically rather than silently keeping a stale value.
+    pub async fn seed_version(&self, key: Bytes, version: u64) {
+        self.version_cache.upsert_async(key, version).await;
+    }
+
     /// cancel-safe: NO — applies a batch of `KvOp` via multi-step
     /// sequences (Phase 1 pre-reads, Phase 2 batched history transact,
     /// Phase 3 batched main transact, Phase 4 version_cache updates).
