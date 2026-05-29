@@ -189,19 +189,58 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
 /// on mixed-version corpora.
 ///
 /// Called from `RepoInstance::recover_v2_inflight`.
+///
+/// CRIT-B: restoring MVCC version state.
+///
+/// 1. Force gate construction up front (`repo.tx_gate()`). The gate seeds
+///    its `version_counter`/`last_committed_version` floor from
+///    `max(persisted marker, max inflight commit_version)` (see
+///    `RepoInstance::tx_gate`), so `assign_next_version()` is already
+///    guaranteed to exceed every version the entries below replay at —
+///    this is the part that fixes the monotonicity violation, because the
+///    gate exposes no after-the-fact counter setter.
+/// 2. Replay all inflight entries (sorted by `commit_version`, HIGH-5)
+///    and remove their markers.
+/// 3. Persist `last_committed = gate.last_committed()` so the recovered
+///    floor survives the *next* restart. Once step 2 clears the markers,
+///    the inflight pre-scan in step 1 would find nothing, so the durable
+///    marker must now carry the recovered max or the floor would rewind.
 pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
+    // Step 1: build the gate before replay so its version floor is seeded
+    // from the inflight commit_versions while the markers still exist.
+    let gate = repo.tx_gate().await?;
+
     let wal = repo.repo_wal().await?;
     let mut entries = wal.list_inflight().await?;
     entries.sort_by_key(|e| e.commit_version);
     let count = entries.len();
 
+    // Track the highest replayed commit_version for logging / assertion.
+    // entries are sorted ascending so the last one carries the max, but
+    // fold defensively in case of legacy commit_version == 0 entries.
+    let mut max_replayed = 0u64;
     for entry in entries {
+        max_replayed = max_replayed.max(entry.commit_version);
         replay_v2_entry(&entry, repo).await?;
         wal.commit(entry.txn_id).await?;
     }
 
     if count > 0 {
-        log::info!("V2 recovery replayed {} inflight tx entries", count);
+        // Step 3: persist the (possibly advanced) floor so a clean
+        // restart — which sees no inflight markers — still seeds the gate
+        // above the recovered commit versions. `gate.last_committed()`
+        // already reflects max(marker, max_inflight) from step 1.
+        let floor = gate.last_committed();
+        let info_store = repo.tx_info_store().await?;
+        crate::meta::recovery_marker::save_last_committed(&info_store, floor).await?;
+
+        log::info!(
+            "V2 recovery replayed {} inflight tx entries (max commit_version {}, \
+             gate version floor {})",
+            count,
+            max_replayed,
+            floor
+        );
     }
     Ok(count)
 }
@@ -214,6 +253,12 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
 /// Replay all ops in one WAL entry. Iterates ops in declared order
 /// (counter → interner → index → data per `wal_ops_from_tx` emission
 /// order, though replay order is logically commutative within one entry).
+///
+/// CRIT-B: after the data ops land in `main`, seed each touched table's
+/// `MvccStore::version_cache` with this entry's `commit_version`. Replay
+/// writes go straight to `data_store()` (bypassing `apply_committed_ops`),
+/// so without this the version cache would report `0` for recovered keys.
+/// See [`seed_version_cache_for_entry`] for why this matters.
 pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
     for op in &entry.ops {
         replay_v2_op(op, repo).await.map_err(|e| {
@@ -223,5 +268,44 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
             ))
         })?;
     }
+    seed_version_cache_for_entry(entry, repo).await;
     Ok(())
+}
+
+/// cancel-safe: yes — read-only resolution of per-table MvccStores plus
+/// CAS-based `seed_version` upserts; cancellation leaves the cache in a
+/// consistent (possibly partially seeded) state that a re-replay fixes.
+///
+/// Seed the version cache for every data (`Put`/`Delete`) op in `entry`
+/// with the entry's `commit_version`. Index / counter / interner ops do
+/// not flow through the `MvccStore` (it wraps only the data store), so
+/// they are skipped.
+///
+/// Looks up the table's `MvccStore` via `per_table_mvcc` — populated when
+/// `table_by_token` (called during replay) instantiates the
+/// `TableManager`. A missing entry (dropped/unconfigured table) is a
+/// silent skip, matching the replay ops' own graceful handling.
+async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) {
+    let v = entry.commit_version;
+    for op in &entry.ops {
+        let (table_id, rid) = match op {
+            WalOpV2::Put {
+                table_id_interned,
+                rid,
+                ..
+            } => (*table_id_interned, *rid),
+            WalOpV2::Delete {
+                table_id_interned,
+                rid,
+            } => (*table_id_interned, *rid),
+            _ => continue,
+        };
+        if let Some(mvcc) = repo
+            .per_table_mvcc()
+            .read_async(&table_id, |_, m| std::sync::Arc::clone(m))
+            .await
+        {
+            mvcc.seed_version(rid.to_bytes(), v).await;
+        }
+    }
 }

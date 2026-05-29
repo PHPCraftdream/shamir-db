@@ -213,12 +213,29 @@ impl RepoInstance {
     ///
     /// Recovery marker reads are best-effort — if absent we start from
     /// defaults (`RepoTxGate::fresh()`).
+    ///
+    /// CRIT-B: the persisted `last_committed_version` marker can lag the
+    /// highest `commit_version` of an *inflight* V2 WAL entry — the
+    /// commit pipeline stamps `commit_version` in Phase 4 (WAL begin) but
+    /// only persists the marker in Phase 6.5. A crash in that window
+    /// leaves the marker stale (e.g. 7) while a durable inflight entry
+    /// carries `commit_version = 10`. Seeding the gate solely from the
+    /// marker would let `assign_next_version()` re-issue 8, 9, 10 —
+    /// versions the crashed (and about-to-be-recovered) tx already
+    /// consumed — violating version monotonicity. We therefore pre-scan
+    /// the inflight entries and seed the gate's counter from
+    /// `max(marker, max_inflight_commit_version)`. `RepoTxGate::new`
+    /// initialises BOTH the monotonic `version_counter` and
+    /// `last_committed_version` to this floor, so the next
+    /// `assign_next_version()` is strictly greater than every version a
+    /// recovered entry will replay at. The scan is the same cheap
+    /// `list_inflight()` recovery runs and happens once per gate (OnceCell).
     pub async fn tx_gate(&self) -> DbResult<Arc<shamir_tx::RepoTxGate>> {
         self.tx_gate
             .get_or_try_init(|| async {
                 let info_store = self.repo.store_get("__tx__").await?;
 
-                let last_committed = crate::meta::recovery_marker::load_last_committed(&info_store)
+                let marker = crate::meta::recovery_marker::load_last_committed(&info_store)
                     .await
                     .unwrap_or(None)
                     .unwrap_or(0);
@@ -228,11 +245,34 @@ impl RepoInstance {
                         .unwrap_or(None)
                         .unwrap_or(1);
 
+                // Pre-scan inflight V2 entries so the version floor covers
+                // any commit_version stamped before its marker was
+                // persisted (CRIT-B). Best-effort: a WAL read error here
+                // falls back to the marker rather than blocking gate
+                // construction — recovery (which propagates errors) runs
+                // separately on the open path.
+                let max_inflight = self.max_inflight_commit_version().await.unwrap_or(0);
+                let last_committed = marker.max(max_inflight);
+
                 let gate = shamir_tx::RepoTxGate::new(last_committed, next_tx_id);
                 Ok::<Arc<shamir_tx::RepoTxGate>, DbError>(Arc::new(gate))
             })
             .await
             .cloned()
+    }
+
+    /// cancel-safe: yes — read-only `list_inflight()` scan over the
+    /// repo's `"__tx__"` store; cancellation drops the future with no
+    /// state change.
+    ///
+    /// Highest `commit_version` across all durable inflight V2 WAL
+    /// entries, or `0` if there are none. Used to seed the tx gate's
+    /// version floor (CRIT-B) so recovered commit versions are never
+    /// re-issued.
+    pub(crate) async fn max_inflight_commit_version(&self) -> DbResult<u64> {
+        let wal = self.repo_wal().await?;
+        let entries = wal.list_inflight().await?;
+        Ok(entries.iter().map(|e| e.commit_version).max().unwrap_or(0))
     }
 
     /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
