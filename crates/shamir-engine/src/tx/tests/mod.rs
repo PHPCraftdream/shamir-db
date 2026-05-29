@@ -1,4 +1,5 @@
 pub mod acceptance_tests;
+pub mod commit_phase5_defer_tests;
 pub mod commit_phase5_tests;
 pub mod commit_tests;
 pub mod gc_tests;
