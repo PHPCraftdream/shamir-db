@@ -1046,3 +1046,411 @@ async fn interactive_tx_rollback_discards_staged_writes() {
         "a rolled-back interactive tx must leave nothing durable"
     );
 }
+
+// ============================================================================
+// Phase B Stage 9 — SSI read-set ACCUMULATES across multiple TxExecute calls.
+//
+// Two interactive Serializable txs race. Each does its SELECT in one
+// execute_in_open_tx call and its UPDATE in a SECOND, separate
+// execute_in_open_tx call against the SAME parked TxContext. tx_a commits
+// first (Ok). tx_b commits second and MUST abort with CommitError::SsiConflict
+// — its read_set, recorded back in call #1, still pins alice@v0 while tx_a's
+// commit bumped alice's version. If execute_in_open_tx did not preserve the
+// read_set across calls (e.g. by re-creating the TxContext per call) tx_b
+// would commit cleanly — so the SsiConflict is the load-bearing proof that
+// (a) read_set survives across TxExecute round-trips inside the same parked
+// TxContext, and (b) validate_read_set fires at commit_interactive_tx exactly
+// like Phase-A commit_tx. Mirrors acceptance_tests.rs:467
+// (`ssi_write_skew_one_aborts`) but through the Phase-B engine wrappers.
+// ============================================================================
+#[tokio::test]
+async fn interactive_ssi_write_skew_across_calls_one_aborts() {
+    use shamir_types::core::interner::TouchInd;
+
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // Seed two named rows so an UPDATE can target one by field. Same pattern
+    // as ssi_write_skew_detected_through_execute_batch (:706-729).
+    let tbl = repo.get_table("users").await.unwrap();
+    let interner = tbl.interner().get().await.unwrap();
+    let name_id = match interner.touch_ind("name").unwrap() {
+        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+    };
+    let val_id = match interner.touch_ind("val").unwrap() {
+        TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
+    };
+    tbl.interner().persist().await.unwrap();
+    let mk_row = |name: &str| {
+        let mut m = shamir_types::types::common::new_map_wc(2);
+        m.insert(
+            shamir_types::core::interner::InternerKey::new(name_id),
+            shamir_types::types::value::InnerValue::Str(name.into()),
+        );
+        m.insert(
+            shamir_types::core::interner::InternerKey::new(val_id),
+            shamir_types::types::value::InnerValue::Str("initial".into()),
+        );
+        shamir_types::types::value::InnerValue::Map(m)
+    };
+    tbl.insert(&mk_row("alice")).await.unwrap();
+    tbl.insert(&mk_row("bob")).await.unwrap();
+
+    // BEGIN two interactive Serializable txs.
+    let (mut tx_a, guard_a) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Serializable)
+        .await
+        .unwrap();
+    let (mut tx_b, guard_b) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Serializable)
+        .await
+        .unwrap();
+
+    // Call #1 on EACH tx: SELECT every users row -> recorded into that tx's
+    // read_set via the tx-aware read path.
+    let select_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": { "r": { "from": "users" } }
+    }))
+    .unwrap();
+    let ra1 = execute_in_open_tx(&select_req, &resolver, None, &mut tx_a)
+        .await
+        .unwrap();
+    assert!(ra1.transaction.is_none(), "tx_a still open after call #1");
+    assert_eq!(
+        ra1.results["r"].records.len(),
+        2,
+        "tx_a SELECT sees both seeded rows"
+    );
+
+    let rb1 = execute_in_open_tx(&select_req, &resolver, None, &mut tx_b)
+        .await
+        .unwrap();
+    assert!(rb1.transaction.is_none(), "tx_b still open after call #1");
+    assert_eq!(
+        rb1.results["r"].records.len(),
+        2,
+        "tx_b SELECT sees both seeded rows"
+    );
+
+    // Call #2 on EACH tx: UPDATE the row the OTHER tx also read.
+    let update_alice: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "w": {
+                "update": "users",
+                "where": {"op": "eq", "field": ["name"], "value": "alice"},
+                "set": {"val": "a2"}
+            }
+        }
+    }))
+    .unwrap();
+    let update_bob: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "w": {
+                "update": "users",
+                "where": {"op": "eq", "field": ["name"], "value": "bob"},
+                "set": {"val": "b2"}
+            }
+        }
+    }))
+    .unwrap();
+    let _ra2 = execute_in_open_tx(&update_alice, &resolver, None, &mut tx_a)
+        .await
+        .unwrap();
+    let _rb2 = execute_in_open_tx(&update_bob, &resolver, None, &mut tx_b)
+        .await
+        .unwrap();
+
+    // COMMIT tx_a first — succeeds (its read_set, accumulated from call #1, is
+    // still valid since nothing committed since its snapshot). Bumps alice's
+    // version above tx_b's snapshot.
+    let oa = commit_interactive_tx(&repo, tx_a).await;
+    assert!(
+        oa.is_ok(),
+        "tx_a must commit cleanly; got {:?}",
+        oa.as_ref().err()
+    );
+    drop(guard_a);
+
+    // COMMIT tx_b — MUST abort with SsiConflict. tx_b's read_set, populated
+    // back in call #1 (NOT in this commit call), still pins alice@v0 — the
+    // load-bearing proof that read_set survived across TxExecute calls and
+    // validate_read_set fires at commit_interactive_tx.
+    let ob = commit_interactive_tx(&repo, tx_b).await;
+    match ob {
+        Err(crate::tx::CommitError::SsiConflict { .. }) => {}
+        other => panic!(
+            "tx_b MUST abort with SsiConflict — recorded read from call #1 \
+             must outlive that call inside the parked TxContext and be \
+             validated at commit. Got {:?}",
+            other
+                .as_ref()
+                .map(|_| "Ok(committed)")
+                .map_err(|e| format!("Err({:?})", e)),
+        ),
+    }
+    drop(guard_b);
+}
+
+// ============================================================================
+// Phase B Stage 10 — concurrency + recovery tests for interactive tx
+// ============================================================================
+
+/// (a) Two interactive SI transactions race — each accumulates writes across
+/// TWO `execute_in_open_tx` calls (the load-bearing Phase-B property), then
+/// both commit. The second committer must assign a higher version
+/// (last-commit-wins ordering). Both txs' writes survive (SI permits
+/// non-conflicting inserts).
+#[tokio::test]
+async fn two_interactive_si_txs_race_last_commit_wins() {
+    use futures::StreamExt;
+
+    let factory = crate::repo::repo_types::BoxRepoFactory::in_memory();
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        factory,
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+
+    // Seed a baseline row OUTSIDE any tx so both interactive txs share the
+    // same starting state.
+    let tbl = repo.get_table("users").await.unwrap();
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 0,
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "baseline"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let seed_resp = crate::query::batch::execute_batch(&seed_req, &resolver, None).await;
+    assert!(
+        seed_resp.is_ok(),
+        "seeding baseline row failed: {:?}",
+        seed_resp.err()
+    );
+
+    // BEGIN two interactive SI txs.
+    let (mut tx_a, guard_a) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+    let (mut tx_b, guard_b) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+
+    // Each tx does TWO execute calls (proves state accumulates across calls).
+    let ins_a1: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "a1"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let ins_a2: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "a2"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let ins_b1: BatchRequest = serde_json::from_value(json!({
+        "id": 3,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "b1"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let ins_b2: BatchRequest = serde_json::from_value(json!({
+        "id": 4,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "b2"}
+                ]
+            }
+        }
+    }))
+    .unwrap();
+
+    // Interleave the calls — each tx accumulates state across two execute
+    // calls before the FIRST commit lands.
+    execute_in_open_tx(&ins_a1, &resolver, None, &mut tx_a)
+        .await
+        .unwrap();
+    execute_in_open_tx(&ins_b1, &resolver, None, &mut tx_b)
+        .await
+        .unwrap();
+    execute_in_open_tx(&ins_a2, &resolver, None, &mut tx_a)
+        .await
+        .unwrap();
+    execute_in_open_tx(&ins_b2, &resolver, None, &mut tx_b)
+        .await
+        .unwrap();
+
+    // tx_a commits first → version V_a. tx_b commits second → version V_b > V_a.
+    let o_a = commit_interactive_tx(&repo, tx_a).await.unwrap();
+    drop(guard_a);
+    let o_b = commit_interactive_tx(&repo, tx_b).await.unwrap();
+    drop(guard_b);
+    assert!(
+        o_b.commit_version > o_a.commit_version,
+        "second-committing interactive SI tx assigns a higher version \
+         (last-commit-wins ordering)"
+    );
+
+    // Both txs' writes survive (SI permits both): 1 baseline + 4 inserts = 5.
+    let stream = tbl.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(b) = stream.next().await {
+        count += b.unwrap().len();
+    }
+    assert_eq!(
+        count, 5,
+        "both interactive SI txs committed (1 seed + 2 + 2)"
+    );
+}
+
+/// (b) Crash mid-interactive-tx leaves NOTHING durable.
+///
+/// Reuse the shared-`Arc<InMemoryRepo>` restart pattern from
+/// `tx/tests/recovery_gate_tests.rs:42-62`. An interactive tx is in-memory
+/// ONLY until COMMIT (`wal.begin` runs only in commit Phase 4 —
+/// `commit.rs:732`). Dropping the `RepoInstance` + tx WITHOUT calling
+/// `commit_interactive_tx` perfectly models the crash: no `commit_tx` →
+/// no `wal.begin` → no durable footprint.
+#[tokio::test]
+async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use shamir_storage::storage_in_memory::InMemoryRepo;
+
+    let underlying = Arc::new(InMemoryRepo::new());
+
+    // === ORIGINAL PROCESS ===
+    {
+        let repo = crate::repo::RepoInstance::new(
+            "r".into(),
+            crate::repo::BoxRepo::InMemory(Arc::clone(&underlying)),
+            vec![crate::table::TableConfig::new("users")],
+        );
+        let resolver = TxTestResolver { repo: repo.clone() };
+
+        let (mut tx, _guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+            .await
+            .unwrap();
+
+        // Stage writes across TWO execute calls.
+        let c1: BatchRequest = serde_json::from_value(json!({
+            "id": 1,
+            "queries": {
+                "ins": {
+                    "insert_into": "users",
+                    "values": [
+                        {"name": "alpha"}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        let c2: BatchRequest = serde_json::from_value(json!({
+            "id": 2,
+            "queries": {
+                "ins": {
+                    "insert_into": "users",
+                    "values": [
+                        {"name": "beta"}
+                    ]
+                }
+            }
+        }))
+        .unwrap();
+        execute_in_open_tx(&c1, &resolver, None, &mut tx)
+            .await
+            .unwrap();
+        execute_in_open_tx(&c2, &resolver, None, &mut tx)
+            .await
+            .unwrap();
+
+        // Sanity: while tx is open, BEFORE commit, the WAL has no inflight
+        // entry (wal.begin runs only in commit Phase 4 — commit.rs:732).
+        let wal = repo.repo_wal().await.unwrap();
+        assert!(
+            wal.list_inflight().await.unwrap().is_empty(),
+            "no WAL entry exists pre-commit — wal.begin runs only in Phase 4"
+        );
+
+        // === CRASH === drop tx + guard + repo WITHOUT calling
+        // commit_interactive_tx.
+        drop(tx);
+        drop(_guard);
+        drop(resolver);
+        drop(repo);
+    }
+
+    // === RESTART === fresh RepoInstance over the SAME underlying storage.
+    let repo = crate::repo::RepoInstance::new(
+        "r".into(),
+        crate::repo::BoxRepo::InMemory(Arc::clone(&underlying)),
+        vec![crate::table::TableConfig::new("users")],
+    );
+
+    // (1) No inflight WAL entry survives — none was ever written.
+    let wal = repo.repo_wal().await.unwrap();
+    assert!(
+        wal.list_inflight().await.unwrap().is_empty(),
+        "crash before any commit leaves no inflight WAL entry"
+    );
+
+    // (2) Recovery is a no-op.
+    let replayed = repo.recover_v2_inflight().await.unwrap();
+    assert_eq!(
+        replayed, 0,
+        "recovery has nothing to replay — interactive tx never reached the WAL"
+    );
+
+    // (3) Nothing materialized — the table is empty.
+    let tbl = repo.get_table("users").await.unwrap();
+    let stream = tbl.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(b) = stream.next().await {
+        count += b.unwrap().len();
+    }
+    assert_eq!(
+        count, 0,
+        "a crash mid-interactive-tx must leave NOTHING durable \
+         (no wal.begin → clean abort)"
+    );
+}

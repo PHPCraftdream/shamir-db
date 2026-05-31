@@ -2,12 +2,17 @@
 
 # Phase B — Interactive (Multi-Call) Transactions — Design
 
-**Status: PLANNED — not started.** Depends on **Phase A** (single-batch
-SI/SSI ACID transactions with WAL crash-recovery), which is DONE and
-production-grade — see [`docs/pre-transactional/REVIEW.md`](../pre-transactional/REVIEW.md)
-for the state-of-the-world snapshot and [`TRANSACTIONS.md`](./TRANSACTIONS.md)
+**Status: IMPLEMENTED (2026-05-31).** Stages 1-10 landed: wire DTOs
+(`TxBegin/TxExecute/TxCommit/TxRollback`), server-side `TxRegistry`,
+engine glue (`open/execute/commit_interactive_tx`), facade methods, handler
+dispatch (ownership + single-repo pin + per-tx staging budget `tx_too_large`),
+a background idle/absolute-deadline reaper, and the full test matrix
+(wire-level e2e, SSI write-skew across calls, two-tx SI race, crash-mid-tx
+leaves no durable footprint). Builds on **Phase A** (single-batch SI/SSI ACID
+with WAL crash-recovery) — see [`docs/pre-transactional/REVIEW.md`](../pre-transactional/REVIEW.md)
+for the Phase-A snapshot and [`TRANSACTIONS.md`](./TRANSACTIONS.md)
 §"Phase B — interactive transactions (later)" for the original two-phase
-split.
+split. The design below records the *how*; it matches what shipped.
 
 This document is the Phase-B counterpart of [`TRANSACTIONS_IMPL.md`](./TRANSACTIONS_IMPL.md):
 it gives the *how* — concrete recon of today's single-batch machinery, the
@@ -840,5 +845,5 @@ real-crash subprocess harness tracked in `PHASE_A_TAILS.md` /
 
 ---
 
-*Status: PLANNED — not started. Depends on Phase A (done). Last updated
-2026-05-29.*
+*Status: IMPLEMENTED — stages 1-10 + lifecycle reaper + staging budget
+shipped. Depends on Phase A (done). Last updated 2026-05-31.*

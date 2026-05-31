@@ -327,7 +327,17 @@ breadth nor an integration-test job") уже устарела**: оба гейт
 
 ---
 
-## 3. Property / fuzz coverage  ⚠️ ТРЕБУЕТ САНКЦИИ НА DEV-DEPS
+## 3. Property / fuzz coverage — ✅ DONE (2026-05-31, proptest sanctioned)
+
+> **Update 2026-05-31.** The maintainer sanctioned the dependency. `proptest`
+> is now a `shamir-tx` dev-dependency; 7 property tests landed — 4 for the
+> version codec (round-trip, byte-sort-order == version-order, strict
+> monotonicity, key-prefix-dominates-version-suffix) and 3 for the SSI
+> `validate_read_set` predicate (conflict-iff-oracle, version-bump-creates-
+> conflict, none-provider-is-conflict). `cargo-fuzz`/`arbitrary` remain
+> optional nightly follow-ups. The original spec below is kept for reference.
+
+### (historical spec — superseded by the landed tests above) ⚠️ ТРЕБОВАЛА САНКЦИИ НА DEV-DEPS
 
 ### Мотивация (по-русски)
 

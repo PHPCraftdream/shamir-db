@@ -162,6 +162,36 @@ pub struct SecurityConfig {
     /// `BatchRequest.limits` may shrink them, but cannot exceed.
     #[serde(default)]
     pub query_limits: QueryLimitsConfig,
+    /// Hard cap on per-interactive-tx staged bytes.
+    #[serde(default)]
+    pub tx: TxLimitsConfig,
+}
+
+/// Server-side hard cap on per-interactive-tx staged bytes.
+///
+/// Without this block the default 64 MiB cap applies. A malicious client
+/// staging unbounded data inside a single interactive tx would grow the WAL
+/// entry and in-memory staging until OOM — the cap aborts the tx with
+/// `tx_too_large` before that happens.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TxLimitsConfig {
+    /// Maximum total bytes that an interactive tx may stage across all
+    /// its `TxExecute` calls. Over-budget aborts the tx with
+    /// `tx_too_large`. Default 64 MiB.
+    #[serde(default = "default_max_tx_bytes")]
+    pub max_tx_bytes: usize,
+}
+
+impl Default for TxLimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_tx_bytes: default_max_tx_bytes(),
+        }
+    }
+}
+
+fn default_max_tx_bytes() -> usize {
+    64 * 1024 * 1024 // 64 MiB
 }
 
 /// Server-side hard caps on `BatchRequest.limits`.

@@ -171,6 +171,20 @@ impl QueryLimitsCap {
     };
 }
 
+/// Server-side hard cap on per-interactive-tx staged bytes. Checked on
+/// each `TxExecute`; over-budget aborts the tx with `tx_too_large`.
+/// Default 64 MiB; tests use [`Self::UNLIMITED`].
+#[derive(Debug, Clone, Copy)]
+pub struct TxLimitsCap {
+    pub max_tx_bytes: usize,
+}
+
+impl TxLimitsCap {
+    pub const UNLIMITED: Self = Self {
+        max_tx_bytes: usize::MAX,
+    };
+}
+
 /// Bridge handler — routes wire requests to a shared [`ShamirDb`] instance.
 ///
 /// # Permissions (v1)
@@ -192,6 +206,8 @@ pub struct ShamirDbHandler {
     slow_query: SlowQueryConfig,
     /// Server-side hard caps on per-batch resources.
     query_limits: QueryLimitsCap,
+    /// Server-side hard cap on per-interactive-tx staged bytes.
+    tx_limits: TxLimitsCap,
     /// Phase B — registry of open interactive (multi-call) transactions,
     /// shared across all clones of the handler (`Arc`), so a `TxExecute` on
     /// one dispatch finds the tx a prior `TxBegin` parked.
@@ -207,6 +223,7 @@ impl ShamirDbHandler {
             admin: None,
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
+            tx_limits: TxLimitsCap::UNLIMITED,
             tx_registry: Arc::new(TxRegistry::new()),
         }
     }
@@ -218,6 +235,7 @@ impl ShamirDbHandler {
             admin: Some(admin),
             slow_query: SlowQueryConfig::DISABLED,
             query_limits: QueryLimitsCap::UNLIMITED,
+            tx_limits: TxLimitsCap::UNLIMITED,
             tx_registry: Arc::new(TxRegistry::new()),
         }
     }
@@ -235,9 +253,23 @@ impl ShamirDbHandler {
         self
     }
 
+    /// Set the per-interactive-tx staging byte cap.
+    pub fn with_tx_limits(mut self, tx_limits: TxLimitsCap) -> Self {
+        self.tx_limits = tx_limits;
+        self
+    }
+
     /// Reference to the underlying [`ShamirDb`] (for tests / admin glue).
     pub fn db(&self) -> &Arc<ShamirDb> {
         &self.db
+    }
+
+    /// Phase B Stage 6 — borrow the interactive-tx registry so the boot
+    /// path can spawn the periodic reaper against it. The registry is
+    /// already `Arc<TxRegistry>` internally; this returns a clone of that
+    /// `Arc` so the reaper task and the handler share state.
+    pub fn tx_registry(&self) -> Arc<TxRegistry> {
+        Arc::clone(&self.tx_registry)
     }
 }
 
@@ -548,7 +580,8 @@ impl ShamirDbHandler {
                     if r.is_ok() {
                         it_for_exec.bump_activity();
                     }
-                    r
+                    // Measure staged size INSIDE the same lock as the engine call.
+                    r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
                 }
                 None => Err(BatchError::QueryError {
                     alias: String::new(),
@@ -557,7 +590,23 @@ impl ShamirDbHandler {
             }
         });
         match exec {
-            Ok(response) => DbResponse::TxBatch { response },
+            Ok((response, staged_bytes)) => {
+                if staged_bytes > self.tx_limits.max_tx_bytes {
+                    // Abort: drop the handle (RAII rollback of TxContext +
+                    // SnapshotGuard via the Arc) and surface the cap to the
+                    // client.
+                    self.tx_registry.remove(tx_handle);
+                    drop(it);
+                    return DbResponse::Error {
+                        code: "tx_too_large".into(),
+                        message: format!(
+                            "interactive transaction exceeded max_tx_bytes ({} > {})",
+                            staged_bytes, self.tx_limits.max_tx_bytes
+                        ),
+                    };
+                }
+                DbResponse::TxBatch { response }
+            }
             Err(e) => DbResponse::Error {
                 code: error_code(&e).to_string(),
                 message: e.to_string(),

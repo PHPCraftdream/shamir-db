@@ -176,6 +176,50 @@ impl TxContext {
         self.started_at.elapsed() > max_lifetime
     }
 
+    /// Approximate byte footprint of everything this tx has staged.
+    ///
+    /// Mirrors the per-field set that `wal_ops_from_tx`
+    /// (`crates/shamir-engine/src/tx/commit.rs:236`) materialises into the
+    /// WAL entry: per-table staging (`write_set`), accumulated index ops
+    /// (`index_write_set`), and tx-buffered HNSW vectors (`staged_vectors`).
+    /// Counters, interner overlay, read-set, table tokens and unique guards
+    /// are bounded bookkeeping and intentionally excluded — the cap is there
+    /// to protect the *payload* dimension.
+    ///
+    /// Note: this measures the in-memory staging footprint, not the eventual
+    /// `WalEntryV2` serialized length. The cap will trip somewhat earlier
+    /// than the actual on-disk WAL size — fine for a protective budget.
+    ///
+    /// `O(N)` over staged entries; called once per `TxExecute` from the
+    /// server's interactive-tx handler. Saturating arithmetic so a degenerate
+    /// caller can never wrap.
+    pub fn staged_bytes(&self) -> usize {
+        let mut total: usize = 0;
+        for staging in self.write_set.values() {
+            total = total.saturating_add(staging.staged_bytes());
+        }
+        for (_token, op) in &self.index_write_set {
+            match op {
+                crate::IndexWriteOp::SetPosting { key, value } => {
+                    total = total.saturating_add(key.len()).saturating_add(value.len());
+                }
+                crate::IndexWriteOp::RemovePosting { key } => {
+                    total = total.saturating_add(key.len());
+                }
+                crate::IndexWriteOp::BumpFtsStats { .. } => {} // counter-only, no payload
+            }
+        }
+        for vecs in self.staged_vectors.values() {
+            for (_rid, embedding) in vecs {
+                // 16 bytes of RecordId + 4 bytes per f32 lane.
+                total = total
+                    .saturating_add(16)
+                    .saturating_add(embedding.len().saturating_mul(4));
+            }
+        }
+        total
+    }
+
     /// True if the tx has no pending writes / index ops / staging at all.
     pub fn is_empty(&self) -> bool {
         self.write_set.is_empty()
@@ -600,6 +644,50 @@ mod tests {
         assert_eq!(v, Some(42));
     }
 
+    #[tokio::test]
+    async fn staged_bytes_accumulates_across_fields() {
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use shamir_storage::types::Store;
+
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Snapshot,
+        );
+
+        // Empty tx → 0.
+        assert_eq!(tx.staged_bytes(), 0);
+
+        // Add a write_set entry: Set("k1", "val") → 2 + 3 = 5 bytes.
+        let base: std::sync::Arc<dyn Store> = std::sync::Arc::new(InMemoryStore::new());
+        let staging = tx.ensure_table_staging(42, "users", base);
+        staging
+            .set(Bytes::from_static(b"k1"), Bytes::from_static(b"val"))
+            .await;
+        let after_write = tx.staged_bytes();
+        assert!(after_write > 0, "write_set should contribute");
+        assert_eq!(after_write, 5);
+
+        // Add an IndexWriteOp::SetPosting → key(3) + value(4) = 7 more.
+        tx.index_write_set.push((
+            42,
+            crate::IndexWriteOp::SetPosting {
+                key: Bytes::from_static(b"idx"),
+                value: Bytes::from_static(b"post"),
+            },
+        ));
+        let after_index = tx.staged_bytes();
+        assert!(after_index > after_write, "index ops should add bytes");
+        assert_eq!(after_index, 5 + 7);
+
+        // Add a staged vector: 2-lane f32 → 16 (rid) + 2*4 = 24 bytes.
+        tx.stage_vector(1, RecordId([0u8; 16]), vec![1.0, 2.0]);
+        let after_vec = tx.staged_bytes();
+        assert!(after_vec > after_index, "staged vectors should add bytes");
+        assert_eq!(after_vec, 5 + 7 + 24);
+    }
+
     #[test]
     fn validate_read_set_unknown_table_returns_conflict() {
         let mut tx = TxContext::new(
@@ -616,5 +704,214 @@ mod tests {
         let (table_id, key) = result.unwrap_err();
         assert_eq!(table_id, 99);
         assert_eq!(key, Bytes::from_static(b"key"));
+    }
+
+    // ── proptest: SSI read-set validation properties ──────────────────
+
+    use proptest::prelude::*;
+    use std::collections::HashMap as StdHashMap;
+
+    /// Reference oracle: independently compute the expected validate_read_set
+    /// outcome given the recorded reads and the provider map. Mirrors the
+    /// IFF rule: Ok iff every recorded key has Some(current) with
+    /// current <= version_seen.
+    fn oracle_conflict(
+        recorded: &StdHashMap<(u64, Vec<u8>), u64>,
+        provider: &StdHashMap<(u64, Vec<u8>), Option<u64>>,
+    ) -> bool {
+        for ((t, k), version_seen) in recorded {
+            match provider.get(&(*t, k.clone())) {
+                None => return true,
+                Some(None) => return true,
+                Some(Some(current)) if *current > *version_seen => return true,
+                Some(Some(_)) => {}
+            }
+        }
+        false
+    }
+
+    /// Build a TxContext (Serializable) and replay the generated reads. Returns
+    /// the tx plus the de-duplicated reference map (first-read-wins -> MIN).
+    fn build_tx_with_reads(
+        reads: &[(u64, Vec<u8>, u64)],
+    ) -> (TxContext, StdHashMap<(u64, Vec<u8>), u64>) {
+        let mut tx = TxContext::new(
+            crate::types::TxId::new(1),
+            0,
+            10,
+            crate::types::IsolationLevel::Serializable,
+        );
+        let mut recorded: StdHashMap<(u64, Vec<u8>), u64> = StdHashMap::new();
+        for (t, k, v) in reads {
+            tx.record_read(*t, Bytes::copy_from_slice(k), *v);
+            recorded
+                .entry((*t, k.clone()))
+                .and_modify(|cur| {
+                    if *v < *cur {
+                        *cur = *v;
+                    }
+                })
+                .or_insert(*v);
+        }
+        (tx, recorded)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 256,
+            .. ProptestConfig::default()
+        })]
+
+        /// Property 1 (AGREEMENT / IFF):
+        /// `validate_read_set` returns Ok iff for every recorded read the
+        /// provider yields Some(current) with current <= version_seen.
+        #[test]
+        fn prop_validate_read_set_iff_oracle(
+            reads in proptest::collection::vec(
+                (
+                    0u64..4,
+                    proptest::collection::vec(any::<u8>(), 1..=4),
+                    0u64..=20,
+                ),
+                0..=8,
+            ),
+            provider_overrides in proptest::collection::vec(
+                (0u64..=25, any::<bool>()),
+                0..=8,
+            ),
+        ) {
+            let (tx, recorded) = build_tx_with_reads(&reads);
+
+            let mut provider_map: StdHashMap<(u64, Vec<u8>), Option<u64>> =
+                StdHashMap::new();
+            let keys: Vec<(u64, Vec<u8>)> = recorded.keys().cloned().collect();
+            for (i, k) in keys.iter().enumerate() {
+                if provider_overrides.is_empty() {
+                    provider_map.insert(k.clone(), Some(0));
+                } else {
+                    let (cur, is_none) =
+                        provider_overrides[i % provider_overrides.len()];
+                    provider_map
+                        .insert(k.clone(), if is_none { None } else { Some(cur) });
+                }
+            }
+
+            let expected_conflict = oracle_conflict(&recorded, &provider_map);
+
+            let pm_ref = &provider_map;
+            let result = tx.validate_read_set(|t, k| {
+                let kv: Vec<u8> = k.as_ref().to_vec();
+                match pm_ref.get(&(t, kv)) {
+                    Some(opt) => *opt,
+                    None => Some(0),
+                }
+            });
+
+            prop_assert_eq!(result.is_err(), expected_conflict);
+
+            if let Err((conflict_t, conflict_k)) = result {
+                let kv: Vec<u8> = conflict_k.as_ref().to_vec();
+                prop_assert!(recorded.contains_key(&(conflict_t, kv.clone())));
+                let version_seen = recorded[&(conflict_t, kv.clone())];
+                let provided = pm_ref.get(&(conflict_t, kv)).copied();
+                let is_real_conflict = match provided {
+                    Some(None) => true,
+                    Some(Some(cur)) => cur > version_seen,
+                    None => false,
+                };
+                prop_assert!(
+                    is_real_conflict,
+                    "validate_read_set returned a non-conflicting key"
+                );
+            }
+        }
+
+        /// Property 2 (MONOTONE BUMP):
+        /// Start from an exactly-passing provider (current = version_seen for
+        /// every recorded read). Validation MUST succeed. Then, for any
+        /// recorded key, bumping its current_version by `bump >= 1` MUST flip
+        /// the result to a conflict.
+        #[test]
+        fn prop_validate_read_set_bump_creates_conflict(
+            reads in proptest::collection::vec(
+                (
+                    0u64..4,
+                    proptest::collection::vec(any::<u8>(), 1..=4),
+                    0u64..=20,
+                ),
+                1..=8,
+            ),
+            pick in 0usize..1024,
+            bump in 1u64..=50,
+        ) {
+            let (tx, recorded) = build_tx_with_reads(&reads);
+            prop_assume!(!recorded.is_empty());
+
+            let baseline: StdHashMap<(u64, Vec<u8>), u64> = recorded.clone();
+
+            let baseline_ref = &baseline;
+            let baseline_result = tx.validate_read_set(|t, k| {
+                let kv: Vec<u8> = k.as_ref().to_vec();
+                Some(*baseline_ref.get(&(t, kv)).unwrap_or(&0))
+            });
+            prop_assert!(
+                baseline_result.is_ok(),
+                "baseline provider (current == version_seen) must NOT conflict"
+            );
+
+            let keys: Vec<(u64, Vec<u8>)> = recorded.keys().cloned().collect();
+            let target = keys[pick % keys.len()].clone();
+
+            let mut bumped = baseline.clone();
+            let target_seen = bumped[&target];
+            bumped.insert(target.clone(), target_seen.saturating_add(bump));
+
+            let bumped_ref = &bumped;
+            let bumped_result = tx.validate_read_set(|t, k| {
+                let kv: Vec<u8> = k.as_ref().to_vec();
+                Some(*bumped_ref.get(&(t, kv)).unwrap_or(&0))
+            });
+            prop_assert!(
+                bumped_result.is_err(),
+                "bumping any recorded key's current_version above version_seen \
+                 must trigger an SSI conflict"
+            );
+        }
+
+        /// Property 3 (NONE-PROVIDER):
+        /// If the provider returns None for ANY recorded key while every other
+        /// key passes, validation must conflict.
+        #[test]
+        fn prop_validate_read_set_none_provider_is_conflict(
+            reads in proptest::collection::vec(
+                (
+                    0u64..4,
+                    proptest::collection::vec(any::<u8>(), 1..=4),
+                    0u64..=20,
+                ),
+                1..=8,
+            ),
+            pick in 0usize..1024,
+        ) {
+            let (tx, recorded) = build_tx_with_reads(&reads);
+            prop_assume!(!recorded.is_empty());
+
+            let keys: Vec<(u64, Vec<u8>)> = recorded.keys().cloned().collect();
+            let nilled = keys[pick % keys.len()].clone();
+            let recorded_ref = &recorded;
+            let nilled_ref = &nilled;
+            let result = tx.validate_read_set(|t, k| {
+                let kv: Vec<u8> = k.as_ref().to_vec();
+                if (t, kv.clone()) == (nilled_ref.0, nilled_ref.1.clone()) {
+                    None
+                } else {
+                    Some(*recorded_ref.get(&(t, kv)).unwrap_or(&0))
+                }
+            });
+            prop_assert!(
+                result.is_err(),
+                "a None provider response for a recorded key must conflict"
+            );
+        }
     }
 }

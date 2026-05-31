@@ -26,6 +26,31 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use shamir_tx::{SnapshotGuard, TxContext};
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+
+/// Phase B Stage 6 — default idle TTL for an open interactive tx.
+/// Matches `TRANSACTIONS.md` (30 s) and `PHASE_B_INTERACTIVE_TX.md` §6.4.
+///
+/// The absolute lifetime cap is a separate constant
+/// (`INTERACTIVE_TX_MAX_LIFETIME` in `db_handler.rs`, 5 min, mirroring
+/// `shamir_engine::DEFAULT_MAX_TX_LIFETIME`). Both are checked by
+/// [`InteractiveTx::is_expired`] and so by [`TxRegistry::expired_handles`].
+pub const DEFAULT_INTERACTIVE_TX_IDLE_TTL: Duration = Duration::from_secs(30);
+
+/// Phase B Stage 6 — default sweep cadence for the reaper task.
+/// Comfortably below the 30 s idle TTL so a tx that idles past its TTL is
+/// reaped within a few seconds of becoming reapable.
+pub const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Phase B Stage 6 — handle for the periodic interactive-tx reaper task.
+/// Same shape as the server's `MetaSnapshotTask`: a `JoinHandle<()>` plus
+/// a `Notify` stop signal so shutdown wakes the task immediately rather
+/// than waiting one full sweep interval.
+pub struct ReaperTask {
+    pub handle: JoinHandle<()>,
+    pub stop: Arc<Notify>,
+}
 
 /// Errors surfaced when driving a handle through the registry.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -236,6 +261,63 @@ impl TxRegistry {
     }
 }
 
+/// Spawn the periodic interactive-tx reaper.
+///
+/// The task loops every `reap_interval`, calling
+/// [`TxRegistry::expired_handles`] with `idle_ttl`, then [`TxRegistry::remove`]
+/// on each. Removing the [`Arc<InteractiveTx>`] drops it; if no commit /
+/// rollback path took the inner `TxContext` first, drop = RAII rollback per
+/// the `TxContext` doc-comment (no storage I/O). The `SnapshotGuard` held
+/// inside drops alongside, releasing MVCC GC's `min_alive` hold.
+///
+/// **Abort-on-disconnect (Stage 7 limitation).** `SessionStore`
+/// (`shamir_connect::server::session`) has no observer hook on idle
+/// eviction — there is no callback surface to inject "abort tx for this
+/// session" when a TCP connection drops. The idle TTL checked by this
+/// reaper is therefore the authoritative cleanup for txs orphaned by a
+/// dropped connection (the §6.3 backstop). A future `SessionStore`
+/// eviction-hook API could tighten this, but nothing is durable until
+/// commit, so the wait is free.
+pub fn spawn_reaper_task(
+    registry: Arc<TxRegistry>,
+    idle_ttl: Duration,
+    reap_interval: Duration,
+) -> ReaperTask {
+    let stop = Arc::new(Notify::new());
+    let stop_inner = stop.clone();
+    let handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(reap_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Drop the immediate first tick — pointless to scan an empty registry
+        // the moment we boot.
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop_inner.notified() => {
+                    tracing::debug!("interactive_tx_reaper: shutdown notified");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let now = Instant::now();
+                    let expired = registry.expired_handles(now, idle_ttl);
+                    if expired.is_empty() {
+                        continue;
+                    }
+                    let reaped = expired.len();
+                    for h in expired {
+                        // remove() returns the Arc<InteractiveTx>; drop = RAII
+                        // rollback if the ctx was never committed/rolled back.
+                        let _ = registry.remove(h);
+                    }
+                    tracing::info!(reaped, "interactive_tx_reaper: aborted past-deadline transactions");
+                }
+            }
+        }
+    });
+    ReaperTask { handle, stop }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +454,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reaper_contract_past_deadline_tx_is_removed() {
+        let reg = TxRegistry::new();
+        // Zero lifetime -> deadline == creation instant; the registry's
+        // is_expired check fires immediately. Same trick as
+        // `expired_by_absolute_deadline`.
+        let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+        reg.register(handle, it).unwrap();
+
+        // The contract the reaper task runs each tick:
+        let expired = reg.expired_handles(Instant::now(), Duration::from_secs(60));
+        assert_eq!(expired, vec![handle], "past-deadline tx is listed by sweep");
+        for h in expired {
+            let arc = reg.remove(h);
+            assert!(arc.is_some(), "remove yields the parked tx for RAII drop");
+        }
+        assert!(reg.is_empty(), "registry empty after sweep");
+        assert!(
+            matches!(
+                reg.get_owned(handle, &SID_A),
+                Err(TxRegistryError::TxNotFound)
+            ),
+            "lookup after reap returns TxNotFound"
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_task_reaps_past_deadline_tx() {
+        let reg = Arc::new(TxRegistry::new());
+        let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+        reg.register(handle, it).unwrap();
+        assert_eq!(reg.len(), 1);
+
+        // Tight sweep, generous idle TTL -> only the absolute-deadline branch fires.
+        let reaper = spawn_reaper_task(
+            Arc::clone(&reg),
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        );
+        // The first tick is dropped (set in spawn_reaper_task), so the first
+        // real sweep fires ~50ms later. Sleep generously to avoid CI flake.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(reg.is_empty(), "reaper task drained the past-deadline tx");
+        assert!(matches!(
+            reg.get_owned(handle, &SID_A),
+            Err(TxRegistryError::TxNotFound)
+        ));
+
+        // Clean drain -- mirror ServerHandle::shutdown so the test never leaks the task.
+        reaper.stop.notify_waiters();
+        let _ = reaper.handle.await;
+    }
+
+    #[tokio::test]
     async fn expired_by_idle_ttl() {
         let reg = TxRegistry::new();
         // Long absolute deadline, but a zero idle TTL → always idle-expired.
@@ -385,5 +520,100 @@ mod tests {
         assert!(reg
             .expired_handles(Instant::now(), Duration::from_secs(3600))
             .is_empty());
+    }
+
+    /// Sweep workflow: `expired_handles` yields the reaped set; `remove`
+    /// drops the `InteractiveTx` (RAII = no storage side effect, design
+    /// §6.4) and frees the one-tx-per-session slot.
+    #[tokio::test]
+    async fn sweep_reaps_expired_handle_and_frees_session_slot() {
+        let reg = TxRegistry::new();
+        // absolute=0 → already expired
+        let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+        reg.register(handle, it).unwrap();
+
+        // Sweep step 1: collect expired handles.
+        let expired = reg.expired_handles(Instant::now(), Duration::from_secs(3600));
+        assert_eq!(
+            expired,
+            vec![handle],
+            "sweep must surface the past-deadline handle"
+        );
+
+        // Sweep step 2: drop each — RAII rollback, no storage I/O.
+        for h in expired {
+            let arc = reg.remove(h).expect("sweep removes the entry");
+            // Closing the handle on the sweep path mirrors
+            // commit/rollback semantics.
+            let _ = arc.ctx().lock().await.take();
+        }
+
+        assert!(reg.is_empty(), "sweep drained the open map");
+        assert!(
+            matches!(
+                reg.get_owned(handle, &SID_A),
+                Err(TxRegistryError::TxNotFound)
+            ),
+            "reaped handle is no longer addressable"
+        );
+
+        // Session slot is freed → the session can open a NEW tx (would have
+        // hit TxAlreadyOpen if `remove` had skipped by_session cleanup).
+        let (h2, it2) = make_tx(SID_A, Duration::from_secs(300), 2).await;
+        reg.register(h2, it2)
+            .expect("session slot freed after sweep");
+        assert_eq!(reg.len(), 1);
+    }
+
+    /// `bump_activity` defers idle-deadline reaping but does NOT extend the
+    /// absolute deadline (the hard upper bound on how long a tx can pin GC).
+    #[tokio::test]
+    async fn bump_activity_defers_idle_reap() {
+        let reg = TxRegistry::new();
+        // Far absolute deadline.
+        let (handle, it) = make_tx(SID_A, Duration::from_secs(3600), 1).await;
+        let arc = reg.register(handle, it).unwrap();
+
+        // Before bump: zero idle-ttl reaps any inactive tx.
+        let expired_pre = reg.expired_handles(Instant::now(), Duration::ZERO);
+        assert_eq!(
+            expired_pre,
+            vec![handle],
+            "sanity: idle-reap fires at ZERO ttl"
+        );
+
+        // Bump activity — the idle clock restarts.
+        arc.bump_activity();
+
+        // With a generous idle ttl (1 hour), the just-bumped tx is NOT
+        // idle-expired.
+        assert!(
+            reg.expired_handles(Instant::now(), Duration::from_secs(3600))
+                .is_empty(),
+            "bump_activity defers the idle-reap when the absolute deadline is far"
+        );
+    }
+
+    /// Even after `bump_activity`, an absolute-deadline-past tx is reaped.
+    /// The absolute deadline is the hard upper bound (design doc §6.4).
+    #[tokio::test]
+    async fn absolute_deadline_overrides_bump_activity() {
+        let reg = TxRegistry::new();
+        // absolute=0 → already past
+        let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
+        let arc = reg.register(handle, it).unwrap();
+
+        // Bump activity — but the absolute deadline is the hard cap.
+        arc.bump_activity();
+
+        // Even with a huge idle ttl, the past-absolute-deadline tx is
+        // expired.
+        let expired = reg.expired_handles(Instant::now(), Duration::from_secs(3600));
+        assert_eq!(
+            expired,
+            vec![handle],
+            "absolute deadline overrides bump_activity — it is the hard \
+             upper bound on tx lifetime"
+        );
     }
 }

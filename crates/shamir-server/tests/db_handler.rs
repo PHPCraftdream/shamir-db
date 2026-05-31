@@ -22,7 +22,7 @@ use shamir_db::ShamirDb;
 
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_server::db_handler::{
-    AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler,
+    AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler, TxLimitsCap,
 };
 use shamir_server::user_directory::RedbUserDirectory;
 use tempfile::TempDir;
@@ -618,4 +618,131 @@ async fn create_scram_user_success_then_duplicate() {
 #[allow(dead_code)]
 fn _indexmap_in_scope() -> IndexMap<String, u32> {
     IndexMap::new()
+}
+
+// --------------------------------------------------------------------------
+// Phase B Stage 8 — per-tx staging byte budget (`tx_too_large` abort).
+// --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tx_too_large_aborts_and_removes_handle() {
+    let shamir = make_db_with_table("prod", "main", "items").await;
+    // Tiny cap (32 bytes) — a single insert of a non-trivial row blows past it.
+    let handler = ShamirDbHandler::new(shamir).with_tx_limits(TxLimitsCap { max_tx_bytes: 32 });
+    let session = user_session();
+
+    // BEGIN
+    let begin = DbRequest::TxBegin {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        db: "prod".into(),
+        repo: "main".into(),
+        isolation: None,
+    };
+    let opened = decode(&handler.handle(&session, &encode(&begin)).unwrap());
+    let tx_handle = match opened {
+        DbResponse::TxOpened { tx_handle, .. } => tx_handle,
+        other => panic!("expected TxOpened, got {:?}", other),
+    };
+
+    // EXECUTE — insert one row (well above 32 bytes once MessagePack-encoded).
+    let body: BatchRequest = serde_json::from_value(json!({
+        "id": "v",
+        "queries": {
+            "ins": {
+                "insert_into": "items",
+                "repo": "main",
+                "values": [
+                    {
+                        "name": "Alice the Great",
+                        "tag": "padding-to-blow-past-32-bytes"
+                    }
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let exec = DbRequest::TxExecute {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        db: "prod".into(),
+        tx_handle,
+        batch: body,
+    };
+    let res = decode(&handler.handle(&session, &encode(&exec)).unwrap());
+    match res {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "tx_too_large",
+                "expected tx_too_large, got {:?}",
+                message
+            );
+            assert!(
+                message.contains("max_tx_bytes"),
+                "msg should name the cap: {:?}",
+                message
+            );
+        }
+        other => panic!("expected tx_too_large Error, got {:?}", other),
+    }
+
+    // Verify the handle is gone — a follow-up COMMIT on it should now
+    // surface `tx_not_found`, proving the abort removed it from the registry.
+    let commit = DbRequest::TxCommit {
+        db: "prod".into(),
+        tx_handle,
+    };
+    let after = decode(&handler.handle(&session, &encode(&commit)).unwrap());
+    match after {
+        DbResponse::Error { code, .. } => assert_eq!(code, "tx_not_found"),
+        other => panic!("expected tx_not_found after abort, got {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tx_under_cap_passes_through() {
+    let shamir = make_db_with_table("prod", "main", "items").await;
+    // Generous cap — same insert as above must succeed.
+    let handler = ShamirDbHandler::new(shamir).with_tx_limits(TxLimitsCap {
+        max_tx_bytes: 64 * 1024 * 1024,
+    });
+    let session = user_session();
+
+    let begin = DbRequest::TxBegin {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        db: "prod".into(),
+        repo: "main".into(),
+        isolation: None,
+    };
+    let tx_handle = match decode(&handler.handle(&session, &encode(&begin)).unwrap()) {
+        DbResponse::TxOpened { tx_handle, .. } => tx_handle,
+        other => panic!("expected TxOpened, got {:?}", other),
+    };
+    let body: BatchRequest = serde_json::from_value(json!({
+        "id": "v",
+        "queries": {
+            "ins": {
+                "insert_into": "items",
+                "repo": "main",
+                "values": [
+                    {
+                        "name": "Alice"
+                    }
+                ]
+            }
+        }
+    }))
+    .unwrap();
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&DbRequest::TxExecute {
+                    query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+                    db: "prod".into(),
+                    tx_handle,
+                    batch: body,
+                }),
+            )
+            .unwrap(),
+    );
+    assert!(matches!(res, DbResponse::TxBatch { .. }), "got {:?}", res);
 }
