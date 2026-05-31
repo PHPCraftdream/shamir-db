@@ -91,7 +91,7 @@ impl SessionPermissions {
         }
 
         // Sort by specificity descending for early exit in check()
-        decisions.sort_by(|a, b| b.resource.specificity().cmp(&a.resource.specificity()));
+        decisions.sort_by_key(|b| std::cmp::Reverse(b.resource.specificity()));
 
         // Merge row filters: group by (action, resource), OR them together.
         let row_filters = merge_row_filters(raw_filters);
