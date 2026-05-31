@@ -269,10 +269,12 @@ async fn aborted_tx_hnsw_staged_cleaned() {
         // resolve the tx's own staged slice and merge it in the lookup.
         let res = backend
             .lookup_tx(
+                token,
                 IndexQuery::Vector {
                     vec: vec![1.0, 0.0, 0.0],
                     k: 10,
                 },
+                None,
                 tx.staged_vectors_for(token),
             )
             .await
@@ -397,10 +399,12 @@ async fn in_tx_search_sees_own_staged_vector() {
 
     let res = backend
         .lookup_tx(
+            token,
             IndexQuery::Vector {
                 vec: vec![1.0, 0.0, 0.0],
                 k: 10,
             },
+            None,
             tx.staged_vectors_for(token),
         )
         .await

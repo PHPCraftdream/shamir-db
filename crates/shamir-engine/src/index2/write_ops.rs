@@ -265,9 +265,11 @@ mod tests {
         let backend = MockBackend::new();
         let res = backend
             .lookup_tx(
+                0,
                 IndexQuery::Point {
                     keys: SmallVec::new(),
                 },
+                None,
                 None,
             )
             .await
@@ -283,9 +285,11 @@ mod tests {
         let staged: Vec<(RecordId, Vec<f32>)> = Vec::new();
         let res = backend
             .lookup_tx(
+                0,
                 IndexQuery::Point {
                     keys: SmallVec::new(),
                 },
+                None,
                 Some(&staged),
             )
             .await

@@ -75,11 +75,36 @@ pub trait IndexBackend: Send + Sync {
     /// query sees its own writes (HIGH-6). Non-vector backends stage
     /// their postings in `tx.index_write_set` and have nothing to merge
     /// here.
+    ///
+    /// Phase C (Step 5): for `IndexQuery::Range` under Serializable
+    /// isolation, records an `IndexRange` predicate dependency BEFORE
+    /// forwarding. Zero-overhead: non-Range queries and non-Serializable
+    /// txs skip the recording block entirely.
     async fn lookup_tx(
         &self,
+        table_token: u64,
         query: IndexQuery,
+        tx: Option<&shamir_tx::TxContext>,
         _staged_vectors: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<IndexResult, IndexError> {
+        if let (IndexQuery::Range { ref lo, ref hi }, Some(t)) = (&query, tx) {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let idx_id = self.descriptor().name_interned;
+                let map_b = |b: &Bound<Vec<u8>>| -> Bound<bytes::Bytes> {
+                    match b {
+                        Bound::Included(v) => Bound::Included(bytes::Bytes::copy_from_slice(v)),
+                        Bound::Excluded(v) => Bound::Excluded(bytes::Bytes::copy_from_slice(v)),
+                        Bound::Unbounded => Bound::Unbounded,
+                    }
+                };
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::IndexRange {
+                    table_token,
+                    index_id: idx_id,
+                    lo: map_b(lo),
+                    hi: map_b(hi),
+                });
+            }
+        }
         self.lookup(query).await
     }
 

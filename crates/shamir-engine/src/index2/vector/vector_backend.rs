@@ -191,7 +191,9 @@ impl IndexBackend for VectorBackend {
 
     async fn lookup_tx(
         &self,
+        _table_token: u64,
         query: IndexQuery,
+        _tx: Option<&shamir_tx::TxContext>,
         staged_vectors: Option<&[(RecordId, Vec<f32>)]>,
     ) -> Result<IndexResult, IndexError> {
         match query {
@@ -382,7 +384,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let via_tx = backend.lookup_tx(q, None).await.unwrap();
+        let via_tx = backend.lookup_tx(0, q, None, None).await.unwrap();
         match (via_lookup, via_tx) {
             (IndexResult::Ranked(a), IndexResult::Ranked(b)) => {
                 assert_eq!(a.len(), b.len());
@@ -446,10 +448,12 @@ mod tests {
         // tx-aware lookup gets the staged slice threaded in by the caller.
         let in_tx = backend
             .lookup_tx(
+                0,
                 IndexQuery::Vector {
                     vec: vec![1.0, 0.0, 0.0],
                     k: 2,
                 },
+                None,
                 Some(&staged),
             )
             .await

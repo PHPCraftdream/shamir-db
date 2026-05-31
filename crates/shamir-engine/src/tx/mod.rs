@@ -1,4 +1,5 @@
 pub mod commit;
+pub mod predicate_range;
 pub mod recovery;
 
 pub use commit::{commit_tx, TxError as CommitError, TxOutcome};

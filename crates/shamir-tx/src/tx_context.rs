@@ -133,6 +133,12 @@ pub struct TxContext {
     /// only ever accompanies a staged write, so it is never the sole
     /// occupant of the tx.
     pub unique_guards: Vec<UniqueGuard>,
+
+    /// Predicate / range read-set for SSI phantom detection (Phase C).
+    /// Populated ONLY when `isolation == Serializable`, exactly like
+    /// [`read_set`](Self::read_set). Interior-mutable so the engine's
+    /// scan path can append through a shared `&TxContext`.
+    pub predicate_set: crate::predicate_set::PredicateSet,
 }
 
 impl TxContext {
@@ -158,6 +164,7 @@ impl TxContext {
             version_provider: None,
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),
+            predicate_set: crate::predicate_set::PredicateSet::new(),
         }
     }
 
@@ -277,6 +284,17 @@ impl TxContext {
                     ve.insert_entry(version);
                 }
             }
+        }
+    }
+
+    /// Record a predicate dependency for SSI phantom detection.
+    ///
+    /// No-op under Snapshot isolation — zero-overhead invariant: the
+    /// isolation gate runs BEFORE any work. Takes `&self` via interior
+    /// mutability so engine scan paths can append through `&TxContext`.
+    pub fn record_predicate_shared(&self, dep: crate::predicate_set::PredicateDep) {
+        if self.isolation == IsolationLevel::Serializable {
+            self.predicate_set.push(dep);
         }
     }
 
@@ -704,6 +722,37 @@ mod tests {
         let (table_id, key) = result.unwrap_err();
         assert_eq!(table_id, 99);
         assert_eq!(key, Bytes::from_static(b"key"));
+    }
+
+    #[test]
+    fn record_predicate_shared_noop_on_snapshot() {
+        use crate::predicate_set::PredicateDep;
+        let ctx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+        ctx.record_predicate_shared(PredicateDep::TableScan { table_token: 7 });
+        ctx.record_predicate_shared(PredicateDep::IndexRange {
+            table_token: 7,
+            index_id: 1,
+            lo: std::ops::Bound::Unbounded,
+            hi: std::ops::Bound::Unbounded,
+        });
+        assert!(
+            ctx.predicate_set.is_empty(),
+            "Snapshot isolation must not record predicate deps"
+        );
+    }
+
+    #[test]
+    fn record_predicate_shared_appends_on_serializable() {
+        use crate::predicate_set::PredicateDep;
+        let ctx = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Serializable);
+        ctx.record_predicate_shared(PredicateDep::TableScan { table_token: 7 });
+        ctx.record_predicate_shared(PredicateDep::IndexRange {
+            table_token: 7,
+            index_id: 42,
+            lo: std::ops::Bound::Included(bytes::Bytes::from_static(b"\x00")),
+            hi: std::ops::Bound::Excluded(bytes::Bytes::from_static(b"\xff")),
+        });
+        assert_eq!(ctx.predicate_set.len(), 2);
     }
 
     // ── proptest: SSI read-set validation properties ──────────────────

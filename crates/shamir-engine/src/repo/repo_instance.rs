@@ -591,6 +591,31 @@ impl RepoInstance {
         for mvcc in stores {
             total += mvcc.gc().await?;
         }
+
+        // Phase C Step 7: prune the per-repo commit-write-log on the SAME
+        // GC tick that just pruned per-table `MvccStore::version_cache`.
+        // Uses the gate's `min_alive()` — byte-for-byte the same threshold
+        // the per-store `MvccStore::gc()` consumed inside
+        // `prune_version_cache` (mvcc_store.rs:447). Identical discipline,
+        // identical safety argument (see `RepoTxGate::prune_commit_log_below`
+        // doc-comment and the invariant on mvcc_store.rs:416-441).
+        //
+        // Zero-overhead on non-Serializable repos: the log is empty, so
+        // `prune_commit_log_below` walks an empty `TreeIndex` range and
+        // returns 0 immediately. The gate may not even exist yet (the
+        // `OnceCell` is lazy-init'd on the first `tx_gate()` call); we use
+        // `self.tx_gate.get()` (non-allocating peek) to skip cleanly when
+        // the gate has never been initialised.
+        //
+        // Lock order: `prune_commit_log_below` takes NO locks — it uses
+        // `scc::TreeIndex::remove_range` (lock-free CAS). Callers MUST NOT
+        // hold `commit_mutex` here (we don't — `run_gc` is an independent
+        // background task).
+        if let Some(gate) = self.tx_gate.get() {
+            let min_alive = gate.min_alive();
+            let _pruned = gate.prune_commit_log_below(min_alive);
+        }
+
         self.tx_metrics.on_gc_run(total);
         Ok(total)
     }

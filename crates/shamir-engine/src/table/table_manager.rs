@@ -1290,6 +1290,16 @@ impl TableManager {
         tx: Option<&'a shamir_tx::TxContext>,
         batch_size: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        // Phase C (Step 6): defensive coarse recording for streams
+        // reached directly (bypassing read_tx). Zero-overhead: gate on
+        // Serializable before any work.
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
+                    table_token: self.table_token(),
+                });
+            }
+        }
         let inner = self.list_stream(batch_size);
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
@@ -1310,6 +1320,29 @@ impl TableManager {
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
     ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
+        // Phase C (Step 6): predicate recording for filter streams
+        // reached directly (bypassing read_tx). Zero-overhead: gate on
+        // Serializable before any work.
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let token = self.table_token();
+                let deps = crate::query::filter::eval::predicate_to_index_range(
+                    filter,
+                    self.sorted_indexes(),
+                    ctx.interner,
+                    token,
+                );
+                if deps.is_empty() {
+                    t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
+                        table_token: token,
+                    });
+                } else {
+                    for d in deps {
+                        t.record_predicate_shared(d);
+                    }
+                }
+            }
+        }
         let inner = self.filter_stream(batch_size, filter, ctx).await?;
         let token = self.table_token();
         let mvcc = self.mvcc_store.clone();
@@ -1563,6 +1596,42 @@ impl TableManager {
             .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
             .is_some();
         if recording {
+            // Phase C (Step 6): one-shot predicate-set recording derived
+            // from query.r#where. Zero-overhead: this block only runs for
+            // Serializable txs.
+            let tx_ref = tx.expect("recording=true implies tx is Some");
+            let token = self.table_token();
+            match query.r#where.as_ref() {
+                None => {
+                    // No WHERE → coarse TableScan over the whole table.
+                    tx_ref.record_predicate_shared(
+                        shamir_tx::predicate_set::PredicateDep::TableScan { table_token: token },
+                    );
+                }
+                Some(filter) => {
+                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                        filter,
+                        self.sorted_indexes(),
+                        ctx.interner,
+                        token,
+                    );
+                    if deps.is_empty() {
+                        tx_ref.record_predicate_shared(
+                            shamir_tx::predicate_set::PredicateDep::TableScan {
+                                table_token: token,
+                            },
+                        );
+                    } else {
+                        for dep in deps {
+                            tx_ref.record_predicate_shared(dep);
+                        }
+                    }
+                }
+            }
+
+            // Existing per-record recording pass (unchanged) — captures
+            // point-key reads for the read_set, complementing the
+            // predicate_set.
             self.record_query_reads(query, ctx, tx).await?;
         }
         self.read(query, ctx).await
