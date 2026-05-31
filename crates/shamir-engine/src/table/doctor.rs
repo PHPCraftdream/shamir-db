@@ -342,7 +342,7 @@ impl TableManager {
                 shamir_types::types::value::InnerValue,
             )> = created_ids
                 .iter()
-                .zip(values.into_iter())
+                .zip(values)
                 .filter_map(|(id, opt)| opt.map(|v| (*id, v)))
                 .collect();
             records_processed += pairs.len() as u64;
@@ -368,7 +368,7 @@ impl TableManager {
                 shamir_types::types::value::InnerValue,
             )> = updated_ids
                 .iter()
-                .zip(values.into_iter())
+                .zip(values)
                 .filter_map(|(id, opt)| opt.map(|v| (*id, v)))
                 .collect();
             records_processed += pairs.len() as u64;
