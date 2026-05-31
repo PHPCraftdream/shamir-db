@@ -110,6 +110,14 @@ Commit arc roughly `2cfb7f6 → dfaed28`:
    de-flaked at the root (argon2 semaphore, sled transact observer,
    vector-migration approximate-top-k); roadmap planning docs + `NEXT_PHASES`
    index.
+5. **CI hardened & green**: the `clippy` job had been red since 2026-05-29
+   from `@stable` drift (new lints on untouched code). Fixed durably by
+   **pinning the toolchain** (`rust-toolchain.toml` + `dtolnay/rust-toolchain@1.93.0`
+   in all CI jobs) so local and CI lint identically — green here == green in
+   CI. Bumped `actions/checkout@v4 → @v5` (Node 20 EOL). Added
+   [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the exact four-command gate +
+   the toolchain-bump procedure. Benches never run in CI (`--lib` +
+   `--test '*'` exclude `[[bench]]`).
 
 Method: multi-agent workflows (smart `aoh` research, parallel → `ao46l`
 implementation, sequential → verify) with a zero-trust backstop review (diffs
@@ -124,6 +132,17 @@ and semantics confirmed by independent gate runs, never by agent claims).
   to have) — see [`roadmap/PERF_OPPORTUNITIES.md`](roadmap/PERF_OPPORTUNITIES.md).
 - Nightly `cargo-fuzz` target for the version codec (proptest covers the bulk).
 - `.gitignore` housekeeping: `server-cert.pem`, `crates/shamir-client-node/target/`.
+- Periodically bump the pinned toolchain (currently `1.93.0`) + fix any new
+  lints — procedure in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+- Task #17 ("transactions within a batch — MemBuffer + WAL") is effectively
+  **closed** by Phase A + Phase B.
+
+**Priority recommendation:** the foundation (storage + transactions +
+protocol + security) is complete and solid. The highest-value next major step
+is one of: (1) **WASM modules** (the "M" — sandboxed user logic, the core
+value proposition); (2) **replication / P2P** (the "I" — decentralization);
+(3) **query language v2** (usability over the finished engine). Each taken the
+same way: smart-agent research → implementation → zero-trust verify → green CI.
 
 **Large directions** (per [`roadmap/`](roadmap/)):
 
