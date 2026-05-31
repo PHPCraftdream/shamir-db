@@ -136,6 +136,73 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
             });
         }
     }
+
+    // Indexed variant — exercises the per-row vs batched cost on
+    // the heavier write path: 1 unique index (`uniq_email`) + 1
+    // regular index (`by_city`). Each iteration runs against a fresh
+    // in-memory repo so unique-index state doesn't accumulate across
+    // samples. The win is largest here: per-row validate +
+    // legacy index planning + index2 backend scan dominates.
+    for &n in &[100usize, 1000] {
+        group.throughput(Throughput::Elements(n as u64));
+
+        for transactional in [false, true] {
+            let label = if transactional { "tx" } else { "non_tx" };
+            group.bench_function(format!("indexed/{}/{}", label, n), |b| {
+                b.to_async(&rt).iter_custom(|iters| async move {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        // Fresh repo + table per iter so unique-index
+                        // postings don't collide across samples.
+                        let repo = make_repo();
+                        let tbl = repo.get_table("bench_table").await.unwrap();
+                        tbl.create_unique_index("uniq_email", &["email"])
+                            .await
+                            .unwrap();
+                        tbl.create_index("by_city", &["city"]).await.unwrap();
+                        drop(tbl);
+
+                        let resolver = Resolver { repo: repo.clone() };
+                        let mut queries = new_map();
+                        let values: Vec<serde_json::Value> = (0..n)
+                            .map(|i| {
+                                serde_json::json!({
+                                    "email": format!("user_{}@example.com", i),
+                                    "city": format!("c_{}", i % 8),
+                                    "score": i,
+                                })
+                            })
+                            .collect();
+                        queries.insert(
+                            "ins".to_string(),
+                            QueryEntry {
+                                op: BatchOp::Insert(InsertOp {
+                                    insert_into: TableRef::new("bench_table"),
+                                    values,
+                                }),
+                                return_result: false,
+                            },
+                        );
+                        let request = BatchRequest {
+                            id: serde_json::json!(1),
+                            name: None,
+                            transactional,
+                            isolation: None,
+                            queries,
+                            return_all: false,
+                            return_only: None,
+                            limits: Default::default(),
+                        };
+
+                        let start = Instant::now();
+                        let _ = execute_batch(&request, &resolver, None).await.unwrap();
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+    }
     group.finish();
 }
 

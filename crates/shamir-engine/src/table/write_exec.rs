@@ -127,11 +127,14 @@ impl TableManager {
             vals
         };
 
-        let mut ids: Vec<RecordId> = Vec::with_capacity(inner_values.len());
-        for v in &inner_values {
-            let id = self.insert_tx(v, Some(&mut *tx)).await?;
-            ids.push(id);
-        }
+        // Batched tx insert — mirrors `insert_many`'s structure on the
+        // tx staging path. Lifts per-row overhead
+        // (`validate_unique_for_create`, `unique_keys_for`,
+        // `all_backends().await`, legacy/sorted plan calls) out of
+        // the row loop. Semantics identical to looping `insert_tx`:
+        // same RecordId order, same unique-guard recording, same
+        // staged_vectors, same counter delta.
+        let ids: Vec<RecordId> = self.insert_tx_many(&inner_values, tx).await?;
 
         let mut records = Vec::with_capacity(op.values.len());
         for (value, id) in op.values.iter().zip(ids.iter()) {

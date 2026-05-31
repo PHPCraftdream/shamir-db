@@ -187,6 +187,34 @@ impl SortedIndexManager {
         Ok(ops)
     }
 
+    /// Planner variant of [`on_records_created_batch`] — collects
+    /// entry ops for N records across all sorted indexes in one
+    /// pass, snapshotting `iter_indexes()` ONCE (the per-row
+    /// `plan_record_created` re-snapshots every call). Used by the
+    /// tx batch insert path.
+    pub fn plan_records_created_batch<'a, I>(&self, items: I) -> DbResult<Vec<IndexWriteOp>>
+    where
+        I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
+    {
+        if self.indexes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let mut ops = Vec::new();
+        for def in &defs {
+            for (rid, value) in items.clone() {
+                if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
+                    let key = self.build_entry_key(def.name_interned, &encoded, rid);
+                    ops.push(IndexWriteOp::SetPosting {
+                        key,
+                        value: Bytes::new(),
+                    });
+                }
+            }
+        }
+        Ok(ops)
+    }
+
     /// Plan index entry changes when a record is updated.
     pub fn plan_record_updated(
         &self,
