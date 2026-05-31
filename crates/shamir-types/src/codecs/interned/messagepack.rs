@@ -78,19 +78,28 @@ impl Serialize for InternedRef<'_> {
             Value::Map(m) => {
                 let mut map = ser.serialize_map(Some(m.len()))?;
                 for (k, v) in m {
-                    let user_key = self.interner.get_str(k).ok_or_else(|| {
-                        serde::ser::Error::custom(format!(
-                            "Interned key not found in interner: {:?}",
-                            k
-                        ))
-                    })?;
-                    map.serialize_entry(
-                        user_key.as_ref(),
-                        &InternedRef {
-                            value: v,
-                            interner: self.interner,
-                        },
-                    )?;
+                    // Borrow the interned key string without allocating
+                    // a `UserKey(String)` per entry (hunt #7). The
+                    // `with_str` closure scope covers the
+                    // `serialize_entry` call so the `&str` stays live.
+                    let r: Result<(), S::Error> = self
+                        .interner
+                        .with_str(k, |key_str| {
+                            map.serialize_entry(
+                                key_str,
+                                &InternedRef {
+                                    value: v,
+                                    interner: self.interner,
+                                },
+                            )
+                        })
+                        .ok_or_else(|| {
+                            serde::ser::Error::custom(format!(
+                                "Interned key not found in interner: {:?}",
+                                k
+                            ))
+                        })?;
+                    r?;
                 }
                 map.end()
             }
