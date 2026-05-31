@@ -432,6 +432,166 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Client-visible commit latency on an INDEX-HEAVY tx, sync vs async-index
+/// visibility. Async ON should return BEFORE Phase 5c (index posting writes
+/// to `info_store`) lands — for N=100/1000 postings this is the dominant
+/// cost on a sled-backed table, so the win is a multiple. Measured purely as
+/// the time `commit_tx().await` takes — the background tail is NOT awaited
+/// inside the timed window. Each iter creates a fresh repo and runs ONE
+/// commit, so a previous iter's background tail can't contend with the next.
+/// Two backends are measured: in-memory (CPU-bound 5c) and sled (sled
+/// transact is heavier — exposes the largest sync→async delta).
+fn bench_async_commit_index_heavy(c: &mut Criterion) {
+    use shamir_engine::tx::commit_tx;
+    use shamir_tx::{
+        CommitVisibility, IndexWriteOp, IsolationLevel, StagingStore, TxContext, TxId,
+    };
+    use shamir_types::types::record_id::RecordId;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut group = c.benchmark_group("commit_tx/async_visibility_index_heavy");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(8));
+
+    for &n in &[100usize, 1000usize] {
+        group.throughput(Throughput::Elements(n as u64));
+
+        // In-memory backend — Phase 5c is per-key + (cheap) HashMap writes.
+        for visibility in [CommitVisibility::Synchronous, CommitVisibility::AsyncIndex] {
+            let label = match visibility {
+                CommitVisibility::Synchronous => "sync",
+                CommitVisibility::AsyncIndex => "async",
+            };
+            group.bench_with_input(
+                BenchmarkId::new(format!("inmem_{}", label), n),
+                &n,
+                |b, &n| {
+                    b.to_async(&rt).iter_custom(|iters| async move {
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let repo = make_repo();
+                            let tbl = repo.get_table("bench_table").await.unwrap();
+                            let token = shamir_engine::table::table_token_for("bench_table");
+
+                            let staging = StagingStore::new(Arc::clone(tbl.data_store()));
+                            for i in 0..n {
+                                let rid = RecordId::new();
+                                let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();
+                                staging.set(rid.to_bytes(), body).await;
+                            }
+                            let mut tx = TxContext::new(
+                                TxId::new(7_900_000 + n as u64),
+                                0,
+                                0,
+                                IsolationLevel::Snapshot,
+                            );
+                            tx.write_set.insert(token, staging);
+                            for i in 0..n {
+                                tx.index_write_set.push((
+                                    token,
+                                    IndexWriteOp::SetPosting {
+                                        key: bytes::Bytes::from(format!("idx_k_{}", i)),
+                                        value: bytes::Bytes::from(format!("idx_v_{}", i)),
+                                    },
+                                ));
+                            }
+                            tx.set_visibility(visibility);
+
+                            let start = Instant::now();
+                            let mut outcome = commit_tx(tx, &repo).await.unwrap();
+                            total += start.elapsed();
+                            // Drain the background tail OUTSIDE the timed
+                            // window so subsequent iters aren't contending
+                            // with this iter's pending work (no carry-over
+                            // distortion across samples).
+                            if let Some(bg) = outcome.take_background() {
+                                let _ = bg.join().await;
+                            }
+                        }
+                        total
+                    });
+                },
+            );
+        }
+
+        // Sled backend — Phase 5c does a real (batched) transact + fsync
+        // per call; the absolute sync→async delta is largest here.
+        for visibility in [CommitVisibility::Synchronous, CommitVisibility::AsyncIndex] {
+            let label = match visibility {
+                CommitVisibility::Synchronous => "sync",
+                CommitVisibility::AsyncIndex => "async",
+            };
+            group.bench_with_input(
+                BenchmarkId::new(format!("sled_{}", label), n),
+                &n,
+                |b, &n| {
+                    b.to_async(&rt).iter_custom(|iters| async move {
+                        let mut total = Duration::ZERO;
+                        for _ in 0..iters {
+                            let tempdir = tempfile::TempDir::new().expect("tempdir");
+                            let factory = BoxRepoFactory::sled_raw(tempdir.path().to_path_buf());
+                            let repo = RepoInstance::from_factory(
+                                "bench".into(),
+                                factory,
+                                vec![TableConfig::new("bench_table".to_string())],
+                            )
+                            .await
+                            .unwrap();
+                            let tbl = repo.get_table("bench_table").await.unwrap();
+                            let token = shamir_engine::table::table_token_for("bench_table");
+
+                            let staging = StagingStore::new(Arc::clone(tbl.data_store()));
+                            for i in 0..n {
+                                let rid = RecordId::new();
+                                let body = InnerValue::Str(format!("v{}", i)).to_bytes().unwrap();
+                                staging.set(rid.to_bytes(), body).await;
+                            }
+                            let mut tx = TxContext::new(
+                                TxId::new(7_900_500 + n as u64),
+                                0,
+                                0,
+                                IsolationLevel::Snapshot,
+                            );
+                            tx.write_set.insert(token, staging);
+                            for i in 0..n {
+                                tx.index_write_set.push((
+                                    token,
+                                    IndexWriteOp::SetPosting {
+                                        key: bytes::Bytes::from(format!("idx_k_{}", i)),
+                                        value: bytes::Bytes::from(format!("idx_v_{}", i)),
+                                    },
+                                ));
+                            }
+                            tx.set_visibility(visibility);
+
+                            let start = Instant::now();
+                            let mut outcome = commit_tx(tx, &repo).await.unwrap();
+                            total += start.elapsed();
+                            // Drain the background tail OUTSIDE the timed
+                            // window so subsequent iters aren't contending
+                            // with this iter's pending work (no carry-over
+                            // distortion across samples).
+                            if let Some(bg) = outcome.take_background() {
+                                let _ = bg.join().await;
+                            }
+
+                            drop(repo);
+                            drop(tempdir);
+                        }
+                        total
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_tx_vs_non_tx,
@@ -439,5 +599,6 @@ criterion_group!(
     bench_commit_tx_phase_breakdown,
     bench_provider_overhead,
     bench_commit_phase5c_indexed_sled,
+    bench_async_commit_index_heavy,
 );
 criterion_main!(benches);

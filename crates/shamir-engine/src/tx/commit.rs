@@ -58,7 +58,7 @@ pub enum MaterializationState {
     Deferred,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TxOutcome {
     pub tx_id: u64,
     pub snapshot_version: u64,
@@ -66,15 +66,73 @@ pub struct TxOutcome {
     /// Whether projections materialized inline (`Complete`) or were
     /// deferred to recovery (`Deferred`). Either way the tx is
     /// COMMITTED — see [`MaterializationState`].
+    ///
+    /// **Async-index mode caveat.** When the tx opted into
+    /// [`shamir_tx::CommitVisibility::AsyncIndex`], this field reflects the
+    /// state at *ack time*: it can only be `Complete` (sync-prefix phases
+    /// landed) since the deferral-bearing phases (5c index, 6.5 markers,
+    /// 7 WAL cleanup) are still in flight on the background task. The
+    /// truly-final materialization state (the moral equivalent of the sync
+    /// `Complete` / `Deferred` outcome) is observable via
+    /// [`background`](TxOutcome::background) — awaiting that handle yields
+    /// the same `MaterializationState` that sync mode would have returned
+    /// on this commit's pipeline tail.
     pub materialization: MaterializationState,
+    /// Async-index mode: handle for the background materialization tail.
+    /// `None` in sync mode (everything ran inline).
+    ///
+    /// Tests / callers that need read-your-own-writes on a SECONDARY INDEX
+    /// after an async commit can `await` this handle to block until 5c+ has
+    /// landed. Production callers normally do NOT await this — the whole
+    /// point of async mode is to return without waiting. A failed tail
+    /// (panic / abort) does NOT corrupt anything: the inflight WAL marker
+    /// is the recovery guarantor, exactly as in the `Deferred` path.
+    #[doc(hidden)]
+    pub background: Option<BackgroundCommitHandle>,
 }
 
 impl TxOutcome {
     /// Convenience: `true` when all projections materialized inline.
     /// `false` means materialization was deferred to recovery (the tx is
     /// still committed).
+    ///
+    /// In async-index mode this reflects the SYNC-PREFIX result at ack
+    /// time and is therefore always `true`. To observe the post-tail state,
+    /// `await` [`background`](TxOutcome::background).
     pub fn materialized(&self) -> bool {
         self.materialization == MaterializationState::Complete
+    }
+
+    /// Async-index mode: take the background-tail handle (leaves `None`
+    /// behind so subsequent calls don't double-await). Returns `None` in
+    /// sync mode and on a deferred sync outcome.
+    pub fn take_background(&mut self) -> Option<BackgroundCommitHandle> {
+        self.background.take()
+    }
+}
+
+/// Awaitable handle for the async-index materialization tail.
+///
+/// Returned in [`TxOutcome::background`] when the tx opted into
+/// [`shamir_tx::CommitVisibility::AsyncIndex`]. Awaiting it blocks until
+/// Phases 5c (index) + 6.5 (markers) + 7 (WAL cleanup) + 5d (HNSW promote)
+/// have all finished, and yields the [`MaterializationState`] that would
+/// have been returned by an equivalent sync commit. A failed background
+/// task (panic) resolves to `MaterializationState::Deferred` — the inflight
+/// WAL marker is left for recovery, exactly as in the sync deferral path.
+#[derive(Debug)]
+pub struct BackgroundCommitHandle {
+    join: tokio::task::JoinHandle<MaterializationState>,
+}
+
+impl BackgroundCommitHandle {
+    /// Wait for the background tail to complete. A panicked task is
+    /// reported as `Deferred` (recovery is the guarantor).
+    pub async fn join(self) -> MaterializationState {
+        match self.join.await {
+            Ok(state) => state,
+            Err(_) => MaterializationState::Deferred,
+        }
     }
 }
 
@@ -415,6 +473,7 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
                 snapshot_version: tx.snapshot_version,
                 commit_version: tx.snapshot_version,
                 materialization: MaterializationState::Complete,
+                background: None,
             });
         }
     };
@@ -424,53 +483,297 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     // From here there is NO abort — only materialization. Failures are
     // logged + deferred to recovery; the version is still published.
     //
-    // `materialize` now runs Phases 5a (data) → 5b (counter) → 5c (index)
-    // → 6 (publish) → 6.5 (markers) → 7 (wal.commit) — every projection
-    // that determines visibility or removes the WAL marker, all UNDER
-    // `commit_lock`. It NO LONGER promotes HNSW vectors: that derived,
-    // rebuildable read-accelerator is moved out of the critical section
-    // below (III.5).
-    let materialization = materialize(
-        &mut tx,
-        repo,
-        gate.as_ref(),
-        commit_version,
-        wal.as_ref(),
-        uwl_guards,
-    )
-    .await;
+    // Branch on the opt-in visibility mode (default `Synchronous` — byte-
+    // identical to the historical behaviour). `AsyncIndex` performs only
+    // the sync-prefix phases inline (5a data, 5b counter, 6 publish, write-
+    // log) and spawns the tail (5c, 6.5, 7, 5d) on a background task — the
+    // client returns once the version is published.
+    let visibility = tx.visibility;
+    let snapshot_version = tx.snapshot_version;
+    let tx_id_u64 = tx.tx_id.0;
 
-    repo.tx_metrics().on_tx_committed();
-    if materialization == MaterializationState::Deferred {
-        repo.tx_metrics().on_tx_materialization_deferred();
+    let outcome = match visibility {
+        shamir_tx::CommitVisibility::Synchronous => {
+            // === Sync mode (default, unchanged behaviour) ===
+            //
+            // `materialize` runs Phases 5a (data) → 5b (counter) → 5c (index)
+            // → 6 (publish) → 6.5 (markers) → 7 (wal.commit), all UNDER
+            // `commit_lock`. It NO LONGER promotes HNSW vectors: that
+            // derived, rebuildable read-accelerator is moved out of the
+            // critical section below (III.5).
+            let materialization = materialize(
+                &mut tx,
+                repo,
+                gate.as_ref(),
+                commit_version,
+                wal.as_ref(),
+                uwl_guards,
+            )
+            .await;
+
+            repo.tx_metrics().on_tx_committed();
+            if materialization == MaterializationState::Deferred {
+                repo.tx_metrics().on_tx_materialization_deferred();
+            }
+
+            // === III.5: release `commit_lock` BEFORE the HNSW promote. ===
+            //
+            // Everything that determines visibility (data → main, counter,
+            // index → info), publishes the version, persists recovery
+            // markers, and removes the WAL marker has already run under the
+            // lock. Drop the guard here so other committers proceed while
+            // this tx promotes its vectors.
+            drop(commit_guard);
+
+            // Phase 5d (moved): promote staged HNSW vectors into the live
+            // graph, OUTSIDE `commit_lock` and AFTER Phase 7. A failure here
+            // does NOT mark the tx Deferred — see `promote_vectors`.
+            promote_vectors(&tx, repo, commit_version).await;
+
+            TxOutcome {
+                tx_id: tx_id_u64,
+                snapshot_version,
+                commit_version,
+                materialization,
+                background: None,
+            }
+        }
+        shamir_tx::CommitVisibility::AsyncIndex => {
+            // === Async-index mode (opt-in) ===
+            //
+            // Run ONLY the phases that determine the client-visible commit
+            // outcome under `commit_lock`:
+            //   5a (data → MvccStore — read-your-own-writes holds),
+            //   5b (counter — in-memory bump),
+            //   6  (publish_committed — version visible to readers),
+            //   record_commit_writes (SSI phantom log).
+            // Then RELEASE `commit_lock` + ack the client.
+            //
+            // The tail — 5c (index postings to info_store), 6.5 (durable
+            // recovery markers), 7 (wal.commit marker removal), 5d (HNSW
+            // promote) — runs on a `tokio::task`. The tail holds the
+            // per-table `unique_write_lock` guards (Phase 2.5) across 5c
+            // exactly as in sync mode; concurrent non-tx unique writers
+            // to the same tables block on those guards until 5c finishes.
+            //
+            // CONTRACT (re-stated in `CommitVisibility::AsyncIndex` doc):
+            //   * Durability: WAL fsync already happened (Phase 4) — NOT
+            //     relaxed.
+            //   * Data read-your-writes: 5a + 6 already ran — preserved.
+            //   * Secondary-index visibility: may briefly lag (5c is on
+            //     the background task); a data scan immediately sees the
+            //     row.
+            //   * Crash safety: if the process dies before the tail
+            //     finishes, the inflight WAL marker survives → recovery
+            //     replays exactly the same WAL entry that sync-mode
+            //     deferral relies on (`recover_v2_inflight`).
+            apply_data_phase(&mut tx, repo, commit_version).await;
+            apply_counter_phase(&tx, repo).await;
+            gate.publish_committed(commit_version);
+            gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+
+            // Crash seam (test-only): version published in-memory but the
+            // background tail has NOT begun. The inflight WAL marker is
+            // still present so a hard crash here is recovered identically
+            // to a `Deferred` sync commit.
+            maybe_crash("phase6_async", repo).await;
+
+            // Release `commit_lock` BEFORE spawning the tail — the whole
+            // point of async mode is that subsequent committers proceed
+            // without waiting on this tx's 5c. The tail will keep the
+            // per-table `uwl_guards` until 5c is done.
+            drop(commit_guard);
+
+            // Move ownership of the tx and the per-task guards onto the
+            // background task; `RepoInstance` is `Clone` (Arc-backed), so
+            // a clone is cheap.
+            let repo_clone = repo.clone();
+            let metrics = repo.tx_metrics().clone();
+            let join = tokio::spawn(async move {
+                let state =
+                    materialize_async_tail(&mut tx, &repo_clone, commit_version, uwl_guards).await;
+                if state == MaterializationState::Deferred {
+                    metrics.on_tx_materialization_deferred();
+                }
+                // Phase 5d (post-tail): HNSW promote, derived, never
+                // defers the tx. Done inside the background task so the
+                // client never waits for the per-vector spawn_blocking.
+                promote_vectors(&tx, &repo_clone, commit_version).await;
+                state
+            });
+
+            // Ack-time accounting: count the committed tx, ack the client.
+            repo.tx_metrics().on_tx_committed();
+
+            TxOutcome {
+                tx_id: tx_id_u64,
+                snapshot_version,
+                commit_version,
+                // SYNC-PREFIX phases all landed before ack (5a + 5b + 6 are
+                // unconditional and don't surface failures up here — 5a's
+                // bounded-retry deferral is folded into the tail's state
+                // because failure to materialize data should ALSO leave the
+                // marker inflight). With async mode the prefix doesn't have
+                // sub-phases that can flip the published outcome: 5a
+                // either succeeds or already logged + flipped `ok` inside
+                // the tail's state-tracking shim. Report `Complete` at ack
+                // and let `BackgroundCommitHandle::join` carry the truly
+                // final state.
+                materialization: MaterializationState::Complete,
+                background: Some(BackgroundCommitHandle { join }),
+            }
+        }
+    };
+
+    Ok(outcome)
+}
+
+/// Async-mode helper: run Phase 5a (data) inline on the client path.
+///
+/// Mirrors the per-table loop in [`materialize`] (drain → bounded retry →
+/// log warn on persistent failure) but writes outcomes into a shared
+/// `Arc<AtomicBool>` so the background tail can flip its final state to
+/// `Deferred` if a data write actually failed. The DATA write must finish
+/// before ack so read-your-own-writes on data holds.
+async fn apply_data_phase(tx: &mut TxContext, repo: &RepoInstance, commit_version: u64) {
+    let tx_id = tx.tx_id.0;
+    let data_batches = collect_data_batches(tx);
+    for (table_id, base, ops) in data_batches {
+        if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+            apply_data_batch(
+                repo,
+                table_id,
+                base.clone(),
+                ops.clone(),
+                commit_version,
+                tx_id,
+            )
+        })
+        .await
+        {
+            // A data-apply failure on the ack path is logged here and
+            // RE-SURFACED via the inflight WAL marker — the tail will see
+            // an empty staging (data already drained) but the recovery
+            // contract still holds: the marker is left inflight, recovery
+            // replays the WAL entry. Mark the tx as having an async-prefix
+            // failure so the background tail forces `Deferred`.
+            log::warn!(
+                "commit_tx (async) Phase 5a (data) failed for tx {tx_id} \
+                 commit_version {commit_version} table {table_id}: {e}; deferring to recovery"
+            );
+            tx.async_prefix_failed = true;
+        }
+    }
+}
+
+/// Async-mode helper: run Phase 5b (counter) inline on the client path.
+/// Counter persistence is best-effort; a failure here is metric-only drift
+/// (same contract as sync mode).
+async fn apply_counter_phase(tx: &TxContext, repo: &RepoInstance) {
+    let tx_id = tx.tx_id.0;
+    for (table_id, delta) in &tx.counter_deltas {
+        match repo.table_by_token(*table_id).await {
+            Ok(Some(tbl)) => {
+                if let Err(e) = tbl.counter().increment(*delta).await {
+                    log::warn!(
+                        "commit_tx (async) Phase 5b (counter) failed for tx {tx_id} \
+                         table {table_id}: {e}; counter drift accepted (metric only)"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "commit_tx (async) Phase 5b (counter) table lookup failed for \
+                     tx {tx_id} table {table_id}: {e}; counter drift accepted (metric only)"
+                );
+            }
+        }
+    }
+}
+
+/// Async-mode helper: run the materialization TAIL on the background task.
+///
+/// Phases (in order): 5c (index) → drop `uwl_guards` → 6.5 (markers) →
+/// 7 (`wal.commit`). NEVER aborts: a sub-phase failure flips the returned
+/// state to `Deferred` and leaves the WAL marker inflight, exactly like the
+/// sync deferral path. `recover_v2_inflight` is the eventual reconciler.
+async fn materialize_async_tail(
+    tx: &mut TxContext,
+    repo: &RepoInstance,
+    commit_version: u64,
+    uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+) -> MaterializationState {
+    let tx_id = tx.tx_id.0;
+    let mut ok = !tx.async_prefix_failed;
+
+    // Phase 5c: index postings.
+    if !tx.index_write_set.is_empty() {
+        let mut by_token: std::collections::HashMap<u64, Vec<shamir_tx::IndexWriteOp>> =
+            std::collections::HashMap::new();
+        for (token, op) in &tx.index_write_set {
+            by_token.entry(*token).or_default().push(op.clone());
+        }
+        for (token, ops) in by_token {
+            if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                apply_index_batch(repo, token, ops.clone(), tx_id)
+            })
+            .await
+            {
+                log::warn!(
+                    "commit_tx (async) Phase 5c (index) failed for tx {tx_id} \
+                     commit_version {commit_version} table {token}: {e}; deferring to recovery"
+                );
+                ok = false;
+            }
+        }
     }
 
-    // === III.5: release `commit_lock` BEFORE the HNSW promote. ===
-    //
-    // Everything that determines visibility (data → main, counter, index
-    // → info), publishes the version, persists recovery markers, and
-    // removes the WAL marker has already run under the lock. The HNSW
-    // graph is a DERIVED read-accelerator — the vectors are already in
-    // `main` (Phase 5a + WAL) and the graph is re-derived from
-    // `data_store` by `VectorBackend::rebuild` on open. Promoting it does
-    // NOT need the commit gate for correctness, and for bulk vector
-    // commits the promote does unbounded work (brute_force's bounded-actor
-    // `submit().await`, HNSW's per-vector `spawn_blocking`) that would
-    // otherwise stall ALL other committers. Drop the guard here so other
-    // committers proceed while this tx promotes its vectors.
-    drop(commit_guard);
+    // Release per-table unique_write_lock guards (HIGH-A): the Phase 2.6
+    // guard window has closed (postings either published or deferred to
+    // recovery; recovery is idempotent). Released even on a deferred 5c —
+    // a stuck guard would only block non-tx writers.
+    drop(uwl_guards);
 
-    // Phase 5d (moved): promote staged HNSW vectors into the live graph,
-    // OUTSIDE `commit_lock` and AFTER Phase 7 (wal.commit). A failure here
-    // does NOT mark the tx Deferred — see `promote_vectors`.
-    promote_vectors(&tx, repo, commit_version).await;
+    // Phase 6.5: persist recovery markers.
+    if let Ok(gate) = repo.tx_gate().await {
+        if let Err(e) = persist_markers(repo, gate.as_ref(), commit_version).await {
+            log::warn!(
+                "commit_tx (async) Phase 6.5 (recovery markers) failed for tx {tx_id} \
+                 commit_version {commit_version}: {e}; deferring to recovery"
+            );
+            ok = false;
+        }
+    } else {
+        ok = false;
+    }
 
-    Ok(TxOutcome {
-        tx_id: tx.tx_id.0,
-        snapshot_version: tx.snapshot_version,
-        commit_version,
-        materialization,
-    })
+    // Phase 7: WAL cleanup ONLY on full success.
+    if ok {
+        if let Ok(wal) = repo.repo_wal().await {
+            if let Err(e) = wal.commit(tx_id).await {
+                log::warn!(
+                    "commit_tx (async) Phase 7 (WAL cleanup) failed for tx {tx_id} \
+                     commit_version {commit_version}: {e}; marker left inflight for recovery"
+                );
+                ok = false;
+            }
+        } else {
+            ok = false;
+        }
+    } else {
+        log::warn!(
+            "commit_tx (async) tx {tx_id} commit_version {commit_version} COMMITTED but \
+             materialization DEFERRED — WAL marker left inflight; recovery will \
+             reconcile main/info on the next open"
+        );
+    }
+
+    if ok {
+        MaterializationState::Complete
+    } else {
+        MaterializationState::Deferred
+    }
 }
 
 /// cancel-safe: NO, and it does NOT need to be — by the time this runs the

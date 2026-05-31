@@ -53,7 +53,7 @@ const INJECT_TX_ID: u64 = 7_000_001;
 /// during materialization), so this is `tokio::sync::Mutex` — async-aware,
 /// no poisoning, and clippy-clean across the await. Contention is bounded
 /// to the two injecting tests.
-static PHASE_5C_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static PHASE_5C_INJECT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Serialises the arm → commit → reset window of the multi-table Phase 5a
 /// injection test. `FAIL_PHASE_5A_TX_ID` / `FAIL_PHASE_5A_TABLE_TOKEN` are a
