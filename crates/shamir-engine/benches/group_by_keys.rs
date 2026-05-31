@@ -13,7 +13,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughpu
 use shamir_engine::query::filter::FilterContext;
 use shamir_engine::query::read::exec::apply_group_by;
 use shamir_engine::query::read::{Select, SelectItem};
-use shamir_query_types::read::GroupBy;
+use shamir_query_types::read::{AggFunc, AggregateField, GroupBy};
 use shamir_types::core::interner::{Interner, TouchInd};
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::record_id::RecordId;
@@ -79,6 +79,44 @@ fn bench(c: &mut Criterion) {
         distinct: false,
     };
 
+    // Multi-aggregate select: count(*) + sum(age) + avg(age) + min(age) + max(age).
+    // The previous compute_aggregate path re-walked the group per aggregate
+    // (5 walks × Vec<Option<InnerValue>> allocations + Count{All} cloning
+    // the whole record). With 10 groups × 100 rows × 5 aggregates the cost
+    // is visible above bench noise.
+    let select_multi = Select {
+        items: vec![
+            SelectItem::CountAll {
+                alias: Some("count".to_string()),
+            },
+            SelectItem::Aggregate {
+                func: AggFunc::Sum,
+                field: AggregateField::Field(vec!["age".to_string()]),
+                alias: Some("sum_age".to_string()),
+                distinct: false,
+            },
+            SelectItem::Aggregate {
+                func: AggFunc::Avg,
+                field: AggregateField::Field(vec!["age".to_string()]),
+                alias: Some("avg_age".to_string()),
+                distinct: false,
+            },
+            SelectItem::Aggregate {
+                func: AggFunc::Min,
+                field: AggregateField::Field(vec!["age".to_string()]),
+                alias: Some("min_age".to_string()),
+                distinct: false,
+            },
+            SelectItem::Aggregate {
+                func: AggFunc::Max,
+                field: AggregateField::Field(vec!["age".to_string()]),
+                alias: Some("max_age".to_string()),
+                distinct: false,
+            },
+        ],
+        distinct: false,
+    };
+
     let mut group = c.benchmark_group("apply_group_by");
     group.throughput(Throughput::Elements(records.len() as u64));
 
@@ -110,6 +148,35 @@ fn bench(c: &mut Criterion) {
                 &records,
                 &group_by_two,
                 &select,
+                &interner,
+                &ctx,
+            ))
+        });
+    });
+
+    // Multi-aggregate scenario: 10 groups (by city) × 100 rows/group,
+    // 5 aggregates per group. Tests the per-aggregate re-walk + clone cost.
+    group.bench_function("multi_aggregate_5_funcs", |b| {
+        b.iter(|| {
+            black_box(apply_group_by(
+                &records,
+                &group_by_city,
+                &select_multi,
+                &interner,
+                &ctx,
+            ))
+        });
+    });
+
+    // Many groups (100 by age) × 10 rows/group with multi-aggregate. Stresses
+    // the Count{All} record-clone path (one clone per row per aggregate
+    // in the baseline).
+    group.bench_function("multi_aggregate_5_funcs_many_groups", |b| {
+        b.iter(|| {
+            black_box(apply_group_by(
+                &records,
+                &group_by_age,
+                &select_multi,
                 &interner,
                 &ctx,
             ))

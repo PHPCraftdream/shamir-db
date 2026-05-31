@@ -9,9 +9,7 @@
 use serde_json as json;
 use smallvec::SmallVec;
 
-use crate::query::filter::eval::{
-    compare_values, intern_field_path, resolve_field, resolve_field_ref,
-};
+use crate::query::filter::eval::{compare_values, intern_field_path, resolve_field_ref};
 use crate::query::filter::{compile_filter, FilterContext};
 use crate::query::read::{
     AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderDirection, Pagination,
@@ -190,118 +188,193 @@ fn pre_intern_select_keys(select: &Select, interner: &Interner) {
     }
 }
 
-/// Compute a single aggregate over a slice of InnerValues.
-fn compute_aggregate(
-    values: &[&InnerValue],
-    func: &AggFunc,
-    field: &AggregateField,
-    interner: &Interner,
-) -> json::Value {
-    let field_path = match field {
-        AggregateField::Field(path) => intern_field_path(path, interner),
-        AggregateField::All => None,
-    };
+/// Per-aggregate accumulator state. One instance per `Aggregate` select item
+/// in a single group. The group is walked exactly once; every record feeds
+/// every accumulator via `step(record)` using borrowed `&InnerValue` lookups
+/// (no per-aggregate `Vec<Option<InnerValue>>` allocation, no record clone).
+///
+/// `Count{All}` is *not* represented here — it never touches records, so the
+/// caller short-circuits to a plain `group_len` counter.
+struct AggAccum<'a> {
+    /// Pre-interned field path (`None` for `AggregateField::All`).
+    field_path: Option<Vec<u64>>,
+    /// `AggregateField::All` → step() uses the whole record as the value.
+    all_field: bool,
+    state: AggState<'a>,
+}
 
-    // Extract field values from each record
-    let field_values: Vec<Option<InnerValue>> = values
-        .iter()
-        .map(|record| {
-            if let Some(ref path) = field_path {
-                resolve_field(record, path)
-            } else {
-                // All → the record itself (meaningful only for Count)
-                Some((*record).clone())
-            }
-        })
-        .collect();
+enum AggState<'a> {
+    /// Count(field) → non-null count.  Count(All) is folded into the caller.
+    Count { count: u64 },
+    /// Sum: integer fast path, lifted to f64 when any float is seen.
+    Sum {
+        sum_i: i64,
+        sum_f: f64,
+        has_float: bool,
+    },
+    /// Avg: f64 accumulator + non-null numeric count.
+    Avg { sum: f64, count: u64 },
+    /// Min: keeps a borrow into the source record.
+    Min { current: Option<&'a InnerValue> },
+    /// Max: keeps a borrow into the source record.
+    Max { current: Option<&'a InnerValue> },
+}
 
-    match func {
-        AggFunc::Count => {
-            let count = field_values.iter().filter(|v| v.is_some()).count();
-            json::Value::Number(count.into())
+impl<'a> AggAccum<'a> {
+    fn new(func: AggFunc, field: &AggregateField, interner: &Interner) -> Self {
+        let (field_path, all_field) = match field {
+            AggregateField::Field(p) => (intern_field_path(p, interner), false),
+            AggregateField::All => (None, true),
+        };
+        let state = match func {
+            AggFunc::Count => AggState::Count { count: 0 },
+            AggFunc::Sum => AggState::Sum {
+                sum_i: 0,
+                sum_f: 0.0,
+                has_float: false,
+            },
+            AggFunc::Avg => AggState::Avg { sum: 0.0, count: 0 },
+            AggFunc::Min => AggState::Min { current: None },
+            AggFunc::Max => AggState::Max { current: None },
+        };
+        Self {
+            field_path,
+            all_field,
+            state,
         }
-        AggFunc::Sum => {
-            let mut sum_i: i64 = 0;
-            let mut sum_f: f64 = 0.0;
-            let mut has_float = false;
-            for val in field_values.iter().flatten() {
-                match val {
-                    InnerValue::Int(i) => sum_i += i,
-                    InnerValue::F64(f) => {
-                        has_float = true;
-                        sum_f += f;
-                    }
-                    _ => {}
+    }
+
+    #[inline]
+    fn resolve<'r>(&self, record: &'r InnerValue) -> Option<&'r InnerValue>
+    where
+        'r: 'a,
+    {
+        if self.all_field {
+            // Count(*) was special-cased away; the only remaining caller for
+            // AggregateField::All here is Count(All) via SelectItem::Aggregate
+            // (rare path; CountAll is the documented spelling). The record
+            // itself is the "value" — never None, always counted.
+            Some(record)
+        } else {
+            self.field_path
+                .as_deref()
+                .and_then(|p| resolve_field_ref(record, p))
+        }
+    }
+
+    #[inline]
+    fn step(&mut self, record: &'a InnerValue) {
+        let val = self.resolve(record);
+        match &mut self.state {
+            AggState::Count { count } => {
+                if val.is_some() {
+                    *count += 1;
                 }
             }
-            if has_float {
-                let total = sum_f + sum_i as f64;
-                serde_json::Number::from_f64(total)
-                    .map(json::Value::Number)
-                    .unwrap_or(json::Value::Null)
-            } else {
-                json::Value::Number(sum_i.into())
-            }
-        }
-        AggFunc::Avg => {
-            let mut sum: f64 = 0.0;
-            let mut count: u64 = 0;
-            for val in field_values.iter().flatten() {
-                match val {
-                    InnerValue::Int(i) => {
-                        sum += *i as f64;
-                        count += 1;
+            AggState::Sum {
+                sum_i,
+                sum_f,
+                has_float,
+            } => {
+                if let Some(v) = val {
+                    match v {
+                        InnerValue::Int(i) => *sum_i += *i,
+                        InnerValue::F64(f) => {
+                            *has_float = true;
+                            *sum_f += *f;
+                        }
+                        _ => {}
                     }
-                    InnerValue::F64(f) => {
-                        sum += f;
-                        count += 1;
-                    }
-                    _ => {}
                 }
             }
-            if count == 0 {
-                json::Value::Null
-            } else {
-                let avg = sum / count as f64;
-                serde_json::Number::from_f64(avg)
-                    .map(json::Value::Number)
-                    .unwrap_or(json::Value::Null)
+            AggState::Avg { sum, count } => {
+                if let Some(v) = val {
+                    match v {
+                        InnerValue::Int(i) => {
+                            *sum += *i as f64;
+                            *count += 1;
+                        }
+                        InnerValue::F64(f) => {
+                            *sum += *f;
+                            *count += 1;
+                        }
+                        _ => {}
+                    }
+                }
             }
-        }
-        AggFunc::Min => {
-            let mut min: Option<&InnerValue> = None;
-            for val in field_values.iter().flatten() {
-                match min {
-                    None => min = Some(val),
-                    Some(current) => {
-                        if let Some(std::cmp::Ordering::Less) = compare_values(val, current) {
-                            min = Some(val);
+            AggState::Min { current } => {
+                if let Some(v) = val {
+                    match current {
+                        None => *current = Some(v),
+                        Some(cur) => {
+                            if let Some(std::cmp::Ordering::Less) = compare_values(v, cur) {
+                                *current = Some(v);
+                            }
                         }
                     }
                 }
             }
-            min.map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
-                .unwrap_or(json::Value::Null)
-        }
-        AggFunc::Max => {
-            let mut max: Option<&InnerValue> = None;
-            for val in field_values.iter().flatten() {
-                match max {
-                    None => max = Some(val),
-                    Some(current) => {
-                        if let Some(std::cmp::Ordering::Greater) = compare_values(val, current) {
-                            max = Some(val);
+            AggState::Max { current } => {
+                if let Some(v) = val {
+                    match current {
+                        None => *current = Some(v),
+                        Some(cur) => {
+                            if let Some(std::cmp::Ordering::Greater) = compare_values(v, cur) {
+                                *current = Some(v);
+                            }
                         }
                     }
                 }
             }
-            max.map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
-                .unwrap_or(json::Value::Null)
+        }
+    }
+
+    fn finish(self, interner: &Interner) -> json::Value {
+        match self.state {
+            AggState::Count { count } => json::Value::Number(count.into()),
+            AggState::Sum {
+                sum_i,
+                sum_f,
+                has_float,
+            } => {
+                if has_float {
+                    let total = sum_f + sum_i as f64;
+                    serde_json::Number::from_f64(total)
+                        .map(json::Value::Number)
+                        .unwrap_or(json::Value::Null)
+                } else {
+                    json::Value::Number(sum_i.into())
+                }
+            }
+            AggState::Avg { sum, count } => {
+                if count == 0 {
+                    json::Value::Null
+                } else {
+                    let avg = sum / count as f64;
+                    serde_json::Number::from_f64(avg)
+                        .map(json::Value::Number)
+                        .unwrap_or(json::Value::Null)
+                }
+            }
+            AggState::Min { current } | AggState::Max { current } => current
+                .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
+                .unwrap_or(json::Value::Null),
         }
     }
 }
 
 /// Build a JSON object from select items for a group of records.
+///
+/// Single-pass aggregation: every `SelectItem::Aggregate` becomes one
+/// `AggAccum` slot; the group is walked exactly once and each record feeds
+/// every accumulator via borrowed `&InnerValue` lookups. The previous code
+/// path called `compute_aggregate` per item — which allocated a
+/// `Vec<Option<InnerValue>>` of the same length as the group and *cloned*
+/// the whole record for `Count(All)` on every row. With A aggregates that
+/// was O(G·R·A) clones; we now do O(G·R) borrowed lookups.
+///
+/// `SelectItem::CountAll` is short-circuited to `group_records.len()` — it
+/// never touches the records at all (no `AggAccum` slot, no resolve).
 fn build_aggregate_object(
     group_records: &[&InnerValue],
     select: &Select,
@@ -317,6 +390,15 @@ fn build_aggregate_object(
         }
     }
 
+    // First pass over select items: allocate accumulators and remember the
+    // output key for each one. Default-name strings need to outlive the
+    // step loop, so we materialise them here.
+    let mut agg_slots: Vec<(String, AggAccum<'_>)> = Vec::new();
+    // Field-projection fallbacks (in group context, normally already
+    // populated from `group_key_values`). Recorded for a second pass so
+    // we don't run them during the hot aggregation loop.
+    let mut field_slots: Vec<(String, &Vec<String>)> = Vec::new();
+
     for item in &select.items {
         match item {
             SelectItem::CountAll { alias } => {
@@ -329,40 +411,53 @@ fn build_aggregate_object(
             SelectItem::Aggregate {
                 func, field, alias, ..
             } => {
-                let default_name = match (func, field) {
-                    (_, AggregateField::Field(f)) => {
-                        format!("{:?}_{}", func, f.join(".")).to_lowercase()
-                    }
-                    (_, AggregateField::All) => format!("{:?}", func).to_lowercase(),
+                let key = match alias {
+                    Some(a) => a.clone(),
+                    None => match field {
+                        AggregateField::Field(f) => {
+                            format!("{:?}_{}", func, f.join(".")).to_lowercase()
+                        }
+                        AggregateField::All => format!("{:?}", func).to_lowercase(),
+                    },
                 };
-                let key = alias.as_deref().unwrap_or(&default_name);
-                let val = compute_aggregate(group_records, func, field, interner);
-                obj.insert(key.to_string(), val);
+                agg_slots.push((key, AggAccum::new(*func, field, interner)));
             }
             SelectItem::Field { path, alias } => {
-                // In group context, field must be a group-by field.
-                // Already added from group_key_values, but handle case
-                // where it wasn't in group_key_values
                 let default_key = path.last().map(|s| s.as_str()).unwrap_or("");
                 let key = alias.as_deref().unwrap_or(default_key);
                 if !obj.contains_key(key) {
-                    // Take value from first record
-                    if let Some(first) = group_records.first() {
-                        if let Some(interned) = intern_field_path(path, interner) {
-                            let val = resolve_field(first, &interned)
-                                .map(|v| {
-                                    inner_to_json_value(&v, interner).unwrap_or(json::Value::Null)
-                                })
-                                .unwrap_or(json::Value::Null);
-                            obj.insert(key.to_string(), val);
-                        } else {
-                            obj.insert(key.to_string(), json::Value::Null);
-                        }
-                    }
+                    field_slots.push((key.to_string(), path));
                 }
             }
             SelectItem::All | SelectItem::Expression { .. } => {}
         }
+    }
+
+    // Single walk over the group: feeds every aggregate accumulator at once.
+    if !agg_slots.is_empty() {
+        for record in group_records {
+            for (_, acc) in agg_slots.iter_mut() {
+                acc.step(record);
+            }
+        }
+    }
+
+    for (key, acc) in agg_slots {
+        obj.insert(key, acc.finish(interner));
+    }
+
+    // Resolve field-projection fallbacks from the first record (rare path).
+    for (key, path) in field_slots {
+        let val = group_records
+            .first()
+            .and_then(|first| {
+                intern_field_path(path, interner)
+                    .as_deref()
+                    .and_then(|p| resolve_field_ref(first, p))
+                    .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
+            })
+            .unwrap_or(json::Value::Null);
+        obj.insert(key, val);
     }
 
     json::Value::Object(obj)
