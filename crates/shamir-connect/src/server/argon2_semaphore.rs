@@ -203,22 +203,43 @@ mod tests {
     #[test]
     fn many_concurrent_threads_respect_cap() {
         let s = Arc::new(Argon2Semaphore::with_capacity(4));
+
+        // Count permits ACTUALLY held — NOT `capacity - available()`. The
+        // latter is corrupted by the optimistic `fetch_sub`-then-restore in
+        // `try_acquire`: under contention several threads decrement
+        // `available` past zero before the losers restore it, so `available`
+        // dips transiently NEGATIVE and `capacity - available()` spuriously
+        // reports more than `capacity` "in use" — a flaky false failure, not
+        // a real cap violation. Instead increment a dedicated counter only
+        // AFTER a successful `acquire` and decrement it BEFORE releasing the
+        // permit: that interval lies strictly inside [acquire, release], and
+        // the semaphore guarantees at most `capacity` permits are held at
+        // once, so the counter never exceeds the cap — deterministically.
+        let held = Arc::new(AtomicI64::new(0));
         let max_observed = Arc::new(AtomicI64::new(0));
         let handles: Vec<_> = (0..20)
             .map(|_| {
                 let s = s.clone();
+                let held = held.clone();
                 let max = max_observed.clone();
                 thread::spawn(move || {
                     let _p = s.acquire();
-                    let in_use = (s.capacity() as i64) - s.available();
-                    max.fetch_max(in_use, Ordering::Relaxed);
+                    let now_held = held.fetch_add(1, Ordering::AcqRel) + 1;
+                    max.fetch_max(now_held, Ordering::AcqRel);
                     thread::sleep(Duration::from_millis(10));
+                    // Decrement while still holding the permit so the counted
+                    // interval stays within the permit's lifetime.
+                    held.fetch_sub(1, Ordering::AcqRel);
                 })
             })
             .collect();
         for h in handles {
             h.join().unwrap();
         }
-        assert!(max_observed.load(Ordering::Relaxed) <= 4);
+        assert!(
+            max_observed.load(Ordering::Acquire) <= 4,
+            "at most `capacity` permits may be held at once; observed {}",
+            max_observed.load(Ordering::Acquire)
+        );
     }
 }
