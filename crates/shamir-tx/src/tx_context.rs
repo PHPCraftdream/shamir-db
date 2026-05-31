@@ -15,6 +15,42 @@ use crate::types::{IsolationLevel, TxId};
 use crate::version_provider::VersionProvider;
 use crate::IndexWriteOp;
 
+/// Opt-in commit visibility / ack policy.
+///
+/// Default is [`Synchronous`](CommitVisibility::Synchronous) — the historical
+/// behaviour: `commit_tx` returns to the caller only after EVERY phase of the
+/// commit pipeline has completed (data, index, recovery markers, WAL marker
+/// removal, HNSW promote). Nothing about the on-disk image or in-memory state
+/// differs from the pre-async-mode code path.
+///
+/// [`AsyncIndex`](CommitVisibility::AsyncIndex) is the OPT-IN relaxation
+/// described in the async-commit design:
+///   * The Phase-4 WAL fsync (the commit point) ALWAYS happens before the
+///     client ack — durability is NOT relaxed.
+///   * Data is applied to MvccStore (Phase 5a) and the version is published
+///     (Phase 6) BEFORE the ack — read-your-own-writes on DATA holds.
+///   * Index posting application (Phase 5c), durable recovery markers
+///     (Phase 6.5), WAL marker removal (Phase 7), and the HNSW promote
+///     (Phase 5d, post-lock) are moved to a `tokio::task` that runs after
+///     the client returns. A query served by a SECONDARY INDEX may briefly
+///     miss the just-committed row; the row is immediately visible via a
+///     data scan.
+///   * Crash safety is preserved by the existing recovery machinery: if
+///     the process dies after ack but before the background task finishes,
+///     the inflight WAL marker survives and `recover_v2_inflight` replays
+///     the entry on the next open — the same path that backs the
+///     `MaterializationState::Deferred` contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitVisibility {
+    /// Default. `commit_tx` returns only after the whole pipeline has run.
+    #[default]
+    Synchronous,
+    /// Opt-in. `commit_tx` returns once WAL durability + data application +
+    /// MVCC publish are done; index apply / markers / WAL cleanup / HNSW
+    /// promote run on a background task.
+    AsyncIndex,
+}
+
 /// A promise this tx makes about a unique-index posting: at stage time
 /// the deterministic unique key `index_key` was free (or owned by this
 /// tx's `owner`). Re-validated under `commit_lock` (closes the
@@ -139,6 +175,20 @@ pub struct TxContext {
     /// [`read_set`](Self::read_set). Interior-mutable so the engine's
     /// scan path can append through a shared `&TxContext`.
     pub predicate_set: crate::predicate_set::PredicateSet,
+
+    /// Commit visibility / ack policy. Default `Synchronous` (no behaviour
+    /// change). When set to `AsyncIndex`, the engine's `commit_tx` returns
+    /// to the caller right after WAL durability + data apply + publish; the
+    /// remaining materialization runs on a background `tokio::task`. See
+    /// [`CommitVisibility`] for the full contract.
+    pub visibility: CommitVisibility,
+
+    /// Async-mode only book-keeping: set by the ack-path Phase-5a (data)
+    /// helper if a per-table data write persistently failed. The background
+    /// tail picks this up and forces a `Deferred` outcome so the inflight
+    /// WAL marker is left for recovery. Never set in sync mode (the sync
+    /// `materialize` path tracks `ok` on its own stack).
+    pub async_prefix_failed: bool,
 }
 
 impl TxContext {
@@ -165,7 +215,16 @@ impl TxContext {
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),
             predicate_set: crate::predicate_set::PredicateSet::new(),
+            visibility: CommitVisibility::default(),
+            async_prefix_failed: false,
         }
+    }
+
+    /// Opt into async-index commit visibility (see [`CommitVisibility`]).
+    /// Returns `&mut Self` for builder-style chaining.
+    pub fn set_visibility(&mut self, visibility: CommitVisibility) -> &mut Self {
+        self.visibility = visibility;
+        self
     }
 
     /// Record a unique-index guard for commit-time re-validation.

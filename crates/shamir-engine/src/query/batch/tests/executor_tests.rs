@@ -586,12 +586,14 @@ fn deferred_outcome_maps_to_materialized_false() {
         snapshot_version: 100,
         commit_version: 101,
         materialization: MaterializationState::Complete,
+        background: None,
     };
     let deferred = crate::tx::TxOutcome {
         tx_id: 12,
         snapshot_version: 100,
         commit_version: 102,
         materialization: MaterializationState::Deferred,
+        background: None,
     };
 
     let complete_info = map_outcome_to_info(&complete);
