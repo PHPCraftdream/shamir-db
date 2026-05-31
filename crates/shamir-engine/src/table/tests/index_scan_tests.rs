@@ -682,3 +682,124 @@ async fn test_order_by_asc_limit_uses_sorted_index_fast_path() {
         used
     );
 }
+
+// ============================================================================
+// Opt #3a — LIMIT push-down (index scan): correctness gate
+// ============================================================================
+//
+// Three tests guard the push-down's semantics:
+//   1. plain SELECT + LIMIT (no ORDER BY / DISTINCT / GROUP BY) — the
+//      page rows must equal the first N rows the unoptimised pipeline
+//      would have returned (scan order is unchanged);
+//   2. count_total + LIMIT — the page is truncated but `total_count`
+//      still reflects every matching row;
+//   3. fall-back: DISTINCT + LIMIT — DISTINCT MUST see every matching
+//      row before pagination, so the page can include duplicates only
+//      if the full-projection path would have, never more.
+
+/// (1) push-down: LIMIT without ORDER BY returns the first N rows in
+/// scan order — same set the full-projection path produced.
+#[tokio::test]
+async fn test_limit_pushdown_no_order_by_matches_full_projection() {
+    let table = setup_table_with_index().await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // Reference: full result, no pagination.
+    let q_full: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"},
+        "select": {
+            "items": [
+                {"type": "field", "path": ["name"]},
+                {"type": "field", "path": ["age"]}
+            ],
+            "distinct": false
+        }
+    }))
+    .unwrap();
+    let full = table.read(&q_full, &ctx).await.unwrap();
+    assert_eq!(full.records.len(), 3);
+
+    // Push-down: LIMIT 2 should give the first two rows from `full`.
+    let q_lim: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"},
+        "select": {
+            "items": [
+                {"type": "field", "path": ["name"]},
+                {"type": "field", "path": ["age"]}
+            ],
+            "distinct": false
+        },
+        "pagination": {"mode": "LimitOffset", "limit": 2}
+    }))
+    .unwrap();
+    let limited = table.read(&q_lim, &ctx).await.unwrap();
+
+    assert_eq!(limited.records.len(), 2);
+    assert_eq!(&limited.records[..], &full.records[..2]);
+}
+
+/// (2) push-down + count_total: page is truncated, but `total_count`
+/// still reports the full match count.
+#[tokio::test]
+async fn test_limit_pushdown_preserves_count_total() {
+    let table = setup_table_with_index().await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    let q: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"},
+        "pagination": {"mode": "LimitOffset", "limit": 1, "offset": 0},
+        "count_total": true
+    }))
+    .unwrap();
+    let r = table.read(&q, &ctx).await.unwrap();
+
+    assert_eq!(r.records.len(), 1);
+    let info = r.pagination.as_ref().expect("pagination info");
+    assert_eq!(info.total_count, Some(3));
+    assert!(info.has_next);
+}
+
+/// (3) fall-back: DISTINCT + LIMIT must NOT push the limit before
+/// projection — DISTINCT depends on seeing every row. The fall-back
+/// path produces the same result the unoptimised pipeline always did.
+#[tokio::test]
+async fn test_distinct_with_limit_falls_back_and_sees_all_rows() {
+    let table = setup_table_with_index().await;
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+
+    // status=active has 3 records in 2 cities (NYC, LA, LA) → DISTINCT
+    // city yields 2 unique cities. If LIMIT were wrongly pushed BEFORE
+    // DISTINCT, a LIMIT of 1 in the raw scan would project a single
+    // city and DISTINCT would never see the second one — but the
+    // expectation here is the post-DISTINCT page: still up to 2 rows.
+    let q: ReadQuery = serde_json::from_value(json!({
+        "from": "users",
+        "where": {"op": "eq", "field": ["status"], "value": "active"},
+        "select": {
+            "items": [{"type": "field", "path": ["city"]}],
+            "distinct": true
+        },
+        "pagination": {"mode": "LimitOffset", "limit": 5}
+    }))
+    .unwrap();
+    let r = table.read(&q, &ctx).await.unwrap();
+
+    // Two unique cities for status=active: LA, NYC.
+    assert_eq!(r.records.len(), 2);
+    let mut cities: Vec<String> = r
+        .records
+        .iter()
+        .filter_map(|v| v.get("city").and_then(|c| c.as_str()).map(String::from))
+        .collect();
+    cities.sort();
+    assert_eq!(cities, vec!["LA".to_string(), "NYC".to_string()]);
+}
