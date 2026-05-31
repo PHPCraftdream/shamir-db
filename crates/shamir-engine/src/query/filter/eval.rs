@@ -520,12 +520,51 @@ impl FilterNode {
                     Some(InnerValue::Str(s)) => s,
                     _ => return false,
                 };
-                let lower = text.to_lowercase();
-                let words: std::collections::HashSet<&str> = lower.split_whitespace().collect();
-                if *mode_and {
-                    query_tokens.iter().all(|t| words.contains(t.as_str()))
+                if query_tokens.is_empty() {
+                    // AND over empty set = true; OR over empty set = false.
+                    return *mode_and;
+                }
+                // Invert the loop: iterate field words once and probe the
+                // small (1..=N) pre-lowercased query-token slice. Saves a
+                // full-string `to_lowercase` alloc + a `HashSet<&str>` build
+                // per record. Semantics preserved bit-for-bit: full Unicode
+                // lowercasing applied per word (matches whole-string
+                // `to_lowercase` exactly under whitespace tokenisation).
+                //
+                // AND mode uses a bitmask over `query_tokens` (capped at 64
+                // tokens — beyond that we fall back to a Vec<bool>).
+                if *mode_and && query_tokens.len() <= 64 {
+                    let target: u64 = if query_tokens.len() == 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << query_tokens.len()) - 1
+                    };
+                    let mut seen: u64 = 0;
+                    for word in text.split_whitespace() {
+                        if fts_word_matches(word, query_tokens, &mut seen) && seen == target {
+                            return true;
+                        }
+                    }
+                    seen == target
+                } else if *mode_and {
+                    let mut seen = vec![false; query_tokens.len()];
+                    let mut remaining = query_tokens.len();
+                    for word in text.split_whitespace() {
+                        if fts_word_matches_vec(word, query_tokens, &mut seen, &mut remaining)
+                            && remaining == 0
+                        {
+                            return true;
+                        }
+                    }
+                    remaining == 0
                 } else {
-                    query_tokens.iter().any(|t| words.contains(t.as_str()))
+                    // OR mode — early-return on first hit.
+                    for word in text.split_whitespace() {
+                        if fts_word_matches_or(word, query_tokens) {
+                            return true;
+                        }
+                    }
+                    false
                 }
             }
 
@@ -596,6 +635,72 @@ fn like_pattern_to_regex(pattern: &str, case_insensitive: bool) -> Option<Regex>
     }
     regex_str.push('$');
     Regex::new(&regex_str).ok()
+}
+
+// ============================================================================
+// FTS brute-force helpers — inverted-loop word probe (no per-record alloc).
+// ============================================================================
+
+/// Compare `word` (raw, possibly mixed-case) against the pre-lowercased
+/// query token at `idx`. Avoids allocating a fresh `String` per word on
+/// the ASCII-already-lowercase fast path (the common case for English
+/// corpora). Falls back to a full Unicode `to_lowercase()` allocation
+/// only when the word actually contains uppercase characters.
+#[inline]
+fn fts_word_eq_token(word: &str, token: &str) -> bool {
+    if word.is_ascii() {
+        // ASCII fast path: bytewise compare with ASCII case folding.
+        word.eq_ignore_ascii_case(token)
+    } else {
+        // Non-ASCII: must apply full Unicode lowercasing to preserve the
+        // semantics of the previous `text.to_lowercase()` whole-string
+        // pass. `str::to_lowercase` is per-char, so applying it to each
+        // whitespace-split word produces the same bytes as folding the
+        // whole string and then splitting.
+        word.to_lowercase() == token
+    }
+}
+
+/// AND-mode word probe (bitmask variant, up to 64 query tokens).
+/// Returns whether the word matched anything; updates `seen` in place.
+#[inline]
+fn fts_word_matches(word: &str, query_tokens: &[String], seen: &mut u64) -> bool {
+    let mut hit = false;
+    for (i, t) in query_tokens.iter().enumerate() {
+        let bit = 1u64 << i;
+        if (*seen & bit) == 0 && fts_word_eq_token(word, t.as_str()) {
+            *seen |= bit;
+            hit = true;
+        }
+    }
+    hit
+}
+
+/// AND-mode word probe (Vec<bool> variant, > 64 query tokens — rare).
+#[inline]
+fn fts_word_matches_vec(
+    word: &str,
+    query_tokens: &[String],
+    seen: &mut [bool],
+    remaining: &mut usize,
+) -> bool {
+    let mut hit = false;
+    for (i, t) in query_tokens.iter().enumerate() {
+        if !seen[i] && fts_word_eq_token(word, t.as_str()) {
+            seen[i] = true;
+            *remaining -= 1;
+            hit = true;
+        }
+    }
+    hit
+}
+
+/// OR-mode word probe: any-hit short-circuit.
+#[inline]
+fn fts_word_matches_or(word: &str, query_tokens: &[String]) -> bool {
+    query_tokens
+        .iter()
+        .any(|t| fts_word_eq_token(word, t.as_str()))
 }
 
 // ============================================================================
