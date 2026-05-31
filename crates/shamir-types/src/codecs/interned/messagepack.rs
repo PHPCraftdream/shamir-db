@@ -149,14 +149,20 @@ fn rmpv_value_to_inner(
         RmpvValue::Map(map) => {
             let mut converted = new_map();
             for (key_val, val) in map {
-                // Convert key
-                let key_str = match rmpv_value_to_inner(key_val, interner)? {
-                    InnerValue::Str(s) => s,
+                // Intern map keys directly from the borrowed `&str`
+                // owned by `rmpv::Value::String` — no transient
+                // `String` allocation, no intermediate
+                // `InnerValue::Str` build-then-discard per key
+                // (mirror of the encode-side `with_str` borrow win).
+                let key_str = match key_val {
+                    RmpvValue::String(s) => s.as_str().ok_or_else(|| {
+                        CodecError::Decode("Invalid UTF-8 in map key".to_string())
+                    })?,
                     _ => return Err(CodecError::Decode("Map keys must be strings".to_string())),
                 };
 
-                // Intern the key
-                let interned_key = intern_string_key(interner, &key_str)?;
+                // Intern the key from the borrowed slice.
+                let interned_key = intern_string_key(interner, key_str)?;
 
                 // Convert value
                 let converted_val = rmpv_value_to_inner(val, interner)?;
