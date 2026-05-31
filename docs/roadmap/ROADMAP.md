@@ -2,6 +2,15 @@
 
 Future features beyond v1 spec. Не нормативные, не binding обещания.
 
+> **Current state (2026-05-31):** the transactional layer is COMPLETE —
+> SI + SSI + true serializability (phantom protection), single-batch and
+> interactive multi-call, crash-safe, property-covered. See
+> [`../PROJECT_STATE.md`](../PROJECT_STATE.md) for the full snapshot and
+> [`NEXT_PHASES.md`](./NEXT_PHASES.md) for the post-Phase-A index. The items
+> below are still-future (auth v1.1+, transports, PQ, cluster) plus the
+> Database-Engine section (replication / sharding / query-language-v2 /
+> backup tooling — not started).
+
 ## Auth Protocol
 
 ### v1.1 (короткий горизонт)
