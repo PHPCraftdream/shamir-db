@@ -115,6 +115,52 @@ fn bench_set_many(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
     group.finish();
 }
 
+fn bench_get_many(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+    let rt = rt();
+    let keys = rt.block_on(seed(&store, SEED_COUNT));
+    let mut group = c.benchmark_group(format!("{name}/get_many"));
+    let batch_size = 100;
+    group.throughput(Throughput::Elements(batch_size as u64));
+    let probe: Vec<_> = keys[..batch_size].to_vec();
+    group.bench_function(BenchmarkId::new("batch", batch_size), |b| {
+        let s = Arc::clone(&store);
+        let probe = probe.clone();
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&s);
+            let probe = probe.clone();
+            async move {
+                s.get_many(probe).await.unwrap();
+            }
+        });
+    });
+    group.finish();
+}
+
+fn bench_remove_many(c: &mut Criterion, name: &str, store: Arc<dyn Store>) {
+    let rt = rt();
+    // Pre-seed a working set; the bench removes the same set of keys
+    // every iter — the second iter onward they're tombstoned, but the
+    // per-key cost shape (dirty insert + cache insert + notify) is the
+    // same as a hot-path remove on an existing key.
+    let keys = rt.block_on(seed(&store, SEED_COUNT));
+    let mut group = c.benchmark_group(format!("{name}/remove_many"));
+    let batch_size = 100;
+    group.throughput(Throughput::Elements(batch_size as u64));
+    let probe: Vec<_> = keys[..batch_size].to_vec();
+    group.bench_function(BenchmarkId::new("batch", batch_size), |b| {
+        let s = Arc::clone(&store);
+        let probe = probe.clone();
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&s);
+            let probe = probe.clone();
+            async move {
+                s.remove_many(probe).await.unwrap();
+            }
+        });
+    });
+    group.finish();
+}
+
 // ────────────────────────────────────────────────────────────────────
 // In-memory backend (always available)
 // ────────────────────────────────────────────────────────────────────
@@ -247,9 +293,34 @@ fn bench_cached_in_memory(c: &mut Criterion) {
     bench_set_many(c, name, cached_in_memory_store());
 }
 
+fn membuffer_in_memory_store() -> Arc<dyn Store> {
+    let inner = in_memory_store();
+    let cfg = shamir_storage::storage_membuffer::MemBufferConfig {
+        max_bytes: 64 * 1024 * 1024,
+        max_entries: 1_000_000,
+        ttl_ms: None,
+        flush_interval_ms: 60_000,
+        flush_batch_size: 256,
+    };
+    let rt = rt();
+    rt.block_on(async {
+        Arc::new(shamir_storage::storage_membuffer::MemBufferStore::new(
+            inner, cfg,
+        )) as Arc<dyn Store>
+    })
+}
+
+fn bench_membuffer_in_memory(c: &mut Criterion) {
+    let name = "membuffer_in_memory";
+    bench_set_many(c, name, membuffer_in_memory_store());
+    bench_get_many(c, name, membuffer_in_memory_store());
+    bench_remove_many(c, name, membuffer_in_memory_store());
+}
+
 fn bench_all_backends(c: &mut Criterion) {
     bench_in_memory(c);
     bench_cached_in_memory(c);
+    bench_membuffer_in_memory(c);
     #[cfg(feature = "redb")]
     bench_redb(c);
     #[cfg(feature = "sled")]
