@@ -1,11 +1,20 @@
 # Transactions — Design
 
-Status: **Phase A implemented** (2026-05-28). Single-batch SI/SSI
-transactions work end-to-end with crash recovery. See
-`docs/pre-transactional/REVIEW.md` for the comprehensive state snapshot.
+Status: **Phases A + B + C all implemented** (last updated 2026-05-31).
+- **Phase A** — single-batch SI/SSI transactions, end-to-end with WAL crash
+  recovery (2026-05-28; hardened through three audit waves).
+- **Phase B** — interactive multi-call transactions (`begin → execute* →
+  commit/rollback`) with session-scoped state, idle/lifetime reaper, per-tx
+  staging budget. See [`PHASE_B_INTERACTIVE_TX.md`](./PHASE_B_INTERACTIVE_TX.md).
+- **Phase C** — predicate/range SIREAD locks → phantom protection (true
+  serializability). See [`PHASE_C_SERIALIZABLE.md`](./PHASE_C_SERIALIZABLE.md).
 
-Remaining: Phase B (interactive multi-call transactions with session-
-scoped state) is a separate sprint — not started.
+The full isolation spectrum (SI → SSI → true serializability) is now closed,
+in both single-batch and interactive modes. See
+[`../PROJECT_STATE.md`](../PROJECT_STATE.md) for the project snapshot and
+`docs/pre-transactional/REVIEW.md` for the Phase-A audit record. Q5 below
+(raise the default to Serializable now that phantoms are closed) is now
+actionable.
 
 > **Note on prior drafts.** Earlier revisions of this file proposed
 > "rely on the storage backend's native MVCC (redb / persy / canopy)".

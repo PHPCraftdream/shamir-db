@@ -5,7 +5,14 @@
 State-of-the-world snapshot. Captures what landed, what remains, what
 compromises were taken, and what open questions exist.
 
-**As of:** 2026-05-29 (post-audit hardening — two review waves landed on
+**As of:** 2026-05-31. This is the **Phase-A** audit record; since it,
+**Phase B** (interactive multi-call transactions) and **Phase C** (predicate/
+range locks → phantom protection, true serializability) have shipped — see
+[`../PROJECT_STATE.md`](../PROJECT_STATE.md) for the current project snapshot
+and `../roadmap/{PHASE_B_INTERACTIVE_TX,PHASE_C_SERIALIZABLE}.md`. The §11
+follow-up list below is updated to reflect what has since closed.
+
+(Original Phase-A line: post-audit hardening — two review waves landed on
 top of Phase A; see §11 for the audit closures and the honest list of
 follow-ups still open).
 
@@ -553,6 +560,23 @@ toward honesty, not to declare victory.
 Not bugs hiding behind green tests — known, documented stage-cut
 boundaries. Listed so the next engineer doesn't rediscover them.
 
+> **Update 2026-05-31 — most of this list has since CLOSED:**
+> - **I.1** (executor read tx-threading) — ✅ closed (`230f8b5`).
+> - **I.2** (index-config catalogue replay) — ✅ closed (`20ee9ed`).
+> - **Perf `table_by_token`** (III.1) — ✅ closed (`20ee9ed`).
+> - **Real-crash subprocess harness** (II.1) — ✅ closed (`783a7bf`); MED-A
+>   extended it with a two-table redb reopen test.
+> - **CI `--all-targets`** — ✅ closed (`55adef0`).
+> - **Property / fuzz** — ✅ closed (`proptest` dev-dep sanctioned; version-
+>   codec + SSI `validate_read_set` property tests landed 2026-05-31).
+> - **MED-A** (cross-table physical atomicity) — **WONTFIX-by-design**: a
+>   physical multi-store transact would leak backend identity; logical-WAL +
+>   idempotent recovery is the correct backend-agnostic answer. See
+>   [`../roadmap/PHASE_A_TAILS.md`](../roadmap/PHASE_A_TAILS.md) §1.
+>
+> Beyond Phase A, **Phase B** (interactive tx) and **Phase C** (phantom
+> protection) shipped. The original bullets are kept below for the record.
+
 - **I.1 — executor `BatchOp::Read` tx-threading** — *in progress
   (parallel task).* The read-tracking plumbing (HIGH-C) is committed; the
   remaining work routes a transactional SELECT through `read_tx` with a
@@ -585,7 +609,8 @@ boundaries. Listed so the next engineer doesn't rediscover them.
 
 ---
 
-Документ обновляется по мере landing новых stages. Текущая ревизия —
-2026-05-29 после двух audit-волн (CRIT-A/B, HIGH-A/C, NEW-1/2,
-unique-under-lock, HNSW-relocation, password-at-rest, flaky-fixed); I.1 и
-I.2 закрываются параллельными задачами.
+Документ обновляется по мере landing новых stages. Это Phase-A audit-запись;
+ревизия 2026-05-31. С тех пор закрыты I.1/I.2/II.1/III.1/CI/property-fuzz,
+MED-A — WONTFIX-by-design, и поверх Phase A приземлились **Phase B**
+(interactive tx) и **Phase C** (phantom protection / true serializability).
+Актуальный снимок проекта — [`../PROJECT_STATE.md`](../PROJECT_STATE.md).
