@@ -23,9 +23,9 @@ A modern, modular embedded database written in Rust with pluggable storage backe
 - ✅ Transports: TCP, WebSocket (native + browser)
 - ✅ Session resumption tickets (AES-256-GCM, anti-downgrade, multi-device families)
 - ✅ Audit log with HMAC chain
-- ✅ ACID Transactions: single-batch Snapshot Isolation (SI) + Serializable (SSI), crash recovery via WAL V2
-- ✅ MVCC versioned reads, history store GC, max-tx-lifetime enforcement
-- ✅ 1452+ workspace tests
+- ✅ ACID Transactions: single-batch + **interactive multi-call** (`begin → execute* → commit/rollback`) Snapshot Isolation (SI) + Serializable (SSI), crash recovery via WAL V2
+- ✅ MVCC versioned reads, history store GC, max-tx-lifetime enforcement, interactive-tx idle/lifetime reaper + per-tx staging budget
+- ✅ 1600+ workspace tests (incl. proptest property tests for the version codec + SSI read-set validation)
 
 **Planned Features (see [docs/roadmap/ROADMAP.md](docs/roadmap/ROADMAP.md)):**
 - 🔜 Browser WASM client (Argon2id in Web Worker)

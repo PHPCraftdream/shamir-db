@@ -61,6 +61,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
                 max_active_connections: 0, // unlimited for this test
             },
             query_limits: Default::default(),
+            tx: Default::default(),
         },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {

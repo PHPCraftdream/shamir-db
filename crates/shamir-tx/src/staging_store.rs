@@ -153,6 +153,32 @@ impl StagingStore {
         ops
     }
 
+    /// Approximate in-memory byte footprint of all currently staged ops.
+    ///
+    /// `O(N)` over the staged keys via a sync `scc::HashMap::scan` (the same
+    /// pattern as [`snapshot_ops`] and [`len`]). `Bytes::len()` is O(1), so
+    /// each visit is constant work.
+    ///
+    /// Counts `key.len() + value.len()` for [`StagedOp::Set`] and `key.len()`
+    /// for [`StagedOp::Remove`]. Used by the server-side per-tx staging
+    /// budget enforced on each `TxExecute` (Phase B Stage 8) to abort a tx
+    /// with `tx_too_large` before its WAL entry — built from these very bytes
+    /// in `wal_ops_from_tx` — grows unboundedly.
+    ///
+    /// Note: this measures the in-memory staging footprint, not the eventual
+    /// `WalEntryV2` serialized length (which adds variant tags, lengths,
+    /// interner overlay entries, counter deltas). The cap will trip somewhat
+    /// earlier than the actual on-disk WAL size — fine for a protective
+    /// budget, not equivalent to a WAL-byte cap.
+    pub fn staged_bytes(&self) -> usize {
+        let mut total: usize = 0;
+        self.writes.scan(|k, v| match v {
+            StagedOp::Set(b) => total = total.saturating_add(k.len()).saturating_add(b.len()),
+            StagedOp::Remove => total = total.saturating_add(k.len()),
+        });
+        total
+    }
+
     /// Number of unique keys with staged writes.
     pub fn len(&self) -> usize {
         self.writes.len()
@@ -403,6 +429,25 @@ mod tests {
         );
         // A never-staged key of yet another length is still None.
         assert_eq!(staging.staged_op(b"never-staged-key".as_ref()), None);
+    }
+
+    #[tokio::test]
+    async fn staged_bytes_sums_keys_and_values() {
+        let base = mem_store();
+        let staging = StagingStore::new(base);
+
+        // Empty staging → 0 bytes.
+        assert_eq!(staging.staged_bytes(), 0);
+
+        // One Set("ab", "12345") → key 2 + value 5 = 7 bytes.
+        staging
+            .set(Bytes::from_static(b"ab"), Bytes::from_static(b"12345"))
+            .await;
+        assert_eq!(staging.staged_bytes(), 7);
+
+        // Add Remove("xyz") → key 3 bytes. Total = 7 + 3 = 10.
+        staging.remove(Bytes::from_static(b"xyz")).await;
+        assert_eq!(staging.staged_bytes(), 10);
     }
 
     #[tokio::test]

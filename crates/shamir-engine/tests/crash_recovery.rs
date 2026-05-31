@@ -65,7 +65,13 @@ const CRASH_AFTER: &str = "SHAMIR_TEST_CRASH_AFTER";
 const REPO_PATH: &str = "SHAMIR_TEST_CRASH_PATH";
 
 const TABLE: &str = "docs";
+const TABLE_B: &str = "tags";
 const REPO_NAME: &str = "crash_repo";
+
+/// Env sentinel: when present the child runs the MULTI-TABLE scenario
+/// instead of the single-table one. Distinct from `CHILD_SENTINEL` so the
+/// existing single-table tests are unaffected.
+const CHILD_SENTINEL_MULTI: &str = "SHAMIR_TEST_CRASH_CHILD_MULTI";
 
 // ---------------------------------------------------------------------------
 // Shared scenario helpers (used by both the child and, on the read side,
@@ -115,9 +121,13 @@ fn text_record(body_key_id: u64, text: &str) -> InnerValue {
 /// image the killed child left behind.
 async fn open_repo(path: &Path) -> RepoInstance {
     let factory = BoxRepoFactory::redb_raw(path.to_path_buf());
-    RepoInstance::from_factory(REPO_NAME.into(), factory, vec![TableConfig::new(TABLE)])
-        .await
-        .expect("open redb repo")
+    RepoInstance::from_factory(
+        REPO_NAME.into(),
+        factory,
+        vec![TableConfig::new(TABLE), TableConfig::new(TABLE_B)],
+    )
+    .await
+    .expect("open redb repo")
 }
 
 /// Count records physically present in a table store by draining its
@@ -365,4 +375,116 @@ async fn crash_at_phase7_is_clean_committed() {
     assert_eq!(replayed, 0, "WAL marker gone → recovery is a no-op");
     assert_eq!(data, 1, "already materialized before the crash");
     assert!(fts >= 1, "index postings already present (got {fts})");
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-TABLE (MED-A): cross-table logical atomicity via WAL replay.
+// ---------------------------------------------------------------------------
+
+/// Multi-table variant: a SINGLE tx writes ONE record into EACH of two
+/// tables (`docs` + `tags`) and crashes at `phase4` (AFTER `wal.begin`,
+/// BEFORE any Phase-5 materialization). The on-disk image after the
+/// `process::abort` contains exactly one inflight WAL entry whose
+/// `Vec<WalOpV2>` carries the Put for BOTH tables (per `wal_ops_from_tx`
+/// iterating every entry in `tx.write_set`).
+async fn run_child_scenario_multi_table(path: PathBuf) {
+    let repo = open_repo(&path).await;
+    let tbl_a = repo.get_table(TABLE).await.unwrap();
+    let tbl_b = repo.get_table(TABLE_B).await.unwrap();
+
+    let body_id_a = field_id(&tbl_a, "body").await;
+    let body_id_b = field_id(&tbl_b, "body").await;
+
+    let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tbl_a
+        .insert_tx(&text_record(body_id_a, "row-in-table-a"), Some(&mut tx))
+        .await
+        .unwrap();
+    tbl_b
+        .insert_tx(&text_record(body_id_b, "row-in-table-b"), Some(&mut tx))
+        .await
+        .unwrap();
+
+    // commit_tx reads SHAMIR_TEST_CRASH_AFTER and aborts at `phase4`.
+    let _ = repo.commit_tx(tx).await;
+    drop(guard);
+}
+
+/// Child entrypoint for the multi-table scenario. A `#[test]` that is a
+/// NO-OP in the parent process (sentinel absent) and runs the multi-table
+/// crash scenario in the spawned child (sentinel present).
+#[test]
+fn child_entrypoint_multi_table() {
+    if std::env::var(CHILD_SENTINEL_MULTI).is_err() {
+        return;
+    }
+    let path = PathBuf::from(std::env::var(REPO_PATH).expect("child needs REPO_PATH"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("child runtime");
+    rt.block_on(run_child_scenario_multi_table(path));
+}
+
+fn spawn_child_multi_table(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
+    let exe = std::env::current_exe().expect("current_exe");
+    std::process::Command::new(exe)
+        .args(["--exact", "child_entrypoint_multi_table", "--nocapture"])
+        .env(CHILD_SENTINEL_MULTI, "1")
+        .env(CRASH_AFTER, phase)
+        .env(REPO_PATH, repo_path)
+        .output()
+        .expect("spawn crash child")
+        .status
+}
+
+/// MED-A cheap-win (Phase-A tails S1.2): a multi-table tx that crashes at
+/// the Phase-4 commit point leaves a single inflight WAL entry covering
+/// BOTH tables; `recover_v2_inflight` replays that one entry and both
+/// tables converge at the same `commit_version`. Proves "logical-WAL
+/// atomicity covers N tables" on REAL on-disk redb (not in-process
+/// injection), making "restart-bounded cross-table consistency" an
+/// executable fact, not a doc claim.
+#[tokio::test]
+async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo_path = dir.path().join("repo.redb");
+
+    let status = spawn_child_multi_table("phase4", &repo_path);
+    assert!(
+        !status.success(),
+        "child must die abnormally on process::abort() at phase4; got {status:?}"
+    );
+
+    // REOPEN over the same on-disk image.
+    let repo = open_repo(&repo_path).await;
+    let replayed = repo.recover_v2_inflight().await.expect("recovery");
+    assert_eq!(
+        replayed, 1,
+        "one inflight entry must carry BOTH tables' ops (logical-WAL atomicity)"
+    );
+
+    let tbl_a = repo.get_table(TABLE).await.unwrap();
+    let tbl_b = repo.get_table(TABLE_B).await.unwrap();
+    let count_a = store_record_count(tbl_a.data_store()).await;
+    let count_b = store_record_count(tbl_b.data_store()).await;
+    assert_eq!(count_a, 1, "table A materialized by WAL replay");
+    assert_eq!(count_b, 1, "table B materialized by WAL replay");
+
+    // Cross-table same commit floor: `recover_inflight_v2` persists
+    // `last_committed = gate.last_committed()` (recovery.rs:249-256). Both
+    // tables' rows live under that same monotonic floor — the single
+    // shared `commit_version` of the replayed entry.
+    let floor = repo.tx_gate().await.unwrap().last_committed();
+    assert!(
+        floor > 0,
+        "recovery must publish a non-zero commit floor covering both tables"
+    );
+
+    // Re-recovery is a no-op (marker cleaned).
+    assert_eq!(
+        repo.recover_v2_inflight().await.unwrap(),
+        0,
+        "second recovery pass must be a no-op"
+    );
 }

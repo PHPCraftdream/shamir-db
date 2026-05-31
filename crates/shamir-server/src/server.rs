@@ -60,7 +60,7 @@ use crate::bootstrap::{
 use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::conn_limiter::ConnLimiter;
 use crate::connection::{handle_connection, ConnectionContext};
-use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig};
+use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap};
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server_meta::ServerMetaStore;
 use crate::tables_registry::TablesRegistry;
@@ -140,6 +140,10 @@ pub struct ServerHandle {
     /// `server_meta.redb` is released cleanly before a same-data-dir
     /// restart can succeed.
     meta_snapshot_task: Option<MetaSnapshotTask>,
+    /// Phase B Stage 6 — periodic reaper for expired interactive txs.
+    /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
+    /// task drops and any lingering open txs are dropped (RAII abort).
+    interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
 }
 
 /// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
@@ -178,6 +182,12 @@ impl ServerHandle {
         if let Some(snap) = self.meta_snapshot_task {
             snap.stop.notify_waiters();
             let _ = snap.handle.await;
+        }
+        // 6. Stop the interactive-tx reaper so the Arc<TxRegistry> drops
+        //    and any lingering open txs are dropped (RAII abort).
+        if let Some(reaper) = self.interactive_tx_reaper {
+            reaper.stop.notify_waiters();
+            let _ = reaper.handle.await;
         }
     }
 
@@ -395,7 +405,7 @@ impl ServerLauncher {
                 }
             }
         }
-        let handler: Arc<dyn RequestHandler> = Arc::new(
+        let handler_concrete: Arc<ShamirDbHandler> = Arc::new(
             ShamirDbHandler::with_admin(
                 shamir.clone(),
                 AdminGlue {
@@ -411,8 +421,23 @@ impl ServerLauncher {
                 max_result_size_bytes: config.security.query_limits.max_result_size_bytes,
                 max_execution_time_secs: config.security.query_limits.max_execution_time_secs,
                 max_queries_per_batch: config.security.query_limits.max_queries_per_batch,
+            })
+            .with_tx_limits(TxLimitsCap {
+                max_tx_bytes: config.security.tx.max_tx_bytes,
             }),
         );
+        let tx_registry_for_reaper = handler_concrete.tx_registry();
+        let handler: Arc<dyn RequestHandler> = handler_concrete;
+
+        // Phase B Stage 6 — background reaper for interactive txs that
+        // outlive their idle TTL or absolute deadline. Mirrors the
+        // `MetaSnapshotTask` lifecycle: Notify-based stop + JoinHandle
+        // drained on shutdown.
+        let interactive_tx_reaper = Some(crate::tx_registry::spawn_reaper_task(
+            tx_registry_for_reaper,
+            crate::tx_registry::DEFAULT_INTERACTIVE_TX_IDLE_TTL,
+            crate::tx_registry::DEFAULT_REAPER_INTERVAL,
+        ));
 
         // 6. ResumeConfig.
         let (current_key, previous_key) = meta
@@ -696,6 +721,7 @@ impl ServerLauncher {
             shutdown_notify,
             observability,
             meta_snapshot_task,
+            interactive_tx_reaper,
         })
     }
 }

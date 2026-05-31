@@ -65,7 +65,7 @@ CRIT/HIGH/MED-векторы трёх audit-волн закрыты.
 
 ## Три форвард-фазы
 
-### ① Phase B — Interactive (multi-call) transactions
+### ① Phase B — Interactive (multi-call) transactions — ✅ DONE (2026-05-31)
 📄 [`PHASE_B_INTERACTIVE_TX.md`](./PHASE_B_INTERACTIVE_TX.md)
 
 `BEGIN → EXECUTE(handle, batch)* → COMMIT | ROLLBACK | timeout/disconnect`.

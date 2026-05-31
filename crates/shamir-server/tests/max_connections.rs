@@ -62,6 +62,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
                 max_active_connections: max_conns,
             },
             query_limits: Default::default(),
+            tx: Default::default(),
         },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
