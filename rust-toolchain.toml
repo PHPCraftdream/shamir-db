@@ -1,0 +1,16 @@
+# Pinned toolchain — keeps local dev and CI on the SAME rustc/clippy so the
+# `clippy --workspace --all-targets -- -D warnings` gate is deterministic.
+#
+# WHY PINNED: with `dtolnay/rust-toolchain@stable` the CI runner resolved a
+# moving `stable`, so every new stable release introduced fresh clippy lints
+# on UNTOUCHED code and reddened CI for no code reason (the clippy job was red
+# from 2026-05-29 onward while fmt/lib/integration stayed green). Pinning makes
+# the gate reproducible: green here == green in CI.
+#
+# TO BUMP: raise `channel`, run `cargo clippy --workspace --all-targets
+# -- -D warnings` locally, fix any new lints in a dedicated `chore(clippy):`
+# commit, then bump the matching `dtolnay/rust-toolchain@<version>` refs in
+# .github/workflows/ci.yml.
+[toolchain]
+channel = "1.93.0"
+components = ["rustfmt", "clippy"]
