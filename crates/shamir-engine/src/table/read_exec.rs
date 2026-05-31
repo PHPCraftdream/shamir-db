@@ -733,6 +733,23 @@ impl TableManager {
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
 
+        // Opt #3a (LIMIT push-down): plain filtered SELECT with LIMIT
+        // and no in-memory ORDER BY / GROUP BY / DISTINCT / aggregates
+        // projects only the page rows instead of every match.
+        if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+            let records_returned = paged.len() as u64;
+            return Ok(QueryResult {
+                records: paged,
+                stats: Some(QueryStats {
+                    index_used: Some(format!("sorted_idx_{index_name}")),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                }),
+                pagination,
+            });
+        }
+
         let mut result = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
@@ -940,6 +957,30 @@ impl TableManager {
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
 
+        // Resolve index name for stats — needed by both paths below.
+        let index_name_str = interner
+            .get_str(&InternerKey::new(index_name))
+            .map(|k| k.as_str().to_string())
+            .unwrap_or_else(|| index_name.to_string());
+
+        // Opt #3a (LIMIT push-down): plain filtered SELECT with LIMIT
+        // and no in-memory ORDER BY / GROUP BY / DISTINCT / aggregates
+        // projects only the page rows instead of every match.
+        if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+            let elapsed = start.elapsed();
+            let records_returned = paged.len() as u64;
+            return Ok(QueryResult {
+                records: paged,
+                stats: Some(QueryStats {
+                    index_used: Some(index_name_str),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: elapsed.as_micros() as u64,
+                }),
+                pagination,
+            });
+        }
+
         let mut result = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
@@ -961,12 +1002,6 @@ impl TableManager {
 
         let elapsed = start.elapsed();
         let records_returned = records.len() as u64;
-
-        // Resolve index name for stats
-        let index_name_str = interner
-            .get_str(&InternerKey::new(index_name))
-            .map(|k| k.as_str().to_string())
-            .unwrap_or_else(|| index_name.to_string());
 
         Ok(QueryResult {
             records,
@@ -1225,4 +1260,85 @@ impl TableManager {
             pagination,
         })
     }
+}
+
+/// Opt #3a — LIMIT push-down for index scan paths.
+///
+/// When the query has **no in-memory ORDER BY, no GROUP BY, no DISTINCT,
+/// no aggregates** (plain filtered SELECT with LIMIT [+ optional OFFSET]),
+/// project ONLY the page rows instead of every matched row. Semantics are
+/// byte-identical to the full-projection path: LIMIT without ORDER BY
+/// already returns "the first N in scan order"; we just stop projecting
+/// the rest.
+///
+/// Returns `None` (caller falls through to the full pipeline) when any
+/// of the gate conditions fails or when there is no finite LIMIT to push.
+/// `count_total` is preserved: the full match count equals `matched.len()`
+/// — we can read it without projecting any row beyond the page.
+fn try_project_page_only(
+    query: &ReadQuery,
+    matched: &[(RecordId, InnerValue)],
+    interner: &Interner,
+) -> Option<(Vec<serde_json::Value>, Option<PaginationInfo>)> {
+    // Gate: every condition below disables the push-down.
+    if query.order_by.is_some()
+        || query.group_by.is_some()
+        || query.select.distinct
+        || exec::has_aggregates(&query.select)
+    {
+        return None;
+    }
+
+    // Need pagination or count_total — otherwise the original path is
+    // already O(matches) and there's nothing to push down.
+    if query.pagination.is_none() && !query.count_total {
+        return None;
+    }
+
+    let (skip_u64, take_u64) = query.pagination.resolve();
+    // Require a finite limit to project: without it, the page is the
+    // whole tail and we'd still project every row. Skip-only optimisation
+    // (no limit, offset > 0) would only save the prefix — not worth it
+    // here; let the fall-through path handle it.
+    let take = take_u64? as usize;
+    let skip = skip_u64 as usize;
+
+    let total_matches = matched.len();
+    let total_u64 = total_matches as u64;
+
+    // Slice the page from `matched` before projection.
+    let page_start = skip.min(total_matches);
+    let page_end = skip.saturating_add(take).min(total_matches);
+    let page_slice = &matched[page_start..page_end];
+
+    let proj = exec::SelectProjection::new(&query.select, interner);
+    let mut paged: Vec<serde_json::Value> = Vec::with_capacity(page_slice.len());
+    for (_, record) in page_slice {
+        paged.push(proj.project(record, interner));
+    }
+
+    // Pagination metadata mirrors `apply_pagination`'s semantics: when
+    // count_total is set, `total_count` is the full match count
+    // (= matched.len()); otherwise we still get page_size / has_prev
+    // from PaginationInfo::compute.
+    let pagination = if query.pagination.is_none() && query.count_total {
+        // count_total without pagination — same shape as apply_pagination.
+        Some(PaginationInfo {
+            total_count: Some(total_u64),
+            total_pages: None,
+            current_page: None,
+            page_size: None,
+            has_next: false,
+            has_prev: false,
+        })
+    } else {
+        let total_for_info = if query.count_total {
+            Some(total_u64)
+        } else {
+            None
+        };
+        Some(PaginationInfo::compute(&query.pagination, total_for_info))
+    };
+
+    Some((paged, pagination))
 }
