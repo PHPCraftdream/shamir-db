@@ -1,7 +1,7 @@
 //! Write-op planning primitives for transactional index commit.
 
 use crate::index2::backend::{IndexBackend, IndexError};
-use shamir_storage::types::Store;
+use shamir_storage::types::{KvOp, Store};
 use std::sync::Arc;
 
 // Re-export from shamir-tx where the pure-data enum now lives.
@@ -20,37 +20,36 @@ pub async fn apply_index_ops(
     store: &Arc<dyn Store>,
     backend: &dyn IndexBackend,
 ) -> Result<(), IndexError> {
-    let mut in_memory_ops: Vec<&IndexWriteOp> = Vec::new();
+    // Collect Set/Remove postings into one ordered KvOp batch (preserving
+    // input order — Set-then-Remove on the same key still yields the
+    // last-write-wins semantics of the per-key loop). On transactional
+    // backends `Store::transact` collapses N fsyncs into one; on the
+    // default loop impl the result is identical to the previous per-op
+    // path.
+    let mut kv_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
+    let mut in_memory_ops: Vec<IndexWriteOp> = Vec::new();
 
     for op in ops {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
-                store
-                    .set(key.clone(), value.clone())
-                    .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                kv_ops.push(KvOp::Set(key.clone(), value.clone()));
             }
             IndexWriteOp::RemovePosting { key } => {
-                let _ = store
-                    .remove(key.clone())
-                    .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                kv_ops.push(KvOp::Remove(key.clone()));
             }
-            other => {
-                in_memory_ops.push(other);
-            }
+            other => in_memory_ops.push(other.clone()),
         }
     }
 
+    if !kv_ops.is_empty() {
+        store
+            .transact(kv_ops)
+            .await
+            .map_err(|e| IndexError::Storage(e.to_string()))?;
+    }
+
     if !in_memory_ops.is_empty() {
-        backend
-            .apply_in_memory(
-                &in_memory_ops
-                    .iter()
-                    .map(|o| (*o).clone())
-                    .collect::<Vec<_>>(),
-            )
-            .await?;
+        backend.apply_in_memory(&in_memory_ops).await?;
     }
 
     Ok(())
@@ -82,24 +81,33 @@ pub async fn apply_index_ops_at_commit(
     info_store: &Arc<dyn Store>,
     backends: &[Arc<dyn IndexBackend>],
 ) -> Result<(), IndexError> {
+    // Collapse all SetPosting / RemovePosting ops into one ordered
+    // `Store::transact` batch. On transactional backends (sled, redb,
+    // fjall, persy, nebari, canopy) the batch is one fsync instead of N
+    // — exactly mirroring the V2 WAL recovery path's effect when it
+    // batch-replays IndexPut/IndexDel. Last-write-wins semantics are
+    // preserved by feeding ops in their original order. BumpFtsStats is
+    // in-memory only and unchanged.
+    let mut kv_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
     let mut in_memory_ops: Vec<IndexWriteOp> = Vec::new();
 
     for op in ops {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
-                info_store
-                    .set(key.clone(), value.clone())
-                    .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                kv_ops.push(KvOp::Set(key.clone(), value.clone()));
             }
             IndexWriteOp::RemovePosting { key } => {
-                let _ = info_store
-                    .remove(key.clone())
-                    .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                kv_ops.push(KvOp::Remove(key.clone()));
             }
             other => in_memory_ops.push(other.clone()),
         }
+    }
+
+    if !kv_ops.is_empty() {
+        info_store
+            .transact(kv_ops)
+            .await
+            .map_err(|e| IndexError::Storage(e.to_string()))?;
     }
 
     if !in_memory_ops.is_empty() {
