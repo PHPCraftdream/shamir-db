@@ -622,28 +622,114 @@ impl Store for MemBufferStore {
     }
 
     async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Batched mirror of `set` for each (k,v) — same dirty/cache
+        // dual-write, same best-effort `existed` semantics (dirty →
+        // cache, never inner), but with hoisted cache snapshot and a
+        // SINGLE notify_one at the end. Last-write-wins within the
+        // batch on duplicate keys (the dirty/cache inserts happen in
+        // input order; the final state matches the per-element loop).
+        let cache = self.state.cache.load();
         let mut flags = Vec::with_capacity(items.len());
         for (k, v) in items {
-            flags.push(self.set(k, v).await?);
+            let existed = match self.state.dirty.get(&k).map(|e| e.value().clone()) {
+                Some(Slot::Live(_)) => true,
+                Some(Slot::Tombstone) => false,
+                None => match cache.get(&k).await {
+                    Some(Slot::Live(_)) => true,
+                    Some(Slot::Tombstone) => false,
+                    None => false,
+                },
+            };
+            let slot = Slot::Live(v);
+            self.state.dirty.insert(k.clone(), slot.clone());
+            cache.insert(k, slot).await;
+            flags.push(!existed);
         }
+        self.notify.notify_one();
         Ok(flags)
     }
 
     async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Batched mirror of `remove` — see `set_many` for the
+        // batching shape. Tombstones replace Live slots; dirty/cache
+        // dual-write preserved, ONE notify_one.
+        let cache = self.state.cache.load();
         let mut flags = Vec::with_capacity(keys.len());
         for k in keys {
-            flags.push(self.remove(k).await?);
+            let existed = match self.state.dirty.get(&k).map(|e| e.value().clone()) {
+                Some(Slot::Live(_)) => true,
+                Some(Slot::Tombstone) => false,
+                None => match cache.get(&k).await {
+                    Some(Slot::Live(_)) => true,
+                    Some(Slot::Tombstone) => false,
+                    None => false,
+                },
+            };
+            self.state.dirty.insert(k.clone(), Slot::Tombstone);
+            cache.insert(k, Slot::Tombstone).await;
+            flags.push(existed);
         }
+        self.notify.notify_one();
         Ok(flags)
     }
 
     async fn get_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<Option<Bytes>>> {
-        let mut out = Vec::with_capacity(keys.len());
-        for k in keys {
-            match self.get(k).await {
-                Ok(v) => out.push(Some(v)),
-                Err(DbError::NotFound(_)) => out.push(None),
-                Err(e) => return Err(e),
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Same lookup order as `get`: cache → dirty → inner. Cache
+        // hits and dirty hits are answered locally; the remaining
+        // misses are batched into ONE `inner.get_many` call so disk
+        // backends get a single transactional read instead of N.
+        let cache = self.state.cache.load();
+        let mut out: Vec<Option<Bytes>> = Vec::with_capacity(keys.len());
+        let mut miss_idxs: Vec<usize> = Vec::new();
+        let mut miss_keys: Vec<RecordKey> = Vec::new();
+        for (i, k) in keys.into_iter().enumerate() {
+            // Cache lookup first.
+            if let Some(slot) = cache.get(&k).await {
+                match slot {
+                    Slot::Live(v) => out.push(Some(v)),
+                    Slot::Tombstone => out.push(None),
+                }
+                continue;
+            }
+            // Cache miss — check dirty (may hold a value moka evicted).
+            if let Some(entry) = self.state.dirty.get(&k) {
+                match entry.value() {
+                    Slot::Live(v) => out.push(Some(v.clone())),
+                    Slot::Tombstone => out.push(None),
+                }
+                continue;
+            }
+            // Both miss — defer to a single inner.get_many.
+            out.push(None);
+            miss_idxs.push(i);
+            miss_keys.push(k);
+        }
+        if !miss_keys.is_empty() {
+            // Keep the miss keys for cache-fill after the batch read.
+            let miss_keys_for_fill = miss_keys.clone();
+            let inner_vals = self.inner.get_many(miss_keys).await?;
+            for ((i, k), v) in miss_idxs
+                .into_iter()
+                .zip(miss_keys_for_fill.into_iter())
+                .zip(inner_vals.into_iter())
+            {
+                // Populate cache (clean read-fill — NOT dirty). Tombstone
+                // negative result so subsequent gets short-circuit.
+                let slot = match &v {
+                    Some(b) => Slot::Live(b.clone()),
+                    None => Slot::Tombstone,
+                };
+                cache.insert(k, slot).await;
+                out[i] = v;
             }
         }
         Ok(out)
