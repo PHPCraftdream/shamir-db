@@ -23,7 +23,7 @@ use crate::meta::MetaKey;
 use bytes::Bytes;
 use dashmap::DashMap;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::Store;
+use shamir_storage::types::{KvOp, Store};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -807,19 +807,31 @@ impl IndexManager {
 
     /// Apply a slice of `IndexWriteOp` against `self.info_store`.
     /// Used by the `on_record_*` wrapper methods after planning.
+    ///
+    /// All SetPosting/RemovePosting ops are collapsed into ONE
+    /// ordered `Store::transact` call — on transactional backends
+    /// (sled / redb / fjall / persy / nebari / canopy) this is one
+    /// atomic batch (one fsync) instead of N per-key writes. Order is
+    /// preserved, so the per-key last-write-wins semantics of the
+    /// original loop are unchanged. BumpFtsStats is in-memory only
+    /// and not relevant for the legacy IndexManager.
     async fn apply_ops(&self, ops: &[IndexWriteOp]) -> DbResult<()> {
+        let mut kv_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
                 IndexWriteOp::SetPosting { key, value } => {
-                    self.info_store.set(key.clone(), value.clone()).await?;
+                    kv_ops.push(KvOp::Set(key.clone(), value.clone()));
                 }
                 IndexWriteOp::RemovePosting { key } => {
-                    let _ = self.info_store.remove(key.clone()).await;
+                    kv_ops.push(KvOp::Remove(key.clone()));
                 }
                 IndexWriteOp::BumpFtsStats { .. } => {
                     // Not relevant for legacy IndexManager.
                 }
             }
+        }
+        if !kv_ops.is_empty() {
+            self.info_store.transact(kv_ops).await?;
         }
         // Invalidate posting cache for any keys touched.
         // We invalidate broadly: any SetPosting/RemovePosting key whose

@@ -8,14 +8,18 @@
 //!   scaling across 1 vs N tables.
 //! - `bench_provider_overhead` — stub vs real VersionProvider for
 //!   SSI read-set validation; delta = MvccStore lookup overhead.
+//! - `bench_commit_phase5c_indexed_sled` — tx commit Phase 5c writing
+//!   N postings to a sled-backed indexed table; exposes the
+//!   batched-vs-per-key info_store apply cost.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use shamir_engine::query::batch::{
     execute_batch, BatchOp, BatchRequest, QueryEntry, TableResolver,
 };
-use shamir_engine::repo::{BoxRepo, RepoInstance};
+use shamir_engine::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
 use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
@@ -279,11 +283,94 @@ fn bench_provider_overhead(c: &mut Criterion) {
     group.finish();
 }
 
+/// Phase 5c (`apply_index_ops_at_commit`) on a sled-backed repo with a
+/// table that has a non-unique regular index on `city` — exposes the
+/// per-key vs batched info_store write cost. Each iter:
+///   * provisions a fresh tempdir + sled-backed RepoInstance,
+///   * creates a `by_city` index on `city`,
+///   * runs ONE transactional `BatchRequest` that inserts `n` rows.
+///
+/// At commit the tx pipeline drains `index_write_set` through
+/// `apply_index_ops_at_commit` → `info_store.transact(...)`. On the
+/// unbatched code path each `SetPosting` was one `Store::set` (one
+/// `sled::Tree::insert`); after batching it is one
+/// `Store::transact` (one `sled::Batch::apply_batch`) → one fsync.
+fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut group = c.benchmark_group("commit_tx/phase5c_indexed_sled");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(15));
+
+    for &n in &[100usize, 1000usize] {
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.to_async(&rt).iter_custom(|iters| async move {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let tempdir = tempfile::TempDir::new().expect("tempdir");
+                    // Raw sled — no MemBuffer wrapper, so every commit
+                    // sees real per-write cost.
+                    let factory = BoxRepoFactory::sled_raw(tempdir.path().to_path_buf());
+                    let repo = RepoInstance::from_factory(
+                        "bench".into(),
+                        factory,
+                        vec![TableConfig::new("indexed".to_string())],
+                    )
+                    .await
+                    .unwrap();
+                    let tbl = repo.get_table("indexed").await.unwrap();
+                    tbl.create_index("by_city", &["city"]).await.unwrap();
+                    drop(tbl);
+
+                    let resolver = Resolver { repo: repo.clone() };
+                    let mut queries = new_map();
+                    let values: Vec<serde_json::Value> = (0..n)
+                        .map(|i| serde_json::json!({"city": format!("c_{}", i % 8), "score": i}))
+                        .collect();
+                    queries.insert(
+                        "ins".to_string(),
+                        QueryEntry {
+                            op: BatchOp::Insert(InsertOp {
+                                insert_into: TableRef::new("indexed"),
+                                values,
+                            }),
+                            return_result: false,
+                        },
+                    );
+                    let request = BatchRequest {
+                        id: serde_json::json!(1),
+                        name: None,
+                        transactional: true,
+                        isolation: None,
+                        queries,
+                        return_all: false,
+                        return_only: None,
+                        limits: Default::default(),
+                    };
+
+                    let start = Instant::now();
+                    let _ = execute_batch(&request, &resolver, None).await.unwrap();
+                    total += start.elapsed();
+
+                    drop(repo);
+                    drop(tempdir);
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_tx_vs_non_tx,
     bench_batch_insert_pipeline,
     bench_commit_tx_phase_breakdown,
-    bench_provider_overhead
+    bench_provider_overhead,
+    bench_commit_phase5c_indexed_sled,
 );
 criterion_main!(benches);
