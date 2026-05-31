@@ -176,6 +176,12 @@ pub enum TxError {
         elapsed: std::time::Duration,
         max: std::time::Duration,
     },
+    /// Phase C. A concurrent committer wrote a key matching one of
+    /// this tx's recorded predicate dependencies (a phantom). Surfaced
+    /// to the wire path as `"tx_conflict"` so existing client retry
+    /// covers it.
+    #[error("phantom conflict on predicate {dep}")]
+    PhantomConflict { dep: String },
 }
 
 /// Test-only injection: when set to a non-zero tx_id, Phase 5c (index
@@ -614,6 +620,31 @@ async fn pre_commit(
         }
     }
 
+    // Phase 2-bis (SSI only, Phase C): predicate read-set validation.
+    //
+    // Phase 2 above caught rw-antidependencies on keys the tx ACTUALLY READ
+    // (the point read-set). It does NOT catch phantoms — a concurrent
+    // committer inserting a NEW key that matches one of this tx's
+    // predicate/range reads. Phase C records those dependencies in
+    // `tx.predicate_set` (populated only on Serializable; empty otherwise)
+    // and validates them here against `RepoTxGate`'s commit-write-log.
+    //
+    // Zero-overhead: gated on `Serializable` AND on a non-empty
+    // `predicate_set`, so Snapshot, non-tx, and Serializable-with-only-point-
+    // reads skip the loop entirely.
+    if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
+        let mut conflict_dep: Option<String> = None;
+        tx.predicate_set.with_iter(|dep| {
+            if conflict_dep.is_none() && gate.predicate_conflicts(dep, tx.snapshot_version) {
+                conflict_dep = Some(format!("{:?}", dep));
+            }
+        });
+        if let Some(dep) = conflict_dep {
+            repo.tx_metrics().on_tx_aborted_phantom();
+            return Err(TxError::PhantomConflict { dep });
+        }
+    }
+
     // === C6: empty-tx fast-path ===
     //
     // A tx that staged nothing durable (read-only Serializable txs, or any
@@ -926,6 +957,11 @@ async fn materialize(
     // version IS committed (the WAL entry is durable) regardless of
     // whether the projections above landed inline.
     gate.publish_committed(commit_version);
+
+    // Phase 6-bis (Phase C): record this tx's write footprint into the
+    // commit-write log so future Serializable txs can detect phantoms
+    // against our writes. No-op off Serializable (footprint is empty).
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(tx, commit_version));
 
     // Crash seam (test-only): version published in-memory but lost with
     // the process; markers (6.5) not yet persisted and Phase 7 not run.

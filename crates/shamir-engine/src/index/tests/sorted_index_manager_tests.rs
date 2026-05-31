@@ -578,7 +578,7 @@ async fn lookup_range_tx_none_equals_lookup_range() {
     }
 
     let a = mgr.lookup_range(101, None, None).await.unwrap();
-    let b = mgr.lookup_range_tx(101, None, None, None).await.unwrap();
+    let b = mgr.lookup_range_tx(0, 101, None, None, None).await.unwrap();
     assert_eq!(a, b);
 }
 
@@ -596,11 +596,11 @@ async fn lookup_min_max_tx_none_equal_non_tx() {
 
     assert_eq!(
         mgr.lookup_min(101).await.unwrap(),
-        mgr.lookup_min_tx(101, None).await.unwrap()
+        mgr.lookup_min_tx(0, 101, None).await.unwrap()
     );
     assert_eq!(
         mgr.lookup_max(101).await.unwrap(),
-        mgr.lookup_max_tx(101, None).await.unwrap()
+        mgr.lookup_max_tx(0, 101, None).await.unwrap()
     );
 }
 
@@ -618,11 +618,11 @@ async fn lookup_first_last_k_tx_none_equal_non_tx() {
 
     assert_eq!(
         mgr.lookup_first_k(101, 3).await.unwrap(),
-        mgr.lookup_first_k_tx(101, 3, None).await.unwrap()
+        mgr.lookup_first_k_tx(0, 101, 3, None).await.unwrap()
     );
     assert_eq!(
         mgr.lookup_last_k(101, 3).await.unwrap(),
-        mgr.lookup_last_k_tx(101, 3, None).await.unwrap()
+        mgr.lookup_last_k_tx(0, 101, 3, None).await.unwrap()
     );
 }
 

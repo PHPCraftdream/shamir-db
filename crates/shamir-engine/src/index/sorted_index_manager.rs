@@ -450,55 +450,134 @@ impl SortedIndexManager {
 
     /// tx-aware variant of [`lookup_range`].
     ///
-    /// In sub-stage 3.4 this forwards to the non-tx method regardless
-    /// of `tx`. Future wiring (Stage 4) will route through MvccStore
-    /// for versioned range scans (`get_at(snapshot)` for each posting).
+    /// Phase C (Step 5): records an `IndexRange` predicate dependency
+    /// for Serializable txs BEFORE forwarding to the non-tx method.
+    /// Zero-overhead: Snapshot / non-tx callers skip the recording
+    /// block entirely (single tag-compare on `Option<&TxContext>`).
     pub async fn lookup_range_tx(
         &self,
+        table_token: u64,
         name_interned: u64,
         start_encoded: Option<&[u8]>,
         end_encoded: Option<&[u8]>,
-        _tx: Option<&shamir_tx::TxContext>,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<BTreeSet<RecordId>> {
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let prefix = self.entry_prefix(name_interned);
+                let (lower, upper) = self.range_bounds(&prefix, start_encoded, end_encoded);
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::IndexRange {
+                    table_token,
+                    index_id: name_interned,
+                    lo: std::ops::Bound::Included(lower),
+                    hi: std::ops::Bound::Included(upper),
+                });
+            }
+        }
         self.lookup_range(name_interned, start_encoded, end_encoded)
             .await
     }
 
-    /// tx-aware variant of [`lookup_min`]. Same forward-only semantics.
+    /// tx-aware variant of [`lookup_min`].
+    ///
+    /// Phase C (Step 5): records a full-prefix `IndexRange` predicate
+    /// dependency (the entire sorted index) for Serializable txs.
     pub async fn lookup_min_tx(
         &self,
+        table_token: u64,
         name_interned: u64,
-        _tx: Option<&shamir_tx::TxContext>,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Option<RecordId>> {
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let prefix = self.entry_prefix(name_interned);
+                let (lower, upper) = self.range_bounds(&prefix, None, None);
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::IndexRange {
+                    table_token,
+                    index_id: name_interned,
+                    lo: std::ops::Bound::Included(lower),
+                    hi: std::ops::Bound::Included(upper),
+                });
+            }
+        }
         self.lookup_min(name_interned).await
     }
 
-    /// tx-aware variant of [`lookup_max`]. Same forward-only semantics.
+    /// tx-aware variant of [`lookup_max`].
+    ///
+    /// Phase C (Step 5): records a full-prefix `IndexRange` predicate
+    /// dependency for Serializable txs.
     pub async fn lookup_max_tx(
         &self,
+        table_token: u64,
         name_interned: u64,
-        _tx: Option<&shamir_tx::TxContext>,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Option<RecordId>> {
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let prefix = self.entry_prefix(name_interned);
+                let (lower, upper) = self.range_bounds(&prefix, None, None);
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::IndexRange {
+                    table_token,
+                    index_id: name_interned,
+                    lo: std::ops::Bound::Included(lower),
+                    hi: std::ops::Bound::Included(upper),
+                });
+            }
+        }
         self.lookup_max(name_interned).await
     }
 
-    /// tx-aware variant of [`lookup_last_k`]. Same forward-only semantics.
+    /// tx-aware variant of [`lookup_last_k`].
+    ///
+    /// Phase C (Step 5): records a full-prefix `IndexRange` predicate
+    /// dependency for Serializable txs. The interval does not depend on
+    /// `k` — every entry the scan could reach is in the full-prefix range.
     pub async fn lookup_last_k_tx(
         &self,
+        table_token: u64,
         name_interned: u64,
         k: usize,
-        _tx: Option<&shamir_tx::TxContext>,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Vec<RecordId>> {
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let prefix = self.entry_prefix(name_interned);
+                let (lower, upper) = self.range_bounds(&prefix, None, None);
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::IndexRange {
+                    table_token,
+                    index_id: name_interned,
+                    lo: std::ops::Bound::Included(lower),
+                    hi: std::ops::Bound::Included(upper),
+                });
+            }
+        }
         self.lookup_last_k(name_interned, k).await
     }
 
-    /// tx-aware variant of [`lookup_first_k`]. Same forward-only semantics.
+    /// tx-aware variant of [`lookup_first_k`].
+    ///
+    /// Phase C (Step 5): records a full-prefix `IndexRange` predicate
+    /// dependency for Serializable txs.
     pub async fn lookup_first_k_tx(
         &self,
+        table_token: u64,
         name_interned: u64,
         k: usize,
-        _tx: Option<&shamir_tx::TxContext>,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<Vec<RecordId>> {
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let prefix = self.entry_prefix(name_interned);
+                let (lower, upper) = self.range_bounds(&prefix, None, None);
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::IndexRange {
+                    table_token,
+                    index_id: name_interned,
+                    lo: std::ops::Bound::Included(lower),
+                    hi: std::ops::Bound::Included(upper),
+                });
+            }
+        }
         self.lookup_first_k(name_interned, k).await
     }
 

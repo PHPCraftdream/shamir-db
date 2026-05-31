@@ -35,6 +35,7 @@ pub mod index_write_op;
 pub mod layered_interner;
 pub mod metrics;
 pub mod mvcc_store;
+pub mod predicate_set;
 pub mod repo_tx_gate;
 pub mod repo_wal_manager;
 pub mod staging_store;
@@ -48,7 +49,12 @@ pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
 pub use metrics::{TxMetrics, TxMetricsSnapshot};
 pub use mvcc_store::MvccStore;
-pub use repo_tx_gate::{RepoTxGate, SnapshotGuard};
+pub use predicate_set::{
+    key_in_interval, PredicateDep, PredicateSet, SORTED_PREFIX_LEN, SORTED_TAG,
+};
+pub use repo_tx_gate::{
+    build_footprint_from_tx, CommitWriteRecord, RepoTxGate, SnapshotGuard, TableWriteFootprint,
+};
 pub use repo_wal_manager::RepoWalManager;
 pub use staging_store::StagingStore;
 pub use tx_context::{TxContext, UniqueGuard};

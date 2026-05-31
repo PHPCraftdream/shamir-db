@@ -88,7 +88,7 @@ CRIT/HIGH/MED-векторы трёх audit-волн закрыты.
   round-trip'ами (Phase A уже откладывает их до commit-time re-validation —
   это и спасает). SI-first, потом SSI; phantom-защита — в Phase C.
 
-### ② Phase C — Predicate/range locks → true serializability
+### ② Phase C — Predicate/range locks → true serializability — ✅ DONE (2026-05-31)
 📄 [`PHASE_C_SERIALIZABLE.md`](./PHASE_C_SERIALIZABLE.md)
 
 Сегодняшний SSI валидирует **точечный** read-set (ловит write-skew по

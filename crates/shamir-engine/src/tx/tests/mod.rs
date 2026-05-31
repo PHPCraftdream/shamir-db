@@ -9,4 +9,5 @@ pub mod non_tx_mvcc_routing_tests;
 pub mod read_your_own_writes_tests;
 pub mod recovery_gate_tests;
 pub mod recovery_tests;
+pub mod ssi_phantom_tests;
 pub mod ssi_unique_serialization_tests;

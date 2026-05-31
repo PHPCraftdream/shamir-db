@@ -307,6 +307,7 @@ async fn execute_transactional(
                 Err(commit_err) => {
                     let reason = match commit_err {
                         crate::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
+                        crate::tx::CommitError::PhantomConflict { .. } => "tx_conflict".to_string(),
                         crate::tx::CommitError::UniqueViolation { .. } => {
                             "unique_violation".to_string()
                         }

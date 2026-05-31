@@ -11,6 +11,11 @@ pub struct TxMetrics {
     pub txs_aborted_expired: AtomicU64,
     pub txs_aborted_storage: AtomicU64,
     pub txs_aborted_unique: AtomicU64,
+    /// PROPOSED (Phase C). Committed tx aborted by Phase 2-bis because a
+    /// concurrent committer wrote a key matching one of this tx's recorded
+    /// predicate dependencies (a phantom). Disjoint from
+    /// `txs_aborted_ssi` (point read-set) and `txs_aborted_unique`.
+    pub txs_aborted_phantom: AtomicU64,
     /// Committed txs whose projections did NOT fully materialize inline on
     /// the commit path — recovery is the materialization guarantor on the
     /// next open (see `MaterializationState::Deferred`). NOT an abort.
@@ -48,6 +53,10 @@ impl TxMetrics {
         self.txs_aborted_unique.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn on_tx_aborted_phantom(&self) {
+        self.txs_aborted_phantom.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// A committed tx deferred at least one projection sub-phase to
     /// recovery (`MaterializationState::Deferred`). The tx is still
     /// COMMITTED — this counts deferral, not abort.
@@ -71,6 +80,7 @@ impl TxMetrics {
             txs_aborted_expired: self.txs_aborted_expired.load(Ordering::Relaxed),
             txs_aborted_storage: self.txs_aborted_storage.load(Ordering::Relaxed),
             txs_aborted_unique: self.txs_aborted_unique.load(Ordering::Relaxed),
+            txs_aborted_phantom: self.txs_aborted_phantom.load(Ordering::Relaxed),
             txs_materialization_deferred: self.txs_materialization_deferred.load(Ordering::Relaxed),
             gc_runs: self.gc_runs.load(Ordering::Relaxed),
             gc_entries_deleted: self.gc_entries_deleted.load(Ordering::Relaxed),
@@ -86,6 +96,7 @@ pub struct TxMetricsSnapshot {
     pub txs_aborted_expired: u64,
     pub txs_aborted_storage: u64,
     pub txs_aborted_unique: u64,
+    pub txs_aborted_phantom: u64,
     pub txs_materialization_deferred: u64,
     pub gc_runs: u64,
     pub gc_entries_deleted: u64,

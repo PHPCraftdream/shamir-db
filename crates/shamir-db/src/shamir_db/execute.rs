@@ -1091,6 +1091,9 @@ impl ShamirDb {
             Err(commit_err) => {
                 let reason = match commit_err {
                     crate::engine::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
+                    crate::engine::tx::CommitError::PhantomConflict { .. } => {
+                        "tx_conflict".to_string()
+                    }
                     crate::engine::tx::CommitError::UniqueViolation { .. } => {
                         "unique_violation".to_string()
                     }
