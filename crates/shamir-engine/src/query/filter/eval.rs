@@ -240,6 +240,12 @@ pub enum FilterNode {
     In {
         field_path: CompactPath,
         values: Vec<FilterValue>,
+        /// Parallel slice of pre-resolved literals (Null/Bool/Int/Float/String/Binary).
+        /// `None` entries are non-literal variants (FieldRef/QueryRef/...) that
+        /// still need per-record dynamic resolution via `resolve_filter_value`.
+        /// Hoisting literal materialisation off the per-record path eliminates
+        /// O(records × |list|) `String::clone` / `Vec::clone` allocations.
+        pre_resolved: Vec<Option<InnerValue>>,
         negate: bool,
     },
     Like {
@@ -347,32 +353,49 @@ impl FilterNode {
             FilterNode::In {
                 field_path,
                 values,
+                pre_resolved,
                 negate,
             } => {
                 let field_val = match resolve_field_ref(record, field_path) {
                     Some(v) => v,
                     None => return *negate,
                 };
-                let found = values.iter().any(|fv| {
+                // Walk literals and non-literals in the same order as `values`
+                // to preserve any short-circuit semantics; `pre_resolved[i]` is
+                // `Some` exactly when `values[i]` is a literal (no per-record
+                // alloc), `None` otherwise (FieldRef / QueryRef / ... — fall
+                // back to dynamic resolution).
+                let mut found = false;
+                for (i, fv) in values.iter().enumerate() {
+                    if let Some(pre) = &pre_resolved[i] {
+                        if compare_values(field_val, pre) == Some(Ordering::Equal) {
+                            found = true;
+                            break;
+                        }
+                        continue;
+                    }
                     if is_column_query_ref(fv) {
                         if let FilterValue::QueryRef { alias, path } = fv {
                             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
                             if let Some(qr) = ctx.resolved_refs.get(key) {
                                 let column = resolve_query_ref_column(qr, path.as_deref());
-                                return column.iter().any(|cv| {
+                                if column.iter().any(|cv| {
                                     compare_values(field_val, cv) == Some(Ordering::Equal)
-                                });
+                                }) {
+                                    found = true;
+                                    break;
+                                }
                             }
                         }
-                        return false;
+                        continue;
                     }
-                    match resolve_filter_value(fv, record, ctx) {
-                        Some(resolved) => {
-                            compare_values(field_val, &resolved) == Some(Ordering::Equal)
+                    if let Some(resolved) = resolve_filter_value(fv, record, ctx) {
+                        if compare_values(field_val, &resolved) == Some(Ordering::Equal) {
+                            found = true;
+                            break;
                         }
-                        None => false,
                     }
-                });
+                }
                 if *negate {
                     !found
                 } else {
@@ -749,19 +772,29 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         },
 
         Filter::In { field, values } => match intern_field_path(field, interner) {
-            Some(path) => FilterNode::In {
-                field_path: SmallVec::from_vec(path),
-                values: values.clone(),
-                negate: false,
-            },
+            Some(path) => {
+                let pre_resolved: Vec<Option<InnerValue>> =
+                    values.iter().map(filter_value_to_inner).collect();
+                FilterNode::In {
+                    field_path: SmallVec::from_vec(path),
+                    values: values.clone(),
+                    pre_resolved,
+                    negate: false,
+                }
+            }
             None => FilterNode::False,
         },
         Filter::NotIn { field, values } => match intern_field_path(field, interner) {
-            Some(path) => FilterNode::In {
-                field_path: SmallVec::from_vec(path),
-                values: values.clone(),
-                negate: true,
-            },
+            Some(path) => {
+                let pre_resolved: Vec<Option<InnerValue>> =
+                    values.iter().map(filter_value_to_inner).collect();
+                FilterNode::In {
+                    field_path: SmallVec::from_vec(path),
+                    values: values.clone(),
+                    pre_resolved,
+                    negate: true,
+                }
+            }
             None => FilterNode::True,
         },
 

@@ -257,6 +257,53 @@ fn bench(c: &mut Criterion) {
         })
     });
 
+    // ── IN list: int membership over a medium-sized list ─────
+    // Targets the per-record `values.iter().any { resolve_filter_value }` loop:
+    // every literal triggers an `InnerValue` materialise (and a `String::clone`
+    // for String variants) — O(records × |list|) per scan.
+    let in_int_32 = compile_filter(
+        &Filter::In {
+            field: vec!["age".to_string()],
+            values: (0i64..32).map(FilterValue::Int).collect(),
+        },
+        &interner,
+    );
+    group.bench_function("in_int_list_32_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if in_int_32.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
+    // ── IN list: string membership over a medium-sized list ─────
+    // String literals exercise the `Str(s.clone())` allocation in
+    // `resolve_filter_value` on every record × every list element.
+    let in_str_32 = compile_filter(
+        &Filter::In {
+            field: vec!["name".to_string()],
+            values: (0..32)
+                .map(|i| FilterValue::String(format!("user-{}", i * 7)))
+                .collect(),
+        },
+        &interner,
+    );
+    group.bench_function("in_str_list_32_1000", |b| {
+        b.iter(|| {
+            let mut n = 0usize;
+            for r in &records {
+                if in_str_32.matches(r, &ctx) {
+                    n += 1;
+                }
+            }
+            black_box(n);
+        })
+    });
+
     // ── Computed: LOWER(name) == "user-50" on 1000 records ────
     let computed_lower = compile_filter(
         &Filter::Computed {
