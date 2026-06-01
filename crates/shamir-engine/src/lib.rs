@@ -9,6 +9,7 @@
 //! paths keep resolving without caller-side changes.
 
 pub mod db_instance;
+pub mod function;
 pub mod index;
 pub mod index2;
 pub mod meta;

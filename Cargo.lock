@@ -3322,6 +3322,7 @@ name = "shamir-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "argon2",
  "async-stream",
  "async-trait",
  "bincode",
