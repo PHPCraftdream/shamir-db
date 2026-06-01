@@ -1,4 +1,4 @@
-//! Wasmtime execution backend for user-defined functions (slice 2).
+//! Wasmtime execution backend for user-defined functions (slice 2 → slice 6).
 //!
 //! A [`WasmFunction`] wraps a compiled Wasmtime [`Module`] and implements the
 //! [`ShamirFunction`] trait. Execution is pure — the guest has **no host
@@ -17,6 +17,25 @@
 //!   `((out_ptr as i64) << 32) | (out_len as i64 & 0xFFFF_FFFF)` pointing at
 //!   the msgpack-encoded result [`QueryValue`].
 //!
+//! # Host imports (slice 6)
+//!
+//! The host registers synchronous helper functions under the import module
+//! `"shamir_host"` so the guest can access the batch context and global
+//! variables:
+//!
+//! * `batch_put(key_ptr, key_len, val_ptr, val_len)` — write to batch.
+//! * `batch_get(key_ptr, key_len) -> i64` — read from batch (0 = absent).
+//! * `global_set(key_ptr, key_len, val_ptr, val_len)` — write a global var.
+//! * `global_get(key_ptr, key_len) -> i64` — read a global var (0 = absent).
+//!
+//! For the `*_get` variants a non-zero return is `((ptr as i64) << 32) |
+//! (len as i64)` where `[ptr, ptr+len)` in guest memory holds the msgpack-
+//! encoded value. The host calls the guest's `shamir_alloc` to create the
+//! buffer and writes into it before returning.
+//!
+//! Guests that do **not** import these symbols are unaffected (unused Linker
+//! definitions are silently ignored by Wasmtime).
+//!
 //! # Host algorithm
 //!
 //! 1. Encode `params` as msgpack → `input_bytes`.
@@ -27,7 +46,7 @@
 //! 6. Read `out_len` bytes from `memory[out_ptr..out_ptr+out_len]`.
 //! 7. Decode as `QueryValue::from_bytes`.
 
-use super::context::{FnBatch, FnCtx};
+use super::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 use super::contract::ShamirFunction;
 use super::error::{FnResult, FunctionError};
 use super::params::Params;
@@ -35,6 +54,21 @@ use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use wasmtime::{Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+
+// ── HostState ─────────────────────────────────────────────────────────
+
+/// Per-invocation state carried inside the Wasmtime [`Store`].
+///
+/// Wraps [`StoreLimits`] (memory/fuel resource caps) together with the
+/// shared batch context and global-variables handles so the sync host-import
+/// callbacks can reach them through [`wasmtime::Caller::data`].
+struct HostState {
+    limits: StoreLimits,
+    batch: Arc<BatchContext>,
+    globals: Arc<GlobalVars>,
+}
+
+// ── WasmEngine ────────────────────────────────────────────────────────
 
 /// A configured Wasmtime [`Engine`] with fuel enabled.
 ///
@@ -115,9 +149,213 @@ impl WasmFunction {
     }
 }
 
+// ── Host-import helpers ──────────────────────────────────────────────
+
+/// Read `len` bytes from the memory data slice starting at `ptr`.
+///
+/// Returns a wasm trap on out-of-bounds.
+fn read_guest_mem(mem_data: &[u8], ptr: i32, len: i32) -> Result<Vec<u8>, wasmtime::Error> {
+    if ptr < 0 || len < 0 {
+        return Err(wasmtime::Error::msg("negative pointer or length"));
+    }
+    let start = ptr as usize;
+    let end = start.saturating_add(len as usize);
+    if end > mem_data.len() {
+        return Err(wasmtime::Error::msg(
+            "host import read past end of guest memory",
+        ));
+    }
+    Ok(mem_data[start..end].to_vec())
+}
+
+/// Host implementation of `batch_put(key_ptr, key_len, val_ptr, val_len)`.
+fn host_batch_put(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    val_ptr: i32,
+    val_len: i32,
+) -> Result<(), wasmtime::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+
+    let key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
+    let val_bytes = read_guest_mem(memory.data(&caller), val_ptr, val_len)?;
+
+    let key = String::from_utf8(key_bytes)
+        .map_err(|_| wasmtime::Error::msg("batch_put: key is not valid UTF-8"))?;
+    let value = QueryValue::from_bytes(&val_bytes)
+        .map_err(|e| wasmtime::Error::msg(format!("batch_put: value decode error: {e}")))?;
+
+    caller.data().batch.put(key, value);
+    Ok(())
+}
+
+/// Host implementation of `batch_get(key_ptr, key_len) -> i64`.
+fn host_batch_get(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    key_ptr: i32,
+    key_len: i32,
+) -> Result<i64, wasmtime::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+
+    let key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
+    let key = String::from_utf8(key_bytes)
+        .map_err(|_| wasmtime::Error::msg("batch_get: key is not valid UTF-8"))?;
+
+    let value = match caller.data().batch.get(&key) {
+        Some(v) => v,
+        None => return Ok(0),
+    };
+
+    let encoded = value
+        .to_bytes()
+        .map_err(|e| wasmtime::Error::msg(format!("batch_get: encode error: {e}")))?;
+
+    // Clone the Arcs we need before &mut Caller is consumed by calling alloc.
+    let batch = caller.data().batch.clone();
+    let globals = caller.data().globals.clone();
+
+    let alloc_fn = caller
+        .get_export("shamir_alloc")
+        .and_then(|e| e.into_func())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `shamir_alloc`"))?;
+    let alloc_typed = alloc_fn.typed::<i32, i32>(&caller)?;
+
+    // Release the read-only borrow on Caller before the mutable call.
+    let _ = memory;
+    let out_len =
+        i32::try_from(encoded.len()).map_err(|_| wasmtime::Error::msg("value too large"))?;
+    let out_ptr = alloc_typed.call(&mut caller, out_len)?;
+
+    if out_ptr < 0 {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned negative pointer",
+        ));
+    }
+
+    // Re-acquire the memory export and write the encoded value.
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+    let start = out_ptr as usize;
+    let end = start.saturating_add(encoded.len());
+    if end > memory.data_size(&caller) {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned pointer outside memory bounds",
+        ));
+    }
+    memory.data_mut(&mut caller)[start..end].copy_from_slice(&encoded);
+
+    // Suppress unused-variable warnings (the clones are for borrow-scope hygiene).
+    let _ = (batch, globals);
+
+    let packed = ((out_ptr as i64) << 32) | (encoded.len() as i64 & 0xFFFF_FFFF);
+    Ok(packed)
+}
+
+/// Host implementation of `global_set(key_ptr, key_len, val_ptr, val_len)`.
+fn host_global_set(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    key_ptr: i32,
+    key_len: i32,
+    val_ptr: i32,
+    val_len: i32,
+) -> Result<(), wasmtime::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+
+    let key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
+    let val_bytes = read_guest_mem(memory.data(&caller), val_ptr, val_len)?;
+
+    let key = String::from_utf8(key_bytes)
+        .map_err(|_| wasmtime::Error::msg("global_set: key is not valid UTF-8"))?;
+    let value = QueryValue::from_bytes(&val_bytes)
+        .map_err(|e| wasmtime::Error::msg(format!("global_set: value decode error: {e}")))?;
+
+    caller.data().globals.set(key, value);
+    Ok(())
+}
+
+/// Host implementation of `global_get(key_ptr, key_len) -> i64`.
+fn host_global_get(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    key_ptr: i32,
+    key_len: i32,
+) -> Result<i64, wasmtime::Error> {
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+
+    let key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
+    let key = String::from_utf8(key_bytes)
+        .map_err(|_| wasmtime::Error::msg("global_get: key is not valid UTF-8"))?;
+
+    let value = match caller.data().globals.get(&key) {
+        Some(v) => v,
+        None => return Ok(0),
+    };
+
+    let encoded = value
+        .to_bytes()
+        .map_err(|e| wasmtime::Error::msg(format!("global_get: encode error: {e}")))?;
+
+    // Clone the Arcs we need before &mut Caller is consumed by calling alloc.
+    let batch = caller.data().batch.clone();
+    let globals = caller.data().globals.clone();
+
+    let alloc_fn = caller
+        .get_export("shamir_alloc")
+        .and_then(|e| e.into_func())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `shamir_alloc`"))?;
+    let alloc_typed = alloc_fn.typed::<i32, i32>(&caller)?;
+
+    // Release the read-only borrow on Caller before the mutable call.
+    let _ = memory;
+    let out_len =
+        i32::try_from(encoded.len()).map_err(|_| wasmtime::Error::msg("value too large"))?;
+    let out_ptr = alloc_typed.call(&mut caller, out_len)?;
+
+    if out_ptr < 0 {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned negative pointer",
+        ));
+    }
+
+    // Re-acquire the memory export and write the encoded value.
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+    let start = out_ptr as usize;
+    let end = start.saturating_add(encoded.len());
+    if end > memory.data_size(&caller) {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned pointer outside memory bounds",
+        ));
+    }
+    memory.data_mut(&mut caller)[start..end].copy_from_slice(&encoded);
+
+    let _ = (batch, globals);
+
+    let packed = ((out_ptr as i64) << 32) | (encoded.len() as i64 & 0xFFFF_FFFF);
+    Ok(packed)
+}
+
+// ── ShamirFunction impl ──────────────────────────────────────────────
+
 #[async_trait]
 impl ShamirFunction for WasmFunction {
-    async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
+    async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
         let input = QueryValue::Map(params.raw().clone())
             .to_bytes()
             .map_err(|e| FunctionError::Compute(format!("params encode error: {e}")))?
@@ -126,18 +364,41 @@ impl ShamirFunction for WasmFunction {
         let engine = self.engine.clone();
         let limits = self.limits.clone();
         let module = self.module.clone();
+        let batch_ctx = batch.context().clone();
+        let globals = ctx.globals().clone();
 
         let out = tokio::task::spawn_blocking(move || -> FnResult<Vec<u8>> {
             let limiter = StoreLimitsBuilder::new()
                 .memory_size(limits.max_memory_bytes)
                 .build();
-            let mut store: Store<StoreLimits> = Store::new(engine.engine(), limiter);
-            store.limiter(|s| s as &mut dyn wasmtime::ResourceLimiter);
+            let state = HostState {
+                limits: limiter,
+                batch: batch_ctx,
+                globals,
+            };
+            let mut store: Store<HostState> = Store::new(engine.engine(), state);
+            store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
             store
                 .set_fuel(limits.fuel)
                 .map_err(|e| FunctionError::Compute(e.to_string()))?;
 
-            let linker: Linker<StoreLimits> = Linker::new(engine.engine());
+            let mut linker: Linker<HostState> = Linker::new(engine.engine());
+
+            // Register host imports under "shamir_host". Unused definitions
+            // are harmless — modules that don't import them simply ignore them.
+            linker
+                .func_wrap("shamir_host", "batch_put", host_batch_put)
+                .map_err(|e| FunctionError::Compute(format!("linker batch_put: {e}")))?;
+            linker
+                .func_wrap("shamir_host", "batch_get", host_batch_get)
+                .map_err(|e| FunctionError::Compute(format!("linker batch_get: {e}")))?;
+            linker
+                .func_wrap("shamir_host", "global_set", host_global_set)
+                .map_err(|e| FunctionError::Compute(format!("linker global_set: {e}")))?;
+            linker
+                .func_wrap("shamir_host", "global_get", host_global_get)
+                .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
+
             let instance = linker
                 .instantiate(&mut store, &module)
                 .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;

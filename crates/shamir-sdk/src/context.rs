@@ -1,9 +1,20 @@
-//! Placeholder execution-context handles (slice 3).
+//! Placeholder execution-context handles (slice 3 → slice 6).
 //!
-//! [`Ctx`] and [`Batch`] are empty this slice. Real bodies arrive in slice 4
-//! (DBMS handle, transaction snapshot, batch staging buffer).
+//! [`Ctx`] provides access to global variables (process-lifetime, shared
+//! across batches). [`Batch`] provides access to the per-batch scratchpad
+//! so functions in the same batch can exchange data.
+//!
+//! The real WASM host-import shims live in [`crate::host_imports`]; the
+//! methods here delegate to them. On non-wasm targets the imports panic
+//! (they can only be called from inside a WASM module).
 
-/// Access to the DBMS on the current transaction (placeholder).
+/// Access to the DBMS on the current transaction.
+///
+/// Global variables are process-lifetime and shared across all batches.
+/// The `new()` constructor creates a fresh context for backward compat on
+/// the host target (the macro always calls `new()` at the top of
+/// `shamir_call`; the real handles are injected by the host via the store
+/// data, not by the guest constructor).
 #[derive(Debug, Clone, Default)]
 pub struct Ctx {
     _private: (),
@@ -14,9 +25,23 @@ impl Ctx {
     pub fn new() -> Self {
         Self { _private: () }
     }
+
+    /// Read a global variable. Returns `None` if absent.
+    pub fn global_get(&self, key: &str) -> Option<crate::Value> {
+        crate::host_imports::global_get(key)
+    }
+
+    /// Set a global variable.
+    pub fn global_set(&self, key: &str, value: crate::Value) {
+        crate::host_imports::global_set(key, value);
+    }
 }
 
-/// The batch the function executes within (placeholder).
+/// The batch the function executes within.
+///
+/// Functions executing inside the same batch exchange intermediate values
+/// through this scratchpad. The `new()` constructor creates a fresh batch
+/// for backward compat on the host target.
 #[derive(Debug, Clone, Default)]
 pub struct Batch {
     _private: (),
@@ -26,5 +51,15 @@ impl Batch {
     /// Construct an empty batch view.
     pub fn new() -> Self {
         Self { _private: () }
+    }
+
+    /// Write a value into the batch scratchpad.
+    pub fn put(&self, key: &str, value: crate::Value) {
+        crate::host_imports::batch_put(key, value);
+    }
+
+    /// Read a value from the batch scratchpad. Returns `None` if absent.
+    pub fn get(&self, key: &str) -> Option<crate::Value> {
+        crate::host_imports::batch_get(key)
     }
 }
