@@ -17,6 +17,7 @@
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
+use super::db_gateway::DbGateway;
 use super::env_policy::EnvPolicy;
 use super::registry::FunctionRegistry;
 
@@ -267,12 +268,18 @@ impl Default for GlobalVars {
 /// Slice 8a adds an optional [`FunctionRegistry`] gateway and a recursion
 /// depth counter so a function can call another registered function via
 /// `ctx.call` while bounding the call-stack depth.
+///
+/// Slice 8b adds an optional [`DbGateway`] and a default `repo` so a
+/// function can read/write database tables via `ctx.db().table(...)`.
+/// When the gateway is `None`, db host imports trap with a clear error.
 #[derive(Clone)]
 pub struct FnCtx {
     globals: Arc<GlobalVars>,
     registry: Option<Arc<FunctionRegistry>>,
     depth: u32,
     depth_limit: u32,
+    db: Option<Arc<dyn DbGateway>>,
+    repo: String,
 }
 
 impl FnCtx {
@@ -286,6 +293,8 @@ impl FnCtx {
             registry: None,
             depth: 0,
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
+            db: None,
+            repo: String::new(),
         }
     }
 
@@ -296,6 +305,8 @@ impl FnCtx {
             registry: None,
             depth: 0,
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
+            db: None,
+            repo: String::new(),
         }
     }
 
@@ -314,6 +325,17 @@ impl FnCtx {
     /// Builder: set the recursion depth limit.
     pub fn with_depth_limit(mut self, limit: u32) -> Self {
         self.depth_limit = limit;
+        self
+    }
+
+    /// Builder: attach a DB gateway and default repo name.
+    ///
+    /// The gateway routes `ctx.db().table(...)` calls through
+    /// `ShamirDb::execute`. `repo` is the function's home repo (used as the
+    /// default repo in all db host imports unless overridden).
+    pub fn with_db(mut self, gateway: Arc<dyn DbGateway>, repo: String) -> Self {
+        self.db = Some(gateway);
+        self.repo = repo;
         self
     }
 
@@ -357,6 +379,16 @@ impl FnCtx {
         self.depth_limit
     }
 
+    /// Access the optional DB gateway.
+    pub fn db_gateway(&self) -> Option<&Arc<dyn DbGateway>> {
+        self.db.as_ref()
+    }
+
+    /// The default repo name for DB operations.
+    pub fn repo(&self) -> &str {
+        &self.repo
+    }
+
     /// Atomic integer increment on a global variable.
     ///
     /// Missing/non-Int treated as 0. Returns the new value.
@@ -380,6 +412,8 @@ impl std::fmt::Debug for FnCtx {
             .field("depth", &self.depth)
             .field("depth_limit", &self.depth_limit)
             .field("has_registry", &self.registry.is_some())
+            .field("has_db", &self.db.is_some())
+            .field("repo", &self.repo)
             .finish()
     }
 }

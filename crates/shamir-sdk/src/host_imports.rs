@@ -1,9 +1,20 @@
-//! Host-import ABI shims for accessing batch context and global variables.
+//! Host-import ABI shims for accessing batch context, global variables,
+//! function calls, and database operations.
 //!
-//! On `wasm32` these are thin `unsafe` wrappers around the four functions
+//! On `wasm32` these are thin `unsafe` wrappers around the functions
 //! the host registers under the `"shamir_host"` import module. On all other
 //! targets they panic because host imports are only available when running
 //! inside the ShamirDB WASM runtime.
+//!
+//! # Database host imports (slice 8b)
+//!
+//! * `db_get(table_ptr, table_len, key_ptr, key_len) -> i64`
+//! * `db_insert(table_ptr, table_len, doc_ptr, doc_len) -> i64`
+//! * `db_query(table_ptr, table_len, filter_ptr, filter_len) -> i64`
+//!
+//! Table name is UTF-8 bytes; key/doc/filter are msgpack-encoded `Value`.
+//! Zero-length filter means "no filter" (return all).
+//! Return is packed `((ptr as i64) << 32) | (len as i64)` (0 = absent).
 
 // ── WASM target: real imports ────────────────────────────────────────
 
@@ -27,6 +38,12 @@ mod imp {
         fn host_global_set(kp: i32, kl: i32, vp: i32, vl: i32);
         #[link_name = "call"]
         fn host_call(np: i32, nl: i32, pp: i32, pl: i32) -> i64;
+        #[link_name = "db_get"]
+        fn host_db_get(tp: i32, tl: i32, kp: i32, kl: i32) -> i64;
+        #[link_name = "db_insert"]
+        fn host_db_insert(tp: i32, tl: i32, dp: i32, dl: i32) -> i64;
+        #[link_name = "db_query"]
+        fn host_db_query(tp: i32, tl: i32, fp: i32, fl: i32) -> i64;
     }
 
     /// Encode `value` to msgpack, leak the bytes, and return `(ptr, len)`.
@@ -107,6 +124,58 @@ mod imp {
         let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
         rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
     }
+
+    /// Read a record from a table by key.
+    ///
+    /// `table` is the table name. `key` is a `Value::Map` of primary-key
+    /// fields (e.g. `{\"id\": 1}`) or a scalar (treated as filter on \"id\").
+    /// Returns `None` if no record matches.
+    pub fn db_get(table: &str, key: &Value) -> Option<Value> {
+        let tp = table.as_ptr() as i32;
+        let tl = table.len() as i32;
+        let (kp, kl) = encode_leak(key);
+        let packed = unsafe { host_db_get(tp, tl, kp, kl) };
+        let (ptr, len) = unpack_ptr_len(packed)?;
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        rmp_serde::from_slice(bytes).ok()
+    }
+
+    /// Insert a document into a table. Returns the stored record.
+    ///
+    /// `doc` must be a `Value::Map`. Traps on error.
+    pub fn db_insert(table: &str, doc: &Value) -> Value {
+        let tp = table.as_ptr() as i32;
+        let tl = table.len() as i32;
+        let (dp, dl) = encode_leak(doc);
+        let packed = unsafe { host_db_insert(tp, tl, dp, dl) };
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Value::Null,
+        };
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    /// Query records from a table with an optional filter.
+    ///
+    /// `filter` is `None` for "all records", or a `Value` that the host
+    /// interprets as a filter (same key convention as `db_get`).
+    /// Returns a `Value::List` of matching records.
+    pub fn db_query(table: &str, filter: Option<&Value>) -> Value {
+        let tp = table.as_ptr() as i32;
+        let tl = table.len() as i32;
+        let (fp, fl) = match filter {
+            Some(v) => encode_leak(v),
+            None => (core::ptr::null::<u8>() as i32, 0i32),
+        };
+        let packed = unsafe { host_db_query(tp, tl, fp, fl) };
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Value::List(Vec::new()),
+        };
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        rmp_serde::from_slice(bytes).unwrap_or(Value::List(Vec::new()))
+    }
 }
 
 // ── Non-WASM target: stubs that panic ────────────────────────────────
@@ -137,6 +206,21 @@ mod imp {
 
     /// Invoke another registered function by name (host-only).
     pub fn call(_name: &str, _args: Value) -> Value {
+        host_only()
+    }
+
+    /// Read a record by key (host-only).
+    pub fn db_get(_table: &str, _key: &Value) -> Option<Value> {
+        host_only()
+    }
+
+    /// Insert a document (host-only).
+    pub fn db_insert(_table: &str, _doc: &Value) -> Value {
+        host_only()
+    }
+
+    /// Query records (host-only).
+    pub fn db_query(_table: &str, _filter: Option<&Value>) -> Value {
         host_only()
     }
 }

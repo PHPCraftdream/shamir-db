@@ -54,6 +54,7 @@
 
 use super::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 use super::contract::ShamirFunction;
+use super::db_gateway::DbGateway;
 use super::error::{FnResult, FunctionError};
 use super::params::Params;
 use super::registry::FunctionRegistry;
@@ -68,8 +69,9 @@ use wasmtime::{Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 ///
 /// Wraps [`StoreLimits`] (memory/fuel resource caps) together with the
 /// shared batch context, global-variables handles, the optional function
-/// registry gateway, and recursion depth tracking so host-import callbacks
-/// can reach them through [`wasmtime::Caller::data`].
+/// registry gateway, the optional DB gateway, default repo name, and
+/// recursion depth tracking so host-import callbacks can reach them
+/// through [`wasmtime::Caller::data`].
 struct HostState {
     limits: StoreLimits,
     batch: Arc<BatchContext>,
@@ -77,6 +79,8 @@ struct HostState {
     registry: Option<Arc<FunctionRegistry>>,
     depth: u32,
     depth_limit: u32,
+    db: Option<Arc<dyn DbGateway>>,
+    repo: String,
 }
 
 // ── WasmEngine ────────────────────────────────────────────────────────
@@ -502,6 +506,213 @@ fn host_call(
     })
 }
 
+// ── Async host imports: db_get / db_insert / db_query (slice 8b) ───────
+//
+// Same three-phase borrow dance as host_call:
+// 1. Read table-name (utf8) + key/doc/filter bytes (msgpack) from guest.
+// 2. Clone Arc<dyn DbGateway> + repo from caller.data().
+// 3. Drop Caller borrows, await the gateway method.
+// 4. Re-acquire Caller, alloc + write result.
+
+/// Helper: write a msgpack-encoded `QueryValue` back into guest memory via
+/// `shamir_alloc`, returning the packed `(ptr, len)` i64. Returns `Ok(0)`
+/// if `value` is `None`.
+///
+/// Uses explicit reborrows (`&mut *caller`) because `Caller` is `&mut` and
+/// method calls consume it.
+async fn write_value_to_guest(
+    caller: &mut wasmtime::Caller<'_, HostState>,
+    value: Option<QueryValue>,
+) -> Result<i64, wasmtime::Error> {
+    let value = match value {
+        Some(v) => v,
+        None => return Ok(0),
+    };
+    let encoded = value
+        .to_bytes()
+        .map_err(|e| wasmtime::Error::msg(format!("encode error: {e}")))?;
+
+    let alloc_fn = caller
+        .get_export("shamir_alloc")
+        .and_then(|e| e.into_func())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `shamir_alloc`"))?;
+    let alloc_typed = alloc_fn.typed::<i32, i32>(&mut *caller)?;
+
+    let out_len =
+        i32::try_from(encoded.len()).map_err(|_| wasmtime::Error::msg("value too large"))?;
+    let out_ptr = alloc_typed.call_async(&mut *caller, out_len).await?;
+
+    if out_ptr < 0 {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned negative pointer",
+        ));
+    }
+
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+    let start = out_ptr as usize;
+    let end = start.saturating_add(encoded.len());
+    if end > memory.data_size(&mut *caller) {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned pointer outside memory bounds",
+        ));
+    }
+    memory.data_mut(&mut *caller)[start..end].copy_from_slice(&encoded);
+
+    let packed = ((out_ptr as i64) << 32) | (encoded.len() as i64 & 0xFFFF_FFFF);
+    Ok(packed)
+}
+
+/// Host implementation of `db_get(table_ptr, table_len, key_ptr, key_len) -> i64`.
+///
+/// Reads a record from `repo.table` by the given key (msgpack `QueryValue`).
+/// Returns 0 if not found, or the packed pointer to the record's msgpack.
+fn host_db_get(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    (table_ptr, table_len, key_ptr, key_len): (i32, i32, i32, i32),
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    Box::new(async move {
+        // Phase 1: read inputs (sync).
+        let table_bytes;
+        let key_bytes;
+        let db;
+        let repo;
+        {
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| wasmtime::Error::msg("db_get: missing export `memory`"))?;
+
+            table_bytes = read_guest_mem(memory.data(&caller), table_ptr, table_len)?;
+            key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
+
+            let state = caller.data();
+            db = state.db.clone();
+            repo = state.repo.clone();
+        }
+
+        let table = String::from_utf8(table_bytes)
+            .map_err(|_| wasmtime::Error::msg("db_get: table name is not valid UTF-8"))?;
+        let key = QueryValue::from_bytes(&key_bytes)
+            .map_err(|e| wasmtime::Error::msg(format!("db_get: key decode error: {e}")))?;
+
+        let gateway = db.ok_or_else(|| {
+            wasmtime::Error::msg("db_get: no db gateway (invoke via invoke_function_in_db)")
+        })?;
+
+        // Phase 2: await the gateway.
+        let result = gateway
+            .get(&repo, &table, key)
+            .await
+            .map_err(|e| wasmtime::Error::msg(format!("db_get: {e}")))?;
+
+        // Phase 3: write result back.
+        write_value_to_guest(&mut caller, result).await
+    })
+}
+
+/// Host implementation of `db_insert(table_ptr, table_len, doc_ptr, doc_len) -> i64`.
+///
+/// Inserts a document into `repo.table`. Returns the stored record as
+/// packed msgpack.
+fn host_db_insert(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    (table_ptr, table_len, doc_ptr, doc_len): (i32, i32, i32, i32),
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    Box::new(async move {
+        let table_bytes;
+        let doc_bytes;
+        let db;
+        let repo;
+        {
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| wasmtime::Error::msg("db_insert: missing export `memory`"))?;
+
+            table_bytes = read_guest_mem(memory.data(&caller), table_ptr, table_len)?;
+            doc_bytes = read_guest_mem(memory.data(&caller), doc_ptr, doc_len)?;
+
+            let state = caller.data();
+            db = state.db.clone();
+            repo = state.repo.clone();
+        }
+
+        let table = String::from_utf8(table_bytes)
+            .map_err(|_| wasmtime::Error::msg("db_insert: table name is not valid UTF-8"))?;
+        let doc = QueryValue::from_bytes(&doc_bytes)
+            .map_err(|e| wasmtime::Error::msg(format!("db_insert: doc decode error: {e}")))?;
+
+        let gateway = db.ok_or_else(|| {
+            wasmtime::Error::msg("db_insert: no db gateway (invoke via invoke_function_in_db)")
+        })?;
+
+        let result = gateway
+            .insert(&repo, &table, doc)
+            .await
+            .map_err(|e| wasmtime::Error::msg(format!("db_insert: {e}")))?;
+
+        write_value_to_guest(&mut caller, Some(result)).await
+    })
+}
+
+/// Host implementation of `db_query(table_ptr, table_len, filter_ptr, filter_len) -> i64`.
+///
+/// Queries `repo.table` with an optional filter. The filter is a msgpack
+/// `QueryValue`; zero-length bytes means `None` (no filter / return all).
+/// Returns a msgpack `Value::List` of matching records, packed.
+fn host_db_query(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    (table_ptr, table_len, filter_ptr, filter_len): (i32, i32, i32, i32),
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    Box::new(async move {
+        let table_bytes;
+        let filter_bytes;
+        let db;
+        let repo;
+        {
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| wasmtime::Error::msg("db_query: missing export `memory`"))?;
+
+            table_bytes = read_guest_mem(memory.data(&caller), table_ptr, table_len)?;
+            filter_bytes = read_guest_mem(memory.data(&caller), filter_ptr, filter_len)?;
+
+            let state = caller.data();
+            db = state.db.clone();
+            repo = state.repo.clone();
+        }
+
+        let table = String::from_utf8(table_bytes)
+            .map_err(|_| wasmtime::Error::msg("db_query: table name is not valid UTF-8"))?;
+
+        let filter =
+            if filter_bytes.is_empty() {
+                None
+            } else {
+                Some(QueryValue::from_bytes(&filter_bytes).map_err(|e| {
+                    wasmtime::Error::msg(format!("db_query: filter decode error: {e}"))
+                })?)
+            };
+
+        let gateway = db.ok_or_else(|| {
+            wasmtime::Error::msg("db_query: no db gateway (invoke via invoke_function_in_db)")
+        })?;
+
+        let records = gateway
+            .query(&repo, &table, filter)
+            .await
+            .map_err(|e| wasmtime::Error::msg(format!("db_query: {e}")))?;
+
+        // Pack as a Value::List.
+        let list_value = QueryValue::List(records);
+        write_value_to_guest(&mut caller, Some(list_value)).await
+    })
+}
+
 // ── ShamirFunction impl ──────────────────────────────────────────────
 
 #[async_trait]
@@ -520,6 +731,8 @@ impl ShamirFunction for WasmFunction {
         let registry = ctx.registry().cloned();
         let depth = ctx.depth();
         let depth_limit = ctx.depth_limit();
+        let db = ctx.db_gateway().cloned();
+        let repo = ctx.repo().to_string();
 
         // NOTE: we no longer use spawn_blocking. With async_support enabled
         // the entire execution runs on the tokio runtime; Wasmtime suspends
@@ -536,6 +749,8 @@ impl ShamirFunction for WasmFunction {
             registry,
             depth,
             depth_limit,
+            db,
+            repo,
         };
         let mut store: Store<HostState> = Store::new(engine.engine(), state);
         store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
@@ -564,6 +779,17 @@ impl ShamirFunction for WasmFunction {
         linker
             .func_wrap_async("shamir_host", "call", host_call)
             .map_err(|e| FunctionError::Compute(format!("linker call: {e}")))?;
+
+        // Register async host imports for ctx.db() (slice 8b).
+        linker
+            .func_wrap_async("shamir_host", "db_get", host_db_get)
+            .map_err(|e| FunctionError::Compute(format!("linker db_get: {e}")))?;
+        linker
+            .func_wrap_async("shamir_host", "db_insert", host_db_insert)
+            .map_err(|e| FunctionError::Compute(format!("linker db_insert: {e}")))?;
+        linker
+            .func_wrap_async("shamir_host", "db_query", host_db_query)
+            .map_err(|e| FunctionError::Compute(format!("linker db_query: {e}")))?;
 
         let instance = linker
             .instantiate_async(&mut store, &module)
