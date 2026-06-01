@@ -8,6 +8,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
+use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 
 use crate::staging_store::StagingStore;
@@ -189,6 +190,11 @@ pub struct TxContext {
     /// WAL marker is left for recovery. Never set in sync mode (the sync
     /// `materialize` path tracks `ok` on its own stack).
     pub async_prefix_failed: bool,
+
+    /// The actor that initiated the transaction (R2).
+    /// Defaults to `Actor::System`; set from the facade when a real
+    /// principal is available.
+    pub actor: Actor,
 }
 
 impl TxContext {
@@ -217,6 +223,7 @@ impl TxContext {
             predicate_set: crate::predicate_set::PredicateSet::new(),
             visibility: CommitVisibility::default(),
             async_prefix_failed: false,
+            actor: Actor::System,
         }
     }
 
@@ -225,6 +232,18 @@ impl TxContext {
     pub fn set_visibility(&mut self, visibility: CommitVisibility) -> &mut Self {
         self.visibility = visibility;
         self
+    }
+
+    /// Set the actor that initiated this transaction (R2).
+    /// Returns `&mut Self` for builder-style chaining.
+    pub fn set_actor(&mut self, actor: Actor) -> &mut Self {
+        self.actor = actor;
+        self
+    }
+
+    /// The actor that initiated this transaction.
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Record a unique-index guard for commit-time re-validation.

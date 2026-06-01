@@ -14,6 +14,7 @@
 //! Database-access helpers (`db()`, `repo()`, `store()`) arrive in a later
 //! slice.
 
+use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
@@ -277,6 +278,9 @@ impl Default for GlobalVars {
 /// Slice 9 adds `secret_grants` — the list of `env.*` variable names the
 /// function is allowed to read. `global_get("env.X")` returns absent when
 /// `X` is not in `secret_grants`; non-`env.` globals are ungated.
+///
+/// R2 adds `actor` — the [`Actor`] that initiated the invocation, threaded
+/// from the facade. Defaults to `Actor::System`.
 #[derive(Clone)]
 pub struct FnCtx {
     globals: Arc<GlobalVars>,
@@ -287,6 +291,7 @@ pub struct FnCtx {
     repo: String,
     net: Option<Arc<dyn NetGateway>>,
     secret_grants: Arc<std::collections::HashSet<String>>,
+    actor: Actor,
 }
 
 impl FnCtx {
@@ -304,6 +309,7 @@ impl FnCtx {
             repo: String::new(),
             net: None,
             secret_grants: Arc::new(std::collections::HashSet::new()),
+            actor: Actor::System,
         }
     }
 
@@ -318,6 +324,7 @@ impl FnCtx {
             repo: String::new(),
             net: None,
             secret_grants: Arc::new(std::collections::HashSet::new()),
+            actor: Actor::System,
         }
     }
 
@@ -366,6 +373,17 @@ impl FnCtx {
     pub fn with_secret_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
         self.secret_grants = Arc::new(grants.into_iter().collect());
         self
+    }
+
+    /// Builder: set the actor that initiated this invocation (R2).
+    pub fn with_actor(mut self, actor: Actor) -> Self {
+        self.actor = actor;
+        self
+    }
+
+    /// The actor that initiated this invocation.
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Read a global variable (cloned out).

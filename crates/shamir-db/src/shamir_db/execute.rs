@@ -995,7 +995,7 @@ impl ShamirDb {
             db_name: db_name.to_string(),
         };
 
-        execute_batch(request, &resolver, Some(&admin)).await
+        execute_batch(request, &resolver, Some(&admin), actor, db_name).await
     }
 }
 
@@ -1054,12 +1054,15 @@ impl ShamirDb {
             "serializable" => crate::engine::tx::IsolationLevel::Serializable,
             _ => crate::engine::tx::IsolationLevel::Snapshot,
         };
-        open_interactive_tx(&repo, iso)
-            .await
-            .map_err(|e| BatchError::QueryError {
-                alias: String::new(),
-                message: format!("begin_tx: {}", e),
-            })
+        let (mut tx, guard) =
+            open_interactive_tx(&repo, iso)
+                .await
+                .map_err(|e| BatchError::QueryError {
+                    alias: String::new(),
+                    message: format!("begin_tx: {}", e),
+                })?;
+        tx.set_actor(actor);
+        Ok((tx, guard))
     }
 
     /// EXECUTE: run one batch inside an already-open interactive tx, WITHOUT
@@ -1093,7 +1096,7 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
         };
-        execute_in_open_tx(request, &resolver, Some(&admin), tx).await
+        execute_in_open_tx(request, &resolver, Some(&admin), &actor, db_name, tx).await
     }
 
     /// COMMIT: run the Phase-A commit pipeline on a parked interactive tx and

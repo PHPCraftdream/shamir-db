@@ -811,9 +811,10 @@ impl ShamirDb {
         self.function_meta.get(name).map(|r| r.value().clone())
     }
 
-    /// Build an [`FnCtx`] with globals, registry, net gateway, and the
-    /// function's secret_grants from [`function_meta`].
-    fn build_invoke_ctx(&self, fn_name: &str) -> FnCtx {
+    /// Build an [`FnCtx`] with globals, registry, net gateway, the
+    /// function's secret_grants from [`function_meta`], and the given
+    /// [`Actor`] (R2).
+    fn build_invoke_ctx(&self, fn_name: &str, actor: Actor) -> FnCtx {
         let grants = self
             .function_meta(fn_name)
             .map(|m| m.secret_grants)
@@ -822,6 +823,7 @@ impl ShamirDb {
             .with_registry(self.functions.clone())
             .with_net(self.build_net_gateway())
             .with_secret_grants(grants)
+            .with_actor(actor)
     }
 
     /// Invoke a function by name with the given parameters.
@@ -839,7 +841,7 @@ impl ShamirDb {
             Action::Execute,
         )
         .map_err(|e| DbError::Function(e.to_string()))?;
-        let ctx = self.build_invoke_ctx(name);
+        let ctx = self.build_invoke_ctx(name, actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
@@ -865,7 +867,7 @@ impl ShamirDb {
             Action::Execute,
         )
         .map_err(|e| DbError::Function(e.to_string()))?;
-        let ctx = self.build_invoke_ctx(name);
+        let ctx = self.build_invoke_ctx(name, actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await

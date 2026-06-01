@@ -15,6 +15,7 @@ use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use crate::table::TableManager;
 use shamir_storage::error::DbResult;
+use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, TMap};
 
 /// Trait for resolving table references to TableManager instances.
@@ -41,10 +42,16 @@ pub trait AdminExecutor: Send + Sync {
 /// 1. Plans the execution (topological sort into parallel stages)
 /// 2. Executes each stage, passing results to dependent queries
 /// 3. Filters results based on return_all / return_only
+///
+/// `actor` is threaded from the facade (R2) and carried into every
+/// resource-touch point via [`QueryRunner`]. `db_name` provides the
+/// database scope for [`ResourcePath`] construction.
 pub async fn execute_batch(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    actor: Actor,
+    db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
     let start = Instant::now();
 
@@ -68,9 +75,17 @@ pub async fn execute_batch(
 
     // 3. Execute — branch on transactional.
     let (all_results, tx_info) = if request.transactional {
-        execute_transactional(request, &mut plan, resolver, admin).await?
+        execute_transactional(request, &mut plan, resolver, admin, &actor, db_name).await?
     } else {
-        let r = execute_plan(&mut plan, &request.queries, resolver, admin).await?;
+        let r = execute_plan(
+            &mut plan,
+            &request.queries,
+            resolver,
+            admin,
+            &actor,
+            db_name,
+        )
+        .await?;
         (r, None)
     };
 
@@ -108,7 +123,7 @@ pub async fn execute_batch_with_permissions(
             message: format!("Permission denied: {:?} on {:?}", action, resource),
         })?;
 
-    execute_batch(request, resolver, admin).await
+    execute_batch(request, resolver, admin, Actor::System, db_name).await
 }
 
 /// Validate that all referenced tables exist before execution.
@@ -162,6 +177,8 @@ async fn execute_plan(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    actor: &Actor,
+    db_name: &str,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map();
 
@@ -176,7 +193,16 @@ async fn execute_plan(
             let deps = plan.dependencies.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
 
-            let result = execute_single(alias, entry, resolver, admin, &resolved_refs).await?;
+            let result = execute_single(
+                alias,
+                entry,
+                resolver,
+                admin,
+                &resolved_refs,
+                actor,
+                db_name,
+            )
+            .await?;
             all_results.insert(alias.clone(), result);
         }
     }
@@ -196,6 +222,8 @@ async fn execute_plan_tx(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    actor: &Actor,
+    db_name: &str,
     tx: &mut shamir_tx::TxContext,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map();
@@ -214,6 +242,8 @@ async fn execute_plan_tx(
                 resolver,
                 admin,
                 tx: Some(&mut *tx),
+                actor: actor.clone(),
+                db_name,
             };
             let result = runner.run(alias, entry, &resolved_refs).await?;
             all_results.insert(alias.clone(), result);
@@ -232,6 +262,8 @@ async fn execute_transactional(
     plan: &mut BatchPlan,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    actor: &Actor,
+    db_name: &str,
 ) -> Result<
     (
         TMap<String, QueryResult>,
@@ -271,11 +303,22 @@ async fn execute_transactional(
             alias: String::new(),
             message: format!("begin_tx: {}", e),
         })?;
+    // Thread the actor into the tx for commit-time provenance (R2).
+    tx.set_actor(actor.clone());
     let _snapshot_version = tx.snapshot_version;
     let tx_id = tx.tx_id.0;
 
     // Execute plan in tx mode.
-    let plan_result = execute_plan_tx(plan, &request.queries, resolver, admin, &mut tx).await;
+    let plan_result = execute_plan_tx(
+        plan,
+        &request.queries,
+        resolver,
+        admin,
+        actor,
+        db_name,
+        &mut tx,
+    )
+    .await;
 
     match plan_result {
         Err(plan_err) => {
@@ -375,6 +418,8 @@ pub async fn execute_in_open_tx(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    actor: &Actor,
+    db_name: &str,
     tx: &mut shamir_tx::TxContext,
 ) -> Result<BatchResponse, BatchError> {
     let start = Instant::now();
@@ -392,7 +437,16 @@ pub async fn execute_in_open_tx(
         shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
     validate_tables(&request.queries, resolver).await?;
 
-    let all_results = execute_plan_tx(&mut plan, &request.queries, resolver, admin, tx).await?;
+    let all_results = execute_plan_tx(
+        &mut plan,
+        &request.queries,
+        resolver,
+        admin,
+        actor,
+        db_name,
+        tx,
+    )
+    .await?;
 
     let results = filter_results(all_results, request);
     let elapsed = start.elapsed();
@@ -436,8 +490,9 @@ fn build_resolved_refs(
     refs
 }
 
-/// Encapsulates per-query execution context — resolver, admin, and
-/// optional transaction state.
+/// Encapsulates per-query execution context — resolver, admin, optional
+/// transaction state, and the [`Actor`] + db name (R2) for the
+/// transparent authorization gate.
 ///
 /// In non-tx mode (`tx == None`) runs exactly like the original free
 /// function `execute_single`. In tx mode (`tx == Some(&mut TxContext)`)
@@ -449,15 +504,29 @@ pub struct QueryRunner<'a> {
     pub resolver: &'a dyn TableResolver,
     pub admin: Option<&'a dyn AdminExecutor>,
     pub tx: Option<&'a mut shamir_tx::TxContext>,
+    pub actor: Actor,
+    pub db_name: &'a str,
 }
 
 impl<'a> QueryRunner<'a> {
+    /// Build a [`ResourcePath::Table`] for the given table reference.
+    fn table_resource(&self, table_ref: &TableRef) -> ResourcePath {
+        ResourcePath::Table {
+            db: self.db_name.to_string(),
+            store: table_ref.repo.clone(),
+            table: table_ref.table.clone(),
+        }
+    }
+
     /// Execute a single query entry.
     ///
     /// Dispatches by `BatchOp` variant. When `self.tx.is_some()`,
     /// mutation ops (Insert/Update/Delete/Set) route through
     /// `TableManager::execute_*_tx`; read and admin ops are
     /// unchanged.
+    ///
+    /// Each data op calls [`authorize`] with the appropriate [`Action`]
+    /// before performing work (R2 transparent gate — always `Ok`).
     pub async fn run(
         &mut self,
         alias: &str,
@@ -476,6 +545,8 @@ impl<'a> QueryRunner<'a> {
         }
 
         let table_ref = entry.op.table_ref().unwrap();
+        let resource = self.table_resource(table_ref);
+
         let table = self
             .resolver
             .resolve(table_ref)
@@ -494,10 +565,16 @@ impl<'a> QueryRunner<'a> {
                 message: e.to_string(),
             })?;
 
-        let ctx = FilterContext::new(interner, resolved_refs);
+        let ctx = FilterContext::new(interner, resolved_refs).with_actor(self.actor.clone());
 
         match &entry.op {
             BatchOp::Read(query) => {
+                authorize(&self.actor, &resource, Action::Read).map_err(|e| {
+                    BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
                 // Vector I.1: in a transactional batch route the read through
                 // `read_tx` with a SHARED `&TxContext` so the SELECT records
                 // into the read-set (Serializable → SSI write-skew detection
@@ -517,6 +594,12 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Insert(op) => {
+                authorize(&self.actor, &resource, Action::Write).map_err(|e| {
+                    BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table.execute_insert_tx(op, tx).await,
                     None => table.execute_insert(op).await,
@@ -529,6 +612,12 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Update(op) => {
+                authorize(&self.actor, &resource, Action::Write).map_err(|e| {
+                    BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table.execute_update_tx(op, &ctx, tx).await,
                     None => table.execute_update(op, &ctx).await,
@@ -541,6 +630,12 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Delete(op) => {
+                authorize(&self.actor, &resource, Action::Delete).map_err(|e| {
+                    BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table.execute_delete_tx(op, &ctx, tx).await,
                     None => table.execute_delete(op, &ctx).await,
@@ -553,6 +648,12 @@ impl<'a> QueryRunner<'a> {
             }
 
             BatchOp::Set(op) => {
+                authorize(&self.actor, &resource, Action::Write).map_err(|e| {
+                    BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: e.to_string(),
+                    }
+                })?;
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table.execute_set_tx(op, tx).await,
                     None => table.execute_set(op).await,
@@ -579,11 +680,15 @@ async fn execute_single(
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
     resolved_refs: &TMap<String, QueryResult>,
+    actor: &Actor,
+    db_name: &str,
 ) -> Result<QueryResult, BatchError> {
     let mut runner = QueryRunner {
         resolver,
         admin,
         tx: None,
+        actor: actor.clone(),
+        db_name,
     };
     runner.run(alias, entry, resolved_refs).await
 }
