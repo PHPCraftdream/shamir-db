@@ -24,29 +24,27 @@ reaches up through its `.await` seams.
 | 4 | `0b1d349`,`f014110` | Durable catalogue + load-on-open + `ShamirDb` lifecycle API + e2e (create→compile→use→rename→use→delete). |
 | 5 | `ad1f299` | `BatchContext` (per-batch scratch) + `GlobalVars` (process-global), real `FnBatch`/`FnCtx`, facade wiring. |
 | 6 | `022336c` | Synchronous WASM host imports: guests read/write batch context + globals (`shamir_host` module). |
+| 7 | `d1d3854` | env seeding into globals (`EnvPolicy`: SHAMIR_ ∪ all/mask/list, default SHAMIR_) under `env.`; atomic `incr`/`update` on globals (scc entry, no mutex). |
+| 8a | `458771e` | **async bridge**: Wasmtime `async_support` + `ctx.call(name,args)` (function-calls-function) with a depth limit; shared batch/globals. |
+| 8b | `f3fba3a` | **DB access** from functions: `ctx.db().table().get/insert/query` via `DbGateway` (autocommit, through `ShamirDb::execute`); persistence verified. |
+| 8c | `d20fa90` | **egress**: `ctx.http_fetch/get/post` via a curl wrapper; SSRF guard + allowlist (deny-default); token in `-K` config (not argv); errors catchable by the guest. |
+| 9 | `43497b8` | per-function **secret grants** (env.* read gated by grant; else absent) + visibility/security metadata stored in the catalogue. |
 
-## Plan
+## Plan — remaining
 
-### Slice 7 — env seeding + atomic globals (small)
-- `EnvPolicy` (composable): `SHAMIR_` prefix ALWAYS, plus optional `all` / prefix masks / explicit name list (unioned). Default = `SHAMIR_` only.
-- Seed matching `std::env::vars()` into `GlobalVars` under the `env.` namespace at `ShamirDb::init` (snapshot at start; OS is the source of truth). env = secrets/tokens/config; globals = caches/runtime state.
-- Atomic `update` / `incr` on `GlobalVars` (scc entry API) so counters don't lose updates — no mutex (concurrency invariants).
-- Durable globals deferred (cheap later: reuse system-store settings + a per-key `durable` flag). YAGNI.
-
-### Slice 8 — the async bridge (the big one)
-Enable Wasmtime `async_support` + fibers; the host-call seam becomes async. Three seams of one nature ride it:
-- **8a** async execution model + `ctx.call(name, params)` (function-calls-function): shared batch/globals/tx, **shared fuel budget + depth limit** (bounds recursion).
-- **8b** **DB access** from functions: `ctx.db()/repo()/store()` host imports routed through the current `TxContext` (RYOW, read/write-set, SSI, predicate locks). The function is the transaction continued.
-- **8c** **egress** `ctx.http_fetch(req)` with host allowlist + `function:net` permission (SSRF/exfiltration surface — trusted-only default). Unblocks the "function calls an embedding AI with an env token, writes vectors back" capstone.
-
-### Slice 9 — permissions & security
-- Privileges `function:compile` / `register` / `alter` / `drop` / `execute` / `net`; deny-by-default; Grant/Revoke; audit-chain events.
-- `security: invoker | definer` (controlled escalation).
-- Per-function **secret grants**: which `env.`/tokens a given function may read (not all functions see all secrets).
-
-### Slice 10 — wire DDL + wire-level e2e
+### Slice 10 — wire DDL + wire-level e2e (not started)
 - `BatchOp::{CreateFunction,DropFunction,RenameFunction,AlterFunction,ListFunctions}` in `shamir-query-types` (+ ser/de) and `execute_admin` dispatch → manage functions via the JSON request API like other DDL.
 - Wire-level e2e through client→server (TLS+SCRAM) exercising the full lifecycle.
+
+### Deferred (by need, noted in code)
+- **Full transactionality** of a function (RYOW/SSI inside one enclosing tx) — arrives when functions run as batch ops and inherit the batch tx; today DB access is autocommit per-op.
+- **Permission ENFORCEMENT** (visibility public/private, `function:compile/execute/net`, invoker/definer with real principals) — rides the **Shomer access fabric** (see `ACCESS_FABRIC.md`); slice 9 already STORES the metadata + enforces secret-grants.
+- Shared fuel budget across the `ctx.call` chain; epoch-yielding for CPU-bound guests; `patch`/`delete`/get-by-key on `DbGateway`; nested-call grant switching.
+
+Note: the function engine was built end-to-end (compile → sandbox → catalogue
+→ batch context/globals/env → compose → DB read/write → egress → secret
+grants). The author surface stayed `async fn(ctx, batch, params) -> Result<Value>`
+— user data only; bytes/memory/fuel/ABI generated and hidden.
 
 ## Implementation detail — slices 8c & 9
 

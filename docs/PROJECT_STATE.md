@@ -2,10 +2,16 @@
 
 # ShamirDB — Project State
 
-**Snapshot date:** 2026-05-31. The canonical "where we are" document — what
+**Snapshot date:** 2026-06-01. The canonical "where we are" document — what
 ShamirDB is, what shipped, and where it goes next. Roadmap index lives in
 [`roadmap/NEXT_PHASES.md`](roadmap/NEXT_PHASES.md); per-feature plans under
 [`roadmap/`](roadmap/).
+
+Since the last snapshot: a **WASM function engine** ("M") was built
+end-to-end ([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) and the
+behavior-preserving substrate of the **Shomer access fabric** landed
+([`roadmap/ACCESS_FABRIC.md`](roadmap/ACCESS_FABRIC.md),
+[`roadmap/ACCESS_REFACTOR.md`](roadmap/ACCESS_REFACTOR.md)).
 
 ---
 
@@ -25,7 +31,7 @@ recovery). Dual-licensed **MIT OR Apache-2.0**.
 
 ---
 
-## 2. Architecture — 13 crates, layered bottom-up
+## 2. Architecture — 15 crates, layered bottom-up
 
 | Crate | Role |
 |---|---|
@@ -41,6 +47,13 @@ recovery). Dual-licensed **MIT OR Apache-2.0**.
 | `shamir-server` | ServerLauncher: bootstrap, RBAC, audit HMAC chain, rate-limit, **interactive-tx registry** |
 | `shamir-client` | Client SDK |
 | `shamir-client-node` | napi binding (MSVC-only, excluded from the workspace) |
+| `shamir-sdk` | function authoring SDK (guest): `Ctx`/`Batch`/`Params`/`Value`, host-call shims; builds to wasm32 |
+| `shamir-sdk-macros` | the `#[shamir::function]` proc-macro — hides the whole guest ABI from the author |
+
+The **function engine** itself lives in `shamir-engine` (`function/`:
+runtime, registry, Wasmtime backend, host imports, gateways) + `shamir-db`
+(durable catalogue, lifecycle API). The **Shomer access fabric** primitives
+live in `shamir-types` (`access`: `Actor`/`ResourcePath`/`Action`/the gate).
 
 **Architectural leitmotif** (held throughout): *the truth lives in one place
 — the versioned MVCC store; everything derived (indexes, the HNSW graph,
@@ -83,7 +96,23 @@ paths.
   HMAC chain; RBAC; password-at-rest; rate-limit + persistent lockout
   snapshots; WS pre-auth frame cap; exponential auth backoff.
 - Transports: TCP, WebSocket (native + browser).
-- Quality: **13 crates, 1656 lib tests** + integration; property tests
+- **Functions (WASM, the "M")** — user-defined `async fn(ctx, batch, params)
+  -> Result<Value>` (author sees user data only; the ABI/memory/fuel/msgpack
+  are macro-generated and hidden). Compile-from-source (Rust→wasm via cargo,
+  toolchain-gated) or submit `.wasm`; durable catalogue with load-on-open
+  (a runner without cargo still runs functions); sandboxed (fuel + memory
+  limits); per-batch scratch context + process globals + env seeding;
+  function-calls-function (`ctx.call`, depth-bounded); DB read/write
+  (`ctx.db()`, autocommit); outbound HTTP (`ctx.http_fetch`, curl wrapper,
+  allowlist deny-default); per-function secret grants. See
+  [`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md).
+- **Access fabric (Shomer)** — hierarchical POSIX-style DAC
+  (owner/group/mode over a resource tree + setuid-style delegation +
+  capability bits). The behavior-preserving substrate is in place (`Actor`
+  threaded everywhere; one transparent `authorize` door); enforcement +
+  metadata are the next non-refactor steps. See
+  [`roadmap/ACCESS_FABRIC.md`](roadmap/ACCESS_FABRIC.md).
+- Quality: **15 crates, ~1050+ engine lib tests** + integration; property tests
   (`proptest`: version codec + SSI read-set validation); green gate
   (`fmt --all --check` · `clippy --workspace --all-targets -D warnings` ·
   `test --workspace --lib` · `test --workspace --test '*'`).
@@ -138,11 +167,18 @@ and semantics confirmed by independent gate runs, never by agent claims).
   **closed** by Phase A + Phase B.
 
 **Priority recommendation:** the foundation (storage + transactions +
-protocol + security) is complete and solid. The highest-value next major step
-is one of: (1) **WASM modules** (the "M" — sandboxed user logic, the core
-value proposition); (2) **replication / P2P** (the "I" — decentralization);
-(3) **query language v2** (usability over the finished engine). Each taken the
-same way: smart-agent research → implementation → zero-trust verify → green CI.
+protocol + security) is solid, and the **WASM function engine ("M") shipped**
+end-to-end. The highest-value next steps are now:
+1. **Access enforcement (Shomer P4)** — flip the transparent door to the real
+   POSIX check; add the metadata envelope (owner/group/mode) + provenance
+   (`created_by`/`modified_by`). Substrate is already in place.
+2. **Function wire-DDL (slice 10)** — manage functions via the JSON request
+   API + a wire-level e2e.
+3. **Replication / P2P (the "I")** or **query language v2** — the remaining
+   charter pillars.
+Each taken the same way: smart-agent research → implementation → zero-trust
+verify → green CI. Discipline throughout: "don't over-build" — pull each
+slice by real need, not ahead of it.
 
 **Large directions** (per [`roadmap/`](roadmap/)):
 

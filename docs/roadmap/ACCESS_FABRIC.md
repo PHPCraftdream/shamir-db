@@ -60,6 +60,15 @@ with its owner's authority (definer).
 Seams 1–2 are the painful-to-retrofit refactor (do them first, no-op).
 Seams 3–5 are additive (ride their feature slice).
 
+> **Status:** seams 1–3 are **in place** (the pure-refactor track
+> `ACCESS_REFACTOR.md`, R1 `0be711f` + R2 `1b49194`): `Actor` flows from the
+> facade through `FilterContext`/`FnCtx`/`TxContext`, `ResourcePath`/`Action`
+> exist, and every resource touch passes through the transparent
+> `authorize` door (still `Ok` only → behavior unchanged). Remaining:
+> seam 4 (metadata envelope, P3), seam 5 (publish event, P6), and the
+> enforcement flip (P4). Slice 9 already stores function visibility/security
+> + enforces secret-grants.
+
 ## Implementation stages
 
 Each stage is a `/crush` slice, zero-trust verified + gated. Stages P0–P3
