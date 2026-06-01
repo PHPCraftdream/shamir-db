@@ -18,6 +18,7 @@
 //! this slice.
 
 mod builtin;
+mod compile;
 mod context;
 mod contract;
 mod error;
@@ -26,6 +27,7 @@ mod registry;
 mod wasm;
 
 pub use builtin::Argon2idFunction;
+pub use compile::compile_rust_source;
 pub use context::{FnBatch, FnCtx};
 pub use contract::ShamirFunction;
 pub use error::{FnResult, FunctionError};
