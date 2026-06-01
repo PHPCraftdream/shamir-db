@@ -8,8 +8,8 @@ use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_engine::function::{
-    compile_rust_source, BatchContext, FnBatch, FnCtx, FunctionError, FunctionRegistry, GlobalVars,
-    Params, WasmEngine, WasmFunction, WasmLimits,
+    compile_rust_source, BatchContext, EnvPolicy, FnBatch, FnCtx, FunctionError, FunctionRegistry,
+    GlobalVars, Params, WasmEngine, WasmFunction, WasmLimits,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,6 +61,17 @@ impl ShamirDb {
     /// # Arguments
     /// * `config` — system store config (InMemory for tests, Redb(path) for production)
     pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
+        Self::init_with_env_policy(config, EnvPolicy::default()).await
+    }
+
+    /// Initialize ShamirDb with a system store and an explicit env-seeding policy.
+    ///
+    /// After constructing the global-vars store, eligible OS environment variables
+    /// are seeded into the `env.*` namespace according to `policy`.
+    pub async fn init_with_env_policy(
+        config: SystemStoreConfig,
+        policy: EnvPolicy,
+    ) -> DbResult<Self> {
         let system_store = SystemStore::init(config).await?;
 
         let dbs = Arc::new(DashMap::new());
@@ -70,6 +81,7 @@ impl ShamirDb {
             Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
         let functions = Arc::new(FunctionRegistry::with_builtins());
         let globals = Arc::new(GlobalVars::new());
+        globals.seed_env(&policy);
 
         let shamir = Self {
             dbs,

@@ -17,6 +17,8 @@
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
+use super::env_policy::EnvPolicy;
+
 // ── BatchContext ──────────────────────────────────────────────────────
 
 /// Per-batch shared scratchpad.
@@ -71,6 +73,45 @@ impl BatchContext {
     /// Whether the context is empty.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
+    }
+
+    /// Atomically read-modify-write a key using scc's entry API.
+    ///
+    /// The closure receives the current value (`None` if absent) and must
+    /// return the new value. The entry is held for the duration of the
+    /// closure, so concurrent updates to the same key do not race.
+    pub fn update<F: FnOnce(Option<QueryValue>) -> QueryValue>(
+        &self,
+        key: &str,
+        f: F,
+    ) -> QueryValue {
+        match self.data.entry(key.to_string()) {
+            scc::hash_map::Entry::Occupied(mut occ) => {
+                let old = occ.get().clone();
+                let new = f(Some(old));
+                *occ.get_mut() = new.clone();
+                new
+            }
+            scc::hash_map::Entry::Vacant(vac) => {
+                let new = f(None);
+                vac.insert_entry(new.clone());
+                new
+            }
+        }
+    }
+
+    /// Atomic integer increment: missing/non-Int treated as 0.
+    ///
+    /// Returns the new value after adding `delta`.
+    pub fn incr(&self, key: &str, delta: i64) -> i64 {
+        let new = self.update(key, |old| match old {
+            Some(QueryValue::Int(n)) => QueryValue::Int(n + delta),
+            _ => QueryValue::Int(delta),
+        });
+        match new {
+            QueryValue::Int(n) => n,
+            _ => unreachable!(),
+        }
     }
 }
 
@@ -147,6 +188,57 @@ impl GlobalVars {
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
+
+    /// Seed OS environment variables into the `env.*` namespace.
+    ///
+    /// For each `(name, value)` pair where `policy.includes(&name)`,
+    /// inserts key `env.{name}` with value `QueryValue::Str(value)`.
+    pub fn seed_env(&self, policy: &EnvPolicy) {
+        for (name, value) in std::env::vars() {
+            if policy.includes(&name) {
+                self.set(format!("env.{}", name), QueryValue::Str(value));
+            }
+        }
+    }
+
+    /// Atomically read-modify-write a key using scc's entry API.
+    ///
+    /// The closure receives the current value (`None` if absent) and must
+    /// return the new value. The entry is held for the duration of the
+    /// closure, so concurrent updates to the same key do not race.
+    pub fn update<F: FnOnce(Option<QueryValue>) -> QueryValue>(
+        &self,
+        key: &str,
+        f: F,
+    ) -> QueryValue {
+        match self.data.entry(key.to_string()) {
+            scc::hash_map::Entry::Occupied(mut occ) => {
+                let old = occ.get().clone();
+                let new = f(Some(old));
+                *occ.get_mut() = new.clone();
+                new
+            }
+            scc::hash_map::Entry::Vacant(vac) => {
+                let new = f(None);
+                vac.insert_entry(new.clone());
+                new
+            }
+        }
+    }
+
+    /// Atomic integer increment: missing/non-Int treated as 0.
+    ///
+    /// Returns the new value after adding `delta`.
+    pub fn incr(&self, key: &str, delta: i64) -> i64 {
+        let new = self.update(key, |old| match old {
+            Some(QueryValue::Int(n)) => QueryValue::Int(n + delta),
+            _ => QueryValue::Int(delta),
+        });
+        match new {
+            QueryValue::Int(n) => n,
+            _ => unreachable!(),
+        }
+    }
 }
 
 impl std::fmt::Debug for GlobalVars {
@@ -214,6 +306,22 @@ impl FnCtx {
     /// Access the underlying globals store.
     pub fn globals(&self) -> &Arc<GlobalVars> {
         &self.globals
+    }
+
+    /// Atomic integer increment on a global variable.
+    ///
+    /// Missing/non-Int treated as 0. Returns the new value.
+    pub fn global_incr(&self, key: &str, delta: i64) -> i64 {
+        self.globals.incr(key, delta)
+    }
+
+    /// Atomic read-modify-write on a global variable.
+    pub fn global_update<F: FnOnce(Option<QueryValue>) -> QueryValue>(
+        &self,
+        key: &str,
+        f: F,
+    ) -> QueryValue {
+        self.globals.update(key, f)
     }
 }
 

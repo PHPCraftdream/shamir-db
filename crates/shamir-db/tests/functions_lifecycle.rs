@@ -414,3 +414,16 @@ async fn wasm_globals_exchange_via_host_imports() {
     // Verify through the DB's globals accessor.
     assert_eq!(db.globals().get("g"), Some(QueryValue::Int(7)));
 }
+
+// ── Slice 7: env-seeding facade test ─────────────────────────────────
+
+#[tokio::test]
+async fn facade_seeds_shamir_env() {
+    std::env::set_var("SHAMIR_S7_FACADE_TEST", "42");
+    let db = ShamirDb::init_memory().await.unwrap();
+    assert_eq!(
+        db.globals().get("env.SHAMIR_S7_FACADE_TEST"),
+        Some(QueryValue::Str("42".to_string()))
+    );
+    std::env::remove_var("SHAMIR_S7_FACADE_TEST");
+}
