@@ -25,6 +25,9 @@ const TABLE_TABLES: &str = "tables";
 const TABLE_SETTINGS: &str = "settings";
 const TABLE_USERS: &str = "users";
 const TABLE_ROLES: &str = "roles";
+/// Function catalogue: one record per user-defined WASM function so the
+/// function survives a restart (slice 4).
+const TABLE_FUNCTIONS: &str = "functions";
 
 /// Configuration for the system store.
 #[derive(Clone)]
@@ -57,7 +60,8 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_TABLES))
             .add_table(TableConfig::new(TABLE_SETTINGS))
             .add_table(TableConfig::new(TABLE_USERS))
-            .add_table(TableConfig::new(TABLE_ROLES));
+            .add_table(TableConfig::new(TABLE_ROLES))
+            .add_table(TableConfig::new(TABLE_FUNCTIONS));
 
         db.add_repo(repo_config).await?;
 
@@ -326,5 +330,54 @@ impl SystemStore {
     /// Get the roles table manager.
     pub async fn roles_table(&self) -> DbResult<TableManager> {
         self.table(TABLE_ROLES).await
+    }
+
+    // ========================================================================
+    // Function catalogue (slice 4)
+    // ========================================================================
+
+    /// Persist a function catalogue entry. Upsert keyed by `name`.
+    pub async fn save_function(&self, name: &str, record: &serde_json::Value) -> DbResult<()> {
+        let table = self.table(TABLE_FUNCTIONS).await?;
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_FUNCTIONS),
+            key: json!({"name": name}),
+            value: record.clone(),
+        };
+        table.execute_set(&op).await?;
+        table.interner().persist().await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Remove a function catalogue entry by name.
+    pub async fn remove_function(&self, name: &str) -> DbResult<()> {
+        let table = self.table(TABLE_FUNCTIONS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_FUNCTIONS),
+            where_clause: crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+        };
+        table.execute_delete(&op, &ctx).await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Load every persisted function catalogue record.
+    pub async fn load_functions(&self) -> DbResult<Vec<serde_json::Value>> {
+        let table = self.table(TABLE_FUNCTIONS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_FUNCTIONS);
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records)
     }
 }

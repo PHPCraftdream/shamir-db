@@ -3597,8 +3597,10 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "async-trait",
+ "base64",
  "criterion",
  "dashmap 6.1.0",
+ "fxhash",
  "log",
  "rand 0.8.5",
  "rcgen",
@@ -3613,6 +3615,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls",
+ "wat",
 ]
 
 [[package]]
