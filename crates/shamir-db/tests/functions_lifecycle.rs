@@ -101,6 +101,27 @@ async fn lifecycle_create_use_rename_use_drop() {
     assert!(!dropped_again);
 }
 
+/// Open a redb-backed `ShamirDb`, tolerating the brief window where a
+/// just-dropped previous instance's redb file lock is still being released
+/// (synchronous on Windows, can lag on Linux). Bounded retry (~5s).
+async fn init_redb_retry(path: &std::path::Path) -> ShamirDb {
+    for _ in 0..50 {
+        match ShamirDb::init(SystemStoreConfig::Redb(path.to_path_buf())).await {
+            Ok(db) => return db,
+            Err(e)
+                if {
+                    let m = e.to_string();
+                    m.contains("Cannot acquire lock") || m.contains("already open")
+                } =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(e) => panic!("unexpected reopen error: {e}"),
+        }
+    }
+    panic!("redb lock was not released within the retry window");
+}
+
 #[tokio::test]
 async fn functions_persist_across_reopen() {
     let tmp = tempfile::tempdir().unwrap();
@@ -122,9 +143,13 @@ async fn functions_persist_across_reopen() {
 
     // Re-open on the same path — function should be reloaded from catalogue.
     {
-        let db = ShamirDb::init(SystemStoreConfig::Redb(path.clone()))
-            .await
-            .unwrap();
+        // redb releases its exclusive file lock when the previous instance
+        // drops, but that release is not synchronous on every platform
+        // (Windows frees it immediately; Linux can lag a few ms behind the
+        // block-scope drop). Retry the open briefly so the in-process reopen
+        // is deterministic. (In production a restart releases the lock via
+        // process exit; same-process reopen is a test-only pattern.)
+        let db = init_redb_retry(&path).await;
         let params = make_echo_params();
         let result = db.invoke_function("echo", params.clone()).await.unwrap();
         assert_eq!(result, QueryValue::Map(params.raw().clone()));
