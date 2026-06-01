@@ -7,9 +7,10 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AlterBufferConfigOp, CommitMigrationOp, CreateDbOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
-    DropDbOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp, MigrationStatusOp,
-    RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
+    AddGroupMemberOp, AlterBufferConfigOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp,
+    CreateDbOp, CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, DropDbOp, DropGroupOp,
+    DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp, MigrationStatusOp,
+    RemoveGroupMemberOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::read::{QueryResult, ReadQuery};
@@ -72,6 +73,15 @@ pub enum BatchOp {
     DropRole(DropRoleOp),
     GrantRole(GrantRoleOp),
     RevokeRole(RevokeRoleOp),
+
+    // Access-control DDL (S3)
+    Chmod(ChmodOp),
+    Chown(ChownOp),
+    Chgrp(ChgrpOp),
+    CreateGroup(CreateGroupOp),
+    DropGroup(DropGroupOp),
+    AddGroupMember(AddGroupMemberOp),
+    RemoveGroupMember(RemoveGroupMemberOp),
 }
 
 impl Serialize for BatchOp {
@@ -104,6 +114,13 @@ impl Serialize for BatchOp {
             BatchOp::DropRole(op) => op.serialize(serializer),
             BatchOp::GrantRole(op) => op.serialize(serializer),
             BatchOp::RevokeRole(op) => op.serialize(serializer),
+            BatchOp::Chmod(op) => op.serialize(serializer),
+            BatchOp::Chown(op) => op.serialize(serializer),
+            BatchOp::Chgrp(op) => op.serialize(serializer),
+            BatchOp::CreateGroup(op) => op.serialize(serializer),
+            BatchOp::DropGroup(op) => op.serialize(serializer),
+            BatchOp::AddGroupMember(op) => op.serialize(serializer),
+            BatchOp::RemoveGroupMember(op) => op.serialize(serializer),
         }
     }
 }
@@ -220,6 +237,34 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::List)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("chmod") {
+            serde_json::from_value(value)
+                .map(BatchOp::Chmod)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("chown") {
+            serde_json::from_value(value)
+                .map(BatchOp::Chown)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("chgrp") {
+            serde_json::from_value(value)
+                .map(BatchOp::Chgrp)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_group") {
+            serde_json::from_value(value)
+                .map(BatchOp::CreateGroup)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_group") {
+            serde_json::from_value(value)
+                .map(BatchOp::DropGroup)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("add_group_member") {
+            serde_json::from_value(value)
+                .map(BatchOp::AddGroupMember)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("remove_group_member") {
+            serde_json::from_value(value)
+                .map(BatchOp::RemoveGroupMember)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value)
@@ -270,6 +315,13 @@ impl BatchOp {
                 | BatchOp::DropRole(_)
                 | BatchOp::GrantRole(_)
                 | BatchOp::RevokeRole(_)
+                | BatchOp::Chmod(_)
+                | BatchOp::Chown(_)
+                | BatchOp::Chgrp(_)
+                | BatchOp::CreateGroup(_)
+                | BatchOp::DropGroup(_)
+                | BatchOp::AddGroupMember(_)
+                | BatchOp::RemoveGroupMember(_)
         )
     }
 }
@@ -913,5 +965,224 @@ mod tests {
             info.materialized,
             "absent `materialized` field must default to true"
         );
+    }
+
+    // ========================================================================
+    // Access-control DDL ser/de round-trip (S3)
+    // ========================================================================
+
+    #[test]
+    fn chmod_table_serde() {
+        let op = roundtrip(
+            r#"{
+            "chmod": {
+                "table": ["mydb", "main", "users"]
+            },
+            "mode": 448
+        }"#,
+        );
+        match &op {
+            BatchOp::Chmod(c) => {
+                assert_eq!(c.mode, 0o700);
+                match &c.chmod {
+                    crate::admin::ResourceRef::Table { table } => {
+                        assert_eq!(table, &["mydb", "main", "users"]);
+                    }
+                    _ => panic!("expected Table ResourceRef"),
+                }
+            }
+            _ => panic!("expected Chmod"),
+        }
+        assert!(op.is_admin());
+    }
+
+    #[test]
+    fn chown_database_serde() {
+        let op = roundtrip(
+            r#"{
+            "chown": {
+                "database": "testdb"
+            },
+            "owner": 7
+        }"#,
+        );
+        match &op {
+            BatchOp::Chown(c) => {
+                assert_eq!(c.owner, 7);
+                match &c.chown {
+                    crate::admin::ResourceRef::Database { database } => {
+                        assert_eq!(database, "testdb");
+                    }
+                    _ => panic!("expected Database ResourceRef"),
+                }
+            }
+            _ => panic!("expected Chown"),
+        }
+    }
+
+    #[test]
+    fn chgrp_store_serde() {
+        let op = roundtrip(
+            r#"{
+            "chgrp": {
+                "store": ["testdb", "main"]
+            },
+            "group": 3
+        }"#,
+        );
+        match &op {
+            BatchOp::Chgrp(c) => {
+                assert_eq!(c.group, Some(3));
+            }
+            _ => panic!("expected Chgrp"),
+        }
+    }
+
+    #[test]
+    fn chgrp_null_group_serde() {
+        let op = roundtrip(
+            r#"{
+            "chgrp": {
+                "database": "testdb"
+            },
+            "group": null
+        }"#,
+        );
+        match &op {
+            BatchOp::Chgrp(c) => {
+                assert!(c.group.is_none());
+            }
+            _ => panic!("expected Chgrp"),
+        }
+    }
+
+    #[test]
+    fn create_group_serde() {
+        let op = roundtrip(
+            r#"{
+            "create_group": "devs"
+        }"#,
+        );
+        match &op {
+            BatchOp::CreateGroup(c) => {
+                assert_eq!(c.create_group, "devs");
+            }
+            _ => panic!("expected CreateGroup"),
+        }
+    }
+
+    #[test]
+    fn drop_group_by_name_serde() {
+        let op = roundtrip(
+            r#"{
+            "drop_group": {
+                "name": "devs"
+            }
+        }"#,
+        );
+        match &op {
+            BatchOp::DropGroup(d) => match &d.drop_group {
+                crate::admin::GroupRef::Name { name } => assert_eq!(name, "devs"),
+                _ => panic!("expected Name GroupRef"),
+            },
+            _ => panic!("expected DropGroup"),
+        }
+    }
+
+    #[test]
+    fn drop_group_by_id_serde() {
+        let op = roundtrip(
+            r#"{
+            "drop_group": {
+                "id": 3
+            }
+        }"#,
+        );
+        match &op {
+            BatchOp::DropGroup(d) => match &d.drop_group {
+                crate::admin::GroupRef::Id { id } => assert_eq!(*id, 3),
+                _ => panic!("expected Id GroupRef"),
+            },
+            _ => panic!("expected DropGroup"),
+        }
+    }
+
+    #[test]
+    fn add_group_member_serde() {
+        let op = roundtrip(
+            r#"{
+            "add_group_member": {
+                "name": "devs"
+            },
+            "user": 42
+        }"#,
+        );
+        match &op {
+            BatchOp::AddGroupMember(a) => {
+                assert_eq!(a.user, 42);
+            }
+            _ => panic!("expected AddGroupMember"),
+        }
+    }
+
+    #[test]
+    fn remove_group_member_serde() {
+        let op = roundtrip(
+            r#"{
+            "remove_group_member": {
+                "id": 1
+            },
+            "user": 42
+        }"#,
+        );
+        match &op {
+            BatchOp::RemoveGroupMember(r) => {
+                assert_eq!(r.user, 42);
+            }
+            _ => panic!("expected RemoveGroupMember"),
+        }
+    }
+
+    #[test]
+    fn chmod_function_namespace_serde() {
+        let op = roundtrip(
+            r#"{
+            "chmod": {
+                "function_namespace": true
+            },
+            "mode": 493
+        }"#,
+        );
+        match &op {
+            BatchOp::Chmod(c) => {
+                assert_eq!(c.mode, 0o755);
+                match &c.chmod {
+                    crate::admin::ResourceRef::FunctionNamespace { .. } => {}
+                    _ => panic!("expected FunctionNamespace ResourceRef"),
+                }
+            }
+            _ => panic!("expected Chmod"),
+        }
+    }
+
+    #[test]
+    fn chown_function_serde() {
+        let op = roundtrip(
+            r#"{
+            "chown": {
+                "function": "my_fn"
+            },
+            "owner": 10
+        }"#,
+        );
+        match &op {
+            BatchOp::Chown(c) => match &c.chown {
+                crate::admin::ResourceRef::Function { function } => {
+                    assert_eq!(function, "my_fn");
+                }
+                _ => panic!("expected Function ResourceRef"),
+            },
+            _ => panic!("expected Chown"),
+        }
     }
 }
