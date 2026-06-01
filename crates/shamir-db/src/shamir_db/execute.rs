@@ -19,6 +19,7 @@ use crate::DbResult;
 use crate::engine::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
 
 use super::shamir_db::ShamirDb;
+use crate::access::{authorize, Action, Actor, ResourcePath};
 
 /// TableResolver that resolves TableRef within a DbInstance.
 struct DbTableResolver {
@@ -971,6 +972,18 @@ impl ShamirDb {
         db_name: &str,
         request: &BatchRequest,
     ) -> Result<BatchResponse, BatchError> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Database {
+                db: db_name.to_string(),
+            },
+            Action::Read,
+        )
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: e.to_string(),
+        })?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -1015,6 +1028,18 @@ impl ShamirDb {
         ),
         BatchError,
     > {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Database {
+                db: db_name.to_string(),
+            },
+            Action::Read,
+        )
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: e.to_string(),
+        })?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -1047,6 +1072,18 @@ impl ShamirDb {
         request: &BatchRequest,
         tx: &mut crate::engine::tx::TxContext,
     ) -> Result<BatchResponse, BatchError> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Database {
+                db: db_name.to_string(),
+            },
+            Action::Read,
+        )
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: e.to_string(),
+        })?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
@@ -1070,6 +1107,18 @@ impl ShamirDb {
         repo_name: &str,
         tx: crate::engine::tx::TxContext,
     ) -> Result<TransactionInfo, BatchError> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Database {
+                db: db_name.to_string(),
+            },
+            Action::Write,
+        )
+        .map_err(|e| BatchError::QueryError {
+            alias: String::new(),
+            message: e.to_string(),
+        })?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),

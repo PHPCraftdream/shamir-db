@@ -10,6 +10,7 @@
 
 // Re-export foundation crates so callers that imported them through
 // `shamir_db::*` keep working unchanged.
+pub use shamir_types::access;
 pub use shamir_types::codecs;
 pub use shamir_types::core;
 pub use shamir_types::types;

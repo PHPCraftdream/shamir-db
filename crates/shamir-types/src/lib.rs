@@ -11,6 +11,7 @@
 //! `crate::types::...` / `crate::codecs::...` / `crate::core::interner::...`
 //! paths in `shamir-db` continue to resolve via re-exports.
 
+pub mod access;
 pub mod codecs;
 pub mod core;
 pub mod types;
