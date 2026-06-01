@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use shamir_engine::function::{
     compile_rust_source, BatchContext, EnvPolicy, FnBatch, FnCtx, FunctionError, FunctionRegistry,
-    GlobalVars, Params, WasmEngine, WasmFunction, WasmLimits,
+    GlobalVars, NetGateway, Params, WasmEngine, WasmFunction, WasmLimits,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,6 +60,8 @@ pub struct ShamirDb {
     wasm_engine: Arc<WasmEngine>,
     /// Database-global variables shared across all function invocations.
     globals: Arc<GlobalVars>,
+    /// Network egress allowlist (host patterns). Default empty = deny all.
+    net_allowlist: Arc<Vec<String>>,
 }
 
 impl ShamirDb {
@@ -98,6 +100,7 @@ impl ShamirDb {
             functions,
             wasm_engine,
             globals,
+            net_allowlist: Arc::new(Vec::new()),
         };
 
         // Load existing databases from system store
@@ -736,7 +739,9 @@ impl ShamirDb {
     /// between calls). Use [`invoke_function_with_batch`] for multi-call
     /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
-        let ctx = FnCtx::with_globals(self.globals.clone()).with_registry(self.functions.clone());
+        let ctx = FnCtx::with_globals(self.globals.clone())
+            .with_registry(self.functions.clone())
+            .with_net(self.build_net_gateway());
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
@@ -753,7 +758,9 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
-        let ctx = FnCtx::with_globals(self.globals.clone()).with_registry(self.functions.clone());
+        let ctx = FnCtx::with_globals(self.globals.clone())
+            .with_registry(self.functions.clone())
+            .with_net(self.build_net_gateway());
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
@@ -768,6 +775,24 @@ impl ShamirDb {
     /// Create a fresh batch context for use with [`invoke_function_with_batch`].
     pub fn new_batch_context(&self) -> Arc<BatchContext> {
         Arc::new(BatchContext::new())
+    }
+
+    /// Set the network egress allowlist (host patterns for HTTP fetch).
+    ///
+    /// Default is empty (deny all). Must be called before any function
+    /// invocation that uses `ctx.http_fetch()`.
+    pub fn set_net_allowlist(&mut self, allowlist: Vec<String>) {
+        self.net_allowlist = Arc::new(allowlist);
+    }
+
+    /// Build a [`NetGateway`] from the current allowlist.
+    ///
+    /// Always returns a gateway so that allowlist-denial is a catchable
+    /// runtime error, not a "no net gateway" trap.
+    fn build_net_gateway(&self) -> Arc<dyn NetGateway> {
+        Arc::new(super::curl_gateway::CurlNetGateway::new(
+            self.net_allowlist.to_vec(),
+        ))
     }
 
     /// Invoke a function with database read/write access (slice 8b).
@@ -795,7 +820,8 @@ impl ShamirDb {
         });
         let ctx = FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
-            .with_db(gateway, repo.to_string());
+            .with_db(gateway, repo.to_string())
+            .with_net(self.build_net_gateway());
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
@@ -817,7 +843,8 @@ impl ShamirDb {
         });
         let ctx = FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
-            .with_db(gateway, repo.to_string());
+            .with_db(gateway, repo.to_string())
+            .with_net(self.build_net_gateway());
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
