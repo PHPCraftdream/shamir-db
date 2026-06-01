@@ -875,6 +875,129 @@ impl AdminExecutor for ShamirAdminExecutor {
                 })))
             }
 
+            // ── Access-control DDL (S3) ─────────────────────────────────
+            BatchOp::Chmod(op) => {
+                let path = op
+                    .chmod
+                    .to_path()
+                    .ok_or_else(|| err("invalid resource reference".to_string()))?;
+                self.shamir
+                    .authorize_access(&Actor::System, &path, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let mut meta = self.shamir.resource_meta(&path).await;
+                meta.mode = op.mode;
+                self.shamir
+                    .set_resource_meta(&path, &meta)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "chmod": serde_json::to_value(&op.chmod).map_err(|e| err(e.to_string()))?,
+                    "mode": op.mode,
+                })))
+            }
+
+            BatchOp::Chown(op) => {
+                let path = op
+                    .chown
+                    .to_path()
+                    .ok_or_else(|| err("invalid resource reference".to_string()))?;
+                self.shamir
+                    .authorize_access(&Actor::System, &path, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let mut meta = self.shamir.resource_meta(&path).await;
+                meta.owner = Actor::from_owner_id(op.owner);
+                self.shamir
+                    .set_resource_meta(&path, &meta)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "chown": serde_json::to_value(&op.chown).map_err(|e| err(e.to_string()))?,
+                    "owner": op.owner,
+                })))
+            }
+
+            BatchOp::Chgrp(op) => {
+                let path = op
+                    .chgrp
+                    .to_path()
+                    .ok_or_else(|| err("invalid resource reference".to_string()))?;
+                self.shamir
+                    .authorize_access(&Actor::System, &path, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let mut meta = self.shamir.resource_meta(&path).await;
+                meta.group = op.group;
+                self.shamir
+                    .set_resource_meta(&path, &meta)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "chgrp": serde_json::to_value(&op.chgrp).map_err(|e| err(e.to_string()))?,
+                    "group": op.group,
+                })))
+            }
+
+            BatchOp::CreateGroup(op) => {
+                let group_id = self
+                    .shamir
+                    .create_group(&op.create_group)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "created_group": op.create_group,
+                    "group_id": group_id,
+                })))
+            }
+
+            BatchOp::DropGroup(op) => {
+                let group_id = self
+                    .shamir
+                    .resolve_group_id(&op.drop_group)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                self.shamir
+                    .drop_group(group_id)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "dropped_group_id": group_id,
+                })))
+            }
+
+            BatchOp::AddGroupMember(op) => {
+                let group_id = self
+                    .shamir
+                    .resolve_group_id(&op.add_group_member)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                self.shamir
+                    .add_group_member(group_id, op.user)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "added_to_group": group_id,
+                    "user": op.user,
+                })))
+            }
+
+            BatchOp::RemoveGroupMember(op) => {
+                let group_id = self
+                    .shamir
+                    .resolve_group_id(&op.remove_group_member)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                self.shamir
+                    .remove_group_member(group_id, op.user)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "removed_from_group": group_id,
+                    "user": op.user,
+                })))
+            }
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }

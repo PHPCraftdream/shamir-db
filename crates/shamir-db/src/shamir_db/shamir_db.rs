@@ -1209,6 +1209,29 @@ impl ShamirDb {
             .await
     }
 
+    /// Resolve a [`GroupRef`] to a numeric group id.
+    ///
+    /// `GroupRef::Id` returns the id directly. `GroupRef::Name` scans
+    /// the groups table for a matching name. Returns `Err` if the name
+    /// does not resolve to any group.
+    pub async fn resolve_group_id(
+        &self,
+        group_ref: &crate::query::admin::GroupRef,
+    ) -> DbResult<u64> {
+        match group_ref {
+            crate::query::admin::GroupRef::Id { id } => Ok(*id),
+            crate::query::admin::GroupRef::Name { name } => {
+                let groups = self.system_store.load_groups().await?;
+                let id = groups
+                    .iter()
+                    .find(|g| g["name"].as_str() == Some(name.as_str()))
+                    .and_then(|g| g["group_id"].as_u64())
+                    .ok_or_else(|| DbError::NotFound(format!("group '{}' not found", name)))?;
+                Ok(id)
+            }
+        }
+    }
+
     /// Get the members of a group.
     pub async fn group_members(&self, group_id: u64) -> DbResult<Vec<u64>> {
         let rec = self.system_store.load_group(group_id).await?;

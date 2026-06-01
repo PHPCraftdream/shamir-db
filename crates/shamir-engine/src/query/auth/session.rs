@@ -347,6 +347,15 @@ impl SessionPermissions {
 
             // List — read on global
             BatchOp::List(_) => (Action::Read, Resource::Global),
+
+            // Access-control DDL (S3) — admin manage operations
+            BatchOp::Chmod(_)
+            | BatchOp::Chown(_)
+            | BatchOp::Chgrp(_)
+            | BatchOp::CreateGroup(_)
+            | BatchOp::DropGroup(_)
+            | BatchOp::AddGroupMember(_)
+            | BatchOp::RemoveGroupMember(_) => (Action::Alter, Resource::Global),
         }
     }
 }
