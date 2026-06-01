@@ -183,4 +183,75 @@ impl Interner {
             })
             .collect()
     }
+
+    /// Returns the slice of interned entries whose ids fall in
+    /// `(start_exclusive .. end_inclusive]`. Used by the persistence
+    /// layer to capture only the delta added since the last persist
+    /// without cloning the whole reverse vec.
+    ///
+    /// Both bounds are interpreted as raw ids (1-based — slot 0 is the
+    /// sentinel). `end_inclusive` is clamped to the current reverse-vec
+    /// length so a stale `end` from a concurrent reader is safe.
+    pub fn entries_in_id_range(
+        &self,
+        start_exclusive: usize,
+        end_inclusive: usize,
+    ) -> Vec<(InternerKey, UserKey)> {
+        let rev = self.reverse.load();
+        let lo = start_exclusive.saturating_add(1);
+        let hi = end_inclusive.min(rev.len().saturating_sub(1));
+        if lo > hi {
+            return Vec::new();
+        }
+        let mut out = Vec::with_capacity(hi + 1 - lo);
+        for idx in lo..=hi {
+            if let Some(Some(key)) = rev.get(idx) {
+                out.push((InternerKey::new(idx as u64), key.clone()));
+            }
+        }
+        out
+    }
+
+    /// Captures the delta of entries with id > `start_exclusive`,
+    /// reading the reverse vec atomically. Returns `(entries,
+    /// new_high_water)` where `new_high_water` is the highest id
+    /// actually present in the reverse vec at capture time — the
+    /// persistence layer uses this (NOT `len()`) as the new
+    /// `last_persisted_len`, because under concurrent `touch_ind`
+    /// the forward map's `len()` can outrun the reverse vec by a
+    /// window. Using the reverse-vec high-water mark guarantees we
+    /// never advance past unwritten entries.
+    pub fn entries_after(&self, start_exclusive: usize) -> (Vec<(InternerKey, UserKey)>, usize) {
+        let rev = self.reverse.load();
+        // `rev.len() - 1` is the highest id that has a slot. Some
+        // slots in the captured range may still be `None` if we're
+        // reading mid-insert from another thread — but those will
+        // be picked up by the NEXT persist, since we don't advance
+        // `last_persisted_len` past them.
+        let hi_full = rev.len().saturating_sub(1);
+        let lo = start_exclusive.saturating_add(1);
+        if lo > hi_full {
+            return (Vec::new(), start_exclusive);
+        }
+        let mut out = Vec::with_capacity(hi_full + 1 - lo);
+        let mut new_high = start_exclusive;
+        for idx in lo..=hi_full {
+            match rev.get(idx) {
+                Some(Some(key)) => {
+                    out.push((InternerKey::new(idx as u64), key.clone()));
+                    new_high = idx;
+                }
+                Some(None) => {
+                    // A `None` slot inside the populated range means
+                    // a concurrent `touch_ind` reserved the id but
+                    // hasn't yet stored the swap visible to us. Stop
+                    // advancing the high-water mark here so the next
+                    // persist re-captures everything past this gap.
+                    break;
+                }
+                None => break,
+            }
+        }
+        (out, new_high)
+    }
 }

@@ -1,7 +1,9 @@
+use crate::meta::MetaKey;
 use crate::table::interner_manager::InternerManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
-use shamir_types::core::interner::UserKey;
+use shamir_types::codecs::basic::bincode;
+use shamir_types::core::interner::{InternerKey, UserKey};
 use std::sync::Arc;
 
 async fn create_manager() -> InternerManager {
@@ -92,4 +94,136 @@ async fn test_interner_multiple_saves() {
         .unwrap();
 
     assert_eq!(interner.len(), 2);
+}
+
+/// Incremental persist writes one chunk per call, reload reconstructs
+/// the identical dictionary (every id → name mapping preserved).
+#[tokio::test]
+async fn test_interner_incremental_persist_then_reload() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = InternerManager::new(Arc::clone(&store));
+
+    let interner = manager.get().await.unwrap();
+    let mut expected: Vec<(u64, String)> = Vec::new();
+    for i in 0..50usize {
+        let name = format!("field_{i}");
+        let t = interner.touch_ind(&name).unwrap();
+        expected.push((t.key().id(), name));
+        // Persist after every touch — exercises the per-op call path.
+        manager.persist().await.unwrap();
+    }
+
+    // Reload into a fresh manager wired to the same store.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), expected.len());
+    for (id, name) in &expected {
+        let key = interner2.make_key(*id);
+        let got = interner2.get_str(&key).expect("id must resolve to name");
+        assert_eq!(got.as_str(), name.as_str(), "id {} mismapped", id);
+        // Reverse: name → id round-trips.
+        let id2 = interner2.get_ind(name).expect("name must intern");
+        assert_eq!(id2.id(), *id, "name {} mismapped", name);
+    }
+}
+
+/// OLD-format single-blob written under MetaKey::Internals must load
+/// correctly under new code (backward-compat). After load, new
+/// persists chain on top as delta chunks.
+#[tokio::test]
+async fn test_interner_legacy_blob_loads_under_new_code() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    // Hand-write a legacy blob: a Vec<(InternerKey, UserKey)> serialized
+    // with bincode under MetaKey::Internals — mirrors what the old
+    // persist() used to write.
+    let legacy_entries = vec![
+        (InternerKey::new(1), UserKey::from_str("alpha")),
+        (InternerKey::new(2), UserKey::from_str("beta")),
+        (InternerKey::new(3), UserKey::from_str("gamma")),
+    ];
+    let bytes = bincode::to_bytes(&legacy_entries).unwrap();
+    store
+        .set(MetaKey::Internals.as_record_id().to_bytes(), bytes)
+        .await
+        .unwrap();
+
+    // New code reads the legacy blob.
+    let manager = InternerManager::new(Arc::clone(&store));
+    let interner = manager.get().await.unwrap();
+    assert_eq!(interner.len(), 3);
+    assert_eq!(
+        interner.get_str(&InternerKey::new(1)).unwrap().as_str(),
+        "alpha"
+    );
+    assert_eq!(
+        interner.get_str(&InternerKey::new(2)).unwrap().as_str(),
+        "beta"
+    );
+    assert_eq!(
+        interner.get_str(&InternerKey::new(3)).unwrap().as_str(),
+        "gamma"
+    );
+
+    // Append a fresh entry — should land as a delta chunk, not as a
+    // rewrite of the legacy blob.
+    let touch = interner.touch_ind("delta").unwrap();
+    assert_eq!(touch.key().id(), 4);
+    manager.persist().await.unwrap();
+
+    // Reload into yet another fresh manager — legacy blob + delta
+    // chunk must combine into the full dictionary.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), 4);
+    for (id, name) in [(1u64, "alpha"), (2, "beta"), (3, "gamma"), (4, "delta")] {
+        assert_eq!(
+            interner2.get_str(&InternerKey::new(id)).unwrap().as_str(),
+            name
+        );
+    }
+}
+
+/// Concurrent touch + persist must converge to a consistent state:
+/// every interned id resolves to its name after reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_interner_concurrent_touch_and_persist() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = InternerManager::new(Arc::clone(&store));
+
+    // Force initial load so all clones share the same interner.
+    let _ = manager.get().await.unwrap();
+
+    let mut handles = Vec::new();
+    for t in 0..4usize {
+        let mgr = manager.clone();
+        handles.push(tokio::spawn(async move {
+            let mut names = Vec::new();
+            for i in 0..100usize {
+                let name = format!("t{}_f{}", t, i);
+                let interner = mgr.get().await.unwrap();
+                let touch = interner.touch_ind(&name).unwrap();
+                names.push((touch.key().id(), name));
+                mgr.persist().await.unwrap();
+            }
+            names
+        }));
+    }
+
+    let mut all_pairs: Vec<(u64, String)> = Vec::new();
+    for h in handles {
+        all_pairs.extend(h.await.unwrap());
+    }
+
+    // Reload and verify every name we touched still resolves to its id.
+    let manager2 = InternerManager::new(store);
+    let interner2 = manager2.get().await.unwrap();
+    assert_eq!(interner2.len(), 400);
+    for (id, name) in &all_pairs {
+        let key = interner2.make_key(*id);
+        let got = interner2
+            .get_str(&key)
+            .unwrap_or_else(|| panic!("id {} (name {}) not found after reload", id, name));
+        assert_eq!(got.as_str(), name.as_str());
+    }
 }

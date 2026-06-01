@@ -1839,20 +1839,37 @@ impl TableManager {
     /// Persists src first so the bytes are current.
     pub async fn replicate_interner_from(&self, src: &TableManager) -> DbResult<()> {
         src.interner().persist().await?;
-        let key = crate::meta::MetaKey::Internals.as_record_id().to_bytes();
-        match src.info_store.get(key.clone()).await {
+        // Copy the legacy single-blob record (if any) — for repos
+        // upgraded from the old persist format. New code never writes
+        // here, but on-disk data may still contain it.
+        let legacy_key = crate::meta::MetaKey::Internals.as_record_id().to_bytes();
+        match src.info_store.get(legacy_key.clone()).await {
             Ok(bytes) => {
-                self.info_store.set(key, bytes).await?;
-                Ok(())
+                self.info_store.set(legacy_key, bytes).await?;
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => {
-                // src has never persisted an interner — empty source, nothing
-                // to replicate. The dst interner's lazy load will start
-                // fresh, which is correct.
-                Ok(())
+                // No legacy blob — fall through to chunk copy.
             }
-            Err(e) => Err(e),
+            Err(e) => return Err(e),
         }
+        // Copy every append-only delta chunk emitted by the new
+        // incremental persist path. Without this, the dst would load
+        // an empty interner and msgpack-encoded field-name ids on dst
+        // would not resolve.
+        use futures::StreamExt;
+        let prefix = {
+            let mut p = Vec::with_capacity(4 + 3);
+            p.extend_from_slice(&[0u8, 0, 0, 0]);
+            p.extend_from_slice(b"i.d");
+            bytes::Bytes::from(p)
+        };
+        let mut stream = src.info_store.scan_prefix_stream(prefix, 256);
+        while let Some(batch) = stream.next().await {
+            for (k, v) in batch? {
+                self.info_store.set(k, v).await?;
+            }
+        }
+        Ok(())
     }
 
     /// Replicate src's index2 descriptors onto this TableManager.
