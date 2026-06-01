@@ -1,7 +1,7 @@
 use base64::Engine;
 use serde_json::json;
 
-use crate::access::{authorize, Action, Actor, ResourcePath};
+use crate::access::{authorize, Action, Actor, ResourceMeta, ResourcePath};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::function::DbGateway;
 use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry};
@@ -330,6 +330,7 @@ impl ShamirDb {
                     "name": name,
                     "created_at": created_at,
                 }),
+                &ResourceMeta::open(),
             )
             .await
         {
@@ -408,7 +409,13 @@ impl ShamirDb {
         // Persist to system store
         if let Err(e) = self
             .system_store
-            .save_repository(db_name, &repo_name, &storage_type, path.as_deref())
+            .save_repository(
+                db_name,
+                &repo_name,
+                &storage_type,
+                path.as_deref(),
+                &ResourceMeta::open(),
+            )
             .await
         {
             log::warn!(
@@ -425,7 +432,13 @@ impl ShamirDb {
         for (table_name, enable_indexes) in &inline_tables {
             if let Err(e) = self
                 .system_store
-                .save_table(db_name, &repo_name, table_name, *enable_indexes)
+                .save_table(
+                    db_name,
+                    &repo_name,
+                    table_name,
+                    *enable_indexes,
+                    &ResourceMeta::open(),
+                )
                 .await
             {
                 log::warn!(
@@ -469,7 +482,13 @@ impl ShamirDb {
 
         if let Err(e) = self
             .system_store
-            .save_table(db_name, repo_name, table_name, enable_indexes)
+            .save_table(
+                db_name,
+                repo_name,
+                table_name,
+                enable_indexes,
+                &ResourceMeta::open(),
+            )
             .await
         {
             log::warn!(
@@ -708,7 +727,9 @@ impl ShamirDb {
             "version": version,
         });
         meta.inject_into(&mut record);
-        self.system_store.save_function(name, &record).await?;
+        self.system_store
+            .save_function(name, &record, &ResourceMeta::open())
+            .await?;
 
         if opts.replace {
             self.functions.replace(name, Arc::new(wf));
@@ -788,7 +809,9 @@ impl ShamirDb {
         if let Some(mut rec) = old_record {
             self.system_store.remove_function(from).await?;
             rec["name"] = json!(to);
-            self.system_store.save_function(to, &rec).await?;
+            self.system_store
+                .save_function(to, &rec, &ResourceMeta::open())
+                .await?;
         }
 
         Ok(())
@@ -984,6 +1007,207 @@ impl ShamirDb {
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
             .map_err(|e| DbError::Function(e.to_string()))
+    }
+
+    // ========================================================================
+    // Resource metadata resolver + groups (P3 metadata plates)
+    // ========================================================================
+
+    /// Resolve the [`ResourceMeta`] for a given [`ResourcePath`].
+    ///
+    /// - **Record / Index** inherit their Table's meta.
+    /// - **Root** and unknown / missing paths default to [`ResourceMeta::open`].
+    /// - All other mode-bearing objects read from the persistent catalogue.
+    /// - **FunctionNamespace** is stored as a settings entry keyed
+    ///   `"fn_namespace_meta"`, defaulting to `open()`.
+    pub async fn resource_meta(&self, path: &ResourcePath) -> ResourceMeta {
+        let table_path = match path {
+            // Record and Index inherit their Table's meta.
+            ResourcePath::Record {
+                db, store, table, ..
+            }
+            | ResourcePath::Index {
+                db, store, table, ..
+            } => ResourcePath::table(db, store, table),
+            ResourcePath::Table { .. } => path.clone(),
+            _ => path.clone(),
+        };
+
+        match &table_path {
+            ResourcePath::Database { db } => {
+                let rec = self.system_store.load_database(db).await;
+                rec.ok()
+                    .flatten()
+                    .map(|r| ResourceMeta::from_record(&r))
+                    .unwrap_or_default()
+            }
+            ResourcePath::Store { db, store } => {
+                let rec = self.system_store.load_repository(db, store).await;
+                rec.ok()
+                    .flatten()
+                    .map(|r| ResourceMeta::from_record(&r))
+                    .unwrap_or_default()
+            }
+            ResourcePath::Table { db, store, table } => {
+                let rec = self.system_store.load_table_record(db, store, table).await;
+                rec.ok()
+                    .flatten()
+                    .map(|r| ResourceMeta::from_record(&r))
+                    .unwrap_or_default()
+            }
+            ResourcePath::Function { name } => {
+                let rec = self.system_store.load_function(name).await;
+                rec.ok()
+                    .flatten()
+                    .map(|r| ResourceMeta::from_record(&r))
+                    .unwrap_or_default()
+            }
+            ResourcePath::FunctionNamespace => {
+                let val = self
+                    .system_store
+                    .load_setting("fn_namespace_meta")
+                    .await
+                    .ok()
+                    .flatten();
+                val.map(|v| ResourceMeta::from_record(&v))
+                    .unwrap_or_default()
+            }
+            ResourcePath::Root | ResourcePath::User { .. } | ResourcePath::Group { .. } => {
+                ResourceMeta::open()
+            }
+            // Record/Index already resolved to Table above; if something
+            // slips through, return open.
+            ResourcePath::Record { .. } | ResourcePath::Index { .. } => ResourceMeta::open(),
+        }
+    }
+
+    /// Durable write of [`ResourceMeta`] for a mode-bearing resource.
+    ///
+    /// Loads the existing catalogue record, injects the new meta fields,
+    /// and writes it back. This is the storage API; DDL wiring (chmod/chown)
+    /// is deferred to a later slice.
+    pub async fn set_resource_meta(
+        &self,
+        path: &ResourcePath,
+        meta: &ResourceMeta,
+    ) -> DbResult<()> {
+        match path {
+            ResourcePath::Database { db } => {
+                let rec = self
+                    .system_store
+                    .load_database(db)
+                    .await?
+                    .ok_or_else(|| DbError::NotFound(format!("database '{}' not found", db)))?;
+                let mut rec = rec;
+                meta.inject_into(&mut rec);
+                self.system_store.save_database_meta(db, &rec).await
+            }
+            ResourcePath::Store { db, store } => {
+                let rec = self
+                    .system_store
+                    .load_repository(db, store)
+                    .await?
+                    .ok_or_else(|| {
+                        DbError::NotFound(format!("store '{}/{}' not found", db, store))
+                    })?;
+                let mut rec = rec;
+                meta.inject_into(&mut rec);
+                self.system_store.save_repository_meta(&rec).await
+            }
+            ResourcePath::Table { db, store, table } => {
+                let rec = self
+                    .system_store
+                    .load_table_record(db, store, table)
+                    .await?
+                    .ok_or_else(|| {
+                        DbError::NotFound(format!("table '{}/{}/{}' not found", db, store, table))
+                    })?;
+                let mut rec = rec;
+                meta.inject_into(&mut rec);
+                self.system_store.save_table_meta(&rec).await
+            }
+            ResourcePath::Function { name } => {
+                let rec = self
+                    .system_store
+                    .load_function(name)
+                    .await?
+                    .ok_or_else(|| DbError::NotFound(format!("function '{}' not found", name)))?;
+                let mut rec = rec;
+                meta.inject_into(&mut rec);
+                self.system_store
+                    .save_function_meta_record(name, &rec)
+                    .await
+            }
+            ResourcePath::FunctionNamespace => {
+                let mut rec = serde_json::json!({"key": "fn_namespace_meta"});
+                meta.inject_into(&mut rec);
+                self.system_store
+                    .save_setting("fn_namespace_meta", &rec)
+                    .await
+            }
+            // Root, User, Group, Record, Index — not directly settable via
+            // catalogue in this slice. Root is always open; Record/Index
+            // inherit from their Table.
+            _ => Err(DbError::NotFound(format!(
+                "resource path '{}' does not support set_resource_meta in this slice",
+                path
+            ))),
+        }
+    }
+
+    /// Create a group with the given name. Returns the allocated group id.
+    ///
+    /// Group ids are allocated monotonically from a counter stored in the
+    /// `settings` table under the key `"next_group_id"`. Id 0 is
+    /// reserved/unused; allocation starts from 1.
+    pub async fn create_group(&self, name: &str) -> DbResult<u64> {
+        let current = self
+            .system_store
+            .load_setting("next_group_id")
+            .await?
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        let group_id = current;
+        self.system_store.save_group(group_id, name, &[]).await?;
+        self.system_store
+            .save_setting("next_group_id", &serde_json::json!(current + 1))
+            .await?;
+        Ok(group_id)
+    }
+
+    /// Drop a group by id.
+    pub async fn drop_group(&self, group_id: u64) -> DbResult<()> {
+        self.system_store.remove_group(group_id).await
+    }
+
+    /// Add a user to a group.
+    pub async fn add_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
+        self.system_store.add_group_member(group_id, user_id).await
+    }
+
+    /// Remove a user from a group.
+    pub async fn remove_group_member(&self, group_id: u64, user_id: u64) -> DbResult<()> {
+        self.system_store
+            .remove_group_member(group_id, user_id)
+            .await
+    }
+
+    /// Get the members of a group.
+    pub async fn group_members(&self, group_id: u64) -> DbResult<Vec<u64>> {
+        let rec = self.system_store.load_group(group_id).await?;
+        Ok(rec
+            .and_then(|r| {
+                r["members"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+            })
+            .unwrap_or_default())
+    }
+
+    /// Check whether a user belongs to a group.
+    pub async fn user_in_group(&self, user_id: u64, group_id: u64) -> DbResult<bool> {
+        let members = self.group_members(group_id).await?;
+        Ok(members.contains(&user_id))
     }
 }
 
