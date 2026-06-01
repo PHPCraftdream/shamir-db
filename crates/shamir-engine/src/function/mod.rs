@@ -23,6 +23,7 @@ mod contract;
 mod error;
 mod params;
 mod registry;
+mod wasm;
 
 pub use builtin::Argon2idFunction;
 pub use context::{FnBatch, FnCtx};
@@ -30,6 +31,7 @@ pub use contract::ShamirFunction;
 pub use error::{FnResult, FunctionError};
 pub use params::Params;
 pub use registry::FunctionRegistry;
+pub use wasm::{WasmEngine, WasmFunction, WasmLimits};
 
 #[cfg(test)]
 mod tests;

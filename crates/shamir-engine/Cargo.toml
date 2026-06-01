@@ -47,6 +47,13 @@ scc = "2.2"               # lock-free concurrent hashmap (index2::registry)
 arc-swap = "1.7"          # RCU-style atomic Arc swap (index2::actor snapshots)
 hnsw_rs = "0.3"           # HNSW approximate nearest neighbor (vector index)
 argon2 = "0.5"            # function::builtin argon2id (matches shamir-connect)
+# Pulls Cranelift — the function-engine Wasm runtime (slice 2+).
+wasmtime = { version = "45", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "wat",
+] }
 
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
