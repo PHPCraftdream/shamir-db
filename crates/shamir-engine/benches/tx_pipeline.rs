@@ -25,6 +25,7 @@ use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
@@ -130,7 +131,9 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_only: None,
                             limits: Default::default(),
                         };
-                        let _ = execute_batch(&request, resolver, None).await.unwrap();
+                        let _ = execute_batch(&request, resolver, None, Actor::System, "bench")
+                            .await
+                            .unwrap();
                     }
                 });
             });
@@ -195,7 +198,9 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                         };
 
                         let start = Instant::now();
-                        let _ = execute_batch(&request, &resolver, None).await.unwrap();
+                        let _ = execute_batch(&request, &resolver, None, Actor::System, "bench")
+                            .await
+                            .unwrap();
                         total += start.elapsed();
                     }
                     total
@@ -419,7 +424,9 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                     };
 
                     let start = Instant::now();
-                    let _ = execute_batch(&request, &resolver, None).await.unwrap();
+                    let _ = execute_batch(&request, &resolver, None, Actor::System, "bench")
+                        .await
+                        .unwrap();
                     total += start.elapsed();
 
                     drop(repo);

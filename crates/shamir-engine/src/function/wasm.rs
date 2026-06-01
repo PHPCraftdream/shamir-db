@@ -470,6 +470,7 @@ fn host_call(
             .ok_or_else(|| wasmtime::Error::msg(format!("call: function not found: {name}")))?;
 
         // ── Phase 2: await the callee ──
+        // TODO(Shomer R2): thread actor from parent FnCtx into child
         let child_ctx = FnCtx::with_globals(globals)
             .with_registry(reg)
             .with_depth(next_depth)

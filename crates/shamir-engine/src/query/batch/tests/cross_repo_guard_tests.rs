@@ -11,6 +11,7 @@ use crate::table::{TableConfig, TableManager};
 use shamir_query_types::batch::distinct_repos;
 use shamir_query_types::batch::QueryEntry;
 use shamir_storage::error::DbResult;
+use shamir_types::access::Actor;
 use shamir_types::types::common::TMap;
 
 struct TestResolver {
@@ -119,7 +120,9 @@ async fn cross_repo_transactional_batch_rejected() {
     }))
     .unwrap();
 
-    let err = execute_batch(&req, &resolver, None).await.unwrap_err();
+    let err = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap_err();
     match &err {
         BatchError::CrossRepoNotSupported { repos } => {
             assert_eq!(repos.len(), 2);
@@ -144,7 +147,7 @@ async fn single_repo_transactional_batch_passes_guard() {
     }))
     .unwrap();
 
-    let result = execute_batch(&req, &resolver, None).await;
+    let result = execute_batch(&req, &resolver, None, Actor::System, "test").await;
     assert!(
         !matches!(result, Err(BatchError::CrossRepoNotSupported { .. })),
         "single-repo transactional batch must NOT be rejected by cross-repo guard"
@@ -168,7 +171,7 @@ async fn non_transactional_cross_repo_batch_unaffected() {
     // Non-transactional: the guard should not fire.
     // This will still fail because the "hot" repo doesn't exist in the
     // test resolver, but the error must NOT be CrossRepoNotSupported.
-    let result = execute_batch(&req, &resolver, None).await;
+    let result = execute_batch(&req, &resolver, None, Actor::System, "test").await;
     assert!(
         !matches!(result, Err(BatchError::CrossRepoNotSupported { .. })),
         "non-transactional batch must never trigger cross-repo guard"

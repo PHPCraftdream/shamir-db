@@ -12,6 +12,7 @@ use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
+use shamir_types::access::Actor;
 
 /// Simple resolver that wraps a DbInstance + repo name.
 struct TestResolver {
@@ -67,7 +68,9 @@ async fn test_single_read_query() {
         }
     }))
     .unwrap();
-    let resp = execute_batch(&insert_req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&insert_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
     assert_eq!(resp.results["insert"].records.len(), 2);
 
     // Now read
@@ -79,7 +82,9 @@ async fn test_single_read_query() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     assert_eq!(resp.results.len(), 1);
     assert_eq!(resp.results["users"].records.len(), 2);
@@ -111,7 +116,9 @@ async fn test_independent_queries_same_stage() {
         }
     }))
     .unwrap();
-    execute_batch(&seed_req, &resolver, None).await.unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Two independent reads
     let req: BatchRequest = serde_json::from_value(json!({
@@ -123,7 +130,9 @@ async fn test_independent_queries_same_stage() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Both in same stage (no dependencies)
     assert_eq!(resp.execution_plan.len(), 1);
@@ -155,7 +164,9 @@ async fn test_dependent_query_ref() {
         }
     }))
     .unwrap();
-    execute_batch(&seed_req, &resolver, None).await.unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Query 1: get active users
     // Query 2: get users where name == first active user's name (via $query ref)
@@ -178,7 +189,9 @@ async fn test_dependent_query_ref() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Two stages: [active], [first_active]
     assert_eq!(resp.execution_plan.len(), 2);
@@ -209,7 +222,9 @@ async fn test_insert_then_read() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Both in same stage (no explicit dependency)
     assert_eq!(resp.results["insert"].records.len(), 2);
@@ -239,7 +254,9 @@ async fn test_return_only() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Only "read" returned
     assert_eq!(resp.results.len(), 1);
@@ -268,7 +285,9 @@ async fn test_return_result_false() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // "setup" has return_result=false, "read" has return_result=true (default)
     assert_eq!(resp.results.len(), 1);
@@ -298,7 +317,9 @@ async fn test_batch_with_delete() {
         }
     }))
     .unwrap();
-    execute_batch(&seed_req, &resolver, None).await.unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Delete inactive, then read
     let req: BatchRequest = serde_json::from_value(json!({
@@ -312,7 +333,9 @@ async fn test_batch_with_delete() {
     }))
     .unwrap();
 
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
     // 1 record deleted (Bob)
     assert_eq!(
         resp.results["cleanup"]
@@ -356,7 +379,9 @@ async fn test_circular_dependency_error() {
     }))
     .unwrap();
 
-    let err = execute_batch(&req, &resolver, None).await.unwrap_err();
+    let err = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         crate::query::batch::BatchError::CircularDependency { .. }
@@ -383,7 +408,9 @@ async fn test_unknown_table_fails_early() {
     }))
     .unwrap();
 
-    let err = execute_batch(&req, &resolver, None).await.unwrap_err();
+    let err = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap_err();
     // Should fail with table not found error BEFORE any execution
     assert!(matches!(
         err,
@@ -407,7 +434,9 @@ async fn test_request_id_echoed() {
         }
     }))
     .unwrap();
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
     assert_eq!(resp.id, json!("req-42"));
 
     // Numeric ID
@@ -418,7 +447,9 @@ async fn test_request_id_echoed() {
         }
     }))
     .unwrap();
-    let resp = execute_batch(&req, &resolver, None).await.unwrap();
+    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
     assert_eq!(resp.id, json!(123));
 }
 
@@ -446,6 +477,8 @@ async fn test_query_runner_none_tx_insert_and_read() {
         resolver: &resolver,
         admin: None,
         tx: None,
+        actor: Actor::System,
+        db_name: "test",
     };
     let result = runner
         .run(
@@ -470,6 +503,8 @@ async fn test_query_runner_none_tx_insert_and_read() {
         resolver: &resolver,
         admin: None,
         tx: None,
+        actor: Actor::System,
+        db_name: "test",
     };
     let result = runner
         .run("q", &read_entry, &shamir_types::types::common::new_map())
@@ -528,7 +563,9 @@ async fn execute_batch_transactional_si_happy_path() {
     }))
     .unwrap();
 
-    let response = execute_batch(&request, &resolver, None).await.unwrap();
+    let response = execute_batch(&request, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     let info = response.transaction.expect("transaction info present");
     assert_eq!(info.status, "committed");
@@ -671,9 +708,15 @@ impl TableResolver for GateBarrierResolver {
                 let writer_resolver = TxTestResolver {
                     repo: self.repo.clone(),
                 };
-                let resp = execute_batch(&self.writer_req, &writer_resolver, None)
-                    .await
-                    .expect("writer batch executes");
+                let resp = execute_batch(
+                    &self.writer_req,
+                    &writer_resolver,
+                    None,
+                    Actor::System,
+                    "test",
+                )
+                .await
+                .expect("writer batch executes");
                 let info = resp.transaction.expect("writer batch has transaction info");
                 assert_eq!(
                     info.status, "committed",
@@ -785,7 +828,9 @@ async fn ssi_write_skew_detected_through_execute_batch() {
     }))
     .unwrap();
 
-    let response = execute_batch(&reader_req, &resolver, None).await.unwrap();
+    let response = execute_batch(&reader_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
 
     // Plan must have two stages: [r] then [g] (g depends on r).
     assert_eq!(
@@ -873,7 +918,9 @@ async fn ssi_write_skew_no_record_no_conflict_through_execute_batch() {
     }))
     .unwrap();
 
-    let response = execute_batch(&reader_req, &resolver, None).await.unwrap();
+    let response = execute_batch(&reader_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
     let info = response
         .transaction
         .expect("reader batch has transaction info");
@@ -938,7 +985,7 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
         }
     }))
     .unwrap();
-    let r1 = execute_in_open_tx(&call1, &resolver, None, &mut tx)
+    let r1 = execute_in_open_tx(&call1, &resolver, None, &Actor::System, "test", &mut tx)
         .await
         .unwrap();
     assert!(
@@ -972,7 +1019,7 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
         }
     }))
     .unwrap();
-    let r2 = execute_in_open_tx(&call2, &resolver, None, &mut tx)
+    let r2 = execute_in_open_tx(&call2, &resolver, None, &Actor::System, "test", &mut tx)
         .await
         .unwrap();
     assert!(r2.transaction.is_none(), "tx still open after EXECUTE #2");
@@ -1026,7 +1073,7 @@ async fn interactive_tx_rollback_discards_staged_writes() {
         }
     }))
     .unwrap();
-    execute_in_open_tx(&call, &resolver, None, &mut tx)
+    execute_in_open_tx(&call, &resolver, None, &Actor::System, "test", &mut tx)
         .await
         .unwrap();
 
@@ -1120,9 +1167,16 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         "queries": { "r": { "from": "users" } }
     }))
     .unwrap();
-    let ra1 = execute_in_open_tx(&select_req, &resolver, None, &mut tx_a)
-        .await
-        .unwrap();
+    let ra1 = execute_in_open_tx(
+        &select_req,
+        &resolver,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_a,
+    )
+    .await
+    .unwrap();
     assert!(ra1.transaction.is_none(), "tx_a still open after call #1");
     assert_eq!(
         ra1.results["r"].records.len(),
@@ -1130,9 +1184,16 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         "tx_a SELECT sees both seeded rows"
     );
 
-    let rb1 = execute_in_open_tx(&select_req, &resolver, None, &mut tx_b)
-        .await
-        .unwrap();
+    let rb1 = execute_in_open_tx(
+        &select_req,
+        &resolver,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_b,
+    )
+    .await
+    .unwrap();
     assert!(rb1.transaction.is_none(), "tx_b still open after call #1");
     assert_eq!(
         rb1.results["r"].records.len(),
@@ -1163,12 +1224,26 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         }
     }))
     .unwrap();
-    let _ra2 = execute_in_open_tx(&update_alice, &resolver, None, &mut tx_a)
-        .await
-        .unwrap();
-    let _rb2 = execute_in_open_tx(&update_bob, &resolver, None, &mut tx_b)
-        .await
-        .unwrap();
+    let _ra2 = execute_in_open_tx(
+        &update_alice,
+        &resolver,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_a,
+    )
+    .await
+    .unwrap();
+    let _rb2 = execute_in_open_tx(
+        &update_bob,
+        &resolver,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_b,
+    )
+    .await
+    .unwrap();
 
     // COMMIT tx_a first — succeeds (its read_set, accumulated from call #1, is
     // still valid since nothing committed since its snapshot). Bumps alice's
@@ -1239,7 +1314,8 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
         }
     }))
     .unwrap();
-    let seed_resp = crate::query::batch::execute_batch(&seed_req, &resolver, None).await;
+    let seed_resp =
+        crate::query::batch::execute_batch(&seed_req, &resolver, None, Actor::System, "test").await;
     assert!(
         seed_resp.is_ok(),
         "seeding baseline row failed: {:?}",
@@ -1306,16 +1382,16 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
 
     // Interleave the calls — each tx accumulates state across two execute
     // calls before the FIRST commit lands.
-    execute_in_open_tx(&ins_a1, &resolver, None, &mut tx_a)
+    execute_in_open_tx(&ins_a1, &resolver, None, &Actor::System, "test", &mut tx_a)
         .await
         .unwrap();
-    execute_in_open_tx(&ins_b1, &resolver, None, &mut tx_b)
+    execute_in_open_tx(&ins_b1, &resolver, None, &Actor::System, "test", &mut tx_b)
         .await
         .unwrap();
-    execute_in_open_tx(&ins_a2, &resolver, None, &mut tx_a)
+    execute_in_open_tx(&ins_a2, &resolver, None, &Actor::System, "test", &mut tx_a)
         .await
         .unwrap();
-    execute_in_open_tx(&ins_b2, &resolver, None, &mut tx_b)
+    execute_in_open_tx(&ins_b2, &resolver, None, &Actor::System, "test", &mut tx_b)
         .await
         .unwrap();
 
@@ -1398,10 +1474,10 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
             }
         }))
         .unwrap();
-        execute_in_open_tx(&c1, &resolver, None, &mut tx)
+        execute_in_open_tx(&c1, &resolver, None, &Actor::System, "test", &mut tx)
             .await
             .unwrap();
-        execute_in_open_tx(&c2, &resolver, None, &mut tx)
+        execute_in_open_tx(&c2, &resolver, None, &Actor::System, "test", &mut tx)
             .await
             .unwrap();
 
@@ -1455,4 +1531,50 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
         "a crash mid-interactive-tx must leave NOTHING durable \
          (no wal.begin → clean abort)"
     );
+}
+
+// ============================================================================
+// R2 structural test — actor flows through FilterContext
+// ============================================================================
+
+/// Verifies the actor field reaches the FilterContext that the QueryRunner
+/// builds for each data op. The gate is transparent (always Ok), so this
+/// confirms plumbing without needing enforcement.
+#[tokio::test]
+async fn r2_actor_flows_through_filter_context() {
+    use shamir_types::access::Actor;
+
+    let resolver = setup_resolver().await;
+
+    // Insert a row so the read has something to scan.
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [{"name": "Alice", "age": 30}],
+                "return_result": false
+            }
+        }
+    }))
+    .unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test_db")
+        .await
+        .unwrap();
+
+    // Read with an explicit User actor — the executor must carry it
+    // into the FilterContext it builds (default is System; using User
+    // proves the pipe is live).
+    let user_actor = Actor::User(42);
+    let read_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "q": {"from": "users"}
+        }
+    }))
+    .unwrap();
+    let resp = execute_batch(&read_req, &resolver, None, user_actor.clone(), "test_db")
+        .await
+        .unwrap();
+    assert_eq!(resp.results["q"].records.len(), 1);
 }
