@@ -10,6 +10,207 @@
 
 use std::fmt;
 
+/// Reserved u64 id for the `System` actor in persisted owner fields.
+///
+/// `Actor::System` serialises to `OWNER_SYSTEM` in catalogue records;
+/// `Actor::User(id)` serialises to the user's numeric id.
+pub const OWNER_SYSTEM: u64 = 0;
+
+impl Actor {
+    /// Persist-friendly u64 encoding: `System` → [`OWNER_SYSTEM`],
+    /// `User(id)` → `id`.
+    pub fn to_owner_id(&self) -> u64 {
+        match self {
+            Actor::System => OWNER_SYSTEM,
+            Actor::User(id) => *id,
+        }
+    }
+
+    /// Decode a persisted owner id back into an [`Actor`].
+    pub fn from_owner_id(id: u64) -> Self {
+        if id == OWNER_SYSTEM {
+            Actor::System
+        } else {
+            Actor::User(id)
+        }
+    }
+}
+
+// ── POSIX-style mode bits ────────────────────────────────────────────
+
+/// Permission class for mode-bit queries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PermClass {
+    Owner,
+    Group,
+    Other,
+}
+
+/// Permission bit (read / write / execute).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Perm {
+    Read,
+    Write,
+    Execute,
+}
+
+/// POSIX-style 12-bit mode helpers (`rwxrwxrwx` + setuid/setgid/sticky).
+///
+/// Bit layout (same as Unix `mode_t`, low 12 bits):
+///
+/// ```text
+/// 11 10  9  8  7  6  5  4  3  2  1  0
+/// s  s  t  rwx rwx rwx
+/// │  │  │  │   │   └── other: r(2) w(1) x(0)
+/// │  │  │  │   └────── group: r(5) w(4) x(3)
+/// │  │  │  └────────── owner:  r(8) w(7) x(6)
+/// │  │  └──────────────── sticky
+/// │  └─────────────────── setgid
+/// └────────────────────── setuid (0o4000)
+/// ```
+pub struct Mode;
+
+/// setuid bit (bit 11, `0o4000`).
+pub const MODE_SETUID: u16 = 0o4000;
+
+impl Mode {
+    /// Bit positions for r/w/x within a 3-bit class slot.
+    const R: u16 = 0o4;
+    const W: u16 = 0o2;
+    const X: u16 = 0o1;
+
+    /// Full rwx for one class.
+    pub const RWX: u16 = Self::R | Self::W | Self::X;
+
+    /// Open mode: owner/group/other all rwx (`0o777`).
+    pub const OPEN: u16 = 0o777;
+
+    /// Shift amount for each permission class.
+    fn shift(class: PermClass) -> u16 {
+        match class {
+            PermClass::Other => 0,
+            PermClass::Group => 3,
+            PermClass::Owner => 6,
+        }
+    }
+
+    /// Build a combined mode from per-class rwx flags.
+    pub fn from_rwx(owner: bool, group: bool, other: bool) -> u16 {
+        let mut mode: u16 = 0;
+        if owner {
+            mode |= Self::RWX << Self::shift(PermClass::Owner);
+        }
+        if group {
+            mode |= Self::RWX << Self::shift(PermClass::Group);
+        }
+        if other {
+            mode |= Self::RWX << Self::shift(PermClass::Other);
+        }
+        mode
+    }
+
+    /// Check whether a specific permission bit is set for a class.
+    pub fn is_set(mode: u16, class: PermClass, perm: Perm) -> bool {
+        let bit = match perm {
+            Perm::Read => Self::R,
+            Perm::Write => Self::W,
+            Perm::Execute => Self::X,
+        };
+        (mode >> Self::shift(class)) & bit == bit
+    }
+
+    /// Check the setuid flag (bit 11).
+    pub fn is_setuid(mode: u16) -> bool {
+        mode & MODE_SETUID != 0
+    }
+
+    /// Set or clear the setuid flag.
+    pub fn with_setuid(mode: u16, set: bool) -> u16 {
+        if set {
+            mode | MODE_SETUID
+        } else {
+            mode & !MODE_SETUID
+        }
+    }
+}
+
+// ── ResourceMeta ─────────────────────────────────────────────────────
+
+/// Per-resource POSIX-style metadata envelope: owner, group, mode.
+///
+/// Mode-bearing objects (Database, Store, Table, Function, FunctionNamespace,
+/// User, Group) each carry one of these. Record/Index inherit their Table's
+/// meta. Default is [`ResourceMeta::open`] — System-owned, no group,
+/// `0o777` (everyone rwx) — so nothing is restricted while the gate is
+/// transparent and after P4 with open defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceMeta {
+    pub owner: Actor,
+    pub group: Option<u64>,
+    pub mode: u16,
+}
+
+impl ResourceMeta {
+    /// Open default: owner = System, group = None, mode = `0o777`.
+    ///
+    /// Every new catalogue record starts here; existing records without
+    /// owner/group/mode fields load as this via [`ResourceMeta::from_record`].
+    pub fn open() -> Self {
+        Self {
+            owner: Actor::System,
+            group: None,
+            mode: Mode::OPEN,
+        }
+    }
+
+    /// Inject `owner`/`group`/`mode` fields into a JSON catalogue record
+    /// for persistence. Safe to call on any `serde_json::Value::Object`.
+    pub fn inject_into(&self, rec: &mut serde_json::Value) {
+        if let Some(map) = rec.as_object_mut() {
+            map.insert(
+                "owner".to_string(),
+                serde_json::Value::Number(self.owner.to_owner_id().into()),
+            );
+            map.insert(
+                "group".to_string(),
+                match self.group {
+                    Some(gid) => serde_json::Value::Number(gid.into()),
+                    None => serde_json::Value::Null,
+                },
+            );
+            map.insert(
+                "mode".to_string(),
+                serde_json::Value::Number(self.mode.into()),
+            );
+        }
+    }
+
+    /// Decode `owner`/`group`/`mode` from a persisted JSON catalogue record.
+    ///
+    /// Backward-compatible: records that lack any of the three fields fall
+    /// back to [`ResourceMeta::open`] defaults.
+    pub fn from_record(rec: &serde_json::Value) -> Self {
+        let owner = rec
+            .get("owner")
+            .and_then(|v| v.as_u64())
+            .map(Actor::from_owner_id)
+            .unwrap_or(Actor::System);
+        let group = rec.get("group").and_then(|v| v.as_u64());
+        let mode = rec
+            .get("mode")
+            .and_then(|v| v.as_u64())
+            .and_then(|m| u16::try_from(m).ok())
+            .unwrap_or(Mode::OPEN);
+        Self { owner, group, mode }
+    }
+}
+
+impl Default for ResourceMeta {
+    fn default() -> Self {
+        Self::open()
+    }
+}
+
 /// The identity performing an operation.
 ///
 /// `System` is the all-bypassing default used while the authentication
@@ -365,5 +566,106 @@ mod tests {
             ResourcePath::group("g").parent().unwrap(),
             ResourcePath::Root
         );
+    }
+
+    // ========================================================================
+    // ResourceMeta + Mode tests
+    // ========================================================================
+
+    #[test]
+    fn open_default_is_system_owned_mode_777() {
+        let open = ResourceMeta::open();
+        assert_eq!(open.owner, Actor::System);
+        assert!(open.group.is_none());
+        assert_eq!(open.mode, 0o777);
+        assert_eq!(ResourceMeta::default(), open);
+    }
+
+    #[test]
+    fn actor_owner_round_trip() {
+        assert_eq!(Actor::System.to_owner_id(), OWNER_SYSTEM);
+        assert_eq!(Actor::from_owner_id(OWNER_SYSTEM), Actor::System);
+        assert_eq!(Actor::User(42).to_owner_id(), 42);
+        assert_eq!(Actor::from_owner_id(42), Actor::User(42));
+    }
+
+    #[test]
+    fn mode_from_rwx_combinations() {
+        assert_eq!(Mode::from_rwx(true, true, true), 0o777);
+        assert_eq!(Mode::from_rwx(true, false, false), 0o700);
+        assert_eq!(Mode::from_rwx(false, true, false), 0o070);
+        assert_eq!(Mode::from_rwx(false, false, true), 0o007);
+        assert_eq!(Mode::from_rwx(false, false, false), 0o000);
+    }
+
+    #[test]
+    fn mode_is_set_checks() {
+        // 0o770 = rwxrwx---
+        let mode = 0o770;
+        assert!(Mode::is_set(mode, PermClass::Owner, Perm::Read));
+        assert!(Mode::is_set(mode, PermClass::Owner, Perm::Write));
+        assert!(Mode::is_set(mode, PermClass::Owner, Perm::Execute));
+        assert!(Mode::is_set(mode, PermClass::Group, Perm::Read));
+        assert!(Mode::is_set(mode, PermClass::Group, Perm::Write));
+        assert!(Mode::is_set(mode, PermClass::Group, Perm::Execute));
+        assert!(!Mode::is_set(mode, PermClass::Other, Perm::Read));
+        assert!(!Mode::is_set(mode, PermClass::Other, Perm::Write));
+        assert!(!Mode::is_set(mode, PermClass::Other, Perm::Execute));
+        // 0o750 = rwxr-x---
+        let mode2 = 0o750;
+        assert!(!Mode::is_set(mode2, PermClass::Group, Perm::Write));
+        assert!(Mode::is_set(mode2, PermClass::Group, Perm::Execute));
+    }
+
+    #[test]
+    fn setuid_flag_accessor() {
+        let mode = 0o777;
+        assert!(!Mode::is_setuid(mode));
+        let mode_suid = Mode::with_setuid(mode, true);
+        assert!(Mode::is_setuid(mode_suid));
+        assert_eq!(mode_suid & 0o777, 0o777);
+        let cleared = Mode::with_setuid(mode_suid, false);
+        assert!(!Mode::is_setuid(cleared));
+        assert_eq!(cleared, 0o777);
+    }
+
+    #[test]
+    fn inject_into_and_from_record_round_trip() {
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: Some(5),
+            mode: 0o750,
+        };
+        let mut rec = serde_json::json!({"name": "test"});
+        meta.inject_into(&mut rec);
+        assert_eq!(rec["owner"], 10);
+        assert_eq!(rec["group"], 5);
+        assert_eq!(rec["mode"], 0o750);
+
+        let loaded = ResourceMeta::from_record(&rec);
+        assert_eq!(loaded.owner, Actor::User(10));
+        assert_eq!(loaded.group, Some(5));
+        assert_eq!(loaded.mode, 0o750);
+    }
+
+    #[test]
+    fn from_record_backward_compat_returns_open() {
+        let rec = serde_json::json!({"name": "legacy"});
+        let loaded = ResourceMeta::from_record(&rec);
+        assert_eq!(loaded, ResourceMeta::open());
+    }
+
+    #[test]
+    fn from_record_null_group_is_none() {
+        let rec = serde_json::json!({
+            "name": "test",
+            "owner": 42,
+            "group": null,
+            "mode": 0o644,
+        });
+        let loaded = ResourceMeta::from_record(&rec);
+        assert_eq!(loaded.owner, Actor::User(42));
+        assert!(loaded.group.is_none());
+        assert_eq!(loaded.mode, 0o644);
     }
 }
