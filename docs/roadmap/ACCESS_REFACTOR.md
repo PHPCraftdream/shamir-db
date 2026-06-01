@@ -1,12 +1,20 @@
 בְּשֵׁם יהוה הָרַחֲמָן וְהַחַנּוּן
 
-# Shomer — pure-refactoring track (do this first)
+# Shomer — pure-refactoring track ✅ DONE
 
-This is the **behavior-preserving** substrate refactor that must land BEFORE
+> **Status: complete.** R1 `0be711f`, R2 `1b49194`. The behavior-preserving
+> substrate is in place: `Actor` + `ResourcePath` + a single transparent
+> `authorize` door, with the actor flowing from the facade entries down
+> through `FilterContext`/`FnCtx`/`TxContext` and every resource touch
+> routed through the door. The door still returns `Ok` only; the actor is
+> still `System` everywhere → behavior byte-for-byte unchanged. Enforcement
+> (P4) is now one change inside `authorize`; it is NOT refactoring.
+
+This is the **behavior-preserving** substrate refactor that lands BEFORE
 any access policy. The full model + the rights stages (P0–P6) live in
-[`ACCESS_FABRIC.md`](ACCESS_FABRIC.md); this file isolates the part we do
-NOW: the pure refactoring that changes **no behavior**, so that the rights
-system later just "sits down" without touching call sites.
+[`ACCESS_FABRIC.md`](ACCESS_FABRIC.md); this file isolates the pure
+refactoring that changes **no behavior**, so the rights system later just
+"sits down" without touching call sites.
 
 ## Invariant for the whole track
 
@@ -18,9 +26,12 @@ separate `/crush` slice, zero-trust verified, full gate green
 (`fmt --all --check` · `clippy --workspace --all-targets -D warnings` ·
 `test --workspace --lib` · the function/lifecycle suites).
 
-## Stages
+## Stages (all done)
 
-### R1 — Access types
+R1 + the transparent door + the facade entries landed in `0be711f`; the
+deeper threading + the door at the resource touches landed in `1b49194`.
+
+### R1 — Access types ✅
 Introduce `pub` types at the engine level:
 - `Actor` — the acting identity; **default `System`** (the all-bypassing
   owner-of-owners).
@@ -30,7 +41,7 @@ Introduce `pub` types at the engine level:
 
 Purely additive: `pub` types, not yet wired → no dead-code, no behavior.
 
-### R2 — Thread `Actor` (the painful-to-retrofit seam)
+### R2 — Thread `Actor` (the painful-to-retrofit seam) ✅
 Carry `Actor` from the operation entry points (facade `execute` /
 `invoke_function`, the server/wire session, tests) **down through the
 EXISTING context objects** (`FilterContext` / `TxContext` / `FnCtx` /
@@ -45,7 +56,7 @@ Start with **reconnaissance**: map the real access entry points and which
 context object flows down through reads / writes / commits / function
 invokes. That scoping IS the first move of R2.
 
-### R3 — One door (transparent)
+### R3 — One door (transparent) ✅
 Introduce `authorize(actor: &Actor, path: &ResourcePath, action: Action)
 -> Result<(), AccessError>` that returns `Ok(())` and `log::trace!`s the
 access (consumes the actor → no dead-code; bonus: an access trace for future
