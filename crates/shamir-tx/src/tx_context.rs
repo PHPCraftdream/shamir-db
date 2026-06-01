@@ -839,7 +839,13 @@ mod tests {
     }
 
     /// Build a TxContext (Serializable) and replay the generated reads. Returns
-    /// the tx plus the de-duplicated reference map (first-read-wins -> MIN).
+    /// the tx plus the de-duplicated reference map. The oracle MUST mirror the
+    /// implementation's dedup rule exactly: `record_read_shared` is
+    /// **first-read-wins** (keeps the earliest observed version for a key —
+    /// `Occupied(_) => {}`), so the reference keeps the first `v` it sees and
+    /// ignores later duplicates. (Under a real snapshot, repeat reads of one
+    /// key always return the same version, so first == min == last; the
+    /// divergence only surfaces with the generator's arbitrary triples.)
     fn build_tx_with_reads(
         reads: &[(u64, Vec<u8>, u64)],
     ) -> (TxContext, StdHashMap<(u64, Vec<u8>), u64>) {
@@ -852,14 +858,9 @@ mod tests {
         let mut recorded: StdHashMap<(u64, Vec<u8>), u64> = StdHashMap::new();
         for (t, k, v) in reads {
             tx.record_read(*t, Bytes::copy_from_slice(k), *v);
-            recorded
-                .entry((*t, k.clone()))
-                .and_modify(|cur| {
-                    if *v < *cur {
-                        *cur = *v;
-                    }
-                })
-                .or_insert(*v);
+            // First-read-wins: only the first version observed for a key is
+            // kept (matches `record_read_shared`'s `Occupied(_) => {}`).
+            recorded.entry((*t, k.clone())).or_insert(*v);
         }
         (tx, recorded)
     }
