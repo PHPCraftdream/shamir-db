@@ -1,6 +1,7 @@
 use base64::Engine;
 use serde_json::json;
 
+use crate::access::{authorize, Action, Actor, ResourcePath};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::function::DbGateway;
 use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry};
@@ -623,6 +624,9 @@ impl ShamirDb {
         wasm: &[u8],
         replace: bool,
     ) -> DbResult<()> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let opts = CreateFunctionOptions {
             replace,
             ..CreateFunctionOptions::default()
@@ -641,6 +645,9 @@ impl ShamirDb {
         source: &str,
         replace: bool,
     ) -> DbResult<()> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let opts = CreateFunctionOptions {
             replace,
             ..CreateFunctionOptions::default()
@@ -659,6 +666,9 @@ impl ShamirDb {
         source: FunctionSource<'_>,
         opts: CreateFunctionOptions,
     ) -> DbResult<()> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
             FunctionSource::Source(src) => {
@@ -721,6 +731,15 @@ impl ShamirDb {
     /// removes from the live registry. For user functions, both the durable
     /// record and the live entry are removed.
     pub async fn drop_function(&self, name: &str) -> DbResult<bool> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Delete,
+        )
+        .map_err(|e| DbError::Function(e.to_string()))?;
         let existed = self.functions.remove(name);
         let _ = self.function_meta.remove(name);
         // Best-effort catalogue removal — ignore if there was no durable record
@@ -739,6 +758,15 @@ impl ShamirDb {
     ///
     /// Fails if `from` does not exist or `to` is already taken.
     pub async fn rename_function(&self, from: &str, to: &str) -> DbResult<()> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Function {
+                name: from.to_string(),
+            },
+            Action::Write,
+        )
+        .map_err(|e| DbError::Function(e.to_string()))?;
         // Load the old catalogue record to re-key it.
         let fn_records = self.system_store.load_functions().await?;
         let old_record = fn_records
@@ -802,6 +830,15 @@ impl ShamirDb {
     /// between calls). Use [`invoke_function_with_batch`] for multi-call
     /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .map_err(|e| DbError::Function(e.to_string()))?;
         let ctx = self.build_invoke_ctx(name);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
@@ -819,6 +856,15 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .map_err(|e| DbError::Function(e.to_string()))?;
         let ctx = self.build_invoke_ctx(name);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
@@ -873,6 +919,15 @@ impl ShamirDb {
         name: &str,
         params: Params,
     ) -> DbResult<QueryValue> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .map_err(|e| DbError::Function(e.to_string()))?;
         let gateway = Arc::new(FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
@@ -901,6 +956,15 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
+        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        authorize(
+            &actor,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .map_err(|e| DbError::Function(e.to_string()))?;
         let gateway = Arc::new(FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
