@@ -83,6 +83,9 @@ struct HostState {
     db: Option<Arc<dyn DbGateway>>,
     repo: String,
     net: Option<Arc<dyn NetGateway>>,
+    /// Env-var names this function may read via `global_get("env.X")`.
+    /// Non-`env.` globals are ungated; a denied secret looks absent.
+    secret_grants: Arc<std::collections::HashSet<String>>,
 }
 
 // ── WasmEngine ────────────────────────────────────────────────────────
@@ -306,6 +309,10 @@ fn host_global_set(
 }
 
 /// Host implementation of `global_get(key_ptr, key_len) -> i64`.
+///
+/// If the requested key starts with `"env."`, the suffix (the env-var name)
+/// must be present in the invocation's `secret_grants` — otherwise the
+/// global looks absent (returns 0). Non-`env.` keys are returned normally.
 fn host_global_get(
     mut caller: wasmtime::Caller<'_, HostState>,
     key_ptr: i32,
@@ -319,6 +326,13 @@ fn host_global_get(
     let key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
     let key = String::from_utf8(key_bytes)
         .map_err(|_| wasmtime::Error::msg("global_get: key is not valid UTF-8"))?;
+
+    // Secret-grant enforcement (slice 9): env.* globals require a grant.
+    if let Some(env_name) = key.strip_prefix("env.") {
+        if !caller.data().secret_grants.contains(env_name) {
+            return Ok(0);
+        }
+    }
 
     let value = match caller.data().globals.get(&key) {
         Some(v) => v,
@@ -888,6 +902,7 @@ impl ShamirFunction for WasmFunction {
         let db = ctx.db_gateway().cloned();
         let repo = ctx.repo().to_string();
         let net = ctx.net_gateway().cloned();
+        let secret_grants = ctx.secret_grants().clone();
 
         // NOTE: we no longer use spawn_blocking. With async_support enabled
         // the entire execution runs on the tokio runtime; Wasmtime suspends
@@ -907,6 +922,7 @@ impl ShamirFunction for WasmFunction {
             db,
             repo,
             net,
+            secret_grants,
         };
         let mut store: Store<HostState> = Store::new(engine.engine(), state);
         store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);

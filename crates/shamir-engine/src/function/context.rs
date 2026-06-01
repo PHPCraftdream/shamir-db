@@ -273,6 +273,10 @@ impl Default for GlobalVars {
 /// Slice 8b adds an optional [`DbGateway`] and a default `repo` so a
 /// function can read/write database tables via `ctx.db().table(...)`.
 /// When the gateway is `None`, db host imports trap with a clear error.
+///
+/// Slice 9 adds `secret_grants` — the list of `env.*` variable names the
+/// function is allowed to read. `global_get("env.X")` returns absent when
+/// `X` is not in `secret_grants`; non-`env.` globals are ungated.
 #[derive(Clone)]
 pub struct FnCtx {
     globals: Arc<GlobalVars>,
@@ -282,6 +286,7 @@ pub struct FnCtx {
     db: Option<Arc<dyn DbGateway>>,
     repo: String,
     net: Option<Arc<dyn NetGateway>>,
+    secret_grants: Arc<std::collections::HashSet<String>>,
 }
 
 impl FnCtx {
@@ -298,6 +303,7 @@ impl FnCtx {
             db: None,
             repo: String::new(),
             net: None,
+            secret_grants: Arc::new(std::collections::HashSet::new()),
         }
     }
 
@@ -311,6 +317,7 @@ impl FnCtx {
             db: None,
             repo: String::new(),
             net: None,
+            secret_grants: Arc::new(std::collections::HashSet::new()),
         }
     }
 
@@ -349,6 +356,15 @@ impl FnCtx {
     /// `NetGateway` implementation (e.g. `CurlNetGateway`).
     pub fn with_net(mut self, gateway: Arc<dyn NetGateway>) -> Self {
         self.net = Some(gateway);
+        self
+    }
+
+    /// Builder: set the secret grants for `env.*` global reads (slice 9).
+    ///
+    /// Only env variable names listed here can be read via `global_get`
+    /// with an `env.`-prefixed key. Non-`env.` globals are ungated.
+    pub fn with_secret_grants(mut self, grants: impl IntoIterator<Item = String>) -> Self {
+        self.secret_grants = Arc::new(grants.into_iter().collect());
         self
     }
 
@@ -402,6 +418,11 @@ impl FnCtx {
         self.net.as_ref()
     }
 
+    /// The secret grants for `env.*` global reads.
+    pub fn secret_grants(&self) -> &Arc<std::collections::HashSet<String>> {
+        &self.secret_grants
+    }
+
     /// The default repo name for DB operations.
     pub fn repo(&self) -> &str {
         &self.repo
@@ -433,6 +454,7 @@ impl std::fmt::Debug for FnCtx {
             .field("has_db", &self.db.is_some())
             .field("repo", &self.repo)
             .field("has_net", &self.net.is_some())
+            .field("secret_grants_len", &self.secret_grants.len())
             .finish()
     }
 }
