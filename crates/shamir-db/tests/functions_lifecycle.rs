@@ -4,6 +4,9 @@
 //! re-open, and (toolchain-gated) source compilation.
 //!
 //! Slice 5 additions: batch context exchange + global variables (native fns).
+//!
+//! Slice 6 additions: host-import bridge — compiled SDK functions exchanging
+//! batch context and global variables through the `shamir_host` WASM imports.
 
 use async_trait::async_trait;
 use shamir_db::shamir_db::SystemStoreConfig;
@@ -296,4 +299,118 @@ async fn facade_globals_shared() {
 
     // Verify through the globals accessor directly.
     assert_eq!(db.globals().get("counter"), Some(QueryValue::Int(2)));
+}
+
+// ── Slice 6: compiled-SDK host-import bridge tests ───────────────────
+
+/// Source that writes to the batch scratchpad via host import.
+const BATCH_PUT_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn put_it(_ctx: Ctx, batch: Batch, params: Params) -> Result<Value> {
+    let v: i64 = params.i64("v")?;
+    batch.put("tmp", Value::Int(v));
+    Ok(Value::Null)
+}
+"#;
+
+/// Source that reads from the batch scratchpad via host import.
+const BATCH_GET_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn get_it(_ctx: Ctx, batch: Batch, _params: Params) -> Result<Value> {
+    Ok(batch.get("tmp").unwrap_or(Value::Null))
+}
+"#;
+
+/// Source that sets a global variable via host import.
+const GLOBAL_SET_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn set_g(_ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
+    _ctx.global_set("g", Value::Int(7));
+    Ok(Value::Null)
+}
+"#;
+
+/// Source that reads a global variable via host import.
+const GLOBAL_GET_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn get_g(_ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
+    Ok(_ctx.global_get("g").unwrap_or(Value::Null))
+}
+"#;
+
+/// Helper: compile + register a source function, skipping on toolchain
+/// unavailable.
+async fn compile_or_skip(db: &ShamirDb, name: &str, source: &str) -> bool {
+    match db.create_function_from_source(name, source, false).await {
+        Ok(()) => true,
+        Err(DbError::Function(msg)) if msg.contains("toolchain unavailable") => {
+            eprintln!("SKIP {name} — toolchain unavailable: {msg}");
+            false
+        }
+        Err(e) => panic!("compile {name} failed: {e}"),
+    }
+}
+
+/// Two separately compiled SDK functions sharing a batch context through
+/// the `shamir_host` WASM imports: writer puts Int(99), reader gets it back.
+#[tokio::test]
+async fn wasm_batch_context_exchange_via_host_imports() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    if !compile_or_skip(&db, "put_it", BATCH_PUT_SRC).await {
+        return;
+    }
+    if !compile_or_skip(&db, "get_it", BATCH_GET_SRC).await {
+        return;
+    }
+
+    let batch = db.new_batch_context();
+
+    let mut put_params = Params::new();
+    put_params.set("v", QueryValue::Int(99));
+
+    let r = db
+        .invoke_function_with_batch("put_it", put_params, &batch)
+        .await
+        .unwrap();
+    assert_eq!(r, QueryValue::Null);
+
+    let result = db
+        .invoke_function_with_batch("get_it", Params::new(), &batch)
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        QueryValue::Int(99),
+        "reader should see the value the writer put into the shared batch"
+    );
+}
+
+/// Two separately compiled SDK functions sharing global variables through
+/// the `shamir_host` WASM imports: setter writes Int(7), reader gets it back.
+#[tokio::test]
+async fn wasm_globals_exchange_via_host_imports() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    if !compile_or_skip(&db, "set_g", GLOBAL_SET_SRC).await {
+        return;
+    }
+    if !compile_or_skip(&db, "get_g", GLOBAL_GET_SRC).await {
+        return;
+    }
+
+    // set_g runs with the DB's own globals.
+    let r = db.invoke_function("set_g", Params::new()).await.unwrap();
+    assert_eq!(r, QueryValue::Null);
+
+    // get_g runs in a fresh FnBatch but shares globals through the DB.
+    let result = db.invoke_function("get_g", Params::new()).await.unwrap();
+    assert_eq!(
+        result,
+        QueryValue::Int(7),
+        "reader should see the global set by the writer"
+    );
+
+    // Verify through the DB's globals accessor.
+    assert_eq!(db.globals().get("g"), Some(QueryValue::Int(7)));
 }

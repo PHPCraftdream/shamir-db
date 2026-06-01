@@ -18,6 +18,7 @@
 pub mod __rt;
 mod context;
 mod error;
+mod host_imports;
 mod params;
 pub mod prelude;
 mod value;
