@@ -1,10 +1,16 @@
+use base64::Engine;
 use serde_json::json;
 
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::{TableConfig, TableManager};
+use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
+use shamir_engine::function::{
+    compile_rust_source, FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, WasmEngine,
+    WasmFunction, WasmLimits,
+};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -41,6 +47,10 @@ pub struct ShamirDb {
     /// rare so the memory cost is negligible.
     admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     active_migrations: Arc<DashMap<String, Arc<MigrationCoordinator>>>,
+    /// Live function registry (builtins + WASM functions loaded on open).
+    functions: Arc<FunctionRegistry>,
+    /// Shared Wasmtime engine used for all WASM function invocations.
+    wasm_engine: Arc<WasmEngine>,
 }
 
 impl ShamirDb {
@@ -54,12 +64,17 @@ impl ShamirDb {
         let dbs = Arc::new(DashMap::new());
         let admin_user_locks = Arc::new(DashMap::new());
         let active_migrations = Arc::new(DashMap::new());
+        let wasm_engine =
+            Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
+        let functions = Arc::new(FunctionRegistry::with_builtins());
 
         let shamir = Self {
             dbs,
             system_store,
             admin_user_locks,
             active_migrations,
+            functions,
+            wasm_engine,
         };
 
         // Load existing databases from system store
@@ -142,6 +157,59 @@ impl ShamirDb {
                             );
                         }
                     }
+                }
+            }
+        }
+
+        // Load persisted WASM functions from the function catalogue and
+        // register them. This proves a runner-without-cargo can still run
+        // functions — no toolchain needed, just `from_binary`.
+        let fn_records = shamir.system_store.load_functions().await?;
+        for rec in &fn_records {
+            let name = match rec["name"].as_str() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let wasm_b64 = match rec["wasm_b64"].as_str() {
+                Some(b) => b,
+                None => {
+                    log::warn!(
+                        "shamir_db::init: skipping function '{}' — no wasm_b64 field",
+                        name
+                    );
+                    continue;
+                }
+            };
+            let wasm_bytes = match base64::engine::general_purpose::STANDARD.decode(wasm_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!(
+                        "shamir_db::init: skipping function '{}' — base64 decode error: {}",
+                        name,
+                        e
+                    );
+                    continue;
+                }
+            };
+            match WasmFunction::from_binary(
+                shamir.wasm_engine.clone(),
+                &wasm_bytes,
+                WasmLimits::default(),
+            ) {
+                Ok(wf) => {
+                    if shamir.functions.register(&name, Arc::new(wf)).is_err() {
+                        log::warn!(
+                            "shamir_db::init: function '{}' already registered (builtin?), skipping catalogue load",
+                            name
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "shamir_db::init: failed to compile WASM for function '{}': {}",
+                        name,
+                        e
+                    );
                 }
             }
         }
@@ -484,5 +552,166 @@ impl ShamirDb {
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
         db.get_table(repo_name, table_name).await
+    }
+
+    // ========================================================================
+    // Function lifecycle API (slice 4)
+    // ========================================================================
+
+    /// Access the live function registry.
+    ///
+    /// Built-in functions (e.g. `argon2id`) live in the registry but are NOT
+    /// persisted in the durable catalogue. Calling `drop_function` on a
+    /// builtin removes it from the live registry only; it will not
+    /// resurrect on restart (the next `init` calls `with_builtins()` and
+    /// re-registers it). This is acceptable — builtins are an
+    /// implementation detail, not user-managed functions.
+    pub fn functions(&self) -> &Arc<FunctionRegistry> {
+        &self.functions
+    }
+
+    /// Register a WASM function from pre-compiled binary bytes.
+    ///
+    /// If `replace` is false and a function with the same name already exists
+    /// (either a builtin or a previously registered function), returns
+    /// [`DbError::Function`].
+    pub async fn create_function_from_wasm(
+        &self,
+        name: &str,
+        wasm: &[u8],
+        replace: bool,
+    ) -> DbResult<()> {
+        // Validate the wasm by compiling it.
+        let wf = WasmFunction::from_binary(self.wasm_engine.clone(), wasm, WasmLimits::default())
+            .map_err(|e| DbError::Function(e.to_string()))?;
+
+        let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(wasm);
+        let wasm_hash = format!("{:016x}", fxhash::hash64(wasm));
+
+        if !replace && self.functions.contains(name) {
+            return Err(DbError::Function(format!(
+                "function '{}' already exists",
+                name
+            )));
+        }
+
+        let version = 1u64;
+        let record = json!({
+            "name": name,
+            "wasm_b64": wasm_b64,
+            "wasm_hash": wasm_hash,
+            "lang": "wasm",
+            "source": null,
+            "version": version,
+        });
+        self.system_store.save_function(name, &record).await?;
+
+        if replace {
+            self.functions.replace(name, Arc::new(wf));
+        } else {
+            self.functions
+                .register(name, Arc::new(wf))
+                .map_err(|e| DbError::Function(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Compile a Rust source string to WASM and register the function.
+    ///
+    /// Returns [`DbError::Function`] with a toolchain message if cargo or the
+    /// `wasm32-unknown-unknown` target is not installed.
+    pub async fn create_function_from_source(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+    ) -> DbResult<()> {
+        let wasm = compile_rust_source(source).map_err(|e| match e {
+            FunctionError::ToolchainUnavailable(msg) => {
+                DbError::Function(format!("toolchain unavailable: {}", msg))
+            }
+            other => DbError::Function(other.to_string()),
+        })?;
+
+        self.create_function_from_wasm(name, &wasm, replace).await?;
+
+        // Overwrite the record with source metadata.
+        let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
+        let wasm_hash = format!("{:016x}", fxhash::hash64(&wasm));
+        let record = json!({
+            "name": name,
+            "wasm_b64": wasm_b64,
+            "wasm_hash": wasm_hash,
+            "lang": "rust",
+            "source": source,
+            "version": 1u64,
+        });
+        self.system_store.save_function(name, &record).await?;
+
+        Ok(())
+    }
+
+    /// Drop a function by name. Returns `true` if it existed.
+    ///
+    /// For built-in functions (not in the durable catalogue), this only
+    /// removes from the live registry. For user functions, both the durable
+    /// record and the live entry are removed.
+    pub async fn drop_function(&self, name: &str) -> DbResult<bool> {
+        let existed = self.functions.remove(name);
+        // Best-effort catalogue removal — ignore if there was no durable record
+        // (e.g. builtins don't have one).
+        if let Err(e) = self.system_store.remove_function(name).await {
+            log::warn!(
+                "shamir_db::drop_function: failed to remove '{}' from catalogue: {}",
+                name,
+                e
+            );
+        }
+        Ok(existed)
+    }
+
+    /// Rename a function. The underlying WASM module is not recompiled.
+    ///
+    /// Fails if `from` does not exist or `to` is already taken.
+    pub async fn rename_function(&self, from: &str, to: &str) -> DbResult<()> {
+        // Load the old catalogue record to re-key it.
+        let fn_records = self.system_store.load_functions().await?;
+        let old_record = fn_records
+            .iter()
+            .find(|r| r["name"].as_str() == Some(from))
+            .cloned();
+
+        // Rename in the live registry first.
+        self.functions
+            .rename(from, to)
+            .map_err(|e| DbError::Function(e.to_string()))?;
+
+        // If there was a durable record, re-key it.
+        if let Some(mut rec) = old_record {
+            self.system_store.remove_function(from).await?;
+            rec["name"] = json!(to);
+            self.system_store.save_function(to, &rec).await?;
+        }
+
+        Ok(())
+    }
+
+    /// List all registered function names (sorted alphabetically).
+    ///
+    /// Includes builtins (e.g. `argon2id`) since they live in the live
+    /// registry.
+    pub async fn list_functions(&self) -> DbResult<Vec<String>> {
+        let mut names = self.functions.list();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Invoke a function by name with the given parameters.
+    pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
+        self.functions
+            .invoke(name, &FnCtx::new(), &FnBatch::new(), &params)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))
     }
 }

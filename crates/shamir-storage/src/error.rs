@@ -47,6 +47,10 @@ pub enum DbError {
     /// A validation error (e.g., schema validation).
     #[error("Validation error: {0}")]
     Validation(String),
+
+    /// An error from the function engine (compile, invoke, registry).
+    #[error("Function error: {0}")]
+    Function(String),
 }
 
 impl From<CodecError> for DbError {
