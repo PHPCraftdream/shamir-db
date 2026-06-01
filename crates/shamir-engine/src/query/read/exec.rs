@@ -596,8 +596,12 @@ pub fn apply_order_by(records: &mut Vec<json::Value>, order_by: &OrderBy) {
     }
 
     // Phase 1: pre-resolve field values — one linear pass.
-    // Stores raw pointers into the source records (zero-copy).
-    let keys: Vec<PreResolvedKeys> = records
+    // String keys carry a borrowed `&str` into the source records
+    // (zero-copy); the borrow lives only across phases 1-2, before the
+    // mutable permutation in phase 3. This skips ~n heap allocations
+    // and ~n memcpy of every string sort key vs the previous `Box<str>`
+    // form (measurable on 100k-row string sorts).
+    let keys: Vec<PreResolvedKeys<'_>> = records
         .iter()
         .map(|r| resolve_order_keys(r, &order_by.items))
         .collect();
@@ -605,6 +609,10 @@ pub fn apply_order_by(records: &mut Vec<json::Value>, order_by: &OrderBy) {
     // Phase 2: sort index array by pre-resolved keys.
     let mut idx: Vec<usize> = (0..records.len()).collect();
     idx.sort_by(|&a, &b| compare_preresolved(&keys[a], &keys[b], &order_by.items));
+
+    // Drop borrowed keys before the mutable permutation pass so the
+    // compiler-enforced shared borrow of `records` ends here.
+    drop(keys);
 
     // Phase 3: apply permutation in-place.
     let sorted: Vec<json::Value> = idx
@@ -616,24 +624,28 @@ pub fn apply_order_by(records: &mut Vec<json::Value>, order_by: &OrderBy) {
 
 /// Pre-resolved field values for all ORDER BY fields of one record.
 /// SmallVec<[…; 4]> avoids heap allocation for the common ≤4 field case.
-type PreResolvedKeys = SmallVec<[SortKey; 4]>;
+type PreResolvedKeys<'a> = SmallVec<[SortKey<'a>; 4]>;
 
 /// Typed pre-resolved ORDER BY field value. The comparator dispatches on
 /// the enum variant once and then compares native types (i64::cmp,
 /// str::cmp, etc) — bypassing the per-comparison `serde_json::Value`
 /// match that dominated the original `apply_order_by`.
-#[derive(Clone)]
-enum SortKey {
+///
+/// String variant borrows from the source record to avoid one heap
+/// allocation + memcpy per row (the source `json::Value`s outlive the
+/// `keys` vector — see `apply_order_by`).
+#[derive(Clone, Copy)]
+enum SortKey<'a> {
     Null,
     Bool(bool),
     I64(i64),
     F64(f64),
-    Str(Box<str>),
+    Str(&'a str),
     Other, // unsupported (Array / Object) — falls back to Equal
 }
 
-impl SortKey {
-    fn from_json(v: Option<&json::Value>) -> Self {
+impl<'a> SortKey<'a> {
+    fn from_json(v: Option<&'a json::Value>) -> Self {
         match v {
             None | Some(json::Value::Null) => SortKey::Null,
             Some(json::Value::Bool(b)) => SortKey::Bool(*b),
@@ -646,7 +658,7 @@ impl SortKey {
                     SortKey::Null
                 }
             }
-            Some(json::Value::String(s)) => SortKey::Str(s.as_str().into()),
+            Some(json::Value::String(s)) => SortKey::Str(s.as_str()),
             _ => SortKey::Other,
         }
     }
@@ -658,10 +670,10 @@ impl SortKey {
 }
 
 /// Pre-resolve all ORDER BY field values from a single JSON record.
-fn resolve_order_keys(
-    record: &json::Value,
+fn resolve_order_keys<'a>(
+    record: &'a json::Value,
     items: &[crate::query::read::OrderByItem],
-) -> PreResolvedKeys {
+) -> PreResolvedKeys<'a> {
     items
         .iter()
         .map(|item| SortKey::from_json(get_json_field(record, &item.field)))
@@ -670,8 +682,8 @@ fn resolve_order_keys(
 
 /// Compare two pre-resolved key vectors.
 fn compare_preresolved(
-    a: &PreResolvedKeys,
-    b: &PreResolvedKeys,
+    a: &PreResolvedKeys<'_>,
+    b: &PreResolvedKeys<'_>,
     items: &[crate::query::read::OrderByItem],
 ) -> std::cmp::Ordering {
     for (i, item) in items.iter().enumerate() {
@@ -688,8 +700,8 @@ fn compare_preresolved(
 /// enum once instead of matching `serde_json::Value` on every comparison.
 #[inline]
 fn compare_sort_keys(
-    a: &SortKey,
-    b: &SortKey,
+    a: &SortKey<'_>,
+    b: &SortKey<'_>,
     direction: &OrderDirection,
     nulls: &Option<NullsOrder>,
 ) -> std::cmp::Ordering {
@@ -720,7 +732,7 @@ fn compare_sort_keys(
         (SortKey::F64(x), SortKey::I64(y)) => x
             .partial_cmp(&(*y as f64))
             .unwrap_or(std::cmp::Ordering::Equal),
-        (SortKey::Str(x), SortKey::Str(y)) => x.as_ref().cmp(y.as_ref()),
+        (SortKey::Str(x), SortKey::Str(y)) => (*x).cmp(*y),
         (SortKey::Bool(x), SortKey::Bool(y)) => x.cmp(y),
         _ => std::cmp::Ordering::Equal,
     };
