@@ -1,7 +1,8 @@
-//! Placeholder execution-context handles (slice 3 → slice 6).
+//! Placeholder execution-context handles (slice 3 → slice 6 → slice 8b).
 //!
 //! [`Ctx`] provides access to global variables (process-lifetime, shared
-//! across batches). [`Batch`] provides access to the per-batch scratchpad
+//! across batches), function calls, and database operations.
+//! [`Batch`] provides access to the per-batch scratchpad
 //! so functions in the same batch can exchange data.
 //!
 //! The real WASM host-import shims live in [`crate::host_imports`]; the
@@ -46,6 +47,19 @@ impl Ctx {
     /// fails with a `Compute` error.
     pub fn call(&self, name: &str, args: crate::Value) -> crate::Value {
         crate::host_imports::call(name, args)
+    }
+
+    /// Obtain a database access handle for the default repo.
+    ///
+    /// Must be invoked via `invoke_function_in_db` (which sets up the
+    /// gateway); traps if the host didn't provide one.
+    ///
+    /// ```ignore
+    /// ctx.db().table("users").insert(doc)
+    /// ctx.db().table("users").query(None)
+    /// ```
+    pub fn db(&self) -> crate::Db {
+        crate::db::Db::new()
     }
 }
 

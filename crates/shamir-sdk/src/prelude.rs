@@ -16,5 +16,5 @@
 //! pub async fn my_fn(ctx: Ctx, batch: Batch, params: Params) -> Result<Value> { ... }
 //! ```
 
-pub use crate::{Batch, Ctx, Error, Params, Result, Value};
+pub use crate::{Batch, Ctx, Db, Error, Params, Result, Table, Value};
 pub use shamir_sdk_macros::function;
