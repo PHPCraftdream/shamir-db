@@ -2,8 +2,9 @@
 //!
 //! These types model *who* is acting ([`Actor`]), *what* they target
 //! ([`ResourcePath`]), and *how* ([`Action`]). The [`authorize`] gate is
-//! transparent during the pure-refactoring track (R1–R3); P4 seats the
-//! real POSIX-style check here later.
+//! the engine-level trace (always `Ok`). Real enforcement lives in
+//! [`permits`] (pure decision) and the facade gate in `shamir-db`
+//! (meta resolution + ancestor traversal).
 //!
 //! The full object & operation hierarchy is specified in
 //! `docs/roadmap/ACCESS_HIERARCHY.md`.
@@ -462,14 +463,68 @@ pub struct AccessError {
     pub action: Action,
 }
 
-/// Transparent authorization gate.
+/// Transparent authorization gate (engine-level trace, R2).
 ///
 /// Always returns `Ok(())` and emits a `log::trace!` access line. The real
-/// POSIX-style check (the object × operation matrix in
-/// `ACCESS_HIERARCHY.md`) will be seated here in P4.
+/// POSIX-style enforcement happens in [`permits`] + the facade gate.
 pub fn authorize(actor: &Actor, path: &ResourcePath, action: Action) -> Result<(), AccessError> {
     log::trace!("shomer: {actor} {action} on {path}");
     Ok(())
+}
+
+/// Map an [`Action`] to the [`Perm`] bit it checks in the mode word.
+///
+/// `Read` / `List` → `Read`; `Write` / `Create` / `Delete` → `Write`;
+/// `Execute` → `Execute`. `Manage` is **not** a mode bit — it is
+/// owner-or-admin only, handled separately in [`permits`].
+pub const fn action_perm(action: Action) -> Option<Perm> {
+    match action {
+        Action::Read | Action::List => Some(Perm::Read),
+        Action::Write | Action::Create | Action::Delete => Some(Perm::Write),
+        Action::Execute => Some(Perm::Execute),
+        Action::Manage => None,
+    }
+}
+
+/// Determine the [`PermClass`] for an actor against a resource.
+///
+/// First match wins (POSIX semantics — NOT a union):
+/// 1. Owner — if the actor's owner id matches the meta's owner.
+/// 2. Group — if the meta has a group *and* `in_group` is true.
+/// 3. Other — fallback.
+pub fn class_of(actor: &Actor, meta: &ResourceMeta, in_group: bool) -> PermClass {
+    if actor.to_owner_id() == meta.owner.to_owner_id() {
+        PermClass::Owner
+    } else if meta.group.is_some() && in_group {
+        PermClass::Group
+    } else {
+        PermClass::Other
+    }
+}
+
+/// Pure POSIX-style permission check (no catalogue dependency).
+///
+/// Callers supply the [`ResourceMeta`] and `in_group` flag; this function
+/// only evaluates the mode bits. Returns `true` if the action is allowed.
+///
+/// * `Actor::System` → always `true` (admin bypass).
+/// * `Action::Manage` → `true` iff the actor is the owner (System already
+///   returned above).
+/// * Otherwise → pick [`class_of`], map the action to a [`Perm`] via
+///   [`action_perm`], and check [`Mode::is_set`].
+pub fn permits(actor: &Actor, meta: &ResourceMeta, action: Action, in_group: bool) -> bool {
+    if matches!(actor, Actor::System) {
+        return true;
+    }
+    if action == Action::Manage {
+        return actor.to_owner_id() == meta.owner.to_owner_id();
+    }
+    let class = class_of(actor, meta, in_group);
+    let perm = match action_perm(action) {
+        Some(p) => p,
+        None => return false,
+    };
+    Mode::is_set(meta.mode, class, perm)
 }
 
 #[cfg(test)]
@@ -667,5 +722,150 @@ mod tests {
         assert_eq!(loaded.owner, Actor::User(42));
         assert!(loaded.group.is_none());
         assert_eq!(loaded.mode, 0o644);
+    }
+
+    // ========================================================================
+    // permits / class_of tests (P4)
+    // ========================================================================
+
+    #[test]
+    fn action_perm_mapping() {
+        assert_eq!(action_perm(Action::Read), Some(Perm::Read));
+        assert_eq!(action_perm(Action::List), Some(Perm::Read));
+        assert_eq!(action_perm(Action::Write), Some(Perm::Write));
+        assert_eq!(action_perm(Action::Create), Some(Perm::Write));
+        assert_eq!(action_perm(Action::Delete), Some(Perm::Write));
+        assert_eq!(action_perm(Action::Execute), Some(Perm::Execute));
+        assert_eq!(action_perm(Action::Manage), None);
+    }
+
+    #[test]
+    fn class_of_owner_first_match() {
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: Some(5),
+            mode: 0o777,
+        };
+        // Owner matches even though group is present and in_group is true.
+        assert_eq!(class_of(&Actor::User(10), &meta, true), PermClass::Owner);
+        // Not the owner but in group.
+        assert_eq!(class_of(&Actor::User(20), &meta, true), PermClass::Group);
+        // Not the owner, not in group.
+        assert_eq!(class_of(&Actor::User(20), &meta, false), PermClass::Other);
+        // Group is None — no group class even if in_group is true.
+        let no_group = ResourceMeta {
+            owner: Actor::User(10),
+            group: None,
+            mode: 0o777,
+        };
+        assert_eq!(
+            class_of(&Actor::User(20), &no_group, true),
+            PermClass::Other
+        );
+    }
+
+    #[test]
+    fn permits_system_bypass() {
+        let meta = ResourceMeta {
+            owner: Actor::User(99),
+            group: None,
+            mode: 0o000,
+        };
+        for action in [
+            Action::Read,
+            Action::Write,
+            Action::Create,
+            Action::Delete,
+            Action::Execute,
+            Action::List,
+            Action::Manage,
+        ] {
+            assert!(
+                permits(&Actor::System, &meta, action, false),
+                "System should bypass for {action}"
+            );
+        }
+    }
+
+    #[test]
+    fn permits_owner_class_rwx() {
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: None,
+            mode: 0o700,
+        };
+        assert!(permits(&Actor::User(10), &meta, Action::Read, false));
+        assert!(permits(&Actor::User(10), &meta, Action::Write, false));
+        assert!(permits(&Actor::User(10), &meta, Action::Execute, false));
+        assert!(permits(&Actor::User(10), &meta, Action::Create, false));
+        assert!(permits(&Actor::User(10), &meta, Action::Delete, false));
+        assert!(permits(&Actor::User(10), &meta, Action::List, false));
+        assert!(permits(&Actor::User(10), &meta, Action::Manage, false));
+    }
+
+    #[test]
+    fn permits_group_class() {
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: Some(5),
+            mode: 0o070,
+        };
+        // In group → allowed (group bits are rwx).
+        assert!(permits(&Actor::User(20), &meta, Action::Read, true));
+        assert!(permits(&Actor::User(20), &meta, Action::Write, true));
+        assert!(permits(&Actor::User(20), &meta, Action::Execute, true));
+        // Not in group → denied (owner has rwx but actor is not owner;
+        // other bits are 0).
+        assert!(!permits(&Actor::User(20), &meta, Action::Read, false));
+        assert!(!permits(&Actor::User(20), &meta, Action::Write, false));
+    }
+
+    #[test]
+    fn permits_other_class() {
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: None,
+            mode: 0o007,
+        };
+        assert!(permits(&Actor::User(20), &meta, Action::Read, false));
+        assert!(permits(&Actor::User(20), &meta, Action::Write, false));
+        assert!(permits(&Actor::User(20), &meta, Action::Execute, false));
+    }
+
+    #[test]
+    fn permits_manage_owner_only() {
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: Some(5),
+            mode: 0o777,
+        };
+        // Owner can manage.
+        assert!(permits(&Actor::User(10), &meta, Action::Manage, false));
+        // Non-owner cannot manage, even with full mode bits.
+        assert!(!permits(&Actor::User(20), &meta, Action::Manage, true));
+        assert!(!permits(&Actor::User(20), &meta, Action::Manage, false));
+    }
+
+    #[test]
+    fn permits_first_match_wins_owner_denied() {
+        // Owner bits are 0, but other bits are rwx. POSIX first-match:
+        // actor IS the owner → Owner class → owner bits (0) → denied.
+        let meta = ResourceMeta {
+            owner: Actor::User(10),
+            group: None,
+            mode: 0o007,
+        };
+        assert!(
+            !permits(&Actor::User(10), &meta, Action::Read, false),
+            "owner should be denied when owner bits are 0 despite other=rwx"
+        );
+    }
+
+    #[test]
+    fn permits_open_mode_allows_everyone() {
+        let meta = ResourceMeta::open(); // mode 0o777
+        assert!(permits(&Actor::User(99), &meta, Action::Read, false));
+        assert!(permits(&Actor::User(99), &meta, Action::Write, false));
+        assert!(permits(&Actor::User(99), &meta, Action::Execute, false));
     }
 }
