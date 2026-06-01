@@ -36,4 +36,9 @@ pub enum FunctionError {
     /// The off-thread task carrying the computation was cancelled or panicked.
     #[error("function task cancelled")]
     Cancelled,
+
+    /// The Rust→WASM toolchain (cargo + wasm32-unknown-unknown target) is not
+    /// installed on this host.
+    #[error("toolchain unavailable: {0}")]
+    ToolchainUnavailable(String),
 }

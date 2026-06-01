@@ -3671,6 +3671,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-sdk"
+version = "0.1.0"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "shamir-sdk-macros",
+ "shamir-types",
+]
+
+[[package]]
+name = "shamir-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "shamir-server"
 version = "0.1.0"
 dependencies = [

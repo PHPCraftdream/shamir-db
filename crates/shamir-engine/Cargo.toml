@@ -54,6 +54,7 @@ wasmtime = { version = "45", default-features = false, features = [
     "std",
     "wat",
 ] }
+tempfile = "3.10.1"
 
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
