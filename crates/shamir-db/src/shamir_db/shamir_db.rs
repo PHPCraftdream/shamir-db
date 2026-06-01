@@ -729,13 +729,9 @@ impl ShamirDb {
     /// between calls). Use [`invoke_function_with_batch`] for multi-call
     /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
+        let ctx = FnCtx::with_globals(self.globals.clone()).with_registry(self.functions.clone());
         self.functions
-            .invoke(
-                name,
-                &FnCtx::with_globals(self.globals.clone()),
-                &FnBatch::new(),
-                &params,
-            )
+            .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
             .map_err(|e| DbError::Function(e.to_string()))
     }
@@ -750,13 +746,9 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
+        let ctx = FnCtx::with_globals(self.globals.clone()).with_registry(self.functions.clone());
         self.functions
-            .invoke(
-                name,
-                &FnCtx::with_globals(self.globals.clone()),
-                &FnBatch::with_context(batch.clone()),
-                &params,
-            )
+            .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
             .map_err(|e| DbError::Function(e.to_string()))
     }

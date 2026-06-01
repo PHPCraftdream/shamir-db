@@ -25,6 +25,8 @@ mod imp {
         fn host_global_get(kp: i32, kl: i32) -> i64;
         #[link_name = "global_set"]
         fn host_global_set(kp: i32, kl: i32, vp: i32, vl: i32);
+        #[link_name = "call"]
+        fn host_call(np: i32, nl: i32, pp: i32, pl: i32) -> i64;
     }
 
     /// Encode `value` to msgpack, leak the bytes, and return `(ptr, len)`.
@@ -87,6 +89,24 @@ mod imp {
         let (vp, vl) = encode_leak(&value);
         unsafe { host_global_set(kp, kl, vp, vl) };
     }
+
+    /// Invoke another registered function by name.
+    ///
+    /// `args` is a `Value::Map` whose entries become the callee's `Params`.
+    /// Returns the callee's result as a `Value`. Traps if the callee is
+    /// not found, depth limit is exceeded, or the callee errors.
+    pub fn call(name: &str, args: Value) -> Value {
+        let np = name.as_ptr() as i32;
+        let nl = name.len() as i32;
+        let (pp, pl) = encode_leak(&args);
+        let packed = unsafe { host_call(np, nl, pp, pl) };
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Value::Null,
+        };
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
+    }
 }
 
 // ── Non-WASM target: stubs that panic ────────────────────────────────
@@ -112,6 +132,11 @@ mod imp {
     }
 
     pub fn global_set(_key: &str, _value: Value) {
+        host_only()
+    }
+
+    /// Invoke another registered function by name (host-only).
+    pub fn call(_name: &str, _args: Value) -> Value {
         host_only()
     }
 }
