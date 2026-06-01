@@ -3,11 +3,15 @@
 //! Hot path: both brute-force search and HNSW graph traversal call
 //! `dot_product` / `l2_squared` for every distance computation. For
 //! typical 128-d f32 vectors that's a clean vectorizable inner loop.
-//! On x86_64 we runtime-detect AVX2 once and dispatch to an AVX2+FMA
-//! kernel (8 lanes, fused multiply-add) for a repeatable multiple over
-//! the autovec scalar path. Fallback is the scalar kernel written in a
-//! chunked form the compiler also reliably vectorizes (no per-iteration
-//! bounds checks, multiple accumulators).
+//! We runtime-detect the widest available SIMD once and dispatch to it,
+//! one predictable branch per call on already-hot memory. On x86/x86_64
+//! the order is AVX-512F (16-lane FMA), then AVX2+FMA (8-lane), then
+//! scalar; on aarch64 it is NEON (4-lane FMA), then scalar.
+//!
+//! The scalar fallback is itself written in a chunked, multi-accumulator
+//! form the compiler reliably autovectorizes (SSE2 on x86 without AVX2,
+//! NEON-less targets, WASM), so even the "slow" path gets compiler SIMD.
+//! All paths return the same value to within FMA rounding.
 //!
 //! The dispatch flag is loaded with `Relaxed` from a `OnceLock`-cached
 //! `bool` so the per-call overhead is one predictable branch on
@@ -19,21 +23,52 @@
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[inline]
+fn has_avx512f() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| std::is_x86_feature_detected!("avx512f"))
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[inline]
 fn has_avx2() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| std::is_x86_feature_detected!("avx2"))
 }
 
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn has_neon() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    // NEON is architecturally guaranteed on aarch64, but the detect
+    // macro is the canonical gate for the `#[target_feature]` call.
+    *CACHED.get_or_init(|| std::arch::is_aarch64_feature_detected!("neon"))
+}
+
 #[inline]
 pub(super) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if has_avx512f() {
+            // SAFETY: `has_avx512f()` guarantees the AVX-512F target
+            // feature required by the intrinsics in `dot_product_avx512`.
+            return unsafe { dot_product_avx512(a, b) };
+        }
         if has_avx2() {
             // SAFETY: `has_avx2()` guarantees the AVX2 + FMA target
             // features required by the intrinsics used in
             // `dot_product_avx2` are present on this CPU.
             return unsafe { dot_product_avx2(a, b) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            // SAFETY: `has_neon()` guarantees the NEON target feature
+            // required by the intrinsics in `dot_product_neon`.
+            return unsafe { dot_product_neon(a, b) };
         }
     }
     dot_product_scalar(a, b)
@@ -43,9 +78,20 @@ pub(super) fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 pub(super) fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
+        if has_avx512f() {
+            // SAFETY: see `dot_product` above.
+            return unsafe { l2_squared_avx512(a, b) };
+        }
         if has_avx2() {
             // SAFETY: see `dot_product` above.
             return unsafe { l2_squared_avx2(a, b) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if has_neon() {
+            // SAFETY: see `dot_product` above.
+            return unsafe { l2_squared_neon(a, b) };
         }
     }
     l2_squared_scalar(a, b)
@@ -221,6 +267,217 @@ unsafe fn l2_squared_avx2(a: &[f32], b: &[f32]) -> f32 {
     let mut s = _mm_cvtss_f32(sums2);
 
     for k in (chunks * 8)..n {
+        let d = a[k] - b[k];
+        s += d * d;
+    }
+    s
+}
+
+// ---------------------------------------------------------------------
+// AVX-512 kernels (16-lane f32, FMA). Preferred over AVX2 when the CPU
+// advertises avx512f. AVX-512 intrinsics are stable since Rust 1.89.
+// For dim=128 there are exactly 8 16-lane chunks → 2 per accumulator
+// over four accumulators, keeping the FMA pipeline full. Numerics match
+// the AVX2/scalar paths to within FMA rounding.
+// ---------------------------------------------------------------------
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn dot_product_avx512(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len().min(b.len());
+    let chunks = n / 16;
+
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut acc2 = _mm512_setzero_ps();
+    let mut acc3 = _mm512_setzero_ps();
+
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let mut i = 0usize;
+    while i + 64 <= chunks * 16 {
+        let av0 = _mm512_loadu_ps(ap.add(i));
+        let bv0 = _mm512_loadu_ps(bp.add(i));
+        let av1 = _mm512_loadu_ps(ap.add(i + 16));
+        let bv1 = _mm512_loadu_ps(bp.add(i + 16));
+        let av2 = _mm512_loadu_ps(ap.add(i + 32));
+        let bv2 = _mm512_loadu_ps(bp.add(i + 32));
+        let av3 = _mm512_loadu_ps(ap.add(i + 48));
+        let bv3 = _mm512_loadu_ps(bp.add(i + 48));
+        acc0 = _mm512_fmadd_ps(av0, bv0, acc0);
+        acc1 = _mm512_fmadd_ps(av1, bv1, acc1);
+        acc2 = _mm512_fmadd_ps(av2, bv2, acc2);
+        acc3 = _mm512_fmadd_ps(av3, bv3, acc3);
+        i += 64;
+    }
+    while i + 16 <= chunks * 16 {
+        let av = _mm512_loadu_ps(ap.add(i));
+        let bv = _mm512_loadu_ps(bp.add(i));
+        acc0 = _mm512_fmadd_ps(av, bv, acc0);
+        i += 16;
+    }
+
+    let sum = _mm512_add_ps(_mm512_add_ps(acc0, acc1), _mm512_add_ps(acc2, acc3));
+    let mut s = _mm512_reduce_add_ps(sum);
+
+    for k in (chunks * 16)..n {
+        s += a[k] * b[k];
+    }
+    s
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx512f")]
+unsafe fn l2_squared_avx512(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len().min(b.len());
+    let chunks = n / 16;
+
+    let mut acc0 = _mm512_setzero_ps();
+    let mut acc1 = _mm512_setzero_ps();
+    let mut acc2 = _mm512_setzero_ps();
+    let mut acc3 = _mm512_setzero_ps();
+
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let mut i = 0usize;
+    while i + 64 <= chunks * 16 {
+        let d0 = _mm512_sub_ps(_mm512_loadu_ps(ap.add(i)), _mm512_loadu_ps(bp.add(i)));
+        let d1 = _mm512_sub_ps(
+            _mm512_loadu_ps(ap.add(i + 16)),
+            _mm512_loadu_ps(bp.add(i + 16)),
+        );
+        let d2 = _mm512_sub_ps(
+            _mm512_loadu_ps(ap.add(i + 32)),
+            _mm512_loadu_ps(bp.add(i + 32)),
+        );
+        let d3 = _mm512_sub_ps(
+            _mm512_loadu_ps(ap.add(i + 48)),
+            _mm512_loadu_ps(bp.add(i + 48)),
+        );
+        acc0 = _mm512_fmadd_ps(d0, d0, acc0);
+        acc1 = _mm512_fmadd_ps(d1, d1, acc1);
+        acc2 = _mm512_fmadd_ps(d2, d2, acc2);
+        acc3 = _mm512_fmadd_ps(d3, d3, acc3);
+        i += 64;
+    }
+    while i + 16 <= chunks * 16 {
+        let d = _mm512_sub_ps(_mm512_loadu_ps(ap.add(i)), _mm512_loadu_ps(bp.add(i)));
+        acc0 = _mm512_fmadd_ps(d, d, acc0);
+        i += 16;
+    }
+
+    let sum = _mm512_add_ps(_mm512_add_ps(acc0, acc1), _mm512_add_ps(acc2, acc3));
+    let mut s = _mm512_reduce_add_ps(sum);
+
+    for k in (chunks * 16)..n {
+        let d = a[k] - b[k];
+        s += d * d;
+    }
+    s
+}
+
+// ---------------------------------------------------------------------
+// NEON kernels (4-lane f32, FMA). aarch64 only. NEON is architecturally
+// guaranteed on aarch64, so this is the SIMD path for Apple Silicon,
+// Graviton, etc. For dim=128 there are 32 4-lane chunks → 8 per
+// accumulator over four accumulators. Numerics match the other paths to
+// within FMA rounding.
+//
+// NOTE: these kernels are NOT exercised on the x86_64 CI/dev hosts; they
+// are verified by `cargo check --target aarch64-*` (intrinsic
+// signatures + borrow/type check) and by mirroring the proven AVX2/
+// scalar structure. No aarch64 wall-time measurement was taken.
+// ---------------------------------------------------------------------
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_product_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len().min(b.len());
+    let chunks = n / 4;
+
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let mut i = 0usize;
+    while i + 16 <= chunks * 4 {
+        // vfmaq_f32(acc, x, y) = acc + x * y (fused).
+        acc0 = vfmaq_f32(acc0, vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+        acc1 = vfmaq_f32(acc1, vld1q_f32(ap.add(i + 4)), vld1q_f32(bp.add(i + 4)));
+        acc2 = vfmaq_f32(acc2, vld1q_f32(ap.add(i + 8)), vld1q_f32(bp.add(i + 8)));
+        acc3 = vfmaq_f32(acc3, vld1q_f32(ap.add(i + 12)), vld1q_f32(bp.add(i + 12)));
+        i += 16;
+    }
+    while i + 4 <= chunks * 4 {
+        acc0 = vfmaq_f32(acc0, vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+        i += 4;
+    }
+
+    let sum = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+    let mut s = vaddvq_f32(sum);
+
+    for k in (chunks * 4)..n {
+        s += a[k] * b[k];
+    }
+    s
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn l2_squared_neon(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+
+    debug_assert_eq!(a.len(), b.len());
+    let n = a.len().min(b.len());
+    let chunks = n / 4;
+
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+
+    let ap = a.as_ptr();
+    let bp = b.as_ptr();
+    let mut i = 0usize;
+    while i + 16 <= chunks * 4 {
+        let d0 = vsubq_f32(vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+        let d1 = vsubq_f32(vld1q_f32(ap.add(i + 4)), vld1q_f32(bp.add(i + 4)));
+        let d2 = vsubq_f32(vld1q_f32(ap.add(i + 8)), vld1q_f32(bp.add(i + 8)));
+        let d3 = vsubq_f32(vld1q_f32(ap.add(i + 12)), vld1q_f32(bp.add(i + 12)));
+        acc0 = vfmaq_f32(acc0, d0, d0);
+        acc1 = vfmaq_f32(acc1, d1, d1);
+        acc2 = vfmaq_f32(acc2, d2, d2);
+        acc3 = vfmaq_f32(acc3, d3, d3);
+        i += 16;
+    }
+    while i + 4 <= chunks * 4 {
+        let d = vsubq_f32(vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+        acc0 = vfmaq_f32(acc0, d, d);
+        i += 4;
+    }
+
+    let sum = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+    let mut s = vaddvq_f32(sum);
+
+    for k in (chunks * 4)..n {
         let d = a[k] - b[k];
         s += d * d;
     }
