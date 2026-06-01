@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use super::db_gateway::DbGateway;
 use super::env_policy::EnvPolicy;
+use super::net_gateway::NetGateway;
 use super::registry::FunctionRegistry;
 
 // ── BatchContext ──────────────────────────────────────────────────────
@@ -280,6 +281,7 @@ pub struct FnCtx {
     depth_limit: u32,
     db: Option<Arc<dyn DbGateway>>,
     repo: String,
+    net: Option<Arc<dyn NetGateway>>,
 }
 
 impl FnCtx {
@@ -295,6 +297,7 @@ impl FnCtx {
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
             db: None,
             repo: String::new(),
+            net: None,
         }
     }
 
@@ -307,6 +310,7 @@ impl FnCtx {
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
             db: None,
             repo: String::new(),
+            net: None,
         }
     }
 
@@ -336,6 +340,15 @@ impl FnCtx {
     pub fn with_db(mut self, gateway: Arc<dyn DbGateway>, repo: String) -> Self {
         self.db = Some(gateway);
         self.repo = repo;
+        self
+    }
+
+    /// Builder: attach a network gateway for HTTP egress (slice 8c).
+    ///
+    /// The gateway routes `ctx.http_fetch(req)` calls through the
+    /// `NetGateway` implementation (e.g. `CurlNetGateway`).
+    pub fn with_net(mut self, gateway: Arc<dyn NetGateway>) -> Self {
+        self.net = Some(gateway);
         self
     }
 
@@ -384,6 +397,11 @@ impl FnCtx {
         self.db.as_ref()
     }
 
+    /// Access the optional network gateway.
+    pub fn net_gateway(&self) -> Option<&Arc<dyn NetGateway>> {
+        self.net.as_ref()
+    }
+
     /// The default repo name for DB operations.
     pub fn repo(&self) -> &str {
         &self.repo
@@ -414,6 +432,7 @@ impl std::fmt::Debug for FnCtx {
             .field("has_registry", &self.registry.is_some())
             .field("has_db", &self.db.is_some())
             .field("repo", &self.repo)
+            .field("has_net", &self.net.is_some())
             .finish()
     }
 }

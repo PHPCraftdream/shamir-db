@@ -44,6 +44,8 @@ mod imp {
         fn host_db_insert(tp: i32, tl: i32, dp: i32, dl: i32) -> i64;
         #[link_name = "db_query"]
         fn host_db_query(tp: i32, tl: i32, fp: i32, fl: i32) -> i64;
+        #[link_name = "http_fetch"]
+        fn host_http_fetch(rp: i32, rl: i32) -> i64;
     }
 
     /// Encode `value` to msgpack, leak the bytes, and return `(ptr, len)`.
@@ -176,6 +178,30 @@ mod imp {
         let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
         rmp_serde::from_slice(bytes).unwrap_or(Value::List(Vec::new()))
     }
+
+    /// Send an HTTP request via the host gateway.
+    ///
+    /// `req` must be a `Value::Map` with the shape:
+    /// ```text
+    /// { "method": Str, "url": Str, "headers": Map, "body": Bin }
+    /// ```
+    ///
+    /// Returns a `Value::List([Bool, payload])` envelope:
+    /// - `[true, { "status": Int, "headers": Map, "body": Bin }]` on success.
+    /// - `[false, "error message"]` on runtime error (allowlist denial,
+    ///   curl failure, timeout).
+    ///
+    /// Traps only if egress is not configured at all (config bug).
+    pub fn http_fetch(req: &Value) -> Value {
+        let (rp, rl) = encode_leak(req);
+        let packed = unsafe { host_http_fetch(rp, rl) };
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Value::Null,
+        };
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
+    }
 }
 
 // ── Non-WASM target: stubs that panic ────────────────────────────────
@@ -221,6 +247,11 @@ mod imp {
 
     /// Query records (host-only).
     pub fn db_query(_table: &str, _filter: Option<&Value>) -> Value {
+        host_only()
+    }
+
+    /// HTTP egress: send a request and get a response (host-only).
+    pub fn http_fetch(_req: &Value) -> Value {
         host_only()
     }
 }

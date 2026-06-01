@@ -20,6 +20,7 @@ mod context;
 mod db;
 mod error;
 mod host_imports;
+mod http;
 mod params;
 pub mod prelude;
 mod value;
@@ -31,6 +32,7 @@ pub use shamir_sdk_macros::function;
 pub use context::{Batch, Ctx};
 pub use db::{Db, Table};
 pub use error::{Error, Result};
+pub use http::{HttpRequest, HttpResponse};
 pub use params::Params;
 pub use value::Value;
 

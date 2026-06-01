@@ -61,6 +61,34 @@ impl Ctx {
     pub fn db(&self) -> crate::Db {
         crate::db::Db::new()
     }
+
+    /// Send an HTTP request via the egress gateway (slice 8c).
+    ///
+    /// The host checks the request against the configured allowlist and
+    /// SSRF guard before performing any network I/O. Traps only if egress
+    /// is not configured at all (config bug). All runtime errors
+    /// (allowlist denial, curl failure, timeout) are returned as
+    /// catchable `Err`.
+    ///
+    /// # Wire envelope
+    ///
+    /// The host returns `Value::List([Bool, payload])`:
+    /// - `[true, { status, headers, body }]` → `Ok(HttpResponse)`
+    /// - `[false, "error message"]` → `Err(Error)`
+    pub fn http_fetch(&self, req: crate::HttpRequest) -> crate::Result<crate::HttpResponse> {
+        let raw = crate::host_imports::http_fetch(&req.to_value());
+        crate::http::decode_fetch_envelope(&raw)
+    }
+
+    /// Convenience: HTTP GET the given URL and return the response.
+    pub fn http_get(&self, url: &str) -> crate::Result<crate::HttpResponse> {
+        self.http_fetch(crate::HttpRequest::get(url))
+    }
+
+    /// Convenience: HTTP POST the given body to the URL and return the response.
+    pub fn http_post(&self, url: &str, body: Vec<u8>) -> crate::Result<crate::HttpResponse> {
+        self.http_fetch(crate::HttpRequest::post(url, body))
+    }
 }
 
 /// The batch the function executes within.

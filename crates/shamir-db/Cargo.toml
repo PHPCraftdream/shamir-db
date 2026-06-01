@@ -44,6 +44,7 @@ rand        = "0.8.5"          # facade rng for record-id allocation
 argon2      = "0.5"            # hash users.password_hash at rest (PHC string)
 base64      = "0.22"           # function wasm binary persistence
 fxhash      = "0.2.1"          # function content hash
+tempfile    = "3.10.1"         # curl gateway temp files for secrets
 
 # Legacy network / TLS module (`db/net/*`) — kept compiling so the
 # obsolete code doesn't bit-rot before its planned deletion.
