@@ -8,6 +8,7 @@
 //! compensate for filtered-out tombstones.
 
 use super::adapter::{VectorAdapter, VectorError};
+use super::simd::{dot_product, l2_squared};
 use crate::index2::kind::VectorMetric;
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
@@ -23,17 +24,19 @@ pub struct ShamirDist {
 
 impl Distance<f32> for ShamirDist {
     fn eval(&self, a: &[f32], b: &[f32]) -> f32 {
+        // Route through the shared SIMD kernels (AVX2+FMA when available,
+        // chunked-scalar fallback). `hnsw_rs` calls `eval` for every
+        // distance computation during graph traversal and insertion —
+        // this is the production hot path. Semantics are preserved
+        // bit-for-bit-modulo-FMA-rounding (kernels match the original
+        // sum/zip semantics; FMA differs by at most 0.5 ulp per op,
+        // within existing test tolerances).
         match self.metric {
-            VectorMetric::L2 => a
-                .iter()
-                .zip(b.iter())
-                .map(|(x, y)| (x - y) * (x - y))
-                .sum::<f32>()
-                .sqrt(),
+            VectorMetric::L2 => l2_squared(a, b).sqrt(),
             VectorMetric::Cosine => {
-                let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-                let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let dot = dot_product(a, b);
+                let na = dot_product(a, a).sqrt();
+                let nb = dot_product(b, b).sqrt();
                 if na < 1e-9 || nb < 1e-9 {
                     return 1.0;
                 }
@@ -44,7 +47,7 @@ impl Distance<f32> for ShamirDist {
                 // vectors, dot ∈ [-1, 1] and dist = 1 - dot ∈ [0, 2]
                 // preserves the search ordering. Callers must normalize
                 // their vectors for correct top-k with `Dot`.
-                let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+                let dot = dot_product(a, b);
                 (1.0 - dot).max(0.0)
             }
         }
