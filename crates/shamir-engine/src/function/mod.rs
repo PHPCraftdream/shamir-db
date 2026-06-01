@@ -28,7 +28,7 @@ mod wasm;
 
 pub use builtin::Argon2idFunction;
 pub use compile::compile_rust_source;
-pub use context::{FnBatch, FnCtx};
+pub use context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 pub use contract::ShamirFunction;
 pub use error::{FnResult, FunctionError};
 pub use params::Params;
