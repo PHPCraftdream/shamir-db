@@ -152,3 +152,46 @@ async fn create_from_source_compiles() {
         Err(e) => panic!("unexpected error: {}", e),
     }
 }
+
+/// The full requested e2e in ONE flow on a SOURCE-COMPILED function:
+/// create → compile → use → rename → use → delete. Toolchain-gated — skips
+/// cleanly when cargo / the wasm32 target is absent.
+#[tokio::test]
+async fn source_function_full_lifecycle() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    // create + compile (Rust source → wasm).
+    match db
+        .create_function_from_source("double", DOUBLE_SRC, false)
+        .await
+    {
+        Ok(()) => {}
+        Err(DbError::Function(msg)) if msg.contains("toolchain unavailable") => {
+            eprintln!("SKIP source_function_full_lifecycle — toolchain unavailable: {msg}");
+            return;
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+    }
+
+    let mut params = Params::new();
+    params.set("n", QueryValue::Int(21));
+
+    // use.
+    let r1 = db.invoke_function("double", params.clone()).await.unwrap();
+    assert_eq!(r1, QueryValue::Int(42));
+
+    // rename.
+    db.rename_function("double", "times_two").await.unwrap();
+    assert!(db.invoke_function("double", params.clone()).await.is_err());
+
+    // use (after rename) — still the compiled artifact, no recompile.
+    let r2 = db
+        .invoke_function("times_two", params.clone())
+        .await
+        .unwrap();
+    assert_eq!(r2, QueryValue::Int(42));
+
+    // delete.
+    assert!(db.drop_function("times_two").await.unwrap());
+    assert!(db.invoke_function("times_two", params).await.is_err());
+}
