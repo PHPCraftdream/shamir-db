@@ -88,6 +88,10 @@ name = "interner_concurrent"
 harness = false
 
 [[bench]]
+name = "interner_cold_growth"
+harness = false
+
+[[bench]]
 name = "membuffer_concurrent"
 harness = false
 
