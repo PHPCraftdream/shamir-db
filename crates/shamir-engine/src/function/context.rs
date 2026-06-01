@@ -18,6 +18,7 @@ use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
 use super::env_policy::EnvPolicy;
+use super::registry::FunctionRegistry;
 
 // ── BatchContext ──────────────────────────────────────────────────────
 
@@ -263,24 +264,57 @@ impl Default for GlobalVars {
 /// lifetime of the database process. The `new()` constructor creates a
 /// fresh standalone context (empty globals) for backward compatibility.
 ///
-/// Database-access helpers (`db()`, `repo()`, `store()`) arrive in a
-/// later slice.
-#[derive(Debug, Clone)]
+/// Slice 8a adds an optional [`FunctionRegistry`] gateway and a recursion
+/// depth counter so a function can call another registered function via
+/// `ctx.call` while bounding the call-stack depth.
+#[derive(Clone)]
 pub struct FnCtx {
     globals: Arc<GlobalVars>,
+    registry: Option<Arc<FunctionRegistry>>,
+    depth: u32,
+    depth_limit: u32,
 }
 
 impl FnCtx {
+    /// Default recursion depth limit.
+    pub const DEFAULT_DEPTH_LIMIT: u32 = 32;
+
     /// Construct a context with fresh empty globals (standalone / back-compat).
     pub fn new() -> Self {
         Self {
             globals: Arc::new(GlobalVars::new()),
+            registry: None,
+            depth: 0,
+            depth_limit: Self::DEFAULT_DEPTH_LIMIT,
         }
     }
 
     /// Construct a context wrapping existing globals.
     pub fn with_globals(globals: Arc<GlobalVars>) -> Self {
-        Self { globals }
+        Self {
+            globals,
+            registry: None,
+            depth: 0,
+            depth_limit: Self::DEFAULT_DEPTH_LIMIT,
+        }
+    }
+
+    /// Builder: attach a function registry (call gateway).
+    pub fn with_registry(mut self, registry: Arc<FunctionRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Builder: set the current recursion depth.
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Builder: set the recursion depth limit.
+    pub fn with_depth_limit(mut self, limit: u32) -> Self {
+        self.depth_limit = limit;
+        self
     }
 
     /// Read a global variable (cloned out).
@@ -308,6 +342,21 @@ impl FnCtx {
         &self.globals
     }
 
+    /// Access the optional function registry (call gateway).
+    pub fn registry(&self) -> Option<&Arc<FunctionRegistry>> {
+        self.registry.as_ref()
+    }
+
+    /// Current recursion depth.
+    pub fn depth(&self) -> u32 {
+        self.depth
+    }
+
+    /// Recursion depth limit.
+    pub fn depth_limit(&self) -> u32 {
+        self.depth_limit
+    }
+
     /// Atomic integer increment on a global variable.
     ///
     /// Missing/non-Int treated as 0. Returns the new value.
@@ -322,6 +371,16 @@ impl FnCtx {
         f: F,
     ) -> QueryValue {
         self.globals.update(key, f)
+    }
+}
+
+impl std::fmt::Debug for FnCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FnCtx")
+            .field("depth", &self.depth)
+            .field("depth_limit", &self.depth_limit)
+            .field("has_registry", &self.registry.is_some())
+            .finish()
     }
 }
 

@@ -53,6 +53,7 @@ wasmtime = { version = "45", default-features = false, features = [
     "runtime",
     "std",
     "wat",
+    "async",
 ] }
 tempfile = "3.10.1"
 

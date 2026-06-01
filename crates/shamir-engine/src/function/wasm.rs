@@ -1,9 +1,8 @@
-//! Wasmtime execution backend for user-defined functions (slice 2 → slice 6).
+//! Wasmtime execution backend for user-defined functions (slice 2 → slice 8a).
 //!
 //! A [`WasmFunction`] wraps a compiled Wasmtime [`Module`] and implements the
-//! [`ShamirFunction`] trait. Execution is pure — the guest has **no host
-//! imports** (slice 4 adds DB-access host functions). Parameters and results
-//! are marshalled across the guest's linear memory as MessagePack bytes.
+//! [`ShamirFunction`] trait. Execution uses Wasmtime's async support so host
+//! imports can `.await` (e.g. `ctx.call` for function-calls-function).
 //!
 //! # Guest ABI
 //!
@@ -28,28 +27,36 @@
 //! * `global_set(key_ptr, key_len, val_ptr, val_len)` — write a global var.
 //! * `global_get(key_ptr, key_len) -> i64` — read a global var (0 = absent).
 //!
-//! For the `*_get` variants a non-zero return is `((ptr as i64) << 32) |
-//! (len as i64)` where `[ptr, ptr+len)` in guest memory holds the msgpack-
-//! encoded value. The host calls the guest's `shamir_alloc` to create the
-//! buffer and writes into it before returning.
+//! # Host imports (slice 8a — async)
+//!
+//! * `call(name_ptr, name_len, params_ptr, params_len) -> i64` — invoke
+//!   another registered function by name. Uses the same batch context and
+//!   globals, with a depth limit to bound recursion.
+//!
+//! For the `*_get` variants and `call`, a non-zero return is
+//! `((ptr as i64) << 32) | (len as i64)` where `[ptr, ptr+len)` in guest
+//! memory holds the msgpack-encoded value. The host calls the guest's
+//! `shamir_alloc` to create the buffer and writes into it before returning.
 //!
 //! Guests that do **not** import these symbols are unaffected (unused Linker
 //! definitions are silently ignored by Wasmtime).
 //!
-//! # Host algorithm
+//! # Async execution
 //!
-//! 1. Encode `params` as msgpack → `input_bytes`.
-//! 2. Call `shamir_alloc(input_bytes.len())` → `in_ptr`.
-//! 3. Write `input_bytes` into `memory[in_ptr..in_ptr+len]`.
-//! 4. Call `shamir_call(in_ptr, len)` → packed `i64`.
-//! 5. Split packed into `(out_ptr, out_len)`.
-//! 6. Read `out_len` bytes from `memory[out_ptr..out_ptr+out_len]`.
-//! 7. Decode as `QueryValue::from_bytes`.
+//! Since slice 8a the engine uses `Config::async_support(true)`. The four
+//! original sync host imports remain sync (they are allowed under async_support
+//! and never `.await`). The new `call` host import is async — it must await
+//! `FunctionRegistry::invoke`.
+//!
+//! Note: a CPU-bound guest with no host-import awaits still occupies the
+//! tokio worker thread for the duration of its timeslice. Epoch-based
+//! yielding is a future refinement; out of scope here.
 
 use super::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 use super::contract::ShamirFunction;
 use super::error::{FnResult, FunctionError};
 use super::params::Params;
+use super::registry::FunctionRegistry;
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
@@ -60,17 +67,21 @@ use wasmtime::{Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 /// Per-invocation state carried inside the Wasmtime [`Store`].
 ///
 /// Wraps [`StoreLimits`] (memory/fuel resource caps) together with the
-/// shared batch context and global-variables handles so the sync host-import
-/// callbacks can reach them through [`wasmtime::Caller::data`].
+/// shared batch context, global-variables handles, the optional function
+/// registry gateway, and recursion depth tracking so host-import callbacks
+/// can reach them through [`wasmtime::Caller::data`].
 struct HostState {
     limits: StoreLimits,
     batch: Arc<BatchContext>,
     globals: Arc<GlobalVars>,
+    registry: Option<Arc<FunctionRegistry>>,
+    depth: u32,
+    depth_limit: u32,
 }
 
 // ── WasmEngine ────────────────────────────────────────────────────────
 
-/// A configured Wasmtime [`Engine`] with fuel enabled.
+/// A configured Wasmtime [`Engine`] with fuel and async support enabled.
 ///
 /// Cheap to clone-share via `Arc` — `Engine` is internally reference-counted.
 #[derive(Clone)]
@@ -79,10 +90,13 @@ pub struct WasmEngine {
 }
 
 impl WasmEngine {
-    /// Create a new engine with fuel consumption enabled.
+    /// Create a new engine with fuel consumption and async support enabled.
     pub fn new() -> FnResult<Self> {
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
+        // async_support is auto-detected in wasmtime 45; the `async` crate
+        // feature enables the fiber-based runtime that allows host imports
+        // to .await. Instantiation uses instantiate_async / call_async.
         let engine = Engine::new(&config).map_err(|e| FunctionError::Compute(e.to_string()))?;
         Ok(Self { engine })
     }
@@ -351,6 +365,143 @@ fn host_global_get(
     Ok(packed)
 }
 
+// ── Async host import: call ───────────────────────────────────────────
+//
+// Borrow-dance across await:
+// 1. Read name + params bytes from guest memory into owned Vecs (sync).
+// 2. Clone Arc<BatchContext>, Arc<GlobalVars>, Option<Arc<FunctionRegistry>>,
+//    depth, depth_limit from caller.data() into owned locals.
+// 3. Drop all borrows on Caller.
+// 4. .await the registry.invoke call (may take arbitrary time).
+// 5. Re-acquire Caller (mutable), get memory + shamir_alloc, write result.
+
+/// Host implementation of `call(name_ptr, name_len, params_ptr, params_len) -> i64`.
+///
+/// Invokes another registered function by name. The callee shares the same
+/// batch context and globals. On error (depth exceeded, function not found,
+/// callee trapped), the host import traps — propagating as the caller's
+/// `FunctionError::Compute`.
+/// Host implementation of `call(name_ptr, name_len, params_ptr, params_len) -> i64`.
+///
+/// Invokes another registered function by name. The callee shares the same
+/// batch context and globals. On error (depth exceeded, function not found,
+/// callee trapped), the host import traps — propagating as the caller's
+/// `FunctionError::Compute`.
+///
+/// # Borrow dance across await
+///
+/// 1. Read `name` + `params` bytes from guest memory via `Caller` (sync).
+/// 2. Clone `Arc<BatchContext>`, `Arc<GlobalVars>`, `Option<Arc<FunctionRegistry>>`,
+///    `depth`, `depth_limit` from `caller.data()` into owned locals.
+/// 3. Drop the `&Caller` borrow on `memory` / `data`.
+/// 4. `.await` the `registry.invoke` call.
+/// 5. Re-acquire `Caller` (mutable), get `memory` + `shamir_alloc`, write result.
+///
+/// The `Caller<'_, HostState>` is kept alive for the entire future lifetime
+/// because the returned `Box<dyn Future + Send + '_>` captures it. Wasmtime
+/// guarantees `Caller` is `Send` when `T: Send` and async support is active.
+fn host_call(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    (name_ptr, name_len, params_ptr, params_len): (i32, i32, i32, i32),
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    Box::new(async move {
+        // ── Phase 1: read inputs + clone Arcs (all sync, before any await) ──
+        let name_bytes;
+        let params_bytes;
+        let registry;
+        let batch_ctx;
+        let globals;
+        let next_depth;
+        let depth_limit;
+        {
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| wasmtime::Error::msg("call: missing export `memory`"))?;
+
+            name_bytes = read_guest_mem(memory.data(&caller), name_ptr, name_len)?;
+            params_bytes = read_guest_mem(memory.data(&caller), params_ptr, params_len)?;
+
+            let state = caller.data();
+            registry = state.registry.clone();
+            batch_ctx = state.batch.clone();
+            globals = state.globals.clone();
+            next_depth = state.depth.saturating_add(1);
+            depth_limit = state.depth_limit;
+        }
+        // Borrows on caller (memory, data) are dropped. Caller itself is still alive.
+
+        let name = String::from_utf8(name_bytes)
+            .map_err(|_| wasmtime::Error::msg("call: name is not valid UTF-8"))?;
+
+        let params_value = QueryValue::from_bytes(&params_bytes)
+            .map_err(|e| wasmtime::Error::msg(format!("call: params decode error: {e}")))?;
+        let params = Params::from_value(params_value)
+            .map_err(|e| wasmtime::Error::msg(format!("call: params not a map: {e}")))?;
+
+        // ── Depth check ──
+        if next_depth > depth_limit {
+            return Err(wasmtime::Error::msg(format!(
+                "call depth limit exceeded: {next_depth} > {depth_limit}"
+            )));
+        }
+
+        let reg = registry
+            .ok_or_else(|| wasmtime::Error::msg(format!("call: function not found: {name}")))?;
+
+        // ── Phase 2: await the callee ──
+        let child_ctx = FnCtx::with_globals(globals)
+            .with_registry(reg)
+            .with_depth(next_depth)
+            .with_depth_limit(depth_limit);
+        let child_batch = FnBatch::with_context(batch_ctx);
+
+        let result = child_ctx
+            .registry()
+            .expect("registry just set")
+            .invoke(&name, &child_ctx, &child_batch, &params)
+            .await
+            .map_err(|e| wasmtime::Error::msg(format!("call: {e}")))?;
+
+        // ── Phase 3: write result back into guest memory ──
+        let encoded = result
+            .to_bytes()
+            .map_err(|e| wasmtime::Error::msg(format!("call: result encode error: {e}")))?;
+
+        let alloc_fn = caller
+            .get_export("shamir_alloc")
+            .and_then(|e| e.into_func())
+            .ok_or_else(|| wasmtime::Error::msg("call: missing export `shamir_alloc`"))?;
+        let alloc_typed = alloc_fn.typed::<i32, i32>(&caller)?;
+
+        let out_len =
+            i32::try_from(encoded.len()).map_err(|_| wasmtime::Error::msg("result too large"))?;
+        let out_ptr = alloc_typed.call_async(&mut caller, out_len).await?;
+
+        if out_ptr < 0 {
+            return Err(wasmtime::Error::msg(
+                "shamir_alloc returned negative pointer",
+            ));
+        }
+
+        let memory = caller
+            .get_export("memory")
+            .and_then(|e| e.into_memory())
+            .ok_or_else(|| wasmtime::Error::msg("call: missing export `memory`"))?;
+        let start = out_ptr as usize;
+        let end = start.saturating_add(encoded.len());
+        if end > memory.data_size(&caller) {
+            return Err(wasmtime::Error::msg(
+                "shamir_alloc returned pointer outside memory bounds",
+            ));
+        }
+        memory.data_mut(&mut caller)[start..end].copy_from_slice(&encoded);
+
+        let packed = ((out_ptr as i64) << 32) | (encoded.len() as i64 & 0xFFFF_FFFF);
+        Ok(packed)
+    })
+}
+
 // ── ShamirFunction impl ──────────────────────────────────────────────
 
 #[async_trait]
@@ -366,101 +517,112 @@ impl ShamirFunction for WasmFunction {
         let module = self.module.clone();
         let batch_ctx = batch.context().clone();
         let globals = ctx.globals().clone();
+        let registry = ctx.registry().cloned();
+        let depth = ctx.depth();
+        let depth_limit = ctx.depth_limit();
 
-        let out = tokio::task::spawn_blocking(move || -> FnResult<Vec<u8>> {
-            let limiter = StoreLimitsBuilder::new()
-                .memory_size(limits.max_memory_bytes)
-                .build();
-            let state = HostState {
-                limits: limiter,
-                batch: batch_ctx,
-                globals,
-            };
-            let mut store: Store<HostState> = Store::new(engine.engine(), state);
-            store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
-            store
-                .set_fuel(limits.fuel)
-                .map_err(|e| FunctionError::Compute(e.to_string()))?;
+        // NOTE: we no longer use spawn_blocking. With async_support enabled
+        // the entire execution runs on the tokio runtime; Wasmtime suspends
+        // the fiber at host-import .await points (only the `call` import
+        // awaits today). A CPU-bound guest with no awaits still occupies the
+        // worker — epoch-based yielding is a future refinement.
+        let limiter = StoreLimitsBuilder::new()
+            .memory_size(limits.max_memory_bytes)
+            .build();
+        let state = HostState {
+            limits: limiter,
+            batch: batch_ctx,
+            globals,
+            registry,
+            depth,
+            depth_limit,
+        };
+        let mut store: Store<HostState> = Store::new(engine.engine(), state);
+        store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
+        store
+            .set_fuel(limits.fuel)
+            .map_err(|e| FunctionError::Compute(e.to_string()))?;
 
-            let mut linker: Linker<HostState> = Linker::new(engine.engine());
+        let mut linker: Linker<HostState> = Linker::new(engine.engine());
 
-            // Register host imports under "shamir_host". Unused definitions
-            // are harmless — modules that don't import them simply ignore them.
-            linker
-                .func_wrap("shamir_host", "batch_put", host_batch_put)
-                .map_err(|e| FunctionError::Compute(format!("linker batch_put: {e}")))?;
-            linker
-                .func_wrap("shamir_host", "batch_get", host_batch_get)
-                .map_err(|e| FunctionError::Compute(format!("linker batch_get: {e}")))?;
-            linker
-                .func_wrap("shamir_host", "global_set", host_global_set)
-                .map_err(|e| FunctionError::Compute(format!("linker global_set: {e}")))?;
-            linker
-                .func_wrap("shamir_host", "global_get", host_global_get)
-                .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
+        // Register sync host imports under "shamir_host". Sync host funcs are
+        // allowed under async_support — they just don't await.
+        linker
+            .func_wrap("shamir_host", "batch_put", host_batch_put)
+            .map_err(|e| FunctionError::Compute(format!("linker batch_put: {e}")))?;
+        linker
+            .func_wrap("shamir_host", "batch_get", host_batch_get)
+            .map_err(|e| FunctionError::Compute(format!("linker batch_get: {e}")))?;
+        linker
+            .func_wrap("shamir_host", "global_set", host_global_set)
+            .map_err(|e| FunctionError::Compute(format!("linker global_set: {e}")))?;
+        linker
+            .func_wrap("shamir_host", "global_get", host_global_get)
+            .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
 
-            let instance = linker
-                .instantiate(&mut store, &module)
-                .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;
+        // Register the async host import for ctx.call.
+        linker
+            .func_wrap_async("shamir_host", "call", host_call)
+            .map_err(|e| FunctionError::Compute(format!("linker call: {e}")))?;
 
-            let memory = instance
-                .get_memory(&mut store, "memory")
-                .ok_or_else(|| FunctionError::Compute("missing export `memory`".into()))?;
+        let instance = linker
+            .instantiate_async(&mut store, &module)
+            .await
+            .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;
 
-            let alloc_fn = instance
-                .get_typed_func::<i32, i32>(&mut store, "shamir_alloc")
-                .map_err(|e| {
-                    FunctionError::Compute(format!("missing export `shamir_alloc`: {e}"))
-                })?;
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .ok_or_else(|| FunctionError::Compute("missing export `memory`".into()))?;
 
-            let call_fn = instance
-                .get_typed_func::<(i32, i32), i64>(&mut store, "shamir_call")
-                .map_err(|e| {
-                    FunctionError::Compute(format!("missing export `shamir_call`: {e}"))
-                })?;
+        let alloc_fn = instance
+            .get_typed_func::<i32, i32>(&mut store, "shamir_alloc")
+            .map_err(|e| FunctionError::Compute(format!("missing export `shamir_alloc`: {e}")))?;
 
-            let input_len = i32::try_from(input.len())
-                .map_err(|_| FunctionError::Compute("input too large for i32 length".into()))?;
+        let call_fn = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, "shamir_call")
+            .map_err(|e| FunctionError::Compute(format!("missing export `shamir_call`: {e}")))?;
 
-            // Allocate space for input in guest memory.
-            let in_ptr = alloc_fn
-                .call(&mut store, input_len)
-                .map_err(|e| map_wasm_error(e, "shamir_alloc"))?;
-            if in_ptr < 0 {
-                return Err(FunctionError::Compute(
-                    "shamir_alloc returned negative pointer".into(),
-                ));
-            }
-            let in_ptr_u = in_ptr as usize;
-            let in_end = in_ptr_u.saturating_add(input.len());
-            if in_end > memory.data_size(&store) {
-                return Err(FunctionError::Compute(
-                    "shamir_alloc pointer outside memory bounds".into(),
-                ));
-            }
+        let input_len = i32::try_from(input.len())
+            .map_err(|_| FunctionError::Compute("input too large for i32 length".into()))?;
 
-            // Write input msgpack into guest memory.
-            memory.data_mut(&mut store)[in_ptr_u..in_end].copy_from_slice(&input);
+        // Allocate space for input in guest memory.
+        let in_ptr = alloc_fn
+            .call_async(&mut store, input_len)
+            .await
+            .map_err(|e| map_wasm_error(e, "shamir_alloc"))?;
+        if in_ptr < 0 {
+            return Err(FunctionError::Compute(
+                "shamir_alloc returned negative pointer".into(),
+            ));
+        }
+        let in_ptr_u = in_ptr as usize;
+        let in_end = in_ptr_u.saturating_add(input.len());
+        if in_end > memory.data_size(&store) {
+            return Err(FunctionError::Compute(
+                "shamir_alloc pointer outside memory bounds".into(),
+            ));
+        }
 
-            // Call the guest function.
-            let packed = call_fn
-                .call(&mut store, (in_ptr, input_len))
-                .map_err(|e| map_wasm_error(e, "shamir_call"))?;
+        // Write input msgpack into guest memory.
+        memory.data_mut(&mut store)[in_ptr_u..in_end].copy_from_slice(&input);
 
-            // Unpack the result pointer/length.
-            let out_ptr = (packed >> 32) as u32 as usize;
-            let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
-            let out_end = out_ptr.saturating_add(out_len);
-            if out_end > memory.data_size(&store) {
-                return Err(FunctionError::Compute(
-                    "result pointer outside memory bounds".into(),
-                ));
-            }
+        // Call the guest function.
+        let packed = call_fn
+            .call_async(&mut store, (in_ptr, input_len))
+            .await
+            .map_err(|e| map_wasm_error(e, "shamir_call"))?;
 
-            Ok(memory.data(&store)[out_ptr..out_end].to_vec())
-        })
-        .await
-        .map_err(|_| FunctionError::Cancelled)??;
+        // Unpack the result pointer/length.
+        let out_ptr = (packed >> 32) as u32 as usize;
+        let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
+        let out_end = out_ptr.saturating_add(out_len);
+        if out_end > memory.data_size(&store) {
+            return Err(FunctionError::Compute(
+                "result pointer outside memory bounds".into(),
+            ));
+        }
+
+        let out = memory.data(&store)[out_ptr..out_end].to_vec();
 
         QueryValue::from_bytes(&out)
             .map_err(|e| FunctionError::Compute(format!("result decode error: {e}")))

@@ -427,3 +427,120 @@ async fn facade_seeds_shamir_env() {
     );
     std::env::remove_var("SHAMIR_S7_FACADE_TEST");
 }
+
+// ── Slice 8a: function-calls-function + async execution ───────────────
+
+/// Source for a function that calls `ctx.call("double", {n: N})` and returns
+/// the result.
+const CALLER_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn caller(ctx: Ctx, _batch: Batch, params: Params) -> Result<Value> {
+    let n: i64 = params.i64("n")?;
+    let args = Value::Map(vec![("n".to_string(), Value::Int(n))]);
+    Ok(ctx.call("double", args))
+}
+"#;
+
+/// Source for a function that unconditionally calls itself (tests depth limit).
+const RECURSE_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn recurse(ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
+    let args = Value::Map(vec![]);
+    ctx.call("recurse", args);
+    Ok(Value::Null)
+}
+"#;
+
+/// Source for a caller that puts into the batch, then calls a callee that reads
+/// from the same batch key.
+const BATCH_WRITER_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn batch_writer(ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
+    _batch.put("shared_key", Value::Int(123));
+    let args = Value::Map(vec![]);
+    Ok(ctx.call("batch_reader", args))
+}
+"#;
+
+const BATCH_READER_SRC: &str = r#"use shamir::prelude::*;
+#[shamir::function]
+pub async fn batch_reader(_ctx: Ctx, batch: Batch, _params: Params) -> Result<Value> {
+    Ok(batch.get("shared_key").unwrap_or(Value::Null))
+}
+"#;
+
+/// A `caller` function invokes `double({n: 21})` and returns the result.
+/// Asserts Int(42).
+#[tokio::test]
+async fn wasm_function_calls_function() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    if !compile_or_skip(&db, "double", DOUBLE_SRC).await {
+        return;
+    }
+    if !compile_or_skip(&db, "caller", CALLER_SRC).await {
+        return;
+    }
+
+    let mut params = Params::new();
+    params.set("n", QueryValue::Int(21));
+
+    let result = db.invoke_function("caller", params).await.unwrap();
+    assert_eq!(
+        result,
+        QueryValue::Int(42),
+        "caller should have received double(21) = 42"
+    );
+}
+
+/// A function that calls itself unconditionally must hit the depth limit and
+/// error (not hang or stack-overflow).
+#[tokio::test]
+async fn wasm_call_depth_limit() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    if !compile_or_skip(&db, "recurse", RECURSE_SRC).await {
+        return;
+    }
+
+    let result = db.invoke_function("recurse", Params::new()).await;
+    assert!(
+        result.is_err(),
+        "recursive call must be rejected by the depth limit"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    // The exact message depends on how the depth-limit trap propagates through
+    // the guest. The key invariant is that it errored (did not hang) and the
+    // error came from the WASM compute path.
+    assert!(
+        err_msg.contains("depth limit")
+            || err_msg.contains("call depth")
+            // The guest SDK panics on host-import trap, surfacing as a wasm backtrace:
+            || (err_msg.contains("shamir_call trap") && err_msg.contains("host_imports")),
+        "error should mention depth limit or call failure, got: {err_msg}"
+    );
+}
+
+/// A caller puts into the batch, then calls a callee that reads the same key.
+/// The callee must see the value the caller wrote — they share the batch context.
+#[tokio::test]
+async fn wasm_call_shares_batch_context() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    if !compile_or_skip(&db, "batch_writer", BATCH_WRITER_SRC).await {
+        return;
+    }
+    if !compile_or_skip(&db, "batch_reader", BATCH_READER_SRC).await {
+        return;
+    }
+
+    let result = db
+        .invoke_function("batch_writer", Params::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        QueryValue::Int(123),
+        "callee should see the value the caller put into the shared batch"
+    );
+}

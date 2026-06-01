@@ -35,6 +35,18 @@ impl Ctx {
     pub fn global_set(&self, key: &str, value: crate::Value) {
         crate::host_imports::global_set(key, value);
     }
+
+    /// Invoke another registered function by name.
+    ///
+    /// `args` should be a `Value::Map` whose entries become the callee's
+    /// `Params`. Returns the callee's result as a `Value`.
+    ///
+    /// If the callee is not found, the recursion depth limit is exceeded,
+    /// or the callee itself errors, the host traps and the current function
+    /// fails with a `Compute` error.
+    pub fn call(&self, name: &str, args: crate::Value) -> crate::Value {
+        crate::host_imports::call(name, args)
+    }
 }
 
 /// The batch the function executes within.
