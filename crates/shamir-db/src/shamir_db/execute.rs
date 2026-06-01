@@ -19,7 +19,7 @@ use crate::DbResult;
 use crate::engine::migration::{MigrationCoordinator, MigrationShadowLog, MigrationState};
 
 use super::shamir_db::ShamirDb;
-use crate::access::{authorize, Action, Actor, ResourcePath};
+use crate::access::{Action, Actor, ResourcePath};
 
 /// TableResolver that resolves TableRef within a DbInstance.
 struct DbTableResolver {
@@ -973,13 +973,14 @@ impl ShamirDb {
         request: &BatchRequest,
     ) -> Result<BatchResponse, BatchError> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
+        self.authorize_access(
             &actor,
             &ResourcePath::Database {
                 db: db_name.to_string(),
             },
             Action::Read,
         )
+        .await
         .map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: e.to_string(),
@@ -1029,13 +1030,14 @@ impl ShamirDb {
         BatchError,
     > {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
+        self.authorize_access(
             &actor,
             &ResourcePath::Database {
                 db: db_name.to_string(),
             },
             Action::Read,
         )
+        .await
         .map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: e.to_string(),
@@ -1076,13 +1078,14 @@ impl ShamirDb {
         tx: &mut crate::engine::tx::TxContext,
     ) -> Result<BatchResponse, BatchError> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
+        self.authorize_access(
             &actor,
             &ResourcePath::Database {
                 db: db_name.to_string(),
             },
             Action::Read,
         )
+        .await
         .map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: e.to_string(),
@@ -1111,13 +1114,14 @@ impl ShamirDb {
         tx: crate::engine::tx::TxContext,
     ) -> Result<TransactionInfo, BatchError> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
+        self.authorize_access(
             &actor,
             &ResourcePath::Database {
                 db: db_name.to_string(),
             },
             Action::Write,
         )
+        .await
         .map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: e.to_string(),

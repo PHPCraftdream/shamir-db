@@ -1,7 +1,9 @@
 use base64::Engine;
 use serde_json::json;
 
-use crate::access::{authorize, Action, Actor, ResourceMeta, ResourcePath};
+use crate::access::{
+    authorize, permits, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
+};
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::function::DbGateway;
 use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry};
@@ -644,7 +646,8 @@ impl ShamirDb {
         replace: bool,
     ) -> DbResult<()> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .await
             .map_err(|e| DbError::Function(e.to_string()))?;
         let opts = CreateFunctionOptions {
             replace,
@@ -665,7 +668,8 @@ impl ShamirDb {
         replace: bool,
     ) -> DbResult<()> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .await
             .map_err(|e| DbError::Function(e.to_string()))?;
         let opts = CreateFunctionOptions {
             replace,
@@ -686,7 +690,8 @@ impl ShamirDb {
         opts: CreateFunctionOptions,
     ) -> DbResult<()> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .await
             .map_err(|e| DbError::Function(e.to_string()))?;
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
@@ -753,13 +758,14 @@ impl ShamirDb {
     /// record and the live entry are removed.
     pub async fn drop_function(&self, name: &str) -> DbResult<bool> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
+        self.authorize_access(
             &actor,
             &ResourcePath::Function {
                 name: name.to_string(),
             },
             Action::Delete,
         )
+        .await
         .map_err(|e| DbError::Function(e.to_string()))?;
         let existed = self.functions.remove(name);
         let _ = self.function_meta.remove(name);
@@ -780,13 +786,14 @@ impl ShamirDb {
     /// Fails if `from` does not exist or `to` is already taken.
     pub async fn rename_function(&self, from: &str, to: &str) -> DbResult<()> {
         let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
+        self.authorize_access(
             &actor,
             &ResourcePath::Function {
                 name: from.to_string(),
             },
             Action::Write,
         )
+        .await
         .map_err(|e| DbError::Function(e.to_string()))?;
         // Load the old catalogue record to re-key it.
         let fn_records = self.system_store.load_functions().await?;
@@ -855,15 +862,17 @@ impl ShamirDb {
     /// between calls). Use [`invoke_function_with_batch`] for multi-call
     /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
-            &actor,
+        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.authorize_access(
+            &caller,
             &ResourcePath::Function {
                 name: name.to_string(),
             },
             Action::Execute,
         )
+        .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
         let ctx = self.build_invoke_ctx(name, actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
@@ -881,15 +890,17 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
-            &actor,
+        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.authorize_access(
+            &caller,
             &ResourcePath::Function {
                 name: name.to_string(),
             },
             Action::Execute,
         )
+        .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
         let ctx = self.build_invoke_ctx(name, actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
@@ -944,15 +955,17 @@ impl ShamirDb {
         name: &str,
         params: Params,
     ) -> DbResult<QueryValue> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
-            &actor,
+        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.authorize_access(
+            &caller,
             &ResourcePath::Function {
                 name: name.to_string(),
             },
             Action::Execute,
         )
+        .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
         let gateway = Arc::new(FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
@@ -965,7 +978,8 @@ impl ShamirDb {
             .with_registry(self.functions.clone())
             .with_db(gateway, repo.to_string())
             .with_net(self.build_net_gateway())
-            .with_secret_grants(grants);
+            .with_secret_grants(grants)
+            .with_actor(actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
@@ -981,15 +995,17 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
-        authorize(
-            &actor,
+        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.authorize_access(
+            &caller,
             &ResourcePath::Function {
                 name: name.to_string(),
             },
             Action::Execute,
         )
+        .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
         let gateway = Arc::new(FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
@@ -1002,7 +1018,8 @@ impl ShamirDb {
             .with_registry(self.functions.clone())
             .with_db(gateway, repo.to_string())
             .with_net(self.build_net_gateway())
-            .with_secret_grants(grants);
+            .with_secret_grants(grants)
+            .with_actor(actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
@@ -1208,6 +1225,94 @@ impl ShamirDb {
     pub async fn user_in_group(&self, user_id: u64, group_id: u64) -> DbResult<bool> {
         let members = self.group_members(group_id).await?;
         Ok(members.contains(&user_id))
+    }
+
+    // ========================================================================
+    // Shomer enforcement gate (P4)
+    // ========================================================================
+
+    /// Enforcing authorization gate.
+    ///
+    /// Performs the full POSIX-style check:
+    /// 1. `Actor::System` → `Ok` immediately (admin bypass, zero overhead
+    ///    beyond the branch — the common live path).
+    /// 2. **Traversal**: for each ancestor in `path.ancestors()` (nearest →
+    ///    Root), the actor needs `Execute` on it. Resolves meta, computes
+    ///    `in_group`, and checks [`permits`].
+    /// 3. **Target**: resolves `resource_meta(path)`, computes `in_group`,
+    ///    and checks [`permits`] for the requested `action`.
+    ///
+    /// On denial, builds an [`AccessError`] identifying the actor, the
+    /// denied path, and the action. The engine-level trace
+    /// ([`authorize`]) is still emitted for observability.
+    pub async fn authorize_access(
+        &self,
+        actor: &Actor,
+        path: &ResourcePath,
+        action: Action,
+    ) -> Result<(), AccessError> {
+        // Engine-level trace (R2) — always emitted.
+        authorize(actor, path, action)?;
+
+        // Admin bypass — the common live path.
+        if matches!(actor, Actor::System) {
+            return Ok(());
+        }
+
+        let user_id = match actor {
+            Actor::User(id) => *id,
+            Actor::System => unreachable!(),
+        };
+
+        // Traversal: each ancestor needs Execute.
+        for anc in path.ancestors() {
+            let anc_meta = self.resource_meta(&anc).await;
+            let in_group = self.resolve_in_group(user_id, &anc_meta).await;
+            if !permits(actor, &anc_meta, Action::Execute, in_group) {
+                return Err(AccessError {
+                    actor: actor.clone(),
+                    path: anc.to_string(),
+                    action: Action::Execute,
+                });
+            }
+        }
+
+        // Target check.
+        let meta = self.resource_meta(path).await;
+        let in_group = self.resolve_in_group(user_id, &meta).await;
+        if permits(actor, &meta, action, in_group) {
+            Ok(())
+        } else {
+            Err(AccessError {
+                actor: actor.clone(),
+                path: path.to_string(),
+                action,
+            })
+        }
+    }
+
+    /// Resolve whether the user belongs to the group specified in `meta`.
+    ///
+    /// Returns `false` if the meta has no group or the lookup fails.
+    async fn resolve_in_group(&self, user_id: u64, meta: &ResourceMeta) -> bool {
+        match meta.group {
+            Some(gid) => self.user_in_group(user_id, gid).await.unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// Resolve the effective actor for function invocation.
+    ///
+    /// If the function's metadata has the setuid flag set, the function
+    /// runs with its owner's authority (definer rights). Otherwise the
+    /// caller's actor is used unchanged.
+    pub async fn effective_fn_actor(&self, fn_name: &str, caller: &Actor) -> Actor {
+        let meta = self.resource_meta(&ResourcePath::function(fn_name)).await;
+        if Mode::is_setuid(meta.mode) {
+            meta.owner
+        } else {
+            caller.clone()
+        }
     }
 }
 
