@@ -2,12 +2,16 @@
 //!
 //! Covers: create → invoke → rename → invoke → drop, persistence across
 //! re-open, and (toolchain-gated) source compilation.
+//!
+//! Slice 5 additions: batch context exchange + global variables (native fns).
 
+use async_trait::async_trait;
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
-use shamir_engine::function::Params;
+use shamir_engine::function::{FnBatch, FnCtx, FunctionError, Params, ShamirFunction};
 use shamir_storage::error::DbError;
 use shamir_types::types::value::QueryValue;
+use std::sync::Arc;
 
 /// Identity-echo WAT matching the slice-2 ABI.
 ///
@@ -194,4 +198,102 @@ async fn source_function_full_lifecycle() {
     // delete.
     assert!(db.drop_function("times_two").await.unwrap());
     assert!(db.invoke_function("times_two", params).await.is_err());
+}
+
+// ── Slice 5: native test functions for batch context + globals ────────
+
+/// Writes `batch.put("tmp", Int(99))` and returns `Null`.
+struct Producer;
+
+#[async_trait]
+impl ShamirFunction for Producer {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        batch.put("tmp", QueryValue::Int(99));
+        Ok(QueryValue::Null)
+    }
+}
+
+/// Returns `batch.get("tmp")`, falling back to `Null`.
+struct Consumer;
+
+#[async_trait]
+impl ShamirFunction for Consumer {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        Ok(batch.get("tmp").unwrap_or(QueryValue::Null))
+    }
+}
+
+/// Reads `ctx.global_get("counter")` (default 0), increments, sets it
+/// back, returns the new value.
+struct GlobalBump;
+
+#[async_trait]
+impl ShamirFunction for GlobalBump {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        let current = match ctx.global_get("counter") {
+            Some(QueryValue::Int(n)) => n,
+            _ => 0,
+        };
+        let next = current + 1;
+        ctx.global_set("counter", QueryValue::Int(next));
+        Ok(QueryValue::Int(next))
+    }
+}
+
+#[tokio::test]
+async fn facade_batch_context_exchange() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    db.functions()
+        .register("producer", Arc::new(Producer))
+        .unwrap();
+    db.functions()
+        .register("consumer", Arc::new(Consumer))
+        .unwrap();
+
+    let ctx = db.new_batch_context();
+
+    db.invoke_function_with_batch("producer", Params::new(), &ctx)
+        .await
+        .unwrap();
+
+    let result = db
+        .invoke_function_with_batch("consumer", Params::new(), &ctx)
+        .await
+        .unwrap();
+
+    assert_eq!(result, QueryValue::Int(99));
+}
+
+#[tokio::test]
+async fn facade_globals_shared() {
+    let db = ShamirDb::init_memory().await.unwrap();
+
+    db.functions()
+        .register("bump", Arc::new(GlobalBump))
+        .unwrap();
+
+    let r1 = db.invoke_function("bump", Params::new()).await.unwrap();
+    assert_eq!(r1, QueryValue::Int(1));
+
+    let r2 = db.invoke_function("bump", Params::new()).await.unwrap();
+    assert_eq!(r2, QueryValue::Int(2));
+
+    // Verify through the globals accessor directly.
+    assert_eq!(db.globals().get("counter"), Some(QueryValue::Int(2)));
 }

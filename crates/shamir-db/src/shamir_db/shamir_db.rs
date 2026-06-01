@@ -8,8 +8,8 @@ use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_engine::function::{
-    compile_rust_source, FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, WasmEngine,
-    WasmFunction, WasmLimits,
+    compile_rust_source, BatchContext, FnBatch, FnCtx, FunctionError, FunctionRegistry, GlobalVars,
+    Params, WasmEngine, WasmFunction, WasmLimits,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,6 +51,8 @@ pub struct ShamirDb {
     functions: Arc<FunctionRegistry>,
     /// Shared Wasmtime engine used for all WASM function invocations.
     wasm_engine: Arc<WasmEngine>,
+    /// Database-global variables shared across all function invocations.
+    globals: Arc<GlobalVars>,
 }
 
 impl ShamirDb {
@@ -67,6 +69,7 @@ impl ShamirDb {
         let wasm_engine =
             Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
         let functions = Arc::new(FunctionRegistry::with_builtins());
+        let globals = Arc::new(GlobalVars::new());
 
         let shamir = Self {
             dbs,
@@ -75,6 +78,7 @@ impl ShamirDb {
             active_migrations,
             functions,
             wasm_engine,
+            globals,
         };
 
         // Load existing databases from system store
@@ -708,10 +712,50 @@ impl ShamirDb {
     }
 
     /// Invoke a function by name with the given parameters.
+    ///
+    /// Each call gets a fresh per-invocation batch context (no data sharing
+    /// between calls). Use [`invoke_function_with_batch`] for multi-call
+    /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
         self.functions
-            .invoke(name, &FnCtx::new(), &FnBatch::new(), &params)
+            .invoke(
+                name,
+                &FnCtx::with_globals(self.globals.clone()),
+                &FnBatch::new(),
+                &params,
+            )
             .await
             .map_err(|e| DbError::Function(e.to_string()))
+    }
+
+    /// Invoke a function sharing an existing batch context.
+    ///
+    /// Multiple invocations sharing the same `batch` can exchange data
+    /// through it ("function A writes, function B reads").
+    pub async fn invoke_function_with_batch(
+        &self,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+    ) -> DbResult<QueryValue> {
+        self.functions
+            .invoke(
+                name,
+                &FnCtx::with_globals(self.globals.clone()),
+                &FnBatch::with_context(batch.clone()),
+                &params,
+            )
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))
+    }
+
+    /// Access the database-global variables store.
+    pub fn globals(&self) -> &Arc<GlobalVars> {
+        &self.globals
+    }
+
+    /// Create a fresh batch context for use with [`invoke_function_with_batch`].
+    pub fn new_batch_context(&self) -> Arc<BatchContext> {
+        Arc::new(BatchContext::new())
     }
 }
