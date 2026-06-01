@@ -46,6 +46,7 @@ rust-stemmers = "1.2"    # snowball stemming for FTS tokenizers
 scc = "2.2"               # lock-free concurrent hashmap (index2::registry)
 arc-swap = "1.7"          # RCU-style atomic Arc swap (index2::actor snapshots)
 hnsw_rs = "0.3"           # HNSW approximate nearest neighbor (vector index)
+argon2 = "0.5"            # function::builtin argon2id (matches shamir-connect)
 
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
