@@ -15,8 +15,9 @@ use crate::{DbError, DbResult};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use shamir_engine::function::{
-    compile_rust_source, BatchContext, EnvPolicy, FnBatch, FnCtx, FunctionError, FunctionRegistry,
-    GlobalVars, NetGateway, Params, WasmEngine, WasmFunction, WasmLimits,
+    compile_rust_source, BatchContext, CreateFunctionOptions, EnvPolicy, FnBatch, FnCtx,
+    FunctionError, FunctionMeta, FunctionRegistry, GlobalVars, NetGateway, Params, WasmEngine,
+    WasmFunction, WasmLimits,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +28,14 @@ use crate::engine::migration::MigrationCoordinator;
 use super::system_store::{SystemStore, SystemStoreConfig};
 
 const SYSTEM_DB_NAME: &str = "__system__";
+
+/// Input source for [`ShamirDb::create_function_with_opts`].
+pub enum FunctionSource<'a> {
+    /// Pre-compiled WASM binary bytes.
+    Wasm(&'a [u8]),
+    /// Rust source code to compile.
+    Source(&'a str),
+}
 
 /// Top-level manager for multiple database instances.
 ///
@@ -62,6 +71,9 @@ pub struct ShamirDb {
     globals: Arc<GlobalVars>,
     /// Network egress allowlist (host patterns). Default empty = deny all.
     net_allowlist: Arc<Vec<String>>,
+    /// Per-function metadata (visibility, security, secret_grants).
+    /// Populated on create/load, updated on rename, removed on drop.
+    function_meta: DashMap<String, FunctionMeta>,
 }
 
 impl ShamirDb {
@@ -101,6 +113,7 @@ impl ShamirDb {
             wasm_engine,
             globals,
             net_allowlist: Arc::new(Vec::new()),
+            function_meta: DashMap::new(),
         };
 
         // Load existing databases from system store
@@ -229,6 +242,9 @@ impl ShamirDb {
                             name
                         );
                     }
+                    // Populate in-memory metadata from the persisted record.
+                    let meta = FunctionMeta::from_record(rec);
+                    let _ = shamir.function_meta.insert(name.clone(), meta);
                 }
                 Err(e) => {
                     log::warn!(
@@ -607,40 +623,12 @@ impl ShamirDb {
         wasm: &[u8],
         replace: bool,
     ) -> DbResult<()> {
-        // Validate the wasm by compiling it.
-        let wf = WasmFunction::from_binary(self.wasm_engine.clone(), wasm, WasmLimits::default())
-            .map_err(|e| DbError::Function(e.to_string()))?;
-
-        let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(wasm);
-        let wasm_hash = format!("{:016x}", fxhash::hash64(wasm));
-
-        if !replace && self.functions.contains(name) {
-            return Err(DbError::Function(format!(
-                "function '{}' already exists",
-                name
-            )));
-        }
-
-        let version = 1u64;
-        let record = json!({
-            "name": name,
-            "wasm_b64": wasm_b64,
-            "wasm_hash": wasm_hash,
-            "lang": "wasm",
-            "source": null,
-            "version": version,
-        });
-        self.system_store.save_function(name, &record).await?;
-
-        if replace {
-            self.functions.replace(name, Arc::new(wf));
-        } else {
-            self.functions
-                .register(name, Arc::new(wf))
-                .map_err(|e| DbError::Function(e.to_string()))?;
-        }
-
-        Ok(())
+        let opts = CreateFunctionOptions {
+            replace,
+            ..CreateFunctionOptions::default()
+        };
+        self.create_function_with_opts(name, FunctionSource::Wasm(wasm), opts)
+            .await
     }
 
     /// Compile a Rust source string to WASM and register the function.
@@ -653,27 +641,76 @@ impl ShamirDb {
         source: &str,
         replace: bool,
     ) -> DbResult<()> {
-        let wasm = compile_rust_source(source).map_err(|e| match e {
-            FunctionError::ToolchainUnavailable(msg) => {
-                DbError::Function(format!("toolchain unavailable: {}", msg))
+        let opts = CreateFunctionOptions {
+            replace,
+            ..CreateFunctionOptions::default()
+        };
+        self.create_function_with_opts(name, FunctionSource::Source(source), opts)
+            .await
+    }
+
+    /// Canonical function creation with full options (slice 9).
+    ///
+    /// `source_or_wasm` is either a pre-compiled binary or Rust source.
+    /// `opts` carries replace, visibility, security, and secret_grants.
+    pub async fn create_function_with_opts(
+        &self,
+        name: &str,
+        source: FunctionSource<'_>,
+        opts: CreateFunctionOptions,
+    ) -> DbResult<()> {
+        let (wasm, lang_tag, source_str) = match source {
+            FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
+            FunctionSource::Source(src) => {
+                let compiled = compile_rust_source(src).map_err(|e| match e {
+                    FunctionError::ToolchainUnavailable(msg) => {
+                        DbError::Function(format!("toolchain unavailable: {}", msg))
+                    }
+                    other => DbError::Function(other.to_string()),
+                })?;
+                (compiled, "rust", Some(src.to_string()))
             }
-            other => DbError::Function(other.to_string()),
-        })?;
+        };
 
-        self.create_function_from_wasm(name, &wasm, replace).await?;
+        // Validate the wasm by compiling it.
+        let wf = WasmFunction::from_binary(self.wasm_engine.clone(), &wasm, WasmLimits::default())
+            .map_err(|e| DbError::Function(e.to_string()))?;
 
-        // Overwrite the record with source metadata.
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
         let wasm_hash = format!("{:016x}", fxhash::hash64(&wasm));
-        let record = json!({
+
+        if !opts.replace && self.functions.contains(name) {
+            return Err(DbError::Function(format!(
+                "function '{}' already exists",
+                name
+            )));
+        }
+
+        let meta = FunctionMeta::new(opts.visibility, opts.security, opts.secret_grants.clone());
+
+        let version = 1u64;
+        let mut record = json!({
             "name": name,
             "wasm_b64": wasm_b64,
             "wasm_hash": wasm_hash,
-            "lang": "rust",
-            "source": source,
-            "version": 1u64,
+            "lang": lang_tag,
+            "source": source_str,
+            "version": version,
         });
+        meta.inject_into(&mut record);
         self.system_store.save_function(name, &record).await?;
+
+        if opts.replace {
+            self.functions.replace(name, Arc::new(wf));
+        } else {
+            self.functions
+                .register(name, Arc::new(wf))
+                .map_err(|e| DbError::Function(e.to_string()))?;
+        }
+
+        // Populate in-memory metadata.
+        let _ = self.function_meta.remove(name);
+        let _ = self.function_meta.insert(name.to_string(), meta);
 
         Ok(())
     }
@@ -685,6 +722,7 @@ impl ShamirDb {
     /// record and the live entry are removed.
     pub async fn drop_function(&self, name: &str) -> DbResult<bool> {
         let existed = self.functions.remove(name);
+        let _ = self.function_meta.remove(name);
         // Best-effort catalogue removal — ignore if there was no durable record
         // (e.g. builtins don't have one).
         if let Err(e) = self.system_store.remove_function(name).await {
@@ -713,6 +751,11 @@ impl ShamirDb {
             .rename(from, to)
             .map_err(|e| DbError::Function(e.to_string()))?;
 
+        // Migrate in-memory metadata.
+        if let Some((_, meta)) = self.function_meta.remove(from) {
+            self.function_meta.insert(to.to_string(), meta);
+        }
+
         // If there was a durable record, re-key it.
         if let Some(mut rec) = old_record {
             self.system_store.remove_function(from).await?;
@@ -733,15 +776,33 @@ impl ShamirDb {
         Ok(names)
     }
 
+    /// Look up a function's in-memory metadata.
+    ///
+    /// Returns `None` for builtins (they have no catalogue entry).
+    pub fn function_meta(&self, name: &str) -> Option<FunctionMeta> {
+        self.function_meta.get(name).map(|r| r.value().clone())
+    }
+
+    /// Build an [`FnCtx`] with globals, registry, net gateway, and the
+    /// function's secret_grants from [`function_meta`].
+    fn build_invoke_ctx(&self, fn_name: &str) -> FnCtx {
+        let grants = self
+            .function_meta(fn_name)
+            .map(|m| m.secret_grants)
+            .unwrap_or_default();
+        FnCtx::with_globals(self.globals.clone())
+            .with_registry(self.functions.clone())
+            .with_net(self.build_net_gateway())
+            .with_secret_grants(grants)
+    }
+
     /// Invoke a function by name with the given parameters.
     ///
     /// Each call gets a fresh per-invocation batch context (no data sharing
     /// between calls). Use [`invoke_function_with_batch`] for multi-call
     /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
-        let ctx = FnCtx::with_globals(self.globals.clone())
-            .with_registry(self.functions.clone())
-            .with_net(self.build_net_gateway());
+        let ctx = self.build_invoke_ctx(name);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
@@ -758,9 +819,7 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
-        let ctx = FnCtx::with_globals(self.globals.clone())
-            .with_registry(self.functions.clone())
-            .with_net(self.build_net_gateway());
+        let ctx = self.build_invoke_ctx(name);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
@@ -818,10 +877,15 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
         });
+        let grants = self
+            .function_meta(name)
+            .map(|m| m.secret_grants)
+            .unwrap_or_default();
         let ctx = FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
             .with_db(gateway, repo.to_string())
-            .with_net(self.build_net_gateway());
+            .with_net(self.build_net_gateway())
+            .with_secret_grants(grants);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
             .await
@@ -841,10 +905,15 @@ impl ShamirDb {
             shamir: self.clone(),
             db_name: db_name.to_string(),
         });
+        let grants = self
+            .function_meta(name)
+            .map(|m| m.secret_grants)
+            .unwrap_or_default();
         let ctx = FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
             .with_db(gateway, repo.to_string())
-            .with_net(self.build_net_gateway());
+            .with_net(self.build_net_gateway())
+            .with_secret_grants(grants);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
             .await
