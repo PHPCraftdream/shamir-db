@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 
 use shamir_server::backup;
 use shamir_server::config::Config;
-use shamir_server::server::{BootstrapMode, ServerLauncher};
+use shamir_server::server::BootstrapMode;
 
 #[derive(Parser, Debug)]
 #[command(name = "shamir-server", version, about = "ShamirDB production server")]
@@ -39,14 +39,19 @@ struct Cli {
     #[arg(long)]
     skip_bootstrap: bool,
 
-    /// Optional subcommand. Without one the server runs normally; with
-    /// `backup` it performs a one-shot snapshot and exits.
+    /// Optional subcommand. Without one (or with `run`) the server runs
+    /// normally in the foreground; with `backup` it performs a one-shot
+    /// snapshot and exits.
     #[command(subcommand)]
     command: Option<Subcmd>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Subcmd {
+    /// Run in the foreground (default). Ctrl+C / SIGTERM → graceful
+    /// shutdown. Omitting a subcommand is equivalent to `run`.
+    Run,
+
     /// Snapshot `data_dir` (from --config) into `<to>/<UTC-timestamp>/`.
     /// **Server should be stopped first** for a fully consistent snapshot.
     /// redb's per-page CRC + atomic-commit design means a copy taken
@@ -101,9 +106,10 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_file(&cli.config)?;
     config.validate()?;
 
-    let filter = tracing_subscriber::EnvFilter::try_new(&config.logging.level)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Non-blocking logging: log events flow through a lock-free MPSC
+    // channel to a background writer thread so emitting never blocks a
+    // worker. The guard must live until process exit for a clean flush.
+    let _log_guard = shamir_server::logging::init(&config.logging);
 
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
     // the server.
@@ -139,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
             shamir_server::access_tree::run(&config, &args).await?;
             return Ok(());
         }
-        None => {}
+        Some(Subcmd::Run) | None => {}
     }
 
     tracing::info!(data_dir = ?config.data_dir, "shamir-server boot");
@@ -160,17 +166,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
-    let handle = launcher.launch().await?;
-    tracing::info!(
-        bound = ?handle.bound_addrs.iter().filter_map(|a| *a).collect::<Vec<_>>(),
-        "shamir-server ready",
-    );
-
-    // SIGINT-aware wait. (Windows: Ctrl-C; Unix: SIGINT.)
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutting down");
-
-    handle.shutdown().await;
-    Ok(())
+    shamir_server::runtime::serve(
+        config,
+        bootstrap,
+        shamir_server::runtime::foreground_shutdown(),
+    )
+    .await
 }

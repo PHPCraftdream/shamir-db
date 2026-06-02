@@ -155,6 +155,8 @@ fn make_test_config(temp: &TempDir) -> Config {
         logging: LoggingConfig {
             level: "warn".into(),
             slow_query_threshold_ms: 0,
+            file: None,
+            flush_interval_ms: 2000,
         },
         kdf_defaults: fast_kdf(),
         argon2_concurrent_max: 4,

@@ -294,23 +294,35 @@ pub struct LoggingConfig {
     /// 1000 ms (1 second).
     #[serde(default = "default_slow_query_threshold_ms")]
     pub slow_query_threshold_ms: u64,
+    /// Optional file path for batched log output. When `None` (default)
+    /// logs go to stdout via the non-blocking appender (slice 1). When
+    /// `Some(path)`, logs are written to a file through an in-memory
+    /// buffer flushed every `flush_interval_ms` or on shutdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// How often (ms) the batched file writer flushes its in-memory
+    /// buffer to disk. Only used when `file` is `Some`. Default 2000 ms.
+    #[serde(default = "default_log_flush_interval_ms")]
+    pub flush_interval_ms: u64,
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        // Hand-rolled rather than `#[derive(Default)]` so the level
-        // matches the per-field `default_log_level` instead of falling
-        // back to `String::default()` when the whole `logging` block is
-        // omitted from the config.
         Self {
             level: default_log_level(),
             slow_query_threshold_ms: default_slow_query_threshold_ms(),
+            file: None,
+            flush_interval_ms: default_log_flush_interval_ms(),
         }
     }
 }
 
 fn default_slow_query_threshold_ms() -> u64 {
     1_000
+}
+
+fn default_log_flush_interval_ms() -> u64 {
+    2_000
 }
 
 /// Argon2id KDF parameters (spec §3.7).
@@ -459,6 +471,12 @@ impl Config {
                 "security.auth_init_rate_per_second must be in 1..=100_000 (got {})",
                 self.security.auth_init_rate_per_second
             )));
+        }
+
+        if self.logging.flush_interval_ms == 0 {
+            return Err(ConfigError::Validation(
+                "logging.flush_interval_ms must be >= 1".into(),
+            ));
         }
 
         if self.listeners.is_empty() {
