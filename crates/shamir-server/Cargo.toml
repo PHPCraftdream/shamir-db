@@ -78,6 +78,7 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false }
 metrics-process = "2"
 
 [dev-dependencies]
+fxhash = "0.2"
 hex = "0.4"
 # E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM —
 # brought in here too so dev-only test paths see the same crate version.
