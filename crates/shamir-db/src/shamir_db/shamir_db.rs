@@ -78,6 +78,12 @@ pub struct ShamirDb {
     /// Per-function metadata (visibility, security, secret_grants).
     /// Populated on create/load, updated on rename, removed on drop.
     function_meta: DashMap<String, FunctionMeta>,
+    /// Base directory for durable repos, derived from the system store
+    /// config. `Some(p)` when the system store is redb-backed (production),
+    /// `None` for in-memory (tests). Wire-created repos default to a
+    /// durable redb engine under this root; in-memory homes fall back to
+    /// in-memory repos — coherent with the home's durability class.
+    data_root: Option<std::path::PathBuf>,
 }
 
 impl ShamirDb {
@@ -97,6 +103,12 @@ impl ShamirDb {
         config: SystemStoreConfig,
         policy: EnvPolicy,
     ) -> DbResult<Self> {
+        // Derive data_root BEFORE `config` is moved into SystemStore::init.
+        let data_root: Option<std::path::PathBuf> = match &config {
+            SystemStoreConfig::InMemory => None,
+            SystemStoreConfig::Redb(p) => p.parent().map(|d| d.to_path_buf()),
+        };
+
         let system_store = SystemStore::init(config).await?;
 
         let dbs = Arc::new(DashMap::new());
@@ -118,6 +130,7 @@ impl ShamirDb {
             globals,
             net_allowlist: Arc::new(Vec::new()),
             function_meta: DashMap::new(),
+            data_root,
         };
 
         // Load existing databases from system store
@@ -281,6 +294,12 @@ impl ShamirDb {
 
     pub fn active_migrations(&self) -> &Arc<DashMap<String, Arc<MigrationCoordinator>>> {
         &self.active_migrations
+    }
+
+    /// Base directory for durable repos. `Some` when the system store
+    /// is redb-backed (production), `None` for in-memory (tests).
+    pub fn data_root(&self) -> Option<&std::path::Path> {
+        self.data_root.as_deref()
     }
 
     fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {
