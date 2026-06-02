@@ -26,16 +26,12 @@ pub struct DropDbOp {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateRepoOp {
     pub create_repo: String,
-    #[serde(default = "default_engine")]
-    pub engine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<String>,
-}
-
-fn default_engine() -> String {
-    "in_memory".to_string()
 }
 
 /// Drop a repository.

@@ -68,12 +68,34 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateRepo(op) => {
-                let factory = match op.engine.as_str() {
-                    "in_memory" => BoxRepoFactory::in_memory(),
-                    engine => return Err(err(format!(
-                        "Unsupported engine '{}'. Supported: in_memory. Disk engines require path config.",
-                        engine
-                    ))),
+                let factory = match op.engine.as_deref() {
+                    Some("in_memory") => BoxRepoFactory::in_memory(),
+                    Some("redb") | None => {
+                        // Durable default: if the home has a data_root,
+                        // use a redb file under data_root/<db>/<repo>.redb.
+                        // In-memory home (tests) falls back to in_memory.
+                        match self.shamir.data_root() {
+                            Some(root) => {
+                                let db_dir = root.join(&self.db_name);
+                                std::fs::create_dir_all(&db_dir).map_err(|e| {
+                                    err(format!(
+                                        "failed to create repo directory '{}': {}",
+                                        db_dir.display(),
+                                        e
+                                    ))
+                                })?;
+                                let path = db_dir.join(format!("{}.redb", op.create_repo));
+                                BoxRepoFactory::redb_raw(path)
+                            }
+                            None => BoxRepoFactory::in_memory(),
+                        }
+                    }
+                    Some(other) => {
+                        return Err(err(format!(
+                            "Unsupported engine '{}'. Supported: in_memory, redb.",
+                            other
+                        )));
+                    }
                 };
 
                 let mut config = RepoConfig::new(&op.create_repo, factory);
