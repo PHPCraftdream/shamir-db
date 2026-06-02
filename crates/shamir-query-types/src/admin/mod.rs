@@ -4,8 +4,8 @@ pub mod access;
 pub mod types;
 
 pub use access::{
-    AddGroupMemberOp, ChgrpOp, ChmodOp, ChownOp, CreateGroupOp, DropGroupOp, GroupRef,
-    RemoveGroupMemberOp, ResourceRef,
+    AccessTreeOp, AddGroupMemberOp, ChgrpOp, ChmodOp, ChownOp, CreateGroupOp, DropGroupOp,
+    GroupRef, RemoveGroupMemberOp, ResourceRef,
 };
 pub use types::{
     AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, CommitMigrationOp, CreateDbOp,

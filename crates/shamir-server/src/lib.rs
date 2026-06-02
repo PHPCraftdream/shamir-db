@@ -14,6 +14,7 @@
 //! - [`scheduler`] — background tasks (gc, checkpoint, identity finalize).
 //! - [`db_handler`] — `RequestHandler` bridge to `ShamirDb` query layer.
 
+pub mod access_tree;
 pub mod audit_appender;
 pub mod backup;
 pub mod bootstrap;

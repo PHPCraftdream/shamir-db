@@ -147,3 +147,36 @@ pub struct RemoveGroupMemberOp {
     pub remove_group_member: GroupRef,
     pub user: u64,
 }
+
+// ============================================================================
+// Access tree (read-only introspection)
+// ============================================================================
+
+/// Request the access-control tree: the resource hierarchy
+/// (Root→Database→Store→Table) with `owner:group` and POSIX mode on
+/// every node, plus the principals (users and groups with membership)
+/// and the stored functions with their mode/setuid.
+///
+/// ```json
+/// { "access_tree": true }
+/// { "access_tree": true, "depth": 2 }
+/// { "access_tree": true, "db": "mydb" }
+/// ```
+///
+/// `depth` caps the resource hierarchy: `0` = root only, `1` = databases,
+/// `2` = stores, `3` = tables (the default / current maximum). Functions
+/// and principals are always included regardless of `depth`.
+///
+/// Reading the tree requires `Manage` on the root (admin authority);
+/// non-admin callers are denied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessTreeOp {
+    /// Discriminator flag — always `true`.
+    pub access_tree: bool,
+    /// Resource-depth cap (see struct docs). `None` → full depth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u32>,
+    /// Restrict the resource tree to a single database by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
+}
