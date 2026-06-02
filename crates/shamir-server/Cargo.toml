@@ -21,6 +21,10 @@ shamir-transport-ws = { path = "../shamir-transport-ws" }
 shamir-db = { path = "../shamir-db" }
 shamir-query-types = { path = "../shamir-query-types" }
 shamir-tx = { path = "../shamir-tx" }
+# High-level TLS+SCRAM client — powers the `access-tree --connect` online
+# mode so the one binary can introspect a *running* server, not just a
+# stopped data_dir.
+shamir-client = { path = "../shamir-client" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

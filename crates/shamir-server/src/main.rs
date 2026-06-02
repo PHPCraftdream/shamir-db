@@ -58,6 +58,35 @@ enum Subcmd {
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
     },
+
+    /// Render the Shomer access-control tree (resources + functions +
+    /// principals) and exit. Offline by default (opens `data_dir` from
+    /// `--config`; the server must be stopped). With `--connect` it
+    /// authenticates to a running server as an admin instead.
+    AccessTree {
+        /// Resource-depth cap: 0=root, 1=db, 2=store, 3=table. Default: full.
+        #[arg(long, value_name = "N")]
+        depth: Option<u32>,
+        /// Restrict the resource tree to a single database.
+        #[arg(long, value_name = "DB")]
+        db: Option<String>,
+        /// Emit raw JSON instead of the rendered ASCII tree.
+        #[arg(long)]
+        json: bool,
+        /// Online mode: connect to a running server at `host:port` and
+        /// request the tree over TLS+SCRAM (requires admin credentials).
+        #[arg(long, value_name = "ADDR")]
+        connect: Option<String>,
+        /// SNI hostname for TLS in online mode (matches the server cert).
+        #[arg(long, value_name = "NAME", default_value = "localhost")]
+        server_name: String,
+        /// Username for online mode (must be an admin).
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
+        /// Password for online mode; falls back to `$SHAMIR_PASSWORD`.
+        #[arg(long, value_name = "PASSWORD")]
+        password: Option<String>,
+    },
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -76,16 +105,41 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    // Subcommand dispatch — `backup` exits without booting the server.
-    if let Some(Subcmd::Backup { to }) = cli.command {
-        let report = backup::backup(&config.data_dir, &to)?;
-        println!(
-            "backup ok: {} files, {} bytes → {}",
-            report.files_copied,
-            report.bytes_copied,
-            report.dest_dir.display()
-        );
-        return Ok(());
+    // Subcommand dispatch — `backup` / `access-tree` exit without booting
+    // the server.
+    match cli.command {
+        Some(Subcmd::Backup { to }) => {
+            let report = backup::backup(&config.data_dir, &to)?;
+            println!(
+                "backup ok: {} files, {} bytes → {}",
+                report.files_copied,
+                report.bytes_copied,
+                report.dest_dir.display()
+            );
+            return Ok(());
+        }
+        Some(Subcmd::AccessTree {
+            depth,
+            db,
+            json,
+            connect,
+            server_name,
+            user,
+            password,
+        }) => {
+            let args = shamir_server::access_tree::AccessTreeArgs {
+                depth,
+                db,
+                json,
+                connect,
+                server_name,
+                user,
+                password,
+            };
+            shamir_server::access_tree::run(&config, &args).await?;
+            return Ok(());
+        }
+        None => {}
     }
 
     tracing::info!(data_dir = ?config.data_dir, "shamir-server boot");

@@ -999,6 +999,22 @@ impl AdminExecutor for ShamirAdminExecutor {
                 })))
             }
 
+            BatchOp::AccessTree(op) => {
+                // Admin-only: reading the whole access fabric requires
+                // `Manage` on the root. `System` bypasses; a non-admin
+                // `User` actor is denied here.
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let tree = self
+                    .shamir
+                    .access_tree(op.depth, op.db.as_deref())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({ "access_tree": tree })))
+            }
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }

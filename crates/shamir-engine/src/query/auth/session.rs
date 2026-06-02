@@ -345,8 +345,8 @@ impl SessionPermissions {
             | BatchOp::RollbackMigration(_)
             | BatchOp::MigrationStatus(_) => (Action::Alter, Resource::Global),
 
-            // List — read on global
-            BatchOp::List(_) => (Action::Read, Resource::Global),
+            // List + access-tree introspection — read on global
+            BatchOp::List(_) | BatchOp::AccessTree(_) => (Action::Read, Resource::Global),
 
             // Access-control DDL (S3) — admin manage operations
             BatchOp::Chmod(_)

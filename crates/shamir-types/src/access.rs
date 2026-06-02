@@ -17,6 +17,20 @@ use std::fmt;
 /// `Actor::User(id)` serialises to the user's numeric id.
 pub const OWNER_SYSTEM: u64 = 0;
 
+/// Canonical principal id for a username.
+///
+/// Hashes the username with fxhash and masks to 63 bits so the id always
+/// fits an `i64`: the catalogue stores integers as `i64` (owner /
+/// group-member ids round-trip through JSON→InnerValue→msgpack), and a
+/// `u64` above `i64::MAX` would be lost on read-back. The wire session
+/// layer and the access-tree resolver both call this, so an owner id on a
+/// resource resolves back to the same username everywhere. The reserved
+/// `System` actor keeps id `0` ([`OWNER_SYSTEM`]); a username hashing to
+/// `0` is astronomically unlikely and would merely alias the system id.
+pub fn principal_id(username: &str) -> u64 {
+    fxhash::hash64(username) & (i64::MAX as u64)
+}
+
 impl Actor {
     /// Persist-friendly u64 encoding: `System` → [`OWNER_SYSTEM`],
     /// `User(id)` → `id`.
@@ -642,6 +656,44 @@ mod tests {
         assert_eq!(Actor::from_owner_id(OWNER_SYSTEM), Actor::System);
         assert_eq!(Actor::User(42).to_owner_id(), 42);
         assert_eq!(Actor::from_owner_id(42), Actor::User(42));
+    }
+
+    #[test]
+    fn principal_id_is_deterministic_and_distinct() {
+        // Stable across calls for the same name.
+        assert_eq!(principal_id("alice"), principal_id("alice"));
+        // Distinct names hash apart (no trivial collision for these).
+        assert_ne!(principal_id("alice"), principal_id("bob"));
+    }
+
+    #[test]
+    fn principal_id_always_fits_i64() {
+        // The catalogue stores ids as i64; every principal id must be
+        // <= i64::MAX so it survives the JSON→InnerValue→msgpack round-trip
+        // (the root cause of the empty group-member bug in HIGH-7).
+        for name in [
+            "",
+            "a",
+            "admin",
+            "alice",
+            "bob",
+            "Σίσυφος",
+            "очень-длинное-имя-пользователя-1234567890",
+        ] {
+            assert!(
+                principal_id(name) <= i64::MAX as u64,
+                "principal_id({name:?}) overflowed i64"
+            );
+        }
+    }
+
+    #[test]
+    fn principal_id_round_trips_through_actor_owner_id() {
+        // A user id derived from a name must decode back to the same
+        // `Actor::User`, never aliasing the reserved System id.
+        let id = principal_id("alice");
+        assert_ne!(id, OWNER_SYSTEM);
+        assert_eq!(Actor::from_owner_id(id), Actor::User(id));
     }
 
     #[test]

@@ -397,6 +397,18 @@ impl SystemStore {
         Ok(())
     }
 
+    /// Load every persisted user record (including `password_hash` —
+    /// callers that surface these must strip secret fields themselves).
+    pub async fn load_users(&self) -> DbResult<Vec<serde_json::Value>> {
+        let table = self.table(TABLE_USERS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_USERS);
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records)
+    }
+
     /// Load every persisted function catalogue record.
     pub async fn load_functions(&self) -> DbResult<Vec<serde_json::Value>> {
         let table = self.table(TABLE_FUNCTIONS).await?;

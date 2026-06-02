@@ -7,10 +7,11 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AddGroupMemberOp, AlterBufferConfigOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp,
-    CreateDbOp, CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, DropDbOp, DropGroupOp,
-    DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp, MigrationStatusOp,
-    RemoveGroupMemberOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
+    AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, ChgrpOp, ChmodOp, ChownOp,
+    CommitMigrationOp, CreateDbOp, CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
+    DropDbOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp,
+    MigrationStatusOp, RemoveGroupMemberOp, RollbackMigrationOp, SetBufferConfigOp,
+    StartMigrationOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::read::{QueryResult, ReadQuery};
@@ -82,6 +83,9 @@ pub enum BatchOp {
     DropGroup(DropGroupOp),
     AddGroupMember(AddGroupMemberOp),
     RemoveGroupMember(RemoveGroupMemberOp),
+
+    /// Read-only access-control tree introspection.
+    AccessTree(AccessTreeOp),
 }
 
 impl Serialize for BatchOp {
@@ -121,6 +125,7 @@ impl Serialize for BatchOp {
             BatchOp::DropGroup(op) => op.serialize(serializer),
             BatchOp::AddGroupMember(op) => op.serialize(serializer),
             BatchOp::RemoveGroupMember(op) => op.serialize(serializer),
+            BatchOp::AccessTree(op) => op.serialize(serializer),
         }
     }
 }
@@ -265,6 +270,10 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::RemoveGroupMember)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("access_tree") {
+            serde_json::from_value(value)
+                .map(BatchOp::AccessTree)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value)
@@ -322,6 +331,7 @@ impl BatchOp {
                 | BatchOp::DropGroup(_)
                 | BatchOp::AddGroupMember(_)
                 | BatchOp::RemoveGroupMember(_)
+                | BatchOp::AccessTree(_)
         )
     }
 }
@@ -1162,6 +1172,39 @@ mod tests {
                 }
             }
             _ => panic!("expected Chmod"),
+        }
+    }
+
+    #[test]
+    fn access_tree_serde() {
+        let op = roundtrip(
+            r#"{
+            "access_tree": true,
+            "depth": 2
+        }"#,
+        );
+        match &op {
+            BatchOp::AccessTree(a) => {
+                assert!(a.access_tree);
+                assert_eq!(a.depth, Some(2));
+                assert!(a.db.is_none());
+            }
+            _ => panic!("expected AccessTree"),
+        }
+        assert!(op.is_admin());
+        assert!(op.table_ref().is_none());
+    }
+
+    #[test]
+    fn access_tree_defaults_serde() {
+        let op = roundtrip(r#"{"access_tree": true}"#);
+        match &op {
+            BatchOp::AccessTree(a) => {
+                assert!(a.access_tree);
+                assert!(a.depth.is_none());
+                assert!(a.db.is_none());
+            }
+            _ => panic!("expected AccessTree"),
         }
     }
 
