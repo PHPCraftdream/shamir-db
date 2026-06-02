@@ -70,9 +70,39 @@ pub async fn run(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<()> {
 /// Offline: open the durable system store and assemble the tree directly.
 async fn fetch_offline(config: &Config, args: &AccessTreeArgs) -> anyhow::Result<Value> {
     let meta_path = config.data_dir.join("shamir_db_meta.redb");
-    let shamir = ShamirDb::init(SystemStoreConfig::Redb(meta_path))
-        .await
-        .map_err(|e| anyhow!("open data_dir (is the server stopped?): {e}"))?;
+
+    // redb is single-writer: a fresh open fails while the file lock is still
+    // held. In normal use the server is stopped (separate process exited) and
+    // the lock is free; but the OS can lag releasing a just-dropped handle
+    // (e.g. right after a same-host stop), so retry briefly before giving up.
+    // A genuinely-running server holds the lock past this window → we surface
+    // the clear "is the server stopped?" error.
+    let shamir = {
+        let mut last_err = None;
+        let mut opened = None;
+        for _ in 0..20 {
+            match ShamirDb::init(SystemStoreConfig::Redb(meta_path.clone())).await {
+                Ok(db) => {
+                    opened = Some(db);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+        match opened {
+            Some(db) => db,
+            None => {
+                return Err(anyhow!(
+                    "open data_dir (is the server stopped?): {}",
+                    last_err.expect("at least one attempt failed")
+                ))
+            }
+        }
+    };
+
     shamir
         .access_tree(args.depth, args.db.as_deref())
         .await
