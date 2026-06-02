@@ -75,6 +75,7 @@ use std::time::Duration;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 
+use shamir_db::access::Actor;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_db::ShamirDb;
 
@@ -95,6 +96,20 @@ use crate::tables_registry::TablesRegistry;
 use crate::tx_registry::{InteractiveTx, TxRegistry, TxRegistryError};
 use crate::user_directory::RedbUserDirectory;
 use crate::version::check_query_lang;
+
+/// Resolve the [`Actor`] for the current session.
+///
+/// Superuser sessions (admin / bootstrap) get `Actor::System` which bypasses
+/// the Shomer gate entirely. Regular authenticated users get
+/// `Actor::User(principal_id)` where `principal_id` is `fxhash::hash64(username)`
+/// — a stable, deterministic u64 consistent with `chown`/`chgrp` owner ids.
+fn session_actor(session: &Session) -> Actor {
+    if session.permissions.is_superuser {
+        Actor::System
+    } else {
+        Actor::User(session.principal_id())
+    }
+}
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
 /// how long any one open tx can pin MVCC GC, even if a client keeps it busy.
@@ -382,8 +397,9 @@ impl ShamirDbHandler {
         // registry still see the request.
         let db = self.db.clone();
         let db_name_owned = db_name.to_string();
+        let actor = session_actor(session);
         let (batch, exec_result) = run_blocking(async move {
-            let result = db.execute(&db_name_owned, &batch).await;
+            let result = db.execute_as(actor, &db_name_owned, &batch).await;
             (batch, result)
         });
         match exec_result {
@@ -436,8 +452,9 @@ impl ShamirDbHandler {
         let db_name_owned = db_name.to_string();
         let repo_owned = repo_name.to_string();
         let iso_for_begin = iso.clone();
+        let actor = session_actor(session);
         let begin = run_blocking(async move {
-            db.tx_begin(&db_name_owned, &repo_owned, &iso_for_begin)
+            db.tx_begin_as(actor, &db_name_owned, &repo_owned, &iso_for_begin)
                 .await
         });
         let (tx, guard) = match begin {
@@ -572,11 +589,12 @@ impl ShamirDbHandler {
         let db = self.db.clone();
         let db_name_owned = db_name.to_string();
         let it_for_exec = Arc::clone(&it);
+        let actor = session_actor(session);
         let exec = run_blocking(async move {
             let mut guard = it_for_exec.ctx().lock().await;
             match guard.as_mut() {
                 Some(tx) => {
-                    let r = db.tx_execute(&db_name_owned, &batch, tx).await;
+                    let r = db.tx_execute_as(actor, &db_name_owned, &batch, tx).await;
                     if r.is_ok() {
                         it_for_exec.bump_activity();
                     }
@@ -649,10 +667,11 @@ impl ShamirDbHandler {
         let db_name_owned = db_name.to_string();
         let repo = it.repo().to_string();
         let it_for_commit = Arc::clone(&it);
+        let actor = session_actor(session);
         let commit = run_blocking(async move {
             let tx = it_for_commit.ctx().lock().await.take();
             match tx {
-                Some(tx) => db.tx_commit(&db_name_owned, &repo, tx).await,
+                Some(tx) => db.tx_commit_as(actor, &db_name_owned, &repo, tx).await,
                 None => Err(BatchError::QueryError {
                     alias: String::new(),
                     message: "transaction is already committed or rolled back".into(),
@@ -920,6 +939,8 @@ fn error_code(e: &BatchError) -> &'static str {
             // tell wrong-db from wrong-query.
             if alias.is_empty() && message.contains("not found") {
                 "unknown_db"
+            } else if message.starts_with("access denied:") {
+                "access_denied"
             } else {
                 "query"
             }

@@ -3703,6 +3703,7 @@ dependencies = [
  "criterion",
  "dashmap 6.1.0",
  "futures-util",
+ "fxhash",
  "hex",
  "indexmap",
  "ktav",

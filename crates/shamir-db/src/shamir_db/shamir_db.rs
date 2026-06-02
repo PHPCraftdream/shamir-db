@@ -645,7 +645,18 @@ impl ShamirDb {
         wasm: &[u8],
         replace: bool,
     ) -> DbResult<()> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.create_function_from_wasm_as(name, wasm, replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_function_from_wasm`] but with an explicit [`Actor`].
+    pub async fn create_function_from_wasm_as(
+        &self,
+        name: &str,
+        wasm: &[u8],
+        replace: bool,
+        actor: Actor,
+    ) -> DbResult<()> {
         self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
@@ -667,7 +678,18 @@ impl ShamirDb {
         source: &str,
         replace: bool,
     ) -> DbResult<()> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.create_function_from_source_as(name, source, replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_function_from_source`] but with an explicit [`Actor`].
+    pub async fn create_function_from_source_as(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+        actor: Actor,
+    ) -> DbResult<()> {
         self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
@@ -689,7 +711,18 @@ impl ShamirDb {
         source: FunctionSource<'_>,
         opts: CreateFunctionOptions,
     ) -> DbResult<()> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.create_function_with_opts_as(name, source, opts, Actor::System)
+            .await
+    }
+
+    /// Like [`create_function_with_opts`] but with an explicit [`Actor`].
+    pub async fn create_function_with_opts_as(
+        &self,
+        name: &str,
+        source: FunctionSource<'_>,
+        opts: CreateFunctionOptions,
+        actor: Actor,
+    ) -> DbResult<()> {
         self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
@@ -757,7 +790,11 @@ impl ShamirDb {
     /// removes from the live registry. For user functions, both the durable
     /// record and the live entry are removed.
     pub async fn drop_function(&self, name: &str) -> DbResult<bool> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.drop_function_as(name, Actor::System).await
+    }
+
+    /// Like [`drop_function`] but with an explicit [`Actor`].
+    pub async fn drop_function_as(&self, name: &str, actor: Actor) -> DbResult<bool> {
         self.authorize_access(
             &actor,
             &ResourcePath::Function {
@@ -785,7 +822,11 @@ impl ShamirDb {
     ///
     /// Fails if `from` does not exist or `to` is already taken.
     pub async fn rename_function(&self, from: &str, to: &str) -> DbResult<()> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.rename_function_as(from, to, Actor::System).await
+    }
+
+    /// Like [`rename_function`] but with an explicit [`Actor`].
+    pub async fn rename_function_as(&self, from: &str, to: &str, actor: Actor) -> DbResult<()> {
         self.authorize_access(
             &actor,
             &ResourcePath::Function {
@@ -862,7 +903,16 @@ impl ShamirDb {
     /// between calls). Use [`invoke_function_with_batch`] for multi-call
     /// batched invocation.
     pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
-        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.invoke_function_as(name, params, Actor::System).await
+    }
+
+    /// Like [`invoke_function`] but with an explicit [`Actor`].
+    pub async fn invoke_function_as(
+        &self,
+        name: &str,
+        params: Params,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
         self.authorize_access(
             &caller,
             &ResourcePath::Function {
@@ -890,7 +940,18 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
-        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.invoke_function_with_batch_as(name, params, batch, Actor::System)
+            .await
+    }
+
+    /// Like [`invoke_function_with_batch`] but with an explicit [`Actor`].
+    pub async fn invoke_function_with_batch_as(
+        &self,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
         self.authorize_access(
             &caller,
             &ResourcePath::Function {
@@ -955,7 +1016,19 @@ impl ShamirDb {
         name: &str,
         params: Params,
     ) -> DbResult<QueryValue> {
-        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.invoke_function_in_db_as(db_name, repo, name, params, Actor::System)
+            .await
+    }
+
+    /// Like [`invoke_function_in_db`] but with an explicit [`Actor`].
+    pub async fn invoke_function_in_db_as(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
         self.authorize_access(
             &caller,
             &ResourcePath::Function {
@@ -995,7 +1068,20 @@ impl ShamirDb {
         params: Params,
         batch: &Arc<BatchContext>,
     ) -> DbResult<QueryValue> {
-        let caller = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.invoke_function_in_db_with_batch_as(db_name, repo, name, params, batch, Actor::System)
+            .await
+    }
+
+    /// Like [`invoke_function_in_db_with_batch`] but with an explicit [`Actor`].
+    pub async fn invoke_function_in_db_with_batch_as(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
         self.authorize_access(
             &caller,
             &ResourcePath::Function {

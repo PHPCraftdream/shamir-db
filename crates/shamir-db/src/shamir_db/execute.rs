@@ -43,6 +43,7 @@ impl TableResolver for DbTableResolver {
 struct ShamirAdminExecutor {
     shamir: ShamirDb,
     db_name: String,
+    actor: Actor,
 }
 
 #[async_trait::async_trait]
@@ -882,7 +883,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .to_path()
                     .ok_or_else(|| err("invalid resource reference".to_string()))?;
                 self.shamir
-                    .authorize_access(&Actor::System, &path, Action::Manage)
+                    .authorize_access(&self.actor, &path, Action::Manage)
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 let mut meta = self.shamir.resource_meta(&path).await;
@@ -903,7 +904,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .to_path()
                     .ok_or_else(|| err("invalid resource reference".to_string()))?;
                 self.shamir
-                    .authorize_access(&Actor::System, &path, Action::Manage)
+                    .authorize_access(&self.actor, &path, Action::Manage)
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 let mut meta = self.shamir.resource_meta(&path).await;
@@ -924,7 +925,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .to_path()
                     .ok_or_else(|| err("invalid resource reference".to_string()))?;
                 self.shamir
-                    .authorize_access(&Actor::System, &path, Action::Manage)
+                    .authorize_access(&self.actor, &path, Action::Manage)
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 let mut meta = self.shamir.resource_meta(&path).await;
@@ -1095,7 +1096,20 @@ impl ShamirDb {
         db_name: &str,
         request: &BatchRequest,
     ) -> Result<BatchResponse, BatchError> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.execute_as(Actor::System, db_name, request).await
+    }
+
+    /// Execute a batch request with an explicit [`Actor`] for access control.
+    ///
+    /// This is the principal-aware entry point called by the server with the
+    /// authenticated session's actor. The convenience [`execute`] delegates
+    /// here with `Actor::System` (admin bypass) for backward compatibility.
+    pub async fn execute_as(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+    ) -> Result<BatchResponse, BatchError> {
         self.authorize_access(
             &actor,
             &ResourcePath::Database {
@@ -1113,10 +1127,38 @@ impl ShamirDb {
             message: format!("Database '{}' not found", db_name),
         })?;
 
+        // Per-op authorization: each data op is checked against its TARGET
+        // table (admin/DDL ops carry no table_ref and are authorized in
+        // execute_admin). authorize_access traverses the db/store ancestors,
+        // so the table path covers the whole chain. System bypasses.
+        for entry in request.queries.values() {
+            if let Some(tref) = entry.op.table_ref() {
+                let action = match &entry.op {
+                    BatchOp::Read(_) => Action::Read,
+                    BatchOp::Insert(_) => Action::Create,
+                    BatchOp::Set(_) | BatchOp::Update(_) => Action::Write,
+                    BatchOp::Delete(_) => Action::Delete,
+                    _ => Action::Write,
+                };
+                let path = ResourcePath::Table {
+                    db: db_name.to_string(),
+                    store: tref.repo.clone(),
+                    table: tref.table.clone(),
+                };
+                self.authorize_access(&actor, &path, action)
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: String::new(),
+                        message: e.to_string(),
+                    })?;
+            }
+        }
+
         let resolver = DbTableResolver { db };
         let admin = ShamirAdminExecutor {
             shamir: self.clone(),
             db_name: db_name.to_string(),
+            actor: actor.clone(),
         };
 
         execute_batch(request, &resolver, Some(&admin), actor, db_name).await
@@ -1152,7 +1194,24 @@ impl ShamirDb {
         ),
         BatchError,
     > {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.tx_begin_as(Actor::System, db_name, repo_name, isolation)
+            .await
+    }
+
+    /// BEGIN with an explicit [`Actor`].
+    pub async fn tx_begin_as(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        repo_name: &str,
+        isolation: &str,
+    ) -> Result<
+        (
+            crate::engine::tx::TxContext,
+            crate::engine::tx::SnapshotGuard,
+        ),
+        BatchError,
+    > {
         self.authorize_access(
             &actor,
             &ResourcePath::Database {
@@ -1200,7 +1259,18 @@ impl ShamirDb {
         request: &BatchRequest,
         tx: &mut crate::engine::tx::TxContext,
     ) -> Result<BatchResponse, BatchError> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.tx_execute_as(Actor::System, db_name, request, tx)
+            .await
+    }
+
+    /// EXECUTE with an explicit [`Actor`].
+    pub async fn tx_execute_as(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        request: &BatchRequest,
+        tx: &mut crate::engine::tx::TxContext,
+    ) -> Result<BatchResponse, BatchError> {
         self.authorize_access(
             &actor,
             &ResourcePath::Database {
@@ -1221,6 +1291,7 @@ impl ShamirDb {
         let admin = ShamirAdminExecutor {
             shamir: self.clone(),
             db_name: db_name.to_string(),
+            actor: actor.clone(),
         };
         execute_in_open_tx(request, &resolver, Some(&admin), &actor, db_name, tx).await
     }
@@ -1236,7 +1307,18 @@ impl ShamirDb {
         repo_name: &str,
         tx: crate::engine::tx::TxContext,
     ) -> Result<TransactionInfo, BatchError> {
-        let actor = Actor::System; // TODO(Shomer): from the authenticated principal on the wire path
+        self.tx_commit_as(Actor::System, db_name, repo_name, tx)
+            .await
+    }
+
+    /// COMMIT with an explicit [`Actor`].
+    pub async fn tx_commit_as(
+        &self,
+        actor: Actor,
+        db_name: &str,
+        repo_name: &str,
+        tx: crate::engine::tx::TxContext,
+    ) -> Result<TransactionInfo, BatchError> {
         self.authorize_access(
             &actor,
             &ResourcePath::Database {
