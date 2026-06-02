@@ -1,7 +1,8 @@
 use crate::codecs::interned::{inner_to_msgpack, msgpack_to_inner};
 use crate::core::interner::Interner;
-use crate::types::common::new_map;
+use crate::types::common::{new_map, new_set};
 use crate::types::value::InnerValue;
+use std::str::FromStr;
 
 #[test]
 fn test_msgpack_to_inner_simple() {
@@ -313,5 +314,304 @@ fn test_error_invalid_msgpack() {
     let invalid_msgpack = &[0x92, 0x01]; // [1, <missing>]
 
     let result = msgpack_to_inner(&interner, invalid_msgpack);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Scalar round-trips
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_bool_roundtrip() {
+    let interner = Interner::new();
+    for b in [true, false] {
+        let original = InnerValue::Bool(b);
+        let encoded = inner_to_msgpack(&interner, &original).unwrap();
+        let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+}
+
+#[test]
+fn test_int_roundtrip_boundary_values() {
+    let interner = Interner::new();
+    for &v in &[
+        0i64,
+        1,
+        -1,
+        i64::MIN,
+        i64::MAX,
+        i32::MIN as i64,
+        i32::MAX as i64,
+    ] {
+        let original = InnerValue::Int(v);
+        let encoded = inner_to_msgpack(&interner, &original).unwrap();
+        let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+        assert_eq!(decoded, original, "int roundtrip failed for {}", v);
+    }
+}
+
+#[test]
+fn test_f64_roundtrip() {
+    let interner = Interner::new();
+    for &v in &[
+        0.0f64,
+        -0.0,
+        1.5,
+        -99.999,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        let original = InnerValue::F64(v);
+        let encoded = inner_to_msgpack(&interner, &original).unwrap();
+        let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+        assert_eq!(decoded, original, "f64 roundtrip for {}", v);
+    }
+}
+
+#[test]
+fn test_string_roundtrip_varieties() {
+    let interner = Interner::new();
+    let cases = vec![
+        String::new(),
+        "hello".to_string(),
+        "Привет".to_string(),
+        "🚀🎉🔥".to_string(),
+        "a\"b\\c/d".to_string(),
+        "\t\n\r".to_string(),
+        "x".repeat(10_000),
+    ];
+    for s in cases {
+        let original = InnerValue::Str(s.clone());
+        let encoded = inner_to_msgpack(&interner, &original).unwrap();
+        let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+        assert_eq!(decoded, original, "string roundtrip for len={}", s.len());
+    }
+}
+
+#[test]
+fn test_bin_roundtrip() {
+    let interner = Interner::new();
+    let cases: Vec<Vec<u8>> = vec![
+        vec![],
+        vec![0],
+        vec![255],
+        vec![0, 1, 2, 3, 4, 5],
+        (0..=255).collect(),
+    ];
+    for b in cases {
+        let original = InnerValue::Bin(b.clone());
+        let encoded = inner_to_msgpack(&interner, &original).unwrap();
+        let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+        assert_eq!(decoded, original, "bin roundtrip for len={}", b.len());
+    }
+}
+
+#[test]
+fn test_list_roundtrip_empty_and_nested() {
+    let interner = Interner::new();
+    let empty = InnerValue::List(vec![]);
+    let encoded = inner_to_msgpack(&interner, &empty).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    assert_eq!(decoded, empty);
+
+    let nested = InnerValue::List(vec![
+        InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(2)]),
+        InnerValue::List(vec![]),
+        InnerValue::Null,
+    ]);
+    let encoded = inner_to_msgpack(&interner, &nested).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    assert_eq!(decoded, nested);
+}
+
+#[test]
+fn test_set_roundtrip() {
+    let interner = Interner::new();
+    let mut set = new_set();
+    set.insert(InnerValue::Int(1));
+    set.insert(InnerValue::Str("hello".to_string()));
+    let original = InnerValue::Set(set);
+    let encoded = inner_to_msgpack(&interner, &original).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    // MessagePack encodes set as array → decoded as List
+    match decoded {
+        InnerValue::List(arr) => {
+            assert_eq!(arr.len(), 2);
+        }
+        other => panic!("Expected List (from Set), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_map_roundtrip_varieties() {
+    let interner = Interner::new();
+    // Empty
+    let empty = InnerValue::Map(new_map());
+    let encoded = inner_to_msgpack(&interner, &empty).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    assert_eq!(decoded, empty);
+
+    // With interned keys
+    let k1 = interner.touch_ind("a").unwrap().into_key();
+    let k2 = interner.touch_ind("b").unwrap().into_key();
+    let mut m = new_map();
+    m.insert(k1, InnerValue::Int(1));
+    m.insert(k2, InnerValue::Str("two".to_string()));
+    let original = InnerValue::Map(m);
+
+    let encoded = inner_to_msgpack(&interner, &original).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_deeply_nested_roundtrip() {
+    let interner = Interner::new();
+    let mut current = InnerValue::Int(1);
+    for _ in 0..10 {
+        current = InnerValue::List(vec![current]);
+    }
+    let encoded = inner_to_msgpack(&interner, &current).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    assert_eq!(decoded, current);
+}
+
+#[test]
+fn test_dec_and_big_roundtrip_as_string() {
+    let interner = Interner::new();
+    // Dec serialises as string; after round-trip it comes back as Str
+    let dec_val = InnerValue::Dec(rust_decimal::Decimal::from_str("123.456").unwrap());
+    let encoded = inner_to_msgpack(&interner, &dec_val).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    match decoded {
+        InnerValue::Str(s) => assert_eq!(s, "123.456"),
+        other => panic!("Expected Str from Dec, got {:?}", other),
+    }
+
+    let big_val = InnerValue::Big(num_bigint::BigInt::from(999));
+    let encoded = inner_to_msgpack(&interner, &big_val).unwrap();
+    let decoded = msgpack_to_inner(&interner, &encoded).unwrap();
+    match decoded {
+        InnerValue::Str(s) => assert_eq!(s, "999"),
+        other => panic!("Expected Str from Big, got {:?}", other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rmpv value edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_msgpack_f32_coerced_to_f64() {
+    let interner = Interner::new();
+    let test_data = rmpv::Value::Map(vec![(rmpv::Value::from("f"), rmpv::Value::F32(4.567))]);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &test_data).unwrap();
+    let inner = msgpack_to_inner(&interner, &buf).unwrap();
+    match inner {
+        InnerValue::Map(m) => {
+            let k = interner.touch_ind("f").unwrap().into_key();
+            match m.get(&k) {
+                Some(InnerValue::F64(f)) => {
+                    assert!((f - 4.567f32 as f64).abs() < 1e-5);
+                }
+                other => panic!("Expected F64, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Map"),
+    }
+}
+
+#[test]
+fn test_msgpack_ext_type_stored_as_bin() {
+    let interner = Interner::new();
+    let ext = rmpv::Value::Ext(42, vec![1, 2, 3]);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &ext).unwrap();
+    let inner = msgpack_to_inner(&interner, &buf).unwrap();
+    match inner {
+        InnerValue::Bin(b) => assert_eq!(b, vec![1, 2, 3]),
+        other => panic!("Expected Bin from Ext, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_msgpack_non_string_map_key_error() {
+    let interner = Interner::new();
+    let test_data = rmpv::Value::Map(vec![(
+        rmpv::Value::from(42i64), // Non-string key
+        rmpv::Value::from("value"),
+    )]);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &test_data).unwrap();
+    let result = msgpack_to_inner(&interner, &buf);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        crate::codecs::CodecError::Decode(msg) => {
+            assert!(msg.contains("Map keys must be strings"));
+        }
+        other => panic!("Expected Decode error, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_msgpack_large_uint_as_string() {
+    let interner = Interner::new();
+    // u64 > i64::MAX → stored as String
+    let large = i64::MAX as u64 + 1;
+    let test_data = rmpv::Value::Map(vec![(rmpv::Value::from("v"), rmpv::Value::from(large))]);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &test_data).unwrap();
+    let inner = msgpack_to_inner(&interner, &buf).unwrap();
+    match inner {
+        InnerValue::Map(m) => {
+            let k = interner.touch_ind("v").unwrap().into_key();
+            match m.get(&k) {
+                Some(InnerValue::Str(s)) => assert_eq!(s, &large.to_string()),
+                other => panic!("Expected Str, got {:?}", other),
+            }
+        }
+        _ => panic!("Expected Map"),
+    }
+}
+
+#[test]
+fn test_msgpack_uint_fits_in_i64() {
+    let interner = Interner::new();
+    // u64 that fits in i64
+    let val = 42u64;
+    let test_data = rmpv::Value::Map(vec![(rmpv::Value::from("v"), rmpv::Value::from(val))]);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &test_data).unwrap();
+    let inner = msgpack_to_inner(&interner, &buf).unwrap();
+    match inner {
+        InnerValue::Map(m) => {
+            let k = interner.touch_ind("v").unwrap().into_key();
+            assert_eq!(m.get(&k), Some(&InnerValue::Int(42)));
+        }
+        _ => panic!("Expected Map"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Error paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_error_completely_invalid_bytes() {
+    let interner = Interner::new();
+    // 0xC1 is reserved in MessagePack but rmpv decodes it as a value;
+    // use truly truncated data instead.
+    let result = msgpack_to_inner(&interner, &[0x92, 0x01]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_error_empty_bytes() {
+    let interner = Interner::new();
+    let result = msgpack_to_inner(&interner, &[]);
     assert!(result.is_err());
 }

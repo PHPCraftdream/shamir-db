@@ -589,3 +589,255 @@ fn test_map_with_interned_keys_compact() {
     println!("PASS: Map with InternedKey keys is COMPACT!");
     println!("InternedKeys stored as variable-size bytes (not full u64)!");
 }
+
+// ---------------------------------------------------------------------------
+// InternerKey: all size classes + id round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_interner_key_u8_boundary() {
+    let key = InternerKey::new(u8::MAX as u64);
+    assert_eq!(key.as_bytes().len(), 1);
+    assert_eq!(key.id(), u8::MAX as u64);
+}
+
+#[test]
+fn test_interner_key_u16_boundary() {
+    let key = InternerKey::new(u16::MAX as u64);
+    assert_eq!(key.as_bytes().len(), 2);
+    assert_eq!(key.id(), u16::MAX as u64);
+}
+
+#[test]
+fn test_interner_key_u32_boundary() {
+    let key = InternerKey::new(u32::MAX as u64);
+    assert_eq!(key.as_bytes().len(), 4);
+    assert_eq!(key.id(), u32::MAX as u64);
+}
+
+#[test]
+fn test_interner_key_u64_max() {
+    let key = InternerKey::new(u64::MAX);
+    assert_eq!(key.as_bytes().len(), 8);
+    assert_eq!(key.id(), u64::MAX);
+}
+
+#[test]
+fn test_interner_key_bytes_roundtrip() {
+    for &id in &[1u64, 100, 300, 70_000, 5_000_000_000] {
+        let key = InternerKey::new(id);
+        assert_eq!(key.bytes().len(), key.as_bytes().len());
+        assert_eq!(key.id(), id);
+        let consumed = key.into_bytes();
+        assert_eq!(consumed.len(), InternerKey::new(id).as_bytes().len());
+    }
+}
+
+#[test]
+fn test_interner_key_ordering() {
+    let k1 = InternerKey::new(1);
+    let k2 = InternerKey::new(2);
+    let k_big = InternerKey::new(1_000_000);
+    assert!(k1 < k2);
+    assert!(k2 < k_big);
+    assert_eq!(k1.cmp(&k1), std::cmp::Ordering::Equal);
+}
+
+#[test]
+fn test_interner_key_hash_eq_different_sizes() {
+    use std::collections::HashSet;
+    // Keys with different byte sizes but same id should be equal and hash same
+    let k1 = InternerKey::new(42);
+    let k2 = InternerKey::new(42);
+    assert_eq!(k1, k2);
+    let mut set = HashSet::new();
+    set.insert(k1);
+    assert!(set.contains(&k2));
+}
+
+#[test]
+fn test_interner_key_deserialization_invalid_length() {
+    // 3 bytes is not a valid InternerKey length (must be 1/2/4/8)
+    let bad_bytes = rmpv::Value::Binary(vec![1, 2, 3]);
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &bad_bytes).unwrap();
+    let result: Result<InternerKey, _> = rmp_serde::from_slice(&buf);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Interner: with_state edge cases + all_entries / entries_after / entries_in_id_range
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_with_state_empty() {
+    let interner = Interner::with_state(vec![]);
+    assert!(interner.is_empty());
+    assert_eq!(interner.len(), 0);
+}
+
+#[test]
+fn test_all_entries() {
+    let interner = Interner::new();
+    interner.touch_ind("alpha").unwrap();
+    interner.touch_ind("beta").unwrap();
+    let entries = interner.all_entries();
+    assert_eq!(entries.len(), 2);
+    // slot 0 is sentinel, entries start at 1
+    let ids: Vec<u64> = entries.iter().map(|(k, _)| k.id()).collect();
+    assert!(ids.contains(&1));
+    assert!(ids.contains(&2));
+}
+
+#[test]
+fn test_entries_in_id_range() {
+    let interner = Interner::new();
+    interner.touch_ind("a").unwrap();
+    interner.touch_ind("b").unwrap();
+    interner.touch_ind("c").unwrap();
+    interner.touch_ind("d").unwrap();
+
+    // Range: ids > 1, ≤ 3  → ids 2, 3
+    let entries = interner.entries_in_id_range(1, 3);
+    assert_eq!(entries.len(), 2);
+    let ids: Vec<u64> = entries.iter().map(|(k, _)| k.id()).collect();
+    assert!(ids.contains(&2));
+    assert!(ids.contains(&3));
+}
+
+#[test]
+fn test_entries_in_id_range_empty() {
+    let interner = Interner::new();
+    interner.touch_ind("x").unwrap();
+    // lo > hi → empty
+    let entries = interner.entries_in_id_range(10, 5);
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn test_entries_after() {
+    let interner = Interner::new();
+    interner.touch_ind("p").unwrap();
+    interner.touch_ind("q").unwrap();
+    interner.touch_ind("r").unwrap();
+
+    let (entries, high_water) = interner.entries_after(0);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(high_water, 3);
+}
+
+#[test]
+fn test_entries_after_with_gap() {
+    let interner = Interner::new();
+    interner.touch_ind("a").unwrap();
+    // intern next one — ids are 1, 2
+    let (entries, high_water) = interner.entries_after(5);
+    // lo (6) > hi_full (2) → empty
+    assert!(entries.is_empty());
+    assert_eq!(high_water, 5);
+}
+
+#[test]
+fn test_get_str_unknown_id() {
+    let interner = Interner::new();
+    let unknown = InternerKey::new(999);
+    assert_eq!(interner.get_str(&unknown), None);
+}
+
+#[test]
+fn test_get_ind_unknown_key() {
+    let interner = Interner::new();
+    assert_eq!(interner.get_ind("nonexistent"), None);
+}
+
+#[test]
+fn test_with_str_callback() {
+    let interner = Interner::new();
+    let touch = interner.touch_ind("hello").unwrap();
+    let key = touch.key().clone();
+    let result = interner.with_str(&key, |s| s.to_uppercase());
+    assert_eq!(result, Some("HELLO".to_string()));
+}
+
+#[test]
+fn test_with_str_unknown_id() {
+    let interner = Interner::new();
+    let unknown = InternerKey::new(999);
+    assert!(interner.with_str(&unknown, |_| "called").is_none());
+}
+
+#[test]
+fn test_make_key() {
+    let interner = Interner::new();
+    let key = interner.make_key(42);
+    assert_eq!(key.id(), 42);
+}
+
+// ---------------------------------------------------------------------------
+// UserKey: construction, Display, Borrow<str>, FromStr, serde
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_user_key_from_str_and_display() {
+    let key = UserKey::from_str("hello");
+    assert_eq!(key.as_str(), "hello");
+    assert_eq!(key.to_string(), "hello");
+}
+
+#[test]
+fn test_user_key_std_from_str() {
+    let key: UserKey = "world".parse().unwrap();
+    assert_eq!(key.as_str(), "world");
+}
+
+#[test]
+fn test_user_key_as_ref() {
+    let key = UserKey::from_str("test");
+    let r: &str = key.as_ref();
+    assert_eq!(r, "test");
+}
+
+#[test]
+fn test_user_key_borrow_str() {
+    use std::borrow::Borrow;
+    let key = UserKey::from_str("borrowed");
+    let b: &str = key.borrow();
+    assert_eq!(b, "borrowed");
+}
+
+#[test]
+fn test_user_key_equality() {
+    let k1 = UserKey::from_str("abc");
+    let k2 = UserKey::from_str("abc");
+    let k3 = UserKey::from_str("xyz");
+    assert_eq!(k1, k2);
+    assert_ne!(k1, k3);
+}
+
+#[test]
+fn test_user_key_serde_roundtrip() {
+    let key = UserKey::from_str("serde_test");
+    let bytes = rmp_serde::to_vec(&key).unwrap();
+    let decoded: UserKey = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(key, decoded);
+}
+
+// ---------------------------------------------------------------------------
+// TouchInd: AsRef<[u8]>, into_key
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_touch_ind_as_ref() {
+    let interner = Interner::new();
+    let touch = interner.touch_ind("test").unwrap();
+    let bytes: &[u8] = touch.as_ref();
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn test_touch_ind_into_key() {
+    let interner = Interner::new();
+    let touch = interner.touch_ind("test").unwrap();
+    let key = touch.into_key();
+    assert_eq!(key.id(), 1);
+}
