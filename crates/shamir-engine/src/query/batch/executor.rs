@@ -89,6 +89,29 @@ pub async fn execute_batch(
         (r, None)
     };
 
+    // 3.5. Durability: if `synced`, flush every distinct repo the batch
+    // touched before building the response so the write survives an
+    // immediate hard crash.
+    if request.durability.as_deref() == Some("synced") {
+        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+        for repo_name in repos {
+            let repo =
+                resolver
+                    .resolve_repo(&repo_name)
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: String::new(),
+                        message: format!("resolve_repo({}): {}", repo_name, e),
+                    })?;
+            repo.flush_buffers()
+                .await
+                .map_err(|e| BatchError::QueryError {
+                    alias: String::new(),
+                    message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
+                })?;
+        }
+    }
+
     // 4. Filter results for response
     let results = filter_results(all_results, request);
 

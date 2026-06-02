@@ -476,6 +476,39 @@ impl ShamirDb {
         Ok(())
     }
 
+    /// Drain every repo's in-memory MemBuffers to their durable backing.
+    ///
+    /// Called on graceful shutdown to close the ~500 ms buffered-commit
+    /// loss window. For each repo the tx-info store and every table's
+    /// data + info stores are flushed. In-memory stores are no-ops.
+    /// Best-effort: individual errors are logged and skipped; returns the
+    /// first error encountered (if any) after attempting all repos/tables.
+    pub async fn flush_all(&self) -> DbResult<()> {
+        let mut first_err: Option<DbError> = None;
+        let db_names = self.list_dbs();
+        for db_name in &db_names {
+            let Some(db) = self.get_db(db_name) else {
+                continue;
+            };
+            for repo_name in db.list_repos() {
+                let Some(repo) = db.get_repo(&repo_name) else {
+                    continue;
+                };
+
+                if let Err(e) = repo.flush_buffers().await {
+                    log::warn!("flush_all: {}/{}: {}", db_name, repo_name, e);
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
     /// Create a table in a repo and persist it to the table catalogue so it
     /// survives a restart (I.2).
     ///
@@ -1725,6 +1758,7 @@ impl DbGateway for FacadeDbGateway {
             name: None,
             transactional: false,
             isolation: None,
+            durability: None,
             queries,
             return_all: false,
             return_only: Some(vec!["r".to_string()]),
@@ -1780,6 +1814,7 @@ impl DbGateway for FacadeDbGateway {
             name: None,
             transactional: false,
             isolation: None,
+            durability: None,
             queries,
             return_all: false,
             return_only: Some(vec!["i".to_string()]),
@@ -1857,6 +1892,7 @@ impl DbGateway for FacadeDbGateway {
             name: None,
             transactional: false,
             isolation: None,
+            durability: None,
             queries,
             return_all: false,
             return_only: Some(vec!["q".to_string()]),

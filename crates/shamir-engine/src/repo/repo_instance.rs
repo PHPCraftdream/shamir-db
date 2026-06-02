@@ -220,7 +220,7 @@ impl RepoInstance {
     /// `MetaKey::NextTxId`) here in Phase 6.5 (see
     /// `crate::tx::commit`) so a clean restart can seed the gate
     /// without scanning every active WAL marker.
-    pub(crate) async fn tx_info_store(&self) -> DbResult<Arc<dyn Store>> {
+    pub async fn tx_info_store(&self) -> DbResult<Arc<dyn Store>> {
         self.repo.store_get("__tx__").await
     }
 
@@ -533,6 +533,71 @@ impl RepoInstance {
     /// Returns the count of recovered entries.
     pub async fn recover_v2_inflight(&self) -> DbResult<usize> {
         crate::tx::recovery::recover_inflight_v2(self).await
+    }
+
+    /// Flush this repo's in-memory buffers to their durable backing.
+    ///
+    /// Drains the `__tx__` store and every table's data + info stores.
+    /// In-memory stores are no-ops. Best-effort: individual errors are
+    /// logged and skipped; returns the first error encountered (if any)
+    /// after attempting all stores.
+    pub async fn flush_buffers(&self) -> DbResult<()> {
+        let mut first_err: Option<DbError> = None;
+
+        if let Ok(store) = self.tx_info_store().await {
+            if let Err(e) = store.flush().await {
+                log::warn!("flush_buffers: tx_info_store {}: {}", self.name, e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        for table_name in self.list_table_names() {
+            let table = match self.get_table(&table_name).await {
+                Ok(t) => t,
+                Err(e) => {
+                    log::warn!(
+                        "flush_buffers: get_table {}/{}: {}",
+                        self.name,
+                        table_name,
+                        e
+                    );
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    continue;
+                }
+            };
+
+            if let Err(e) = table.data_store().flush().await {
+                log::warn!(
+                    "flush_buffers: data_store {}/{}: {}",
+                    self.name,
+                    table_name,
+                    e
+                );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            if let Err(e) = table.info_store().flush().await {
+                log::warn!(
+                    "flush_buffers: info_store {}/{}: {}",
+                    self.name,
+                    table_name,
+                    e
+                );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Spawn a background task that runs GC periodically.
