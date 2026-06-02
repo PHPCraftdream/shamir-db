@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 use shamir_server::backup;
 use shamir_server::config::Config;
 use shamir_server::server::BootstrapMode;
+use shamir_server::service::ServiceAction;
 
 #[derive(Parser, Debug)]
 #[command(name = "shamir-server", version, about = "ShamirDB production server")]
@@ -92,6 +93,12 @@ enum Subcmd {
         #[arg(long, value_name = "PASSWORD")]
         password: Option<String>,
     },
+
+    /// Manage the OS service (install / uninstall / status).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -109,6 +116,22 @@ async fn main() -> anyhow::Result<()> {
     // Non-blocking logging: log events flow through a lock-free MPSC
     // channel to a background writer thread so emitting never blocks a
     // worker. The guard must live until process exit for a clean flush.
+    //
+    // RM-6: if `logging.file` is a relative path, resolve it to absolute
+    // *before* init so a service (which runs with a different cwd) writes
+    // where the operator intended.
+    let mut config = config;
+    if let Some(ref rel) = config.logging.file {
+        let p = std::path::Path::new(rel);
+        if !p.is_absolute() {
+            config.logging.file = Some(
+                shamir_server::service::absolute(p)?
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("log file path is not valid UTF-8"))?
+                    .to_string(),
+            );
+        }
+    }
     let _log_guard = shamir_server::logging::init(&config.logging);
 
     // Subcommand dispatch — `backup` / `access-tree` exit without booting
@@ -143,6 +166,20 @@ async fn main() -> anyhow::Result<()> {
                 password,
             };
             shamir_server::access_tree::run(&config, &args).await?;
+            return Ok(());
+        }
+        Some(Subcmd::Service { action }) => {
+            match action {
+                ServiceAction::Install { user } => {
+                    shamir_server::service::install(&cli.config, user.as_deref())?;
+                }
+                ServiceAction::Uninstall => {
+                    shamir_server::service::uninstall()?;
+                }
+                ServiceAction::Status => {
+                    shamir_server::service::status()?;
+                }
+            }
             return Ok(());
         }
         Some(Subcmd::Run) | None => {}
