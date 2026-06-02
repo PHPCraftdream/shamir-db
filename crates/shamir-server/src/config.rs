@@ -150,7 +150,7 @@ fn default_audit_retention_days() -> u32 {
 }
 
 /// Connection-level security limits — apply to every listener.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SecurityConfig {
     /// Slow-loris defence: max wall-clock time to wait for the client's
     /// `auth_init` after the TLS handshake completes. Real clients send
@@ -165,6 +165,22 @@ pub struct SecurityConfig {
     /// Hard cap on per-interactive-tx staged bytes.
     #[serde(default)]
     pub tx: TxLimitsConfig,
+    /// Per-subnet `auth_init` rate limit (token-bucket, spec §8).
+    /// Each `/24` IPv4 or `/64` IPv6 subnet gets this many tokens per
+    /// second. Default 10. Must be in `1..=100_000`.
+    #[serde(default = "default_auth_init_rate_per_second")]
+    pub auth_init_rate_per_second: u32,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            connection: Default::default(),
+            query_limits: Default::default(),
+            tx: Default::default(),
+            auth_init_rate_per_second: default_auth_init_rate_per_second(),
+        }
+    }
 }
 
 /// Server-side hard cap on per-interactive-tx staged bytes.
@@ -395,6 +411,10 @@ fn default_argon2_max() -> u32 {
     64
 }
 
+fn default_auth_init_rate_per_second() -> u32 {
+    10
+}
+
 // Spec §3.7.2 KDF floors.
 const KDF_MIN_MEMORY_KB: u32 = 19_456;
 const KDF_MIN_TIME: u32 = 2;
@@ -430,6 +450,14 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "argon2_concurrent_max must be in 1..=1024 (got {})",
                 self.argon2_concurrent_max
+            )));
+        }
+
+        // Auth-init rate limit.
+        if !(1..=100_000).contains(&self.security.auth_init_rate_per_second) {
+            return Err(ConfigError::Validation(format!(
+                "security.auth_init_rate_per_second must be in 1..=100_000 (got {})",
+                self.security.auth_init_rate_per_second
             )));
         }
 

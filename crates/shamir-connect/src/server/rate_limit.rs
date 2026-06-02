@@ -163,6 +163,10 @@ pub struct InMemoryRateLimiter {
     buckets: DashMap<Subnet, BucketState, SubnetHasher>,
     /// Wall-clock at server-process start. Used to detect warmup window.
     startup_at_ns: u64,
+    /// Configured base rate (tokens per second per subnet). Defaults to
+    /// [`RATE_LIMIT_AUTH_INIT_PER_SECOND`]. The §8.6 warmup divisor is
+    /// applied on top during the first 60 s.
+    rate_per_sec: u32,
     /// Optional durable backend. `None` for in-memory-only deployments
     /// (default and most tests).
     snapshot_sink: Option<Arc<dyn RateLimitSnapshotSink>>,
@@ -188,12 +192,19 @@ impl BucketState {
 }
 
 impl InMemoryRateLimiter {
-    /// New limiter; `startup_at_ns` should be `UnixNanos::now()` at server
-    /// boot.
+    /// New limiter with the default rate ([`RATE_LIMIT_AUTH_INIT_PER_SECOND`]);
+    /// `startup_at_ns` should be `UnixNanos::now()` at server boot.
     pub fn new(startup_at_ns: u64) -> Self {
+        Self::with_rate(startup_at_ns, RATE_LIMIT_AUTH_INIT_PER_SECOND)
+    }
+
+    /// New limiter with an explicit base rate. `startup_at_ns` should be
+    /// `UnixNanos::now()` at server boot.
+    pub fn with_rate(startup_at_ns: u64, rate_per_sec: u32) -> Self {
         Self {
             buckets: DashMap::with_hasher(SubnetHasher::default()),
             startup_at_ns,
+            rate_per_sec,
             snapshot_sink: None,
         }
     }
@@ -222,9 +233,22 @@ impl InMemoryRateLimiter {
     /// Subsequent calls to [`Self::persist_snapshot`] write through the
     /// same sink.
     pub fn with_snapshot_sink(sink: Arc<dyn RateLimitSnapshotSink>, startup_at_ns: u64) -> Self {
+        Self::with_snapshot_sink_and_rate(sink, startup_at_ns, RATE_LIMIT_AUTH_INIT_PER_SECOND)
+    }
+
+    /// Create a limiter backed by `sink`, anchored at a fresh
+    /// `startup_at_ns`, with an explicit base rate.
+    ///
+    /// See [`Self::with_snapshot_sink`] for semantics.
+    pub fn with_snapshot_sink_and_rate(
+        sink: Arc<dyn RateLimitSnapshotSink>,
+        startup_at_ns: u64,
+        rate_per_sec: u32,
+    ) -> Self {
         let limiter = Self {
             buckets: DashMap::with_hasher(SubnetHasher::default()),
             startup_at_ns,
+            rate_per_sec,
             snapshot_sink: Some(sink.clone()),
         };
         match sink.load() {
@@ -295,9 +319,9 @@ impl InMemoryRateLimiter {
     /// during the warmup window.
     pub fn effective_rate_per_sec(&self, now_ns: u64) -> u32 {
         if now_ns < self.startup_at_ns.saturating_add(WARMUP_WINDOW_NS) {
-            (RATE_LIMIT_AUTH_INIT_PER_SECOND / WARMUP_DIVISOR).max(1)
+            (self.rate_per_sec / WARMUP_DIVISOR).max(1)
         } else {
-            RATE_LIMIT_AUTH_INIT_PER_SECOND
+            self.rate_per_sec
         }
     }
 }
@@ -624,5 +648,60 @@ mod tests {
         let json = serde_json::to_vec(&snap).expect("json encode");
         let restored: RateLimitSnapshot = serde_json::from_slice(&json).expect("json decode");
         assert_eq!(restored.buckets.len(), snap.buckets.len());
+    }
+
+    #[test]
+    fn with_rate_honours_configured_rate() {
+        // rate=2, past warmup → exactly 2 tokens/sec burst.
+        let r = InMemoryRateLimiter::with_rate(0, 2);
+        let now = WARMUP_WINDOW_NS + 1;
+
+        assert_eq!(r.effective_rate_per_sec(now), 2);
+
+        // First 2 requests: allowed (bucket starts full).
+        assert_eq!(r.check(s(1), now), RateDecision::Allowed);
+        assert_eq!(r.check(s(1), now), RateDecision::Allowed);
+        // 3rd in the same instant: throttled.
+        assert!(matches!(
+            r.check(s(1), now),
+            RateDecision::RateLimited { .. }
+        ));
+
+        // 1 second later → bucket refilled, 2 more allowed.
+        let later = now + ns::SECOND;
+        assert_eq!(r.check(s(1), later), RateDecision::Allowed);
+        assert_eq!(r.check(s(1), later), RateDecision::Allowed);
+        assert!(matches!(
+            r.check(s(1), later),
+            RateDecision::RateLimited { .. }
+        ));
+    }
+
+    #[test]
+    fn with_rate_high_allows_many_requests() {
+        // rate=1000, past warmup → 1000 tokens/sec.
+        let r = InMemoryRateLimiter::with_rate(0, 1000);
+        let now = WARMUP_WINDOW_NS + 1;
+
+        assert_eq!(r.effective_rate_per_sec(now), 1000);
+
+        // 1000 requests in the same instant: all allowed (full bucket).
+        for _ in 0..1000 {
+            assert_eq!(r.check(s(1), now), RateDecision::Allowed);
+        }
+        // 1001st: throttled (bucket exhausted).
+        assert!(matches!(
+            r.check(s(1), now),
+            RateDecision::RateLimited { .. }
+        ));
+    }
+
+    #[test]
+    fn with_rate_warmup_divides_configured_rate() {
+        // rate=8, within warmup → effective 8/4 = 2.
+        let r = InMemoryRateLimiter::with_rate(0, 8);
+        let now = 1_000_000; // well within warmup window
+
+        assert_eq!(r.effective_rate_per_sec(now), 8 / WARMUP_DIVISOR);
     }
 }
