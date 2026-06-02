@@ -488,6 +488,17 @@ pub struct BatchRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolation: Option<String>,
 
+    /// Per-request durability level.
+    ///
+    /// - `"buffered"` (default / absent) — ack after the in-memory
+    ///   MemBuffer; durability on the ~500 ms background tick or
+    ///   graceful drain.
+    /// - `"synced"` — before ack, flush the durable backing of every
+    ///   repo this batch touched, so a committed write survives even
+    ///   an immediate hard crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durability: Option<String>,
+
     /// Queries map: alias -> query entry.
     ///
     /// Each key is the alias used in `$query` references.
@@ -913,6 +924,38 @@ mod tests {
         });
         let req: BatchRequest = serde_json::from_value(json).unwrap();
         assert!(req.isolation.is_none());
+    }
+
+    #[test]
+    fn batch_request_parses_durability_field() {
+        let json = serde_json::json!({
+            "id": 3,
+            "durability": "synced",
+            "queries": {}
+        });
+        let req: BatchRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.durability, Some("synced".to_string()));
+    }
+
+    #[test]
+    fn batch_request_durability_defaults_to_none() {
+        let json = serde_json::json!({
+            "id": 4,
+            "queries": {}
+        });
+        let req: BatchRequest = serde_json::from_value(json).unwrap();
+        assert!(req.durability.is_none());
+    }
+
+    #[test]
+    fn batch_request_durability_not_serialized_when_none() {
+        let json = serde_json::json!({
+            "id": 5,
+            "queries": {}
+        });
+        let req: BatchRequest = serde_json::from_value(json).unwrap();
+        let back = serde_json::to_value(&req).unwrap();
+        assert!(back.get("durability").is_none());
     }
 
     #[test]

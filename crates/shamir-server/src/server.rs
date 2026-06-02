@@ -144,6 +144,10 @@ pub struct ServerHandle {
     /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
     /// task drops and any lingering open txs are dropped (RAII abort).
     interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
+    /// ShamirDb reference — needed on shutdown to drain all repo
+    /// MemBuffers to durable backing, closing the ~500 ms buffered-
+    /// commit loss window on graceful stop.
+    shamir: Arc<ShamirDb>,
 }
 
 /// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
@@ -170,7 +174,14 @@ impl ServerHandle {
         // 3. Drain the audit chain + scheduler.
         self.audit_appender.shutdown().await;
         self.scheduler.shutdown().await;
-        // 4. Stop the observability HTTP server (if any).
+        // 4. Flush all repo MemBuffers to durable backing so buffered
+        //    commits in the last ~500 ms window are not lost on graceful
+        //    stop. Must happen AFTER accept loops have stopped (no new
+        //    writes can arrive) and BEFORE redb locks are released.
+        if let Err(e) = self.shamir.flush_all().await {
+            tracing::warn!("shutdown: flush_all failed: {}", e);
+        }
+        // 5. Stop the observability HTTP server (if any).
         if let Some(obs) = self.observability {
             obs.shutdown().await;
         }
@@ -722,6 +733,7 @@ impl ServerLauncher {
             observability,
             meta_snapshot_task,
             interactive_tx_reaper,
+            shamir,
         })
     }
 }
