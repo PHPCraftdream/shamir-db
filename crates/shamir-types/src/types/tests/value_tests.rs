@@ -494,4 +494,393 @@ mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // JSON prefix-parsing visitor branches (UserValue = Value<String>)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_json_prefix_int_signed() {
+        let json = r#"{
+            "i:x": -42
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("x"), Some(&UserValue::Int(-42)));
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_unsigned() {
+        let json = r#"{
+            "u:x": 100
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("x"), Some(&UserValue::Int(100)));
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_float() {
+        let json = r#"{
+            "float:x": 4.567
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => match m.get("x") {
+                Some(UserValue::F64(f)) => {
+                    assert!((f - 4.567).abs() < 1e-10);
+                }
+                other => panic!("Expected F64, got {:?}", other),
+            },
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_dec_valid() {
+        let json = r#"{
+            "dec:price": "123.456"
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("price"), Some(&UserValue::Str("123.456".to_string())));
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_dec_invalid() {
+        let json = r#"{
+            "dec:price": "not_a_number"
+        }"#;
+        let result: Result<UserValue, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_json_prefix_big_from_string() {
+        let json = r#"{
+            "big:num": "999999999999999999999999999999"
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(
+                    m.get("num"),
+                    Some(&UserValue::Str(
+                        "999999999999999999999999999999".to_string()
+                    ))
+                );
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_big_invalid_string() {
+        let json = r#"{
+            "big:num": "not_a_number"
+        }"#;
+        let result: Result<UserValue, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_json_prefix_big_from_int() {
+        let json = r#"{
+            "big:num": 42
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("num"), Some(&UserValue::Str("42".to_string())));
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_big_from_uint() {
+        let json = r#"{
+            "big:num": 4294967296
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(
+                    m.get("num"),
+                    Some(&UserValue::Str("4294967296".to_string()))
+                );
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_arr() {
+        let json = r#"{
+            "arr:items": [1, 2, 3]
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(
+                    m.get("items"),
+                    Some(&UserValue::List(vec![
+                        UserValue::Int(1),
+                        UserValue::Int(2),
+                        UserValue::Int(3),
+                    ]))
+                );
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_set() {
+        let json = r#"{
+            "set:items": [1, 2, 3]
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => match m.get("items") {
+                Some(UserValue::Set(s)) => {
+                    assert_eq!(s.len(), 3);
+                }
+                other => panic!("Expected Set, got {:?}", other),
+            },
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    #[test]
+    fn test_json_prefix_unknown_error() {
+        let json = r#"{
+            "unknown:key": "value"
+        }"#;
+        let result: Result<UserValue, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_json_no_prefix_plain_value() {
+        let json = r#"{
+            "name": "Alice"
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(m.get("name"), Some(&UserValue::Str("Alice".to_string())));
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Visitor branches via JSON: visit_u64, visit_f64, visit_none,
+    // visit_some, visit_unit, visit_string, visit_bytes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_json_deserialize_scalar_null() {
+        let val: UserValue = serde_json::from_str("null").unwrap();
+        assert_eq!(val, UserValue::Null);
+    }
+
+    #[test]
+    fn test_json_deserialize_scalar_bool() {
+        let val: UserValue = serde_json::from_str("true").unwrap();
+        assert_eq!(val, UserValue::Bool(true));
+    }
+
+    #[test]
+    fn test_json_deserialize_scalar_int() {
+        let val: UserValue = serde_json::from_str("42").unwrap();
+        assert_eq!(val, UserValue::Int(42));
+    }
+
+    #[test]
+    fn test_json_deserialize_scalar_negative_int() {
+        let val: UserValue = serde_json::from_str("-7").unwrap();
+        assert_eq!(val, UserValue::Int(-7));
+    }
+
+    #[test]
+    fn test_json_deserialize_scalar_float() {
+        let val: UserValue = serde_json::from_str("4.567").unwrap();
+        match val {
+            UserValue::F64(f) => assert!((f - 4.567).abs() < 1e-10),
+            other => panic!("Expected F64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_json_deserialize_scalar_string() {
+        let val: UserValue = serde_json::from_str(r#""hello""#).unwrap();
+        assert_eq!(val, UserValue::Str("hello".to_string()));
+    }
+
+    #[test]
+    fn test_json_deserialize_array() {
+        let val: UserValue = serde_json::from_str("[1, true, null]").unwrap();
+        assert_eq!(
+            val,
+            UserValue::List(vec![
+                UserValue::Int(1),
+                UserValue::Bool(true),
+                UserValue::Null,
+            ])
+        );
+    }
+
+    #[test]
+    fn test_json_deserialize_nested_map() {
+        let json = r#"{
+            "outer": {
+                "inner": 42
+            }
+        }"#;
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                let inner_map = m.get("outer").unwrap();
+                match inner_map {
+                    UserValue::Map(im) => {
+                        assert_eq!(im.get("inner"), Some(&UserValue::Int(42)));
+                    }
+                    other => panic!("Expected nested Map, got {:?}", other),
+                }
+            }
+            _ => panic!("Expected Map"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Hash / Eq for remaining types: Dec, Big, F64 non-NaN
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dec_hash_and_eq() {
+        let d1 = UserValue::Dec(Decimal::from_str("1.23").unwrap());
+        let d2 = UserValue::Dec(Decimal::from_str("1.23").unwrap());
+        assert_eq!(d1, d2);
+        assert_eq!(calculate_hash(&d1), calculate_hash(&d2));
+
+        let d3 = UserValue::Dec(Decimal::from_str("4.56").unwrap());
+        assert_ne!(d1, d3);
+    }
+
+    #[test]
+    fn test_big_hash_and_eq() {
+        let b1 = UserValue::Big(BigInt::from(999));
+        let b2 = UserValue::Big(BigInt::from(999));
+        assert_eq!(b1, b2);
+        assert_eq!(calculate_hash(&b1), calculate_hash(&b2));
+
+        let b3 = UserValue::Big(BigInt::from(1));
+        assert_ne!(b1, b3);
+    }
+
+    #[test]
+    fn test_f64_neg_zero_hash() {
+        let p = UserValue::F64(0.0);
+        let n = UserValue::F64(-0.0);
+        // Different bit patterns → different hashes
+        assert_ne!(calculate_hash(&p), calculate_hash(&n));
+    }
+
+    #[test]
+    fn test_cross_type_inequality() {
+        assert_ne!(UserValue::Null, UserValue::Int(0));
+        assert_ne!(UserValue::Bool(false), UserValue::Int(0));
+        assert_ne!(UserValue::Int(0), UserValue::F64(0.0));
+        assert_ne!(UserValue::Str("1".to_string()), UserValue::Int(1));
+        assert_ne!(UserValue::Bin(vec![]), UserValue::List(vec![]));
+    }
+
+    #[test]
+    fn test_set_hash_order_independent() {
+        let mut s1 = new_set();
+        s1.insert(UserValue::Int(10));
+        s1.insert(UserValue::Int(20));
+        s1.insert(UserValue::Int(30));
+
+        let mut s2 = new_set();
+        s2.insert(UserValue::Int(30));
+        s2.insert(UserValue::Int(10));
+        s2.insert(UserValue::Int(20));
+
+        assert_eq!(
+            calculate_hash(&UserValue::Set(s1)),
+            calculate_hash(&UserValue::Set(s2))
+        );
+    }
+
+    #[test]
+    fn test_map_hash_order_independent() {
+        let mut m1 = new_map();
+        m1.insert("a".to_string(), UserValue::Int(1));
+        m1.insert("b".to_string(), UserValue::Int(2));
+
+        let mut m2 = new_map();
+        m2.insert("b".to_string(), UserValue::Int(2));
+        m2.insert("a".to_string(), UserValue::Int(1));
+
+        assert_eq!(
+            calculate_hash(&UserValue::Map(m1)),
+            calculate_hash(&UserValue::Map(m2))
+        );
+    }
+
+    #[test]
+    fn test_inner_value_map_deserialization() {
+        // InnerValue uses InternerKey keys — hits the non-String branch
+        let mut map = new_map();
+        map.insert(InternerKey::new(1), InnerValue::Int(10));
+        map.insert(InternerKey::new(2), InnerValue::Str("hello".to_string()));
+        let val = InnerValue::Map(map);
+        let bytes = rmp_serde::to_vec(&val).unwrap();
+        let decoded: InnerValue = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(val, decoded);
+    }
+
+    #[test]
+    fn test_from_bytes_empty_input() {
+        let result = UserValue::from_bytes([]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_bytes_truncated() {
+        // Use a value whose encoding is multiple bytes long
+        let bytes = UserValue::List(vec![UserValue::Int(1), UserValue::Int(2)])
+            .to_bytes()
+            .unwrap();
+        // Truncate to just 1 byte (the fixarray header)
+        let result = UserValue::from_bytes(&bytes[..1]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_msgpack_bytes_apis() {
+        let val = UserValue::Int(42);
+        let b = val.to_bytes().unwrap();
+        assert!(!b.is_empty());
+        let decoded = UserValue::from_bytes(b.as_ref()).unwrap();
+        assert_eq!(val, decoded);
+        // Also works with Bytes argument
+        let decoded2 = UserValue::from_bytes(b).unwrap();
+        assert_eq!(val, decoded2);
+    }
 }
