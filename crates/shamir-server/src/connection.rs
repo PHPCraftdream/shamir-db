@@ -459,19 +459,18 @@ async fn run_handshake<F: Framer>(
     let mut proof = [0u8; 32];
     proof.copy_from_slice(&proof_msg.client_proof);
 
-    // 6. Acquire Argon2 permit before verify (server-side HMAC + Ed25519
-    // sign — light, but the permit also gates against burst-DoS that
-    // multiplies the pre-state work). Per spec §8.1 the permit covers
-    // ONLY the actual KDF; here we use it as a server-side concurrency
-    // limiter for the verify operation since real-user path doesn't run
-    // Argon2id (only FakeBlob HKDF + HMACs). Take a try_acquire to avoid
-    // blocking under load — return server_busy on contention.
-    let permit_opt = ctx.argon2_sem.try_acquire();
-    if permit_opt.is_none() {
-        return Err(HandshakeError::Policy); // surface as authentication_failed
-    }
-
-    // 7. Verify the proof. Identity keypair lives behind ServerIdentityState.
+    // 6. Verify the proof. NB: the proof-verify path runs NO Argon2id —
+    // only FakeBlob HKDF + HMAC + Ed25519 sign (all µs-cheap). It is
+    // therefore NOT gated by the Argon2 KDF semaphore. The previous code
+    // took a non-blocking `try_acquire` here and REJECTED on contention,
+    // which dropped legitimate concurrent logins the moment more than
+    // `argon2_concurrent_max` clients reached verify at once — an
+    // availability bug surfacing as `authentication_failed`/early-eof, not
+    // real DoS protection (the verify does no expensive work). Burst is
+    // already bounded by the global connection cap (`conn_limiter`) and the
+    // per-subnet `auth_init` rate limit. `ctx.argon2_sem` stays reserved
+    // for gating genuine server-side Argon2id (e.g. user-creation key
+    // derivation), which this path does not perform. Identity keypair lives behind ServerIdentityState.
     // We need a concrete Ed25519Keypair to pass; ServerIdentityState owns
     // the keypair internally. For this v1 we use sign_with_current via
     // build_identity_input duplicate path — but verify_proof needs a
@@ -508,7 +507,6 @@ async fn run_handshake<F: Framer>(
         // backoff (we did not `register_failure`), so the floor pad applies.
         Err(_) => return Err(HandshakeError::BadProof { backoff_ms: 0 }),
     };
-    drop(permit_opt);
 
     let auth_ok: AuthOkView = match outcome {
         ProofOutcome::Accepted(ok) => *ok,

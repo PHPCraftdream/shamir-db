@@ -545,15 +545,20 @@ async fn permission_deny_allow_by_mode() {
 
 /// Scenario 2: group grant — user allowed via group, non-member denied.
 ///
-/// IGNORED at the wire level: the third SCRAM handshake in this test
-/// (admin + bob + carol, each a real 19 MB argon2 KDF) deterministically
-/// hits an "early eof" on the second runtime user's login — a harness
-/// limitation, not a server fault (no panic, no config/serial/startup race).
+/// IGNORED — confirmed root cause: the per-subnet `auth_init` rate limiter,
+/// NOT the argon2 verify path. This test opens THREE SCRAM connections from
+/// the same loopback subnet (admin + bob + carol). On a freshly-booted
+/// server the §8.6 warmup window throttles `auth_init` to ~2.5/sec with a
+/// ~2.5-token burst, so the third same-subnet login is rejected at the
+/// accept stage — the client reads an early-eof on the *challenge* frame
+/// (`read challenge`, before any proof is sent). `permission_deny_allow_by_mode`
+/// (two logins) passes for exactly this reason. Harness-specific to many
+/// logins from one subnet; real clients come from diverse subnets. Proper
+/// fix tracked in #123 (configurable rate limit so tests can loosen it).
 /// The group-grant *enforcement* logic is covered non-vacuously at the
 /// facade level by `shamir-db`
-/// `enforcement_tests::group_member_authorized_via_group_bits`, and the
-/// i64 owner/member-id round-trip fix is exercised there too.
-#[ignore = "harness: SCRAM early-eof on 2nd runtime user; group logic covered by shamir-db enforcement_tests"]
+/// `enforcement_tests::group_member_authorized_via_group_bits`.
+#[ignore = "harness: per-subnet auth_init rate-limit warmup rejects 3rd same-subnet login (see #123)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn permission_group_grant() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
