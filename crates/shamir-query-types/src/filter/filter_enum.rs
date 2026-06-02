@@ -10,76 +10,93 @@ use super::{FieldPath, FilterValue};
 pub enum Filter {
     // Comparison operators
     Eq {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
     Ne {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
     Gt {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
     Gte {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
     Lt {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
     Lte {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
 
     // Pattern matching
     Like {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         pattern: String,
     },
     ILike {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         pattern: String,
     },
     Regex {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         pattern: String,
     },
 
     // Null checks
     IsNull {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
     },
     IsNotNull {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
     },
 
     // Array/containment operators
     In {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         values: Vec<FilterValue>,
     },
     NotIn {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         values: Vec<FilterValue>,
     },
     Contains {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
     ContainsAny {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         values: Vec<FilterValue>,
     },
     ContainsAll {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         values: Vec<FilterValue>,
     },
 
     // Range
     Between {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         from: FilterValue,
         to: FilterValue,
@@ -87,9 +104,11 @@ pub enum Filter {
 
     // Existence
     Exists {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
     },
     NotExists {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
     },
 
@@ -107,6 +126,7 @@ pub enum Filter {
     // Shortcut: field equals value
     #[serde(rename = "field")]
     FieldEq {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         value: FilterValue,
     },
@@ -115,6 +135,7 @@ pub enum Filter {
     /// Full-text search on a text field.
     /// mode: "and" (all tokens must match) or "or" (any token matches).
     Fts {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         query: String,
         #[serde(default = "default_fts_mode")]
@@ -123,6 +144,7 @@ pub enum Filter {
 
     /// Vector similarity search (top-k nearest neighbors).
     VectorSimilarity {
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         query: Vec<f32>,
         k: u32,
@@ -133,6 +155,7 @@ pub enum Filter {
     /// cmp: "eq" | "lt" | "gt" | "lte" | "gte"
     Computed {
         expr_op: String,
+        #[serde(deserialize_with = "de_field_path")]
         field: FieldPath,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expr_args: Option<Vec<FilterValue>>,
@@ -143,6 +166,29 @@ pub enum Filter {
 
 fn default_fts_mode() -> String {
     "and".to_string()
+}
+
+/// Deserialize a [`FieldPath`] from EITHER a single string (a top-level
+/// field, e.g. `"id"`) OR an array of segments (a nested document path,
+/// e.g. `["address", "city"]` → `record.address.city`).
+///
+/// This keeps the common single-field case ergonomic — `"field": "id"` —
+/// while still supporting nested paths via an array. Serialization always
+/// emits the canonical array form.
+fn de_field_path<'de, D>(deserializer: D) -> Result<FieldPath, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrSeq {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match StringOrSeq::deserialize(deserializer)? {
+        StringOrSeq::One(s) => vec![s],
+        StringOrSeq::Many(v) => v,
+    })
 }
 
 #[cfg(test)]
@@ -224,5 +270,31 @@ mod tests {
         let json = r#"{"op":"eq","field":["age"],"value":30}"#;
         let f: Filter = serde_json::from_str(json).unwrap();
         assert!(matches!(f, Filter::Eq { .. }));
+    }
+
+    #[test]
+    fn field_accepts_bare_string_as_single_segment() {
+        // Ergonomic: a top-level field may be written as a bare string.
+        let json = r#"{"op":"eq","field":"id","value":"user:42"}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        match &f {
+            Filter::Eq { field, .. } => assert_eq!(field, &["id"]),
+            _ => panic!("expected Eq"),
+        }
+        // Serializes back to the canonical array form, which re-parses.
+        let back = serde_json::to_string(&f).unwrap();
+        assert!(back.contains(r#""field":["id"]"#), "serialized: {back}");
+        let f2: Filter = serde_json::from_str(&back).unwrap();
+        assert_eq!(f, f2);
+    }
+
+    #[test]
+    fn field_accepts_nested_path_array() {
+        let json = r#"{"op":"eq","field":["address","city"],"value":"NY"}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        match &f {
+            Filter::Eq { field, .. } => assert_eq!(field, &["address", "city"]),
+            _ => panic!("expected Eq"),
+        }
     }
 }
