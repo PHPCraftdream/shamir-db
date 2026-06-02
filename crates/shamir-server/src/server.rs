@@ -312,9 +312,10 @@ impl ServerLauncher {
         // for the first 60s. See `shamir_connect::server::rate_limit`.
         let rate_limit_sink: Arc<dyn RateLimitSnapshotSink> =
             Arc::new(MetaRateLimitSink::new(meta.clone()));
-        let rate_limit = Arc::new(InMemoryRateLimiter::with_snapshot_sink(
+        let rate_limit = Arc::new(InMemoryRateLimiter::with_snapshot_sink_and_rate(
             rate_limit_sink,
             now_ns,
+            config.security.auth_init_rate_per_second,
         ));
         let argon2_sem = Arc::new(Argon2Semaphore::with_capacity(config.argon2_concurrent_max));
         let session_store = Arc::new(SessionStore::new());

@@ -31,7 +31,8 @@ use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFA
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
 use shamir_server::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, SecurityConfig,
+    TlsConfig,
 };
 use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::server::{BootstrapMode, ServerLauncher};
@@ -120,7 +121,10 @@ fn make_test_config(temp: &TempDir) -> Config {
             cert_path: data_dir.join("cert.pem"),
             key_path: data_dir.join("key.pem"),
         },
-        security: Default::default(),
+        security: SecurityConfig {
+            auth_init_rate_per_second: 1000,
+            ..Default::default()
+        },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
             addr: String::new(),
@@ -545,20 +549,9 @@ async fn permission_deny_allow_by_mode() {
 
 /// Scenario 2: group grant — user allowed via group, non-member denied.
 ///
-/// IGNORED — confirmed root cause: the per-subnet `auth_init` rate limiter,
-/// NOT the argon2 verify path. This test opens THREE SCRAM connections from
-/// the same loopback subnet (admin + bob + carol). On a freshly-booted
-/// server the §8.6 warmup window throttles `auth_init` to ~2.5/sec with a
-/// ~2.5-token burst, so the third same-subnet login is rejected at the
-/// accept stage — the client reads an early-eof on the *challenge* frame
-/// (`read challenge`, before any proof is sent). `permission_deny_allow_by_mode`
-/// (two logins) passes for exactly this reason. Harness-specific to many
-/// logins from one subnet; real clients come from diverse subnets. Proper
-/// fix tracked in #123 (configurable rate limit so tests can loosen it).
-/// The group-grant *enforcement* logic is covered non-vacuously at the
-/// facade level by `shamir-db`
-/// `enforcement_tests::group_member_authorized_via_group_bits`.
-#[ignore = "harness: per-subnet auth_init rate-limit warmup rejects 3rd same-subnet login (see #123)"]
+/// Three SCRAM connections from the same loopback subnet (admin + bob +
+/// carol); the test config sets `auth_init_rate_per_second = 1000` so the
+/// §8.6 warmup rate (/4 = 250/sec) does not throttle multi-login.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn permission_group_grant() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();

@@ -63,6 +63,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
             },
             query_limits: Default::default(),
             tx: Default::default(),
+            auth_init_rate_per_second: 1000,
         },
         audit: Default::default(),
         observability: shamir_server::config::ObservabilityConfig {
