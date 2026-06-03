@@ -145,23 +145,27 @@ fn service_main_inner() -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("failed to build tokio runtime: {e}"))?;
 
-    // Report Running.
-    report_status(
-        &status_handle,
-        ServiceState::Running,
-        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-        Duration::ZERO,
-    )?;
-
-    tracing::info!("shamir-server running as Windows service");
+    tracing::info!("shamir-server starting as Windows service");
 
     // Bridge the SCM stop signal into an async future.
     let shutdown = async move {
         stop_notify.notified().await;
     };
 
+    // on_ready closure: report Running to the SCM only after listeners bind.
+    // `ServiceStatusHandle` is `Copy`, so capturing it in the closure is fine.
+    let on_ready = move || {
+        let _ = report_status(
+            &status_handle,
+            ServiceState::Running,
+            ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+            Duration::ZERO,
+        );
+        tracing::info!("shamir-server running as Windows service");
+    };
+
     // Run the server. On return (normal or error), ALWAYS report Stopped.
-    let result = rt.block_on(crate::runtime::serve(config, bootstrap, shutdown));
+    let result = rt.block_on(crate::runtime::serve(config, bootstrap, shutdown, on_ready));
 
     // Report StopPending then Stopped.
     let exit_code = match &result {

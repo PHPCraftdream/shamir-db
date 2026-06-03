@@ -227,6 +227,7 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
         config,
         bootstrap,
         shamir_server::runtime::foreground_shutdown(),
+        shamir_server::runtime::notify_ready,
     )
     .await
 }
