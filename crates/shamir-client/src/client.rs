@@ -8,7 +8,7 @@ use tokio::io::{split, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
@@ -61,7 +61,9 @@ pub struct Client {
     session_id: [u8; 32],
     pinned_hash: [u8; 32],
     expires_at_ns: u64,
-    resumption_ticket: Option<Vec<u8>>,
+    /// Bearer credential — held in `Zeroizing` so it is wiped when the
+    /// client drops rather than lingering in freed heap.
+    resumption_ticket: Option<Zeroizing<Vec<u8>>>,
     resumption_expires_at_ns: Option<u64>,
     next_request_id: AtomicU32,
 }
@@ -137,7 +139,10 @@ impl Client {
 
         // Step 3: derive proof (Argon2id ~50ms-2s — spawn_blocking so
         // it doesn't stall the tokio worker thread).
-        let mut password_buf = opts.password.to_vec();
+        // Wrap the working copy in `Zeroizing` so it is wiped on EVERY exit
+        // path of the blocking closure (including a `process_challenge`
+        // error), not only the success path.
+        let mut password_buf = Zeroizing::new(opts.password.to_vec());
         let challenge_clone = challenge.clone();
         let (hs_ret, result) = tokio::task::spawn_blocking(move || {
             let res = hs.process_challenge(&challenge_clone, &mut password_buf);
@@ -239,7 +244,7 @@ impl Client {
             session_id: success.session_id,
             pinned_hash,
             expires_at_ns: success.expires_at_ns,
-            resumption_ticket,
+            resumption_ticket: resumption_ticket.map(Zeroizing::new),
             resumption_expires_at_ns,
             next_request_id: AtomicU32::new(1),
         })
@@ -264,7 +269,7 @@ impl Client {
     /// Resumption ticket bytes (if the server issued one). Persist
     /// per-server to skip Argon2id on the next connection.
     pub fn resumption_ticket(&self) -> Option<&[u8]> {
-        self.resumption_ticket.as_deref()
+        self.resumption_ticket.as_deref().map(Vec::as_slice)
     }
 
     /// Resumption expiry (paired with [`Self::resumption_ticket`]).
@@ -307,15 +312,23 @@ impl Client {
     pub async fn create_scram_user(
         &self,
         name: &str,
-        password: &str,
+        password: Zeroizing<String>,
         roles: Vec<String>,
     ) -> Result<Vec<u8>, ClientError> {
-        let req = DbRequest::CreateScramUser {
+        let mut req = DbRequest::CreateScramUser {
             name: name.to_string(),
-            password: password.to_string(),
+            password: password.as_str().to_owned(),
             roles,
         };
-        match self.roundtrip(&req).await? {
+        let result = self.roundtrip(&req).await;
+        // Wipe the cleartext password copy placed into the request before it
+        // drops. (The caller's `password` is `Zeroizing` and wipes on its own
+        // drop; the transient msgpack frame built inside `roundtrip` shares
+        // every request's lifecycle and is not separately wiped.)
+        if let DbRequest::CreateScramUser { password, .. } = &mut req {
+            password.zeroize();
+        }
+        match result? {
             DbResponse::UserCreated { user_id, .. } => Ok(user_id),
             other => Err(ClientError::Protocol(format!(
                 "expected UserCreated, got {other:?}"

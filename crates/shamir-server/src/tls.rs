@@ -24,6 +24,8 @@ use std::sync::Arc;
 
 use tokio_rustls::rustls::ServerConfig;
 
+use zeroize::Zeroizing;
+
 use shamir_transport_tcp::tls::{generate_self_signed_server_cert, make_server_config_from_pem};
 
 /// Errors raised by [`load_or_generate`].
@@ -70,7 +72,7 @@ pub fn load_or_generate(
     let (cert_pem, key_pem, generated) = match (cert_exists, key_exists) {
         (true, true) => {
             let cert = fs::read_to_string(cert_path)?;
-            let key = fs::read_to_string(key_path)?;
+            let key = Zeroizing::new(fs::read_to_string(key_path)?);
             (cert, key, false)
         }
         (false, false) => {

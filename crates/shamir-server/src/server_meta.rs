@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use shamir_connect::common::crypto::random_bytes;
 use shamir_connect::common::time::UnixNanos;
@@ -62,50 +63,93 @@ const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
 // Persisted blobs (one per logical chunk)
 // ---------------------------------------------------------------------------
 
+/// Serde glue: (de)serialize secret byte buffers as `serde_bytes` blobs while
+/// holding them in `Zeroizing<Vec<u8>>` so the key material is wiped on drop.
+/// The on-disk encoding is byte-identical to the previous
+/// `#[serde(with = "serde_bytes")]`, so existing meta stores still load.
+mod serde_zeroizing_bytes {
+    use serde::{Deserializer, Serializer};
+    use zeroize::Zeroizing;
+
+    pub fn serialize<S: Serializer>(v: &Zeroizing<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        serde_bytes::serialize(v.as_slice(), s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<Vec<u8>>, D::Error> {
+        let v: Vec<u8> = serde_bytes::deserialize(d)?;
+        Ok(Zeroizing::new(v))
+    }
+
+    /// Same, for the `Option<…>` secret fields (previous-key slots).
+    pub mod opt {
+        use serde::{Deserializer, Serializer};
+        use zeroize::Zeroizing;
+
+        pub fn serialize<S: Serializer>(
+            v: &Option<Zeroizing<Vec<u8>>>,
+            s: S,
+        ) -> Result<S::Ok, S::Error> {
+            // Mirror serde_bytes' Option framing: serialize_some(bytes) / none.
+            match v {
+                Some(inner) => s.serialize_some(serde_bytes::Bytes::new(inner.as_slice())),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, D::Error> {
+            // serde_bytes handles the Option framing identically to before.
+            let v: Option<Vec<u8>> = serde_bytes::deserialize(d)?;
+            Ok(v.map(Zeroizing::new))
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct PersistedSecrets {
-    #[serde(with = "serde_bytes")]
-    server_secret: Vec<u8>, // 32
-    #[serde(with = "serde_bytes")]
-    server_secret_previous: Option<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes")]
+    server_secret: Zeroizing<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes::opt")]
+    server_secret_previous: Option<Zeroizing<Vec<u8>>>, // 32
     server_secret_rotated_at_ns: u64,
-    #[serde(with = "serde_bytes")]
-    lockout_secret: Vec<u8>, // 32 — NEVER rotated
+    #[serde(with = "serde_zeroizing_bytes")]
+    lockout_secret: Zeroizing<Vec<u8>>, // 32 — NEVER rotated
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedAuditChain {
-    #[serde(with = "serde_bytes")]
-    audit_chain_key: Vec<u8>, // 32
-    #[serde(with = "serde_bytes")]
-    audit_chain_key_previous: Option<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes")]
+    audit_chain_key: Zeroizing<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes::opt")]
+    audit_chain_key_previous: Option<Zeroizing<Vec<u8>>>, // 32
     audit_chain_key_rotated_at_ns: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedTicket {
-    #[serde(with = "serde_bytes")]
-    ticket_key: Vec<u8>, // 32
-    #[serde(with = "serde_bytes")]
-    ticket_key_previous: Option<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes")]
+    ticket_key: Zeroizing<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes::opt")]
+    ticket_key_previous: Option<Zeroizing<Vec<u8>>>, // 32
     ticket_key_rotated_at_ns: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedIdentity {
     /// 32-byte Ed25519 seed (NOT the priv-key — `from_seed` reconstructs it).
-    #[serde(with = "serde_bytes")]
-    current_seed: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    previous_seed: Option<Vec<u8>>,
+    #[serde(with = "serde_zeroizing_bytes")]
+    current_seed: Zeroizing<Vec<u8>>,
+    #[serde(with = "serde_zeroizing_bytes::opt")]
+    previous_seed: Option<Zeroizing<Vec<u8>>>,
     rotation_until_ns: Option<u64>,
     current_version: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PersistedBootstrap {
-    #[serde(with = "serde_bytes")]
-    bootstrap_token_hash: Option<Vec<u8>>, // 32
+    #[serde(with = "serde_zeroizing_bytes::opt")]
+    bootstrap_token_hash: Option<Zeroizing<Vec<u8>>>, // 32
     bootstrap_token_expires_at_ns: Option<u64>,
     superuser_ever_existed: bool,
 }
@@ -113,8 +157,8 @@ struct PersistedBootstrap {
 #[derive(Serialize, Deserialize)]
 struct PersistedAuditCheckpoint {
     last_audit_seq: u64,
-    #[serde(with = "serde_bytes")]
-    last_audit_hmac: Vec<u8>, // 32
+    #[serde(with = "serde_zeroizing_bytes")]
+    last_audit_hmac: Zeroizing<Vec<u8>>, // 32
 }
 
 #[derive(Serialize, Deserialize)]
@@ -246,23 +290,23 @@ impl ServerMetaStore {
         random_bytes(&mut ed25519_seed);
 
         let secrets = PersistedSecrets {
-            server_secret: server_secret.to_vec(),
+            server_secret: Zeroizing::new(server_secret.to_vec()),
             server_secret_previous: None,
             server_secret_rotated_at_ns: now,
-            lockout_secret: lockout_secret.to_vec(),
+            lockout_secret: Zeroizing::new(lockout_secret.to_vec()),
         };
         let audit = PersistedAuditChain {
-            audit_chain_key: audit_chain_key.to_vec(),
+            audit_chain_key: Zeroizing::new(audit_chain_key.to_vec()),
             audit_chain_key_previous: None,
             audit_chain_key_rotated_at_ns: now,
         };
         let ticket = PersistedTicket {
-            ticket_key: ticket_key.to_vec(),
+            ticket_key: Zeroizing::new(ticket_key.to_vec()),
             ticket_key_previous: None,
             ticket_key_rotated_at_ns: now,
         };
         let identity = PersistedIdentity {
-            current_seed: ed25519_seed.to_vec(),
+            current_seed: Zeroizing::new(ed25519_seed.to_vec()),
             previous_seed: None,
             rotation_until_ns: None,
             current_version: 0,
@@ -472,7 +516,7 @@ impl ServerMetaStore {
             let prior: PersistedTicket =
                 get(table, KEY_TICKET)?.ok_or_else(|| missing(KEY_TICKET))?;
             let next = PersistedTicket {
-                ticket_key: new_key.to_vec(),
+                ticket_key: Zeroizing::new(new_key.to_vec()),
                 ticket_key_previous: Some(prior.ticket_key),
                 ticket_key_rotated_at_ns: now_ns,
             };
@@ -486,7 +530,7 @@ impl ServerMetaStore {
             let prior: PersistedAuditChain =
                 get(table, KEY_AUDIT_CHAIN)?.ok_or_else(|| missing(KEY_AUDIT_CHAIN))?;
             let next = PersistedAuditChain {
-                audit_chain_key: new_key.to_vec(),
+                audit_chain_key: Zeroizing::new(new_key.to_vec()),
                 audit_chain_key_previous: Some(prior.audit_chain_key),
                 audit_chain_key_rotated_at_ns: now_ns,
             };
@@ -501,7 +545,7 @@ impl ServerMetaStore {
             let prior: PersistedSecrets =
                 get(table, KEY_SECRETS)?.ok_or_else(|| missing(KEY_SECRETS))?;
             let next = PersistedSecrets {
-                server_secret: new_secret.to_vec(),
+                server_secret: Zeroizing::new(new_secret.to_vec()),
                 server_secret_previous: Some(prior.server_secret),
                 server_secret_rotated_at_ns: now_ns,
                 lockout_secret: prior.lockout_secret,
@@ -521,8 +565,8 @@ impl ServerMetaStore {
     ) -> Result<(), MetaError> {
         self.with_write_txn(|table| {
             let next = PersistedIdentity {
-                current_seed: current_seed.to_vec(),
-                previous_seed: Some(previous_seed.to_vec()),
+                current_seed: Zeroizing::new(current_seed.to_vec()),
+                previous_seed: Some(Zeroizing::new(previous_seed.to_vec())),
                 rotation_until_ns: Some(rotation_until_ns),
                 current_version: new_version,
             };
@@ -559,7 +603,7 @@ impl ServerMetaStore {
                     superuser_ever_existed: false,
                 });
             let next = PersistedBootstrap {
-                bootstrap_token_hash: Some(hash.to_vec()),
+                bootstrap_token_hash: Some(Zeroizing::new(hash.to_vec())),
                 bootstrap_token_expires_at_ns: Some(expires_at_ns),
                 superuser_ever_existed: prior.superuser_ever_existed,
             };
@@ -604,7 +648,7 @@ impl ServerMetaStore {
         self.with_write_txn(|table| {
             let next = PersistedAuditCheckpoint {
                 last_audit_seq: next_seq,
-                last_audit_hmac: prev_hmac.to_vec(),
+                last_audit_hmac: Zeroizing::new(prev_hmac.to_vec()),
             };
             put(table, KEY_AUDIT_CHECKPOINT, &next)
         })

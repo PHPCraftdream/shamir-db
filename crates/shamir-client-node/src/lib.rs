@@ -226,7 +226,7 @@ impl ShamirClient {
             .as_ref()
             .ok_or_else(|| Error::from_reason("client closed"))?;
         let user_id = client
-            .create_scram_user(&name, &password, roles)
+            .create_scram_user(&name, Zeroizing::new(password), roles)
             .await
             .map_err(to_napi)?;
         Ok(Buffer::from(user_id))
