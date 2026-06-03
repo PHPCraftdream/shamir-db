@@ -1,0 +1,2 @@
+#[cfg(test)]
+mod group_commit_tests;

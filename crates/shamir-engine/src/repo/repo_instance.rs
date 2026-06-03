@@ -1,4 +1,5 @@
 use super::super::table::{TableConfig, TableManager};
+use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo, Store};
@@ -35,6 +36,10 @@ pub struct RepoInstance {
     token_names: Arc<scc::HashMap<u64, String>>,
     /// Atomic tx telemetry counters.
     tx_metrics: Arc<shamir_tx::TxMetrics>,
+    /// Group-commit coordinator for `synced` durability flushes.
+    /// Shared across all clones so concurrent synced commits on this
+    /// repo batch their flush+fsync into a single I/O round.
+    group_commit: Arc<GroupCommit>,
 }
 
 impl Clone for RepoInstance {
@@ -49,6 +54,7 @@ impl Clone for RepoInstance {
             per_table_mvcc: Arc::clone(&self.per_table_mvcc),
             token_names: Arc::clone(&self.token_names),
             tx_metrics: Arc::clone(&self.tx_metrics),
+            group_commit: Arc::clone(&self.group_commit),
         }
     }
 }
@@ -78,6 +84,7 @@ impl RepoInstance {
             per_table_mvcc: Arc::new(scc::HashMap::new()),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
+            group_commit: Arc::new(GroupCommit::new()),
         }
     }
 
@@ -598,6 +605,12 @@ impl RepoInstance {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// Durability flush for a `synced` commit, batched via group-commit so
+    /// concurrent synced commits on this repo share one flush+fsync.
+    pub async fn synced_flush(&self) -> DbResult<()> {
+        self.group_commit.run(|| self.flush_buffers()).await
     }
 
     /// Spawn a background task that runs GC periodically.
