@@ -128,6 +128,14 @@ impl IndexBackend for FtsRankedBackend {
         &self.descriptor
     }
 
+    fn tokenize_query(&self, query: &str) -> Vec<u64> {
+        self.tokenizer
+            .tokenize(query)
+            .iter()
+            .map(|t| token_hash(t))
+            .collect()
+    }
+
     async fn plan_insert(
         &self,
         rid: RecordId,

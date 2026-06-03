@@ -173,6 +173,17 @@ pub trait IndexBackend: Send + Sync {
         self.plan_delete(rid, rec).await
     }
 
+    /// Tokenize a query string into posting-key hashes using THIS index's
+    /// tokenizer, so query terms match the way documents were indexed
+    /// (stemming, n-grams, etc.). Default mirrors the legacy behaviour
+    /// (whitespace split + lowercase) for backends without a real tokenizer.
+    fn tokenize_query(&self, query: &str) -> Vec<u64> {
+        query
+            .split_whitespace()
+            .map(|w| crate::index2::tokenizer::token_hash(&w.to_lowercase()))
+            .collect()
+    }
+
     /// Apply in-memory-only ops (e.g. BumpFtsStats). Called by
     /// `apply_index_ops` for ops that don't go through the Store.
     /// Default: no-op.
