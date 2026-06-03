@@ -1,0 +1,37 @@
+[package]
+name = "shamir-funclib"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in scalar function library for ShamirDB (math, strings, arrays, cast, datetime, json, validate, encode, object, text, crypto)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Value model — every scalar fn operates on InnerValue.
+shamir-types = { path = "../shamir-types" }
+
+# Numeric (/math, /cast)
+rust_decimal = { version = "1.40.0", features = ["serde", "maths"] }
+num-bigint = { version = "0.4", features = ["serde"] }
+
+# Text (/str, /text, /validate regex family)
+regex = "1.11.1"
+unicode-normalization = "0.1.24"
+strsim = "0.11.1"
+
+# Temporal (/datetime)
+chrono = { version = "0.4", features = ["serde"] }
+
+# Encoding (/encode)
+base64 = "0.22.1"
+hex = "0.4.3"
+data-encoding = "2.10.0"
+percent-encoding = "2.3.2"
+
+# Crypto — pure/deterministic primitives only (/crypto scalar subset)
+sha2 = "0.10.9"
+sha3 = "0.10.8"
+blake3 = "1.5"
+hmac = "0.12.1"
+subtle = "2.6.1"
+
+[dev-dependencies]
