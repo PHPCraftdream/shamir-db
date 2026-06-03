@@ -9,6 +9,7 @@ use crate::query::auth::SessionPermissions;
 use crate::query::batch::{
     BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
 };
+use crate::query::filter::Filter;
 use crate::query::filter::FilterContext;
 use crate::query::read::{QueryResult, QueryStats};
 use crate::query::write::WriteResult;
@@ -149,7 +150,43 @@ pub async fn execute_batch_with_permissions(
             message: format!("Permission denied: {:?} on {:?}", action, resource),
         })?;
 
-    execute_batch(request, resolver, admin, Actor::System, db_name).await
+    // Stage B-1: enforce row-level security. `row_filter()` was computed but
+    // never applied — AND each op's merged row_filter into its WHERE clause so a
+    // row_filter grant actually restricts the rows a Read/Update/Delete touches.
+    let mut request = request.clone();
+    for (_alias, entry) in request.queries.iter_mut() {
+        if let Some(rf) = permissions.row_filter_for_op(&entry.op, db_name) {
+            apply_row_filter(&mut entry.op, rf);
+        }
+    }
+    execute_batch(&request, resolver, admin, Actor::System, db_name).await
+}
+
+/// AND a row-level-security filter into a data op's WHERE clause.
+/// Read/Update/Delete are restricted; other ops are left unchanged
+/// (Insert/Set row-match validation is a separate follow-up).
+fn apply_row_filter(op: &mut BatchOp, rf: Filter) {
+    match op {
+        BatchOp::Read(q) => q.r#where = Some(and_combine(q.r#where.take(), rf)),
+        BatchOp::Update(u) => u.where_clause = Some(and_combine(u.where_clause.take(), rf)),
+        BatchOp::Delete(d) => {
+            let existing = d.where_clause.clone();
+            d.where_clause = Filter::And {
+                filters: vec![existing, rf],
+            };
+        }
+        _ => {}
+    }
+}
+
+/// Combine an optional existing filter with a row filter via AND.
+fn and_combine(existing: Option<Filter>, rf: Filter) -> Filter {
+    match existing {
+        Some(f) => Filter::And {
+            filters: vec![f, rf],
+        },
+        None => rf,
+    }
 }
 
 /// Validate that all referenced tables exist before execution.

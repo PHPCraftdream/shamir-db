@@ -191,6 +191,16 @@ impl SessionPermissions {
     // Batch check
     // ========================================================================
 
+    /// The merged row-level-security filter that must be AND-ed into this op's
+    /// WHERE clause for the current session, or `None` when unrestricted
+    /// (superadmin, no matching row_filter grant, or an unrestricted Allow).
+    /// Only data ops (Read/Update/Delete/Insert/Set) can be restricted; DDL ops
+    /// naturally yield `None`.
+    pub fn row_filter_for_op(&self, op: &BatchOp, db_name: &str) -> Option<Filter> {
+        let (action, resource) = Self::extract_action_resource(op, db_name);
+        self.row_filter(action, &resource)
+    }
+
     /// Check all operations in a batch. Returns first denied operation or Ok(()).
     ///
     /// The `db_name` parameter provides database context for building
