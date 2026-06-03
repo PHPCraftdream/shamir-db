@@ -3697,6 +3697,7 @@ name = "shamir-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "axum",
  "base64",
  "clap",
@@ -3711,6 +3712,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "metrics-process",
  "mimalloc",
+ "once_cell",
  "parking_lot 0.12.5",
  "redb",
  "rmp-serde",
@@ -3718,6 +3720,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "serial_test",
  "shamir-client",
  "shamir-connect",
  "shamir-db",

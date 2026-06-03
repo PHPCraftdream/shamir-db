@@ -77,21 +77,50 @@ A `log::Log` impl:
    block the producer. Policy configurable (drop-new / drop-oldest / buffer).
 
 ## Slices (each = one agent delegation; zero-trust + green gate)
-- **L-1 — BatchLogger backend**: the `Log` impl + bounded queue + writer
-  thread + batch flush (size/interval) + overflow=drop+count. `init(config)`
-  sets the global logger + spawns the thread + returns a guard. Tests:
-  many messages don't block the producer; batches flush by size and by
-  interval; overflow drops + counts; the guard flushes+joins on drop.
-- **L-2 — Namespaces + mask filter + reload**: `TargetFilter` (default +
-  per-target prefix/glob directives), `ArcSwap` storage, `enabled()` consults
-  it, a parser for the directive string, a runtime `reload(directives)`.
-  The canonical target taxonomy as consts + doc. Tests: prefix/glob match;
-  masked-off = `enabled()` false (zero-cost); reload changes behavior live.
-- **L-3 — Integration**: join the writer thread on graceful shutdown
-  (GS milestone); sink per run-mode (stdout / Event Log / file) from
-  RUNTIME_MODES; the `set_log_level` admin op (+ optional SIGHUP). Apply a
-  handful of canonical `target:` groupings at the highest-value sites
-  (commit, shomer, wal, wire) — by need, not big-bang.
+
+### ✅ L-1 — Non-blocking stdout writer
+- `tracing_appender::non_blocking` wrapping stdout.
+- `init(&LoggingConfig)` returns a `LogGuard` the caller keeps alive.
+- Lines dropped on overflow (lossy channel).
+
+### ✅ L-2 — Batched file writer
+- Bounded MPSC channel drained by one worker thread.
+- `BufWriter<File>` with 256 KiB capacity.
+- Flush on burst threshold or `flush_interval_ms` timer.
+- Clean shutdown: guard drops shutdown sender → worker drains + flushes + exits.
+
+### ✅ L-3 — Namespace masks + lock-free runtime reload
+- **Namespace taxonomy** (`logging::ns`): 13 curated `const &str` targets
+  (`ns::WAL`, `ns::ENGINE`, `ns::WIRE`, etc.) for cross-cutting concerns.
+  Module-path targets are matched too — the mask works for any target string.
+- **`LogMask`** — pure, testable decision type: a default `LevelFilter` plus
+  a small `Vec<(String, LevelFilter)>` override table. `allows(target, level)`
+  does a longest-prefix match; the effective level is compared to the event
+  level. No tracing `Metadata` needed for testing.
+- **Lock-free runtime handle** — a process-global `ArcSwap<LogMask>` behind
+  `once_cell::sync::Lazy`. The hot-path decision is a single `ArcSwap::load`
+  (one atomic read) + linear scan of the small override table. No
+  `std::sync::Mutex`, `RwLock`, `parking_lot::*`, or
+  `tracing_subscriber::reload` (which internally uses an `RwLock`).
+  - `set_mask(LogMask)` — RCU swap the whole mask.
+  - `set_namespace_level(target, LevelFilter)` — load → clone → override →
+    store; observable without restart.
+  - `current_mask()` — lock-free snapshot via `load_full()`.
+- **Subscriber integration** — a `MaskFilter` implementing
+  `tracing_subscriber::layer::Filter` whose `enabled()` reads the global
+  `ArcSwap` and delegates to `LogMask::allows`. Composed via
+  `registry().with(fmt_layer.with_filter(mask_filter))`. Boot default comes
+  from `LoggingConfig::level`.
+- **Convention**: log sites SHOULD use `tracing::info!(target: ns::WAL, …)`.
+  Existing sites are NOT bulk-rewritten — that's out of scope; the mask
+  matches any target string.
+
+### 🔜 L-4 — Integration follow-ups
+- Wire admin-op / SIGHUP trigger to call `set_namespace_level` live.
+- Join the writer thread on graceful shutdown (GS milestone).
+- Sink per run-mode (stdout / Event Log / file) from RUNTIME_MODES.
+- Apply canonical `target:` groupings at the highest-value sites (commit,
+  shomer, wal, wire) — by need, not big-bang.
 
 ## log vs tracing
 - `log` + our `ArcSwap` filter: minimal churn (call sites unchanged),
