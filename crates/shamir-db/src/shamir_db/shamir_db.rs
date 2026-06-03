@@ -77,7 +77,13 @@ pub struct ShamirDb {
     net_allowlist: Arc<Vec<String>>,
     /// Per-function metadata (visibility, security, secret_grants).
     /// Populated on create/load, updated on rename, removed on drop.
-    function_meta: DashMap<String, FunctionMeta>,
+    /// Wrapped in `Arc` so all clones share one map — function metadata
+    /// is process-global, exactly like `functions`/`globals`.
+    function_meta: Arc<DashMap<String, FunctionMeta>>,
+    /// Serialises group-id allocation so concurrent create_group calls
+    /// can't read-modify-write the same `next_group_id`. Group creation is
+    /// rare, so holding this across the (bounded) await sequence is fine.
+    group_id_lock: Arc<Mutex<()>>,
     /// Base directory for durable repos, derived from the system store
     /// config. `Some(p)` when the system store is redb-backed (production),
     /// `None` for in-memory (tests). Wire-created repos default to a
@@ -129,7 +135,8 @@ impl ShamirDb {
             wasm_engine,
             globals,
             net_allowlist: Arc::new(Vec::new()),
-            function_meta: DashMap::new(),
+            function_meta: Arc::new(DashMap::new()),
+            group_id_lock: Arc::new(Mutex::new(())),
             data_root,
         };
 
@@ -1317,17 +1324,38 @@ impl ShamirDb {
     /// `settings` table under the key `"next_group_id"`. Id 0 is
     /// reserved/unused; allocation starts from 1.
     pub async fn create_group(&self, name: &str) -> DbResult<u64> {
-        let current = self
+        // Serialise the whole read-modify-write (rare op, bounded contention).
+        let _guard = self.group_id_lock.lock().await;
+
+        let current = match self
             .system_store
             .load_setting("next_group_id")
             .await?
             .and_then(|v| v.as_u64())
-            .unwrap_or(1);
+        {
+            Some(v) => v,
+            // Counter absent: seed past the highest EXISTING group id so a
+            // lost/missing setting can't collide with a live group.
+            None => {
+                let max = self
+                    .system_store
+                    .load_groups()
+                    .await?
+                    .iter()
+                    .filter_map(|g| g["group_id"].as_u64())
+                    .max();
+                max.map_or(1, |m| m + 1)
+            }
+        };
         let group_id = current;
-        self.system_store.save_group(group_id, name, &[]).await?;
+
+        // Durability: bump the counter BEFORE writing the group, so a crash
+        // in between only LEAKS an id (monotonic) — it can never overwrite the
+        // next group on restart.
         self.system_store
             .save_setting("next_group_id", &serde_json::json!(current + 1))
             .await?;
+        self.system_store.save_group(group_id, name, &[]).await?;
         Ok(group_id)
     }
 
