@@ -60,8 +60,8 @@ const BURST_FLUSH_THRESHOLD: usize = 256 * 1024;
 /// in namespace-aware filtering. Module-path targets (`shamir_engine::tx`)
 /// are also matched — the mask works for **any** target string.
 ///
-/// A wire admin-op / SIGHUP trigger to call [`set_namespace_level`] live is
-/// a noted follow-up, not this slice.
+/// SIGHUP triggers a live log-level reload via [`reload`] + [`set_mask`].
+/// Per-namespace overrides can be applied via [`set_namespace_level`].
 pub mod ns {
     /// Access control / permissions enforcement (Shomer).
     pub const SHOMER: &str = "shomer";
@@ -367,6 +367,15 @@ pub fn env_filter(level: &str) -> tracing_subscriber::EnvFilter {
 /// `INFO` on failure.
 fn parse_level_filter(level: &str) -> LevelFilter {
     level.parse::<LevelFilter>().unwrap_or(LevelFilter::INFO)
+}
+
+/// Re-apply the runtime log level from a (re-read) config — lock-free via
+/// the [`LogMask`] `ArcSwap`. Only the level/mask is hot-reloadable;
+/// listeners, `data_dir`, TLS, and the log-file sink require a restart.
+/// (Log-file rotation/reopen is a future addition — the non-blocking
+/// appender holds the file handle.)
+pub fn reload(cfg: &LoggingConfig) {
+    set_mask(LogMask::new(parse_level_filter(&cfg.level)));
 }
 
 /// Initialise the global tracing subscriber.
