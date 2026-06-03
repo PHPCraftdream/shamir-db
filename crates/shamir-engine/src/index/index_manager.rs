@@ -969,7 +969,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        for def in self.indexes_unique.iter() {
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in defs {
             if let Some(values) = Self::extract_index_values(value, &def.paths) {
                 if let Some(existing_id) = self
                     .check_unique_constraint(def.name_interned, &values)
@@ -1007,7 +1008,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        for def in self.indexes_unique.iter() {
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in defs {
             let old_values = Self::extract_index_values(old_value, &def.paths);
             let new_values = Self::extract_index_values(new_value, &def.paths);
 
@@ -1142,7 +1144,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        for def in self.indexes_unique.iter() {
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in defs {
             if let Some(values) = Self::extract_index_values(value, &def.paths) {
                 self.add_unique_entry(def.name_interned, &values, record_id)
                     .await?;
@@ -1170,7 +1173,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        for def in self.indexes_unique.iter() {
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in defs {
             let old_values = Self::extract_index_values(old_value, &def.paths);
             let new_values = Self::extract_index_values(new_value, &def.paths);
 
@@ -1209,7 +1213,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        for def in self.indexes_unique.iter() {
+        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        for def in defs {
             if let Some(values) = Self::extract_index_values(old_value, &def.paths) {
                 self.remove_unique_entry(def.name_interned, &values).await?;
             }
