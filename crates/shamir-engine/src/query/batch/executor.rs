@@ -71,6 +71,9 @@ pub async fn execute_batch(
     // 2. Validate: all referenced tables exist (skip admin ops)
     validate_tables(&request.queries, resolver).await?;
 
+    // 2b. Validate: filter nesting depth (DoS guard)
+    validate_filter_depth(&request.queries)?;
+
     let mut plan = plan;
 
     // 3. Execute — branch on transactional.
@@ -173,6 +176,27 @@ async fn validate_tables(
                             table_ref.table, table_ref.repo, e
                         ),
                     })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that no filter in the batch exceeds the nesting depth cap.
+fn validate_filter_depth(queries: &TMap<String, QueryEntry>) -> Result<(), BatchError> {
+    for (alias, entry) in queries {
+        let filters: Vec<&shamir_query_types::filter::Filter> = match &entry.op {
+            BatchOp::Read(q) => q.r#where.iter().collect(),
+            BatchOp::Delete(d) => vec![&d.where_clause],
+            BatchOp::Update(u) => u.where_clause.iter().collect(),
+            _ => vec![],
+        };
+        for f in filters {
+            if let Err(e) = shamir_query_types::filter::check_filter_depth(f) {
+                return Err(BatchError::QueryError {
+                    alias: alias.clone(),
+                    message: e,
+                });
             }
         }
     }

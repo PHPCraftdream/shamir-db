@@ -615,3 +615,47 @@ fn test_error_empty_bytes() {
     let result = msgpack_to_inner(&interner, &[]);
     assert!(result.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Depth cap (audit fix 3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_deeply_nested_msgpack_rejected() {
+    let interner = Interner::new();
+
+    // Build a 200-level nested array via rmpv
+    let mut val = rmpv::Value::from(42i64);
+    for _ in 0..200 {
+        val = rmpv::Value::Array(vec![val]);
+    }
+
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &val).unwrap();
+
+    let result = msgpack_to_inner(&interner, &buf);
+    assert!(result.is_err(), "deeply-nested msgpack should be rejected");
+    let msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        msg.contains("nesting depth"),
+        "expected depth error, got: {msg}"
+    );
+}
+
+#[test]
+fn test_normal_nesting_roundtrip_still_works() {
+    let interner = Interner::new();
+
+    // 10-level nesting — well within the 128 cap
+    let mut val = rmpv::Value::from(1i64);
+    for _ in 0..10 {
+        val = rmpv::Value::Array(vec![val]);
+    }
+
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &val).unwrap();
+
+    let inner = msgpack_to_inner(&interner, &buf).unwrap();
+    let result = inner_to_msgpack(&interner, &inner).unwrap();
+    assert_eq!(buf, result);
+}
