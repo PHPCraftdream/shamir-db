@@ -76,3 +76,46 @@ fn absolute_idempotent_for_already_absolute() {
 fn service_name_is_shamir_server() {
     assert_eq!(SERVICE_NAME, "shamir-server");
 }
+
+#[test]
+fn launchd_plist_contains_label_and_paths() {
+    let exe = Path::new("/opt/shamir/shamir-server");
+    let config = Path::new("/etc/shamir/config.toml");
+    let plist = launchd_plist(exe, config);
+
+    assert!(plist.contains("<?xml version=\"1.0\""));
+    assert!(plist.contains("<!DOCTYPE plist"));
+    assert!(plist.contains("<key>Label</key>"));
+    assert!(plist.contains("<string>com.shamir.server</string>"));
+    assert!(plist.contains("<key>ProgramArguments</key>"));
+    assert!(plist.contains("/opt/shamir/shamir-server"));
+    assert!(plist.contains("--config"));
+    assert!(plist.contains("/etc/shamir/config.toml"));
+    assert!(plist.contains("<string>run</string>"));
+    assert!(plist.contains("<key>RunAtLoad</key>"));
+    assert!(plist.contains("<true/>"));
+    assert!(plist.contains("<key>KeepAlive</key>"));
+}
+
+#[test]
+fn rcd_script_contains_rcsubr_and_paths() {
+    let exe = Path::new("/opt/shamir/shamir-server");
+    let config = Path::new("/etc/shamir/config.toml");
+    let script = rcd_script(exe, config);
+
+    assert!(script.contains("#!/bin/sh"));
+    assert!(script.contains("# PROVIDE: shamir_server"));
+    assert!(script.contains("# REQUIRE: NETWORKING"));
+    assert!(script.contains("# KEYWORD: shutdown"));
+    assert!(script.contains(". /etc/rc.subr"));
+    assert!(script.contains("name=\"shamir_server\""));
+    assert!(script.contains("rcvar=\"shamir_server_enable\""));
+    assert!(script.contains("pidfile="));
+    assert!(script.contains("command=\"/usr/sbin/daemon\""));
+    assert!(script.contains("command_args="));
+    assert!(script.contains("/opt/shamir/shamir-server"));
+    assert!(script.contains("/etc/shamir/config.toml"));
+    assert!(script.contains("run"));
+    assert!(script.contains("load_rc_config $name"));
+    assert!(script.contains("run_rc_command \"$1\""));
+}

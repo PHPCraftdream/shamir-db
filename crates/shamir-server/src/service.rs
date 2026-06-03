@@ -1,7 +1,8 @@
 //! OS service install / uninstall / status — pure generation + cfg-gated side-effects.
 //!
-//! **Pure functions** (`systemd_unit`, `windows_image_path`, `absolute`,
-//! `SERVICE_NAME`) are cross-platform and unit-tested on every OS.
+//! **Pure functions** (`systemd_unit`, `launchd_plist`, `rcd_script`,
+//! `windows_image_path`, `absolute`, `SERVICE_NAME`) are cross-platform and
+//! unit-tested on every OS.
 //!
 //! OS side-effects (writing unit files, calling `sc.exe` / `systemctl`) live
 //! in cfg-gated functions that are NOT exercised by the test suite — they
@@ -76,6 +77,61 @@ pub fn windows_image_path(exe: &Path, config: &Path) -> String {
     format!(r#""{}" --config "{}" run"#, exe.display(), config.display())
 }
 
+/// Generate a macOS launchd `.plist` (pure, no IO). launchd sends SIGTERM on
+/// stop, which `foreground_shutdown()` already handles.
+pub fn launchd_plist(exe: &Path, config: &Path) -> String {
+    let exe_display = exe.display();
+    let config_display = config.display();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.shamir.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe_display}</string>
+        <string>--config</string>
+        <string>{config_display}</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+/// Generate a FreeBSD rc.d script (pure, no IO). rc.d stop sends SIGTERM via
+/// daemon(8); `foreground_shutdown()` handles it.
+pub fn rcd_script(exe: &Path, config: &Path) -> String {
+    let exe_display = exe.display();
+    let config_display = config.display();
+    format!(
+        r#"#!/bin/sh
+
+# PROVIDE: shamir_server
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="shamir_server"
+rcvar="shamir_server_enable"
+pidfile="/var/run/${{name}}.pid"
+command="/usr/sbin/daemon"
+command_args="-p ${{pidfile}} -f \"{exe_display}\" --config \"{config_display}\" run"
+
+load_rc_config $name
+run_rc_command "$1"
+"#
+    )
+}
+
 // ---------------------------------------------------------------------------
 // OS side-effects (cfg-gated, NOT tested in the suite)
 // ---------------------------------------------------------------------------
@@ -90,17 +146,41 @@ pub fn install(config: &Path, user: Option<&str>) -> anyhow::Result<()> {
     let exe = absolute(&exe)?;
     let config = absolute(config)?;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         install_systemd(&exe, &config, user)?;
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = user;
+        install_launchd(&exe, &config)?;
+    }
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        let _ = user;
+        install_rcd(&exe, &config)?;
+    }
+    #[cfg(windows)]
     {
         let _ = user;
         install_windows(&exe, &config)?;
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )))]
     {
+        let _ = (&exe, &config, user);
         anyhow::bail!("service install is not supported on this platform");
     }
 
@@ -109,15 +189,36 @@ pub fn install(config: &Path, user: Option<&str>) -> anyhow::Result<()> {
 
 /// Uninstall the service on the current platform.
 pub fn uninstall() -> anyhow::Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         uninstall_systemd()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        uninstall_launchd()?;
+    }
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        uninstall_rcd()?;
     }
     #[cfg(windows)]
     {
         uninstall_windows()?;
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )))]
     {
         anyhow::bail!("service uninstall is not supported on this platform");
     }
@@ -127,15 +228,36 @@ pub fn uninstall() -> anyhow::Result<()> {
 
 /// Print the current service status.
 pub fn status() -> anyhow::Result<()> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         status_systemd()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        status_launchd()?;
+    }
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    {
+        status_rcd()?;
     }
     #[cfg(windows)]
     {
         status_windows()?;
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        windows
+    )))]
     {
         println!("service status is not supported on this platform");
     }
@@ -147,7 +269,7 @@ pub fn status() -> anyhow::Result<()> {
 // Linux (systemd)
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn install_systemd(exe: &Path, config: &Path, user: Option<&str>) -> anyhow::Result<()> {
     use std::io::Write;
 
@@ -180,7 +302,7 @@ fn install_systemd(exe: &Path, config: &Path, user: Option<&str>) -> anyhow::Res
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn uninstall_systemd() -> anyhow::Result<()> {
     let unit_path = format!("/etc/systemd/system/{SERVICE_NAME}.service");
 
@@ -205,7 +327,7 @@ fn uninstall_systemd() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn status_systemd() -> anyhow::Result<()> {
     let exit = std::process::Command::new("systemctl")
         .args(["status", SERVICE_NAME])
@@ -217,6 +339,169 @@ fn status_systemd() -> anyhow::Result<()> {
             }
         }
         Err(e) => println!("failed to run systemctl: {e}"),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// macOS (launchd)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+fn install_launchd(exe: &Path, config: &Path) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let plist = launchd_plist(exe, config);
+    let plist_path = "/Library/LaunchDaemons/com.shamir.server.plist";
+
+    let mut f = match std::fs::File::create(plist_path) {
+        Ok(f) => f,
+        Err(e) => {
+            anyhow::bail!("failed to create {plist_path}: {e}\nHint: run with sudo or as root");
+        }
+    };
+    f.write_all(plist.as_bytes())?;
+
+    // Best-effort load.
+    let _ = std::process::Command::new("launchctl")
+        .args(["load", "-w", plist_path])
+        .status();
+
+    println!("installed {plist_path}");
+    println!();
+    println!("Next steps:");
+    println!("  sudo launchctl load -w {plist_path}");
+    println!();
+    println!("NOTE: set `logging.file` to an ABSOLUTE path in your config so the");
+    println!("service can write logs (launchd does not capture stdout by default).");
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_launchd() -> anyhow::Result<()> {
+    let plist_path = "/Library/LaunchDaemons/com.shamir.server.plist";
+
+    // Best-effort unload.
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w", plist_path])
+        .status();
+
+    match std::fs::remove_file(plist_path) {
+        Ok(()) => println!("removed {plist_path}"),
+        Err(e) => println!("could not remove {plist_path}: {e}"),
+    }
+
+    println!("service uninstalled");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn status_launchd() -> anyhow::Result<()> {
+    let exit = std::process::Command::new("launchctl")
+        .args(["print", "system/com.shamir.server"])
+        .status();
+    match exit {
+        Ok(s) => {
+            if !s.success() {
+                println!("(launchctl returned {} — service may not be installed)", s);
+            }
+        }
+        Err(e) => println!("failed to run launchctl: {e}"),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// BSD (rc.d)
+// ---------------------------------------------------------------------------
+
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+fn install_rcd(exe: &Path, config: &Path) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let script = rcd_script(exe, config);
+    let script_path = "/usr/local/etc/rc.d/shamir_server";
+
+    let mut f = match std::fs::File::create(script_path) {
+        Ok(f) => f,
+        Err(e) => {
+            anyhow::bail!("failed to create {script_path}: {e}\nHint: run with sudo or as root");
+        }
+    };
+    f.write_all(script.as_bytes())?;
+
+    // Set executable permission (0o755).
+    let perms = std::fs::Permissions::from_mode(0o755);
+    std::fs::set_permissions(script_path, perms)?;
+
+    // Best-effort enable via sysrc.
+    let _ = std::process::Command::new("sysrc")
+        .arg("shamir_server_enable=YES")
+        .status();
+
+    println!("installed {script_path}");
+    println!();
+    println!("Next steps:");
+    println!("  service shamir_server start");
+    println!();
+    println!("NOTE: set `logging.file` to an ABSOLUTE path in your config so the");
+    println!("service can write logs (rc.d does not capture stdout by default).");
+
+    Ok(())
+}
+
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+fn uninstall_rcd() -> anyhow::Result<()> {
+    let script_path = "/usr/local/etc/rc.d/shamir_server";
+
+    // Best-effort stop.
+    let _ = std::process::Command::new("service")
+        .args(["shamir_server", "stop"])
+        .status();
+
+    match std::fs::remove_file(script_path) {
+        Ok(()) => println!("removed {script_path}"),
+        Err(e) => println!("could not remove {script_path}: {e}"),
+    }
+
+    // Best-effort remove sysrc variable.
+    let _ = std::process::Command::new("sysrc")
+        .args(["-x", "shamir_server_enable"])
+        .status();
+
+    println!("service uninstalled");
+    Ok(())
+}
+
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+fn status_rcd() -> anyhow::Result<()> {
+    let exit = std::process::Command::new("service")
+        .args(["shamir_server", "status"])
+        .status();
+    match exit {
+        Ok(s) => {
+            if !s.success() {
+                println!("(service returned {} — service may not be installed)", s);
+            }
+        }
+        Err(e) => println!("failed to run service: {e}"),
     }
     Ok(())
 }
