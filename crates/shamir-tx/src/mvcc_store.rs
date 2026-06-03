@@ -63,10 +63,14 @@ impl MvccStore {
             return Ok(());
         }
         // Archive old value if it exists.
-        if let Ok(old) = self.main.get(key.clone()).await {
-            let cur_v = self.current_version(&key);
-            let h_key = encode_version_key(&key, cur_v);
-            self.history.set(h_key, old).await?;
+        match self.main.get(key.clone()).await {
+            Ok(old) => {
+                let cur_v = self.current_version(&key);
+                let h_key = encode_version_key(&key, cur_v);
+                self.history.set(h_key, old).await?;
+            }
+            Err(DbError::NotFound(_)) => {}
+            Err(e) => return Err(e),
         }
         self.main.set(key.clone(), value).await?;
         let new_v = self.gate.assign_next_version();
@@ -128,10 +132,14 @@ impl MvccStore {
             if self.gate.active_snapshots_empty() {
                 continue;
             }
-            if let Ok(old) = self.main.get(key.clone()).await {
-                let cur_v = self.current_version(key);
-                let h_key = encode_version_key(key, cur_v);
-                history_ops.push(KvOp::Set(h_key, old));
+            match self.main.get(key.clone()).await {
+                Ok(old) => {
+                    let cur_v = self.current_version(key);
+                    let h_key = encode_version_key(key, cur_v);
+                    history_ops.push(KvOp::Set(h_key, old));
+                }
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
             }
         }
 
@@ -167,10 +175,14 @@ impl MvccStore {
     /// if snapshots are active.
     pub async fn delete_versioned(&self, key: Bytes) -> DbResult<()> {
         if !self.gate.active_snapshots_empty() {
-            if let Ok(old) = self.main.get(key.clone()).await {
-                let cur_v = self.current_version(&key);
-                let h_key = encode_version_key(&key, cur_v);
-                self.history.set(h_key, old).await?;
+            match self.main.get(key.clone()).await {
+                Ok(old) => {
+                    let cur_v = self.current_version(&key);
+                    let h_key = encode_version_key(&key, cur_v);
+                    self.history.set(h_key, old).await?;
+                }
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
             }
         }
         let _ = self.main.remove(key.clone()).await;
@@ -299,10 +311,14 @@ impl MvccStore {
                 KvOp::Set(k, _) => k,
                 KvOp::Remove(k) => k,
             };
-            if let Ok(old) = self.main.get(key.clone()).await {
-                let cur_v = self.current_version(key);
-                let h_key = encode_version_key(key, cur_v);
-                history_ops.push(KvOp::Set(h_key, old));
+            match self.main.get(key.clone()).await {
+                Ok(old) => {
+                    let cur_v = self.current_version(key);
+                    let h_key = encode_version_key(key, cur_v);
+                    history_ops.push(KvOp::Set(h_key, old));
+                }
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
             }
         }
 
@@ -1430,5 +1446,41 @@ mod tests {
         let mvcc = make_mvcc();
         mvcc.set_versioned_many(Vec::new()).await.unwrap();
         assert_eq!(mvcc.version_cache.len(), 0);
+    }
+
+    /// Regression guard for the NotFound-vs-IO-error conflation bug.
+    /// Before the fix, `if let Ok(old) = self.main.get(key)` treated a
+    /// genuine I/O error identically to a missing key — skipping
+    /// archival but still overwriting main, breaking snapshot isolation.
+    ///
+    /// This test verifies the *correct* NotFound path: writing a brand-
+    /// new key under an active snapshot succeeds (nothing to archive)
+    /// and the key is readable.
+    ///
+    // NOTE: A full regression test for the I/O-error propagation path
+    // would require a fault-injecting Store mock that returns a
+    // non-NotFound `Err` from `get`. No such mock exists in the
+    // current test infrastructure. The fix was verified by code
+    // inspection: all four sites now use `match` with explicit
+    // `Err(DbError::NotFound(_)) => {}` and `Err(e) => return
+    // Err(e)` arms.
+    #[tokio::test]
+    async fn set_versioned_new_key_under_snapshot_succeeds() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        let _guard = gate.open_snapshot().await;
+
+        let key = Bytes::from("brand_new_key");
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+
+        // Key is readable from main.
+        let val = mvcc.main.get(key.clone()).await.unwrap();
+        assert_eq!(val, Bytes::from("v1"));
+
+        // No history entries — nothing was overwritten.
+        let count = count_history_entries(&mvcc).await;
+        assert_eq!(count, 0, "no history for a brand-new key");
     }
 }

@@ -214,13 +214,20 @@ impl Interner {
 
     /// Captures the delta of entries with id > `start_exclusive`,
     /// reading the reverse vec atomically. Returns `(entries,
-    /// new_high_water)` where `new_high_water` is the highest id
-    /// actually present in the reverse vec at capture time — the
-    /// persistence layer uses this (NOT `len()`) as the new
-    /// `last_persisted_len`, because under concurrent `touch_ind`
+    /// new_high_water)` where `new_high_water` is the highest
+    /// *gap-free* contiguous id present in the reverse vec at capture
+    /// time — the persistence layer uses this (NOT `len()`) as the
+    /// new `last_persisted_len`, because under concurrent `touch_ind`
     /// the forward map's `len()` can outrun the reverse vec by a
     /// window. Using the reverse-vec high-water mark guarantees we
     /// never advance past unwritten entries.
+    ///
+    /// Gaps: a `Some(None)` slot (reserved-but-unswapped id, or a
+    /// permanently leaked id) does **not** stop the scan — populated
+    /// entries above the gap are still captured so they are not lost
+    /// on restart. However, the high-water mark is frozen at the id
+    /// just before the first gap, so the next `entries_after` call
+    /// re-captures the gap slot once (if) it fills.
     pub fn entries_after(&self, start_exclusive: usize) -> (Vec<(InternerKey, UserKey)>, usize) {
         let rev = self.reverse.load();
         // `rev.len() - 1` is the highest id that has a slot. Some
@@ -235,21 +242,26 @@ impl Interner {
         }
         let mut out = Vec::with_capacity(hi_full + 1 - lo);
         let mut new_high = start_exclusive;
+        let mut gapped = false;
         for idx in lo..=hi_full {
             match rev.get(idx) {
                 Some(Some(key)) => {
                     out.push((InternerKey::new(idx as u64), key.clone()));
-                    new_high = idx;
+                    // Only advance the high-water mark while the range is still
+                    // gap-free; once a gap is seen we still capture present
+                    // entries but must not claim to have persisted past the hole.
+                    if !gapped {
+                        new_high = idx;
+                    }
                 }
                 Some(None) => {
-                    // A `None` slot inside the populated range means
-                    // a concurrent `touch_ind` reserved the id but
-                    // hasn't yet stored the swap visible to us. Stop
-                    // advancing the high-water mark here so the next
-                    // persist re-captures everything past this gap.
-                    break;
+                    // Reserved-but-unswapped (concurrent touch_ind) or a leaked
+                    // id. Keep scanning so populated higher ids are still
+                    // captured, but freeze new_high so the next persist
+                    // re-captures this slot once (if) it fills.
+                    gapped = true;
                 }
-                None => break,
+                None => break, // past the end of the reverse vec
             }
         }
         (out, new_high)

@@ -841,3 +841,39 @@ fn test_touch_ind_into_key() {
     let key = touch.into_key();
     assert_eq!(key.id(), 1);
 }
+
+/// Regression test for the silent data-loss bug in `entries_after`:
+/// a `None` gap in the reverse vec caused the loop to `break`,
+/// dropping every populated entry above the gap (never persisted →
+/// missing after restart). The fix keeps scanning past gaps but
+/// freezes the high-water mark so the gap is re-captured by the
+/// next persist.
+#[test]
+fn entries_after_captures_entries_above_gap() {
+    // with_state creates reverse vec with None holes for missing ids:
+    //   idx 0 = None (sentinel)
+    //   idx 1 = Some("a")
+    //   idx 2 = None  (gap — id 2 was never interned)
+    //   idx 3 = Some("c")
+    let interner = Interner::with_state(vec![
+        (InternerKey::new(1), UserKey::from_str("a")),
+        (InternerKey::new(3), UserKey::from_str("c")),
+    ]);
+
+    let (entries, new_high) = interner.entries_after(0);
+
+    // The entry above the gap (id 3) MUST be captured — was the
+    // data-loss bug.
+    assert!(
+        entries.iter().any(|(k, _)| k.id() == 3),
+        "entry above the gap must still be captured (was the data-loss bug)"
+    );
+    // The entry before the gap (id 1) must also be present.
+    assert!(
+        entries.iter().any(|(k, _)| k.id() == 1),
+        "entry before the gap must be captured"
+    );
+    // The high-water mark must be frozen before the gap so it is
+    // re-captured on the next persist.
+    assert_eq!(new_high, 1, "high-water mark must freeze before the gap");
+}
