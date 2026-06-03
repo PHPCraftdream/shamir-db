@@ -39,6 +39,38 @@ impl TableResolver for DbTableResolver {
     }
 }
 
+/// Rejects path-traversal characters in database and repository names.
+///
+/// Only `[A-Za-z0-9_-]` is allowed — no `/`, `\`, `:`, `.`, or any
+/// non-ASCII byte. Empty strings are also rejected.
+fn validate_name_component(s: &str, label: &str) -> Result<(), BatchError> {
+    if s.is_empty() {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: format!("{} must not be empty", label),
+        });
+    }
+    if s == "." || s == ".." {
+        return Err(BatchError::QueryError {
+            alias: String::new(),
+            message: format!("{} must not be '.' or '..'", label),
+        });
+    }
+    for ch in s.chars() {
+        if !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' {
+            return Err(BatchError::QueryError {
+                alias: String::new(),
+                message: format!(
+                    "{} contains disallowed character '{}': \
+                     only [A-Za-z0-9_-] are permitted",
+                    label, ch
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// AdminExecutor that operates on ShamirDb.
 struct ShamirAdminExecutor {
     shamir: ShamirDb,
@@ -56,6 +88,7 @@ impl AdminExecutor for ShamirAdminExecutor {
 
         match op {
             BatchOp::CreateDb(op) => {
+                validate_name_component(&op.create_db, "db_name")?;
                 self.shamir.create_db(&op.create_db).await;
                 Ok(admin_result(json!({"created": op.create_db})))
             }
@@ -68,6 +101,8 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateRepo(op) => {
+                validate_name_component(&self.db_name, "db_name")?;
+                validate_name_component(&op.create_repo, "repo_name")?;
                 let factory = match op.engine.as_deref() {
                     Some("in_memory") => BoxRepoFactory::in_memory(),
                     Some("redb") | None => {
@@ -77,7 +112,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         match self.shamir.data_root() {
                             Some(root) => {
                                 let db_dir = root.join(&self.db_name);
-                                std::fs::create_dir_all(&db_dir).map_err(|e| {
+                                tokio::fs::create_dir_all(&db_dir).await.map_err(|e| {
                                     err(format!(
                                         "failed to create repo directory '{}': {}",
                                         db_dir.display(),
@@ -103,12 +138,6 @@ impl AdminExecutor for ShamirAdminExecutor {
                     config = config.add_table(TableConfig::new(table_name));
                 }
 
-                // Route through ShamirDb so the repo record and its inline
-                // table catalogue are persisted to the system store and
-                // survive a restart (symmetry with CreateTable, I.2). For an
-                // in-memory engine only the catalogue record is durable — the
-                // repo's data legitimately does not survive a process restart;
-                // a re-attach on the next open creates a fresh empty repo.
                 self.shamir
                     .add_repo(&self.db_name, config)
                     .await

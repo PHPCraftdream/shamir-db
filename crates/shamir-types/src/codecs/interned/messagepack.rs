@@ -11,6 +11,10 @@ use crate::types::value::{InnerValue, Value};
 use rmpv::Value as RmpvValue;
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
+/// Maximum nesting depth for MessagePack decoding. Deep input beyond this
+/// cap returns a `CodecError` instead of overflowing the stack.
+const MAX_MSGPACK_DEPTH: usize = 128;
+
 /// Decodes MessagePack bytes to InnerValue, interning string keys
 ///
 /// This function:
@@ -21,7 +25,7 @@ pub fn msgpack_to_inner(interner: &Interner, bytes: &[u8]) -> Result<InnerValue,
     let rmpv_value: RmpvValue = rmpv::decode::read_value(&mut &*bytes)
         .map_err(|e| CodecError::Decode(format!("MessagePack decode error: {}", e)))?;
 
-    rmpv_value_to_inner(&rmpv_value, interner)
+    rmpv_value_to_inner(&rmpv_value, interner, 0)
 }
 
 /// Encodes InnerValue to MessagePack bytes, de-interning keys.
@@ -107,11 +111,19 @@ impl Serialize for InternedRef<'_> {
     }
 }
 
-/// Converts rmpv::Value to InnerValue, interning all string keys
+/// Converts rmpv::Value to InnerValue, interning all string keys.
+/// `depth` tracks nesting level; returns error if `MAX_MSGPACK_DEPTH` is exceeded.
 fn rmpv_value_to_inner(
     rmpv_value: &RmpvValue,
     interner: &Interner,
+    depth: usize,
 ) -> Result<InnerValue, CodecError> {
+    if depth > MAX_MSGPACK_DEPTH {
+        return Err(CodecError::Decode(format!(
+            "MessagePack nesting depth exceeds {}",
+            MAX_MSGPACK_DEPTH
+        )));
+    }
     match rmpv_value {
         RmpvValue::Nil => Ok(InnerValue::Null),
         RmpvValue::Boolean(b) => Ok(InnerValue::Bool(*b)),
@@ -142,18 +154,13 @@ fn rmpv_value_to_inner(
         RmpvValue::Array(arr) => {
             let converted: Result<Vec<InnerValue>, CodecError> = arr
                 .iter()
-                .map(|v| rmpv_value_to_inner(v, interner))
+                .map(|v| rmpv_value_to_inner(v, interner, depth + 1))
                 .collect();
             Ok(InnerValue::List(converted?))
         }
         RmpvValue::Map(map) => {
             let mut converted = new_map();
             for (key_val, val) in map {
-                // Intern map keys directly from the borrowed `&str`
-                // owned by `rmpv::Value::String` — no transient
-                // `String` allocation, no intermediate
-                // `InnerValue::Str` build-then-discard per key
-                // (mirror of the encode-side `with_str` borrow win).
                 let key_str = match key_val {
                     RmpvValue::String(s) => s.as_str().ok_or_else(|| {
                         CodecError::Decode("Invalid UTF-8 in map key".to_string())
@@ -161,11 +168,9 @@ fn rmpv_value_to_inner(
                     _ => return Err(CodecError::Decode("Map keys must be strings".to_string())),
                 };
 
-                // Intern the key from the borrowed slice.
                 let interned_key = intern_string_key(interner, key_str)?;
 
-                // Convert value
-                let converted_val = rmpv_value_to_inner(val, interner)?;
+                let converted_val = rmpv_value_to_inner(val, interner, depth + 1)?;
                 converted.insert(interned_key, converted_val);
             }
             Ok(InnerValue::Map(converted))

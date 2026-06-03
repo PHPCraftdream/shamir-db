@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{FieldPath, FilterValue};
 
+/// Maximum nesting depth for filter trees. Deeply-nested `$cond`/`not`/`and`/`or`
+/// beyond this cap will be rejected to prevent stack overflow post-handshake.
+pub const MAX_FILTER_DEPTH: usize = 64;
+
 /// A complete filter expression (WHERE/HAVING)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -164,6 +168,30 @@ pub enum Filter {
     },
 }
 
+/// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`.
+/// Uses an explicit stack (iterative, no unbounded recursion).
+/// Returns `Ok(())` if the tree is within bounds.
+pub fn check_filter_depth(filter: &Filter) -> Result<(), String> {
+    let mut stack: Vec<(&Filter, usize)> = vec![(filter, 1)];
+    while let Some((current, depth)) = stack.pop() {
+        if depth > MAX_FILTER_DEPTH {
+            return Err(format!("filter nesting depth exceeds {}", MAX_FILTER_DEPTH));
+        }
+        match current {
+            Filter::And { filters } | Filter::Or { filters } => {
+                for f in filters {
+                    stack.push((f, depth + 1));
+                }
+            }
+            Filter::Not { filter } => {
+                stack.push((filter, depth + 1));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn default_fts_mode() -> String {
     "and".to_string()
 }
@@ -296,5 +324,42 @@ mod tests {
             Filter::Eq { field, .. } => assert_eq!(field, &["address", "city"]),
             _ => panic!("expected Eq"),
         }
+    }
+
+    #[test]
+    fn deep_filter_rejected_by_depth_check() {
+        use super::check_filter_depth;
+        // Build a deeply nested Not chain: Not(Not(Not(...(Eq)...)))
+        let mut f = Filter::Eq {
+            field: vec!["id".into()],
+            value: crate::filter::FilterValue::String("x".into()),
+        };
+        for _ in 0..100 {
+            f = Filter::Not {
+                filter: Box::new(f),
+            };
+        }
+        let result = check_filter_depth(&f);
+        assert!(result.is_err(), "deeply nested filter should be rejected");
+    }
+
+    #[test]
+    fn normal_filter_depth_passes() {
+        use super::check_filter_depth;
+        let f = Filter::And {
+            filters: vec![
+                Filter::Eq {
+                    field: vec!["a".into()],
+                    value: crate::filter::FilterValue::String("b".into()),
+                },
+                Filter::Not {
+                    filter: Box::new(Filter::Eq {
+                        field: vec!["c".into()],
+                        value: crate::filter::FilterValue::Int(1),
+                    }),
+                },
+            ],
+        };
+        assert!(check_filter_depth(&f).is_ok());
     }
 }

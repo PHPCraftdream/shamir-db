@@ -31,6 +31,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+/// Maximum allowed top-k value. Mirrors `HnswAdapter::MAX_TOPK`.
+const MAX_TOPK: u32 = 10_000;
+
 /// Parallel-array snapshot. Lock-free read: a search loads the `Arc`
 /// once and scans the three slices.
 #[derive(Default)]
@@ -267,6 +270,11 @@ impl VectorAdapter for BruteForceAdapter {
                 got: query.len() as u32,
             });
         }
+        let k = if k == 0 {
+            return Ok(vec![]);
+        } else {
+            k.min(MAX_TOPK)
+        };
         let snap = self.snapshot.load_full();
         let k_usize = k as usize;
         let metric = self.metric;
@@ -411,5 +419,25 @@ mod tests {
         let results = adapter.search(&[10.0, 10.0], 1, None).await.unwrap();
         assert_eq!(results[0].0, rid(1));
         assert!(results[0].1 < 0.01);
+    }
+
+    #[tokio::test]
+    async fn huge_k_clamped_no_panic() {
+        let adapter = BruteForceAdapter::new(2, VectorMetric::L2);
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // k = u32::MAX would previously cause huge allocation
+        let results = adapter.search(&[0.0, 0.0], u32::MAX, None).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn k_zero_returns_empty() {
+        let adapter = BruteForceAdapter::new(2, VectorMetric::L2);
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let results = adapter.search(&[0.0, 0.0], 0, None).await.unwrap();
+        assert!(results.is_empty());
     }
 }

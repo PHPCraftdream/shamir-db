@@ -8,7 +8,7 @@ pub mod filter_value;
 pub mod fn_call;
 
 pub use cond::Cond;
-pub use filter_enum::Filter;
+pub use filter_enum::{check_filter_depth, Filter, MAX_FILTER_DEPTH};
 pub use filter_expr::{FilterExpr, FilterExprOp};
 pub use filter_value::FilterValue;
 pub use fn_call::FnCall;

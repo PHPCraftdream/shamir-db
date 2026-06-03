@@ -113,6 +113,13 @@ enum BigIntSource {
     Uint(u64),
 }
 
+/// Maximum pre-allocation cap for visitor `Vec::with_capacity`.
+///
+/// A MessagePack/JSON array/map header can declare a huge element count,
+/// driving `Vec::with_capacity(size_hint)` to multi-GB / abort.
+/// The Vec still grows on demand for legit large inputs beyond this cap.
+const SANE_PREALLOC_CAP: usize = 4096;
+
 struct ValueVisitor<K>(std::marker::PhantomData<K>);
 
 impl<'de, Key> Visitor<'de> for ValueVisitor<Key>
@@ -169,7 +176,7 @@ where
     where
         A: SeqAccess<'de>,
     {
-        let mut list = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        let mut list = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(SANE_PREALLOC_CAP));
         while let Some(elem) = seq.next_element()? {
             list.push(elem);
         }
@@ -182,7 +189,7 @@ where
     {
         // For InnerValue (Key=u64) or other non-string keys, use direct deserialization.
         if TypeId::of::<Key>() != TypeId::of::<String>() {
-            let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0));
+            let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0).min(SANE_PREALLOC_CAP));
             while let Some((key, value)) = map.next_entry()? {
                 inner_map.insert(key, value);
             }
@@ -190,7 +197,7 @@ where
         }
 
         // For UserValue (Key=String), use the special prefix-parsing logic.
-        let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0));
+        let mut inner_map = new_map_wc(map.size_hint().unwrap_or(0).min(SANE_PREALLOC_CAP));
         while let Some(key_str) = map.next_key::<String>()? {
             let (prefix, real_key) = parse_key_prefix(&key_str);
 

@@ -161,7 +161,8 @@ struct MemBufferState {
 
 impl MemBufferState {
     fn flush_interval(&self) -> Duration {
-        Duration::from_millis(self.flush_interval_ms.load(Ordering::Relaxed))
+        let ms = self.flush_interval_ms.load(Ordering::Relaxed);
+        Duration::from_millis(ms.max(1))
     }
 }
 
@@ -242,7 +243,7 @@ impl MemBufferStore {
                     break;
                 }
                 let flush_interval = state.flush_interval();
-                let batch_size = state.flush_batch_size.load(Ordering::Relaxed);
+                let batch_size = state.flush_batch_size.load(Ordering::Relaxed).max(1);
                 tokio::select! {
                     _ = notify.notified() => {},
                     _ = tokio::time::sleep(flush_interval) => {},

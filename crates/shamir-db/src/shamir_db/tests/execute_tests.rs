@@ -629,3 +629,92 @@ async fn test_execute_unknown_repo() {
         crate::query::batch::BatchError::QueryError { .. }
     ));
 }
+
+// ============================================================================
+// Path-traversal rejection in CreateRepo / CreateDb (audit fix 1)
+// ============================================================================
+
+#[tokio::test]
+async fn create_repo_rejects_dotdot_name() {
+    let shamir = setup_shamir().await;
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "cr": {
+                "create_repo": "..",
+                "engine": "in_memory"
+            }
+        }
+    }))
+    .unwrap();
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("disallowed") || msg.contains("'.'") || msg.contains("repo_name"),
+        "expected path-traversal rejection, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_repo_rejects_slash_in_name() {
+    let shamir = setup_shamir().await;
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "cr": {
+                "create_repo": "a/b",
+                "engine": "in_memory"
+            }
+        }
+    }))
+    .unwrap();
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("disallowed") || msg.contains("repo_name"),
+        "expected path-traversal rejection, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_repo_accepts_valid_name() {
+    let shamir = setup_shamir().await;
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "cr": {
+                "create_repo": "my-repo_01",
+                "engine": "in_memory"
+            }
+        }
+    }))
+    .unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    assert_eq!(resp.results["cr"].records[0]["created_repo"], "my-repo_01");
+}
+
+#[tokio::test]
+async fn create_db_rejects_dotdot_name() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "cd": {
+                "create_db": ".."
+            }
+        }
+    }))
+    .unwrap();
+    // Use execute_as with System actor so the unknown-db auth check
+    // passes; we need to reach CreateDb validation.
+    // Actually, CreateDb is an admin op so we just use execute.
+    // The db_name param here is just routing — the create_db value is
+    // the payload. We need a db that exists.
+    shamir.create_db("testdb").await;
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(
+        msg.contains("disallowed") || msg.contains("'.'") || msg.contains("db_name"),
+        "expected path-traversal rejection, got: {msg}"
+    );
+}

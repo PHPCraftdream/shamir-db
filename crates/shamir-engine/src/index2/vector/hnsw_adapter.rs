@@ -17,6 +17,10 @@ use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+/// Maximum allowed top-k value. Untrusted `k` near `u32::MAX` would drive
+/// `overscan*2+10` and `Vec::with_capacity(k+16)` to multi-GB allocation.
+const MAX_TOPK: u32 = 10_000;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ShamirDist {
     metric: VectorMetric,
@@ -186,6 +190,12 @@ impl VectorAdapter for HnswAdapter {
                 got: query.len() as u32,
             });
         }
+
+        let k = if k == 0 {
+            return Ok(vec![]);
+        } else {
+            k.min(MAX_TOPK)
+        };
 
         // Search committed graph
         let hnsw = Arc::clone(&self.hnsw);
@@ -481,6 +491,24 @@ mod tests {
 
         let results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn huge_k_clamped_no_panic() {
+        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
+        // k = u32::MAX would previously cause huge allocation
+        let results = adapter.search(&[0.0, 0.0], u32::MAX, None).await.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn k_zero_returns_empty() {
+        let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());
+        adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
+        let results = adapter.search(&[0.0, 0.0], 0, None).await.unwrap();
+        assert!(results.is_empty());
     }
 
     #[tokio::test]

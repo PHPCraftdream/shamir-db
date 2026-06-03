@@ -29,6 +29,13 @@ const DEFAULT_TIME: u32 = 2;
 const DEFAULT_PARALLELISM: u32 = 1;
 const DEFAULT_LENGTH: u32 = 32;
 
+/// Upper bounds for caller-supplied Argon2id parameters to prevent
+/// resource exhaustion on untrusted input.
+const MAX_MEMORY_KB: u32 = 1_048_576; // 1 GiB
+const MAX_TIME: u32 = 16;
+const MAX_PARALLELISM: u32 = 16;
+const MAX_LENGTH: u32 = 256;
+
 #[async_trait]
 impl ShamirFunction for Argon2idFunction {
     async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
@@ -40,6 +47,31 @@ impl ShamirFunction for Argon2idFunction {
             .opt_u32("parallelism")?
             .unwrap_or(DEFAULT_PARALLELISM);
         let length = params.opt_u32("length")?.unwrap_or(DEFAULT_LENGTH) as usize;
+
+        if memory_kb > MAX_MEMORY_KB {
+            return Err(FunctionError::BadParam {
+                name: "memory_kb".into(),
+                reason: format!("memory_kb exceeds maximum ({MAX_MEMORY_KB} KiB)"),
+            });
+        }
+        if time > MAX_TIME {
+            return Err(FunctionError::BadParam {
+                name: "time".into(),
+                reason: format!("time exceeds maximum ({MAX_TIME})"),
+            });
+        }
+        if parallelism > MAX_PARALLELISM {
+            return Err(FunctionError::BadParam {
+                name: "parallelism".into(),
+                reason: format!("parallelism exceeds maximum ({MAX_PARALLELISM})"),
+            });
+        }
+        if length > MAX_LENGTH as usize {
+            return Err(FunctionError::BadParam {
+                name: "length".into(),
+                reason: format!("length exceeds maximum ({MAX_LENGTH})"),
+            });
+        }
 
         // CPU/memory-bound — never run it on an async worker thread.
         let digest = tokio::task::spawn_blocking(move || -> FnResult<Vec<u8>> {
