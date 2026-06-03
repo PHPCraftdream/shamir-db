@@ -334,25 +334,17 @@ impl Store for FjallStore {
                 let start_key = last_key;
 
                 let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
+                    use std::ops::Bound;
+                    let lower: Bound<Vec<u8>> = match &start_key {
+                        Some(c) => Bound::Excluded(c.clone()),
+                        None => Bound::Unbounded,
+                    };
+                    let upper: Bound<Vec<u8>> = Bound::Unbounded;
+
                     let mut items = Vec::new();
                     let mut last_batch_key: Option<Vec<u8>> = None;
 
-                    let mut iter = keyspace_clone.iter();
-
-                    // If cursor specified, skip until we pass it
-                    if let Some(start) = start_key {
-                        for guard in iter.by_ref() {
-                            let (key, _) = guard
-                                .into_inner()
-                                .map_err(|e| DbError::Storage(e.to_string()))?;
-                            if key.as_ref() == start.as_slice() {
-                                // Found it, next item will be first in batch
-                                break;
-                            }
-                        }
-                    }
-
-                    for guard in iter.take(batch_size) {
+                    for guard in keyspace_clone.range((lower, upper)).take(batch_size) {
                         let (key, value_slice) = guard
                             .into_inner()
                             .map_err(|e| DbError::Storage(e.to_string()))?;
@@ -604,5 +596,44 @@ mod tests {
         let mut tables_after_delete = repo.stores_list().await.unwrap();
         tables_after_delete.sort();
         assert_eq!(tables_after_delete, vec!["table1", "table3"]);
+    }
+
+    /// Regression: a deleted key that lands on a batch boundary (cursor)
+    /// must NOT cause the stream to silently drop all subsequent records.
+    #[tokio::test]
+    async fn test_fjall_deleted_cursor_no_truncation() {
+        let path = "./test_data/fjall_deleted_cursor";
+        if std::path::Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+
+        let repo = FjallRepo::new(path).unwrap();
+        let store = repo.store_get("test_table").await.unwrap();
+
+        // Insert four keys with deterministic ordering
+        for i in 1..=4 {
+            let key = Bytes::from(format!("k{i}"));
+            let val = Bytes::from(format!("v{i}"));
+            store.set(key, val).await.unwrap();
+        }
+
+        // Delete k2 — this key would be the batch-1 cursor with batch_size=2
+        store.remove(Bytes::from_static(b"k2")).await.unwrap();
+
+        // Drain with batch_size=2.  Without the exclusive-bound fix the
+        // stream would end after k1 because the cursor (k2) is gone and
+        // the exact-match skip consumed the whole iterator.
+        let all = collect_stream(store.iter_stream(2)).await.unwrap();
+
+        let mut keys: Vec<&[u8]> = all.iter().map(|(k, _)| k.as_ref()).collect();
+        keys.sort();
+
+        assert_eq!(
+            keys,
+            vec![&b"k1"[..], &b"k3"[..], &b"k4"[..]],
+            "deleted cursor must not truncate the tail"
+        );
+
+        fs::remove_dir_all(path).ok();
     }
 }
