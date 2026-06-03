@@ -130,7 +130,7 @@ name="shamir_server"
 rcvar="shamir_server_enable"
 pidfile="/var/run/${{name}}.pid"
 command="/usr/sbin/daemon"
-command_args="-p ${{pidfile}} -f \"{exe_display}\" --config \"{config_display}\" run"
+command_args="-r -p ${{pidfile}} -f \"{exe_display}\" --config \"{config_display}\" run"
 
 load_rc_config $name
 run_rc_command "$1"
@@ -535,7 +535,23 @@ fn install_windows(exe: &Path, config: &Path) -> anyhow::Result<()> {
 
     match exit {
         Ok(s) if s.success() => {
+            // Best-effort: configure SCM to auto-restart on failure.
+            // Restart up to 3 times with a 5 s delay; reset the failure
+            // counter after 24 h. Ignore errors — the service is already
+            // installed; recovery config is a bonus.
+            let _ = std::process::Command::new("sc.exe")
+                .args([
+                    "failure",
+                    SERVICE_NAME,
+                    "reset=",
+                    "86400",
+                    "actions=",
+                    "restart/5000/restart/5000/restart/5000",
+                ])
+                .status();
+
             println!("installed Windows service '{SERVICE_NAME}'");
+            println!("  crash auto-restart: configured (3x, 5 s delay, 24 h reset)");
             println!();
             println!("Next steps:");
             println!("  sc start {}", SERVICE_NAME);

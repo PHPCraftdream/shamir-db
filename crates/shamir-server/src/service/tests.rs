@@ -117,6 +117,11 @@ fn rcd_script_contains_rcsubr_and_paths() {
     assert!(script.contains("pidfile="));
     assert!(script.contains("command=\"/usr/sbin/daemon\""));
     assert!(script.contains("command_args="));
+    // daemon(8) `-r` flag: restart the child if it exits.
+    assert!(
+        script.contains("-r -p"),
+        "expected daemon -r flag for restart-on-failure, got:\n{script}"
+    );
     assert!(script.contains("/opt/shamir/shamir-server"));
     assert!(script.contains("/etc/shamir/config.toml"));
     assert!(script.contains("run"));
