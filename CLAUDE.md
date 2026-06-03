@@ -74,6 +74,19 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 
 GitHub's web blame reads the file automatically.
 
+**Pre-push hook.** A versioned hook at `.githooks/pre-push` runs the same
+three gate checks before every push so drift / lint regressions / failing
+lib tests can't land on a shared branch. Each contributor activates it
+once per clone:
+
+```
+git config core.hooksPath .githooks
+```
+
+Bypass in emergencies only — `git push --no-verify` (or
+`SHAMIR_SKIP_PREPUSH=1 git push`). The hook is a fast safety net, not a
+substitute for running the gate yourself before committing.
+
 ---
 
 ## 🔒 Concurrency invariants
