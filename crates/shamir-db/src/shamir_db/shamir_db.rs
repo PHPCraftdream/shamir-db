@@ -1102,6 +1102,7 @@ impl ShamirDb {
         let gateway = Arc::new(FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
+            actor: actor.clone(),
         });
         let grants = self
             .function_meta(name)
@@ -1155,6 +1156,7 @@ impl ShamirDb {
         let gateway = Arc::new(FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
+            actor: actor.clone(),
         });
         let grants = self
             .function_meta(name)
@@ -1690,6 +1692,10 @@ fn access_node(
 struct FacadeDbGateway {
     shamir: ShamirDb,
     db_name: String,
+    /// Effective actor of the invoking function (caller, or function owner
+    /// under setuid).  The gateway runs the function's DB access AS this
+    /// actor so per-table ACLs apply — NOT as System.
+    actor: Actor,
 }
 
 impl FacadeDbGateway {
@@ -1795,7 +1801,7 @@ impl DbGateway for FacadeDbGateway {
 
         let resp = self
             .shamir
-            .execute(&self.db_name, &req)
+            .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
             .map_err(Self::batch_err_to_string)?;
 
@@ -1851,7 +1857,7 @@ impl DbGateway for FacadeDbGateway {
 
         let resp = self
             .shamir
-            .execute(&self.db_name, &req)
+            .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
             .map_err(Self::batch_err_to_string)?;
 
@@ -1929,7 +1935,7 @@ impl DbGateway for FacadeDbGateway {
 
         let resp = self
             .shamir
-            .execute(&self.db_name, &req)
+            .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
             .map_err(Self::batch_err_to_string)?;
 
