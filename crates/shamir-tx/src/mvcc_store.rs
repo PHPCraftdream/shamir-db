@@ -185,7 +185,10 @@ impl MvccStore {
                 Err(e) => return Err(e),
             }
         }
-        let _ = self.main.remove(key.clone()).await;
+        // Propagate a backend I/O failure instead of swallowing it — a
+        // dropped error here would let the caller see Ok() while the row is
+        // still live in main (the delete silently never happened).
+        self.main.remove(key.clone()).await?;
         if !self.gate.active_snapshots_empty() {
             let new_v = self.gate.assign_next_version();
             // CRIT-2: see `set_versioned` for rationale.
