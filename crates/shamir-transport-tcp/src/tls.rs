@@ -9,6 +9,7 @@
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, ServerConfig};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 /// TLS exporter label per spec §4.2 / RFC 9266.
 pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-ShamirDB-AUTH-v1";
@@ -19,17 +20,18 @@ pub const EXPORTER_CONTEXT: &[u8] = b"";
 ///
 /// Returns `(cert_pem, key_pem)` — caller persists for reuse across restarts
 /// to avoid breaking session_id continuity (sessions are in-memory anyway,
-/// so cert rotation has no protocol impact in v1).
+/// so cert rotation has no protocol impact in v1). The private-key PEM is
+/// returned inside `Zeroizing` so the caller can zeroize it after use.
 pub fn generate_self_signed_server_cert(
     subject_alt_names: Vec<String>,
-) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(String, Zeroizing<String>), Box<dyn std::error::Error + Send + Sync>> {
     let key = rcgen::KeyPair::generate()?;
     let mut params = rcgen::CertificateParams::new(subject_alt_names)?;
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, "shamir-db");
     let cert = params.self_signed(&key)?;
-    Ok((cert.pem(), key.serialize_pem()))
+    Ok((cert.pem(), Zeroizing::new(key.serialize_pem())))
 }
 
 /// Build a TLS 1.3 server config from PEM cert + key.
@@ -38,7 +40,7 @@ pub fn make_server_config_from_pem(
     key_pem: &str,
 ) -> Result<Arc<ServerConfig>, Box<dyn std::error::Error + Send + Sync>> {
     let certs = rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
-    let key_pem_bytes = key_pem.as_bytes().to_vec();
+    let key_pem_bytes = Zeroizing::new(key_pem.as_bytes().to_vec());
     let mut slice = key_pem_bytes.as_slice();
     let mut key_iter = rustls_pemfile::pkcs8_private_keys(&mut slice);
     let key = key_iter.next().ok_or("no PKCS8 key in PEM")??;
