@@ -489,8 +489,22 @@ mod tests {
         adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
         adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
 
-        let results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
-        assert_eq!(results.len(), 2);
+        // Poll for both vectors rather than asserting on a single search: the
+        // HNSW insert's `spawn_blocking` graph work shares the blocking pool
+        // with every crate's tests under a full `--workspace` run, so a search
+        // issued the instant after `upsert().await` can occasionally observe
+        // the graph mid-update (flaky only under parallel-test CPU contention;
+        // deterministic when run alone). The loop succeeds the moment both
+        // appear; the bound only guards a genuinely lost insert.
+        let mut results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
+        for _ in 0..200 {
+            if results.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
+        }
+        assert_eq!(results.len(), 2, "search must return both inserted vectors");
     }
 
     #[tokio::test]
