@@ -38,13 +38,17 @@ fn systemd_unit_with_user() {
 }
 
 #[test]
-fn windows_image_path_quotes_and_appends_run() {
+fn windows_image_path_quotes_and_appends_run_service() {
     let exe = Path::new(r"C:\Program Files\shamir-server.exe");
     let config = Path::new(r"C:\ProgramData\shamir\server.ktav");
     let image_path = windows_image_path(exe, config);
 
     assert!(image_path.starts_with('"'));
-    assert!(image_path.ends_with("run"));
+    assert!(
+        image_path.ends_with("--service"),
+        "expected image path to end with --service, got: {image_path}"
+    );
+    assert!(image_path.contains("run --service"));
     assert!(image_path.contains("--config"));
     assert!(image_path.contains(r"shamir-server.exe"));
     assert!(image_path.contains(r"server.ktav"));
