@@ -465,7 +465,9 @@ impl AdminExecutor for ShamirAdminExecutor {
                 // ServerKey, which never reads this field. Hashing here is
                 // defense-in-depth for the at-rest secret; no verify-side
                 // change is required.
-                let password_hash = hash_password(&op.password).map_err(|e| err(e.to_string()))?;
+                let password_hash = crate::query::auth::SecretString::new(
+                    hash_password(op.password.reveal()).map_err(|e| err(e.to_string()))?,
+                );
                 let user = crate::query::auth::User {
                     name: op.create_user.clone(),
                     password_hash,

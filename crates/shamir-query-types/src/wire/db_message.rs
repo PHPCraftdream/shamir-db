@@ -45,7 +45,10 @@ pub enum DbRequest {
         /// Username (will be NFC + UsernameCaseMapped normalised on
         /// the server write path).
         name: String,
-        /// Plaintext password. Hashed server-side; zeroized after.
+        /// Plaintext password. Hashed server-side; the server wraps the
+        /// received `String` in `Zeroizing<Vec<u8>>` before deriving keys
+        /// so it is zeroized on drop. The `String` here is the on-the-wire
+        /// carrier — callers should avoid retaining it longer than needed.
         password: String,
         /// Roles to grant. `["superuser"]` for admin powers; other
         /// strings are opaque to the protocol (RBAC is app-defined).

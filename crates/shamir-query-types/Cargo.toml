@@ -23,6 +23,9 @@ fxhash     = "0.2.1"
 hmac       = "0.12"
 sha2       = "0.10"
 
+# Secret-bearing newtypes for password / key fields.
+zeroize    = { version = "1", features = ["derive"] }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
