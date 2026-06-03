@@ -584,13 +584,12 @@ impl Store for NebariStore {
                             // Skip records until we pass start_key
                             if skipping {
                                 if let Some(ref start) = start_key {
-                                    if key.as_ref() == start.as_slice() {
-                                        skipping = false; // Next record will be included
+                                    if key.as_ref() <= start.as_slice() {
+                                        return Ok(());
                                     }
-                                } else {
-                                    skipping = false;
                                 }
-                                return Ok(());
+                                skipping = false;
+                                // key > cursor — fall through to include this record
                             }
 
                             if count < batch_size {
@@ -663,13 +662,12 @@ impl Store for NebariStore {
                             // Skip records until we pass start_key
                             if skipping {
                                 if let Some(ref start) = start_key {
-                                    if key.as_ref() == start.as_slice() {
-                                        skipping = false;
+                                    if key.as_ref() <= start.as_slice() {
+                                        return Ok(());
                                     }
-                                } else {
-                                    skipping = false;
                                 }
-                                return Ok(());
+                                skipping = false;
+                                // key > cursor — fall through to include this record
                             }
 
                             // Stop if we've collected enough
@@ -926,5 +924,44 @@ mod tests {
         // Clean up
         repo.store_delete("isolated_table1").await.unwrap();
         repo.store_delete("isolated_table2").await.unwrap();
+    }
+
+    /// Regression: a deleted key that lands on a batch boundary (cursor)
+    /// must NOT cause the stream to silently drop all subsequent records.
+    #[tokio::test]
+    async fn test_nebari_deleted_cursor_no_truncation() {
+        let path = "./test_data/nebari_deleted_cursor.nebari";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+
+        let repo = NebariRepo::new(path).unwrap();
+        let store = repo.store_get("test_table").await.unwrap();
+
+        // Insert four keys with deterministic ordering
+        for i in 1..=4 {
+            let key = Bytes::from(format!("k{i}"));
+            let val = Bytes::from(format!("v{i}"));
+            store.set(key, val).await.unwrap();
+        }
+
+        // Delete k2 — this key would be the batch-1 cursor with batch_size=2
+        store.remove(Bytes::from_static(b"k2")).await.unwrap();
+
+        // Drain with batch_size=2.  Without the ordering-based skip fix,
+        // the exact-match skip never finds k2, so skipping stays true
+        // and the entire batch is empty → stream ends early.
+        let all = collect_stream(store.iter_stream(2)).await.unwrap();
+
+        let mut keys: Vec<&[u8]> = all.iter().map(|(k, _)| k.as_ref()).collect();
+        keys.sort();
+
+        assert_eq!(
+            keys,
+            vec![&b"k1"[..], &b"k3"[..], &b"k4"[..]],
+            "deleted cursor must not truncate the tail"
+        );
+
+        fs::remove_dir_all(path).ok();
     }
 }

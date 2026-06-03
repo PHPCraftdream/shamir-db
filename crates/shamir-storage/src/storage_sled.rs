@@ -171,21 +171,18 @@ impl Store for SledStore {
                 let start_key = last_key.clone();
 
                 let batch: DbResult<Vec<(Bytes, Bytes)>> = spawn_blocking(move || {
-                    let iter = if let Some(ref start) = start_key {
-                        tree_clone.range::<&[u8], _>(start.as_slice()..)
-                    } else {
-                        tree_clone.iter()
+                    use std::ops::Bound;
+                    let iter = match start_key {
+                        Some(ref start) => tree_clone.range::<&[u8], _>((
+                            Bound::Excluded(start.as_slice()),
+                            Bound::Unbounded,
+                        )),
+                        None => tree_clone.iter(),
                     };
 
                     let mut items = Vec::new();
-                    let mut skip_first = start_key.is_some();
 
                     for item in iter {
-                        if skip_first {
-                            skip_first = false;
-                            continue; // Skip the cursor record itself
-                        }
-
                         if items.len() >= batch_size {
                             break;
                         }
@@ -826,6 +823,45 @@ mod tests {
         }
         assert_eq!(total, 20);
         assert!(batches >= 4, "expected ≥4 batches, got {batches}");
+
+        fs::remove_dir_all(path).ok();
+    }
+
+    /// Regression: a deleted key that lands on a batch boundary (cursor)
+    /// must NOT cause the stream to silently drop all subsequent records.
+    #[tokio::test]
+    async fn test_sled_deleted_cursor_no_truncation() {
+        let path = "./test_data/sled_deleted_cursor";
+        if Path::new(path).exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+
+        let repo = SledRepo::new(path).unwrap();
+        let store = repo.store_get("test_table").await.unwrap();
+
+        // Insert four keys with deterministic ordering
+        for i in 1..=4 {
+            let key = Bytes::from(format!("k{i}"));
+            let val = Bytes::from(format!("v{i}"));
+            store.set(key, val).await.unwrap();
+        }
+
+        // Delete k2 — this key would be the batch-1 cursor with batch_size=2
+        store.remove(Bytes::from_static(b"k2")).await.unwrap();
+
+        // Drain with batch_size=2.  Without the exclusive-bound fix,
+        // range(start..) already skips past deleted k2, then skip_first
+        // drops the next legitimate record (k3).
+        let all = collect_stream(store.iter_stream(2)).await.unwrap();
+
+        let mut keys: Vec<&[u8]> = all.iter().map(|(k, _)| k.as_ref()).collect();
+        keys.sort();
+
+        assert_eq!(
+            keys,
+            vec![&b"k1"[..], &b"k3"[..], &b"k4"[..]],
+            "deleted cursor must not truncate the tail"
+        );
 
         fs::remove_dir_all(path).ok();
     }
