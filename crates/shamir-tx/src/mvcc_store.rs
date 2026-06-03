@@ -1459,14 +1459,6 @@ mod tests {
     /// This test verifies the *correct* NotFound path: writing a brand-
     /// new key under an active snapshot succeeds (nothing to archive)
     /// and the key is readable.
-    ///
-    // NOTE: A full regression test for the I/O-error propagation path
-    // would require a fault-injecting Store mock that returns a
-    // non-NotFound `Err` from `get`. No such mock exists in the
-    // current test infrastructure. The fix was verified by code
-    // inspection: all four sites now use `match` with explicit
-    // `Err(DbError::NotFound(_)) => {}` and `Err(e) => return
-    // Err(e)` arms.
     #[tokio::test]
     async fn set_versioned_new_key_under_snapshot_succeeds() {
         let gate = make_gate();
@@ -1485,5 +1477,272 @@ mod tests {
         // No history entries — nothing was overwritten.
         let count = count_history_entries(&mvcc).await;
         assert_eq!(count, 0, "no history for a brand-new key");
+    }
+
+    // ================================================================
+    // Fault-injecting Store double for I/O-error propagation tests.
+    // ================================================================
+
+    mod failing_store {
+        use async_trait::async_trait;
+        use bytes::Bytes;
+        use shamir_storage::error::{DbError, DbResult};
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use shamir_storage::types::{KvOp, RecordKey, Store};
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use futures::stream::Stream;
+
+        /// A test double that wraps `InMemoryStore` and can be armed to
+        /// inject I/O errors on `get` and/or `remove` calls. Used to
+        /// regression-test that `MvccStore` propagates non-NotFound
+        /// errors rather than swallowing them.
+        pub(super) struct FailingStore {
+            inner: InMemoryStore,
+            /// When `true`, the next `get` call returns a Storage error.
+            pub fail_get: AtomicBool,
+            /// When `true`, the next `remove` call returns a Storage error.
+            pub fail_remove: AtomicBool,
+        }
+
+        impl FailingStore {
+            pub fn new() -> Self {
+                Self {
+                    inner: InMemoryStore::new(),
+                    fail_get: AtomicBool::new(false),
+                    fail_remove: AtomicBool::new(false),
+                }
+            }
+
+            fn injected_error() -> DbError {
+                DbError::Storage("injected I/O fault".into())
+            }
+        }
+
+        #[async_trait]
+        impl Store for FailingStore {
+            async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+                self.inner.insert(value).await
+            }
+
+            async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+                self.inner.set(key, value).await
+            }
+
+            async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+                if self.fail_get.load(Ordering::Relaxed) {
+                    return Err(Self::injected_error());
+                }
+                self.inner.get(key).await
+            }
+
+            async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+                if self.fail_remove.load(Ordering::Relaxed) {
+                    return Err(Self::injected_error());
+                }
+                self.inner.remove(key).await
+            }
+
+            fn iter_stream(
+                &self,
+                batch_size: usize,
+            ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>
+            {
+                self.inner.iter_stream(batch_size)
+            }
+
+            fn scan_prefix_stream(
+                &self,
+                prefix: Bytes,
+                batch_size: usize,
+            ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>
+            {
+                self.inner.scan_prefix_stream(prefix, batch_size)
+            }
+
+            async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+                // Honour per-op fault flags so batched paths
+                // (set_versioned_many, apply_committed_ops) also hit the
+                // injection when they call `self.main.get(...)` pre-read.
+                for op in ops {
+                    match op {
+                        KvOp::Set(k, v) => {
+                            let _ = self.set(k, v).await?;
+                        }
+                        KvOp::Remove(k) => {
+                            let _ = self.remove(k).await?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    // ================================================================
+    // Regression tests — I/O error propagation (fault injection).
+    // ================================================================
+
+    use failing_store::FailingStore;
+    use std::sync::atomic::Ordering;
+
+    /// Helper: build an MvccStore whose `main` is a FailingStore.
+    fn make_failing_mvcc(gate: Arc<RepoTxGate>) -> (MvccStore, Arc<FailingStore>) {
+        let main = Arc::new(FailingStore::new());
+        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mvcc = MvccStore::new(main.clone() as Arc<dyn Store>, history, gate);
+        (mvcc, main)
+    }
+
+    /// Regression test for fix #1: `delete_versioned` propagates
+    /// `main.remove()` errors.
+    ///
+    /// **Pre-fix behaviour:** `let _ = self.main.remove(key).await;`
+    /// discarded the error → caller saw `Ok(())` even though the row
+    /// was still live in main (silent data retention).
+    ///
+    /// **Post-fix:** `self.main.remove(key).await?;` propagates the
+    /// error → caller sees `Err`.
+    ///
+    /// This test would FAIL on the pre-fix code because the old
+    /// `let _ = ...` swallowed the injected `Err(Storage(...))` and
+    /// returned `Ok(())`.
+    #[tokio::test]
+    async fn delete_versioned_propagates_remove_error() {
+        let gate = make_gate();
+        let (mvcc, main) = make_failing_mvcc(gate.clone());
+
+        // Seed a key so delete has something to target.
+        main.set(Bytes::from("k"), Bytes::from("val"))
+            .await
+            .unwrap();
+
+        // Open a snapshot so the active-snapshot path runs (archive +
+        // remove + version_cache update).
+        let _guard = gate.open_snapshot().await;
+
+        // Arm: the next `remove` call will fail.
+        main.fail_remove.store(true, Ordering::Relaxed);
+
+        let result = mvcc.delete_versioned(Bytes::from("k")).await;
+        assert!(
+            result.is_err(),
+            "delete_versioned must propagate main.remove() I/O error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("injected"),
+            "error should be the injected fault, got: {err_msg}"
+        );
+    }
+
+    /// Regression test for fix #2: `set_versioned` propagates
+    /// non-NotFound `get()` errors during the archive pre-read.
+    ///
+    /// **Pre-fix behaviour:** `if let Ok(old) = self.main.get(key)`
+    /// treated any `Err` (including genuine I/O failures) the same as
+    /// `NotFound` — silently skipped archival and overwrote main →
+    /// snapshot-isolation violation (a live snapshot would miss the old
+    /// value that should have been archived).
+    ///
+    /// **Post-fix:** `match self.main.get(...) { ... Err(e) => return Err(e) }`
+    /// propagates non-NotFound errors → caller sees `Err`, main is NOT
+    /// overwritten, snapshot isolation is preserved.
+    ///
+    /// This test would FAIL on the pre-fix code because the old
+    /// `if let Ok(old)` arm would fall through to the `set` on main,
+    /// returning `Ok(())` while silently breaking snapshot isolation.
+    #[tokio::test]
+    async fn set_versioned_propagates_archive_read_error() {
+        let gate = make_gate();
+        let (mvcc, main) = make_failing_mvcc(gate.clone());
+
+        // Seed a key so the archive pre-read path is taken (there IS
+        // an existing value to archive).
+        main.set(Bytes::from("k"), Bytes::from("old_val"))
+            .await
+            .unwrap();
+
+        // Open a snapshot so set_versioned enters the archive path.
+        let _guard = gate.open_snapshot().await;
+
+        // Arm: the next `get` call will fail with a non-NotFound error.
+        main.fail_get.store(true, Ordering::Relaxed);
+
+        let result = mvcc
+            .set_versioned(Bytes::from("k"), Bytes::from("new_val"))
+            .await;
+        assert!(
+            result.is_err(),
+            "set_versioned must propagate archive pre-read I/O error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("injected"),
+            "error should be the injected fault, got: {err_msg}"
+        );
+
+        // Verify main was NOT overwritten — the old value survives
+        // (snapshot-isolation guarantee). Disarm to read.
+        main.fail_get.store(false, Ordering::Relaxed);
+        let val = mvcc.main.get(Bytes::from("k")).await.unwrap();
+        assert_eq!(
+            val,
+            Bytes::from("old_val"),
+            "main must NOT be overwritten when archive pre-read fails"
+        );
+    }
+
+    /// Regression test for fix #2 (delete_versioned variant):
+    /// `delete_versioned` propagates non-NotFound `get()` errors from
+    /// the archive pre-read block.
+    ///
+    /// **Pre-fix behaviour:** same `if let Ok(old)` pattern as
+    /// `set_versioned` — a genuine I/O error from `get` was silently
+    /// treated as "nothing to archive", then `remove` proceeded and
+    /// returned `Ok`, losing the old value for any live snapshot.
+    ///
+    /// **Post-fix:** the explicit `Err(e) => return Err(e)` arm stops
+    /// the operation before the remove, preserving snapshot isolation.
+    ///
+    /// This test would FAIL on the pre-fix code because the old
+    /// fallthrough would skip archival and still call `remove`,
+    /// returning `Ok(())`.
+    #[tokio::test]
+    async fn delete_versioned_propagates_archive_read_error() {
+        let gate = make_gate();
+        let (mvcc, main) = make_failing_mvcc(gate.clone());
+
+        // Seed a key.
+        main.set(Bytes::from("k"), Bytes::from("val"))
+            .await
+            .unwrap();
+
+        // Open a snapshot.
+        let _guard = gate.open_snapshot().await;
+
+        // Arm: `get` fails (non-NotFound).
+        main.fail_get.store(true, Ordering::Relaxed);
+
+        let result = mvcc.delete_versioned(Bytes::from("k")).await;
+        assert!(
+            result.is_err(),
+            "delete_versioned must propagate archive pre-read I/O error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("injected"),
+            "error should be the injected fault, got: {err_msg}"
+        );
+
+        // Main must still have the key (remove was never called).
+        main.fail_get.store(false, Ordering::Relaxed);
+        let val = mvcc.main.get(Bytes::from("k")).await.unwrap();
+        assert_eq!(
+            val,
+            Bytes::from("val"),
+            "key must survive when archive pre-read fails"
+        );
     }
 }
