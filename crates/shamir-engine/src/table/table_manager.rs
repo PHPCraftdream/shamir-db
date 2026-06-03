@@ -2072,23 +2072,36 @@ impl TableManager {
         let (_kind, backend): (IndexKind, Arc<dyn IndexBackend>) = match index_type {
             "fts" => {
                 // DSL names for fts_tokenizer:
-                //   "whitespace"      → plain whitespace split
-                //   "unicode"         → unicode-aware split
-                //   "stemmed_en"      → Full { English, stopwords=true, stem=true }
-                //   "stemmed_ru"      → Full { Russian, stopwords=true, stem=true }
-                //   "stemmed_english" / "stemmed_russian" — aliases
+                //   "whitespace"          → plain whitespace split
+                //   "unicode"             → unicode-aware split
+                //   "stemmed_<lang>"      → Full { <lang>, stopwords=true, stem=true }
+                //       where <lang> is a full name or 2-letter ISO code:
+                //       en/english, ru/russian, fr/french, de/german,
+                //       es/spanish, it/italian, pt/portuguese, nl/dutch,
+                //       sv/swedish, no/norwegian, da/danish, fi/finnish,
+                //       hu/hungarian, ro/romanian, tr/turkish, el/greek,
+                //       ar/arabic, ta/tamil
+                //   "ngram"               → Ngram { n: 3 } (default trigram)
+                //   "ngram2".."ngram9"    → Ngram { n: <digit> }
                 let tok = match op.fts_tokenizer.as_deref() {
                     Some("unicode") => TokenizerKind::Unicode,
-                    Some("stemmed_en" | "stemmed_english") => TokenizerKind::Full {
-                        language: StemLanguage::English,
-                        stopwords: true,
-                        stem: true,
-                    },
-                    Some("stemmed_ru" | "stemmed_russian") => TokenizerKind::Full {
-                        language: StemLanguage::Russian,
-                        stopwords: true,
-                        stem: true,
-                    },
+                    Some("ngram") => TokenizerKind::Ngram { n: 3 },
+                    Some(s) if s.starts_with("ngram") => {
+                        let digits = &s["ngram".len()..];
+                        let n: u8 = digits.parse().unwrap_or(3);
+                        TokenizerKind::Ngram { n: n.max(1) }
+                    }
+                    Some(s) if s.starts_with("stemmed_") => {
+                        let rest = &s["stemmed_".len()..];
+                        match StemLanguage::from_dsl(rest) {
+                            Some(lang) => TokenizerKind::Full {
+                                language: lang,
+                                stopwords: true,
+                                stem: true,
+                            },
+                            None => TokenizerKind::Whitespace,
+                        }
+                    }
                     _ => TokenizerKind::Whitespace,
                 };
                 let kind = IndexKind::Fts {

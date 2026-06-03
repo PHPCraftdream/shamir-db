@@ -65,8 +65,120 @@ fn lowercase_cow(word: &str) -> Cow<'_, str> {
 }
 
 // ---------------------------------------------------------------------------
+// Character n-gram tokenizer
+// ---------------------------------------------------------------------------
+
+/// Character n-gram tokenizer: splits on non-alphanumeric (unicode-aware),
+/// lowercases, then emits sliding character n-grams of length `n` per word.
+/// A word shorter than `n` is emitted whole (so short words remain findable).
+/// `n == 0` is treated as `1`. Enables substring / CJK / fuzzy matching where
+/// word-boundary tokenization fails.
+pub struct NgramTokenizer {
+    n: usize,
+}
+
+impl NgramTokenizer {
+    pub fn new(n: u8) -> Self {
+        Self {
+            n: (n as usize).max(1),
+        }
+    }
+}
+
+impl Tokenizer for NgramTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        let mut tokens = Vec::new();
+        // Iterate words the same way UnicodeTokenizer does (alphanumeric runs).
+        let mut start = None;
+        for (i, ch) in text.char_indices() {
+            if ch.is_alphanumeric() {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            } else if let Some(s) = start.take() {
+                emit_ngrams(&text[s..i], self.n, &mut tokens);
+            }
+        }
+        if let Some(s) = start {
+            emit_ngrams(&text[s..], self.n, &mut tokens);
+        }
+        tokens
+    }
+}
+
+/// Lowercase a word, then emit character n-grams (or the whole word if
+/// shorter than `n`).
+fn emit_ngrams<'a>(word: &str, n: usize, out: &mut Vec<Cow<'a, str>>) {
+    let lowered = word.to_lowercase();
+    let chars: Vec<char> = lowered.chars().collect();
+    if chars.len() <= n {
+        out.push(Cow::Owned(lowered));
+    } else {
+        for i in 0..=chars.len() - n {
+            let gram: String = chars[i..i + n].iter().collect();
+            out.push(Cow::Owned(gram));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Full pipeline tokenizer (stopwords + stemming)
 // ---------------------------------------------------------------------------
+
+/// Returns the curated stopword set for a language, if one exists.
+///
+/// Currently only English and Russian have curated stopword lists.
+/// For all other Snowball languages the function returns `None`;
+/// stemming still works — stopword filtering is simply skipped.
+/// Non-EN/RU stopword lists are a future addition.
+fn stopwords_for(lang: StemLanguage) -> Option<&'static std::collections::HashSet<&'static str>> {
+    match lang {
+        StemLanguage::English => Some(english_stopwords()),
+        StemLanguage::Russian => Some(russian_stopwords()),
+        StemLanguage::Arabic
+        | StemLanguage::Danish
+        | StemLanguage::Dutch
+        | StemLanguage::Finnish
+        | StemLanguage::French
+        | StemLanguage::German
+        | StemLanguage::Greek
+        | StemLanguage::Hungarian
+        | StemLanguage::Italian
+        | StemLanguage::Norwegian
+        | StemLanguage::Portuguese
+        | StemLanguage::Romanian
+        | StemLanguage::Spanish
+        | StemLanguage::Swedish
+        | StemLanguage::Tamil
+        | StemLanguage::Turkish => None,
+    }
+}
+
+/// Map [`StemLanguage`] → [`rust_stemmers::Algorithm`].
+/// Exhaustive — no wildcard arm, so adding a new variant to
+/// `StemLanguage` is a compile error until mapped here.
+fn stem_algorithm(lang: StemLanguage) -> rust_stemmers::Algorithm {
+    match lang {
+        StemLanguage::English => rust_stemmers::Algorithm::English,
+        StemLanguage::Russian => rust_stemmers::Algorithm::Russian,
+        StemLanguage::Arabic => rust_stemmers::Algorithm::Arabic,
+        StemLanguage::Danish => rust_stemmers::Algorithm::Danish,
+        StemLanguage::Dutch => rust_stemmers::Algorithm::Dutch,
+        StemLanguage::Finnish => rust_stemmers::Algorithm::Finnish,
+        StemLanguage::French => rust_stemmers::Algorithm::French,
+        StemLanguage::German => rust_stemmers::Algorithm::German,
+        StemLanguage::Greek => rust_stemmers::Algorithm::Greek,
+        StemLanguage::Hungarian => rust_stemmers::Algorithm::Hungarian,
+        StemLanguage::Italian => rust_stemmers::Algorithm::Italian,
+        StemLanguage::Norwegian => rust_stemmers::Algorithm::Norwegian,
+        StemLanguage::Portuguese => rust_stemmers::Algorithm::Portuguese,
+        StemLanguage::Romanian => rust_stemmers::Algorithm::Romanian,
+        StemLanguage::Spanish => rust_stemmers::Algorithm::Spanish,
+        StemLanguage::Swedish => rust_stemmers::Algorithm::Swedish,
+        StemLanguage::Tamil => rust_stemmers::Algorithm::Tamil,
+        StemLanguage::Turkish => rust_stemmers::Algorithm::Turkish,
+    }
+}
 
 /// Full-pipeline FTS tokenizer: whitespace split → lowercase →
 /// optional language-specific stopwords → optional snowball stemming.
@@ -81,18 +193,12 @@ pub struct FullTokenizer {
 impl FullTokenizer {
     pub fn new(language: StemLanguage, stopwords: bool, stem: bool) -> Self {
         let stop_set = if stopwords {
-            Some(match language {
-                StemLanguage::English => english_stopwords(),
-                StemLanguage::Russian => russian_stopwords(),
-            })
+            stopwords_for(language)
         } else {
             None
         };
         let stemmer = if stem {
-            Some(rust_stemmers::Stemmer::create(match language {
-                StemLanguage::English => rust_stemmers::Algorithm::English,
-                StemLanguage::Russian => rust_stemmers::Algorithm::Russian,
-            }))
+            Some(rust_stemmers::Stemmer::create(stem_algorithm(language)))
         } else {
             None
         };
@@ -280,7 +386,7 @@ pub fn build_tokenizer(kind: &crate::index2::kind::TokenizerKind) -> Box<dyn Tok
     match kind {
         crate::index2::kind::TokenizerKind::Whitespace => Box::new(WhitespaceTokenizer),
         crate::index2::kind::TokenizerKind::Unicode => Box::new(UnicodeTokenizer),
-        crate::index2::kind::TokenizerKind::Ngram { .. } => Box::new(WhitespaceTokenizer),
+        crate::index2::kind::TokenizerKind::Ngram { n } => Box::new(NgramTokenizer::new(*n)),
         crate::index2::kind::TokenizerKind::Full {
             language,
             stopwords,
@@ -411,5 +517,126 @@ mod tests {
         let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
         assert!(!strs.contains(&"the"), "stopword 'the' should be filtered");
         assert!(!strs.contains(&"are"), "stopword 'are' should be filtered");
+    }
+
+    // ----- Stemming: new languages -----
+
+    #[test]
+    fn french_stem_inflections() {
+        let t = FullTokenizer::new(StemLanguage::French, false, true);
+        let a = t.tokenize("chats");
+        let b = t.tokenize("chat");
+        assert_eq!(a, b, "French: chats and chat should stem identically");
+    }
+
+    #[test]
+    fn german_stem_produces_output() {
+        let t = FullTokenizer::new(StemLanguage::German, false, true);
+        let tokens = t.tokenize("laufen");
+        assert!(!tokens.is_empty());
+        assert!(!tokens[0].is_empty());
+    }
+
+    #[test]
+    fn spanish_stem_inflections() {
+        let t = FullTokenizer::new(StemLanguage::Spanish, false, true);
+        let a = t.tokenize("corriendo");
+        let b = t.tokenize("corre");
+        // Both should produce non-empty stems; Snowball may or may not
+        // unify them but they must be non-empty.
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+    }
+
+    #[test]
+    fn italian_stem_produces_output() {
+        let t = FullTokenizer::new(StemLanguage::Italian, false, true);
+        let tokens = t.tokenize("correndo");
+        assert!(!tokens.is_empty());
+        assert!(!tokens[0].is_empty());
+    }
+
+    #[test]
+    fn stopwords_graceful_for_unsupported_language() {
+        // French has no curated stopword set — requesting stopwords
+        // should be a no-op (no error, no filtering).
+        let t = FullTokenizer::new(StemLanguage::French, true, false);
+        let tokens = t.tokenize("le chat");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        // "le" is NOT filtered because there's no French stopword list.
+        assert_eq!(strs, vec!["le", "chat"]);
+    }
+
+    // ----- NgramTokenizer -----
+
+    #[test]
+    fn ngram_hello_n3() {
+        let t = NgramTokenizer::new(3);
+        let tokens = t.tokenize("hello");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["hel", "ell", "llo"]);
+    }
+
+    #[test]
+    fn ngram_short_word() {
+        let t = NgramTokenizer::new(3);
+        let tokens = t.tokenize("hi");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["hi"], "word shorter than n emitted whole");
+    }
+
+    #[test]
+    fn ngram_n2_abc() {
+        let t = NgramTokenizer::new(2);
+        let tokens = t.tokenize("abc");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["ab", "bc"]);
+    }
+
+    #[test]
+    fn ngram_splits_on_punctuation() {
+        let t = NgramTokenizer::new(2);
+        let tokens = t.tokenize("ab-cd");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["ab", "cd"]);
+    }
+
+    #[test]
+    fn ngram_zero_treated_as_one() {
+        let t = NgramTokenizer::new(0);
+        let tokens = t.tokenize("hi");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["h", "i"]);
+    }
+
+    #[test]
+    fn ngram_lowercases() {
+        let t = NgramTokenizer::new(3);
+        let tokens = t.tokenize("HELLO");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["hel", "ell", "llo"]);
+    }
+
+    // ----- build_tokenizer: ngram + full French -----
+
+    #[test]
+    fn build_tokenizer_ngram() {
+        use crate::index2::kind::TokenizerKind;
+        let t = build_tokenizer(&TokenizerKind::Ngram { n: 3 });
+        let tokens = t.tokenize("hello");
+        let strs: Vec<&str> = tokens.iter().map(|c| c.as_ref()).collect();
+        assert_eq!(strs, vec!["hel", "ell", "llo"]);
+    }
+
+    #[test]
+    fn build_tokenizer_full_french() {
+        use crate::index2::kind::TokenizerKind;
+        let t = build_tokenizer(&TokenizerKind::Full {
+            language: StemLanguage::French,
+            stopwords: true,
+            stem: true,
+        });
+        let tokens = t.tokenize("chats");
+        assert!(!tokens.is_empty(), "French stemmer should produce output");
     }
 }
