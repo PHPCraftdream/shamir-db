@@ -157,3 +157,81 @@ fn hex_lower(bytes: &[u8]) -> String {
     }
     s
 }
+
+#[test]
+fn argon2id_matches_reference_and_is_deterministic() {
+    use argon2::{Algorithm, Argon2, Params, Version};
+
+    let r = reg();
+    let password = b"correct horse battery staple";
+    let salt = b"0123456789abcdef"; // 16 bytes
+
+    let got = out(r.call("argon2id", &[bin(password), bin(salt)]).unwrap());
+
+    // Independent reference using the documented defaults (19456 KiB, t=2,
+    // p=1, len=32).
+    let cfg = Params::new(19_456, 2, 1, Some(32)).unwrap();
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, cfg);
+    let mut expected = vec![0u8; 32];
+    argon
+        .hash_password_into(password, salt, &mut expected)
+        .unwrap();
+
+    assert_eq!(got.len(), 32);
+    assert_eq!(got, expected);
+
+    // Same inputs → same digest.
+    let again = out(r.call("argon2id", &[bin(password), bin(salt)]).unwrap());
+    assert_eq!(got, again);
+}
+
+#[test]
+fn argon2id_honours_custom_length() {
+    let r = reg();
+    // memory_kb, time, parallelism, length = 64
+    let got = out(r
+        .call(
+            "argon2id",
+            &[
+                bin(b"pw"),
+                bin(b"0123456789abcdef"),
+                InnerValue::Int(19_456),
+                InnerValue::Int(2),
+                InnerValue::Int(1),
+                InnerValue::Int(64),
+            ],
+        )
+        .unwrap());
+    assert_eq!(got.len(), 64);
+}
+
+#[test]
+fn argon2id_errors() {
+    let r = reg();
+    // Salt < 8 bytes → Argon2 rejects → "compute".
+    assert_eq!(
+        r.call("argon2id", &[bin(b"pw"), bin(b"short")])
+            .unwrap_err()
+            .code,
+        "compute"
+    );
+    // length over the cap → "out_of_range".
+    assert_eq!(
+        r.call(
+            "argon2id",
+            &[
+                bin(b"pw"),
+                bin(b"0123456789abcdef"),
+                InnerValue::Int(19_456),
+                InnerValue::Int(2),
+                InnerValue::Int(1),
+                InnerValue::Int(9999),
+            ],
+        )
+        .unwrap_err()
+        .code,
+        "out_of_range"
+    );
+    // missing salt (arity) → "arity".
+    assert_eq!(r.call("argon2id", &[bin(b"pw")]).unwrap_err().code, "arity");
+}

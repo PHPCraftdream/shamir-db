@@ -635,6 +635,7 @@ async fn ssi_phantom_filter_stream_tx_records_coarse_when_filter_has_no_sorted_i
         interner,
         resolved_refs: &refs,
         actor: Actor::System,
+        scalars: crate::function::builtin_scalars(),
     };
 
     let stream = tbl
@@ -714,6 +715,7 @@ async fn ssi_phantom_indexed_range_aborts_second_commit() {
         interner,
         resolved_refs: &refs,
         actor: Actor::System,
+        scalars: crate::function::builtin_scalars(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
@@ -794,6 +796,7 @@ async fn ssi_phantom_between_range_aborts() {
         interner,
         resolved_refs: &refs,
         actor: Actor::System,
+        scalars: crate::function::builtin_scalars(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
@@ -859,6 +862,7 @@ async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
         interner,
         resolved_refs: &refs,
         actor: Actor::System,
+        scalars: crate::function::builtin_scalars(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
@@ -915,6 +919,7 @@ async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
         interner,
         resolved_refs: &refs,
         actor: Actor::System,
+        scalars: crate::function::builtin_scalars(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 

@@ -115,6 +115,73 @@ fn select_nonexistent_field_returns_null() {
 }
 
 // ============================================================================
+// scalar function projection (SelectItem::Function)
+// ============================================================================
+
+#[test]
+fn select_scalar_function_projection() {
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    // SELECT name, strings/upper(name) AS upper_name
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["name"]},
+            {
+                "type": "function",
+                "name": "strings/upper",
+                "args": [{"$ref": ["name"]}],
+                "alias": "upper_name"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let result = apply_select(&records, &select, &interner);
+    assert_eq!(result[0]["name"], "Alice");
+    assert_eq!(result[0]["upper_name"], "ALICE");
+    assert_eq!(result[1]["upper_name"], "BOB");
+}
+
+#[test]
+fn select_scalar_function_nested_and_literal() {
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    // SELECT strings/concat(strings/upper(city), "!") AS shout  → "NYC!" etc.
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {
+                "type": "function",
+                "name": "strings/concat",
+                "args": [
+                    {"$fn": {"name": "strings/upper", "args": [{"$ref": ["city"]}]}},
+                    "!"
+                ],
+                "alias": "shout"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let result = apply_select(&records, &select, &interner);
+    assert_eq!(result[0]["shout"], "NYC!");
+}
+
+#[test]
+fn select_scalar_function_unknown_is_null() {
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "function", "name": "strings/nope", "args": [{"$ref": ["name"]}], "alias": "x"}
+        ]
+    }))
+    .unwrap();
+
+    let result = apply_select(&records, &select, &interner);
+    assert_eq!(result[0]["x"], serde_json::Value::Null);
+}
+
+// ============================================================================
 // apply_group_by tests
 // ============================================================================
 
@@ -578,4 +645,90 @@ fn has_aggregates_false() {
     }))
     .unwrap();
     assert!(!has_aggregates(&select));
+}
+
+// ============================================================================
+// funclib aggregate dispatch (SelectItem::AggregateFn → funclib AggRegistry)
+// ============================================================================
+
+#[test]
+fn aggregate_fn_median_per_group() {
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    // SELECT city, median(age) AS med_age GROUP BY city
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {"type": "field", "path": ["city"]},
+            {
+                "type": "aggregate_fn",
+                "name": "median",
+                "field": ["age"],
+                "alias": "med_age"
+            }
+        ]
+    }))
+    .unwrap();
+    let group_by: GroupBy = serde_json::from_value(json!({
+        "fields": [["city"]]
+    }))
+    .unwrap();
+
+    let refs = new_map();
+    let ctx = FilterContext::new(&interner, &refs);
+    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+
+    // Groups are emitted in alphabetical key order: LA, then NYC.
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["city"], "LA");
+    // LA ages [25, 25] → lower-median = 25.
+    assert_eq!(result[0]["med_age"], 25);
+    assert_eq!(result[1]["city"], "NYC");
+    // NYC ages [30, 35] → lower-median (even n) = 30.
+    assert_eq!(result[1]["med_age"], 30);
+}
+
+#[test]
+fn aggregate_fn_count_distinct_all_rows() {
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    // SELECT count_distinct(city) AS cities  (no GROUP BY)
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {
+                "type": "aggregate_fn",
+                "name": "count_distinct",
+                "field": ["city"],
+                "alias": "cities"
+            }
+        ]
+    }))
+    .unwrap();
+    assert!(has_aggregates(&select));
+
+    let result = apply_aggregate_all(&records, &select, &interner);
+    assert_eq!(result.len(), 1);
+    // Distinct cities across the four rows: NYC, LA → 2.
+    assert_eq!(result[0]["cities"], 2);
+}
+
+#[test]
+fn aggregate_fn_unknown_name_is_null() {
+    let interner = Interner::default();
+    let records = make_records(&interner);
+    let select: Select = serde_json::from_value(json!({
+        "items": [
+            {
+                "type": "aggregate_fn",
+                "name": "does_not_exist",
+                "field": ["age"],
+                "alias": "x"
+            }
+        ]
+    }))
+    .unwrap();
+
+    let result = apply_aggregate_all(&records, &select, &interner);
+    assert_eq!(result.len(), 1);
+    // An unregistered aggregate yields a null cell, never a panic.
+    assert_eq!(result[0]["x"], serde_json::Value::Null);
 }

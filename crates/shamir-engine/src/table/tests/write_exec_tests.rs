@@ -506,3 +506,98 @@ async fn test_interner_persisted_after_set() {
     assert!(interner.get_ind("unique_field_xyz").is_some());
     assert!(interner.get_ind("another_new_field").is_some());
 }
+
+// ============================================================================
+// Computed write values ("установка знаний" via inline $fn)
+// ============================================================================
+
+#[tokio::test]
+async fn test_insert_computed_field_lowercase() {
+    let table = setup_empty_table().await;
+
+    // email_norm = strings/lower(email), evaluated at write time.
+    let op: InsertOp = serde_json::from_value(json!({
+        "insert_into": "users",
+        "values": [
+            {
+                "email": "Alice@Example.COM",
+                "email_norm": {
+                    "$fn": {
+                        "name": "strings/lower",
+                        "args": [{ "$ref": ["email"] }]
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    let result = table.execute_insert(&op).await.unwrap();
+    assert_eq!(result.affected, 1);
+    // The literal field is untouched; the computed field holds the result.
+    assert_eq!(result.records[0]["email"], "Alice@Example.COM");
+    assert_eq!(result.records[0]["email_norm"], "alice@example.com");
+}
+
+#[tokio::test]
+async fn test_set_computed_field() {
+    let table = setup_empty_table().await;
+
+    let op: SetOp = serde_json::from_value(json!({
+        "set": "users",
+        "key": {"email": "x@y.z"},
+        "value": {
+            "email": "X@Y.Z",
+            "email_norm": {
+                "$fn": {
+                    "name": "strings/lower",
+                    "args": [{ "$ref": ["email"] }]
+                }
+            }
+        }
+    }))
+    .unwrap();
+
+    let result = table.execute_set(&op).await.unwrap();
+    assert_eq!(result.records[0]["email_norm"], "x@y.z");
+}
+
+#[tokio::test]
+async fn test_insert_computed_unknown_function_fails_closed() {
+    let table = setup_empty_table().await;
+
+    let op: InsertOp = serde_json::from_value(json!({
+        "insert_into": "users",
+        "values": [
+            {
+                "x": { "$fn": { "name": "strings/does_not_exist", "args": [] } }
+            }
+        ]
+    }))
+    .unwrap();
+
+    // A broken computed value aborts the write rather than storing garbage.
+    assert!(table.execute_insert(&op).await.is_err());
+}
+
+#[tokio::test]
+async fn test_insert_computed_bad_ref_fails_closed() {
+    let table = setup_empty_table().await;
+
+    let op: InsertOp = serde_json::from_value(json!({
+        "insert_into": "users",
+        "values": [
+            {
+                "y": {
+                    "$fn": {
+                        "name": "strings/lower",
+                        "args": [{ "$ref": ["missing_field"] }]
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert!(table.execute_insert(&op).await.is_err());
+}

@@ -106,7 +106,11 @@ pub fn filter_value_to_inner(fv: &FilterValue) -> Option<InnerValue> {
 }
 
 /// Resolve a FilterValue into an InnerValue for comparison.
-fn resolve_filter_value(
+///
+/// Public so the SELECT projection (`query::read::exec`) can evaluate
+/// scalar-function select items against a record with the same semantics as
+/// filter values (`$ref` / literals / `$fn`).
+pub fn resolve_filter_value(
     fv: &FilterValue,
     record: &InnerValue,
     ctx: &FilterContext,
@@ -126,6 +130,18 @@ fn resolve_filter_value(
             let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
             let qr = ctx.resolved_refs.get(key)?;
             resolve_query_ref_value(qr, path.as_deref())
+        }
+        FilterValue::FnCall { call } => {
+            // Resolve each argument (literal / FieldRef / nested FnCall) into an
+            // InnerValue, then dispatch by folder-qualified name through the
+            // scalar registry. Any failure (unresolvable arg, unknown function,
+            // arity / type error) collapses to `None` so the comparison treats
+            // the value as absent rather than panicking.
+            let mut args = Vec::with_capacity(call.args().len());
+            for a in call.args() {
+                args.push(resolve_filter_value(a, record, ctx)?);
+            }
+            ctx.scalars.call(call.name(), &args).ok()
         }
         _ => None,
     }

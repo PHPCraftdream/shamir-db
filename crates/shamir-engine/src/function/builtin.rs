@@ -4,15 +4,18 @@ use super::context::{FnBatch, FnCtx};
 use super::contract::ShamirFunction;
 use super::error::{FnResult, FunctionError};
 use super::params::Params;
-use argon2::{Algorithm, Argon2, Params as Argon2Params, Version};
+use super::scalar::builtin_scalars;
 use async_trait::async_trait;
-use shamir_types::types::value::QueryValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 
 /// `argon2id(password, salt, [memory_kb, time, parallelism, length]) -> Bin`
 ///
-/// The first built-in and the proof of the execution model: Argon2id is
-/// CPU- and memory-bound, so the hash runs on `tokio::task::spawn_blocking`
-/// — the async runtime's worker threads are never occupied by the KDF.
+/// The async, runtime-safe shell around the **single** Argon2id implementation,
+/// which lives in `shamir-funclib` (`crypto/argon2id`). The KDF is CPU- and
+/// memory-bound, so this wrapper offloads it to `tokio::task::spawn_blocking`
+/// — the async runtime's worker threads are never occupied by the hash. The
+/// hashing logic, OWASP defaults, and parameter bounds are owned by funclib;
+/// this type only decodes the `Params` map, fills defaults, and delegates.
 ///
 /// Parameters:
 /// * `password` — `Bin | Str`, required.
@@ -24,17 +27,12 @@ use shamir_types::types::value::QueryValue;
 pub struct Argon2idFunction;
 
 /// OWASP-recommended defaults for an interactive-login Argon2id profile.
+/// These mirror `shamir_funclib::crypto`'s constants so the named-param shell
+/// and the positional funclib call agree.
 const DEFAULT_MEMORY_KB: u32 = 19_456;
 const DEFAULT_TIME: u32 = 2;
 const DEFAULT_PARALLELISM: u32 = 1;
 const DEFAULT_LENGTH: u32 = 32;
-
-/// Upper bounds for caller-supplied Argon2id parameters to prevent
-/// resource exhaustion on untrusted input.
-const MAX_MEMORY_KB: u32 = 1_048_576; // 1 GiB
-const MAX_TIME: u32 = 16;
-const MAX_PARALLELISM: u32 = 16;
-const MAX_LENGTH: u32 = 256;
 
 #[async_trait]
 impl ShamirFunction for Argon2idFunction {
@@ -46,48 +44,40 @@ impl ShamirFunction for Argon2idFunction {
         let parallelism = params
             .opt_u32("parallelism")?
             .unwrap_or(DEFAULT_PARALLELISM);
-        let length = params.opt_u32("length")?.unwrap_or(DEFAULT_LENGTH) as usize;
+        let length = params.opt_u32("length")?.unwrap_or(DEFAULT_LENGTH);
 
-        if memory_kb > MAX_MEMORY_KB {
-            return Err(FunctionError::BadParam {
-                name: "memory_kb".into(),
-                reason: format!("memory_kb exceeds maximum ({MAX_MEMORY_KB} KiB)"),
-            });
-        }
-        if time > MAX_TIME {
-            return Err(FunctionError::BadParam {
-                name: "time".into(),
-                reason: format!("time exceeds maximum ({MAX_TIME})"),
-            });
-        }
-        if parallelism > MAX_PARALLELISM {
-            return Err(FunctionError::BadParam {
-                name: "parallelism".into(),
-                reason: format!("parallelism exceeds maximum ({MAX_PARALLELISM})"),
-            });
-        }
-        if length > MAX_LENGTH as usize {
-            return Err(FunctionError::BadParam {
-                name: "length".into(),
-                reason: format!("length exceeds maximum ({MAX_LENGTH})"),
-            });
-        }
+        // Positional argument list for the funclib scalar:
+        // (password, salt, memory_kb, time, parallelism, length).
+        let args = vec![
+            InnerValue::Bin(password),
+            InnerValue::Bin(salt),
+            InnerValue::Int(memory_kb as i64),
+            InnerValue::Int(time as i64),
+            InnerValue::Int(parallelism as i64),
+            InnerValue::Int(length as i64),
+        ];
 
-        // CPU/memory-bound — never run it on an async worker thread.
+        // CPU/memory-bound — never run it on an async worker thread. The
+        // single implementation lives in funclib; we invoke it through the
+        // shared scalar registry here.
         let digest = tokio::task::spawn_blocking(move || -> FnResult<Vec<u8>> {
-            let cfg =
-                Argon2Params::new(memory_kb, time, parallelism, Some(length)).map_err(|e| {
-                    FunctionError::BadParam {
+            let out = builtin_scalars()
+                .call("crypto/argon2id", &args)
+                .map_err(|e| match e.code.as_str() {
+                    // Out-of-range / malformed parameters are caller faults.
+                    "out_of_range" | "bad_params" => FunctionError::BadParam {
                         name: "params".into(),
-                        reason: e.to_string(),
-                    }
+                        reason: e.code,
+                    },
+                    // Everything else (e.g. salt too short) is a compute error.
+                    other => FunctionError::Compute(other.to_string()),
                 })?;
-            let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, cfg);
-            let mut out = vec![0u8; length];
-            argon
-                .hash_password_into(&password, &salt, &mut out)
-                .map_err(|e| FunctionError::Compute(e.to_string()))?;
-            Ok(out)
+            match out {
+                InnerValue::Bin(b) => Ok(b),
+                other => Err(FunctionError::Compute(format!(
+                    "argon2id returned non-Bin value: {other:?}"
+                ))),
+            }
         })
         .await
         .map_err(|_| FunctionError::Cancelled)??;

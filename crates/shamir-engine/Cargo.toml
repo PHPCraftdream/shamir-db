@@ -14,6 +14,9 @@ shamir-storage = { path = "../shamir-storage", default-features = false }
 # Pure DTOs for the SDBQL surface — re-exported through the engine's
 # `query::*` modules so callers see no path change.
 shamir-query-types = { path = "../shamir-query-types" }
+# Built-in scalar + aggregate function library. Dispatched from the
+# filter / set / group-by paths via the engine's shared registries.
+shamir-funclib = { path = "../shamir-funclib" }
 shamir-wal = { path = "../shamir-wal" }
 shamir-tx = { path = "../shamir-tx" }
 
@@ -46,7 +49,6 @@ rust-stemmers = "1.2"    # snowball stemming for FTS tokenizers
 scc = "2.2"               # lock-free concurrent hashmap (index2::registry)
 arc-swap = "1.7"          # RCU-style atomic Arc swap (index2::actor snapshots)
 hnsw_rs = "0.3"           # HNSW approximate nearest neighbor (vector index)
-argon2 = "0.5"            # function::builtin argon2id (matches shamir-connect)
 # Pulls Cranelift — the function-engine Wasm runtime (slice 2+).
 wasmtime = { version = "45", default-features = false, features = [
     "cranelift",
@@ -82,6 +84,7 @@ dhat = "0.3"
 [dev-dependencies]
 tempfile = "3.10.1"
 serial_test = "3.3.1"
+argon2 = "0.5"            # independent KAT reference in function::tests::argon2id_tests
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to

@@ -28,6 +28,7 @@ mod meta;
 mod net_gateway;
 mod params;
 mod registry;
+mod scalar;
 mod wasm;
 
 pub use builtin::Argon2idFunction;
@@ -41,6 +42,7 @@ pub use meta::{CreateFunctionOptions, FunctionMeta, Security, Visibility};
 pub use net_gateway::{check_url_allowed, HttpRequest, HttpResponse, NetGateway};
 pub use params::Params;
 pub use registry::FunctionRegistry;
+pub use scalar::{builtin_aggs, builtin_scalars};
 pub use wasm::{WasmEngine, WasmFunction, WasmLimits};
 
 #[cfg(test)]

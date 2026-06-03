@@ -8,20 +8,134 @@ use std::time::Instant;
 use futures::StreamExt;
 use serde_json as json;
 
+use crate::function::builtin_scalars;
 use crate::query::filter::eval::resolve_field;
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::Filter;
+use crate::query::filter::{Filter, FilterValue};
 use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
+use shamir_funclib::registry::ScalarRegistry;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     inner_to_json_value, json_value_to_inner, json_value_to_inner_with,
 };
-use shamir_types::core::interner::InternerKey;
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+
+// ============================================================================
+// Computed write values ("установка знаний" via inline `$fn`)
+// ============================================================================
+
+/// Detect whether a JSON field value encodes an inline function call
+/// (`{ "$fn": ... }`). Such fields are evaluated at write time and replaced
+/// by their computed result before the record is interned and persisted.
+fn is_computed_field(v: &json::Value) -> bool {
+    v.as_object().is_some_and(|o| o.contains_key("$fn"))
+}
+
+/// Resolve any inline `$fn` computed fields in a record (the "computed value
+/// on write" feature). A field whose value is
+/// `{ "$fn": { "name": "strings/lower", "args": [{ "$ref": ["email"] }] } }`
+/// is evaluated through the scalar registry; `$ref` arguments resolve against
+/// the record's *literal* (non-computed) fields. The computed result replaces
+/// the field value.
+///
+/// **Fail-closed:** any evaluation failure (unknown function, unresolved
+/// `$ref`, type / arity error) aborts the write with an `Err` rather than
+/// storing a wrong or null value — a computed value is an integrity concern,
+/// not a best-effort hint.
+///
+/// Non-object values and records with no computed fields are returned
+/// unchanged, so the common (literal-only) write path pays nothing beyond one
+/// `any()` scan.
+fn resolve_computed_record(
+    value: &json::Value,
+    interner: &Interner,
+) -> Result<json::Value, String> {
+    let obj = match value {
+        json::Value::Object(m) => m,
+        _ => return Ok(value.clone()),
+    };
+    if !obj.values().any(is_computed_field) {
+        return Ok(value.clone());
+    }
+
+    // `$ref` resolves only against literal fields; a reference to another
+    // computed field is intentionally unresolved (fail-closed) so computed
+    // fields can't depend on evaluation order.
+    let literal: json::Map<String, json::Value> = obj
+        .iter()
+        .filter(|(_, v)| !is_computed_field(v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let scalars = builtin_scalars();
+    let mut out = obj.clone();
+    for (k, v) in obj {
+        if !is_computed_field(v) {
+            continue;
+        }
+        let fv: FilterValue =
+            serde_json::from_value(v.clone()).map_err(|e| format!("computed field '{k}': {e}"))?;
+        let result = eval_write_value(&fv, &literal, interner, scalars)
+            .map_err(|e| format!("computed field '{k}': {e}"))?;
+        let jv = inner_to_json_value(&result, interner)
+            .map_err(|e| format!("computed field '{k}': {e}"))?;
+        out.insert(k.clone(), jv);
+    }
+    Ok(json::Value::Object(out))
+}
+
+/// Evaluate a [`FilterValue`] to an [`InnerValue`] in the write-time computed
+/// context: literals map directly, `$ref` navigates `literal` (the record's
+/// own literal fields), and `$fn` dispatches recursively through the scalar
+/// registry.
+fn eval_write_value(
+    fv: &FilterValue,
+    literal: &json::Map<String, json::Value>,
+    interner: &Interner,
+    scalars: &ScalarRegistry,
+) -> Result<InnerValue, String> {
+    match fv {
+        FilterValue::Null => Ok(InnerValue::Null),
+        FilterValue::Bool(b) => Ok(InnerValue::Bool(*b)),
+        FilterValue::Int(i) => Ok(InnerValue::Int(*i)),
+        FilterValue::Float(f) => Ok(InnerValue::F64(*f)),
+        FilterValue::String(s) => Ok(InnerValue::Str(s.clone())),
+        FilterValue::Binary(b) => Ok(InnerValue::Bin(b.clone())),
+        FilterValue::FieldRef { path } => {
+            let leaf = json_nav(literal, path).ok_or_else(|| {
+                format!("$ref '{}' not found among literal fields", path.join("."))
+            })?;
+            json_value_to_inner(leaf, interner).map_err(|e| e.to_string())
+        }
+        FilterValue::FnCall { call } => {
+            let mut args = Vec::with_capacity(call.args().len());
+            for a in call.args() {
+                args.push(eval_write_value(a, literal, interner, scalars)?);
+            }
+            scalars
+                .call(call.name(), &args)
+                .map_err(|e| format!("{}: {}", call.name(), e.code))
+        }
+        _ => Err("unsupported computed value variant".to_string()),
+    }
+}
+
+/// Navigate a field path through a JSON object (`["address","zip"]`).
+fn json_nav<'a>(
+    obj: &'a json::Map<String, json::Value>,
+    path: &[String],
+) -> Option<&'a json::Value> {
+    let mut cur = obj.get(path.first()?)?;
+    for seg in &path[1..] {
+        cur = cur.as_object()?.get(seg)?;
+    }
+    Some(cur)
+}
 
 /// Build a [`LayeredInterner`] that routes new field names to `tx.interner_overlay`.
 fn make_layered_interner<'a>(
@@ -58,12 +172,20 @@ impl TableManager {
         let start = Instant::now();
         let interner = self.interner().get().await?;
 
-        // 1. Convert all JSON values to InnerValue upfront. Any
-        //    codec error fails the whole insert with nothing written
-        //    (matches the previous per-record semantics — the first
-        //    bad value aborts).
-        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
+        // 1. Resolve inline `$fn` computed fields first (fail-closed); the
+        //    resolved record is what we both store and echo back, so the
+        //    client never sees the unevaluated marker. Then convert all JSON
+        //    values to InnerValue upfront — any codec error fails the whole
+        //    insert with nothing written (the first bad value aborts).
+        let mut resolved_values: Vec<json::Value> = Vec::with_capacity(op.values.len());
         for value in &op.values {
+            resolved_values.push(
+                resolve_computed_record(value, interner)
+                    .map_err(shamir_storage::error::DbError::Codec)?,
+            );
+        }
+        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(resolved_values.len());
+        for value in &resolved_values {
             let inner = json_value_to_inner(value, interner)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
             inner_values.push(inner);
@@ -75,9 +197,10 @@ impl TableManager {
         //    redb). Index updates still loop per-record inside.
         let ids = self.insert_many(&inner_values).await?;
 
-        // 3. Build the result records in input order.
-        let mut records = Vec::with_capacity(op.values.len());
-        for (value, id) in op.values.iter().zip(ids.iter()) {
+        // 3. Build the result records in input order (from the resolved
+        //    values, so computed fields are echoed with their results).
+        let mut records = Vec::with_capacity(resolved_values.len());
+        for (value, id) in resolved_values.iter().zip(ids.iter()) {
             let mut obj = match value {
                 json::Value::Object(map) => map.clone(),
                 _ => json::Map::new(),
@@ -113,13 +236,20 @@ impl TableManager {
         let start = Instant::now();
         let interner = self.interner().get().await?;
 
-        // Intern field names through the tx overlay, then release the
-        // immutable borrow on `tx` before the mutable `insert_tx` calls.
+        // Resolve inline `$fn` computed fields first (fail-closed), then
+        // intern field names through the tx overlay.
+        let mut resolved_values: Vec<json::Value> = Vec::with_capacity(op.values.len());
+        for value in &op.values {
+            resolved_values.push(
+                resolve_computed_record(value, interner)
+                    .map_err(shamir_storage::error::DbError::Codec)?,
+            );
+        }
         let inner_values: Vec<InnerValue> = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
-            let mut vals = Vec::with_capacity(op.values.len());
-            for value in &op.values {
+            let mut vals = Vec::with_capacity(resolved_values.len());
+            for value in &resolved_values {
                 let inner = json_value_to_inner_with(value, &intern_fn)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 vals.push(inner);
@@ -136,8 +266,8 @@ impl TableManager {
         // staged_vectors, same counter delta.
         let ids: Vec<RecordId> = self.insert_tx_many(&inner_values, tx).await?;
 
-        let mut records = Vec::with_capacity(op.values.len());
-        for (value, id) in op.values.iter().zip(ids.iter()) {
+        let mut records = Vec::with_capacity(resolved_values.len());
+        for (value, id) in resolved_values.iter().zip(ids.iter()) {
             let mut obj = match value {
                 json::Value::Object(map) => map.clone(),
                 _ => json::Map::new(),
@@ -168,8 +298,12 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        // Convert set fields to InnerValue map entries
-        let set_inner = json_value_to_inner(&op.set, interner)
+        // Resolve inline `$fn` computed fields, then convert set fields to
+        // InnerValue map entries. `$ref` resolves against the other literal
+        // fields in the same `set` payload.
+        let resolved_set = resolve_computed_record(&op.set, interner)
+            .map_err(shamir_storage::error::DbError::Codec)?;
+        let set_inner = json_value_to_inner(&resolved_set, interner)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         let set_map = match &set_inner {
             InnerValue::Map(m) => m,
@@ -304,12 +438,14 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        // Intern field names through the tx overlay, then release the
-        // immutable borrow on `tx` before the mutable `update_tx` calls.
+        // Resolve inline `$fn` computed fields, then intern field names
+        // through the tx overlay.
+        let resolved_set = resolve_computed_record(&op.set, interner)
+            .map_err(shamir_storage::error::DbError::Codec)?;
         let set_inner = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
-            json_value_to_inner_with(&op.set, &intern_fn)
+            json_value_to_inner_with(&resolved_set, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
         };
         let set_map = match &set_inner {
@@ -551,8 +687,10 @@ impl TableManager {
             .lookup_existing_for_set(&key_fields, batch_size)
             .await?;
 
-        // Convert the new value
-        let new_inner = json_value_to_inner(&op.value, interner)
+        // Resolve inline `$fn` computed fields, then convert the new value.
+        let resolved_value = resolve_computed_record(&op.value, interner)
+            .map_err(shamir_storage::error::DbError::Codec)?;
+        let new_inner = json_value_to_inner(&resolved_value, interner)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
         let (created, result_record) = if let Some((id, existing)) = found {
@@ -622,6 +760,10 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
+        // Resolve inline `$fn` computed fields in the value first (fail-closed).
+        let resolved_value = resolve_computed_record(&op.value, interner)
+            .map_err(shamir_storage::error::DbError::Codec)?;
+
         // Intern field names through the tx overlay, then release the
         // immutable borrow on `tx` before the mutable `update_tx`/`insert_tx` calls.
         let (key_fields, new_inner) = {
@@ -646,7 +788,7 @@ impl TableManager {
                 }
             };
 
-            let new_inner = json_value_to_inner_with(&op.value, &intern_fn)
+            let new_inner = json_value_to_inner_with(&resolved_value, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
             (key_fields, new_inner)

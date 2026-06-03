@@ -27,11 +27,14 @@ hex = "0.4.3"
 data-encoding = "2.10.0"
 percent-encoding = "2.3.2"
 
-# Crypto — pure/deterministic primitives only (/crypto scalar subset)
+# Crypto — pure/deterministic primitives (/crypto scalar subset)
 sha2 = "0.10.9"
 sha3 = "0.10.8"
 blake3 = "1.5"
 hmac = "0.12.1"
 subtle = "2.6.1"
+# Argon2id KDF — deterministic given (password, salt, params). CPU/memory-bound:
+# callers dispatching it on an async runtime must offload to spawn_blocking.
+argon2 = "0.5"
 
 [dev-dependencies]
