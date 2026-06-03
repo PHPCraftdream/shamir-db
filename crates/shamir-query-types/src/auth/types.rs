@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::SecretString;
 use crate::filter::Filter;
 
 // ============================================================================
@@ -135,14 +136,27 @@ pub struct Role {
 }
 
 /// User document.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct User {
     pub name: String,
-    pub password_hash: String,
+    /// Argon2id PHC-string. Wrapped in [`SecretString`] so `Debug` never
+    /// prints the hash and the buffer is zeroized on drop.
+    pub password_hash: SecretString,
     pub roles: Vec<String>,
     /// Arbitrary user profile fields (for $user references in row filters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("name", &self.name)
+            .field("password_hash", &self.password_hash)
+            .field("roles", &self.roles)
+            .field("profile", &self.profile)
+            .finish()
+    }
 }
 
 // ============================================================================
@@ -150,14 +164,27 @@ pub struct User {
 // ============================================================================
 
 /// Create a user.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateUserOp {
     pub create_user: String,
-    pub password: String,
+    /// Plaintext password. Wrapped in [`SecretString`] so `Debug` never
+    /// prints the value and the buffer is zeroized on drop.
+    pub password: SecretString,
     #[serde(default)]
     pub roles: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for CreateUserOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateUserOp")
+            .field("create_user", &self.create_user)
+            .field("password", &self.password)
+            .field("roles", &self.roles)
+            .field("profile", &self.profile)
+            .finish()
+    }
 }
 
 /// Drop a user.

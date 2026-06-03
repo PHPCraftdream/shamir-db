@@ -10,5 +10,5 @@ mod session;
 pub use session::SessionPermissions;
 pub use shamir_query_types::auth::{
     Action, CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, Effect, GrantRoleOp, Permission,
-    Resource, RevokeRoleOp, Role, User,
+    Resource, RevokeRoleOp, Role, SecretString, User,
 };
