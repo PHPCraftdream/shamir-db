@@ -223,6 +223,33 @@ async fn run_async(cli: Cli) -> anyhow::Result<()> {
         }
     };
 
+    // SIGHUP → live log-level reload.  Unix-only (no SIGHUP on Windows).
+    // The task runs until the process exits; `_sighup_task` keeps the
+    // `JoinHandle` alive so clippy's `let_underscore_future` is satisfied.
+    #[cfg(unix)]
+    let _sighup_task = {
+        let config_path = cli.config.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut hup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("SIGHUP handler unavailable: {e}");
+                    return;
+                }
+            };
+            while hup.recv().await.is_some() {
+                match shamir_server::config::Config::from_file(&config_path) {
+                    Ok(c) => {
+                        shamir_server::logging::reload(&c.logging);
+                        tracing::info!(level = %c.logging.level, "SIGHUP: reloaded log level");
+                    }
+                    Err(e) => tracing::warn!("SIGHUP: config reload failed: {e}"),
+                }
+            }
+        })
+    };
+
     shamir_server::runtime::serve(
         config,
         bootstrap,
