@@ -9,12 +9,16 @@
 use serde_json as json;
 use smallvec::SmallVec;
 
-use crate::query::filter::eval::{compare_values, intern_field_path, resolve_field_ref};
-use crate::query::filter::{compile_filter, FilterContext};
+use crate::function::builtin_aggs;
+use crate::query::filter::eval::{
+    compare_values, intern_field_path, resolve_field_ref, resolve_filter_value,
+};
+use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
 use crate::query::read::{
     AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderDirection, Pagination,
-    PaginationInfo, Select, SelectItem,
+    PaginationInfo, QueryResult, Select, SelectItem,
 };
+use shamir_funclib::agg::Aggregator;
 use shamir_types::codecs::interned::inner_to_json_value;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map_wc, TMap};
@@ -76,6 +80,13 @@ pub struct SelectProjection {
     is_all: bool,
     /// (interned_path, pre-built output key)
     fields: Vec<(Option<Vec<u64>>, String)>,
+    /// Scalar-function projections: (output key, FnCall-shaped FilterValue).
+    /// Evaluated per record via `resolve_filter_value`, reusing the filter
+    /// value model (`$ref` / literals / nested `$fn`).
+    funcs: Vec<(String, FilterValue)>,
+    /// Empty resolved-refs map so `project` can build a `FilterContext`
+    /// without `$query` support (projection scalar fns see only the row).
+    empty_refs: TMap<String, QueryResult>,
 }
 
 impl SelectProjection {
@@ -84,26 +95,39 @@ impl SelectProjection {
         let is_all =
             select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
 
-        let fields = if is_all {
-            Vec::new()
+        let (fields, funcs) = if is_all {
+            (Vec::new(), Vec::new())
         } else {
-            select
-                .items
-                .iter()
-                .filter_map(|item| match item {
+            let mut fields = Vec::new();
+            let mut funcs = Vec::new();
+            for item in &select.items {
+                match item {
                     SelectItem::Field { path, alias } => {
                         let interned = intern_field_path(path, interner);
                         let key = alias
                             .clone()
                             .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                        Some((interned, key))
+                        fields.push((interned, key));
                     }
-                    _ => None,
-                })
-                .collect()
+                    SelectItem::Function { name, args, alias } => {
+                        let key = alias.clone().unwrap_or_else(|| name.clone());
+                        let fv = FilterValue::FnCall {
+                            call: FnCall::complex(name.clone(), args.clone()),
+                        };
+                        funcs.push((key, fv));
+                    }
+                    _ => {}
+                }
+            }
+            (fields, funcs)
         };
 
-        Self { is_all, fields }
+        Self {
+            is_all,
+            fields,
+            funcs,
+            empty_refs: new_map_wc(0),
+        }
     }
 
     /// Project a single InnerValue record to JSON.
@@ -111,7 +135,7 @@ impl SelectProjection {
         if self.is_all {
             return inner_to_json_value(record, interner).unwrap_or(json::Value::Null);
         }
-        if self.fields.is_empty() {
+        if self.fields.is_empty() && self.funcs.is_empty() {
             return json::Value::Object(json::Map::new());
         }
         let mut obj = json::Map::new();
@@ -122,6 +146,15 @@ impl SelectProjection {
                 .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
                 .unwrap_or(json::Value::Null);
             obj.insert(key.clone(), val);
+        }
+        if !self.funcs.is_empty() {
+            let ctx = FilterContext::new(interner, &self.empty_refs);
+            for (key, fv) in &self.funcs {
+                let val = resolve_filter_value(fv, record, &ctx)
+                    .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
+                    .unwrap_or(json::Value::Null);
+                obj.insert(key.clone(), val);
+            }
         }
         json::Value::Object(obj)
     }
@@ -152,7 +185,9 @@ pub fn has_aggregates(select: &Select) -> bool {
     select.items.iter().any(|item| {
         matches!(
             item,
-            SelectItem::Aggregate { .. } | SelectItem::CountAll { .. }
+            SelectItem::Aggregate { .. }
+                | SelectItem::CountAll { .. }
+                | SelectItem::AggregateFn { .. }
         )
     })
 }
@@ -181,6 +216,14 @@ fn pre_intern_select_keys(select: &Select, interner: &Interner) {
                     continue;
                 }
             }
+            SelectItem::AggregateFn { alias, .. } => {
+                if let Some(a) = alias {
+                    a.as_str()
+                } else {
+                    continue;
+                }
+            }
+            SelectItem::Function { alias, name, .. } => alias.as_deref().unwrap_or(name.as_str()),
             _ => continue,
         };
         // touch_ind ensures the key is interned (creates if missing)
@@ -399,6 +442,18 @@ fn build_aggregate_object(
     // we don't run them during the hot aggregation loop.
     let mut field_slots: Vec<(String, &Vec<String>)> = Vec::new();
 
+    // funclib aggregate slots: (output key, interned field path, whole-record
+    // flag, freshly-minted aggregator). `None` aggregator = unknown name →
+    // the cell finalises to Null rather than panicking.
+    #[allow(clippy::type_complexity)] // parallel to agg_slots; clarity over brevity
+    let mut fn_slots: Vec<(String, Option<Vec<u64>>, bool, Option<Box<dyn Aggregator>>)> =
+        Vec::new();
+
+    // Scalar-function select items in a group context: evaluated once against
+    // the group's representative (first) record — same fallback as plain
+    // field projections in a group.
+    let mut func_slots: Vec<(String, FilterValue)> = Vec::new();
+
     for item in &select.items {
         match item {
             SelectItem::CountAll { alias } => {
@@ -429,21 +484,70 @@ fn build_aggregate_object(
                     field_slots.push((key.to_string(), path));
                 }
             }
+            SelectItem::AggregateFn {
+                name, field, alias, ..
+            } => {
+                let key = match alias {
+                    Some(a) => a.clone(),
+                    None => match field {
+                        AggregateField::Field(f) => format!("{}_{}", name, f.join(".")),
+                        AggregateField::All => name.clone(),
+                    },
+                };
+                let (field_path, all_field) = match field {
+                    AggregateField::Field(p) => (intern_field_path(p, interner), false),
+                    AggregateField::All => (None, true),
+                };
+                fn_slots.push((key, field_path, all_field, builtin_aggs().make(name)));
+            }
+            SelectItem::Function { name, args, alias } => {
+                let key = alias.clone().unwrap_or_else(|| name.clone());
+                let fv = FilterValue::FnCall {
+                    call: FnCall::complex(name.clone(), args.clone()),
+                };
+                func_slots.push((key, fv));
+            }
             SelectItem::All | SelectItem::Expression { .. } => {}
         }
     }
 
-    // Single walk over the group: feeds every aggregate accumulator at once.
-    if !agg_slots.is_empty() {
+    // Single walk over the group: feeds every aggregate accumulator at once
+    // (both the built-in fast-path slots and the funclib aggregate slots).
+    if !agg_slots.is_empty() || !fn_slots.is_empty() {
         for record in group_records {
             for (_, acc) in agg_slots.iter_mut() {
                 acc.step(record);
+            }
+            for (_, path, all_field, agg) in fn_slots.iter_mut() {
+                if let Some(agg) = agg {
+                    let val = if *all_field {
+                        Some(*record)
+                    } else {
+                        path.as_deref().and_then(|p| resolve_field_ref(record, p))
+                    };
+                    if let Some(v) = val {
+                        // Aggregator errors (e.g. type_mismatch) are swallowed
+                        // per-row; finalize() decides the cell's final value.
+                        let _ = agg.accumulate(v);
+                    }
+                }
             }
         }
     }
 
     for (key, acc) in agg_slots {
         obj.insert(key, acc.finish(interner));
+    }
+
+    for (key, _, _, agg) in fn_slots {
+        let jv = match agg {
+            Some(agg) => match agg.finalize() {
+                Ok(v) => inner_to_json_value(&v, interner).unwrap_or(json::Value::Null),
+                Err(_) => json::Value::Null,
+            },
+            None => json::Value::Null,
+        };
+        obj.insert(key, jv);
     }
 
     // Resolve field-projection fallbacks from the first record (rare path).
@@ -458,6 +562,21 @@ fn build_aggregate_object(
             })
             .unwrap_or(json::Value::Null);
         obj.insert(key, val);
+    }
+
+    // Scalar functions in a group SELECT: evaluate against the group's first
+    // record (mirrors the field-projection fallback above).
+    if !func_slots.is_empty() {
+        let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
+        let ctx = FilterContext::new(interner, &empty_refs);
+        for (key, fv) in func_slots {
+            let val = group_records
+                .first()
+                .and_then(|first| resolve_filter_value(&fv, first, &ctx))
+                .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
+                .unwrap_or(json::Value::Null);
+            obj.insert(key, val);
+        }
     }
 
     json::Value::Object(obj)

@@ -1707,3 +1707,74 @@ fn test_computed_unknown_op_is_false() {
     let cb = compile_filter(&filter, &interner);
     assert!(!cb.matches(&rec, &ctx));
 }
+
+// ============================================================================
+// funclib scalar dispatch in filters (FilterValue::FnCall)
+// ============================================================================
+
+/// Build a record {a: "alice", b: "ALICE"} for FnCall dispatch tests.
+fn make_ab_record(interner: &Interner) -> InnerValue {
+    let mut map = new_map();
+    let k_a = interner.touch_ind("a").unwrap().key().clone();
+    let k_b = interner.touch_ind("b").unwrap().key().clone();
+    map.insert(k_a, InnerValue::Str("alice".into()));
+    map.insert(k_b, InnerValue::Str("ALICE".into()));
+    InnerValue::Map(map)
+}
+
+#[test]
+fn test_fncall_scalar_upper_matches() {
+    use crate::query::filter::FnCall;
+    let interner = Interner::new();
+    let record = make_ab_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // b == strings/upper(a)  →  "ALICE" == upper("alice") == "ALICE"
+    let filter = Filter::Eq {
+        field: vec!["b".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("strings/upper", vec![FilterValue::field_ref("a")]),
+        },
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(node.matches(&record, &ctx));
+}
+
+#[test]
+fn test_fncall_scalar_upper_no_match() {
+    use crate::query::filter::FnCall;
+    let interner = Interner::new();
+    let record = make_ab_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // a == strings/upper(a)  →  "alice" == "ALICE"  → false
+    let filter = Filter::Eq {
+        field: vec!["a".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("strings/upper", vec![FilterValue::field_ref("a")]),
+        },
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(!node.matches(&record, &ctx));
+}
+
+#[test]
+fn test_fncall_unknown_function_no_match() {
+    use crate::query::filter::FnCall;
+    let interner = Interner::new();
+    let record = make_ab_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // An unregistered function resolves to None → Eq cannot match.
+    let filter = Filter::Eq {
+        field: vec!["b".into()],
+        value: FilterValue::FnCall {
+            call: FnCall::complex("strings/does_not_exist", vec![FilterValue::field_ref("a")]),
+        },
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(!node.matches(&record, &ctx));
+}
