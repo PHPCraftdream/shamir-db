@@ -109,8 +109,13 @@ async fn spawn_gc_task_runs_and_stops() {
     // Signal shutdown.
     shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // Task should finish within one more interval.
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+    // The task stops at its next loop check; `await` completes the instant
+    // it does. The timeout only guards a genuinely stuck task — keep it
+    // GENEROUS: a tight 1 s bound is flaky under parallel-test CPU
+    // contention, where the GC cycle's `spawn_blocking` work can queue
+    // behind a saturated blocking pool shared by every crate's storage
+    // tests (the same flake class fixed in commit_phase5_tests).
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
     assert!(result.is_ok(), "GC task should stop after shutdown signal");
 }
 
