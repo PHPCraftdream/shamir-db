@@ -753,9 +753,18 @@ impl TableManager {
         let residual_cb: Option<FilterNode> =
             residual.as_ref().map(|f| compile_filter(f, interner));
 
+        // NOTE (audit 3c-C2): stale index entries (id present in index but
+        // absent from data_store) are silently skipped via `let … else {
+        // continue }`. The old per-`get` loop propagated NotFound as an
+        // error; now a stale pointer degrades gracefully. This path is not
+        // cheaply unit-reachable without manually corrupting the info_store
+        // behind the IndexManager's back (requires raw Store + IndexManager
+        // cross-layer setup heavier than justified for a guard-scope fix).
         let mut result = Vec::with_capacity(record_ids.len());
-        for id in record_ids {
-            let record = self.get(id).await?;
+        let id_vec: Vec<RecordId> = record_ids.into_iter().collect();
+        let records = self.table().get_many(&id_vec).await?;
+        for (id, record_opt) in id_vec.into_iter().zip(records) {
+            let Some(record) = record_opt else { continue };
             let matches = match &residual_cb {
                 Some(cb) => cb.matches(&record, ctx),
                 None => true,
