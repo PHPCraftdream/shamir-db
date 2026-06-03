@@ -22,6 +22,16 @@ struct ResolvedPermission {
 /// Resolves all role/permission conflicts once at construction time,
 /// then provides fast access checks for individual operations or
 /// entire batches.
+///
+/// **NOTE (architectural status):** This role-matrix RBAC + `row_filter`
+/// RLS path is **test-only scaffolding**. The live access model is the
+/// **Shomer DAC** (owner/group/mode, POSIX-style), enforced via
+/// `ShamirDb::execute_as` -> `authorize_access` -> `permits`.
+/// In the Shomer model, **groups replace roles** for coarse-grained
+/// access; row-level security is a future Shomer feature
+/// (`ResourcePath::Record`-level meta). This type and its companion
+/// `execute_batch_with_permissions` are retained for engine-level unit
+/// tests only and are NOT wired into the server's live request path.
 #[derive(Debug, Clone)]
 pub struct SessionPermissions {
     /// Fast path: if any role grants Action::All on Resource::Global, this is true.

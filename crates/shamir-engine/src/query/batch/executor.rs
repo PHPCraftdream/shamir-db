@@ -135,6 +135,14 @@ pub async fn execute_batch(
 /// Same as [`execute_batch`] but runs `SessionPermissions::check_batch`
 /// before planning/execution. Returns `BatchError::QueryError` if any
 /// operation is denied.
+///
+/// **NOTE (architectural status):** This role-matrix RBAC +
+/// `row_filter` RLS path is **test-only scaffolding**. The live
+/// server access model is the **Shomer DAC** (owner/group/mode),
+/// enforced via `ShamirDb::execute_as` -> `authorize_access` ->
+/// `permits`. Groups replace roles; row-level security will be a
+/// future Shomer `ResourcePath::Record`-level feature. This
+/// function is retained for engine-level unit tests only.
 pub async fn execute_batch_with_permissions(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
