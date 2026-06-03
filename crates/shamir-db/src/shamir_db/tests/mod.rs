@@ -5,5 +5,6 @@ mod durable_repo_tests;
 mod enforcement_tests;
 mod execute_tests;
 mod flush_all_tests;
+mod group_tests;
 mod shamir_db_tests;
 mod system_metadata_tests;
