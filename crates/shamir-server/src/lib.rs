@@ -35,3 +35,5 @@ pub mod tls;
 pub mod tx_registry;
 pub mod user_directory;
 pub mod version;
+#[cfg(windows)]
+pub mod windows_service;

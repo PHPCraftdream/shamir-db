@@ -72,9 +72,15 @@ WantedBy=multi-user.target
 
 /// Generate the Windows SCM `ImagePath` / `binPath` string (pure, no IO).
 ///
-/// Returns something like `"<exe>" --config "<config>" run`.
+/// Returns something like `"<exe>" --config "<config>" run --service`.
+/// The `--service` flag tells the binary to enter the SCM dispatcher loop
+/// instead of running in the foreground.
 pub fn windows_image_path(exe: &Path, config: &Path) -> String {
-    format!(r#""{}" --config "{}" run"#, exe.display(), config.display())
+    format!(
+        r#""{}" --config "{}" run --service"#,
+        exe.display(),
+        config.display()
+    )
 }
 
 /// Generate a macOS launchd `.plist` (pure, no IO). launchd sends SIGTERM on

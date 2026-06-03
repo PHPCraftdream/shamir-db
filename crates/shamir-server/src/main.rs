@@ -51,7 +51,12 @@ struct Cli {
 enum Subcmd {
     /// Run in the foreground (default). Ctrl+C / SIGTERM → graceful
     /// shutdown. Omitting a subcommand is equivalent to `run`.
-    Run,
+    Run {
+        /// Internal: set by the Windows service ImagePath so the binary
+        /// starts the SCM dispatcher instead of running in the foreground.
+        #[arg(long, hide = true)]
+        service: bool,
+    },
 
     /// Snapshot `data_dir` (from --config) into `<to>/<UTC-timestamp>/`.
     /// **Server should be stopped first** for a fully consistent snapshot.
@@ -101,10 +106,25 @@ enum Subcmd {
     },
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Windows SCM dispatcher: the SCM starts the process with `--service`
+    // and expects a blocking `StartServiceCtrlDispatcher` call on the main
+    // thread BEFORE any tokio runtime exists.
+    #[cfg(windows)]
+    if matches!(cli.command, Some(Subcmd::Run { service: true })) {
+        return shamir_server::windows_service::run();
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    rt.block_on(run_async(cli))
+}
+
+async fn run_async(cli: Cli) -> anyhow::Result<()> {
     // Install rustls crypto provider (required by tokio-rustls; second call
     // is a harmless no-op).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -182,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        Some(Subcmd::Run) | None => {}
+        Some(Subcmd::Run { .. }) | None => {}
     }
 
     tracing::info!(data_dir = ?config.data_dir, "shamir-server boot");
