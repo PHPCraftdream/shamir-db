@@ -61,10 +61,7 @@ impl TableManager {
             Filter::Fts { field, query, mode } => {
                 let interned = intern_field_path(field, interner)?;
                 let backend = registry.find_by_field_and_kind(&interned, "fts").await?;
-                let tokens: Vec<u64> = query
-                    .split_whitespace()
-                    .map(|w| crate::index2::tokenizer::token_hash(&w.to_lowercase()))
-                    .collect();
+                let tokens: Vec<u64> = backend.tokenize_query(query);
                 let fts_mode = if mode == "or" {
                     FtsMode::OrAny
                 } else {

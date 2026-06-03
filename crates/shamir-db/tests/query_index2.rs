@@ -354,6 +354,13 @@ async fn create_index_persists_metadata() {
 // FTS — stemming (English)
 // ============================================================================
 
+/// English Snowball stemmer: query-side stemming of the INFLECTED
+/// form "running" → stem "run", matching stored stem from "running".
+///
+/// Fails on the pre-fix hardcoded-whitespace query path: the old code
+/// hashed "running" raw (without stemming); the stored posting was
+/// under token_hash("run") (the stem). hash("running") != hash("run")
+/// → no match returned.
 #[tokio::test]
 async fn fts_stemmed_en_query() {
     let shamir = setup().await;
@@ -386,7 +393,9 @@ async fn fts_stemmed_en_query() {
     )
     .await;
 
-    // "run" should match "running" through stemming.
+    // Query the INFLECTED form "running" — the fix stems it to "run"
+    // which matches the stored stem. On the old code "running" hashed
+    // raw != stored "run" hash → zero results.
     let resp = exec(
         &shamir,
         json!({
@@ -394,7 +403,7 @@ async fn fts_stemmed_en_query() {
             "queries": {
                 "q": {
                     "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "run", "mode": "and"}
+                    "where": {"op": "fts", "field": ["body"], "query": "running", "mode": "and"}
                 }
             }
         }),
@@ -404,7 +413,7 @@ async fn fts_stemmed_en_query() {
     assert_eq!(
         records.len(),
         1,
-        "stemmed query 'run' should match 'running'"
+        "stemmed query 'running' should match 'running fast'"
     );
     assert_eq!(records[0]["body"], "running fast");
 }
@@ -467,4 +476,168 @@ async fn fts_stopwords_filtered() {
         "stopword 'the' should be filtered, match on 'cat'"
     );
     assert_eq!(records[0]["body"], "the cat sat");
+}
+
+// ============================================================================
+// FTS — n-gram (substring matching)
+// ============================================================================
+
+/// N-gram tokenizer (n=3) enables substring matching via character
+/// trigrams.  The QUERY must be ngram-tokenized the same way as
+/// documents — a full word like "hello" becomes trigrams [hel,ell,llo].
+///
+/// Fails on the pre-fix hardcoded-whitespace query path: the old code
+/// hashed the 5-char word "hello" as one token — that hash never
+/// matches any stored trigram, so zero results were returned.
+///
+/// Docs:
+///   "hello world" → grams [hel,ell,llo,wor,orl,rld]
+///   "help wanted" → grams [hel,elp,wan,ant,nte,ted]
+///   "goodbye"     → grams [goo,ood,odb,dby,bye]
+///
+/// Query "hello" with mode "and" → grams [hel,ell,llo]. All three
+/// must match: "hello world" has all three → matched. "help wanted"
+/// has [hel] but lacks [ell,llo] → NOT matched. "goodbye" shares
+/// none → NOT matched. Result: exactly 1 record.
+#[tokio::test]
+async fn fts_ngram_query() {
+    let shamir = setup().await;
+
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "body_fts",
+                    "table": "posts",
+                    "fields": [["body"]],
+                    "index_type": "fts",
+                    "fts_tokenizer": "ngram3",
+                }
+            }
+        }),
+    )
+    .await;
+
+    exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [
+                    {"body": "hello world"},
+                    {"body": "help wanted"},
+                    {"body": "goodbye"}
+                ]},
+            }
+        }),
+    )
+    .await;
+
+    // Query the FULL word "hello" (5 chars, NOT a single trigram).
+    // The fix ngram-tokenizes the query → [hel,ell,llo]. With mode
+    // "and", ALL three grams must be present in the doc. Only "hello
+    // world" contains all three; "help wanted" has only "hel".
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {
+                        "op": "fts",
+                        "field": ["body"],
+                        "query": "hello",
+                        "mode": "and"
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let records = &resp.results["q"].records;
+    assert_eq!(
+        records.len(),
+        1,
+        "ngram query 'hello' should match only 'hello world', got {records:?}"
+    );
+    assert_eq!(records[0]["body"], "hello world");
+}
+
+// ============================================================================
+// FTS — stemming (French)
+// ============================================================================
+
+/// French Snowball stemmer: query-side stemming of the INFLECTED
+/// plural "chats" → stem "chat", matching stored stem from "chats".
+///
+/// Fails on the pre-fix hardcoded-whitespace query path: the old code
+/// hashed "chats" raw (without stemming); the stored posting was under
+/// token_hash("chat") (the stem). hash("chats") != hash("chat") → no
+/// match returned.
+#[tokio::test]
+async fn fts_stemmed_fr_query() {
+    let shamir = setup().await;
+
+    exec(
+        &shamir,
+        json!({
+            "id": 1,
+            "queries": {
+                "mk": {
+                    "create_index": "body_fts",
+                    "table": "posts",
+                    "fields": [["body"]],
+                    "index_type": "fts",
+                    "fts_tokenizer": "stemmed_fr",
+                }
+            }
+        }),
+    )
+    .await;
+
+    exec(
+        &shamir,
+        json!({
+            "id": 2,
+            "queries": {
+                "w1": {"insert_into": "posts", "values": [
+                    {"body": "les chats noirs"},
+                    {"body": "un chien blanc"}
+                ]},
+            }
+        }),
+    )
+    .await;
+
+    // Query the INFLECTED plural "chats" — the fix stems it to "chat"
+    // which matches the stored stem. On the old code "chats" hashed
+    // raw != stored "chat" hash → zero results.
+    let resp = exec(
+        &shamir,
+        json!({
+            "id": 3,
+            "queries": {
+                "q": {
+                    "from": "posts",
+                    "where": {
+                        "op": "fts",
+                        "field": ["body"],
+                        "query": "chats",
+                        "mode": "and"
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let records = &resp.results["q"].records;
+    assert_eq!(
+        records.len(),
+        1,
+        "French stemmed query 'chats' (plural) should match 'les chats noirs'"
+    );
+    assert_eq!(records[0]["body"], "les chats noirs");
 }
