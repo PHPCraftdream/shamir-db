@@ -107,7 +107,7 @@ pub async fn execute_batch(
                         alias: String::new(),
                         message: format!("resolve_repo({}): {}", repo_name, e),
                     })?;
-            repo.flush_buffers()
+            repo.synced_flush()
                 .await
                 .map_err(|e| BatchError::QueryError {
                     alias: String::new(),
