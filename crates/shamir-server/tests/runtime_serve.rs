@@ -71,9 +71,14 @@ async fn serve_boots_and_shuts_down_on_trigger() {
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-    let serve_task = tokio::spawn(serve(config, bootstrap, async {
-        let _ = rx.await;
-    }));
+    let serve_task = tokio::spawn(serve(
+        config,
+        bootstrap,
+        async {
+            let _ = rx.await;
+        },
+        || {},
+    ));
 
     // Give the server a moment to bind listeners before triggering shutdown.
     tokio::time::sleep(Duration::from_millis(500)).await;

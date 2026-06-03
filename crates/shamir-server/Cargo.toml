@@ -88,6 +88,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
 metrics-process = "2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+sd-notify = "0.4"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
 

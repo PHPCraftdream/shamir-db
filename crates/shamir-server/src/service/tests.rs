@@ -21,7 +21,7 @@ fn systemd_unit_contains_execstart_and_sigterm() {
     assert!(unit.contains("KillSignal=SIGTERM"));
     assert!(unit.contains("WantedBy=multi-user.target"));
     assert!(unit.contains("After=network.target"));
-    assert!(unit.contains("Type=simple"));
+    assert!(unit.contains("Type=notify"));
     assert!(unit.contains("Restart=on-failure"));
 
     // Without a user, no User= line should appear.

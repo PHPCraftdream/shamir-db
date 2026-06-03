@@ -63,7 +63,7 @@ After=network.target
 ExecStart="{exe_display}" --config "{config_display}" run
 KillSignal=SIGTERM
 Restart=on-failure
-Type=simple
+Type=notify
 {user_line}[Install]
 WantedBy=multi-user.target
 "#

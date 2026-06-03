@@ -27,6 +27,7 @@ pub async fn serve(
     config: Config,
     bootstrap: BootstrapMode,
     shutdown: impl std::future::Future<Output = ()>,
+    on_ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let launcher = ServerLauncher { config, bootstrap };
     let handle = launcher
@@ -38,6 +39,8 @@ pub async fn serve(
         bound = ?handle.bound_addrs.iter().filter_map(|a| *a).collect::<Vec<_>>(),
         "shamir-server ready",
     );
+
+    on_ready();
 
     shutdown.await;
     tracing::info!("shutting down");
@@ -54,6 +57,19 @@ pub async fn serve(
         ),
     }
     Ok(())
+}
+
+/// Notify the init system that the server is ready (post-bind).
+///
+/// On Linux under systemd (`Type=notify`), this sends `READY=1` via
+/// `sd_notify`. Everywhere else (macOS, BSD, Windows, plain terminal) it
+/// is a compile-time no-op.
+pub fn notify_ready() {
+    #[cfg(target_os = "linux")]
+    {
+        // Best-effort; no-op if $NOTIFY_SOCKET is unset (not under systemd).
+        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    }
 }
 
 /// Resolves when the OS asks us to stop: Ctrl+C everywhere, plus SIGTERM on
