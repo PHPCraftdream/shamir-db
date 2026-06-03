@@ -3,9 +3,10 @@
 use serde_json::json;
 
 use crate::db_instance::db_instance::DbInstance;
+use crate::query::auth::{Action, Effect, Permission, Resource, Role, SessionPermissions};
 use crate::query::batch::{
-    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, BatchRequest,
-    QueryRunner, TableResolver,
+    commit_interactive_tx, execute_batch, execute_batch_with_permissions, execute_in_open_tx,
+    open_interactive_tx, BatchRequest, QueryRunner, TableResolver,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -1577,4 +1578,301 @@ async fn r2_actor_flows_through_filter_context() {
         .await
         .unwrap();
     assert_eq!(resp.results["q"].records.len(), 1);
+}
+
+// ============================================================================
+// Stage B-1 — row-level security (RLS) enforcement
+//
+// Before the fix, `row_filter()` was computed but never applied to the
+// actual query — a session with a row_filter grant got UNRESTRICTED row
+// access (silent no-op data exfiltration). These tests prove that
+// `execute_batch_with_permissions` now ANDs the merged row_filter into
+// each Read/Update/Delete op's WHERE clause.
+//
+// Insert/Set ops are NOT restricted here — row-match validation for those
+// needs record-level filter evaluation at a deeper layer and is a separate
+// follow-up.
+// ============================================================================
+
+/// Build a `SessionPermissions` that grants Read/Update/Delete on
+/// `default/users` with a row_filter restricting to `status == "active"`.
+fn rls_permissions() -> SessionPermissions {
+    let row_filter = crate::query::filter::Filter::Eq {
+        field: vec!["status".to_string()],
+        value: crate::query::filter::FilterValue::String("active".to_string()),
+    };
+    SessionPermissions::build(&[Role {
+        name: "rls_role".to_string(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::Read, Action::Update, Action::Delete],
+            resource: Resource::Table {
+                database: "test".to_string(),
+                repo: "main".to_string(),
+                table: "users".to_string(),
+            },
+            row_filter: Some(row_filter),
+        }],
+    }])
+}
+
+/// Superadmin session — Action::All on Resource::Global → row_filter is None.
+fn superadmin_permissions() -> SessionPermissions {
+    SessionPermissions::build(&[Role {
+        name: "admin".to_string(),
+        permissions: vec![Permission {
+            effect: Effect::Allow,
+            actions: vec![Action::All],
+            resource: Resource::Global,
+            row_filter: None,
+        }],
+    }])
+}
+
+#[tokio::test]
+async fn rls_read_returns_only_matching_rows() {
+    let resolver = setup_resolver().await;
+    let permissions = rls_permissions();
+
+    // Seed mixed rows: some status="active", some not.
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"},
+                    {"name": "Carol", "status": "active"},
+                    {"name": "Dave", "status": "pending"}
+                ],
+                "return_result": false
+            }
+        }
+    }))
+    .unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Read via execute_batch_with_permissions — should return ONLY active rows.
+    let read_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "q": {"from": "users"}
+        }
+    }))
+    .unwrap();
+
+    let resp = execute_batch_with_permissions(&read_req, &resolver, None, &permissions, "test")
+        .await
+        .unwrap();
+
+    let records = &resp.results["q"].records;
+    assert_eq!(
+        records.len(),
+        2,
+        "RLS must restrict Read to active rows only; got {:?}",
+        records
+    );
+    let names: Vec<&str> = records
+        .iter()
+        .filter_map(|r| r.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(names.contains(&"Alice"), "Alice is active");
+    assert!(names.contains(&"Carol"), "Carol is active");
+    assert!(
+        !names.contains(&"Bob"),
+        "Bob is inactive — must be excluded"
+    );
+    assert!(
+        !names.contains(&"Dave"),
+        "Dave is pending — must be excluded"
+    );
+}
+
+#[tokio::test]
+async fn rls_delete_only_removes_matching_rows() {
+    let resolver = setup_resolver().await;
+    let permissions = rls_permissions();
+
+    // Seed mixed rows.
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"},
+                    {"name": "Carol", "status": "active"}
+                ],
+                "return_result": false
+            }
+        }
+    }))
+    .unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Delete all via RLS — only active rows should be deleted.
+    let delete_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "del": {
+                "delete_from": "users",
+                "where": {"op": "eq", "field": ["status"], "value": "active"}
+            }
+        }
+    }))
+    .unwrap();
+
+    let resp = execute_batch_with_permissions(&delete_req, &resolver, None, &permissions, "test")
+        .await
+        .unwrap();
+
+    // The delete should have matched 2 records (Alice + Carol).
+    assert_eq!(
+        resp.results["del"].stats.as_ref().unwrap().records_scanned,
+        2,
+        "RLS restricts Delete to active rows"
+    );
+
+    // Verify the inactive row (Bob) still exists.
+    let verify_req: BatchRequest = serde_json::from_value(json!({
+        "id": 3,
+        "queries": {
+            "remaining": {"from": "users"}
+        }
+    }))
+    .unwrap();
+    let verify_resp = execute_batch(&verify_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
+    let remaining = &verify_resp.results["remaining"].records;
+    assert_eq!(
+        remaining.len(),
+        1,
+        "only the inactive row should remain after RLS-scoped delete"
+    );
+    assert_eq!(
+        remaining[0]["name"].as_str().unwrap(),
+        "Bob",
+        "the surviving row must be the inactive one"
+    );
+}
+
+#[tokio::test]
+async fn rls_superadmin_sees_all_rows() {
+    let resolver = setup_resolver().await;
+    let permissions = superadmin_permissions();
+
+    // Seed mixed rows.
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"},
+                    {"name": "Carol", "status": "pending"}
+                ],
+                "return_result": false
+            }
+        }
+    }))
+    .unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Superadmin read — no row_filter restriction.
+    let read_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "q": {"from": "users"}
+        }
+    }))
+    .unwrap();
+
+    let resp = execute_batch_with_permissions(&read_req, &resolver, None, &permissions, "test")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.results["q"].records.len(),
+        3,
+        "superadmin must see ALL rows (no RLS restriction)"
+    );
+}
+
+#[tokio::test]
+async fn rls_update_only_affects_matching_rows() {
+    let resolver = setup_resolver().await;
+    let permissions = rls_permissions();
+
+    // Seed mixed rows.
+    let seed_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "seed": {
+                "insert_into": "users",
+                "values": [
+                    {"name": "Alice", "status": "active"},
+                    {"name": "Bob", "status": "inactive"}
+                ],
+                "return_result": false
+            }
+        }
+    }))
+    .unwrap();
+    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Update ALL rows (no WHERE clause) — RLS should restrict to active only.
+    let update_req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "upd": {
+                "update": "users",
+                "set": {"tag": "updated"}
+            }
+        }
+    }))
+    .unwrap();
+
+    let resp = execute_batch_with_permissions(&update_req, &resolver, None, &permissions, "test")
+        .await
+        .unwrap();
+
+    // Only 1 record should have been updated (Alice — active).
+    assert_eq!(
+        resp.results["upd"].stats.as_ref().unwrap().records_scanned,
+        1,
+        "RLS restricts Update to active rows only"
+    );
+
+    // Verify Bob was NOT updated.
+    let verify_req: BatchRequest = serde_json::from_value(json!({
+        "id": 3,
+        "queries": {
+            "check": {
+                "from": "users",
+                "where": {"op": "eq", "field": ["name"], "value": "Bob"}
+            }
+        }
+    }))
+    .unwrap();
+    let verify_resp = execute_batch(&verify_req, &resolver, None, Actor::System, "test")
+        .await
+        .unwrap();
+    let bob = &verify_resp.results["check"].records;
+    assert_eq!(bob.len(), 1, "Bob should still exist");
+    assert!(
+        bob[0].get("tag").is_none(),
+        "Bob should NOT have the 'tag' field — Update was RLS-restricted to active rows"
+    );
 }
