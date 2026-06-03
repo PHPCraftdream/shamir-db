@@ -612,6 +612,126 @@ async fn create_scram_user_success_then_duplicate() {
 }
 
 // --------------------------------------------------------------------------
+// Shomer DAC: wire-level enforcement through session_actor → execute_as →
+// authorize_access → permits.
+// --------------------------------------------------------------------------
+
+/// Build a non-superuser session with a specific username.
+///
+/// `principal_id()` = `fxhash::hash64(username) & (i64::MAX as u64)`, which
+/// must differ from the resource owner id set via `set_resource_meta` for the
+/// deny path to trigger.
+fn named_user_session(username: &str) -> Session {
+    Session::new(
+        [0xCC; 16],
+        username.into(),
+        SessionPermissions::from_roles(vec!["read_write".into()]),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0u8; 32],
+        1_000_000,
+    )
+}
+
+/// Shomer DAC end-to-end through the handler wire path.
+///
+/// Proves that `session_actor` → `ShamirDb::execute_as` → `authorize_access`
+/// → `permits` is live on the `ShamirDbHandler::execute` entry point:
+///
+///   1. Seed a table as System (superuser session).
+///   2. `set_resource_meta` to owner=User(1), mode=0o700 (owner-only).
+///   3. A non-superuser session whose `principal_id()` != 1 is DENIED.
+///   4. A superuser session (Actor::System) is ALLOWED.
+///
+/// If `session_actor` were removed (always System) or `execute_as` skipped
+/// the `authorize_access` call, assertion (3) would fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shomer_dac_denies_non_owner_through_handler_wire() {
+    use shamir_db::access::{Actor, ResourceMeta, ResourcePath};
+
+    let shamir = make_db_with_table("acl", "main", "secret").await;
+
+    // Seed a row so Read has something to return on the allow path.
+    shamir
+        .execute(
+            "acl",
+            &serde_json::from_value(json!({
+                "id": "seed",
+                "queries": {
+                    "s": {
+                        "set": "secret",
+                        "key": { "id": 1 },
+                        "value": { "id": 1, "data": "classified" }
+                    }
+                },
+                "return_all": false
+            }))
+            .unwrap(),
+        )
+        .await
+        .expect("seed");
+
+    // Restrict the table: owner=User(1), mode=0o700 (owner rwx, nobody else).
+    shamir
+        .set_resource_meta(
+            &ResourcePath::table("acl", "main", "secret"),
+            &ResourceMeta {
+                owner: Actor::User(1),
+                group: None,
+                mode: 0o700,
+            },
+        )
+        .await
+        .expect("set_resource_meta");
+
+    let handler = ShamirDbHandler::new(shamir);
+
+    // --- Non-owner, non-superuser session → DENIED ---
+    // "eve" hashes to a principal_id that is NOT 1.
+    let eve = named_user_session("eve");
+    assert_ne!(
+        eve.principal_id(),
+        1,
+        "eve's principal_id must differ from owner 1"
+    );
+
+    let read = execute(
+        "acl",
+        json!({
+            "id": "rd",
+            "queries": {
+                "r": { "from": "secret" }
+            }
+        }),
+    );
+    let res = decode(&handler.handle(&eve, &encode(&read)).unwrap());
+    match res {
+        DbResponse::Error { code, message } => {
+            assert_eq!(
+                code, "access_denied",
+                "non-owner should be denied; got code={code}, msg={message}"
+            );
+            assert!(
+                message.contains("access denied"),
+                "error message should describe denial: {message}"
+            );
+        }
+        other => panic!("expected access_denied error for eve, got {:?}", other),
+    }
+
+    // --- Superuser session (Actor::System) → ALLOWED ---
+    let su = root_session();
+    let res = decode(&handler.handle(&su, &encode(&read)).unwrap());
+    match res {
+        DbResponse::Batch { response } => {
+            let rows = &response.results.get("r").expect("r alias").records;
+            assert_eq!(rows.len(), 1, "superuser should see the seeded row");
+        }
+        other => panic!("expected Batch for superuser, got {:?}", other),
+    }
+}
+
+// --------------------------------------------------------------------------
 // Sanity: `IndexMap` is in the import set so that future tests can build
 // `TMap` directly without going through JSON if they need to.
 // --------------------------------------------------------------------------
