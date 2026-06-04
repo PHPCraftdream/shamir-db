@@ -77,6 +77,30 @@ pub struct TableManager {
     /// reads this to resolve `ValidatorBinding.validator_id` to a
     /// compiled `ShamirFunction`.
     validator_registry: Option<Arc<crate::validator::ValidatorRegistry>>,
+    /// Changefeed (Phase 3b follow-up) — the non-tx write path's bridge to
+    /// the per-repo changefeed. `None` for system tables / tests that have
+    /// no feed wired. Attached by `RepoInstance::create_table_context` via
+    /// [`with_changefeed`](Self::with_changefeed). When present, the non-tx
+    /// `execute_insert/update/set/delete` methods project their footprint
+    /// into a `ChangelogEvent`, stamp it with a `commit_version` allocated
+    /// from the SAME per-repo gate the tx commit pipeline uses (so non-tx
+    /// and tx events share one monotonic version sequence), and emit it
+    /// best-effort. Emission never blocks or fails the write.
+    changefeed: Option<NonTxChangefeed>,
+}
+
+/// Bundle wiring the non-tx write path to the per-repo changefeed.
+///
+/// Holds the repo name (carried into each `ChangelogEvent::repo`), the
+/// per-repo [`RepoTxGate`](shamir_tx::RepoTxGate) (the version source —
+/// shared with the tx commit pipeline so versions stay monotonic across
+/// both paths), and the [`RepoChangefeed`](shamir_tx::RepoChangefeed) the
+/// event is fanned out through. Cloned cheaply (all `Arc`/`String`).
+#[derive(Clone)]
+struct NonTxChangefeed {
+    repo: String,
+    gate: Arc<shamir_tx::RepoTxGate>,
+    feed: Arc<shamir_tx::RepoChangefeed>,
 }
 
 /// How often the background watchdog runs a `verify` pass.
@@ -103,6 +127,7 @@ impl Clone for TableManager {
             mvcc_store: self.mvcc_store.clone(),
             validator_bindings: Arc::clone(&self.validator_bindings),
             validator_registry: self.validator_registry.clone(),
+            changefeed: self.changefeed.clone(),
         }
     }
 }
@@ -148,6 +173,7 @@ impl TableManager {
             mvcc_store: None,
             validator_bindings,
             validator_registry: None,
+            changefeed: None,
         };
 
         // Hot-load persisted buffer config (if any) and apply
@@ -249,6 +275,7 @@ impl TableManager {
             mvcc_store: None,
             validator_bindings: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             validator_registry: None,
+            changefeed: None,
         }
     }
 
@@ -1789,6 +1816,107 @@ impl TableManager {
     pub fn with_mvcc_store(mut self, mvcc: Arc<shamir_tx::MvccStore>) -> Self {
         self.mvcc_store = Some(mvcc);
         self
+    }
+
+    /// Wire this table's non-tx write path to the per-repo changefeed.
+    ///
+    /// Returns `self` so callers can chain after `create()` (mirrors
+    /// [`with_mvcc_store`](Self::with_mvcc_store)). `gate` MUST be the same
+    /// per-repo [`RepoTxGate`](shamir_tx::RepoTxGate) the tx commit pipeline
+    /// uses — that is what keeps non-tx and tx `commit_version`s on one
+    /// monotonic sequence per repo. `feed` is the repo's
+    /// [`RepoChangefeed`](shamir_tx::RepoChangefeed).
+    ///
+    /// Attached by `RepoInstance::create_table_context`. When absent, the
+    /// non-tx write methods skip changefeed emission entirely (system tables
+    /// / direct-constructed test tables).
+    pub fn with_changefeed(
+        mut self,
+        repo: String,
+        gate: Arc<shamir_tx::RepoTxGate>,
+        feed: Arc<shamir_tx::RepoChangefeed>,
+    ) -> Self {
+        self.changefeed = Some(NonTxChangefeed { repo, gate, feed });
+        self
+    }
+
+    /// Project + emit a non-transactional write footprint to the changefeed.
+    ///
+    /// Called by the non-tx `execute_insert/update/set/delete` methods AFTER
+    /// the mutations are applied to the table. Best-effort and non-blocking:
+    ///
+    /// * No feed wired (`changefeed == None`) → no-op.
+    /// * Empty `changes` → no-op (no version is burned for an empty write).
+    /// * Otherwise allocate ONE `commit_version` from the shared per-repo
+    ///   gate (`assign_next_version` — the same atomic counter the MVCC
+    ///   commit pipeline and `MvccStore::set_versioned` bump, so the version
+    ///   is monotonic and never duplicated across non-tx and tx writes),
+    ///   build the event via [`shamir_tx::nontx_event`], and hand it to the
+    ///   feed's two non-blocking tracks (broadcast `send` + journal
+    ///   `try_send`). Neither track waits nor errors back to us.
+    ///
+    /// One `commit_version` covers the whole batch (all `changes`), exactly
+    /// as a tx commit stamps one version over its whole write-set.
+    ///
+    /// We deliberately do NOT call `gate.publish_committed` here. That call
+    /// advances the reader-visible MVCC floor and runs under `commit_lock` on
+    /// the tx path; the non-tx write path holds no such lock, and
+    /// `publish_committed` is a plain store (not a max), so calling it off the
+    /// lock could momentarily move `last_committed` backwards relative to a
+    /// concurrent tx commit. The changefeed needs only a monotonic
+    /// `commit_version` (the journal is keyed by it and `read_changelog_from`
+    /// never consults `publish_committed`); the non-tx data's MVCC visibility
+    /// is governed independently by `MvccStore::set_versioned`, which likewise
+    /// bumps the counter without publishing.
+    pub(crate) async fn emit_nontx_changefeed(&self, changes: Vec<shamir_tx::RecordChange>) {
+        let Some(cf) = &self.changefeed else {
+            return; // no feed wired (system table / test)
+        };
+        if changes.is_empty() {
+            return; // empty footprint — nothing to emit, no version burned
+        }
+        let commit_version = cf.gate.assign_next_version();
+        let event = shamir_tx::nontx_event(
+            &cf.repo,
+            commit_version,
+            shamir_types::access::Actor::System,
+            changes,
+        );
+        if let Some(event) = event {
+            cf.feed.emit(event);
+        }
+    }
+
+    /// Build one [`RecordChange`](shamir_tx::RecordChange) for a non-tx
+    /// `Put` (insert / update / set): the raw `RecordId` key bytes plus the
+    /// serialized new record bytes — byte-identical to what the tx staging
+    /// path carries for the same mutation. Serialization failure (which
+    /// would also have failed the data write upstream) yields `None` so the
+    /// change is simply omitted rather than poisoning the batch.
+    pub(crate) fn put_change(
+        &self,
+        id: RecordId,
+        value: &InnerValue,
+    ) -> Option<shamir_tx::RecordChange> {
+        let bytes = value.to_bytes().ok()?;
+        Some(shamir_tx::RecordChange {
+            table: self.name.clone(),
+            key: id.to_bytes(),
+            op: shamir_tx::ChangeOp::Put,
+            value: Some(bytes),
+        })
+    }
+
+    /// Build one [`RecordChange`](shamir_tx::RecordChange) for a non-tx
+    /// `Delete`: the raw `RecordId` key bytes, no value (mirrors the tx
+    /// `Remove` projection).
+    pub(crate) fn delete_change(&self, id: RecordId) -> shamir_tx::RecordChange {
+        shamir_tx::RecordChange {
+            table: self.name.clone(),
+            key: id.to_bytes(),
+            op: shamir_tx::ChangeOp::Delete,
+            value: None,
+        }
     }
 
     /// tx-aware single-record read.
