@@ -1845,6 +1845,31 @@ impl ShamirDb {
             alias: String::new(),
             message: e.to_string(),
         })?;
+
+        // Per-op DML authorization (mirrors execute_as).
+        for entry in request.queries.values() {
+            if let Some(tref) = entry.op.table_ref() {
+                let action = match &entry.op {
+                    BatchOp::Read(_) => Action::Read,
+                    BatchOp::Insert(_) => Action::Create,
+                    BatchOp::Set(_) | BatchOp::Update(_) => Action::Write,
+                    BatchOp::Delete(_) => Action::Delete,
+                    _ => Action::Write,
+                };
+                let path = ResourcePath::Table {
+                    db: db_name.to_string(),
+                    store: tref.repo.clone(),
+                    table: tref.table.clone(),
+                };
+                self.authorize_access(&actor, &path, action)
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: String::new(),
+                        message: e.to_string(),
+                    })?;
+            }
+        }
+
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
