@@ -40,6 +40,19 @@ pub struct RepoInstance {
     /// Shared across all clones so concurrent synced commits on this
     /// repo batch their flush+fsync into a single I/O round.
     group_commit: Arc<GroupCommit>,
+    /// Lazily-initialised per-repo changefeed (Phase 3b): live broadcast +
+    /// durable journal writer over the `"__changelog__"` store. Created on
+    /// first call to [`changefeed`](Self::changefeed). Shared across clones.
+    changefeed: Arc<OnceCell<ChangefeedHandle>>,
+}
+
+/// Bundle of the per-repo changefeed and the store it journals into.
+/// The store is retained so [`RepoInstance::read_changelog_from`] can
+/// range-read the journal without re-resolving it.
+#[derive(Clone)]
+struct ChangefeedHandle {
+    feed: Arc<shamir_tx::RepoChangefeed>,
+    store: Arc<dyn shamir_tx::ChangelogStore>,
 }
 
 impl Clone for RepoInstance {
@@ -55,6 +68,7 @@ impl Clone for RepoInstance {
             token_names: Arc::clone(&self.token_names),
             tx_metrics: Arc::clone(&self.tx_metrics),
             group_commit: Arc::clone(&self.group_commit),
+            changefeed: Arc::clone(&self.changefeed),
         }
     }
 }
@@ -85,6 +99,7 @@ impl RepoInstance {
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
             group_commit: Arc::new(GroupCommit::new()),
+            changefeed: Arc::new(OnceCell::new()),
         }
     }
 
@@ -412,6 +427,90 @@ impl RepoInstance {
         tx: shamir_tx::TxContext,
     ) -> Result<crate::tx::TxOutcome, crate::tx::CommitError> {
         crate::tx::commit_tx(tx, self).await
+    }
+
+    // ============================================================================
+    // Changefeed (Phase 3b): live broadcast + durable journal
+    // ============================================================================
+
+    /// cancel-safe: yes — `OnceCell::get_or_try_init`. If cancellation
+    /// occurs during init the cell stays empty and the next caller retries;
+    /// the returned handle is an in-memory `Arc` clone.
+    ///
+    /// Lazily build (once per repo) the changefeed: a live broadcast sender
+    /// plus a background journal writer over the `"__changelog__"` store.
+    /// The feed is "always on" — the commit-path feeds the journal on every
+    /// non-empty commit regardless of live subscribers — so callers that
+    /// subscribed late can still catch up via [`read_changelog_from`].
+    ///
+    /// [`read_changelog_from`]: Self::read_changelog_from
+    async fn changefeed(&self) -> DbResult<ChangefeedHandle> {
+        self.changefeed
+            .get_or_try_init(|| async {
+                let store: Arc<dyn Store> = self.repo.store_get("__changelog__").await?;
+                let cl_store: Arc<dyn shamir_tx::ChangelogStore> =
+                    Arc::new(crate::repo::changelog_store::StoreChangelog::new(store));
+                let feed = shamir_tx::RepoChangefeed::new(Arc::clone(&cl_store));
+                Ok::<ChangefeedHandle, DbError>(ChangefeedHandle {
+                    feed,
+                    store: cl_store,
+                })
+            })
+            .await
+            .cloned()
+    }
+
+    /// Subscribe to this repo's live changefeed.
+    ///
+    /// Returns a `broadcast::Receiver` that yields every `ChangelogEvent`
+    /// emitted after the call. A subscriber that falls behind the bounded
+    /// ring receives `RecvError::Lagged` and should re-sync the missed
+    /// window via [`read_changelog_from`](Self::read_changelog_from).
+    pub async fn subscribe_changelog(
+        &self,
+    ) -> DbResult<tokio::sync::broadcast::Receiver<Arc<shamir_tx::ChangelogEvent>>> {
+        Ok(self.changefeed().await?.feed.subscribe())
+    }
+
+    /// Resumable pull: read up to `limit` durable journal events with
+    /// `commit_version >= from_version`, ascending.
+    pub async fn read_changelog_from(
+        &self,
+        from_version: u64,
+        limit: usize,
+    ) -> DbResult<Vec<shamir_tx::ChangelogEvent>> {
+        let h = self.changefeed().await?;
+        Ok(h.feed.read_from(&h.store, from_version, limit).await)
+    }
+
+    /// cancel-safe: yes — hands a pre-projected event to the changefeed's
+    /// two non-blocking tracks (broadcast `send` + journal `try_send`).
+    /// NEVER blocks the commit-path and NEVER errors out to it.
+    ///
+    /// Emit a committed tx's projected footprint to the changefeed. The
+    /// event must be projected by the caller (via [`shamir_tx::project_event`])
+    /// BEFORE Phase 5a drains `tx.write_set`, and emitted AFTER
+    /// `gate.publish_committed` so subscribers/journal readers never observe
+    /// a version the gate has not yet published. `None` (an empty-footprint
+    /// commit) is a no-op.
+    pub(crate) async fn emit_changefeed_event(&self, event: Option<shamir_tx::ChangelogEvent>) {
+        let Some(event) = event else {
+            return; // empty footprint — nothing to emit
+        };
+        let commit_version = event.commit_version;
+        match self.changefeed().await {
+            Ok(h) => h.feed.emit(event),
+            Err(e) => {
+                // Changefeed init failed (e.g. store_get error). The commit
+                // is already durable; the feed is best-effort, so log + move
+                // on rather than fail the commit.
+                log::warn!(
+                    "emit_changefeed: changefeed unavailable for repo {} commit_version \
+                     {commit_version}: {e}; skipping changefeed emission",
+                    self.name()
+                );
+            }
+        }
     }
 
     // ============================================================================

@@ -30,6 +30,7 @@
 //! RepoWalManager). Upcoming stages (see `docs/pre-transactional/`):
 //! - Stage 6: `GcWorker`, `TxReaper`
 
+pub mod changefeed;
 pub mod id_remap;
 pub mod index_write_op;
 pub mod layered_interner;
@@ -44,6 +45,10 @@ pub mod types;
 pub mod version_codec;
 pub mod version_provider;
 
+pub use changefeed::{
+    project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, RecordChange,
+    RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
+};
 pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
