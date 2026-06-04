@@ -7,11 +7,13 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, ChgrpOp, ChmodOp, ChownOp,
-    CommitMigrationOp, CreateDbOp, CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp,
-    DropDbOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, ListOp,
-    MigrationStatusOp, RemoveGroupMemberOp, RollbackMigrationOp, SetBufferConfigOp,
-    StartMigrationOp,
+    AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, BindValidatorOp, ChgrpOp, ChmodOp,
+    ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
+    CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, CreateValidatorOp, DropDbOp,
+    DropFunctionOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp,
+    GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp, RemoveGroupMemberOp,
+    RenameFunctionOp, RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
+    UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::read::{QueryResult, ReadQuery};
@@ -86,6 +88,22 @@ pub enum BatchOp {
 
     /// Read-only access-control tree introspection.
     AccessTree(AccessTreeOp),
+
+    // Function DDL (DDL-A)
+    CreateFunction(CreateFunctionOp),
+    DropFunction(DropFunctionOp),
+    RenameFunction(RenameFunctionOp),
+
+    // Validator DDL (DDL-A)
+    CreateValidator(CreateValidatorOp),
+    DropValidator(DropValidatorOp),
+    RenameValidator(RenameValidatorOp),
+    BindValidator(BindValidatorOp),
+    UnbindValidator(UnbindValidatorOp),
+    ListValidators(ListValidatorsOp),
+
+    // Function folder DDL
+    CreateFunctionFolder(CreateFunctionFolderOp),
 }
 
 impl Serialize for BatchOp {
@@ -126,6 +144,16 @@ impl Serialize for BatchOp {
             BatchOp::AddGroupMember(op) => op.serialize(serializer),
             BatchOp::RemoveGroupMember(op) => op.serialize(serializer),
             BatchOp::AccessTree(op) => op.serialize(serializer),
+            BatchOp::CreateFunction(op) => op.serialize(serializer),
+            BatchOp::DropFunction(op) => op.serialize(serializer),
+            BatchOp::RenameFunction(op) => op.serialize(serializer),
+            BatchOp::CreateValidator(op) => op.serialize(serializer),
+            BatchOp::DropValidator(op) => op.serialize(serializer),
+            BatchOp::RenameValidator(op) => op.serialize(serializer),
+            BatchOp::BindValidator(op) => op.serialize(serializer),
+            BatchOp::UnbindValidator(op) => op.serialize(serializer),
+            BatchOp::ListValidators(op) => op.serialize(serializer),
+            BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
         }
     }
 }
@@ -274,6 +302,46 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::AccessTree)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_function") {
+            serde_json::from_value(value)
+                .map(BatchOp::CreateFunction)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_function") {
+            serde_json::from_value(value)
+                .map(BatchOp::DropFunction)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("rename_function") {
+            serde_json::from_value(value)
+                .map(BatchOp::RenameFunction)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_validator") {
+            serde_json::from_value(value)
+                .map(BatchOp::CreateValidator)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("drop_validator") {
+            serde_json::from_value(value)
+                .map(BatchOp::DropValidator)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("rename_validator") {
+            serde_json::from_value(value)
+                .map(BatchOp::RenameValidator)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("bind_validator") {
+            serde_json::from_value(value)
+                .map(BatchOp::BindValidator)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("unbind_validator") {
+            serde_json::from_value(value)
+                .map(BatchOp::UnbindValidator)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("list_validators") {
+            serde_json::from_value(value)
+                .map(BatchOp::ListValidators)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("create_function_folder") {
+            serde_json::from_value(value)
+                .map(BatchOp::CreateFunctionFolder)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value)
@@ -332,6 +400,16 @@ impl BatchOp {
                 | BatchOp::AddGroupMember(_)
                 | BatchOp::RemoveGroupMember(_)
                 | BatchOp::AccessTree(_)
+                | BatchOp::CreateFunction(_)
+                | BatchOp::DropFunction(_)
+                | BatchOp::RenameFunction(_)
+                | BatchOp::CreateValidator(_)
+                | BatchOp::DropValidator(_)
+                | BatchOp::RenameValidator(_)
+                | BatchOp::BindValidator(_)
+                | BatchOp::UnbindValidator(_)
+                | BatchOp::ListValidators(_)
+                | BatchOp::CreateFunctionFolder(_)
         )
     }
 }

@@ -376,6 +376,18 @@ impl SessionPermissions {
             | BatchOp::DropGroup(_)
             | BatchOp::AddGroupMember(_)
             | BatchOp::RemoveGroupMember(_) => (Action::Alter, Resource::Global),
+
+            // Function / validator / folder DDL (DDL-A) — admin alter ops
+            BatchOp::CreateFunction(_)
+            | BatchOp::DropFunction(_)
+            | BatchOp::RenameFunction(_)
+            | BatchOp::CreateValidator(_)
+            | BatchOp::DropValidator(_)
+            | BatchOp::RenameValidator(_)
+            | BatchOp::BindValidator(_)
+            | BatchOp::UnbindValidator(_)
+            | BatchOp::ListValidators(_)
+            | BatchOp::CreateFunctionFolder(_) => (Action::Alter, Resource::Global),
         }
     }
 }

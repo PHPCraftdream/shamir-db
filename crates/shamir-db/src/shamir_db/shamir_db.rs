@@ -431,6 +431,12 @@ impl ShamirDb {
     }
 
     pub async fn create_db(&self, name: &str) -> DbInstance {
+        self.create_db_as(name, Actor::System).await
+    }
+
+    /// Like [`create_db`] but stamps the new database's owner as `actor`
+    /// instead of `System`. Mode stays `0o777` (open).
+    pub async fn create_db_as(&self, name: &str, actor: Actor) -> DbInstance {
         let db = DbInstance::new();
         self.dbs.insert(name.to_string(), db.clone());
 
@@ -448,7 +454,7 @@ impl ShamirDb {
                     "name": name,
                     "created_at": created_at,
                 }),
-                &ResourceMeta::open(),
+                &ResourceMeta::owned_by(actor),
             )
             .await
         {
@@ -487,6 +493,17 @@ impl ShamirDb {
     }
 
     pub async fn add_repo(&self, db_name: &str, config: RepoConfig) -> DbResult<()> {
+        self.add_repo_as(db_name, config, Actor::System).await
+    }
+
+    /// Like [`add_repo`] but stamps the repo (and its inline tables) with
+    /// the given actor as owner.
+    pub async fn add_repo_as(
+        &self,
+        db_name: &str,
+        config: RepoConfig,
+        actor: Actor,
+    ) -> DbResult<()> {
         // Owned clone (cheap Arc) — never hold the DashMap shard guard
         // across the `add_repo` / recovery awaits below.
         let db = self
@@ -524,16 +541,12 @@ impl ShamirDb {
             }
         }
 
+        let meta = ResourceMeta::owned_by(actor.clone());
+
         // Persist to system store
         if let Err(e) = self
             .system_store
-            .save_repository(
-                db_name,
-                &repo_name,
-                &storage_type,
-                path.as_deref(),
-                &ResourceMeta::open(),
-            )
+            .save_repository(db_name, &repo_name, &storage_type, path.as_deref(), &meta)
             .await
         {
             log::warn!(
@@ -550,13 +563,7 @@ impl ShamirDb {
         for (table_name, enable_indexes) in &inline_tables {
             if let Err(e) = self
                 .system_store
-                .save_table(
-                    db_name,
-                    &repo_name,
-                    table_name,
-                    *enable_indexes,
-                    &ResourceMeta::open(),
-                )
+                .save_table(db_name, &repo_name, table_name, *enable_indexes, &meta)
                 .await
             {
                 log::warn!(
@@ -619,6 +626,26 @@ impl ShamirDb {
         table_name: &str,
         enable_indexes: bool,
     ) -> DbResult<()> {
+        self.add_table_as(
+            db_name,
+            repo_name,
+            table_name,
+            enable_indexes,
+            Actor::System,
+        )
+        .await
+    }
+
+    /// Like [`add_table`] but stamps the new table with the given actor as
+    /// owner.
+    pub async fn add_table_as(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        enable_indexes: bool,
+        actor: Actor,
+    ) -> DbResult<()> {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
@@ -638,7 +665,7 @@ impl ShamirDb {
                 repo_name,
                 table_name,
                 enable_indexes,
-                &ResourceMeta::open(),
+                &ResourceMeta::owned_by(actor),
             )
             .await
         {
@@ -811,14 +838,11 @@ impl ShamirDb {
         replace: bool,
         actor: Actor,
     ) -> DbResult<()> {
-        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
-            .await
-            .map_err(|e| DbError::Function(e.to_string()))?;
         let opts = CreateFunctionOptions {
             replace,
             ..CreateFunctionOptions::default()
         };
-        self.create_function_with_opts(name, FunctionSource::Wasm(wasm), opts)
+        self.create_function_with_opts_as(name, FunctionSource::Wasm(wasm), opts, actor)
             .await
     }
 
@@ -844,14 +868,11 @@ impl ShamirDb {
         replace: bool,
         actor: Actor,
     ) -> DbResult<()> {
-        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
-            .await
-            .map_err(|e| DbError::Function(e.to_string()))?;
         let opts = CreateFunctionOptions {
             replace,
             ..CreateFunctionOptions::default()
         };
-        self.create_function_with_opts(name, FunctionSource::Source(source), opts)
+        self.create_function_with_opts_as(name, FunctionSource::Source(source), opts, actor)
             .await
     }
 
@@ -920,7 +941,7 @@ impl ShamirDb {
         });
         meta.inject_into(&mut record);
         self.system_store
-            .save_function(name, &record, &ResourceMeta::open())
+            .save_function(name, &record, &ResourceMeta::owned_by(actor.clone()))
             .await?;
 
         if opts.replace {
@@ -1007,12 +1028,14 @@ impl ShamirDb {
             self.function_meta.insert(to.to_string(), meta);
         }
 
-        // If there was a durable record, re-key it.
+        // If there was a durable record, re-key it, preserving the
+        // existing owner/group/mode.
         if let Some(mut rec) = old_record {
+            let existing_meta = ResourceMeta::from_record(&rec);
             self.system_store.remove_function(from).await?;
             rec["name"] = json!(to);
             self.system_store
-                .save_function(to, &rec, &ResourceMeta::open())
+                .save_function(to, &rec, &existing_meta)
                 .await?;
         }
 
@@ -1071,7 +1094,7 @@ impl ShamirDb {
         wasm: &[u8],
         replace: bool,
     ) -> DbResult<RecordId> {
-        self.create_validator_from_wasm_as(name, wasm, replace, Actor::System)
+        self.create_validator_inner(name, FunctionSource::Wasm(wasm), replace, Actor::System)
             .await
     }
 
@@ -1081,9 +1104,9 @@ impl ShamirDb {
         name: &str,
         wasm: &[u8],
         replace: bool,
-        _actor: Actor,
+        actor: Actor,
     ) -> DbResult<RecordId> {
-        self.create_validator_inner(name, FunctionSource::Wasm(wasm), replace)
+        self.create_validator_inner(name, FunctionSource::Wasm(wasm), replace, actor)
             .await
     }
 
@@ -1096,7 +1119,7 @@ impl ShamirDb {
         source: &str,
         replace: bool,
     ) -> DbResult<RecordId> {
-        self.create_validator_from_source_as(name, source, replace, Actor::System)
+        self.create_validator_inner(name, FunctionSource::Source(source), replace, Actor::System)
             .await
     }
 
@@ -1106,9 +1129,9 @@ impl ShamirDb {
         name: &str,
         source: &str,
         replace: bool,
-        _actor: Actor,
+        actor: Actor,
     ) -> DbResult<RecordId> {
-        self.create_validator_inner(name, FunctionSource::Source(source), replace)
+        self.create_validator_inner(name, FunctionSource::Source(source), replace, actor)
             .await
     }
 
@@ -1118,6 +1141,7 @@ impl ShamirDb {
         name: &str,
         source: FunctionSource<'_>,
         replace: bool,
+        actor: Actor,
     ) -> DbResult<RecordId> {
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
@@ -1165,7 +1189,7 @@ impl ShamirDb {
         // Persist before registering so a crash can't leave a live entry
         // without a catalogue record.
         self.system_store
-            .save_validator(name, &record, &ResourceMeta::open())
+            .save_validator(name, &record, &ResourceMeta::owned_by(actor))
             .await?;
 
         if replace {
@@ -1234,12 +1258,14 @@ impl ShamirDb {
             .rename(from, to)
             .map_err(|e| DbError::Validation(e.to_string()))?;
 
-        // If there was a durable record, re-key it.
+        // If there was a durable record, re-key it, preserving the
+        // existing owner/group/mode.
         if let Some(mut rec) = old_record {
+            let existing_meta = ResourceMeta::from_record(&rec);
             self.system_store.remove_validator(from).await?;
             rec["name"] = json!(to);
             self.system_store
-                .save_validator(to, &rec, &ResourceMeta::open())
+                .save_validator(to, &rec, &existing_meta)
                 .await?;
         }
 
@@ -1418,10 +1444,11 @@ impl ShamirDb {
             tables.into_iter().map(serde_json::Value::String).collect();
 
         if let Ok(Some(mut rec)) = self.system_store.load_validator(name).await {
+            let existing_meta = ResourceMeta::from_record(&rec);
             rec["bound_in"] = serde_json::Value::Array(bound_json);
             if let Err(e) = self
                 .system_store
-                .save_validator(name, &rec, &ResourceMeta::open())
+                .save_validator(name, &rec, &existing_meta)
                 .await
             {
                 log::warn!(
@@ -1703,6 +1730,10 @@ impl ShamirDb {
                     .map(|r| ResourceMeta::from_record(&r))
                     .unwrap_or_default()
             }
+            ResourcePath::FunctionFolder { .. } => {
+                // Folder meta persistence is a later stage; default to open.
+                ResourceMeta::open()
+            }
             ResourcePath::FunctionNamespace => {
                 let val = self
                     .system_store
@@ -1778,6 +1809,13 @@ impl ShamirDb {
                 self.system_store
                     .save_function_meta_record(name, &rec)
                     .await
+            }
+            ResourcePath::FunctionFolder { .. } => {
+                // Folder meta persistence is a later stage.
+                Err(DbError::NotFound(format!(
+                    "resource path '{}' does not support set_resource_meta yet",
+                    path
+                )))
             }
             ResourcePath::FunctionNamespace => {
                 let mut rec = serde_json::json!({"key": "fn_namespace_meta"});

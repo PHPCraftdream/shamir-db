@@ -1,5 +1,6 @@
 //! Batch execution entry point for ShamirDb.
 
+use base64::Engine;
 use serde_json::json;
 
 use std::sync::Arc;
@@ -95,7 +96,9 @@ impl AdminExecutor for ShamirAdminExecutor {
         match op {
             BatchOp::CreateDb(op) => {
                 validate_name_component(&op.create_db, "db_name")?;
-                self.shamir.create_db(&op.create_db).await;
+                self.shamir
+                    .create_db_as(&op.create_db, self.actor.clone())
+                    .await;
                 Ok(admin_result(json!({"created": op.create_db})))
             }
 
@@ -145,7 +148,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 }
 
                 self.shamir
-                    .add_repo(&self.db_name, config)
+                    .add_repo_as(&self.db_name, config, self.actor.clone())
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(json!({"created_repo": op.create_repo})))
@@ -165,7 +168,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                 // Route through ShamirDb so the table is persisted to the
                 // catalogue and survives a restart (I.2).
                 self.shamir
-                    .add_table(&self.db_name, &op.repo, &op.create_table, false)
+                    .add_table_as(
+                        &self.db_name,
+                        &op.repo,
+                        &op.create_table,
+                        false,
+                        self.actor.clone(),
+                    )
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(
@@ -1072,6 +1081,302 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(json!({ "access_tree": tree })))
+            }
+
+            // ── Function DDL (DDL-A) ──────────────────────────────────
+            BatchOp::CreateFunction(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::FunctionNamespace,
+                        Action::Create,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                if let Some(ref source) = op.source {
+                    self.shamir
+                        .create_function_from_source_as(
+                            &op.create_function,
+                            source,
+                            op.replace,
+                            self.actor.clone(),
+                        )
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
+                } else if let Some(ref wasm_b64) = op.wasm {
+                    let wasm_bytes = base64::engine::general_purpose::STANDARD
+                        .decode(wasm_b64)
+                        .map_err(|e| err(format!("invalid base64 wasm: {}", e)))?;
+                    self.shamir
+                        .create_function_from_wasm_as(
+                            &op.create_function,
+                            &wasm_bytes,
+                            op.replace,
+                            self.actor.clone(),
+                        )
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
+                } else {
+                    return Err(err(
+                        "create_function requires either 'source' or 'wasm'".to_string()
+                    ));
+                }
+                Ok(admin_result(
+                    json!({"created_function": op.create_function}),
+                ))
+            }
+
+            BatchOp::DropFunction(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::Function {
+                            name: op.drop_function.clone(),
+                        },
+                        Action::Delete,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let existed = self
+                    .shamir
+                    .drop_function_as(&op.drop_function, self.actor.clone())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(
+                    json!({"dropped_function": op.drop_function, "existed": existed}),
+                ))
+            }
+
+            BatchOp::RenameFunction(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::Function {
+                            name: op.rename_function.clone(),
+                        },
+                        Action::Write,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                self.shamir
+                    .rename_function_as(&op.rename_function, &op.to, self.actor.clone())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(
+                    json!({"renamed_function": op.rename_function, "to": op.to}),
+                ))
+            }
+
+            // ── Validator DDL (DDL-A) ─────────────────────────────────
+            BatchOp::CreateValidator(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::FunctionNamespace,
+                        Action::Create,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let id = if let Some(ref source) = op.source {
+                    self.shamir
+                        .create_validator_from_source_as(
+                            &op.create_validator,
+                            source,
+                            op.replace,
+                            self.actor.clone(),
+                        )
+                        .await
+                        .map_err(|e| err(e.to_string()))?
+                } else if let Some(ref wasm_b64) = op.wasm {
+                    let wasm_bytes = base64::engine::general_purpose::STANDARD
+                        .decode(wasm_b64)
+                        .map_err(|e| err(format!("invalid base64 wasm: {}", e)))?;
+                    self.shamir
+                        .create_validator_from_wasm_as(
+                            &op.create_validator,
+                            &wasm_bytes,
+                            op.replace,
+                            self.actor.clone(),
+                        )
+                        .await
+                        .map_err(|e| err(e.to_string()))?
+                } else {
+                    return Err(err(
+                        "create_validator requires either 'source' or 'wasm'".to_string()
+                    ));
+                };
+                Ok(admin_result(json!({
+                    "created_validator": op.create_validator,
+                    "id": id.to_string(),
+                })))
+            }
+
+            BatchOp::DropValidator(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::FunctionNamespace,
+                        Action::Delete,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let existed = self
+                    .shamir
+                    .drop_validator_as(&op.drop_validator, self.actor.clone())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(
+                    json!({"dropped_validator": op.drop_validator, "existed": existed}),
+                ))
+            }
+
+            BatchOp::RenameValidator(op) => {
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::Write)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                self.shamir
+                    .rename_validator_as(&op.rename_validator, &op.to, self.actor.clone())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(
+                    json!({"renamed_validator": op.rename_validator, "to": op.to}),
+                ))
+            }
+
+            BatchOp::BindValidator(op) => {
+                // Auth: Write on the target Table (binding changes the
+                // table's write behaviour).
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::Table {
+                            db: op.db.clone(),
+                            store: op.repo.clone(),
+                            table: op.table.clone(),
+                        },
+                        Action::Write,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                self.shamir
+                    .bind_validator_as(
+                        &op.db,
+                        &op.repo,
+                        &op.table,
+                        &op.bind_validator,
+                        op.ops.clone(),
+                        op.priority,
+                        self.actor.clone(),
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "bound_validator": op.bind_validator,
+                    "table": op.table,
+                })))
+            }
+
+            BatchOp::UnbindValidator(op) => {
+                // Auth: Write on the target Table.
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::Table {
+                            db: op.db.clone(),
+                            store: op.repo.clone(),
+                            table: op.table.clone(),
+                        },
+                        Action::Write,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let removed = self
+                    .shamir
+                    .unbind_validator_as(
+                        &op.db,
+                        &op.repo,
+                        &op.table,
+                        &op.unbind_validator,
+                        self.actor.clone(),
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "unbound_validator": op.unbind_validator,
+                    "table": op.table,
+                    "existed": removed,
+                })))
+            }
+
+            BatchOp::ListValidators(op) => {
+                // Auth: Read on the target Table.
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::Table {
+                            db: op.db.clone(),
+                            store: op.repo.clone(),
+                            table: op.list_validators.clone(),
+                        },
+                        Action::Read,
+                    )
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let bindings = self
+                    .shamir
+                    .list_validator_bindings(&op.db, &op.repo, &op.list_validators)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                let bindings_json: Vec<serde_json::Value> = bindings
+                    .iter()
+                    .map(|b| {
+                        json!({
+                            "validator_id": b.validator_id.to_string(),
+                            "priority": b.priority,
+                        })
+                    })
+                    .collect();
+                Ok(admin_result(json!({
+                    "validators": bindings_json,
+                    "table": op.list_validators,
+                })))
+            }
+
+            // ── Function folder DDL ───────────────────────────────────
+            BatchOp::CreateFunctionFolder(op) => {
+                // Validate path segments.
+                if op.create_function_folder.is_empty() {
+                    return Err(err("function folder path must not be empty".to_string()));
+                }
+                for segment in &op.create_function_folder {
+                    validate_name_component(segment, "folder segment")?;
+                }
+
+                // Auth: Create on the parent folder or FunctionNamespace
+                // (if only one segment).
+                let parent_path = if op.create_function_folder.len() == 1 {
+                    ResourcePath::FunctionNamespace
+                } else {
+                    ResourcePath::FunctionFolder {
+                        path: op.create_function_folder[..op.create_function_folder.len() - 1]
+                            .to_vec(),
+                    }
+                };
+                self.shamir
+                    .authorize_access(&self.actor, &parent_path, Action::Create)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+
+                // Full folder-meta persistence is deferred (#118);
+                // for now the op validates the path and confirms
+                // success. Functions can still be created under the
+                // folder path (the funclib already resolves
+                // slash-namespaced names).
+
+                Ok(admin_result(json!({
+                    "created_function_folder": op.create_function_folder,
+                })))
             }
 
             _ => Err(err("Not an admin operation".to_string())),
