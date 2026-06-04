@@ -492,6 +492,15 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
 
+    // Changefeed (Phase 3b): project the committed footprint ONCE here,
+    // while `tx.write_set` is still intact (Phase 5a / `collect_data_batches`
+    // drains it). The projected event is emitted AFTER the version is
+    // published (sync: post-`materialize`; async: post-`publish_committed`),
+    // so neither the live broadcast nor the durable journal can hand out a
+    // version the gate has not yet published. `None` for an empty-data-write
+    // footprint. Emission itself is non-blocking and never fails the commit.
+    let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+
     let outcome = match visibility {
         shamir_tx::CommitVisibility::Synchronous => {
             // === Sync mode (default, unchanged behaviour) ===
@@ -524,6 +533,13 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             // lock. Drop the guard here so other committers proceed while
             // this tx promotes its vectors.
             drop(commit_guard);
+
+            // Changefeed emit (Phase 3b): publish already happened inside
+            // `materialize` (Phase 6). Fan the pre-projected event out to the
+            // live broadcast + durable journal — both non-blocking, neither
+            // can fail the commit. Done after the lock drop so the feed work
+            // never sits on the commit critical section.
+            repo.emit_changefeed_event(changefeed_event).await;
 
             // Phase 5d (moved): promote staged HNSW vectors into the live
             // graph, OUTSIDE `commit_lock` and AFTER Phase 7. A failure here
@@ -583,6 +599,13 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             // without waiting on this tx's 5c. The tail will keep the
             // per-table `uwl_guards` until 5c is done.
             drop(commit_guard);
+
+            // Changefeed emit (Phase 3b): the version is already published
+            // (above). Fan the pre-projected event out — non-blocking, never
+            // fails the commit, never waits on the background tail. Done
+            // before spawning the tail so the live event is available the
+            // instant the client is acked.
+            repo.emit_changefeed_event(changefeed_event).await;
 
             // Move ownership of the tx and the per-task guards onto the
             // background task; `RepoInstance` is `Clone` (Arc-backed), so

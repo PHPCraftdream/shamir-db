@@ -243,7 +243,7 @@ impl Default for ResourceMeta {
 ///
 /// `System` is the all-bypassing default used while the authentication
 /// wire path is not yet plumbed through.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Actor {
     #[default]
     System,

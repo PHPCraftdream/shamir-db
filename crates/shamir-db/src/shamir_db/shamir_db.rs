@@ -468,6 +468,47 @@ impl ShamirDb {
         self.dbs.get(name).map(|r| r.clone())
     }
 
+    // ============================================================================
+    // Changefeed (Phase 3b): live broadcast + durable journal
+    // ============================================================================
+
+    /// Subscribe to a repo's live changefeed (Phase 3b).
+    ///
+    /// Returns `None` when the database or repository does not exist. The
+    /// returned `broadcast::Receiver` yields every `ChangelogEvent` emitted
+    /// after the call; a subscriber that lags the bounded ring receives
+    /// `RecvError::Lagged` and should re-sync the missed window via
+    /// [`read_changelog_from`](Self::read_changelog_from).
+    pub async fn subscribe_changelog(
+        &self,
+        db: &str,
+        repo: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<std::sync::Arc<shamir_engine::ChangelogEvent>>>
+    {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        repo_instance.subscribe_changelog().await.ok()
+    }
+
+    /// Resumable pull from a repo's durable changelog journal (Phase 3b).
+    ///
+    /// Returns up to `limit` events with `commit_version >= from_version`,
+    /// ascending, or `None` when the database / repository does not exist.
+    /// A consumer that processed through version `V` continues with
+    /// `read_changelog_from(db, repo, V + 1, n)`.
+    pub async fn read_changelog_from(
+        &self,
+        db: &str,
+        repo: &str,
+        from_version: u64,
+        limit: usize,
+    ) -> Option<Vec<shamir_engine::ChangelogEvent>> {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        repo_instance
+            .read_changelog_from(from_version, limit)
+            .await
+            .ok()
+    }
+
     pub fn list_dbs(&self) -> Vec<String> {
         self.dbs.iter().map(|r| r.key().clone()).collect()
     }

@@ -1,3 +1,4 @@
+pub mod changelog_store;
 pub mod group_commit;
 pub mod repo_config;
 pub mod repo_instance;
