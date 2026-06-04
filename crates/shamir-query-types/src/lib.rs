@@ -39,7 +39,9 @@ pub mod filter;
 pub mod hmac;
 pub mod read;
 pub mod table_ref;
+pub mod validator;
 pub mod wire;
 pub mod write;
 
 pub use table_ref::TableRef;
+pub use validator::{ValidationError, WriteOp};

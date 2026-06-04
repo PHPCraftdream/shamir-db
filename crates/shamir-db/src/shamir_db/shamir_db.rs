@@ -23,6 +23,8 @@ use shamir_engine::function::{
     FunctionError, FunctionMeta, FunctionRegistry, GlobalVars, NetGateway, Params, WasmEngine,
     WasmFunction, WasmLimits,
 };
+use shamir_engine::validator::{ValidatorBinding, ValidatorRegistry, WriteOp};
+use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -84,6 +86,8 @@ pub struct ShamirDb {
     /// can't read-modify-write the same `next_group_id`. Group creation is
     /// rare, so holding this across the (bounded) await sequence is fine.
     group_id_lock: Arc<Mutex<()>>,
+    /// Live validator registry (compiled WASM validators loaded on open).
+    validators: Arc<ValidatorRegistry>,
     /// Base directory for durable repos, derived from the system store
     /// config. `Some(p)` when the system store is redb-backed (production),
     /// `None` for in-memory (tests). Wire-created repos default to a
@@ -126,6 +130,8 @@ impl ShamirDb {
         let globals = Arc::new(GlobalVars::new());
         globals.seed_env(&policy);
 
+        let validators = Arc::new(ValidatorRegistry::new());
+
         let shamir = Self {
             dbs,
             system_store,
@@ -137,6 +143,7 @@ impl ShamirDb {
             net_allowlist: Arc::new(Vec::new()),
             function_meta: Arc::new(DashMap::new()),
             group_id_lock: Arc::new(Mutex::new(())),
+            validators,
             data_root,
         };
 
@@ -273,6 +280,88 @@ impl ShamirDb {
                 Err(e) => {
                     log::warn!(
                         "shamir_db::init: failed to compile WASM for function '{}': {}",
+                        name,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Load persisted WASM validators from the validator catalogue and
+        // register them (S1). Mirrors the function loading block above.
+        let val_records = shamir.system_store.load_validators().await?;
+        for rec in &val_records {
+            let name = match rec["name"].as_str() {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let wasm_b64 = match rec["wasm_b64"].as_str() {
+                Some(b) => b,
+                None => {
+                    log::warn!(
+                        "shamir_db::init: skipping validator '{}' — no wasm_b64 field",
+                        name
+                    );
+                    continue;
+                }
+            };
+            let wasm_bytes = match base64::engine::general_purpose::STANDARD.decode(wasm_b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!(
+                        "shamir_db::init: skipping validator '{}' — base64 decode error: {}",
+                        name,
+                        e
+                    );
+                    continue;
+                }
+            };
+            // Reconstruct the RecordId from the persisted `_id` field.
+            let id = match rec.get("_id").and_then(|v| v.as_str()) {
+                Some(id_str) => match id_str.parse::<RecordId>() {
+                    Ok(rid) => rid,
+                    Err(e) => {
+                        log::warn!(
+                            "shamir_db::init: skipping validator '{}' — bad _id: {}",
+                            name,
+                            e
+                        );
+                        continue;
+                    }
+                },
+                None => {
+                    log::warn!(
+                        "shamir_db::init: skipping validator '{}' — no _id field",
+                        name
+                    );
+                    continue;
+                }
+            };
+            match WasmFunction::from_binary(
+                shamir.wasm_engine.clone(),
+                &wasm_bytes,
+                WasmLimits::default(),
+            ) {
+                Ok(wf) => {
+                    if shamir.validators.register(id, &name, Arc::new(wf)).is_err() {
+                        log::warn!(
+                            "shamir_db::init: validator '{}' already registered, skipping",
+                            name
+                        );
+                        continue;
+                    }
+                    // Restore bound_in from the persisted record.
+                    if let Some(bound) = rec.get("bound_in").and_then(|v| v.as_array()) {
+                        for entry in bound {
+                            if let Some(table_ref) = entry.as_str() {
+                                shamir.validators.add_binding(&id, table_ref);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "shamir_db::init: failed to compile WASM for validator '{}': {}",
                         name,
                         e
                     );
@@ -665,7 +754,10 @@ impl ShamirDb {
         }
     }
 
-    /// Direct table access shortcut
+    /// Direct table access shortcut.
+    ///
+    /// The returned `TableManager` has the global `ValidatorRegistry`
+    /// injected (S3) so the write path can resolve validator bindings.
     pub async fn get_table(
         &self,
         db_name: &str,
@@ -675,7 +767,9 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
-        db.get_table(repo_name, table_name).await
+        let mut table = db.get_table(repo_name, table_name).await?;
+        table.set_validator_registry(self.validators().clone());
+        Ok(table)
     }
 
     // ========================================================================
@@ -955,6 +1049,388 @@ impl ShamirDb {
             .with_net(self.build_net_gateway())
             .with_secret_grants(grants)
             .with_actor(actor)
+    }
+
+    // ========================================================================
+    // Validator lifecycle API (S1)
+    // ========================================================================
+
+    /// Access the live validator registry.
+    pub fn validators(&self) -> &Arc<ValidatorRegistry> {
+        &self.validators
+    }
+
+    /// Register a WASM validator from pre-compiled binary bytes.
+    ///
+    /// Returns the `RecordId` assigned to the new validator.
+    /// If `replace` is false and a validator with the same name already
+    /// exists, returns [`DbError::Validation`].
+    pub async fn create_validator_from_wasm(
+        &self,
+        name: &str,
+        wasm: &[u8],
+        replace: bool,
+    ) -> DbResult<RecordId> {
+        self.create_validator_from_wasm_as(name, wasm, replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_validator_from_wasm`] but with an explicit [`Actor`].
+    pub async fn create_validator_from_wasm_as(
+        &self,
+        name: &str,
+        wasm: &[u8],
+        replace: bool,
+        _actor: Actor,
+    ) -> DbResult<RecordId> {
+        self.create_validator_inner(name, FunctionSource::Wasm(wasm), replace)
+            .await
+    }
+
+    /// Compile a Rust source string to WASM and register the validator.
+    ///
+    /// Returns the `RecordId` assigned to the new validator.
+    pub async fn create_validator_from_source(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+    ) -> DbResult<RecordId> {
+        self.create_validator_from_source_as(name, source, replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_validator_from_source`] but with an explicit [`Actor`].
+    pub async fn create_validator_from_source_as(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+        _actor: Actor,
+    ) -> DbResult<RecordId> {
+        self.create_validator_inner(name, FunctionSource::Source(source), replace)
+            .await
+    }
+
+    /// Internal: compile/validate WASM, persist, register.
+    async fn create_validator_inner(
+        &self,
+        name: &str,
+        source: FunctionSource<'_>,
+        replace: bool,
+    ) -> DbResult<RecordId> {
+        let (wasm, lang_tag, source_str) = match source {
+            FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
+            FunctionSource::Source(src) => {
+                let compiled = compile_rust_source(src).map_err(|e| match e {
+                    FunctionError::ToolchainUnavailable(msg) => {
+                        DbError::Validation(format!("toolchain unavailable: {}", msg))
+                    }
+                    other => DbError::Validation(other.to_string()),
+                })?;
+                (compiled, "rust", Some(src.to_string()))
+            }
+        };
+
+        // Validate the wasm by compiling it.
+        let wf = WasmFunction::from_binary(self.wasm_engine.clone(), &wasm, WasmLimits::default())
+            .map_err(|e| DbError::Validation(e.to_string()))?;
+
+        let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
+        let wasm_hash = format!("{:016x}", fxhash::hash64(&wasm));
+
+        if !replace && self.validators.id_for_name(name).is_some() {
+            return Err(DbError::Validation(format!(
+                "validator '{}' already exists",
+                name
+            )));
+        }
+
+        // Determine the RecordId: on replace, reuse existing; otherwise new.
+        let id = if replace {
+            self.validators.id_for_name(name).unwrap_or_default()
+        } else {
+            RecordId::new()
+        };
+
+        let record = json!({
+            "name": name,
+            "_id": id.to_string(),
+            "wasm_b64": wasm_b64,
+            "wasm_hash": wasm_hash,
+            "lang": lang_tag,
+            "source": source_str,
+            "bound_in": [],
+        });
+        // Persist before registering so a crash can't leave a live entry
+        // without a catalogue record.
+        self.system_store
+            .save_validator(name, &record, &ResourceMeta::open())
+            .await?;
+
+        if replace {
+            // Remove old entry if it exists; ignore errors.
+            if let Some(old_id) = self.validators.id_for_name(name) {
+                self.validators.remove(&old_id);
+            }
+        }
+        self.validators
+            .register(id, name, Arc::new(wf))
+            .map_err(|e| DbError::Validation(e.to_string()))?;
+
+        Ok(id)
+    }
+
+    /// Drop a validator by name.
+    ///
+    /// Returns `Ok(true)` if the validator existed and was removed.
+    /// Returns `Err` if the validator is still bound to tables.
+    pub async fn drop_validator(&self, name: &str) -> DbResult<bool> {
+        self.drop_validator_as(name, Actor::System).await
+    }
+
+    /// Like [`drop_validator`] but with an explicit [`Actor`].
+    pub async fn drop_validator_as(&self, name: &str, _actor: Actor) -> DbResult<bool> {
+        let id = match self.validators.id_for_name(name) {
+            Some(id) => id,
+            None => return Ok(false),
+        };
+
+        // Refuse if bound.
+        if self.validators.is_bound(&id) {
+            let tables = self.validators.bound_tables(&id);
+            return Err(DbError::Validation(format!(
+                "cannot drop validator '{}': still bound to tables: {}",
+                name,
+                tables.join(", ")
+            )));
+        }
+
+        let existed = self.validators.remove(&id);
+        // Best-effort catalogue removal.
+        if let Err(e) = self.system_store.remove_validator(name).await {
+            log::warn!(
+                "shamir_db::drop_validator: failed to remove '{}' from catalogue: {}",
+                name,
+                e
+            );
+        }
+        Ok(existed)
+    }
+
+    /// Rename a validator. The underlying WASM module is not recompiled.
+    /// Id and bindings are unchanged.
+    pub async fn rename_validator(&self, from: &str, to: &str) -> DbResult<()> {
+        self.rename_validator_as(from, to, Actor::System).await
+    }
+
+    /// Like [`rename_validator`] but with an explicit [`Actor`].
+    pub async fn rename_validator_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
+        // Load the old catalogue record to re-key it.
+        let old_record = self.system_store.load_validator(from).await?;
+
+        // Rename in the live registry first.
+        self.validators
+            .rename(from, to)
+            .map_err(|e| DbError::Validation(e.to_string()))?;
+
+        // If there was a durable record, re-key it.
+        if let Some(mut rec) = old_record {
+            self.system_store.remove_validator(from).await?;
+            rec["name"] = json!(to);
+            self.system_store
+                .save_validator(to, &rec, &ResourceMeta::open())
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Resolve a validator name to its `RecordId`.
+    pub fn validator_id(&self, name: &str) -> Option<RecordId> {
+        self.validators.id_for_name(name)
+    }
+
+    /// List all registered validators as `(id, name)` pairs.
+    pub fn list_validators(&self) -> Vec<(RecordId, String)> {
+        self.validators.list()
+    }
+
+    // ========================================================================
+    // Validator binding API (S2)
+    // ========================================================================
+
+    /// Canonical table-ref string for validator binding tracking.
+    /// Format: `"db/repo/table"` — matches the form used by
+    /// `ValidatorRegistry::add_binding` / `bound_tables`.
+    fn table_ref_str(db: &str, repo: &str, table: &str) -> String {
+        format!("{}/{}/{}", db, repo, table)
+    }
+
+    /// Bind a validator to a table on specified write operations.
+    ///
+    /// The validator must already exist in the registry (created via
+    /// `create_validator_from_wasm` / `create_validator_from_source`).
+    /// `priority` must be in `[1000, 9999]`, `ops` must be non-empty.
+    /// Bind is idempotent: re-binding the same validator updates its
+    /// `ops` and `priority`.
+    pub async fn bind_validator(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        validator_name: &str,
+        ops: Vec<WriteOp>,
+        priority: u16,
+    ) -> DbResult<()> {
+        self.bind_validator_as(
+            db_name,
+            repo_name,
+            table_name,
+            validator_name,
+            ops,
+            priority,
+            Actor::System,
+        )
+        .await
+    }
+
+    /// Like [`bind_validator`] but with an explicit [`Actor`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_validator_as(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        validator_name: &str,
+        ops: Vec<WriteOp>,
+        priority: u16,
+        _actor: Actor,
+    ) -> DbResult<()> {
+        // 1. Resolve name → id.
+        let validator_id = self.validators.id_for_name(validator_name).ok_or_else(|| {
+            DbError::Validation(format!("validator '{}' not found", validator_name))
+        })?;
+
+        // 2. Validate priority range.
+        if !(1000..=9999).contains(&priority) {
+            return Err(DbError::Validation(format!(
+                "validator priority must be in [1000, 9999], got {}",
+                priority
+            )));
+        }
+
+        // 3. Validate ops non-empty.
+        if ops.is_empty() {
+            return Err(DbError::Validation(
+                "validator binding ops must be non-empty".to_string(),
+            ));
+        }
+
+        // 4. Get the TableManager.
+        let table = self.get_table(db_name, repo_name, table_name).await?;
+
+        // 5. Add the binding to the table's info-twin.
+        let binding = ValidatorBinding {
+            validator_id,
+            ops: ops.into(),
+            priority,
+        };
+        table.add_validator_binding(binding).await?;
+
+        // 6. Update the global registry's bound_in tracking.
+        let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
+        self.validators.add_binding(&validator_id, &table_ref);
+
+        // 7. Persist bound_in in the validator catalogue record.
+        self.persist_validator_bound_in(validator_name, &validator_id)
+            .await;
+
+        Ok(())
+    }
+
+    /// Unbind a validator from a table.
+    ///
+    /// Returns `Ok(true)` if the binding existed and was removed.
+    pub async fn unbind_validator(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        validator_name: &str,
+    ) -> DbResult<bool> {
+        self.unbind_validator_as(
+            db_name,
+            repo_name,
+            table_name,
+            validator_name,
+            Actor::System,
+        )
+        .await
+    }
+
+    /// Like [`unbind_validator`] but with an explicit [`Actor`].
+    pub async fn unbind_validator_as(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+        validator_name: &str,
+        _actor: Actor,
+    ) -> DbResult<bool> {
+        let validator_id = self.validators.id_for_name(validator_name).ok_or_else(|| {
+            DbError::Validation(format!("validator '{}' not found", validator_name))
+        })?;
+
+        let table = self.get_table(db_name, repo_name, table_name).await?;
+        let removed = table.remove_validator_binding(&validator_id).await?;
+
+        if removed {
+            let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
+            self.validators.remove_binding(&validator_id, &table_ref);
+
+            // Persist bound_in update in the validator catalogue.
+            self.persist_validator_bound_in(validator_name, &validator_id)
+                .await;
+        }
+
+        Ok(removed)
+    }
+
+    /// List the validator bindings for a specific table.
+    pub async fn list_validator_bindings(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<Vec<ValidatorBinding>> {
+        let table = self.get_table(db_name, repo_name, table_name).await?;
+        Ok((*table.validator_bindings()).clone())
+    }
+
+    /// Best-effort update of the `bound_in` array in the validator's
+    /// catalogue record. Logged on failure — does not propagate errors
+    /// (the live registry is the source of truth; the catalogue is
+    /// durability insurance for `init` reload).
+    async fn persist_validator_bound_in(&self, name: &str, id: &RecordId) {
+        let tables = self.validators.bound_tables(id);
+        let bound_json: Vec<serde_json::Value> =
+            tables.into_iter().map(serde_json::Value::String).collect();
+
+        if let Ok(Some(mut rec)) = self.system_store.load_validator(name).await {
+            rec["bound_in"] = serde_json::Value::Array(bound_json);
+            if let Err(e) = self
+                .system_store
+                .save_validator(name, &rec, &ResourceMeta::open())
+                .await
+            {
+                log::warn!(
+                    "shamir_db::persist_validator_bound_in: failed to update '{}': {}",
+                    name,
+                    e
+                );
+            }
+        }
     }
 
     /// Invoke a function by name with the given parameters.

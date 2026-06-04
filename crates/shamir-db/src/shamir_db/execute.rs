@@ -22,14 +22,20 @@ use super::shamir_db::ShamirDb;
 use crate::access::{Action, Actor, ResourcePath};
 
 /// TableResolver that resolves TableRef within a DbInstance.
+///
+/// Injects the global `ValidatorRegistry` (S3) into every resolved
+/// `TableManager` so the write path can run validators.
 struct DbTableResolver {
     db: DbInstance,
+    validators: std::sync::Arc<crate::engine::validator::ValidatorRegistry>,
 }
 
 #[async_trait::async_trait]
 impl TableResolver for DbTableResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
-        self.db.get_table(&table_ref.repo, &table_ref.table).await
+        let mut table = self.db.get_table(&table_ref.repo, &table_ref.table).await?;
+        table.set_validator_registry(self.validators.clone());
+        Ok(table)
     }
 
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::engine::repo::RepoInstance> {
@@ -1223,7 +1229,10 @@ impl ShamirDb {
             }
         }
 
-        let resolver = DbTableResolver { db };
+        let resolver = DbTableResolver {
+            db,
+            validators: self.validators().clone(),
+        };
         let admin = ShamirAdminExecutor {
             shamir: self.clone(),
             db_name: db_name.to_string(),
@@ -1356,7 +1365,10 @@ impl ShamirDb {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
         })?;
-        let resolver = DbTableResolver { db };
+        let resolver = DbTableResolver {
+            db,
+            validators: self.validators().clone(),
+        };
         let admin = ShamirAdminExecutor {
             shamir: self.clone(),
             db_name: db_name.to_string(),
