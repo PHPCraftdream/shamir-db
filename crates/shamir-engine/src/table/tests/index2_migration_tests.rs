@@ -65,6 +65,7 @@ async fn migrate_index2_fts() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        if_not_exists: false,
     };
     src.create_index_v2(&op).await.unwrap();
 
@@ -144,6 +145,7 @@ async fn migrate_index2_functional() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        if_not_exists: false,
     };
     src.create_index_v2(&op).await.unwrap();
 
@@ -221,6 +223,7 @@ async fn migrate_index2_vector() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        if_not_exists: false,
     };
     src.create_index_v2(&op).await.unwrap();
 
