@@ -495,6 +495,12 @@ pub struct QueryEntry {
     /// - `false`: Exclude (useful for intermediate queries)
     #[serde(default = "default_return")]
     pub return_result: bool,
+
+    /// Explicit ordering dependencies: aliases (in this batch) that MUST
+    /// execute before this entry. Complements the auto-extracted `$query`
+    /// dependencies. Enables DDL→DML ordering (e.g. insert after create_table).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
 }
 
 fn default_return() -> bool {
@@ -506,6 +512,7 @@ impl From<ReadQuery> for QueryEntry {
         QueryEntry {
             op: BatchOp::Read(query),
             return_result: true,
+            after: Vec::new(),
         }
     }
 }
@@ -1272,6 +1279,46 @@ mod tests {
             }
             _ => panic!("expected RemoveGroupMember"),
         }
+    }
+
+    // ========================================================================
+    // QueryEntry `after` field ser/de
+    // ========================================================================
+
+    #[test]
+    fn query_entry_after_nonempty_roundtrip() {
+        let json = serde_json::json!({
+            "from": "orders",
+            "return_result": true,
+            "after": ["create_tbl"]
+        });
+        let entry: QueryEntry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry.after, vec!["create_tbl".to_string()]);
+
+        let back = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            back.get("after").and_then(|v| v.as_array()).unwrap(),
+            &[serde_json::json!("create_tbl")]
+        );
+
+        let entry2: QueryEntry = serde_json::from_value(back).unwrap();
+        assert_eq!(entry, entry2);
+    }
+
+    #[test]
+    fn query_entry_empty_after_omitted_from_json() {
+        let json = serde_json::json!({
+            "from": "orders",
+            "return_result": true
+        });
+        let entry: QueryEntry = serde_json::from_value(json).unwrap();
+        assert!(entry.after.is_empty());
+
+        let back = serde_json::to_value(&entry).unwrap();
+        assert!(
+            back.get("after").is_none(),
+            "empty `after` must NOT appear in serialized JSON"
+        );
     }
 
     #[test]

@@ -2299,6 +2299,7 @@ impl DbGateway for FacadeDbGateway {
             QueryEntry {
                 op: BatchOp::Read(read_query),
                 return_result: true,
+                after: Vec::new(),
             },
         );
         let req = BatchRequest {
@@ -2355,6 +2356,7 @@ impl DbGateway for FacadeDbGateway {
             QueryEntry {
                 op: BatchOp::Insert(insert_op),
                 return_result: true,
+                after: Vec::new(),
             },
         );
         let req = BatchRequest {
@@ -2433,6 +2435,7 @@ impl DbGateway for FacadeDbGateway {
             QueryEntry {
                 op: BatchOp::Read(read_query),
                 return_result: true,
+                after: Vec::new(),
             },
         );
         let req = BatchRequest {

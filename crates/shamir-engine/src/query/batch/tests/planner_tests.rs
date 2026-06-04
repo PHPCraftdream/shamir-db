@@ -776,3 +776,117 @@ fn test_plan_write_operations_serialization() {
     assert_eq!(plan.stages.len(), 1);
     assert_eq!(plan.stages[0].len(), 4);
 }
+
+// ============================================================================
+// EXPLICIT `after` ORDERING TESTS
+// ============================================================================
+
+#[test]
+fn test_after_orders_into_later_stage() {
+    // B has `after: ["a"]` with no $query refs — should land in a later stage.
+    let json = json!({
+        "id": 1,
+        "queries": {
+            "a": {
+                "create_table": "users",
+                "repo": "main"
+            },
+            "b": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}],
+                "after": ["a"]
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.stages[0], vec!["a"]);
+    assert_eq!(plan.stages[1], vec!["b"]);
+    assert!(plan.dependencies["b"].contains("a"));
+}
+
+#[test]
+fn test_after_unknown_alias_error() {
+    let json = json!({
+        "id": 1,
+        "queries": {
+            "a": {
+                "insert_into": "users",
+                "values": [{"name": "Alice"}],
+                "after": ["nonexistent"]
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::query::batch::BatchError::UnknownAlias { alias, .. }
+            if alias == "nonexistent"
+        ),
+        "expected UnknownAlias for 'nonexistent', got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn test_after_circular_dependency() {
+    let json = json!({
+        "id": 1,
+        "queries": {
+            "a": {
+                "create_table": "t1",
+                "repo": "main",
+                "after": ["b"]
+            },
+            "b": {
+                "create_table": "t2",
+                "repo": "main",
+                "after": ["a"]
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::query::batch::BatchError::CircularDependency { .. }
+        ),
+        "expected CircularDependency, got: {:?}",
+        err
+    );
+}
+
+#[test]
+fn test_after_with_at_prefix_normalizes() {
+    // `after: ["@a"]` should normalize to alias "a".
+    let json = json!({
+        "id": 1,
+        "queries": {
+            "a": {
+                "create_table": "users",
+                "repo": "main"
+            },
+            "b": {
+                "insert_into": "users",
+                "values": [{"name": "Bob"}],
+                "after": ["@a"]
+            }
+        }
+    });
+
+    let request = parse_request(json);
+    let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
+
+    assert_eq!(plan.stages.len(), 2);
+    assert_eq!(plan.stages[0], vec!["a"]);
+    assert_eq!(plan.stages[1], vec!["b"]);
+    assert!(plan.dependencies["b"].contains("a"));
+}

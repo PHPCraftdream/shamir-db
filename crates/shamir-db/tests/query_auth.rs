@@ -731,6 +731,7 @@ fn test_check_batch_allows() {
         QueryEntry {
             op: BatchOp::Read(ReadQuery::new("users")),
             return_result: true,
+            after: Vec::new(),
         },
     );
 
@@ -764,6 +765,7 @@ fn test_check_batch_denies() {
                 values: vec![],
             }),
             return_result: true,
+            after: Vec::new(),
         },
     );
 
