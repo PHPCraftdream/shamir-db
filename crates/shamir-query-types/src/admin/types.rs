@@ -2,10 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Serde skip-serializing-if helper: omit `false` booleans from the wire.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Create a new database.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateDbOp {
     pub create_db: String,
+    /// When `true`, a pre-existing database with the same name is NOT an
+    /// error — the operation returns `{"created": false, "existed": true}`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_not_exists: bool,
 }
 
 /// Drop a database.
@@ -20,6 +29,10 @@ pub struct DropDbOp {
     pub drop_db: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// When `true`, all repositories (and their tables) inside the database
+    /// are removed recursively before the database itself is dropped.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cascade: bool,
 }
 
 /// Create a new repository within the current database.
@@ -32,6 +45,10 @@ pub struct CreateRepoOp {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<String>,
+    /// When `true`, a pre-existing repository with the same name is NOT an
+    /// error — the operation returns `{"created": false, "existed": true}`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_not_exists: bool,
 }
 
 /// Drop a repository.
@@ -42,6 +59,10 @@ pub struct DropRepoOp {
     pub drop_repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
+    /// When `true`, all tables inside the repository are removed before
+    /// the repository itself is dropped.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cascade: bool,
 }
 
 /// Create a table in a repository.
@@ -50,6 +71,10 @@ pub struct CreateTableOp {
     pub create_table: String,
     #[serde(default = "default_repo")]
     pub repo: String,
+    /// When `true`, a pre-existing table with the same name is NOT an
+    /// error — the operation returns `{"created": false, "existed": true}`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_not_exists: bool,
 }
 
 fn default_repo() -> String {
@@ -120,6 +145,11 @@ pub struct CreateIndexOp {
     /// Vector metric: "l2", "cosine" (default), "dot".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_metric: Option<String>,
+
+    /// When `true`, a pre-existing index with the same name is NOT an
+    /// error — the operation returns `{"created": false, "existed": true}`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub if_not_exists: bool,
 }
 
 /// Drop an index.

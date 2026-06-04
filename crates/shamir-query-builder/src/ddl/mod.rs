@@ -90,6 +90,7 @@ pub mod res {
 pub fn create_db(name: impl Into<String>) -> BatchOp {
     BatchOp::CreateDb(CreateDbOp {
         create_db: name.into(),
+        if_not_exists: false,
     })
 }
 
@@ -98,13 +99,15 @@ pub fn drop_db(name: impl Into<String>) -> DropDb {
     DropDb {
         name: name.into(),
         hmac: None,
+        cascade: false,
     }
 }
 
-/// Builder for [`DropDbOp`] (supports optional HMAC).
+/// Builder for [`DropDbOp`] (supports optional HMAC and cascade).
 pub struct DropDb {
     name: String,
     hmac: Option<String>,
+    cascade: bool,
 }
 
 impl DropDb {
@@ -114,11 +117,18 @@ impl DropDb {
         self
     }
 
+    /// Enable cascade (drop all child repos and their tables).
+    pub fn cascade(mut self) -> Self {
+        self.cascade = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropDb(DropDbOp {
             drop_db: self.name,
             hmac: self.hmac,
+            cascade: self.cascade,
         })
     }
 }
@@ -140,6 +150,7 @@ pub fn create_repo(name: impl Into<String>) -> CreateRepo {
         engine: None,
         path: None,
         tables: Vec::new(),
+        if_not_exists: false,
     }
 }
 
@@ -149,6 +160,7 @@ pub struct CreateRepo {
     engine: Option<String>,
     path: Option<String>,
     tables: Vec<String>,
+    if_not_exists: bool,
 }
 
 impl CreateRepo {
@@ -170,6 +182,12 @@ impl CreateRepo {
         self
     }
 
+    /// Skip error if the repo already exists.
+    pub fn if_not_exists(mut self) -> Self {
+        self.if_not_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateRepo(CreateRepoOp {
@@ -177,6 +195,7 @@ impl CreateRepo {
             engine: self.engine,
             path: self.path,
             tables: self.tables,
+            if_not_exists: self.if_not_exists,
         })
     }
 }
@@ -192,6 +211,7 @@ pub fn drop_repo(name: impl Into<String>) -> DropRepo {
     DropRepo {
         name: name.into(),
         hmac: None,
+        cascade: false,
     }
 }
 
@@ -199,6 +219,7 @@ pub fn drop_repo(name: impl Into<String>) -> DropRepo {
 pub struct DropRepo {
     name: String,
     hmac: Option<String>,
+    cascade: bool,
 }
 
 impl DropRepo {
@@ -208,11 +229,18 @@ impl DropRepo {
         self
     }
 
+    /// Enable cascade (drop all child tables).
+    pub fn cascade(mut self) -> Self {
+        self.cascade = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::DropRepo(DropRepoOp {
             drop_repo: self.name,
             hmac: self.hmac,
+            cascade: self.cascade,
         })
     }
 }
@@ -232,6 +260,7 @@ pub fn create_table(name: impl Into<String>) -> CreateTable {
     CreateTable {
         name: name.into(),
         repo: "main".to_owned(),
+        if_not_exists: false,
     }
 }
 
@@ -239,6 +268,7 @@ pub fn create_table(name: impl Into<String>) -> CreateTable {
 pub struct CreateTable {
     name: String,
     repo: String,
+    if_not_exists: bool,
 }
 
 impl CreateTable {
@@ -248,11 +278,18 @@ impl CreateTable {
         self
     }
 
+    /// Skip error if the table already exists.
+    pub fn if_not_exists(mut self) -> Self {
+        self.if_not_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateTable(CreateTableOp {
             create_table: self.name,
             repo: self.repo,
+            if_not_exists: self.if_not_exists,
         })
     }
 }
@@ -329,6 +366,7 @@ pub fn create_index(name: impl Into<String>, table: impl Into<String>) -> Create
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        if_not_exists: false,
     }
 }
 
@@ -347,6 +385,7 @@ pub struct CreateIndex {
     functional_args: Option<Vec<serde_json::Value>>,
     vector_dim: Option<u32>,
     vector_metric: Option<String>,
+    if_not_exists: bool,
 }
 
 impl CreateIndex {
@@ -425,6 +464,12 @@ impl CreateIndex {
         self
     }
 
+    /// Skip error if the index already exists.
+    pub fn if_not_exists(mut self) -> Self {
+        self.if_not_exists = true;
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateIndex(CreateIndexOp {
@@ -441,6 +486,7 @@ impl CreateIndex {
             functional_args: self.functional_args,
             vector_dim: self.vector_dim,
             vector_metric: self.vector_metric,
+            if_not_exists: self.if_not_exists,
         })
     }
 }

@@ -714,6 +714,29 @@ impl ShamirDb {
         Ok(removed)
     }
 
+    /// Drop a table, cleaning up any validator `bound_in` references first.
+    ///
+    /// This is the canonical "drop table" entry point for the executor:
+    /// it removes the table from the repo, clears the table catalogue,
+    /// AND unbinds every validator that was bound to this table so that
+    /// `is_bound` does not reference a ghost table.
+    pub async fn drop_table_cleaning_validators(
+        &self,
+        db_name: &str,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<bool> {
+        // 1. Clean validator bound_in references.
+        let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
+        let affected = self.validators.unbind_all_for_table(&table_ref);
+        for (id, name) in &affected {
+            self.persist_validator_bound_in(name, id).await;
+        }
+
+        // 2. Drop the table itself.
+        self.drop_table(db_name, repo_name, table_name).await
+    }
+
     fn extract_storage_type(factory: &BoxRepoFactory) -> String {
         match factory {
             BoxRepoFactory::InMemory(_) => "in_memory",

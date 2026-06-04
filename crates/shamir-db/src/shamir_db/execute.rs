@@ -96,13 +96,56 @@ impl AdminExecutor for ShamirAdminExecutor {
         match op {
             BatchOp::CreateDb(op) => {
                 validate_name_component(&op.create_db, "db_name")?;
+                if self.shamir.has_db(&op.create_db) {
+                    if op.if_not_exists {
+                        return Ok(admin_result(json!({
+                            "created": false,
+                            "existed": true,
+                            "db": op.create_db
+                        })));
+                    }
+                    return Err(err(format!("Database '{}' already exists", op.create_db)));
+                }
                 self.shamir
                     .create_db_as(&op.create_db, self.actor.clone())
                     .await;
-                Ok(admin_result(json!({"created": op.create_db})))
+                Ok(admin_result(json!({
+                    "created": true,
+                    "existed": false,
+                    "db": op.create_db
+                })))
             }
 
             BatchOp::DropDb(op) => {
+                // Referential integrity: check for child repositories.
+                if let Some(db) = self.shamir.get_db(&op.drop_db) {
+                    let repos = db.list_repos();
+                    if !repos.is_empty() {
+                        if !op.cascade {
+                            return Err(err(format!(
+                                "cannot drop database '{}': still has repositories: {:?}",
+                                op.drop_db, repos
+                            )));
+                        }
+                        // Cascade: remove every repo (and its tables) first.
+                        for repo_name in &repos {
+                            // Remove tables within each repo.
+                            if let Ok(tables) = db.list_tables(repo_name) {
+                                for table_name in &tables {
+                                    let _ = self
+                                        .shamir
+                                        .drop_table_cleaning_validators(
+                                            &self.db_name,
+                                            repo_name,
+                                            table_name,
+                                        )
+                                        .await;
+                                }
+                            }
+                            self.shamir.remove_repo(&op.drop_db, repo_name).await;
+                        }
+                    }
+                }
                 let removed = self.shamir.remove_db(&op.drop_db).await;
                 Ok(admin_result(
                     json!({"dropped": op.drop_db, "existed": removed}),
@@ -112,6 +155,24 @@ impl AdminExecutor for ShamirAdminExecutor {
             BatchOp::CreateRepo(op) => {
                 validate_name_component(&self.db_name, "db_name")?;
                 validate_name_component(&op.create_repo, "repo_name")?;
+
+                // Check existence for if_not_exists / duplicate guard.
+                if let Some(db) = self.shamir.get_db(&self.db_name) {
+                    if db.has_repo(&op.create_repo) {
+                        if op.if_not_exists {
+                            return Ok(admin_result(json!({
+                                "created": false,
+                                "existed": true,
+                                "repo": op.create_repo
+                            })));
+                        }
+                        return Err(err(format!(
+                            "Repository '{}' already exists in database '{}'",
+                            op.create_repo, self.db_name
+                        )));
+                    }
+                }
+
                 let factory = match op.engine.as_deref() {
                     Some("in_memory") => BoxRepoFactory::in_memory(),
                     Some("redb") | None => {
@@ -151,10 +212,38 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .add_repo_as(&self.db_name, config, self.actor.clone())
                     .await
                     .map_err(|e| err(e.to_string()))?;
-                Ok(admin_result(json!({"created_repo": op.create_repo})))
+                Ok(admin_result(json!({
+                    "created_repo": op.create_repo,
+                    "created": true,
+                    "existed": false
+                })))
             }
 
             BatchOp::DropRepo(op) => {
+                // Referential integrity: check for child tables.
+                if let Some(db) = self.shamir.get_db(&self.db_name) {
+                    if let Ok(tables) = db.list_tables(&op.drop_repo) {
+                        if !tables.is_empty() {
+                            if !op.cascade {
+                                return Err(err(format!(
+                                    "cannot drop repository '{}': still has tables: {:?}",
+                                    op.drop_repo, tables
+                                )));
+                            }
+                            // Cascade: remove every table first.
+                            for table_name in &tables {
+                                let _ = self
+                                    .shamir
+                                    .drop_table_cleaning_validators(
+                                        &self.db_name,
+                                        &op.drop_repo,
+                                        table_name,
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
                 // Route through ShamirDb so the repo's catalogue record is
                 // removed from the system store and the repo does not
                 // resurrect on the next open (symmetry with CreateRepo).
@@ -165,6 +254,23 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateTable(op) => {
+                // Check existence for if_not_exists / duplicate guard.
+                if let Some(db) = self.shamir.get_db(&self.db_name) {
+                    if db.has_table(&op.repo, &op.create_table) {
+                        if op.if_not_exists {
+                            return Ok(admin_result(json!({
+                                "created_table": op.create_table,
+                                "repo": op.repo,
+                                "created": false,
+                                "existed": true
+                            })));
+                        }
+                        return Err(err(format!(
+                            "Table '{}' already exists in repository '{}'",
+                            op.create_table, op.repo
+                        )));
+                    }
+                }
                 // Route through ShamirDb so the table is persisted to the
                 // catalogue and survives a restart (I.2).
                 self.shamir
@@ -177,15 +283,18 @@ impl AdminExecutor for ShamirAdminExecutor {
                     )
                     .await
                     .map_err(|e| err(e.to_string()))?;
-                Ok(admin_result(
-                    json!({"created_table": op.create_table, "repo": op.repo}),
-                ))
+                Ok(admin_result(json!({
+                    "created_table": op.create_table,
+                    "repo": op.repo,
+                    "created": true,
+                    "existed": false
+                })))
             }
 
             BatchOp::DropTable(op) => {
                 let removed = self
                     .shamir
-                    .drop_table(&self.db_name, &op.repo, &op.drop_table)
+                    .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 Ok(admin_result(
@@ -202,6 +311,27 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .get_table(&op.repo, &op.table)
                     .await
                     .map_err(|e| err(e.to_string()))?;
+
+                // Check if the index already exists (for if_not_exists / dup guard).
+                let already_exists = if op.unique {
+                    table.unique_index_exists(&op.create_index).await
+                } else {
+                    table.index_exists(&op.create_index).await
+                };
+                if already_exists {
+                    if op.if_not_exists {
+                        return Ok(admin_result(json!({
+                            "created_index": op.create_index,
+                            "table": op.table,
+                            "created": false,
+                            "existed": true
+                        })));
+                    }
+                    return Err(err(format!(
+                        "Index '{}' already exists on table '{}'",
+                        op.create_index, op.table
+                    )));
+                }
 
                 let field_strs: Vec<Vec<&str>> = op
                     .fields

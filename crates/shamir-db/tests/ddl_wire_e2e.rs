@@ -876,3 +876,369 @@ async fn create_table_then_insert_via_after_non_tx() {
     let records = &read_resp.results["q"].records;
     assert_eq!(records.len(), 2, "should have 2 inserted records");
 }
+
+// =====================================================================
+// Phase 1b: idempotent create (if_not_exists)
+// =====================================================================
+
+#[tokio::test]
+async fn create_table_duplicate_without_if_not_exists_fails() {
+    let db = setup_db().await;
+
+    // First create succeeds
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "ct1",
+        "queries": {
+            "op": {
+                "create_table": "orders",
+                "repo": "main"
+            }
+        }
+    }))
+    .unwrap();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], true);
+    assert_eq!(resp.results["op"].records[0]["existed"], false);
+
+    // Second create without if_not_exists -> error
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("already exists"),
+        "expected 'already exists' error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn create_table_with_if_not_exists_idempotent() {
+    let db = setup_db().await;
+
+    // First create
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "ct",
+        "queries": {
+            "op": {
+                "create_table": "orders",
+                "repo": "main",
+                "if_not_exists": true
+            }
+        }
+    }))
+    .unwrap();
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], true);
+    assert_eq!(resp.results["op"].records[0]["existed"], false);
+
+    // Second create with if_not_exists -> OK, no error
+    let resp = db.execute("testdb", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], false);
+    assert_eq!(resp.results["op"].records[0]["existed"], true);
+}
+
+#[tokio::test]
+async fn create_db_with_if_not_exists_idempotent() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("bootstrap").await;
+
+    // Create a new db
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "cd",
+        "queries": {
+            "op": {
+                "create_db": "newdb",
+                "if_not_exists": true
+            }
+        }
+    }))
+    .unwrap();
+    let resp = shamir.execute("bootstrap", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], true);
+    assert_eq!(resp.results["op"].records[0]["existed"], false);
+
+    // Second create with if_not_exists -> OK, existed=true
+    let resp = shamir.execute("bootstrap", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], false);
+    assert_eq!(resp.results["op"].records[0]["existed"], true);
+}
+
+#[tokio::test]
+async fn create_repo_with_if_not_exists_idempotent() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "cr",
+        "queries": {
+            "op": {
+                "create_repo": "archive",
+                "engine": "in_memory",
+                "if_not_exists": true
+            }
+        }
+    }))
+    .unwrap();
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], true);
+    assert_eq!(resp.results["op"].records[0]["existed"], false);
+
+    // Second create -> OK
+    let resp = shamir.execute("testdb", &req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["created"], false);
+    assert_eq!(resp.results["op"].records[0]["existed"], true);
+}
+
+// =====================================================================
+// Phase 1b: referential integrity on drop + cascade
+// =====================================================================
+
+#[tokio::test]
+async fn drop_db_with_repos_no_cascade_fails() {
+    let db = setup_db().await;
+
+    // testdb has "main" repo -> drop without cascade should fail
+    let drop_req: BatchRequest = serde_json::from_value(json!({
+        "id": "dd",
+        "queries": {
+            "op": {
+                "drop_db": "testdb"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &drop_req).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("still has repositories"),
+        "expected referential integrity error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn drop_db_with_cascade_succeeds() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("bootstrap").await;
+    shamir.create_db("target_db").await;
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items"));
+    shamir.add_repo("target_db", repo_config).await.unwrap();
+
+    // Drop with cascade
+    let drop_req: BatchRequest = serde_json::from_value(json!({
+        "id": "dd",
+        "queries": {
+            "op": {
+                "drop_db": "target_db",
+                "cascade": true
+            }
+        }
+    }))
+    .unwrap();
+    let resp = shamir.execute("bootstrap", &drop_req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["existed"], true);
+
+    // Verify the db is gone
+    assert!(!shamir.has_db("target_db"));
+}
+
+#[tokio::test]
+async fn drop_repo_with_tables_no_cascade_fails() {
+    let db = setup_db().await;
+
+    // "main" repo has "users" table -> drop without cascade should fail
+    let drop_req: BatchRequest = serde_json::from_value(json!({
+        "id": "dr",
+        "queries": {
+            "op": {
+                "drop_repo": "main"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &drop_req).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("still has tables"),
+        "expected referential integrity error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn drop_repo_with_cascade_succeeds() {
+    let db = setup_db().await;
+
+    // Drop "main" with cascade (it has "users" table)
+    let drop_req: BatchRequest = serde_json::from_value(json!({
+        "id": "dr",
+        "queries": {
+            "op": {
+                "drop_repo": "main",
+                "cascade": true
+            }
+        }
+    }))
+    .unwrap();
+    let resp = db.execute("testdb", &drop_req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["existed"], true);
+
+    // Verify the repo is gone
+    let db_inst = db.get_db("testdb").unwrap();
+    assert!(db_inst.list_repos().is_empty());
+}
+
+// =====================================================================
+// Phase 1b: drop_table cleans validator bound_in
+// =====================================================================
+
+#[tokio::test]
+async fn drop_table_cleans_validator_bound_in() {
+    let db = setup_db().await;
+
+    // Step 1: create a validator and bind it to "users"
+    let wasm = accept_wasm();
+    let create_req: BatchRequest = serde_json::from_value(json!({
+        "id": "cv",
+        "queries": {
+            "op": {
+                "create_validator": "v_cleanup",
+                "wasm": wasm_b64(&wasm),
+                "replace": false
+            }
+        }
+    }))
+    .unwrap();
+    db.execute("testdb", &create_req).await.unwrap();
+
+    let bind_req: BatchRequest = serde_json::from_value(json!({
+        "id": "bv",
+        "queries": {
+            "op": {
+                "bind_validator": "v_cleanup",
+                "db": "testdb",
+                "repo": "main",
+                "table": "users",
+                "ops": ["insert"],
+                "priority": 1500
+            }
+        }
+    }))
+    .unwrap();
+    db.execute("testdb", &bind_req).await.unwrap();
+
+    // Step 2: drop the table -> should clean bound_in
+    let drop_req: BatchRequest = serde_json::from_value(json!({
+        "id": "dt",
+        "queries": {
+            "op": {
+                "drop_table": "users",
+                "repo": "main"
+            }
+        }
+    }))
+    .unwrap();
+    let resp = db.execute("testdb", &drop_req).await.unwrap();
+    assert_eq!(resp.results["op"].records[0]["existed"], true);
+
+    // Step 3: now drop_validator should succeed (bound_in was cleaned)
+    let drop_val_req: BatchRequest = serde_json::from_value(json!({
+        "id": "dv",
+        "queries": {
+            "op": {
+                "drop_validator": "v_cleanup"
+            }
+        }
+    }))
+    .unwrap();
+    let resp = db.execute("testdb", &drop_val_req).await.unwrap();
+    assert_eq!(
+        resp.results["op"].records[0]["existed"], true,
+        "validator should have existed and been dropped after bound_in cleanup"
+    );
+}
+
+// =====================================================================
+// Phase 1b: serde round-trip — if_not_exists / cascade
+// =====================================================================
+
+#[test]
+fn serde_create_table_if_not_exists_round_trip() {
+    // With flag set
+    let json_with = r#"{
+        "create_table": "orders",
+        "repo": "main",
+        "if_not_exists": true
+    }"#;
+    let op: shamir_db::query::batch::BatchOp = serde_json::from_str(json_with).unwrap();
+    let back = serde_json::to_string(&op).unwrap();
+    let op2: shamir_db::query::batch::BatchOp = serde_json::from_str(&back).unwrap();
+    assert_eq!(op, op2);
+    assert!(
+        back.contains("if_not_exists"),
+        "serialised form should contain if_not_exists when true"
+    );
+
+    // With flag absent (default false) — should NOT appear in JSON
+    let json_without = r#"{
+        "create_table": "orders",
+        "repo": "main"
+    }"#;
+    let op3: shamir_db::query::batch::BatchOp = serde_json::from_str(json_without).unwrap();
+    let back3 = serde_json::to_string(&op3).unwrap();
+    assert!(
+        !back3.contains("if_not_exists"),
+        "serialised form should omit if_not_exists when false, got: {back3}"
+    );
+}
+
+#[test]
+fn serde_drop_db_cascade_round_trip() {
+    // With cascade
+    let json_with = r#"{
+        "drop_db": "testdb",
+        "cascade": true
+    }"#;
+    let op: shamir_db::query::batch::BatchOp = serde_json::from_str(json_with).unwrap();
+    let back = serde_json::to_string(&op).unwrap();
+    let op2: shamir_db::query::batch::BatchOp = serde_json::from_str(&back).unwrap();
+    assert_eq!(op, op2);
+    assert!(
+        back.contains("cascade"),
+        "serialised form should contain cascade when true"
+    );
+
+    // Without cascade — should NOT appear in JSON
+    let json_without = r#"{
+        "drop_db": "testdb"
+    }"#;
+    let op3: shamir_db::query::batch::BatchOp = serde_json::from_str(json_without).unwrap();
+    let back3 = serde_json::to_string(&op3).unwrap();
+    assert!(
+        !back3.contains("cascade"),
+        "serialised form should omit cascade when false, got: {back3}"
+    );
+}
+
+#[test]
+fn serde_drop_repo_cascade_round_trip() {
+    let json_str = r#"{
+        "drop_repo": "archive",
+        "cascade": true
+    }"#;
+    let op: shamir_db::query::batch::BatchOp = serde_json::from_str(json_str).unwrap();
+    let back = serde_json::to_string(&op).unwrap();
+    let op2: shamir_db::query::batch::BatchOp = serde_json::from_str(&back).unwrap();
+    assert_eq!(op, op2);
+    assert!(back.contains("cascade"));
+}
+
+#[test]
+fn serde_create_db_if_not_exists_round_trip() {
+    let json_str = r#"{
+        "create_db": "mydb",
+        "if_not_exists": true
+    }"#;
+    let op: shamir_db::query::batch::BatchOp = serde_json::from_str(json_str).unwrap();
+    let back = serde_json::to_string(&op).unwrap();
+    assert!(back.contains("if_not_exists"));
+    let op2: shamir_db::query::batch::BatchOp = serde_json::from_str(&back).unwrap();
+    assert_eq!(op, op2);
+}

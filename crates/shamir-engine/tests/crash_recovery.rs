@@ -93,6 +93,7 @@ fn fts_index_op() -> CreateIndexOp {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        if_not_exists: false,
     }
 }
 

@@ -158,6 +158,45 @@ impl ValidatorRegistry {
         });
     }
 
+    /// Remove a table reference from **every** validator's `bound_in` set.
+    ///
+    /// Returns `(id, name)` pairs for each validator whose bound_in set was
+    /// non-trivially modified (i.e. the table was actually present). The
+    /// caller should persist the updated `bound_in` for those validators.
+    pub fn unbind_all_for_table(&self, table_ref: &str) -> Vec<(RecordId, String)> {
+        // Step 1: collect ids that contain this table_ref.
+        let mut candidate_ids = Vec::new();
+        self.bound_in.scan(|id, set| {
+            if set.contains(table_ref) {
+                candidate_ids.push(*id);
+            }
+        });
+
+        // Step 2: remove the table_ref from each candidate (entry gives &mut).
+        let mut affected = Vec::new();
+        for id in candidate_ids {
+            let _ = self.bound_in.entry(id).and_modify(|set| {
+                if set.remove(table_ref) {
+                    if let Some(name) = self.name_for_id(&id) {
+                        affected.push((id, name));
+                    }
+                }
+            });
+        }
+        affected
+    }
+
+    /// Resolve a `RecordId` back to its name (reverse of `id_for_name`).
+    pub fn name_for_id(&self, id: &RecordId) -> Option<String> {
+        let mut found: Option<String> = None;
+        self.name_to_id.scan(|name, vid| {
+            if vid == id && found.is_none() {
+                found = Some(name.clone());
+            }
+        });
+        found
+    }
+
     /// Snapshot of all registered validators as `(id, name)` pairs.
     pub fn list(&self) -> Vec<(RecordId, String)> {
         let mut out = Vec::new();

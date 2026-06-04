@@ -97,6 +97,7 @@ async fn index2_round_trip_through_redb() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        if_not_exists: false,
     };
 
     let mk_func_op = || CreateIndexOp {
@@ -113,6 +114,7 @@ async fn index2_round_trip_through_redb() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        if_not_exists: false,
     };
 
     let mk_vec_op = || CreateIndexOp {
@@ -129,6 +131,7 @@ async fn index2_round_trip_through_redb() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        if_not_exists: false,
     };
 
     // ==================================================================
