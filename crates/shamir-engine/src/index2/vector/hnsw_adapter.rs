@@ -21,6 +21,20 @@ use std::sync::Arc;
 /// `overscan*2+10` and `Vec::with_capacity(k+16)` to multi-GB allocation.
 const MAX_TOPK: u32 = 10_000;
 
+/// Live-element count at or below which `search` runs an EXACT brute-force
+/// scan instead of the approximate HNSW graph.
+///
+/// `hnsw_rs` 0.3.x assigns node layers from an internal, **unseedable** RNG,
+/// so a freshly-built graph over a tiny dataset is nondeterministic: recall
+/// can drop below 100% and the same query can return different neighbours
+/// across builds (and across reopen). On a handful of points that surfaces as
+/// flaky / wrong top-k. Brute-force over a few hundred vectors is microseconds
+/// and GUARANTEES exact, stable results; HNSW only earns its keep at larger N
+/// where the graph is well-connected and recall is reliable. 256 keeps small
+/// indexes (and the exact-assertion tests) deterministic while leaving the
+/// recall-tolerance tests (≥1k vectors) on the HNSW path.
+const BRUTE_FORCE_MAX: usize = 256;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ShamirDist {
     metric: VectorMetric,
@@ -85,6 +99,10 @@ pub struct HnswAdapter {
     hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
     rid_map: scc::HashMap<usize, RecordId>,
     rid_to_internal: scc::HashMap<RecordId, usize>,
+    /// Raw vectors retained (keyed by internal id) so a small index can be
+    /// searched EXACTLY by brute force — see [`BRUTE_FORCE_MAX`]. Tombstoned
+    /// entries are removed here on replace/delete.
+    vectors: scc::HashMap<usize, Vec<f32>>,
     deleted: scc::HashMap<usize, ()>,
     next_id: AtomicUsize,
 }
@@ -106,6 +124,7 @@ impl HnswAdapter {
             hnsw: Arc::new(hnsw),
             rid_map: scc::HashMap::new(),
             rid_to_internal: scc::HashMap::new(),
+            vectors: scc::HashMap::new(),
             deleted: scc::HashMap::new(),
             next_id: AtomicUsize::new(0),
         }
@@ -144,6 +163,7 @@ impl VectorAdapter for HnswAdapter {
         // insert having completed: it is in `deleted` before it can ever be
         // observed live (search filters `deleted` before resolving `rid_map`).
         let internal = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let mut replaced: Option<usize> = None;
         {
             use scc::hash_map::Entry::{Occupied, Vacant};
             match self.rid_to_internal.entry_async(rid).await {
@@ -152,6 +172,7 @@ impl VectorAdapter for HnswAdapter {
                     // Tombstone the previous (or concurrently-serialised) internal.
                     let _ = self.deleted.insert(old_internal, ());
                     *occ.get_mut() = internal;
+                    replaced = Some(old_internal);
                 }
                 Vacant(vac) => {
                     vac.insert_entry(internal);
@@ -161,11 +182,22 @@ impl VectorAdapter for HnswAdapter {
 
         let hnsw = Arc::clone(&self.hnsw);
         let vec_owned = vec.to_vec();
+        // Retain a copy for the exact brute-force path before the vector is
+        // moved into the (CPU-bound) graph insert.
+        let vec_for_store = vec_owned.clone();
         tokio::task::spawn_blocking(move || {
             hnsw.insert((&vec_owned, internal));
         })
         .await
         .map_err(|e| VectorError::Internal(e.to_string()))?;
+        // `internal` is freshly allocated (monotonic `next_id`) so this never
+        // collides — the insert always lands.
+        let _ = self.vectors.insert_async(internal, vec_for_store).await;
+        if let Some(old) = replaced {
+            // Drop the superseded vector so brute-force never scans stale data
+            // and memory stays bounded under upsert churn.
+            let _ = self.vectors.remove_async(&old).await;
+        }
         let _ = self.rid_map.insert_async(internal, rid).await;
         Ok(())
     }
@@ -174,6 +206,7 @@ impl VectorAdapter for HnswAdapter {
         if let Some(internal) = self.rid_to_internal.read_async(&rid, |_, v| *v).await {
             let _ = self.deleted.insert_async(internal, ()).await;
             let _ = self.rid_to_internal.remove_async(&rid).await;
+            let _ = self.vectors.remove_async(&internal).await;
         }
         Ok(())
     }
@@ -197,25 +230,47 @@ impl VectorAdapter for HnswAdapter {
             k.min(MAX_TOPK)
         };
 
-        // Search committed graph
-        let hnsw = Arc::clone(&self.hnsw);
-        let ef = self.ef_search;
-        let overscan = (k as usize) * 2 + 10;
-        let query_owned = query.to_vec();
-        let neighbors =
-            tokio::task::spawn_blocking(move || hnsw.search(&query_owned, overscan, ef))
-                .await
-                .map_err(|e| VectorError::Internal(e.to_string()))?;
+        // Small index → EXACT brute-force (deterministic, correct); large
+        // index → approximate HNSW graph. See [`BRUTE_FORCE_MAX`].
+        let mut results: Vec<(RecordId, f32)> = if self.len() <= BRUTE_FORCE_MAX {
+            let dist = ShamirDist {
+                metric: self.metric,
+            };
+            // Snapshot (internal, vector) pairs — the index is tiny here.
+            let mut pairs: Vec<(usize, Vec<f32>)> = Vec::new();
+            self.vectors.scan(|i, v| pairs.push((*i, v.clone())));
+            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
+            for (internal, v) in pairs {
+                if self.deleted.contains_async(&internal).await {
+                    continue;
+                }
+                if let Some(rid) = self.rid_map.read_async(&internal, |_, r| *r).await {
+                    out.push((rid, dist.eval(query, &v)));
+                }
+            }
+            out
+        } else {
+            // Search committed graph (approximate).
+            let hnsw = Arc::clone(&self.hnsw);
+            let ef = self.ef_search;
+            let overscan = (k as usize) * 2 + 10;
+            let query_owned = query.to_vec();
+            let neighbors =
+                tokio::task::spawn_blocking(move || hnsw.search(&query_owned, overscan, ef))
+                    .await
+                    .map_err(|e| VectorError::Internal(e.to_string()))?;
 
-        let mut results: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
-        for n in neighbors {
-            if self.deleted.contains_async(&n.d_id).await {
-                continue;
+            let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(k as usize + 16);
+            for n in neighbors {
+                if self.deleted.contains_async(&n.d_id).await {
+                    continue;
+                }
+                if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
+                    out.push((rid, n.distance));
+                }
             }
-            if let Some(rid) = self.rid_map.read_async(&n.d_id, |_, v| *v).await {
-                results.push((rid, n.distance));
-            }
-        }
+            out
+        };
 
         // Merge the caller's own un-committed staged vectors (in-tx search)
         // via a brute-force scan — they are not in the committed graph.
@@ -489,21 +544,10 @@ mod tests {
         adapter.upsert(rid(1), &[0.0, 0.0]).await.unwrap();
         adapter.upsert(rid(2), &[1.0, 0.0]).await.unwrap();
 
-        // Poll for both vectors rather than asserting on a single search: the
-        // HNSW insert's `spawn_blocking` graph work shares the blocking pool
-        // with every crate's tests under a full `--workspace` run, so a search
-        // issued the instant after `upsert().await` can occasionally observe
-        // the graph mid-update (flaky only under parallel-test CPU contention;
-        // deterministic when run alone). The loop succeeds the moment both
-        // appear; the bound only guards a genuinely lost insert.
-        let mut results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
-        for _ in 0..200 {
-            if results.len() == 2 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
-        }
+        // k > dataset size returns every vector. The index is tiny, so search
+        // runs the exact brute-force path (see `BRUTE_FORCE_MAX`) — fully
+        // deterministic, no polling needed.
+        let results = adapter.search(&[0.0, 0.0], 100, None).await.unwrap();
         assert_eq!(results.len(), 2, "search must return both inserted vectors");
     }
 
