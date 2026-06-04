@@ -201,7 +201,7 @@ impl RepoInstance {
         // logged and the table simply runs without non-tx changefeed (the tx
         // path still emits via its own lazy resolution).
         match self.changefeed().await {
-            Ok(h) => Ok(tbl.with_changefeed(self.name.clone(), Arc::clone(&gate), h.feed)),
+            Ok(h) => Ok(tbl.with_changefeed(self.name.clone(), h.feed)),
             Err(e) => {
                 log::warn!(
                     "create_table_context: changefeed unavailable for repo {} table {}: {e}; \

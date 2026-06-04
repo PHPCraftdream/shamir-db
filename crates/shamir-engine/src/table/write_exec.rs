@@ -230,7 +230,7 @@ impl TableManager {
         //    the backend, collapsing N×fsync to 1×fsync on backends
         //    that have a native batched-write API (nebari, persy,
         //    redb). Index updates still loop per-record inside.
-        let ids = self.insert_many(&inner_values).await?;
+        let (ids, batch_version) = self.insert_many_returning_version(&inner_values).await?;
 
         // 3. Build the result records in input order (from the resolved
         //    values, so computed fields are echoed with their results).
@@ -248,15 +248,14 @@ impl TableManager {
         self.interner().persist().await?;
         self.counter().persist().await?;
 
-        // Changefeed (Phase 3b follow-up): emit one Put per inserted record.
-        // `inner_values` are the exact bytes stored; `ids` are their keys, in
-        // the same order. Best-effort, non-blocking — never fails the write.
+        // Changefeed: emit one Put per inserted record. The event carries
+        // the same MVCC version the data was written at (batch_version).
         let changes: Vec<_> = ids
             .iter()
             .zip(inner_values.iter())
             .filter_map(|(id, iv)| self.put_change(*id, iv))
             .collect();
-        self.emit_nontx_changefeed(changes).await;
+        self.emit_nontx_changefeed(batch_version, changes).await;
 
         let affected = records.len() as u64;
         Ok(WriteResult {
@@ -403,6 +402,9 @@ impl TableManager {
         // Changefeed (Phase 3b follow-up): collect (id, new_value) for each
         // changed record so a Put can be emitted after the batch is durable.
         let mut changefeed_puts: Vec<(RecordId, InnerValue)> = Vec::new();
+        // Track the maximum MVCC version across per-record writes so the
+        // changefeed event carries the batch's commit-version.
+        let mut max_write_version: u64 = 0;
         let return_mode = op
             .select
             .as_ref()
@@ -452,7 +454,8 @@ impl TableManager {
                 .await
                 .map_err(validator_failure_to_db_error)?;
 
-                self.set(*id, &new_record).await?;
+                let (_created, ver) = self.set_returning_version(*id, &new_record).await?;
+                max_write_version = max_write_version.max(ver);
                 affected += 1;
                 changefeed_puts.push((*id, new_record.clone()));
             }
@@ -481,12 +484,13 @@ impl TableManager {
             self.counter().persist().await?;
         }
 
-        // Changefeed: emit one Put per changed record (best-effort).
+        // Changefeed: emit one Put per changed record. The event carries
+        // the max MVCC version from the per-record writes (best-effort).
         let changes: Vec<_> = changefeed_puts
             .iter()
             .filter_map(|(id, iv)| self.put_change(*id, iv))
             .collect();
-        self.emit_nontx_changefeed(changes).await;
+        self.emit_nontx_changefeed(max_write_version, changes).await;
 
         Ok(WriteResult {
             affected,
@@ -681,10 +685,13 @@ impl TableManager {
         // Changefeed (Phase 3b follow-up): record the ids actually removed
         // (a `delete` that found no record contributes no event).
         let mut deleted_ids: Vec<RecordId> = Vec::new();
+        let mut max_write_version: u64 = 0;
         for id in to_delete {
-            if self.delete(id).await? {
+            let (removed, ver) = self.delete_returning_version(id).await?;
+            if removed {
                 affected += 1;
                 deleted_ids.push(id);
+                max_write_version = max_write_version.max(ver);
             }
         }
 
@@ -699,12 +706,13 @@ impl TableManager {
             self.counter().persist().await?;
         }
 
-        // Changefeed: emit one Delete per removed record (best-effort).
+        // Changefeed: emit one Delete per removed record. The event carries
+        // the max MVCC version from the per-record deletes (best-effort).
         let changes: Vec<_> = deleted_ids
             .iter()
             .map(|id| self.delete_change(*id))
             .collect();
-        self.emit_nontx_changefeed(changes).await;
+        self.emit_nontx_changefeed(max_write_version, changes).await;
 
         Ok(WriteResult {
             affected,
@@ -824,52 +832,53 @@ impl TableManager {
         // Changefeed (Phase 3b follow-up): the upsert always ends in a Put of
         // the stored record — `(id, stored_value)` captured from whichever
         // branch ran (update-merge or fresh insert).
-        let (created, result_record, changefeed_put) = if let Some((id, existing)) = found {
-            // Update: merge new value into existing
-            let new_map = match &new_inner {
-                InnerValue::Map(m) => m,
-                _ => {
-                    return Err(shamir_storage::error::DbError::Validation(
-                        "SET value must be a JSON object".to_string(),
-                    ))
-                }
-            };
-            let merged = merge_inner_maps(&existing, new_map);
+        let (created, write_version, result_record, changefeed_put) =
+            if let Some((id, existing)) = found {
+                // Update: merge new value into existing
+                let new_map = match &new_inner {
+                    InnerValue::Map(m) => m,
+                    _ => {
+                        return Err(shamir_storage::error::DbError::Validation(
+                            "SET value must be a JSON object".to_string(),
+                        ))
+                    }
+                };
+                let merged = merge_inner_maps(&existing, new_map);
 
-            // S3: run validators (Upsert — existing found → update path).
-            // TODO actor threading — use Actor::System for now.
-            self.run_validators(
-                WriteOp::Upsert,
-                Some(&merged),
-                Some(&existing),
-                &Actor::System,
-            )
-            .await
-            .map_err(validator_failure_to_db_error)?;
-
-            self.set(id, &merged).await?;
-            let json = inner_to_json_value(&merged, interner)?;
-            (false, json, (id, merged))
-        } else {
-            // S3: run validators (Upsert — no existing → insert path).
-            // TODO actor threading — use Actor::System for now.
-            self.run_validators(WriteOp::Upsert, Some(&new_inner), None, &Actor::System)
+                // S3: run validators (Upsert — existing found → update path).
+                // TODO actor threading — use Actor::System for now.
+                self.run_validators(
+                    WriteOp::Upsert,
+                    Some(&merged),
+                    Some(&existing),
+                    &Actor::System,
+                )
                 .await
                 .map_err(validator_failure_to_db_error)?;
 
-            // Insert new record
-            let id = self.insert(&new_inner).await?;
-            let mut obj = match inner_to_json_value(&new_inner, interner)? {
-                json::Value::Object(m) => m,
-                other => {
-                    let mut m = json::Map::new();
-                    m.insert("_value".to_string(), other);
-                    m
-                }
+                let (_was_created, ver) = self.set_returning_version(id, &merged).await?;
+                let json = inner_to_json_value(&merged, interner)?;
+                (false, ver, json, (id, merged))
+            } else {
+                // S3: run validators (Upsert — no existing → insert path).
+                // TODO actor threading — use Actor::System for now.
+                self.run_validators(WriteOp::Upsert, Some(&new_inner), None, &Actor::System)
+                    .await
+                    .map_err(validator_failure_to_db_error)?;
+
+                // Insert new record
+                let (id, ver) = self.insert_returning_version(&new_inner).await?;
+                let mut obj = match inner_to_json_value(&new_inner, interner)? {
+                    json::Value::Object(m) => m,
+                    other => {
+                        let mut m = json::Map::new();
+                        m.insert("_value".to_string(), other);
+                        m
+                    }
+                };
+                obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+                (true, ver, json::Value::Object(obj), (id, new_inner.clone()))
             };
-            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-            (true, json::Value::Object(obj), (id, new_inner.clone()))
-        };
 
         let mut result_obj = match result_record {
             json::Value::Object(m) => m,
@@ -885,10 +894,11 @@ impl TableManager {
         self.interner().persist().await?;
         self.counter().persist().await?;
 
-        // Changefeed: emit the single Put (best-effort, non-blocking).
+        // Changefeed: emit the single Put. The event carries the MVCC
+        // version the data was written at (best-effort, non-blocking).
         let (put_id, put_val) = changefeed_put;
         let changes: Vec<_> = self.put_change(put_id, &put_val).into_iter().collect();
-        self.emit_nontx_changefeed(changes).await;
+        self.emit_nontx_changefeed(write_version, changes).await;
 
         Ok(WriteResult {
             affected: 1,
