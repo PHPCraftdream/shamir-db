@@ -838,7 +838,16 @@ pub enum BatchError {
     Timeout { elapsed_secs: u64 },
 
     /// Query execution error.
-    QueryError { alias: String, message: String },
+    ///
+    /// `code` carries a machine-readable error category when available
+    /// (e.g. `"exists"`, `"not_found"`, `"access_denied"`,
+    /// `"still_referenced"`).  Unclassified errors leave it `None`.
+    QueryError {
+        alias: String,
+        message: String,
+        #[doc(hidden)]
+        code: Option<String>,
+    },
 
     /// Lock timeout (deadlock prevention).
     ///
@@ -877,8 +886,16 @@ impl std::fmt::Display for BatchError {
             BatchError::Timeout { elapsed_secs } => {
                 write!(f, "Execution timeout after {}s", elapsed_secs)
             }
-            BatchError::QueryError { alias, message } => {
-                write!(f, "Query '{}' failed: {}", alias, message)
+            BatchError::QueryError {
+                alias,
+                message,
+                code,
+            } => {
+                if let Some(c) = code {
+                    write!(f, "Query '{}' failed [{}]: {}", alias, c, message)
+                } else {
+                    write!(f, "Query '{}' failed: {}", alias, message)
+                }
             }
             BatchError::LockTimeout { aliases } => {
                 write!(f, "Lock timeout for queries: {}", aliases.join(", "))
@@ -893,6 +910,29 @@ impl std::fmt::Display for BatchError {
 }
 
 impl std::error::Error for BatchError {}
+
+impl BatchError {
+    /// Structured DDL/admin error with a machine-readable `code`.
+    pub fn query_coded(
+        alias: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        BatchError::QueryError {
+            alias: alias.into(),
+            message: message.into(),
+            code: Some(code.into()),
+        }
+    }
+
+    /// Return the machine-readable code, if set.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            BatchError::QueryError { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

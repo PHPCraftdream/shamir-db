@@ -55,12 +55,14 @@ fn validate_name_component(s: &str, label: &str) -> Result<(), BatchError> {
         return Err(BatchError::QueryError {
             alias: String::new(),
             message: format!("{} must not be empty", label),
+            code: None,
         });
     }
     if s == "." || s == ".." {
         return Err(BatchError::QueryError {
             alias: String::new(),
             message: format!("{} must not be '.' or '..'", label),
+            code: None,
         });
     }
     for ch in s.chars() {
@@ -72,6 +74,7 @@ fn validate_name_component(s: &str, label: &str) -> Result<(), BatchError> {
                      only [A-Za-z0-9_-] are permitted",
                     label, ch
                 ),
+                code: None,
             });
         }
     }
@@ -91,7 +94,15 @@ impl AdminExecutor for ShamirAdminExecutor {
         let err = |msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
+            code: None,
         };
+        let err_code = |code: &str, msg: String| BatchError::QueryError {
+            alias: String::new(),
+            message: msg,
+            code: Some(code.to_string()),
+        };
+        let err_access =
+            |e: shamir_types::access::AccessError| err_code("access_denied", e.to_string());
 
         match op {
             BatchOp::CreateDb(op) => {
@@ -104,7 +115,10 @@ impl AdminExecutor for ShamirAdminExecutor {
                             "db": op.create_db
                         })));
                     }
-                    return Err(err(format!("Database '{}' already exists", op.create_db)));
+                    return Err(err_code(
+                        "exists",
+                        format!("Database '{}' already exists", op.create_db),
+                    ));
                 }
                 self.shamir
                     .create_db_as(&op.create_db, self.actor.clone())
@@ -122,10 +136,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                     let repos = db.list_repos();
                     if !repos.is_empty() {
                         if !op.cascade {
-                            return Err(err(format!(
-                                "cannot drop database '{}': still has repositories: {:?}",
-                                op.drop_db, repos
-                            )));
+                            return Err(err_code(
+                                "still_referenced",
+                                format!(
+                                    "cannot drop database '{}': still has repositories: {:?}",
+                                    op.drop_db, repos
+                                ),
+                            ));
                         }
                         // Cascade: remove every repo (and its tables) first.
                         for repo_name in &repos {
@@ -166,10 +183,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                                 "repo": op.create_repo
                             })));
                         }
-                        return Err(err(format!(
-                            "Repository '{}' already exists in database '{}'",
-                            op.create_repo, self.db_name
-                        )));
+                        return Err(err_code(
+                            "exists",
+                            format!(
+                                "Repository '{}' already exists in database '{}'",
+                                op.create_repo, self.db_name
+                            ),
+                        ));
                     }
                 }
 
@@ -225,10 +245,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                     if let Ok(tables) = db.list_tables(&op.drop_repo) {
                         if !tables.is_empty() {
                             if !op.cascade {
-                                return Err(err(format!(
-                                    "cannot drop repository '{}': still has tables: {:?}",
-                                    op.drop_repo, tables
-                                )));
+                                return Err(err_code(
+                                    "still_referenced",
+                                    format!(
+                                        "cannot drop repository '{}': still has tables: {:?}",
+                                        op.drop_repo, tables
+                                    ),
+                                ));
                             }
                             // Cascade: remove every table first.
                             for table_name in &tables {
@@ -265,10 +288,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                                 "existed": true
                             })));
                         }
-                        return Err(err(format!(
-                            "Table '{}' already exists in repository '{}'",
-                            op.create_table, op.repo
-                        )));
+                        return Err(err_code(
+                            "exists",
+                            format!(
+                                "Table '{}' already exists in repository '{}'",
+                                op.create_table, op.repo
+                            ),
+                        ));
                     }
                 }
                 // Route through ShamirDb so the table is persisted to the
@@ -327,10 +353,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                             "existed": true
                         })));
                     }
-                    return Err(err(format!(
-                        "Index '{}' already exists on table '{}'",
-                        op.create_index, op.table
-                    )));
+                    return Err(err_code(
+                        "exists",
+                        format!(
+                            "Index '{}' already exists on table '{}'",
+                            op.create_index, op.table
+                        ),
+                    ));
                 }
 
                 let field_strs: Vec<Vec<&str>> = op
@@ -655,7 +684,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 // scoped to their own database. System bypasses.
                 self.authorize_user_lifecycle(op.database.as_deref())
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 // Hash the password at rest with Argon2id (PHC string).
                 // This `users.password_hash` field is RBAC/admin metadata,
                 // NOT a live-auth credential — the wire login path is
@@ -735,7 +764,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 };
                 self.authorize_user_lifecycle(scope.as_deref())
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
 
                 let del_op = crate::query::write::DeleteOp {
                     delete_from: crate::query::TableRef::new("users"),
@@ -758,7 +787,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let role = crate::query::auth::Role {
                     name: op.create_role.clone(),
                     permissions: op.permissions.clone(),
@@ -792,7 +821,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let table = self
                     .shamir
                     .system_store()
@@ -827,7 +856,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let user_lock = self
                     .shamir
                     .admin_user_locks()
@@ -861,7 +890,10 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 if result.records.is_empty() {
-                    return Err(err(format!("User '{}' not found", op.user)));
+                    return Err(err_code(
+                        "not_found",
+                        format!("User '{}' not found", op.user),
+                    ));
                 }
                 let mut user_json = result.records[0].clone();
                 if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
@@ -893,7 +925,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let user_lock = self
                     .shamir
                     .admin_user_locks()
@@ -926,7 +958,10 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .await
                     .map_err(|e| err(e.to_string()))?;
                 if result.records.is_empty() {
-                    return Err(err(format!("User '{}' not found", op.user)));
+                    return Err(err_code(
+                        "not_found",
+                        format!("User '{}' not found", op.user),
+                    ));
                 }
                 let mut user_json = result.records[0].clone();
                 if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
@@ -1077,7 +1112,12 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .shamir
                     .active_migrations()
                     .get(&op.commit_migration)
-                    .ok_or_else(|| err(format!("migration '{}' not found", op.commit_migration)))?
+                    .ok_or_else(|| {
+                        err_code(
+                            "not_found",
+                            format!("migration '{}' not found", op.commit_migration),
+                        )
+                    })?
                     .clone();
                 let tail = coord
                     .final_drain_and_commit()
@@ -1137,7 +1177,12 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .shamir
                     .active_migrations()
                     .get(&op.rollback_migration)
-                    .ok_or_else(|| err(format!("migration '{}' not found", op.rollback_migration)))?
+                    .ok_or_else(|| {
+                        err_code(
+                            "not_found",
+                            format!("migration '{}' not found", op.rollback_migration),
+                        )
+                    })?
                     .clone();
                 coord.rollback().await.map_err(|e| err(e.to_string()))?;
                 self.shamir
@@ -1155,7 +1200,12 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .shamir
                     .active_migrations()
                     .get(&op.migration_status)
-                    .ok_or_else(|| err(format!("migration '{}' not found", op.migration_status)))?
+                    .ok_or_else(|| {
+                        err_code(
+                            "not_found",
+                            format!("migration '{}' not found", op.migration_status),
+                        )
+                    })?
                     .clone();
                 let state = coord.state().await;
                 let shadow_lag = coord.shadow_lag().await;
@@ -1183,7 +1233,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &path, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let mut meta = self.shamir.resource_meta(&path).await;
                 meta.mode = op.mode;
                 self.shamir
@@ -1204,7 +1254,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &path, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let mut meta = self.shamir.resource_meta(&path).await;
                 meta.owner = Actor::from_owner_id(op.owner);
                 self.shamir
@@ -1225,7 +1275,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &path, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let mut meta = self.shamir.resource_meta(&path).await;
                 meta.group = op.group;
                 self.shamir
@@ -1243,7 +1293,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let group_id = self
                     .shamir
                     .create_group(&op.create_group)
@@ -1260,7 +1310,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let group_id = self
                     .shamir
                     .resolve_group_id(&op.drop_group)
@@ -1280,7 +1330,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let group_id = self
                     .shamir
                     .resolve_group_id(&op.add_group_member)
@@ -1301,7 +1351,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let group_id = self
                     .shamir
                     .resolve_group_id(&op.remove_group_member)
@@ -1324,7 +1374,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let tree = self
                     .shamir
                     .access_tree(op.depth, op.db.as_deref())
@@ -1342,7 +1392,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Create,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 if let Some(ref source) = op.source {
                     self.shamir
                         .create_function_from_source_as(
@@ -1386,7 +1436,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Delete,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let existed = self
                     .shamir
                     .drop_function_as(&op.drop_function, self.actor.clone())
@@ -1407,7 +1457,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Write,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 self.shamir
                     .rename_function_as(&op.rename_function, &op.to, self.actor.clone())
                     .await
@@ -1426,7 +1476,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Create,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let id = if let Some(ref source) = op.source {
                     self.shamir
                         .create_validator_from_source_as(
@@ -1469,7 +1519,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Delete,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let existed = self
                     .shamir
                     .drop_validator_as(&op.drop_validator, self.actor.clone())
@@ -1484,7 +1534,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &ResourcePath::FunctionNamespace, Action::Write)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 self.shamir
                     .rename_validator_as(&op.rename_validator, &op.to, self.actor.clone())
                     .await
@@ -1508,7 +1558,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Write,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 self.shamir
                     .bind_validator_as(
                         &op.db,
@@ -1540,7 +1590,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Write,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let removed = self
                     .shamir
                     .unbind_validator_as(
@@ -1572,7 +1622,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Action::Read,
                     )
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
                 let bindings = self
                     .shamir
                     .list_validator_bindings(&op.db, &op.repo, &op.list_validators)
@@ -1616,7 +1666,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                 self.shamir
                     .authorize_access(&self.actor, &parent_path, Action::Create)
                     .await
-                    .map_err(|e| err(e.to_string()))?;
+                    .map_err(err_access)?;
 
                 // mkdir -p: create all prefix folders that don't yet exist.
                 let created = self
@@ -1799,13 +1849,11 @@ impl ShamirDb {
             Action::Read,
         )
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: String::new(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
+            code: None,
         })?;
 
         // Per-op authorization: each data op is checked against its TARGET
@@ -1828,10 +1876,7 @@ impl ShamirDb {
                 };
                 self.authorize_access(&actor, &path, action)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: String::new(),
-                        message: e.to_string(),
-                    })?;
+                    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
             }
         }
 
@@ -1904,19 +1949,18 @@ impl ShamirDb {
             Action::Read,
         )
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: String::new(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
+            code: None,
         })?;
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| BatchError::QueryError {
                 alias: String::new(),
                 message: format!("Repository '{}' not found", repo_name),
+                code: None,
             })?;
         let iso = match isolation {
             "serializable" => crate::engine::tx::IsolationLevel::Serializable,
@@ -1928,6 +1972,7 @@ impl ShamirDb {
                 .map_err(|e| BatchError::QueryError {
                     alias: String::new(),
                     message: format!("begin_tx: {}", e),
+                    code: None,
                 })?;
         tx.set_actor(actor);
         Ok((tx, guard))
@@ -1963,10 +2008,7 @@ impl ShamirDb {
             Action::Read,
         )
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: String::new(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
 
         // Per-op DML authorization (mirrors execute_as).
         for entry in request.queries.values() {
@@ -1985,16 +2027,14 @@ impl ShamirDb {
                 };
                 self.authorize_access(&actor, &path, action)
                     .await
-                    .map_err(|e| BatchError::QueryError {
-                        alias: String::new(),
-                        message: e.to_string(),
-                    })?;
+                    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
             }
         }
 
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
+            code: None,
         })?;
         let resolver = DbTableResolver {
             db,
@@ -2039,19 +2079,18 @@ impl ShamirDb {
             Action::Write,
         )
         .await
-        .map_err(|e| BatchError::QueryError {
-            alias: String::new(),
-            message: e.to_string(),
-        })?;
+        .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
         let db = self.get_db(db_name).ok_or_else(|| BatchError::QueryError {
             alias: String::new(),
             message: format!("Database '{}' not found", db_name),
+            code: None,
         })?;
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| BatchError::QueryError {
                 alias: String::new(),
                 message: format!("Repository '{}' not found", repo_name),
+                code: None,
             })?;
         let tx_id = tx.tx_id.0;
         match commit_interactive_tx(&repo, tx).await {

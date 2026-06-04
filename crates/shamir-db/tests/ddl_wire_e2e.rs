@@ -1713,3 +1713,250 @@ fn serde_list_function_folders_with_parent_round_trip() {
     let op2: shamir_db::query::batch::BatchOp = serde_json::from_str(&back).unwrap();
     assert_eq!(op, op2);
 }
+
+// =====================================================================
+// DDL S5: structured error codes
+// =====================================================================
+
+/// Create existing DB without if_not_exists -> code == "exists".
+#[tokio::test]
+async fn error_code_exists_create_db_duplicate() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("bootstrap").await;
+    shamir.create_db("dup_db").await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "create_db": "dup_db"
+            }
+        }
+    }))
+    .unwrap();
+    let err = shamir.execute("bootstrap", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("exists"),
+        "expected code 'exists', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// Create existing table without if_not_exists -> code == "exists".
+#[tokio::test]
+async fn error_code_exists_create_table_duplicate() {
+    let db = setup_db().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "create_table": "users",
+                "repo": "main"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("exists"),
+        "expected code 'exists', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// Create existing repo without if_not_exists -> code == "exists".
+#[tokio::test]
+async fn error_code_exists_create_repo_duplicate() {
+    let db = setup_db().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "create_repo": "main",
+                "engine": "in_memory"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("exists"),
+        "expected code 'exists', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// Drop non-empty DB without cascade -> code == "still_referenced".
+#[tokio::test]
+async fn error_code_still_referenced_drop_db() {
+    let db = setup_db().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "drop_db": "testdb"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("still_referenced"),
+        "expected code 'still_referenced', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// Drop non-empty repo without cascade -> code == "still_referenced".
+#[tokio::test]
+async fn error_code_still_referenced_drop_repo() {
+    let db = setup_db().await;
+
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "drop_repo": "main"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("still_referenced"),
+        "expected code 'still_referenced', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// DDL op by unprivileged user -> code == "access_denied".
+#[tokio::test]
+async fn error_code_access_denied_ddl() {
+    let db = setup_db().await;
+
+    // Restrict the database to owner-only.
+    let chmod_req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "chown": {
+                "chown": {
+                    "database": "testdb"
+                },
+                "owner": 1
+            },
+            "chmod": {
+                "chmod": {
+                    "database": "testdb"
+                },
+                "mode": 448,
+                "after": ["chown"]
+            }
+        }
+    }))
+    .unwrap();
+    db.execute("testdb", &chmod_req).await.unwrap();
+
+    // Non-owner user tries to create a table (needs traversal through db).
+    let user_actor = Actor::User(999);
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "op": {
+                "create_table": "forbidden_table",
+                "repo": "main"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute_as(user_actor, "testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("access_denied"),
+        "expected code 'access_denied', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// GrantRole for non-existent user -> code == "not_found".
+#[tokio::test]
+async fn error_code_not_found_grant_role_user() {
+    let db = setup_db().await;
+
+    // Create a role first.
+    let create_role: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "create_role": "testrole",
+                "permissions": []
+            }
+        }
+    }))
+    .unwrap();
+    db.execute("testdb", &create_role).await.unwrap();
+
+    // Grant to a non-existent user.
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 2,
+        "queries": {
+            "op": {
+                "grant_role": "testrole",
+                "user": "ghost_user"
+            }
+        }
+    }))
+    .unwrap();
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("not_found"),
+        "expected code 'not_found', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
+
+/// Create existing index without if_not_exists -> code == "exists".
+#[tokio::test]
+async fn error_code_exists_create_index_duplicate() {
+    let db = setup_db().await;
+
+    // Create an index.
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": 1,
+        "queries": {
+            "op": {
+                "create_index": "idx_name",
+                "repo": "main",
+                "table": "users",
+                "fields": [["name"]]
+            }
+        }
+    }))
+    .unwrap();
+    db.execute("testdb", &req).await.unwrap();
+
+    // Try to create the same index again.
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert_eq!(
+        err.code(),
+        Some("exists"),
+        "expected code 'exists', got: {:?} ({})",
+        err.code(),
+        err
+    );
+}
