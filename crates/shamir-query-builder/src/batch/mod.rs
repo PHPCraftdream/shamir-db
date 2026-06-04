@@ -386,6 +386,271 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    // ── DDL: database ──────────────────────────────────────────────
+
+    /// Create a new database.
+    pub fn create_db(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a database.
+    pub fn drop_db(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: repository ───────────────────────────────────────────
+
+    /// Create a new repository.
+    pub fn create_repo(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a repository.
+    pub fn drop_repo(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: table ────────────────────────────────────────────────
+
+    /// Create a table.
+    pub fn create_table(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a table.
+    pub fn drop_table(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: index ────────────────────────────────────────────────
+
+    /// Create an index on a table.
+    pub fn create_index(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop an index from a table.
+    pub fn drop_index(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: function ─────────────────────────────────────────────
+
+    /// Create (or replace) a stored function.
+    pub fn create_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a stored function.
+    pub fn drop_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Rename a stored function.
+    pub fn rename_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Create a function folder.
+    pub fn create_function_folder(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+    ) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: validator ────────────────────────────────────────────
+
+    /// Create (or replace) a validator.
+    pub fn create_validator(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a validator.
+    pub fn drop_validator(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Rename a validator.
+    pub fn rename_validator(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Bind a validator to a table.
+    pub fn bind_validator(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Unbind a validator from a table.
+    pub fn unbind_validator(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List validator bindings for a table.
+    pub fn list_validators(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: auth (users + roles) ─────────────────────────────────
+
+    /// Create a user.
+    pub fn create_user(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a user.
+    pub fn drop_user(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Create a role.
+    pub fn create_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a role.
+    pub fn drop_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Grant a role to a user.
+    pub fn grant_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Revoke a role from a user.
+    pub fn revoke_role(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: access control ───────────────────────────────────────
+
+    /// Change mode bits on a resource.
+    pub fn chmod(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Change owner on a resource.
+    pub fn chown(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Change group on a resource.
+    pub fn chgrp(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: groups ───────────────────────────────────────────────
+
+    /// Create a new group.
+    pub fn create_group(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Drop a group.
+    pub fn drop_group(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Add a user to a group.
+    pub fn add_group_member(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Remove a user from a group.
+    pub fn remove_group_member(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+    ) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: buffer config ────────────────────────────────────────
+
+    /// Set the full buffer config for a table.
+    pub fn set_buffer_config(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Get the buffer config for a table.
+    pub fn get_buffer_config(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Partially alter buffer config for a table.
+    pub fn alter_buffer_config(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+    ) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: list operations ──────────────────────────────────────
+
+    /// List databases.
+    pub fn list_databases(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List repositories.
+    pub fn list_repos(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List tables in a repository.
+    pub fn list_tables(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List indexes on a table.
+    pub fn list_indexes(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List users.
+    pub fn list_users(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List roles.
+    pub fn list_roles(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: access tree ──────────────────────────────────────────
+
+    /// Request the access-control tree.
+    pub fn access_tree(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── DDL: migration ────────────────────────────────────────────
+
+    /// Start an online table migration.
+    pub fn start_migration(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Commit a running migration.
+    pub fn commit_migration(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Rollback a running migration.
+    pub fn rollback_migration(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Query the status of a migration.
+    pub fn migration_status(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── escape hatches ────────────────────────────────────────────
+
     /// Escape hatch: add any `BatchOp` (returned in the response).
     pub fn op(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
