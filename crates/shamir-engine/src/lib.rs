@@ -18,3 +18,4 @@ pub mod query;
 pub mod repo;
 pub mod table;
 pub mod tx;
+pub mod validator;

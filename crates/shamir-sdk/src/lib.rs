@@ -23,11 +23,15 @@ mod host_imports;
 mod http;
 mod params;
 pub mod prelude;
+pub mod validation;
 mod value;
 
 // Re-export the proc-macro at the crate root so that `#[shamir_sdk::function]`
 // resolves, and with `use shamir_sdk as shamir;` so does `#[shamir::function]`.
 pub use shamir_sdk_macros::function;
+pub use shamir_sdk_macros::validator;
+
+pub use validation::{IntoFieldPath, Validation, ValidationError};
 
 pub use context::{Batch, Ctx};
 pub use db::{Db, Table};

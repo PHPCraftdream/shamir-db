@@ -35,6 +35,9 @@ const TABLE_FUNCTIONS: &str = "functions";
 /// the `settings` table under the key `"next_group_id"`). Id 0 is
 /// reserved / unused.
 const TABLE_GROUPS: &str = "groups";
+/// Validator catalogue: one record per user-defined WASM validator so
+/// the validator survives a restart (S1).
+const TABLE_VALIDATORS: &str = "validators";
 
 /// Configuration for the system store.
 #[derive(Clone)]
@@ -69,7 +72,8 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_USERS))
             .add_table(TableConfig::new(TABLE_ROLES))
             .add_table(TableConfig::new(TABLE_FUNCTIONS))
-            .add_table(TableConfig::new(TABLE_GROUPS));
+            .add_table(TableConfig::new(TABLE_GROUPS))
+            .add_table(TableConfig::new(TABLE_VALIDATORS));
 
         db.add_repo(repo_config).await?;
 
@@ -674,6 +678,79 @@ impl SystemStore {
         table.interner().persist().await?;
         table.data_store().flush().await?;
         Ok(())
+    }
+
+    // ========================================================================
+    // Validator catalogue (S1)
+    // ========================================================================
+
+    /// Persist a validator catalogue entry. Upsert keyed by `name`.
+    /// Injects `owner`/`group`/`mode` from `meta` into the record.
+    pub async fn save_validator(
+        &self,
+        name: &str,
+        record: &serde_json::Value,
+        meta: &ResourceMeta,
+    ) -> DbResult<()> {
+        let mut rec = record.clone();
+        meta.inject_into(&mut rec);
+        let table = self.table(TABLE_VALIDATORS).await?;
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_VALIDATORS),
+            key: json!({"name": name}),
+            value: rec,
+        };
+        table.execute_set(&op).await?;
+        table.interner().persist().await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Remove a validator catalogue entry by name.
+    pub async fn remove_validator(&self, name: &str) -> DbResult<()> {
+        let table = self.table(TABLE_VALIDATORS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_VALIDATORS),
+            where_clause: crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+        };
+        table.execute_delete(&op, &ctx).await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Load every persisted validator catalogue record.
+    pub async fn load_validators(&self) -> DbResult<Vec<serde_json::Value>> {
+        let table = self.table(TABLE_VALIDATORS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_VALIDATORS);
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records)
+    }
+
+    /// Load a single validator catalogue record by name.
+    pub async fn load_validator(&self, name: &str) -> DbResult<Option<serde_json::Value>> {
+        let table = self.table(TABLE_VALIDATORS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_VALIDATORS).filter(
+            crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+        );
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records.into_iter().next())
     }
 
     /// Persist a replacement function catalogue record (for `set_resource_meta`).

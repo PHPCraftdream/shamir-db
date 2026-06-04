@@ -23,7 +23,32 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
+use crate::validator::{ValidatorFailure, WriteOp};
+use shamir_types::access::Actor;
+
 use super::table_manager::TableManager;
+
+/// Convert a [`ValidatorFailure`] into a [`DbError`](shamir_storage::error::DbError).
+fn validator_failure_to_db_error(failure: ValidatorFailure) -> shamir_storage::error::DbError {
+    match failure {
+        ValidatorFailure::Failed(errors) => {
+            // Serialize the structured errors as a JSON array so the
+            // caller (and eventually the wire layer) gets field-bound
+            // codes. The `ValidationError` derives `Serialize`.
+            let json = serde_json::to_string(&errors).unwrap_or_else(|_| format!("{errors:?}"));
+            shamir_storage::error::DbError::ValidatorRejected(json)
+        }
+        ValidatorFailure::Missing { id } => shamir_storage::error::DbError::ValidatorInvalid(
+            format!("validator {} not found in registry (fail-closed)", id),
+        ),
+        ValidatorFailure::Invocation { id, reason } => {
+            shamir_storage::error::DbError::ValidatorInvalid(format!(
+                "validator {} invocation failed: {}",
+                id, reason
+            ))
+        }
+    }
+}
 
 // ============================================================================
 // Computed write values ("установка знаний" via inline `$fn`)
@@ -191,6 +216,16 @@ impl TableManager {
             inner_values.push(inner);
         }
 
+        // 2a. S3: run validators on each record (fail-closed, before
+        //     persistence). Actor is System — the batch executor
+        //     will thread the real actor once actor-carrying signatures
+        //     land on execute_insert. // TODO actor threading
+        for iv in &inner_values {
+            self.run_validators(WriteOp::Insert, Some(iv), None, &Actor::System)
+                .await
+                .map_err(validator_failure_to_db_error)?;
+        }
+
         // 2. One batched write — dispatches to `Store::insert_many` at
         //    the backend, collapsing N×fsync to 1×fsync on backends
         //    that have a native batched-write API (nebari, persy,
@@ -256,6 +291,14 @@ impl TableManager {
             }
             vals
         };
+
+        // S3: run validators on each record before staging.
+        // TODO actor threading — use Actor::System for now.
+        for iv in &inner_values {
+            self.run_validators(WriteOp::Insert, Some(iv), None, &Actor::System)
+                .await
+                .map_err(validator_failure_to_db_error)?;
+        }
 
         // Batched tx insert — mirrors `insert_many`'s structure on the
         // tx staging path. Lifts per-row overhead
@@ -385,6 +428,17 @@ impl TableManager {
             let changed = &new_record != old_record;
 
             if changed {
+                // S3: run validators before persisting.
+                // TODO actor threading — use Actor::System for now.
+                self.run_validators(
+                    WriteOp::Update,
+                    Some(&new_record),
+                    Some(old_record),
+                    &Actor::System,
+                )
+                .await
+                .map_err(validator_failure_to_db_error)?;
+
                 self.set(*id, &new_record).await?;
                 affected += 1;
             }
@@ -499,6 +553,17 @@ impl TableManager {
             let changed = &new_record != old_record;
 
             if changed {
+                // S3: run validators before staging.
+                // TODO actor threading — use Actor::System for now.
+                self.run_validators(
+                    WriteOp::Update,
+                    Some(&new_record),
+                    Some(old_record),
+                    &Actor::System,
+                )
+                .await
+                .map_err(validator_failure_to_db_error)?;
+
                 self.update_tx(*id, &new_record, Some(&mut *tx)).await?;
                 affected += 1;
             }
@@ -575,6 +640,22 @@ impl TableManager {
             None
         };
 
+        // S3: run validators on each record before deleting.
+        // Only fetch old records if there are delete-bound validators.
+        let has_delete_validators = {
+            let bindings = self.validator_bindings();
+            bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
+        };
+        if has_delete_validators && !to_delete.is_empty() {
+            let records = self.table().get_many(&to_delete).await?;
+            for rec in records.iter().flatten() {
+                // TODO actor threading — use Actor::System for now.
+                self.run_validators(WriteOp::Delete, None, Some(rec), &Actor::System)
+                    .await
+                    .map_err(validator_failure_to_db_error)?;
+            }
+        }
+
         let mut affected: u64 = 0;
         for id in to_delete {
             if self.delete(id).await? {
@@ -633,6 +714,21 @@ impl TableManager {
                 }
                 result
             };
+
+        // S3: run validators on each record before deleting (tx).
+        let has_delete_validators = {
+            let bindings = self.validator_bindings();
+            bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
+        };
+        if has_delete_validators && !to_delete.is_empty() {
+            let records = self.table().get_many(&to_delete).await?;
+            for rec in records.iter().flatten() {
+                // TODO actor threading — use Actor::System for now.
+                self.run_validators(WriteOp::Delete, None, Some(rec), &Actor::System)
+                    .await
+                    .map_err(validator_failure_to_db_error)?;
+            }
+        }
 
         let mut affected: u64 = 0;
         for id in to_delete {
@@ -704,9 +800,27 @@ impl TableManager {
                 }
             };
             let merged = merge_inner_maps(&existing, new_map);
+
+            // S3: run validators (Upsert — existing found → update path).
+            // TODO actor threading — use Actor::System for now.
+            self.run_validators(
+                WriteOp::Upsert,
+                Some(&merged),
+                Some(&existing),
+                &Actor::System,
+            )
+            .await
+            .map_err(validator_failure_to_db_error)?;
+
             self.set(id, &merged).await?;
             (false, inner_to_json_value(&merged, interner)?)
         } else {
+            // S3: run validators (Upsert — no existing → insert path).
+            // TODO actor threading — use Actor::System for now.
+            self.run_validators(WriteOp::Upsert, Some(&new_inner), None, &Actor::System)
+                .await
+                .map_err(validator_failure_to_db_error)?;
+
             // Insert new record
             let id = self.insert(&new_inner).await?;
             let mut obj = match inner_to_json_value(&new_inner, interner)? {
@@ -808,6 +922,18 @@ impl TableManager {
                 }
             };
             let merged = merge_inner_maps(&existing, new_map);
+
+            // S3: run validators (Upsert — existing found → update path, tx).
+            // TODO actor threading — use Actor::System for now.
+            self.run_validators(
+                WriteOp::Upsert,
+                Some(&merged),
+                Some(&existing),
+                &Actor::System,
+            )
+            .await
+            .map_err(validator_failure_to_db_error)?;
+
             self.update_tx(id, &merged, Some(&mut *tx)).await?;
             // Build result JSON from op.value merged onto the existing record
             // (existing was committed before this tx → base ids only, safe to decode).
@@ -822,6 +948,12 @@ impl TableManager {
             }
             (false, json::Value::Object(base_obj))
         } else {
+            // S3: run validators (Upsert — no existing → insert path, tx).
+            // TODO actor threading — use Actor::System for now.
+            self.run_validators(WriteOp::Upsert, Some(&new_inner), None, &Actor::System)
+                .await
+                .map_err(validator_failure_to_db_error)?;
+
             let id = self.insert_tx(&new_inner, Some(&mut *tx)).await?;
             // Build result JSON from original op.value to avoid overlay-id
             // reverse-lookup (overlay ids are not yet in the base interner).

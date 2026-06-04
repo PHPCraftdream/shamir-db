@@ -46,6 +46,10 @@ pub enum MetaKey {
     /// engine seeds the counter from `max(this, max(WAL active txn_id))`
     /// so issued tx ids never collide with already-committed ones.
     NextTxId,
+
+    /// Per-table validator bindings (`PersistedValidators`).
+    /// Stored in the info-twin alongside `Indexes`.
+    Validators,
 }
 
 impl MetaKey {
@@ -65,6 +69,7 @@ impl MetaKey {
             MetaKey::LegacyIndexesUnique => "indexes_unique",
             MetaKey::LastCommittedVersion => "_t.lcv",
             MetaKey::NextTxId => "_t.nti",
+            MetaKey::Validators => "_m.val",
         }
     }
 
@@ -90,6 +95,7 @@ mod tests {
         MetaKey::LegacyIndexesUnique,
         MetaKey::LastCommittedVersion,
         MetaKey::NextTxId,
+        MetaKey::Validators,
     ];
 
     #[test]

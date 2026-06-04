@@ -51,6 +51,17 @@ pub enum DbError {
     /// An error from the function engine (compile, invoke, registry).
     #[error("Function error: {0}")]
     Function(String),
+
+    /// One or more validators rejected the write with structured,
+    /// field-bound errors (S3). The inner string is a JSON-encoded
+    /// array of `{ "field": [...] | null, "code": "..." }` objects.
+    #[error("Validator rejected: {0}")]
+    ValidatorRejected(String),
+
+    /// A validator could not be invoked (missing from registry, WASM
+    /// trap, undecodable return). Fail-closed: operator/deploy fault.
+    #[error("Validator invalid: {0}")]
+    ValidatorInvalid(String),
 }
 
 impl From<CodecError> for DbError {
