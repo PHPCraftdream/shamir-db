@@ -806,3 +806,73 @@ async fn owner_on_create_function_system_stays_system() {
     );
     assert_eq!(meta.mode, 0o777);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Phase 1a: create_table + insert in one non-tx batch via `after`
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A single non-transactional batch that creates a table and inserts
+/// rows into it, using the `after` ordering edge to guarantee the DDL
+/// executes before the DML.
+///
+/// NOTE: the transactional variant is intentionally omitted — admin ops
+/// are not tx-aware (they bypass the MVCC pipeline), so a transactional
+/// batch mixing DDL and DML would require a separate design effort.
+#[tokio::test]
+async fn create_table_then_insert_via_after_non_tx() {
+    // Setup: db + repo (no "items" table yet).
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("testdb").await;
+    let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
+    db.add_repo("testdb", repo_config).await.unwrap();
+
+    // One batch: create_table("items") + insert into "items", with
+    // `after: ["mk"]` on the insert.
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "phase1a",
+        "queries": {
+            "mk": {
+                "create_table": "items",
+                "repo": "main"
+            },
+            "rows": {
+                "insert_into": "items",
+                "values": [
+                    {"name": "Widget", "qty": 10},
+                    {"name": "Gadget", "qty": 5}
+                ],
+                "after": ["mk"]
+            }
+        }
+    }))
+    .unwrap();
+
+    let resp = db
+        .execute("testdb", &req)
+        .await
+        .expect("batch with create_table + insert via after should succeed");
+
+    // The execution plan must have two stages: mk first, rows second.
+    assert_eq!(
+        resp.execution_plan.len(),
+        2,
+        "expected 2 stages (DDL then DML), got: {:?}",
+        resp.execution_plan
+    );
+    assert_eq!(resp.execution_plan[0], vec!["mk"]);
+    assert_eq!(resp.execution_plan[1], vec!["rows"]);
+
+    // Verify insert actually landed: read back the rows.
+    let read_req: BatchRequest = serde_json::from_value(json!({
+        "id": "verify",
+        "queries": {
+            "q": {
+                "from": "items"
+            }
+        }
+    }))
+    .unwrap();
+    let read_resp = db.execute("testdb", &read_req).await.unwrap();
+    let records = &read_resp.results["q"].records;
+    assert_eq!(records.len(), 2, "should have 2 inserted records");
+}

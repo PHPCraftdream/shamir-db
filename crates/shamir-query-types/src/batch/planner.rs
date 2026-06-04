@@ -101,7 +101,13 @@ impl BatchPlanner {
         let mut dependencies: TMap<String, TSet<String>> = new_map();
 
         for (alias, entry) in queries {
-            let deps = Self::extract_dependencies(&entry.op);
+            let mut deps = Self::extract_dependencies(&entry.op);
+
+            // Merge explicit ordering dependencies from `after`.
+            for raw in &entry.after {
+                let base = Self::extract_base_alias(raw);
+                deps.insert(base);
+            }
 
             // Validate all referenced aliases exist
             for dep in &deps {

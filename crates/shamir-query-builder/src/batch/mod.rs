@@ -709,8 +709,12 @@ impl Batch {
     /// checks:
     /// - the base alias exists as a key in `queries`
     /// - the base alias is not the referencing entry's own alias
+    ///
+    /// Also validates `after` entries: each must reference a known alias
+    /// and must not reference the entry's own alias.
     pub fn try_build(&self) -> Result<BatchRequest, BuildError> {
         for (alias, entry) in &self.queries {
+            // Validate $query refs.
             let json =
                 serde_json::to_value(&entry.op).expect("BatchOp serialization is infallible");
             let mut refs = Vec::new();
@@ -729,16 +733,47 @@ impl Batch {
                     });
                 }
             }
+
+            // Validate `after` refs.
+            for raw in &entry.after {
+                let base = extract_base_alias(raw);
+                if base == *alias {
+                    return Err(BuildError::SelfReference {
+                        alias: alias.clone(),
+                    });
+                }
+                if !self.queries.contains_key(&base) {
+                    return Err(BuildError::UnknownAlias {
+                        alias: base,
+                        referenced_by: alias.clone(),
+                    });
+                }
+            }
         }
         Ok(self.build())
     }
 
     // ── internal ───────────────────────────────────────────────────
 
+    /// Declare that `dependent` must execute AFTER `on` (ordering edge).
+    /// Use for DDL→DML ordering, e.g. an insert after a create_table.
+    pub fn after(&mut self, dependent: &Handle, on: &Handle) -> &mut Self {
+        if let Some(entry) = self.queries.get_mut(dependent.alias()) {
+            entry.after.push(on.alias().to_string());
+        }
+        self
+    }
+
     fn add_entry(&mut self, alias: impl Into<String>, op: BatchOp, return_result: bool) -> Handle {
         let alias = alias.into();
-        self.queries
-            .insert(alias.clone(), QueryEntry { op, return_result });
+        self.queries.insert(
+            alias.clone(),
+            QueryEntry {
+                op,
+                return_result,
+                after: Vec::new(),
+            },
+        );
         Handle { alias }
     }
 }

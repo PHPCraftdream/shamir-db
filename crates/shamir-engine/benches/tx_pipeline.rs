@@ -119,6 +119,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                     values: (0..n).map(|i| serde_json::json!({"i": i})).collect(),
                                 }),
                                 return_result: true,
+                                after: Vec::new(),
                             },
                         );
                         let request = BatchRequest {
@@ -185,6 +186,7 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                                     values,
                                 }),
                                 return_result: false,
+                                after: Vec::new(),
                             },
                         );
                         let request = BatchRequest {
@@ -412,6 +414,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                                 values,
                             }),
                             return_result: false,
+                            after: Vec::new(),
                         },
                     );
                     let request = BatchRequest {

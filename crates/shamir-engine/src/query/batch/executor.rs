@@ -201,15 +201,29 @@ fn and_combine(existing: Option<Filter>, rf: Filter) -> Filter {
 ///
 /// Fails fast with a clear error if any table is not found, rather than
 /// discovering it mid-execution after some operations have already run.
+///
+/// Tables/repos that are **created** by this same batch are exempted:
+/// the DDL will materialise them before the DML runs (enforced by
+/// `after` ordering edges).
 async fn validate_tables(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
 ) -> Result<(), BatchError> {
-    // Collect unique table refs (skip admin ops which don't reference tables)
+    // Phase 1: collect tables/repos being created in this batch so we
+    // can skip the existence check for them.
+    let (created_tables, created_repos) = tables_created_in_batch(queries);
+
+    // Phase 2: validate remaining table refs.
     let mut seen = shamir_types::types::common::new_set::<String>();
     for (alias, entry) in queries {
         if let Some(table_ref) = entry.op.table_ref() {
             let key = format!("{}/{}", table_ref.repo, table_ref.table);
+
+            // Skip if this table is created by the batch itself.
+            if created_tables.contains(&key) || created_repos.contains(&table_ref.repo) {
+                continue;
+            }
+
             if seen.insert(key) {
                 resolver
                     .resolve(table_ref)
@@ -225,6 +239,35 @@ async fn validate_tables(
         }
     }
     Ok(())
+}
+
+/// Scan batch entries and return:
+///  - `created_tables`: set of `"repo/table"` keys for `CreateTable` ops.
+///  - `created_repos`: set of repo names for `CreateRepo` ops (any table
+///    inside that repo is implicitly "being created").
+fn tables_created_in_batch(
+    queries: &TMap<String, QueryEntry>,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let mut created_tables = std::collections::HashSet::new();
+    let mut created_repos = std::collections::HashSet::new();
+
+    for entry in queries.values() {
+        match &entry.op {
+            BatchOp::CreateTable(ct) => {
+                let key = format!("{}/{}", ct.repo, ct.create_table);
+                created_tables.insert(key);
+            }
+            BatchOp::CreateRepo(cr) => {
+                created_repos.insert(cr.create_repo.clone());
+            }
+            _ => {}
+        }
+    }
+
+    (created_tables, created_repos)
 }
 
 /// Validate that no filter in the batch exceeds the nesting depth cap.
