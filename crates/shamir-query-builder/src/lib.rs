@@ -26,6 +26,7 @@
 extern crate self as shamir_query_builder;
 
 pub mod batch;
+pub mod ddl;
 pub mod filter;
 #[macro_use]
 pub mod macros;
