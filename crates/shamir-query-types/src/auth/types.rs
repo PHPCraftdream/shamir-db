@@ -146,6 +146,13 @@ pub struct User {
     /// Arbitrary user profile fields (for $user references in row filters).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<serde_json::Value>,
+    /// Optional database scope. When set, the user is *owned* by that
+    /// database — its owner (whoever holds `Manage` on the database) may
+    /// create/drop this user without being a global admin. `None` means a
+    /// global user, manageable only by holders of `Manage` on the root.
+    /// The scope governs *who manages the user*, not the user's own rights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 impl std::fmt::Debug for User {
@@ -155,6 +162,7 @@ impl std::fmt::Debug for User {
             .field("password_hash", &self.password_hash)
             .field("roles", &self.roles)
             .field("profile", &self.profile)
+            .field("database", &self.database)
             .finish()
     }
 }
@@ -174,6 +182,11 @@ pub struct CreateUserOp {
     pub roles: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<serde_json::Value>,
+    /// Optional database scope. When set, the created user is owned by this
+    /// database, so the database owner (a holder of `Manage` on the
+    /// database) may create it without global-admin rights. See [`User`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 impl std::fmt::Debug for CreateUserOp {
@@ -183,6 +196,7 @@ impl std::fmt::Debug for CreateUserOp {
             .field("password", &self.password)
             .field("roles", &self.roles)
             .field("profile", &self.profile)
+            .field("database", &self.database)
             .finish()
     }
 }
