@@ -3641,6 +3641,7 @@ dependencies = [
  "shamir-connect",
  "shamir-db",
  "shamir-engine",
+ "shamir-query-builder",
  "shamir-query-types",
  "shamir-server",
  "shamir-transport-tcp",
@@ -3702,6 +3703,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "shamir-engine",
+ "shamir-query-builder",
  "shamir-storage",
  "shamir-types",
  "tempfile",
@@ -3775,6 +3777,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-query-builder"
+version = "0.1.0"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "shamir-query-builder-macros",
+ "shamir-query-types",
+ "shamir-types",
+]
+
+[[package]]
+name = "shamir-query-builder-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
 name = "shamir-query-types"
 version = "0.1.0"
 dependencies = [
@@ -3843,6 +3866,7 @@ dependencies = [
  "shamir-client",
  "shamir-connect",
  "shamir-db",
+ "shamir-query-builder",
  "shamir-query-types",
  "shamir-transport-tcp",
  "shamir-transport-ws",

@@ -66,3 +66,8 @@ harness = false
 [[bench]]
 name = "json_clone"
 harness = false
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false

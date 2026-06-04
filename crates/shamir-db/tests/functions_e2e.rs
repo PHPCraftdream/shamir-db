@@ -9,13 +9,27 @@
 //!    evaluated per record.
 //! 3. **Aggregation** — a `GROUP BY` with a library aggregate
 //!    (`SelectItem::AggregateFn`, e.g. `median`).
+//!
+//! # Migration note
+//!
+//! Read/write batches are constructed with `shamir_query_builder`. The admin
+//! `create_repo` setup batch remains as raw `json!` because `create_repo` is
+//! an admin op with no builder coverage.
 
 use serde_json::json;
 
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::val::{col, func, lit};
+use shamir_query_builder::write::insert;
+use shamir_query_builder::{select, Query};
 
 /// In-memory ShamirDb with db "testdb", repo "main", table "users".
+///
+/// The `create_repo` batch is an admin op NOT covered by the builder,
+/// so it stays as raw `json!` + `serde_json::from_value`.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
@@ -37,26 +51,43 @@ async fn setup() -> ShamirDb {
 
 /// Insert four users, each with a computed `email_norm = strings/lower(email)`.
 async fn seed_users(shamir: &ShamirDb) {
-    let insert: BatchRequest = serde_json::from_value(json!({
-        "id": "seed",
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [
-                    {"name": "alice", "city": "NYC", "age": 30, "email": "A@X.COM",
-                     "email_norm": {"$fn": {"name": "strings/lower", "args": [{"$ref": ["email"]}]}}},
-                    {"name": "bob",   "city": "LA",  "age": 25, "email": "B@X.COM",
-                     "email_norm": {"$fn": {"name": "strings/lower", "args": [{"$ref": ["email"]}]}}},
-                    {"name": "carol", "city": "NYC", "age": 35, "email": "C@X.COM",
-                     "email_norm": {"$fn": {"name": "strings/lower", "args": [{"$ref": ["email"]}]}}},
-                    {"name": "dave",  "city": "LA",  "age": 25, "email": "D@X.COM",
-                     "email_norm": {"$fn": {"name": "strings/lower", "args": [{"$ref": ["email"]}]}}}
-                ]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &insert).await.unwrap();
+    let mut batch = Batch::named("seed");
+    batch.id("seed");
+    batch.insert(
+        "ins",
+        insert("users").rows([
+            doc! {
+                "name" => "alice",
+                "city" => "NYC",
+                "age" => 30,
+                "email" => "A@X.COM",
+                "email_norm" => func("strings/lower", [col("email")]),
+            },
+            doc! {
+                "name" => "bob",
+                "city" => "LA",
+                "age" => 25,
+                "email" => "B@X.COM",
+                "email_norm" => func("strings/lower", [col("email")]),
+            },
+            doc! {
+                "name" => "carol",
+                "city" => "NYC",
+                "age" => 35,
+                "email" => "C@X.COM",
+                "email_norm" => func("strings/lower", [col("email")]),
+            },
+            doc! {
+                "name" => "dave",
+                "city" => "LA",
+                "age" => 25,
+                "email" => "D@X.COM",
+                "email_norm" => func("strings/lower", [col("email")]),
+            },
+        ]),
+    );
+    let insert_batch = batch.build();
+    shamir.execute("testdb", &insert_batch).await.unwrap();
 }
 
 /// 1. Computed value on write — the persisted `email_norm` is the lowercased
@@ -66,16 +97,11 @@ async fn e2e_computed_value_persisted_on_insert() {
     let shamir = setup().await;
     seed_users(&shamir).await;
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "all": {
-                "from": "users",
-                "where": {"op": "eq", "field": ["name"], "value": "alice"}
-            }
-        }
-    }))
-    .unwrap();
+    let mut batch = Batch::new();
+    batch.id("r");
+    batch.query("all", Query::from("users").where_eq("name", "alice"));
+    let read = batch.build();
+
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["all"].records;
     assert_eq!(recs.len(), 1);
@@ -90,20 +116,14 @@ async fn e2e_filter_with_fn_call() {
     let shamir = setup().await;
     seed_users(&shamir).await;
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "match": {
-                "from": "users",
-                "where": {
-                    "op": "eq",
-                    "field": ["name"],
-                    "value": {"$fn": {"name": "strings/lower", "args": ["ALICE"]}}
-                }
-            }
-        }
-    }))
-    .unwrap();
+    let mut batch = Batch::new();
+    batch.id("r");
+    batch.query(
+        "match",
+        Query::from("users").where_eq("name", func("strings/lower", [lit("ALICE")])),
+    );
+    let read = batch.build();
+
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["match"].records;
     assert_eq!(recs.len(), 1, "only alice matches lower(\"ALICE\")");
@@ -117,23 +137,19 @@ async fn e2e_group_by_library_aggregate() {
     let shamir = setup().await;
     seed_users(&shamir).await;
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "byCity": {
-                "from": "users",
-                "select": {
-                    "items": [
-                        {"type": "field", "path": ["city"]},
-                        {"type": "aggregate_fn", "name": "median",
-                         "field": ["age"], "alias": "med_age"}
-                    ]
-                },
-                "group_by": {"fields": [["city"]]}
-            }
-        }
-    }))
-    .unwrap();
+    let mut batch = Batch::new();
+    batch.id("r");
+    batch.query(
+        "byCity",
+        Query::from("users")
+            .select([
+                select::field("city"),
+                select::agg_fn("median", "age", "med_age"),
+            ])
+            .group_by("city"),
+    );
+    let read = batch.build();
+
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let groups = &resp.results["byCity"].records;
     assert_eq!(groups.len(), 2);
@@ -152,23 +168,19 @@ async fn e2e_select_scalar_function() {
     let shamir = setup().await;
     seed_users(&shamir).await;
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "rows": {
-                "from": "users",
-                "select": {
-                    "items": [
-                        {"type": "field", "path": ["name"]},
-                        {"type": "function", "name": "strings/upper",
-                         "args": [{"$ref": ["name"]}], "alias": "up"}
-                    ]
-                },
-                "where": {"op": "eq", "field": ["name"], "value": "alice"}
-            }
-        }
-    }))
-    .unwrap();
+    let mut batch = Batch::new();
+    batch.id("r");
+    batch.query(
+        "rows",
+        Query::from("users")
+            .select([
+                select::field("name"),
+                select::func("up", "strings/upper", [col("name")]),
+            ])
+            .where_eq("name", "alice"),
+    );
+    let read = batch.build();
+
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["rows"].records;
     assert_eq!(recs.len(), 1);

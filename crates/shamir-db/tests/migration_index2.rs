@@ -8,14 +8,26 @@
 //!   4. commit_migration (final drain + bulk_populate_index2)
 //!   5. query dst — identical results + same index_used (no fall-through
 //!      to brute-force scan, no missing fields from broken interner)
+//!
+//! # Migration note
+//!
+//! Read/write batches are constructed with `shamir_query_builder`. Admin ops
+//! (`create_index`), migration ops (`start_migration`, `commit_migration`),
+//! and `computed` filters stay as raw `json!` because the builder has no
+//! coverage for them.
 
 use serde_json::json;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
+use shamir_db::query::batch::{BatchRequest, BatchResponse};
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::filter;
+use shamir_query_builder::write::Insert;
+use shamir_query_builder::Query;
 
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -26,8 +38,12 @@ async fn setup() -> ShamirDb {
     shamir
 }
 
-async fn exec(shamir: &ShamirDb, req: serde_json::Value) -> shamir_db::query::batch::BatchResponse {
+async fn exec(shamir: &ShamirDb, req: serde_json::Value) -> BatchResponse {
     let req: BatchRequest = serde_json::from_value(req).unwrap();
+    shamir.execute("testdb", &req).await.unwrap()
+}
+
+async fn exec_built(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
     shamir.execute("testdb", &req).await.unwrap()
 }
 
@@ -53,34 +69,37 @@ async fn migration_preserves_fts_index() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": ["src_repo", "docs"], "values": [{"body": "hello rust world"}]},
-                "w2": {"insert_into": ["src_repo", "docs"], "values": [{"body": "rust is great"}]},
-                "w3": {"insert_into": ["src_repo", "docs"], "values": [{"body": "hello python"}]},
-                "w4": {"insert_into": ["src_repo", "docs"], "values": [{"body": "goodbye world"}]},
-                "w5": {"insert_into": ["src_repo", "docs"], "values": [{"body": "hello world rust"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        Insert::with_repo("src_repo", "docs").row(doc! { "body" => "hello rust world" }),
+    );
+    b.insert(
+        "w2",
+        Insert::with_repo("src_repo", "docs").row(doc! { "body" => "rust is great" }),
+    );
+    b.insert(
+        "w3",
+        Insert::with_repo("src_repo", "docs").row(doc! { "body" => "hello python" }),
+    );
+    b.insert(
+        "w4",
+        Insert::with_repo("src_repo", "docs").row(doc! { "body" => "goodbye world" }),
+    );
+    b.insert(
+        "w5",
+        Insert::with_repo("src_repo", "docs").row(doc! { "body" => "hello world rust" }),
+    );
+    exec_built(&shamir, b.build()).await;
 
-    let src_resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": ["src_repo", "docs"],
-                    "where": {"op": "fts", "field": ["body"], "query": "hello world", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query(
+        "q",
+        Query::with_repo("src_repo", "docs").fts("body", "hello world", "and"),
+    );
+    let src_resp = exec_built(&shamir, b.build()).await;
     let src_records = &src_resp.results["q"].records;
     assert_eq!(
         src_records.len(),
@@ -119,19 +138,13 @@ async fn migration_preserves_fts_index() {
     )
     .await;
 
-    let dst_resp = exec(
-        &shamir,
-        json!({
-            "id": 6,
-            "queries": {
-                "q": {
-                    "from": ["dst_repo", "docs"],
-                    "where": {"op": "fts", "field": ["body"], "query": "hello world", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(6);
+    b.query(
+        "q",
+        Query::with_repo("dst_repo", "docs").fts("body", "hello world", "and"),
+    );
+    let dst_resp = exec_built(&shamir, b.build()).await;
     let dst_records = &dst_resp.results["q"].records;
     assert_eq!(
         dst_records.len(),
@@ -169,19 +182,29 @@ async fn migration_preserves_functional_index() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": ["src_repo", "docs"], "values": [{"email": "Alice@FOO.com", "name": "alice"}]},
-                "w2": {"insert_into": ["src_repo", "docs"], "values": [{"email": "BOB@bar.org", "name": "bob"}]},
-                "w3": {"insert_into": ["src_repo", "docs"], "values": [{"email": "Charlie@BAZ.net", "name": "charlie"}]},
-                "w4": {"insert_into": ["src_repo", "docs"], "values": [{"email": "alice@foo.com", "name": "alice2"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "email" => "Alice@FOO.com", "name" => "alice" }),
+    );
+    b.insert(
+        "w2",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "email" => "BOB@bar.org", "name" => "bob" }),
+    );
+    b.insert(
+        "w3",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "email" => "Charlie@BAZ.net", "name" => "charlie" }),
+    );
+    b.insert(
+        "w4",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "email" => "alice@foo.com", "name" => "alice2" }),
+    );
+    exec_built(&shamir, b.build()).await;
 
     let src_resp = exec(
         &shamir,
@@ -279,39 +302,46 @@ async fn migration_preserves_vector_index() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": ["src_repo", "docs"], "values": [{"embedding": [1.0, 0.0, 0.0], "label": "x"}]},
-                "w2": {"insert_into": ["src_repo", "docs"], "values": [{"embedding": [0.0, 1.0, 0.0], "label": "y"}]},
-                "w3": {"insert_into": ["src_repo", "docs"], "values": [{"embedding": [0.95, 0.1, 0.0], "label": "x_near"}]},
-                "w4": {"insert_into": ["src_repo", "docs"], "values": [{"embedding": [0.0, 0.0, 1.0], "label": "z"}]},
-                "w5": {"insert_into": ["src_repo", "docs"], "values": [{"embedding": [0.9, 0.05, 0.05], "label": "x_near2"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "label" => "x" }.set_json("embedding", json!([1.0, 0.0, 0.0]))),
+    );
+    b.insert(
+        "w2",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "label" => "y" }.set_json("embedding", json!([0.0, 1.0, 0.0]))),
+    );
+    b.insert(
+        "w3",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "label" => "x_near" }.set_json("embedding", json!([0.95, 0.1, 0.0]))),
+    );
+    b.insert(
+        "w4",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "label" => "z" }.set_json("embedding", json!([0.0, 0.0, 1.0]))),
+    );
+    b.insert(
+        "w5",
+        Insert::with_repo("src_repo", "docs")
+            .row(doc! { "label" => "x_near2" }.set_json("embedding", json!([0.9, 0.05, 0.05]))),
+    );
+    exec_built(&shamir, b.build()).await;
 
-    let src_resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": ["src_repo", "docs"],
-                    "where": {
-                        "op": "vector_similarity",
-                        "field": ["embedding"],
-                        "query": [1.0, 0.0, 0.0],
-                        "k": 3
-                    }
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query(
+        "q",
+        Query::with_repo("src_repo", "docs").where_(filter::vector_similarity(
+            "embedding",
+            vec![1.0, 0.0, 0.0],
+            3,
+        )),
+    );
+    let src_resp = exec_built(&shamir, b.build()).await;
     let src_records = &src_resp.results["q"].records;
     assert_eq!(src_records.len(), 3);
     let src_labels: Vec<&str> = src_records
@@ -350,24 +380,17 @@ async fn migration_preserves_vector_index() {
     )
     .await;
 
-    let dst_resp = exec(
-        &shamir,
-        json!({
-            "id": 6,
-            "queries": {
-                "q": {
-                    "from": ["dst_repo", "docs"],
-                    "where": {
-                        "op": "vector_similarity",
-                        "field": ["embedding"],
-                        "query": [1.0, 0.0, 0.0],
-                        "k": 3
-                    }
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(6);
+    b.query(
+        "q",
+        Query::with_repo("dst_repo", "docs").where_(filter::vector_similarity(
+            "embedding",
+            vec![1.0, 0.0, 0.0],
+            3,
+        )),
+    );
+    let dst_resp = exec_built(&shamir, b.build()).await;
     let dst_records = &dst_resp.results["q"].records;
     assert_eq!(dst_records.len(), 3);
     let dst_labels: Vec<&str> = dst_records

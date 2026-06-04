@@ -16,6 +16,10 @@ use serde_json::json;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
+use shamir_client::builder::batch::Batch;
+use shamir_client::builder::doc;
+use shamir_client::builder::write::upsert;
+use shamir_client::builder::Query;
 use shamir_client::{BatchRequest, Client, ConnectOptions};
 
 use shamir_server::config::{
@@ -132,14 +136,16 @@ async fn sdk_full_lifecycle() {
     assert!(resp.results.contains_key("tb"));
 
     // 4. write + read in one batch
-    let work: BatchRequest = serde_json::from_value(json!({
-        "id": "rw",
-        "queries": {
-            "ins": { "set": "items", "key": {"sku":"X1"}, "value": {"sku":"X1","qty":42} },
-            "rd":  { "from": "items" }
-        }
-    }))
-    .expect("parse work");
+    let mut batch = Batch::new();
+    batch.id("rw");
+    batch.upsert(
+        "ins",
+        upsert("items")
+            .key(json!({"sku": "X1"}))
+            .value(doc! { "sku" => "X1", "qty" => 42 }),
+    );
+    batch.query("rd", Query::from("items"));
+    let work: BatchRequest = batch.build();
     let resp = client.execute("prod", work).await.expect("rw");
     let rd = resp.results.get("rd").expect("rd alias");
     assert_eq!(rd.records.len(), 1);

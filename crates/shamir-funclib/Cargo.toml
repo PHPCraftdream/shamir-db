@@ -38,3 +38,8 @@ subtle = "2.6.1"
 argon2 = "0.5"
 
 [dev-dependencies]
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false

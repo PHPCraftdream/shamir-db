@@ -38,3 +38,14 @@ pub use error::ClientError;
 // `shamir-query-types` directly.
 pub use shamir_query_types::batch::{BatchRequest, BatchResponse};
 pub use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+
+// Re-export the fluent query builder under `shamir_client::builder` so a
+// single `shamir-client` dependency gives callers both the transport and the
+// request/response ergonomics:
+//
+//   use shamir_client::builder::{query::Query, batch::Batch};
+//   use shamir_client::builder::{filter::*, val::*, response::BatchResponseExt};
+//   let req = Batch::new().query("u", Query::from("users")).build();
+//   let resp = client.execute("db", req).await?;
+//   let users: Vec<User> = resp.rows_as("u")?;
+pub use shamir_query_builder as builder;

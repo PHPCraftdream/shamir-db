@@ -57,6 +57,7 @@ tempfile    = "3.10.1"
 serial_test = "3.3.1"
 criterion   = { version = "0.5", features = ["async_tokio", "html_reports"] }
 wat         = "1.226"
+shamir-query-builder = { path = "../shamir-query-builder" }
 
 [[bench]]
 name = "engine_perf"
@@ -66,3 +67,8 @@ harness = false
 name = "authorize_gate"
 harness = false
 
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false

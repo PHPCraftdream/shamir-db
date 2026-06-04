@@ -96,31 +96,28 @@ async fn quickstart_kv_in_default_store() {
     assert!(resp.results.contains_key("t"), "create_table ok");
 
     // Step 4a — PUT.
-    let put: BatchRequest = serde_json::from_value(json!({
-        "id": "put",
-        "queries": {
-            "p": {
-                "set": "kv",
-                "key":   { "id": "user:42" },
-                "value": { "id": "user:42", "name": "Alice", "score": 7 }
-            }
-        }
-    }))
-    .unwrap();
-    client.execute("default", put).await.expect("put");
+    let mut put_b = shamir_query_builder::batch::Batch::new();
+    put_b.id("put");
+    put_b.upsert(
+        "p",
+        shamir_query_builder::write::upsert("kv")
+            .key(json!({"id": "user:42"}))
+            .value(shamir_query_builder::doc! {
+                "id" => "user:42",
+                "name" => "Alice",
+                "score" => 7,
+            }),
+    );
+    client.execute("default", put_b.build()).await.expect("put");
 
     // Step 4b — GET by key.
-    let get: BatchRequest = serde_json::from_value(json!({
-        "id": "get",
-        "queries": {
-            "g": {
-                "from": "kv",
-                "where": { "op": "eq", "field": "id", "value": "user:42" }
-            }
-        }
-    }))
-    .unwrap();
-    let resp = client.execute("default", get).await.expect("get");
+    let mut get_b = shamir_query_builder::batch::Batch::new();
+    get_b.id("get");
+    get_b.query(
+        "g",
+        shamir_query_builder::Query::from("kv").where_eq("id", "user:42"),
+    );
+    let resp = client.execute("default", get_b.build()).await.expect("get");
     let rows = &resp.results["g"].records;
     assert_eq!(rows.len(), 1, "one row for user:42");
     assert_eq!(rows[0]["name"], "Alice");

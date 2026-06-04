@@ -325,11 +325,15 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     // the read sees the insert from the same stage when we have only one
     // table involved — but to be deterministic we issue them in two
     // separate batches as well). -----
-    let ins: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "ws-ins",
-        "queries": { "ins": { "set": "ws_items", "key": {"id":"a"}, "value": {"id":"a","n":7} } }
-    }))
-    .expect("parse batch");
+    let mut ins_batch = shamir_query_builder::batch::Batch::new();
+    ins_batch.id("ws-ins");
+    ins_batch.upsert(
+        "ins",
+        shamir_query_builder::write::upsert("ws_items")
+            .key(json!({"id": "a"}))
+            .value(shamir_query_builder::doc! { "id" => "a", "n" => 7 }),
+    );
+    let ins = ins_batch.build();
     let req_b = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
@@ -353,11 +357,10 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         other => panic!("insert failed: {:?}", other),
     }
 
-    let rd: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "ws-rd",
-        "queries": { "rd": { "from": "ws_items" } }
-    }))
-    .expect("parse batch");
+    let mut rd_batch = shamir_query_builder::batch::Batch::new();
+    rd_batch.id("ws-rd");
+    rd_batch.query("rd", shamir_query_builder::Query::from("ws_items"));
+    let rd = rd_batch.build();
     let req_c = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),

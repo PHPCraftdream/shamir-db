@@ -28,3 +28,8 @@ tokio = { version = "1.49.0", features = ["full", "test-util"] }
 [[bench]]
 name = "tx_overhead"
 harness = false
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false

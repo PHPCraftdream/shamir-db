@@ -418,18 +418,19 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     }
 
     // --- Step C: write a record, read it back ---
-    let rw: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "rw",
-        "queries": {
-            "ins": { "set": "items", "key": {"sku":"X1"}, "value": {"sku":"X1","qty":42} },
-            "rd":  { "from": "items" }
-        }
-    }))
-    .expect("parse rw batch");
+    let mut rw_batch = shamir_query_builder::batch::Batch::new();
+    rw_batch.id("rw");
+    rw_batch.upsert(
+        "ins",
+        shamir_query_builder::write::upsert("items")
+            .key(json!({"sku": "X1"}))
+            .value(shamir_query_builder::doc! { "sku" => "X1", "qty" => 42 }),
+    );
+    rw_batch.query("rd", shamir_query_builder::Query::from("items"));
     let req_c = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
-        batch: rw,
+        batch: rw_batch.build(),
     };
     let resp_c = roundtrip(&req_c, session_id, &mut next_rid, &mut w, &mut r).await;
     match resp_c {

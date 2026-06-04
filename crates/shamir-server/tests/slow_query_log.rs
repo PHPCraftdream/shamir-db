@@ -8,13 +8,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde_json::json;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_server::db_handler::{DbRequest, ShamirDbHandler, SlowQueryConfig};
 use tracing::Subscriber;
@@ -84,15 +82,13 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
         ShamirDbHandler::new(Arc::new(shamir)).with_slow_query(SlowQueryConfig { threshold_us: 1 });
 
     // 3. Run a batch — should trigger the warn line.
-    let batch: BatchRequest = serde_json::from_value(json!({
-        "id": "client-corr-99",
-        "queries": { "rd": { "from": "items" } }
-    }))
-    .expect("parse batch");
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("client-corr-99");
+    b.query("rd", shamir_query_builder::Query::from("items"));
     let req = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
-        batch,
+        batch: b.build(),
     };
     let req_bytes = rmp_serde::to_vec_named(&req).expect("encode");
     let _ = handler
@@ -146,15 +142,13 @@ async fn no_warn_when_threshold_is_zero() {
     // threshold_us = 0 → DISABLED.
     let handler = ShamirDbHandler::new(Arc::new(shamir)).with_slow_query(SlowQueryConfig::DISABLED);
 
-    let batch: BatchRequest = serde_json::from_value(json!({
-        "id": "noop",
-        "queries": { "rd": { "from": "items" } }
-    }))
-    .unwrap();
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("noop");
+    b.query("rd", shamir_query_builder::Query::from("items"));
     let req = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
-        batch,
+        batch: b.build(),
     };
     let _ = handler
         .handle(&make_session(), &rmp_serde::to_vec_named(&req).unwrap())

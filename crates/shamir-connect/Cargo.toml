@@ -9,6 +9,8 @@ repository = "https://github.com/PHPCraftdream/shamir-db"
 [lib]
 name = "shamir_connect"
 path = "src/lib.rs"
+# Doctests are banned project-wide (slow: recompile-per-example).
+doctest = false
 
 [features]
 default = ["client", "server"]

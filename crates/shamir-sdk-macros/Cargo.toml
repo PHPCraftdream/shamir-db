@@ -6,6 +6,8 @@ license = "MIT OR Apache-2.0"
 
 [lib]
 proc-macro = true
+# Doctests are banned project-wide (slow: recompile-per-example).
+doctest = false
 
 [dependencies]
 syn = { version = "2", features = ["full"] }

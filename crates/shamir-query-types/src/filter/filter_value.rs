@@ -74,9 +74,51 @@ impl FilterValue {
     }
 }
 
+impl From<i8> for FilterValue {
+    fn from(v: i8) -> Self {
+        FilterValue::Int(i64::from(v))
+    }
+}
+
+impl From<i16> for FilterValue {
+    fn from(v: i16) -> Self {
+        FilterValue::Int(i64::from(v))
+    }
+}
+
+impl From<i32> for FilterValue {
+    fn from(v: i32) -> Self {
+        FilterValue::Int(i64::from(v))
+    }
+}
+
 impl From<i64> for FilterValue {
     fn from(v: i64) -> Self {
         FilterValue::Int(v)
+    }
+}
+
+impl From<u8> for FilterValue {
+    fn from(v: u8) -> Self {
+        FilterValue::Int(i64::from(v))
+    }
+}
+
+impl From<u16> for FilterValue {
+    fn from(v: u16) -> Self {
+        FilterValue::Int(i64::from(v))
+    }
+}
+
+impl From<u32> for FilterValue {
+    fn from(v: u32) -> Self {
+        FilterValue::Int(i64::from(v))
+    }
+}
+
+impl From<f32> for FilterValue {
+    fn from(v: f32) -> Self {
+        FilterValue::Float(f64::from(v))
     }
 }
 

@@ -278,13 +278,10 @@ async fn scram_login(
 
 /// Build a simple `BatchRequest` that reads from a table.
 fn read_batch(table: &str) -> shamir_db::query::batch::BatchRequest {
-    serde_json::from_value(json!({
-        "id": "read",
-        "queries": {
-            "rd": { "from": table }
-        }
-    }))
-    .expect("parse read batch")
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("read");
+    b.query("rd", shamir_query_builder::Query::from(table));
+    b.build()
 }
 
 /// Build a batch with a single chmod op on a table.
