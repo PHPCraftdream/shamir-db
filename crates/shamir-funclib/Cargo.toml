@@ -9,6 +9,12 @@ license = "MIT OR Apache-2.0"
 # Value model — every scalar fn operates on InnerValue.
 shamir-types = { path = "../shamir-types" }
 
+# Canonical-key serialisation for the order-independent record hash (/crypto
+# canonical_hash). serde gives the `Serialize` bound on map keys; rmp-serde
+# turns a key into its deterministic byte form for sorting.
+serde = { version = "1.0.217", features = ["derive"] }
+rmp-serde = "1.3.0"
+
 # Numeric (/math, /cast)
 rust_decimal = { version = "1.40.0", features = ["serde", "maths"] }
 num-bigint = { version = "0.4", features = ["serde"] }
