@@ -599,6 +599,53 @@ impl AdminExecutor for ShamirAdminExecutor {
                             json!({"indexes": indexes, "table": table, "repo": repo}),
                         ))
                     }
+                    ListOp::Functions { folder } => {
+                        let mut names = self
+                            .shamir
+                            .list_functions()
+                            .await
+                            .map_err(|e| err(e.to_string()))?;
+                        if let Some(prefix) = folder {
+                            let prefix_slash = if prefix.ends_with('/') {
+                                prefix.clone()
+                            } else {
+                                format!("{}/", prefix)
+                            };
+                            names.retain(|n| n.starts_with(&prefix_slash));
+                        }
+                        Ok(admin_result(json!({"functions": names})))
+                    }
+                    ListOp::Validators => {
+                        let validators = self.shamir.list_validators();
+                        let items: Vec<serde_json::Value> = validators
+                            .iter()
+                            .map(|(id, name)| {
+                                let bound = self.shamir.validators().bound_tables(id);
+                                json!({
+                                    "id": id.to_string(),
+                                    "name": name,
+                                    "bound_in": bound,
+                                })
+                            })
+                            .collect();
+                        Ok(admin_result(json!({"validators": items})))
+                    }
+                    ListOp::FunctionFolders { parent } => {
+                        let mut folders = self
+                            .shamir
+                            .list_function_folders()
+                            .await
+                            .map_err(|e| err(e.to_string()))?;
+                        if let Some(prefix) = parent {
+                            let prefix_slash = if prefix.ends_with('/') {
+                                prefix.clone()
+                            } else {
+                                format!("{}/", prefix)
+                            };
+                            folders.retain(|f| f.starts_with(&prefix_slash));
+                        }
+                        Ok(admin_result(json!({"function_folders": folders})))
+                    }
                 }
             }
 
@@ -1498,14 +1545,16 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .await
                     .map_err(|e| err(e.to_string()))?;
 
-                // Full folder-meta persistence is deferred (#118);
-                // for now the op validates the path and confirms
-                // success. Functions can still be created under the
-                // folder path (the funclib already resolves
-                // slash-namespaced names).
+                // mkdir -p: create all prefix folders that don't yet exist.
+                let created = self
+                    .shamir
+                    .create_function_folder_as(&op.create_function_folder, self.actor.clone())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
 
                 Ok(admin_result(json!({
                     "created_function_folder": op.create_function_folder,
+                    "created": created,
                 })))
             }
 

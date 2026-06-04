@@ -38,6 +38,10 @@ const TABLE_GROUPS: &str = "groups";
 /// Validator catalogue: one record per user-defined WASM validator so
 /// the validator survives a restart (S1).
 const TABLE_VALIDATORS: &str = "validators";
+/// Function folder catalogue: one record per explicitly created folder
+/// (e.g. `"reports/daily"`). Key is the slash-joined path. Persists
+/// ResourceMeta (owner/group/mode) so folder ACLs survive a restart (#118).
+const TABLE_FUNCTION_FOLDERS: &str = "function_folders";
 
 /// Configuration for the system store.
 #[derive(Clone)]
@@ -73,7 +77,8 @@ impl SystemStore {
             .add_table(TableConfig::new(TABLE_ROLES))
             .add_table(TableConfig::new(TABLE_FUNCTIONS))
             .add_table(TableConfig::new(TABLE_GROUPS))
-            .add_table(TableConfig::new(TABLE_VALIDATORS));
+            .add_table(TableConfig::new(TABLE_VALIDATORS))
+            .add_table(TableConfig::new(TABLE_FUNCTION_FOLDERS));
 
         db.add_repo(repo_config).await?;
 
@@ -763,6 +768,101 @@ impl SystemStore {
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTIONS),
             key: json!({"name": name}),
+            value: record.clone(),
+        };
+        table.execute_set(&op).await?;
+        table.interner().persist().await?;
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Function folder catalogue (#118)
+    // ========================================================================
+
+    /// Persist a function folder catalogue entry. Upsert keyed by `path`
+    /// (slash-joined, e.g. `"reports/daily"`). Injects `owner`/`group`/`mode`
+    /// from `meta` into the record.
+    pub async fn save_function_folder(
+        &self,
+        path_key: &str,
+        record: &serde_json::Value,
+        meta: &ResourceMeta,
+    ) -> DbResult<()> {
+        let mut rec = record.clone();
+        meta.inject_into(&mut rec);
+        let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
+            key: json!({"path": path_key}),
+            value: rec,
+        };
+        table.execute_set(&op).await?;
+        table.interner().persist().await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Remove a function folder catalogue entry by path key.
+    pub async fn remove_function_folder(&self, path_key: &str) -> DbResult<()> {
+        let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let op = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
+            where_clause: crate::query::filter::Filter::Eq {
+                field: vec!["path".to_string()],
+                value: crate::query::filter::FilterValue::String(path_key.to_string()),
+            },
+        };
+        table.execute_delete(&op, &ctx).await?;
+        // Durable DDL — see save_repository.
+        table.data_store().flush().await?;
+        Ok(())
+    }
+
+    /// Load every persisted function folder catalogue record.
+    pub async fn load_function_folders(&self) -> DbResult<Vec<serde_json::Value>> {
+        let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_FUNCTION_FOLDERS);
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records)
+    }
+
+    /// Load a single function folder catalogue record by path key.
+    pub async fn load_function_folder(
+        &self,
+        path_key: &str,
+    ) -> DbResult<Option<serde_json::Value>> {
+        let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
+        let interner = table.interner().get().await?;
+        let refs = crate::types::common::new_map();
+        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+        let query = crate::query::read::ReadQuery::new(TABLE_FUNCTION_FOLDERS).filter(
+            crate::query::filter::Filter::Eq {
+                field: vec!["path".to_string()],
+                value: crate::query::filter::FilterValue::String(path_key.to_string()),
+            },
+        );
+        let result = table.read(&query, &ctx).await?;
+        Ok(result.records.into_iter().next())
+    }
+
+    /// Persist a replacement function folder record (for `set_resource_meta`).
+    pub async fn save_function_folder_meta(
+        &self,
+        path_key: &str,
+        record: &serde_json::Value,
+    ) -> DbResult<()> {
+        let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
+        let op = crate::query::write::SetOp {
+            set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
+            key: json!({"path": path_key}),
             value: record.clone(),
         };
         table.execute_set(&op).await?;

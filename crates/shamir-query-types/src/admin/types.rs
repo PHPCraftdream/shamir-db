@@ -451,7 +451,7 @@ pub struct CreateFunctionFolderOp {
     pub create_function_folder: Vec<String>,
 }
 
-/// List databases / repos / tables / indexes.
+/// List databases / repos / tables / indexes / functions / validators / function_folders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "list")]
 pub enum ListOp {
@@ -474,4 +474,19 @@ pub enum ListOp {
     Users,
     #[serde(rename = "roles")]
     Roles,
+    /// List all registered functions. Optionally filter by folder prefix.
+    #[serde(rename = "functions")]
+    Functions {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        folder: Option<String>,
+    },
+    /// List all registered validators (id + name + bound tables).
+    #[serde(rename = "validators")]
+    Validators,
+    /// List explicitly created function folders. Optionally filter by parent.
+    #[serde(rename = "function_folders")]
+    FunctionFolders {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+    },
 }
