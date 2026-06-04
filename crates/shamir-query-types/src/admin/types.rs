@@ -272,6 +272,155 @@ pub struct MigrationStatusOp {
     pub migration_status: String,
 }
 
+// ============================================================================
+// FUNCTION DDL
+// ============================================================================
+
+/// Create (or replace) a stored function from Rust source or pre-compiled WASM.
+///
+/// Exactly one of `source` or `wasm` must be provided. `wasm` is the raw
+/// binary bytes (base64-encoded on the wire).
+///
+/// ```json
+/// { "create_function": "my_fn", "source": "pub fn shamir_call …", "replace": false }
+/// { "create_function": "my_fn", "wasm": "<base64>", "replace": true }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateFunctionOp {
+    pub create_function: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// Drop a stored function by name.
+///
+/// ```json
+/// { "drop_function": "my_fn" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DropFunctionOp {
+    pub drop_function: String,
+}
+
+/// Rename a stored function.
+///
+/// ```json
+/// { "rename_function": "old_name", "to": "new_name" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameFunctionOp {
+    pub rename_function: String,
+    pub to: String,
+}
+
+// ============================================================================
+// VALIDATOR DDL
+// ============================================================================
+
+/// Create (or replace) a validator from Rust source or pre-compiled WASM.
+///
+/// ```json
+/// { "create_validator": "v_age", "source": "pub fn shamir_call …", "replace": false }
+/// { "create_validator": "v_age", "wasm": "<base64>", "replace": true }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateValidatorOp {
+    pub create_validator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// Drop a validator by name.
+///
+/// ```json
+/// { "drop_validator": "v_age" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DropValidatorOp {
+    pub drop_validator: String,
+}
+
+/// Rename a validator.
+///
+/// ```json
+/// { "rename_validator": "old_name", "to": "new_name" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RenameValidatorOp {
+    pub rename_validator: String,
+    pub to: String,
+}
+
+/// Bind a validator to a table on specified write operations.
+///
+/// ```json
+/// {
+///   "bind_validator": "v_age",
+///   "table": { "db": "testdb", "repo": "main", "table": "users" },
+///   "ops": ["insert", "update"],
+///   "priority": 1500
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BindValidatorOp {
+    pub bind_validator: String,
+    pub db: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+    pub table: String,
+    pub ops: Vec<crate::WriteOp>,
+    pub priority: u16,
+}
+
+/// Unbind a validator from a table.
+///
+/// ```json
+/// { "unbind_validator": "v_age", "table": { "db": "testdb", "repo": "main", "table": "users" } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnbindValidatorOp {
+    pub unbind_validator: String,
+    pub db: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+    pub table: String,
+}
+
+/// List validator bindings for a table.
+///
+/// ```json
+/// { "list_validators": "users", "db": "testdb", "repo": "main" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListValidatorsOp {
+    pub list_validators: String,
+    pub db: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+}
+
+// ============================================================================
+// FUNCTION FOLDER DDL
+// ============================================================================
+
+/// Create a function folder by path segments.
+///
+/// ```json
+/// { "create_function_folder": ["reports", "daily"] }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateFunctionFolderOp {
+    pub create_function_folder: Vec<String>,
+}
+
 /// List databases / repos / tables / indexes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "list")]

@@ -8,8 +8,10 @@ pub use access::{
     GroupRef, RemoveGroupMemberOp, ResourceRef,
 };
 pub use types::{
-    AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, CommitMigrationOp, CreateDbOp,
-    CreateIndexOp, CreateRepoOp, CreateTableOp, DropDbOp, DropIndexOp, DropRepoOp, DropTableOp,
-    GetBufferConfigOp, ListOp, MigrationStatusOp, RollbackMigrationOp, SetBufferConfigOp,
-    StartMigrationOp,
+    AlterBufferConfigOp, BindValidatorOp, BufferConfigDto, BufferConfigPatch, CommitMigrationOp,
+    CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp, CreateIndexOp, CreateRepoOp,
+    CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropIndexOp, DropRepoOp,
+    DropTableOp, DropValidatorOp, GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp,
+    RenameFunctionOp, RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
+    UnbindValidatorOp,
 };

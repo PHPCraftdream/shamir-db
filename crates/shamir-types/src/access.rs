@@ -178,6 +178,19 @@ impl ResourceMeta {
         }
     }
 
+    /// Open-mode meta owned by the given actor.
+    ///
+    /// Same as [`open`](Self::open) but stamps the real creator as owner
+    /// instead of `System`. Group stays `None`, mode stays `0o777` — no
+    /// enforcement change, only ownership attribution.
+    pub fn owned_by(actor: Actor) -> Self {
+        Self {
+            owner: actor,
+            group: None,
+            mode: Mode::OPEN,
+        }
+    }
+
     /// Inject `owner`/`group`/`mode` fields into a JSON catalogue record
     /// for persistence. Safe to call on any `serde_json::Value::Object`.
     pub fn inject_into(&self, rec: &mut serde_json::Value) {
@@ -291,6 +304,14 @@ pub enum ResourcePath {
     },
     /// The container under which user-defined functions are created.
     FunctionNamespace,
+    /// A folder within the function namespace, addressed by path segments.
+    ///
+    /// For example, the folder `reports/daily` is represented as
+    /// `FunctionFolder { path: vec!["reports".into(), "daily".into()] }`.
+    /// A function `reports/daily/orders` lives *inside* this folder.
+    FunctionFolder {
+        path: Vec<String>,
+    },
     Function {
         name: String,
     },
@@ -358,6 +379,13 @@ impl ResourcePath {
     pub fn function(name: impl Into<String>) -> Self {
         ResourcePath::Function { name: name.into() }
     }
+    /// Construct a function-folder path from path segments.
+    ///
+    /// An empty `segments` vec is treated as the function namespace root
+    /// (callers should prefer [`FunctionNamespace`] directly).
+    pub fn function_folder(segments: Vec<String>) -> Self {
+        ResourcePath::FunctionFolder { path: segments }
+    }
     /// Construct a user path.
     pub fn user(name: impl Into<String>) -> Self {
         ResourcePath::User { name: name.into() }
@@ -390,7 +418,26 @@ impl ResourcePath {
                 table.clone(),
             )),
             ResourcePath::FunctionNamespace => Some(ResourcePath::Root),
-            ResourcePath::Function { .. } => Some(ResourcePath::FunctionNamespace),
+            ResourcePath::FunctionFolder { path } => {
+                if path.len() > 1 {
+                    Some(ResourcePath::function_folder(
+                        path[..path.len() - 1].to_vec(),
+                    ))
+                } else {
+                    // Single-segment or empty folder → namespace root.
+                    Some(ResourcePath::FunctionNamespace)
+                }
+            }
+            ResourcePath::Function { name } => {
+                if let Some(pos) = name.rfind('/') {
+                    // Slash-qualified name: derive the folder from the prefix.
+                    let segments: Vec<String> =
+                        name[..pos].split('/').map(|s| s.to_string()).collect();
+                    Some(ResourcePath::function_folder(segments))
+                } else {
+                    Some(ResourcePath::FunctionNamespace)
+                }
+            }
             ResourcePath::User { .. } | ResourcePath::Group { .. } => Some(ResourcePath::Root),
         }
     }
@@ -428,6 +475,7 @@ impl fmt::Display for ResourcePath {
                 index,
             } => write!(f, "db://{db}/{store}/{table}.idx/{index}"),
             ResourcePath::FunctionNamespace => f.write_str("fn://"),
+            ResourcePath::FunctionFolder { path } => write!(f, "fn://{}/", path.join("/")),
             ResourcePath::Function { name } => write!(f, "fn://{name}"),
             ResourcePath::User { name } => write!(f, "user://{name}"),
             ResourcePath::Group { name } => write!(f, "group://{name}"),
@@ -560,6 +608,7 @@ mod tests {
             ResourcePath::record("d", "s", "t", "k"),
             ResourcePath::index("d", "s", "t", "i"),
             ResourcePath::FunctionNamespace,
+            ResourcePath::function_folder(vec!["reports".to_string()]),
             ResourcePath::function("f"),
             ResourcePath::user("u"),
             ResourcePath::group("g"),
@@ -919,5 +968,79 @@ mod tests {
         assert!(permits(&Actor::User(99), &meta, Action::Read, false));
         assert!(permits(&Actor::User(99), &meta, Action::Write, false));
         assert!(permits(&Actor::User(99), &meta, Action::Execute, false));
+    }
+
+    // ========================================================================
+    // FunctionFolder tests (#118)
+    // ========================================================================
+
+    #[test]
+    fn function_folder_parent_chain_for_folder_qualified_function() {
+        // reports/daily/orders → folder ["reports","daily"] → ["reports"] → FunctionNamespace → Root
+        let func = ResourcePath::function("reports/daily/orders");
+        let folder2 = func.parent().unwrap();
+        assert_eq!(
+            folder2,
+            ResourcePath::function_folder(vec!["reports".to_string(), "daily".to_string(),])
+        );
+        let folder1 = folder2.parent().unwrap();
+        assert_eq!(
+            folder1,
+            ResourcePath::function_folder(vec!["reports".to_string()])
+        );
+        let ns = folder1.parent().unwrap();
+        assert_eq!(ns, ResourcePath::FunctionNamespace);
+        let root = ns.parent().unwrap();
+        assert_eq!(root, ResourcePath::Root);
+        assert_eq!(root.parent(), None);
+    }
+
+    #[test]
+    fn single_segment_function_parent_is_namespace() {
+        // A function without `/` has FunctionNamespace as parent (unchanged).
+        let func = ResourcePath::function("my_fn");
+        assert_eq!(func.parent().unwrap(), ResourcePath::FunctionNamespace);
+    }
+
+    #[test]
+    fn function_folder_ancestors_order() {
+        let func = ResourcePath::function("reports/daily/orders");
+        let ancestors = func.ancestors();
+        assert_eq!(
+            ancestors,
+            vec![
+                ResourcePath::function_folder(vec!["reports".to_string(), "daily".to_string(),]),
+                ResourcePath::function_folder(vec!["reports".to_string()]),
+                ResourcePath::FunctionNamespace,
+                ResourcePath::Root,
+            ]
+        );
+    }
+
+    #[test]
+    fn function_folder_display() {
+        let folder =
+            ResourcePath::function_folder(vec!["reports".to_string(), "daily".to_string()]);
+        assert_eq!(folder.to_string(), "fn://reports/daily/");
+
+        let single = ResourcePath::function_folder(vec!["utils".to_string()]);
+        assert_eq!(single.to_string(), "fn://utils/");
+    }
+
+    #[test]
+    fn function_folder_constructor() {
+        let folder = ResourcePath::function_folder(vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            folder,
+            ResourcePath::FunctionFolder {
+                path: vec!["a".to_string(), "b".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn empty_function_folder_parent_is_namespace() {
+        let folder = ResourcePath::function_folder(vec![]);
+        assert_eq!(folder.parent().unwrap(), ResourcePath::FunctionNamespace);
     }
 }
