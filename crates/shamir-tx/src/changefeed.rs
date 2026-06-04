@@ -381,6 +381,46 @@ pub fn project_event(
     })
 }
 
+/// Assemble a [`ChangelogEvent`] from pre-built record changes for a
+/// **non-transactional** write batch.
+///
+/// The transactional [`project_event`] reads its changes out of a
+/// committed [`crate::TxContext`]'s staging snapshot. Non-tx writes
+/// (`execute_insert` / `execute_update` / `execute_set` / `execute_delete`)
+/// never build a `TxContext`; they apply mutations directly to the table
+/// and already hold the `(key, value)` pairs they wrote. This constructor
+/// lets that path emit an identically-shaped event without a tx.
+///
+/// `commit_version` MUST be allocated from the SAME per-repo
+/// [`crate::RepoTxGate`] the commit pipeline uses, so non-tx and tx events
+/// share one monotonic version sequence per repo. `tx_id` is `0` — a non-tx
+/// write has no transaction id (the field is retained for shape parity).
+///
+/// Returns `None` for an empty `changes` vector — an empty footprint emits
+/// nothing, matching [`project_event`].
+pub fn nontx_event(
+    repo: &str,
+    commit_version: u64,
+    actor: Actor,
+    changes: Vec<RecordChange>,
+) -> Option<ChangelogEvent> {
+    if changes.is_empty() {
+        return None;
+    }
+    let timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    Some(ChangelogEvent {
+        repo: repo.to_string(),
+        commit_version,
+        tx_id: 0,
+        actor,
+        timestamp_ns,
+        changes,
+    })
+}
+
 /// Serialise an event to msgpack for the journal store.
 fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, String> {
     rmp_serde::to_vec(ev)

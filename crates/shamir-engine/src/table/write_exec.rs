@@ -248,6 +248,16 @@ impl TableManager {
         self.interner().persist().await?;
         self.counter().persist().await?;
 
+        // Changefeed (Phase 3b follow-up): emit one Put per inserted record.
+        // `inner_values` are the exact bytes stored; `ids` are their keys, in
+        // the same order. Best-effort, non-blocking — never fails the write.
+        let changes: Vec<_> = ids
+            .iter()
+            .zip(inner_values.iter())
+            .filter_map(|(id, iv)| self.put_change(*id, iv))
+            .collect();
+        self.emit_nontx_changefeed(changes).await;
+
         let affected = records.len() as u64;
         Ok(WriteResult {
             affected,
@@ -390,6 +400,9 @@ impl TableManager {
 
         let mut affected: u64 = 0;
         let mut result_records: Vec<json::Value> = Vec::new();
+        // Changefeed (Phase 3b follow-up): collect (id, new_value) for each
+        // changed record so a Put can be emitted after the batch is durable.
+        let mut changefeed_puts: Vec<(RecordId, InnerValue)> = Vec::new();
         let return_mode = op
             .select
             .as_ref()
@@ -441,6 +454,7 @@ impl TableManager {
 
                 self.set(*id, &new_record).await?;
                 affected += 1;
+                changefeed_puts.push((*id, new_record.clone()));
             }
 
             if wants_records {
@@ -466,6 +480,13 @@ impl TableManager {
             self.interner().persist().await?;
             self.counter().persist().await?;
         }
+
+        // Changefeed: emit one Put per changed record (best-effort).
+        let changes: Vec<_> = changefeed_puts
+            .iter()
+            .filter_map(|(id, iv)| self.put_change(*id, iv))
+            .collect();
+        self.emit_nontx_changefeed(changes).await;
 
         Ok(WriteResult {
             affected,
@@ -657,9 +678,13 @@ impl TableManager {
         }
 
         let mut affected: u64 = 0;
+        // Changefeed (Phase 3b follow-up): record the ids actually removed
+        // (a `delete` that found no record contributes no event).
+        let mut deleted_ids: Vec<RecordId> = Vec::new();
         for id in to_delete {
             if self.delete(id).await? {
                 affected += 1;
+                deleted_ids.push(id);
             }
         }
 
@@ -673,6 +698,13 @@ impl TableManager {
         if affected > 0 {
             self.counter().persist().await?;
         }
+
+        // Changefeed: emit one Delete per removed record (best-effort).
+        let changes: Vec<_> = deleted_ids
+            .iter()
+            .map(|id| self.delete_change(*id))
+            .collect();
+        self.emit_nontx_changefeed(changes).await;
 
         Ok(WriteResult {
             affected,
@@ -789,7 +821,10 @@ impl TableManager {
         let new_inner = json_value_to_inner(&resolved_value, interner)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
-        let (created, result_record) = if let Some((id, existing)) = found {
+        // Changefeed (Phase 3b follow-up): the upsert always ends in a Put of
+        // the stored record — `(id, stored_value)` captured from whichever
+        // branch ran (update-merge or fresh insert).
+        let (created, result_record, changefeed_put) = if let Some((id, existing)) = found {
             // Update: merge new value into existing
             let new_map = match &new_inner {
                 InnerValue::Map(m) => m,
@@ -813,7 +848,8 @@ impl TableManager {
             .map_err(validator_failure_to_db_error)?;
 
             self.set(id, &merged).await?;
-            (false, inner_to_json_value(&merged, interner)?)
+            let json = inner_to_json_value(&merged, interner)?;
+            (false, json, (id, merged))
         } else {
             // S3: run validators (Upsert — no existing → insert path).
             // TODO actor threading — use Actor::System for now.
@@ -832,7 +868,7 @@ impl TableManager {
                 }
             };
             obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-            (true, json::Value::Object(obj))
+            (true, json::Value::Object(obj), (id, new_inner.clone()))
         };
 
         let mut result_obj = match result_record {
@@ -848,6 +884,11 @@ impl TableManager {
         // Persist any newly interned keys
         self.interner().persist().await?;
         self.counter().persist().await?;
+
+        // Changefeed: emit the single Put (best-effort, non-blocking).
+        let (put_id, put_val) = changefeed_put;
+        let changes: Vec<_> = self.put_change(put_id, &put_val).into_iter().collect();
+        self.emit_nontx_changefeed(changes).await;
 
         Ok(WriteResult {
             affected: 1,

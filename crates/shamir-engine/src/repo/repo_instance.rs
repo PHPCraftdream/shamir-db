@@ -182,14 +182,36 @@ impl RepoInstance {
         let mvcc = Arc::new(shamir_tx::MvccStore::new(
             Arc::clone(&data_store),
             history_store,
-            gate,
+            Arc::clone(&gate),
         ));
 
         let token = table_token_for(table_name);
         let _ = self.per_table_mvcc.insert(token, Arc::clone(&mvcc));
 
         let tbl = TableManager::create(table_name.to_string(), data_store, info_store).await?;
-        Ok(tbl.with_mvcc_store(mvcc))
+        let tbl = tbl.with_mvcc_store(mvcc);
+
+        // Changefeed (Phase 3b follow-up): wire the non-tx write path to the
+        // per-repo changefeed so non-transactional insert/update/set/delete
+        // emit `ChangelogEvent`s too — not just the tx commit pipeline. The
+        // table is handed the SAME `gate` the commit pipeline uses, so non-tx
+        // and tx `commit_version`s share one monotonic sequence per repo. The
+        // feed is "always on" by design, so resolving it here (eagerly, once
+        // per table) is consistent with that contract; an init failure is
+        // logged and the table simply runs without non-tx changefeed (the tx
+        // path still emits via its own lazy resolution).
+        match self.changefeed().await {
+            Ok(h) => Ok(tbl.with_changefeed(self.name.clone(), Arc::clone(&gate), h.feed)),
+            Err(e) => {
+                log::warn!(
+                    "create_table_context: changefeed unavailable for repo {} table {}: {e}; \
+                     non-tx writes on this table will not emit changefeed events",
+                    self.name,
+                    table_name
+                );
+                Ok(tbl)
+            }
+        }
     }
 
     pub fn list_table_names(&self) -> Vec<String> {
