@@ -78,6 +78,14 @@ fn execute(db: &str, body: serde_json::Value) -> DbRequest {
     }
 }
 
+fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
+    DbRequest::Execute {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        db: db.to_string(),
+        batch,
+    }
+}
+
 fn expect_error(res: DbResponse) -> (String, String) {
     match res {
         DbResponse::Error { code, message } => (code, message),
@@ -428,13 +436,10 @@ async fn read_op_passes_without_hmac() {
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": { "r": { "from": "items" } }
-        }),
-    );
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id(1);
+    b.query("r", shamir_query_builder::Query::from("items"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let resp = expect_batch_ok(res);
     assert_eq!(resp.results["r"].records.len(), 0);

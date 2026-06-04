@@ -15,6 +15,10 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::write::upsert;
+use shamir_query_builder::Query;
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 
 // ---------- fixtures (mirror tests/db_handler.rs) ----------
@@ -54,10 +58,6 @@ fn encode(req: &DbRequest) -> Vec<u8> {
 fn decode(bytes: &[u8]) -> DbResponse {
     rmp_serde::from_slice(bytes).expect("decode response")
 }
-fn parse_batch(v: serde_json::Value) -> BatchRequest {
-    serde_json::from_value(v).expect("parse batch")
-}
-
 fn tx_begin(db: &str, repo: &str) -> DbRequest {
     DbRequest::TxBegin {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
@@ -67,17 +67,16 @@ fn tx_begin(db: &str, repo: &str) -> DbRequest {
     }
 }
 
-fn tx_execute(db: &str, tx_handle: u64, body: serde_json::Value) -> DbRequest {
+fn tx_execute_built(db: &str, tx_handle: u64, batch: BatchRequest) -> DbRequest {
     DbRequest::TxExecute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
         tx_handle,
-        batch: parse_batch(body),
+        batch,
     }
 }
 
-fn execute(db: &str, body: serde_json::Value) -> DbRequest {
-    let batch: BatchRequest = serde_json::from_value(body).expect("parse batch");
+fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
     DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: db.to_string(),
@@ -112,23 +111,24 @@ async fn interactive_tx_happy_path_wire() {
     };
 
     // EXECUTE(write) — two rows via `set`.
+    let mut wb = Batch::new();
+    wb.id("w");
+    wb.return_only(std::iter::empty::<String>());
+    wb.upsert(
+        "s1",
+        upsert("items")
+            .key(json!({"id": "a"}))
+            .value(doc! { "id" => "a", "qty" => 3 }),
+    );
+    wb.upsert(
+        "s2",
+        upsert("items")
+            .key(json!({"id": "b"}))
+            .value(doc! { "id" => "b", "qty" => 5 }),
+    );
     let wres = decode(
         &handler
-            .handle(
-                &s,
-                &encode(&tx_execute(
-                    "app",
-                    tx_handle,
-                    json!({
-                        "id": "w",
-                        "queries": {
-                            "s1": {"set": "items", "key": {"id": "a"}, "value": {"id": "a", "qty": 3}},
-                            "s2": {"set": "items", "key": {"id": "b"}, "value": {"id": "b", "qty": 5}}
-                        },
-                        "return_all": false
-                    }),
-                )),
-            )
+            .handle(&s, &encode(&tx_execute_built("app", tx_handle, wb.build())))
             .unwrap(),
     );
     let wresp = match wres {
@@ -144,24 +144,12 @@ async fn interactive_tx_happy_path_wire() {
     // tx's write_set (KNOWN LIMITATION C8, see stream_tx_tests.rs:95-100).
     // Only point reads (`read_one_tx`) do RYOW.  Assert current behaviour:
     // scan returns 0 rows while the tx is still open.
+    let mut rb = Batch::new();
+    rb.id("r");
+    rb.query("top", Query::from("items").order_by_desc("qty"));
     let rres = decode(
         &handler
-            .handle(
-                &s,
-                &encode(&tx_execute(
-                    "app",
-                    tx_handle,
-                    json!({
-                        "id": "r",
-                        "queries": {
-                            "top": {
-                                "from": "items",
-                                "order_by": {"items": [{"field": ["qty"], "direction": "desc"}]}
-                            }
-                        }
-                    }),
-                )),
-            )
+            .handle(&s, &encode(&tx_execute_built("app", tx_handle, rb.build())))
             .unwrap(),
     );
     let rresp = match rres {
@@ -195,18 +183,12 @@ async fn interactive_tx_happy_path_wire() {
     }
 
     // FRESH non-tx Execute — committed rows must be visible.
+    let mut vb = Batch::new();
+    vb.id("v");
+    vb.query("all", Query::from("items"));
     let vres = decode(
         &handler
-            .handle(
-                &s,
-                &encode(&execute(
-                    "app",
-                    json!({
-                        "id": "v",
-                        "queries": {"all": {"from": "items"}}
-                    }),
-                )),
-            )
+            .handle(&s, &encode(&execute_built("app", vb.build())))
             .unwrap(),
     );
     let vresp = match vres {
@@ -234,21 +216,17 @@ async fn interactive_tx_rollback_discards_writes() {
         other => panic!("expected TxOpened, got {:?}", other),
     };
 
+    let mut wb = Batch::new();
+    wb.id("w");
+    wb.return_only(std::iter::empty::<String>());
+    wb.upsert(
+        "s1",
+        upsert("items")
+            .key(json!({"id": "x"}))
+            .value(doc! { "id" => "x", "qty" => 9 }),
+    );
     let _ = handler
-        .handle(
-            &s,
-            &encode(&tx_execute(
-                "app",
-                tx_handle,
-                json!({
-                    "id": "w",
-                    "queries": {
-                        "s1": {"set": "items", "key": {"id": "x"}, "value": {"id": "x", "qty": 9}}
-                    },
-                    "return_all": false
-                }),
-            )),
-        )
+        .handle(&s, &encode(&tx_execute_built("app", tx_handle, wb.build())))
         .unwrap();
 
     let rb = decode(
@@ -267,15 +245,12 @@ async fn interactive_tx_rollback_discards_writes() {
         other => panic!("expected TxRolledBack, got {:?}", other),
     }
 
+    let mut vb = Batch::new();
+    vb.id("v");
+    vb.query("all", Query::from("items"));
     let vres = decode(
         &handler
-            .handle(
-                &s,
-                &encode(&execute(
-                    "app",
-                    json!({"id": "v", "queries": {"all": {"from": "items"}}}),
-                )),
-            )
+            .handle(&s, &encode(&execute_built("app", vb.build())))
             .unwrap(),
     );
     match vres {
@@ -310,21 +285,20 @@ async fn interactive_tx_foreign_session_rejected_wire() {
     };
 
     // Session B attempts TxExecute on A's handle → tx_forbidden.
+    let mut wb = Batch::new();
+    wb.id("w");
+    wb.return_only(std::iter::empty::<String>());
+    wb.upsert(
+        "s",
+        upsert("items")
+            .key(json!({"id": "a"}))
+            .value(doc! { "id" => "a", "qty" => 1 }),
+    );
     let res = decode(
         &handler
             .handle(
                 &sb,
-                &encode(&tx_execute(
-                    "app",
-                    tx_handle,
-                    json!({
-                        "id": "w",
-                        "queries": {
-                            "s": {"set": "items", "key": {"id": "a"}, "value": {"id": "a", "qty": 1}}
-                        },
-                        "return_all": false
-                    }),
-                )),
+                &encode(&tx_execute_built("app", tx_handle, wb.build())),
             )
             .unwrap(),
     );
@@ -351,18 +325,14 @@ async fn interactive_tx_foreign_session_rejected_wire() {
     }
 
     // Unknown handle from A → tx_not_found.
+    let mut xb = Batch::new();
+    xb.id("x");
+    xb.query("q", Query::from("items"));
     let res3 = decode(
         &handler
             .handle(
                 &sa,
-                &encode(&tx_execute(
-                    "app",
-                    999_999_999,
-                    json!({
-                        "id": "x",
-                        "queries": {"q": {"from": "items"}}
-                    }),
-                )),
+                &encode(&tx_execute_built("app", 999_999_999, xb.build())),
             )
             .unwrap(),
     );

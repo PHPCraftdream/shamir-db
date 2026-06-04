@@ -9,6 +9,8 @@ repository = "https://github.com/PHPCraftdream/shamir-db"
 [lib]
 name = "shamir_server"
 path = "src/lib.rs"
+# Doctests are banned project-wide (slow: recompile-per-example).
+doctest = false
 
 [[bin]]
 name = "shamir-server"
@@ -101,6 +103,8 @@ serial_test = "3"
 # E2E test in `tests/mvp_e2e.rs` runs a real client through TLS+SCRAM —
 # brought in here too so dev-only test paths see the same crate version.
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
+# Fluent request builder — used by e2e tests to construct read/write batches.
+shamir-query-builder = { path = "../shamir-query-builder" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

@@ -15,13 +15,15 @@
 
 use async_trait::async_trait;
 use serde_json::json;
-use shamir_db::query::batch::BatchRequest;
+use shamir_db::query::batch::{BatchRequest, BatchResponse};
 use shamir_db::shamir_db::{FunctionSource, SystemStoreConfig};
 use shamir_db::ShamirDb;
 use shamir_engine::function::{
     CreateFunctionOptions, FnBatch, FnCtx, FunctionError, Params, Security, ShamirFunction,
     Visibility,
 };
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::Query;
 use shamir_storage::error::DbError;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
@@ -643,6 +645,10 @@ async fn setup_db_with_people_table() -> ShamirDb {
     shamir
 }
 
+async fn exec_built(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
+    shamir.execute("testdb", &req).await.unwrap()
+}
+
 /// A WASM function inserts a document and queries it back through the
 /// `shamir_host` db_get/db_insert/db_query async host imports.
 /// Then an independent `ShamirDb::execute` Read proves the write persisted.
@@ -668,14 +674,10 @@ async fn wasm_function_inserts_and_queries() {
 
     // Independent verification: read the table directly via execute to prove
     // the write persisted (not just an in-memory echo inside the function).
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "verify",
-        "queries": {
-            "all": { "from": "people" }
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("testdb", &read_req).await.unwrap();
+    let mut b = Batch::new();
+    b.id("verify");
+    b.query("all", Query::from("people"));
+    let resp = exec_built(&shamir, b.build()).await;
     let records = &resp.results["all"].records;
     assert_eq!(
         records.len(),
@@ -707,14 +709,10 @@ async fn wasm_function_get_by_key() {
     );
 
     // Independent persistence check.
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "verify",
-        "queries": {
-            "all": { "from": "people" }
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("testdb", &read_req).await.unwrap();
+    let mut b = Batch::new();
+    b.id("verify");
+    b.query("all", Query::from("people"));
+    let resp = exec_built(&shamir, b.build()).await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["id"], json!(42));

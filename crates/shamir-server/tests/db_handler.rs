@@ -5,6 +5,12 @@
 //! `BatchResponse` API: multi-record reads, projections, ordering,
 //! pagination, multi-query batches with `$query` references, admin DDL,
 //! and the superuser permission gate.
+//!
+//! # Migration note
+//!
+//! Read/write batches are constructed with `shamir_query_builder`. Admin/DDL
+//! ops (`create_table`, `drop_table`, `set_resource_meta`, etc.) stay as raw
+//! `json!` because the builder has no coverage for them.
 
 use std::sync::Arc;
 
@@ -21,6 +27,10 @@ use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::write::{insert, upsert};
+use shamir_query_builder::Query;
 use shamir_server::db_handler::{
     AdminGlue, DbRequest, DbResponse, QueryLimitsCap, ShamirDbHandler, TxLimitsCap,
 };
@@ -74,6 +84,24 @@ fn execute(db: &str, body: serde_json::Value) -> DbRequest {
     execute_with_version(db, shamir_server::version::CURRENT_QUERY_LANG_VERSION, body)
 }
 
+/// Build a `DbRequest::Execute` from a pre-built [`BatchRequest`].
+fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
+    DbRequest::Execute {
+        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
+        db: db.to_string(),
+        batch,
+    }
+}
+
+/// Same as above but with an explicit `query_version`.
+fn execute_built_with_version(db: &str, query_version: u32, batch: BatchRequest) -> DbRequest {
+    DbRequest::Execute {
+        query_version,
+        db: db.to_string(),
+        batch,
+    }
+}
+
 /// Same as [`execute`] but with an explicit `query_version` for the
 /// version-dispatch tests.
 fn execute_with_version(db: &str, query_version: u32, body: serde_json::Value) -> DbRequest {
@@ -120,13 +148,10 @@ async fn unknown_db_returns_typed_error() {
     let handler = ShamirDbHandler::new(Arc::new(db));
     let session = user_session();
 
-    let req = execute(
-        "nope",
-        json!({
-            "id": 1,
-            "queries": { "ping": { "from": "users" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("ping", Query::from("users"));
+    let req = execute_built("nope", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     match res {
         DbResponse::Error { code, message } => {
@@ -149,37 +174,54 @@ async fn read_with_filter_order_limit_returns_full_payload() {
     let session = user_session();
 
     // Seed 5 records via Set ops in a single batch.
-    let seed = execute(
-        "prod",
-        json!({
-            "id": "seed",
-            "queries": {
-                "s1": { "set": "items", "key": {"id": "a"}, "value": {"id":"a","qty":3} },
-                "s2": { "set": "items", "key": {"id": "b"}, "value": {"id":"b","qty":1} },
-                "s3": { "set": "items", "key": {"id": "c"}, "value": {"id":"c","qty":4} },
-                "s4": { "set": "items", "key": {"id": "d"}, "value": {"id":"d","qty":1} },
-                "s5": { "set": "items", "key": {"id": "e"}, "value": {"id":"e","qty":5} }
-            },
-            "return_all": false
-        }),
+    let mut b = Batch::new();
+    b.id("seed");
+    b.return_only(std::iter::empty::<String>());
+    b.upsert(
+        "s1",
+        upsert("items")
+            .key(json!({"id": "a"}))
+            .value(doc! { "id" => "a", "qty" => 3 }),
     );
+    b.upsert(
+        "s2",
+        upsert("items")
+            .key(json!({"id": "b"}))
+            .value(doc! { "id" => "b", "qty" => 1 }),
+    );
+    b.upsert(
+        "s3",
+        upsert("items")
+            .key(json!({"id": "c"}))
+            .value(doc! { "id" => "c", "qty" => 4 }),
+    );
+    b.upsert(
+        "s4",
+        upsert("items")
+            .key(json!({"id": "d"}))
+            .value(doc! { "id" => "d", "qty" => 1 }),
+    );
+    b.upsert(
+        "s5",
+        upsert("items")
+            .key(json!({"id": "e"}))
+            .value(doc! { "id" => "e", "qty" => 5 }),
+    );
+    let seed = execute_built("prod", b.build());
     let _ = handler.handle(&session, &encode(&seed)).unwrap();
 
     // Query: qty >= 3, ordered by qty DESC, limit 2.
-    let read = execute(
-        "prod",
-        json!({
-            "id": "rd",
-            "queries": {
-                "top": {
-                    "from": "items",
-                    "where": { "op": "gte", "field": ["qty"], "value": 3 },
-                    "order_by": { "items": [{ "field": ["qty"], "direction": "desc" }] },
-                    "pagination": { "mode": "LimitOffset", "limit": 2, "offset": 0 }
-                }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id("rd");
+    b.query(
+        "top",
+        Query::from("items")
+            .where_gte("qty", 3)
+            .order_by_desc("qty")
+            .limit(2)
+            .offset(0),
     );
+    let read = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&read)).unwrap());
     let resp = match res {
         DbResponse::Batch { response } => response,
@@ -224,44 +266,52 @@ async fn multi_query_batch_with_query_reference() {
     let session = user_session();
 
     // Seed users + orders.
-    let seed = execute(
-        "prod",
-        json!({
-            "id": "seed",
-            "queries": {
-                "u1": { "set": "users", "key": {"id": 1}, "value": {"id": 1, "name": "alice"} },
-                "u2": { "set": "users", "key": {"id": 2}, "value": {"id": 2, "name": "bob"} },
-                "o1": { "set": "orders", "key": {"id": 100}, "value": {"id": 100, "user_id": 1, "amt": 9} },
-                "o2": { "set": "orders", "key": {"id": 101}, "value": {"id": 101, "user_id": 1, "amt": 4} },
-                "o3": { "set": "orders", "key": {"id": 102}, "value": {"id": 102, "user_id": 2, "amt": 7} }
-            },
-            "return_all": false
-        }),
+    let mut b = Batch::new();
+    b.id("seed");
+    b.return_only(std::iter::empty::<String>());
+    b.upsert(
+        "u1",
+        upsert("users")
+            .key(json!({"id": 1}))
+            .value(doc! { "id" => 1, "name" => "alice" }),
     );
+    b.upsert(
+        "u2",
+        upsert("users")
+            .key(json!({"id": 2}))
+            .value(doc! { "id" => 2, "name" => "bob" }),
+    );
+    b.upsert(
+        "o1",
+        upsert("orders")
+            .key(json!({"id": 100}))
+            .value(doc! { "id" => 100, "user_id" => 1, "amt" => 9 }),
+    );
+    b.upsert(
+        "o2",
+        upsert("orders")
+            .key(json!({"id": 101}))
+            .value(doc! { "id" => 101, "user_id" => 1, "amt" => 4 }),
+    );
+    b.upsert(
+        "o3",
+        upsert("orders")
+            .key(json!({"id": 102}))
+            .value(doc! { "id" => 102, "user_id" => 2, "amt" => 7 }),
+    );
+    let seed = execute_built("prod", b.build());
     let _ = handler.handle(&session, &encode(&seed)).unwrap();
 
     // alice's orders: read user, then read orders WHERE user_id = $query
     // reference into the first result.
-    let chained = execute(
-        "prod",
-        json!({
-            "id": "chained",
-            "queries": {
-                "user": {
-                    "from": "users",
-                    "where": { "op": "eq", "field": ["name"], "value": "alice" }
-                },
-                "user_orders": {
-                    "from": "orders",
-                    "where": {
-                        "op": "eq",
-                        "field": ["user_id"],
-                        "value": { "$query": "user", "path": "[0].id" }
-                    }
-                }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id("chained");
+    let user_h = b.query("user", Query::from("users").where_eq("name", "alice"));
+    b.query(
+        "user_orders",
+        Query::from("orders").where_eq("user_id", user_h.first().field("id")),
     );
+    let chained = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&chained)).unwrap());
     let resp = match res {
         DbResponse::Batch { response } => response,
@@ -326,16 +376,16 @@ async fn admin_batch_allowed_for_superuser() {
     assert!(resp.results.contains_key("mk"), "mk result present");
 
     // Verify table is usable: insert + read back.
-    let rw = execute(
-        "prod",
-        json!({
-            "id": "rw",
-            "queries": {
-                "ins": { "set": "inventory", "key": {"sku": "X1"}, "value": {"sku":"X1","stock":42} },
-                "rd":  { "from": "inventory" }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id("rw");
+    b.upsert(
+        "ins",
+        upsert("inventory")
+            .key(json!({"sku": "X1"}))
+            .value(doc! { "sku" => "X1", "stock" => 42 }),
     );
+    b.query("rd", Query::from("inventory"));
+    let rw = execute_built("prod", b.build());
     let res2 = decode(&handler.handle(&session, &encode(&rw)).unwrap());
     let resp2 = match res2 {
         DbResponse::Batch { response } => response,
@@ -386,13 +436,10 @@ async fn batch_response_echoes_request_id() {
     let handler = ShamirDbHandler::new(shamir);
     let session = user_session();
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": "client-correlation-token-42",
-            "queries": { "all": { "from": "items" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id("client-correlation-token-42");
+    b.query("all", Query::from("items"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     match res {
         DbResponse::Batch { response } => {
@@ -424,19 +471,14 @@ async fn server_query_limits_cap_clamps_max_queries() {
     // Client sends 5 queries with the default `BatchLimits` (max_queries=50).
     // Server-side cap clamps to 2 → planner returns TooManyQueries with
     // max=2, not max=50.
-    let req = execute(
-        "prod",
-        json!({
-            "id": "v",
-            "queries": {
-                "q1": { "from": "items" },
-                "q2": { "from": "items" },
-                "q3": { "from": "items" },
-                "q4": { "from": "items" },
-                "q5": { "from": "items" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id("v");
+    b.query("q1", Query::from("items"));
+    b.query("q2", Query::from("items"));
+    b.query("q3", Query::from("items"));
+    b.query("q4", Query::from("items"));
+    b.query("q5", Query::from("items"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     match res {
         DbResponse::Error { code, message } => {
@@ -463,14 +505,10 @@ async fn unsupported_query_version_rejected_before_db_work() {
 
     // 99 is not in `SUPPORTED_QUERY_LANG_VERSIONS`. Expect a typed error
     // BEFORE the batch hits the DB layer.
-    let req = execute_with_version(
-        "prod",
-        99,
-        json!({
-            "id": "v",
-            "queries": { "all": { "from": "items" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id("v");
+    b.query("all", Query::from("items"));
+    let req = execute_built_with_version("prod", 99, b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     match res {
         DbResponse::Error { code, message } => {
@@ -487,13 +525,13 @@ async fn current_query_version_accepted() {
     let handler = ShamirDbHandler::new(shamir);
     let session = user_session();
 
-    let req = execute_with_version(
+    let mut b = Batch::new();
+    b.id("v");
+    b.query("all", Query::from("items"));
+    let req = execute_built_with_version(
         "prod",
         shamir_server::version::CURRENT_QUERY_LANG_VERSION,
-        json!({
-            "id": "v",
-            "queries": { "all": { "from": "items" } }
-        }),
+        b.build(),
     );
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     assert!(
@@ -652,24 +690,16 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
     let shamir = make_db_with_table("acl", "main", "secret").await;
 
     // Seed a row so Read has something to return on the allow path.
-    shamir
-        .execute(
-            "acl",
-            &serde_json::from_value(json!({
-                "id": "seed",
-                "queries": {
-                    "s": {
-                        "set": "secret",
-                        "key": { "id": 1 },
-                        "value": { "id": 1, "data": "classified" }
-                    }
-                },
-                "return_all": false
-            }))
-            .unwrap(),
-        )
-        .await
-        .expect("seed");
+    let mut b = Batch::new();
+    b.id("seed");
+    b.return_only(std::iter::empty::<String>());
+    b.upsert(
+        "s",
+        upsert("secret")
+            .key(json!({"id": 1}))
+            .value(doc! { "id" => 1, "data" => "classified" }),
+    );
+    shamir.execute("acl", &b.build()).await.expect("seed");
 
     // Restrict the table: owner=User(1), mode=0o700 (owner rwx, nobody else).
     shamir
@@ -695,15 +725,10 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
         "eve's principal_id must differ from owner 1"
     );
 
-    let read = execute(
-        "acl",
-        json!({
-            "id": "rd",
-            "queries": {
-                "r": { "from": "secret" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id("rd");
+    b.query("r", Query::from("secret"));
+    let read = execute_built("acl", b.build());
     let res = decode(&handler.handle(&eve, &encode(&read)).unwrap());
     match res {
         DbResponse::Error { code, message } => {
@@ -765,22 +790,16 @@ async fn tx_too_large_aborts_and_removes_handle() {
     };
 
     // EXECUTE — insert one row (well above 32 bytes once MessagePack-encoded).
-    let body: BatchRequest = serde_json::from_value(json!({
-        "id": "v",
-        "queries": {
-            "ins": {
-                "insert_into": "items",
-                "repo": "main",
-                "values": [
-                    {
-                        "name": "Alice the Great",
-                        "tag": "padding-to-blow-past-32-bytes"
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("v");
+    b.insert(
+        "ins",
+        insert("items").row(doc! {
+            "name" => "Alice the Great",
+            "tag" => "padding-to-blow-past-32-bytes",
+        }),
+    );
+    let body = b.build();
     let exec = DbRequest::TxExecute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
@@ -836,21 +855,10 @@ async fn tx_under_cap_passes_through() {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
         other => panic!("expected TxOpened, got {:?}", other),
     };
-    let body: BatchRequest = serde_json::from_value(json!({
-        "id": "v",
-        "queries": {
-            "ins": {
-                "insert_into": "items",
-                "repo": "main",
-                "values": [
-                    {
-                        "name": "Alice"
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("v");
+    b.insert("ins", insert("items").row(doc! { "name" => "Alice" }));
+    let body = b.build();
     let res = decode(
         &handler
             .handle(

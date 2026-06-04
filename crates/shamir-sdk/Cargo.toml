@@ -11,3 +11,8 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 shamir-types = { path = "../shamir-types" }
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false

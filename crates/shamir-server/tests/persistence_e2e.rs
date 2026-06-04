@@ -305,30 +305,29 @@ fn create_table_req(name: &str) -> DbRequest {
 }
 
 fn write_req(table: &str, sku: &str, qty: i64) -> DbRequest {
-    let batch: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "wr",
-        "queries": {
-            "ins": { "set": table, "key": {"sku": sku}, "value": {"sku": sku, "qty": qty} }
-        }
-    }))
-    .expect("parse batch");
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("wr");
+    b.upsert(
+        "ins",
+        shamir_query_builder::write::upsert(table)
+            .key(json!({"sku": sku}))
+            .value(shamir_query_builder::doc! { "sku" => sku, "qty" => qty }),
+    );
     DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
-        batch,
+        batch: b.build(),
     }
 }
 
 fn read_req(table: &str) -> DbRequest {
-    let batch: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "rd",
-        "queries": { "rd": { "from": table } }
-    }))
-    .expect("parse batch");
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("rd");
+    b.query("rd", shamir_query_builder::Query::from(table));
     DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
-        batch,
+        batch: b.build(),
     }
 }
 

@@ -1,13 +1,23 @@
 //! End-to-end tests for new index types (FTS / Functional / Vector)
 //! via ShamirDb::execute — full wire-format pipeline.
+//!
+//! # Migration note
+//!
+//! Read/write batches are constructed with `shamir_query_builder`.
+//! Admin ops (`create_index`) and functional-index `computed` filters
+//! stay as raw `json!` because the builder has no coverage for them.
 
 use serde_json::json;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
+use shamir_db::query::batch::{BatchRequest, BatchResponse};
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::write::insert;
+use shamir_query_builder::Query;
 
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -18,8 +28,12 @@ async fn setup() -> ShamirDb {
     shamir
 }
 
-async fn exec(shamir: &ShamirDb, req: serde_json::Value) -> shamir_db::query::batch::BatchResponse {
+async fn exec(shamir: &ShamirDb, req: serde_json::Value) -> BatchResponse {
     let req: BatchRequest = serde_json::from_value(req).unwrap();
+    shamir.execute("testdb", &req).await.unwrap()
+}
+
+async fn exec_built(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
     shamir.execute("testdb", &req).await.unwrap()
 }
 
@@ -31,6 +45,7 @@ async fn exec(shamir: &ShamirDb, req: serde_json::Value) -> shamir_db::query::ba
 async fn fts_index_and_query() {
     let shamir = setup().await;
 
+    // create_index is an admin op — no builder coverage.
     exec(
         &shamir,
         json!({
@@ -48,32 +63,24 @@ async fn fts_index_and_query() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [{"body": "hello rust world"}]},
-                "w2": {"insert_into": "posts", "values": [{"body": "rust is great"}]},
-                "w3": {"insert_into": "posts", "values": [{"body": "hello python"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        insert("posts").row(doc! { "body" => "hello rust world" }),
+    );
+    b.insert(
+        "w2",
+        insert("posts").row(doc! { "body" => "rust is great" }),
+    );
+    b.insert("w3", insert("posts").row(doc! { "body" => "hello python" }));
+    exec_built(&shamir, b.build()).await;
 
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "hello world", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("q", Query::from("posts").fts("body", "hello world", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1, "expected 1 record, got {records:?}");
     assert_eq!(records[0]["body"], "hello rust world");
@@ -86,6 +93,7 @@ async fn fts_index_and_query() {
 async fn fts_or_query() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -102,32 +110,18 @@ async fn fts_or_query() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [{"body": "apple orange"}]},
-                "w2": {"insert_into": "posts", "values": [{"body": "banana pear"}]},
-                "w3": {"insert_into": "posts", "values": [{"body": "cherry grape"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert("w1", insert("posts").row(doc! { "body" => "apple orange" }));
+    b.insert("w2", insert("posts").row(doc! { "body" => "banana pear" }));
+    b.insert("w3", insert("posts").row(doc! { "body" => "cherry grape" }));
+    exec_built(&shamir, b.build()).await;
 
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "apple banana", "mode": "or"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("q", Query::from("posts").fts("body", "apple banana", "or"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 2);
 }
@@ -140,6 +134,7 @@ async fn fts_or_query() {
 async fn functional_lower_eq() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -157,14 +152,19 @@ async fn functional_lower_eq() {
     )
     .await;
 
-    exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"email": "Alice@FOO.com", "name": "alice"}]},
-            "w2": {"insert_into": "posts", "values": [{"email": "BOB@bar.org", "name": "bob"}]},
-        }
-    })).await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        insert("posts").row(doc! { "email" => "Alice@FOO.com", "name" => "alice" }),
+    );
+    b.insert(
+        "w2",
+        insert("posts").row(doc! { "email" => "BOB@bar.org", "name" => "bob" }),
+    );
+    exec_built(&shamir, b.build()).await;
 
+    // Filter::Computed has no builder constructor — stays as json!
     let resp = exec(
         &shamir,
         json!({
@@ -199,6 +199,7 @@ async fn functional_lower_eq() {
 async fn vector_hnsw_similarity() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -217,33 +218,35 @@ async fn vector_hnsw_similarity() {
     )
     .await;
 
-    exec(&shamir, json!({
-        "id": 2,
-        "queries": {
-            "w1": {"insert_into": "posts", "values": [{"embedding": [1.0, 0.0, 0.0], "label": "x"}]},
-            "w2": {"insert_into": "posts", "values": [{"embedding": [0.0, 1.0, 0.0], "label": "y"}]},
-            "w3": {"insert_into": "posts", "values": [{"embedding": [0.95, 0.1, 0.0], "label": "x_near"}]},
-        }
-    })).await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        insert("posts").row(doc! { "label" => "x" }.set_json("embedding", json!([1.0, 0.0, 0.0]))),
+    );
+    b.insert(
+        "w2",
+        insert("posts").row(doc! { "label" => "y" }.set_json("embedding", json!([0.0, 1.0, 0.0]))),
+    );
+    b.insert(
+        "w3",
+        insert("posts")
+            .row(doc! { "label" => "x_near" }.set_json("embedding", json!([0.95, 0.1, 0.0]))),
+    );
+    exec_built(&shamir, b.build()).await;
 
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {
-                        "op": "vector_similarity",
-                        "field": ["embedding"],
-                        "query": [1.0, 0.0, 0.0],
-                        "k": 2
-                    }
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query(
+        "q",
+        Query::from("posts").where_(shamir_query_builder::filter::vector_similarity(
+            "embedding",
+            vec![1.0, 0.0, 0.0],
+            2,
+        )),
+    );
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 2, "expected top-2, got {records:?}");
     let labels: Vec<&str> = records
@@ -264,31 +267,20 @@ async fn vector_hnsw_similarity() {
 async fn fts_brute_force_fallback() {
     let shamir = setup().await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 1,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [{"body": "hello world"}]},
-                "w2": {"insert_into": "posts", "values": [{"body": "no match here"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert("w1", insert("posts").row(doc! { "body" => "hello world" }));
+    b.insert(
+        "w2",
+        insert("posts").row(doc! { "body" => "no match here" }),
+    );
+    exec_built(&shamir, b.build()).await;
 
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "hello", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.query("q", Query::from("posts").fts("body", "hello", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["body"], "hello world");
@@ -305,7 +297,7 @@ async fn fts_brute_force_fallback() {
 async fn create_index_persists_metadata() {
     let shamir = setup().await;
 
-    // Create all 3 index types.
+    // Create all 3 index types — admin ops, stays as json!
     exec(
         &shamir,
         json!({
@@ -330,19 +322,11 @@ async fn create_index_persists_metadata() {
     .await;
 
     // Verify: all 3 should appear.
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "q1": {
-                    "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "test", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.query("q1", Query::from("posts").fts("body", "test", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     // Even with no data, the planner should find the FTS index and return empty results
     // via the index path (not fall through to full-scan).
     // Empty results via index → stats.index_used should be set OR empty results.
@@ -365,6 +349,7 @@ async fn create_index_persists_metadata() {
 async fn fts_stemmed_en_query() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -382,33 +367,19 @@ async fn fts_stemmed_en_query() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [{"body": "running fast"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert("w1", insert("posts").row(doc! { "body" => "running fast" }));
+    exec_built(&shamir, b.build()).await;
 
     // Query the INFLECTED form "running" — the fix stems it to "run"
     // which matches the stored stem. On the old code "running" hashed
     // raw != stored "run" hash → zero results.
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "running", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("q", Query::from("posts").fts("body", "running", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(
         records.len(),
@@ -426,6 +397,7 @@ async fn fts_stemmed_en_query() {
 async fn fts_stopwords_filtered() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -443,32 +415,18 @@ async fn fts_stopwords_filtered() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [{"body": "the cat sat"}]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert("w1", insert("posts").row(doc! { "body" => "the cat sat" }));
+    exec_built(&shamir, b.build()).await;
 
     // Query "the cat" — "the" is a stopword and gets filtered both at
     // index time and query time, so the lookup matches by "cat" only.
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {"op": "fts", "field": ["body"], "query": "the cat", "mode": "and"}
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("q", Query::from("posts").fts("body", "the cat", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(
         records.len(),
@@ -503,6 +461,7 @@ async fn fts_stopwords_filtered() {
 async fn fts_ngram_query() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -520,43 +479,27 @@ async fn fts_ngram_query() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [
-                    {"body": "hello world"},
-                    {"body": "help wanted"},
-                    {"body": "goodbye"}
-                ]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        insert("posts").rows([
+            doc! { "body" => "hello world" },
+            doc! { "body" => "help wanted" },
+            doc! { "body" => "goodbye" },
+        ]),
+    );
+    exec_built(&shamir, b.build()).await;
 
     // Query the FULL word "hello" (5 chars, NOT a single trigram).
     // The fix ngram-tokenizes the query → [hel,ell,llo]. With mode
     // "and", ALL three grams must be present in the doc. Only "hello
     // world" contains all three; "help wanted" has only "hel".
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {
-                        "op": "fts",
-                        "field": ["body"],
-                        "query": "hello",
-                        "mode": "and"
-                    }
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("q", Query::from("posts").fts("body", "hello", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(
         records.len(),
@@ -581,6 +524,7 @@ async fn fts_ngram_query() {
 async fn fts_stemmed_fr_query() {
     let shamir = setup().await;
 
+    // create_index — admin op, stays as json!
     exec(
         &shamir,
         json!({
@@ -598,41 +542,25 @@ async fn fts_stemmed_fr_query() {
     )
     .await;
 
-    exec(
-        &shamir,
-        json!({
-            "id": 2,
-            "queries": {
-                "w1": {"insert_into": "posts", "values": [
-                    {"body": "les chats noirs"},
-                    {"body": "un chien blanc"}
-                ]},
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert(
+        "w1",
+        insert("posts").rows([
+            doc! { "body" => "les chats noirs" },
+            doc! { "body" => "un chien blanc" },
+        ]),
+    );
+    exec_built(&shamir, b.build()).await;
 
     // Query the INFLECTED plural "chats" — the fix stems it to "chat"
     // which matches the stored stem. On the old code "chats" hashed
     // raw != stored "chat" hash → zero results.
-    let resp = exec(
-        &shamir,
-        json!({
-            "id": 3,
-            "queries": {
-                "q": {
-                    "from": "posts",
-                    "where": {
-                        "op": "fts",
-                        "field": ["body"],
-                        "query": "chats",
-                        "mode": "and"
-                    }
-                }
-            }
-        }),
-    )
-    .await;
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("q", Query::from("posts").fts("body", "chats", "and"));
+    let resp = exec_built(&shamir, b.build()).await;
+
     let records = &resp.results["q"].records;
     assert_eq!(
         records.len(),

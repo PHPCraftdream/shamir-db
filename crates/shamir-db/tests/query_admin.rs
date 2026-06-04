@@ -1,12 +1,23 @@
 //! End-to-end tests for admin (DDL) operations via ShamirDb::execute.
+//!
+//! # Migration note
+//!
+//! Read/write batches are constructed with `shamir_query_builder`. Admin/DDL
+//! ops (`create_repo`, `drop_repo`, `create_table`, `drop_table`,
+//! `create_index`, `drop_index`, `list`) stay as raw `json!` because the
+//! builder has no coverage for them.
 
 use serde_json::json;
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
+use shamir_db::query::batch::{BatchRequest, BatchResponse};
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::write::insert;
+use shamir_query_builder::Query;
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -17,6 +28,10 @@ async fn setup_shamir() -> ShamirDb {
 
     db.add_repo(repo_config).await.unwrap();
     shamir
+}
+
+async fn exec_built(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
+    shamir.execute("testdb", &req).await.unwrap()
 }
 
 // ============================================================================
@@ -140,20 +155,16 @@ async fn test_create_index_via_query() {
     let shamir = setup_shamir().await;
 
     // Insert data first
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "seed": {
-                "insert_into": "users",
-                "values": [
-                    {"name": "Alice", "email": "alice@test.com"},
-                    {"name": "Bob", "email": "bob@test.com"}
-                ]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &seed).await.unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "seed",
+        insert("users").rows([
+            doc! { "name" => "Alice", "email" => "alice@test.com" },
+            doc! { "name" => "Bob", "email" => "bob@test.com" },
+        ]),
+    );
+    exec_built(&shamir, b.build()).await;
 
     // Create index
     let req: BatchRequest = serde_json::from_value(json!({
@@ -174,18 +185,13 @@ async fn test_create_index_via_query() {
     assert_eq!(resp.results["idx"].records[0]["unique"], true);
 
     // Now query using the index
-    let query: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "find": {
-                "from": "users",
-                "where": {"op": "eq", "field": ["email"], "value": "alice@test.com"}
-            }
-        }
-    }))
-    .unwrap();
-
-    let resp = shamir.execute("testdb", &query).await.unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.query(
+        "find",
+        Query::from("users").where_eq("email", "alice@test.com"),
+    );
+    let resp = exec_built(&shamir, b.build()).await;
     assert_eq!(resp.results["find"].records.len(), 1);
     assert_eq!(resp.results["find"].records[0]["name"], "Alice");
 }
@@ -238,7 +244,7 @@ async fn test_ddl_then_dml_pipeline() {
     .unwrap();
     shamir.execute("app", &setup).await.unwrap();
 
-    // Step 2: Insert data + create index
+    // Step 2: Insert data + create index (mixed admin + write — keep json!)
     let populate: BatchRequest = serde_json::from_value(json!({
         "id": "populate",
         "queries": {
@@ -262,17 +268,10 @@ async fn test_ddl_then_dml_pipeline() {
     assert_eq!(resp.results["products"].records.len(), 3);
 
     // Step 3: Query using index
-    let query: BatchRequest = serde_json::from_value(json!({
-        "id": "query",
-        "queries": {
-            "cheap": {
-                "from": "products",
-                "where": {"op": "eq", "field": ["price"], "value": 10}
-            }
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("app", &query).await.unwrap();
+    let mut b = Batch::new();
+    b.id("query");
+    b.query("cheap", Query::from("products").where_eq("price", 10));
+    let resp = shamir.execute("app", &b.build()).await.unwrap();
     assert_eq!(resp.results["cheap"].records.len(), 1);
     assert_eq!(resp.results["cheap"].records[0]["name"], "Widget");
 }
@@ -285,7 +284,7 @@ async fn test_ddl_then_dml_pipeline() {
 async fn test_list_indexes() {
     let shamir = setup_shamir().await;
 
-    // Seed + create indexes
+    // Seed + create indexes (mixed admin + write — keep json!)
     let setup: BatchRequest = serde_json::from_value(json!({
         "id": 1,
         "queries": {
@@ -373,31 +372,23 @@ async fn test_create_table_then_use_it() {
     assert!(tables.contains(&json!("products")));
 
     // Actually insert data into the new table
-    let insert: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "ins": {
-                "insert_into": "products",
-                "values": [
-                    {"name": "Widget", "price": 10},
-                    {"name": "Gadget", "price": 25}
-                ]
-            }
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("testdb", &insert).await.unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.insert(
+        "ins",
+        insert("products").rows([
+            doc! { "name" => "Widget", "price" => 10 },
+            doc! { "name" => "Gadget", "price" => 25 },
+        ]),
+    );
+    let resp = exec_built(&shamir, b.build()).await;
     assert_eq!(resp.results["ins"].records.len(), 2);
 
     // Read back
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": 4,
-        "queries": {
-            "all": {"from": "products"}
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("testdb", &read).await.unwrap();
+    let mut b = Batch::new();
+    b.id(4);
+    b.query("all", Query::from("products"));
+    let resp = exec_built(&shamir, b.build()).await;
     assert_eq!(resp.results["all"].records.len(), 2);
 }
 
@@ -417,17 +408,10 @@ async fn test_drop_table() {
     assert_eq!(resp.results["dt"].records[0]["existed"], true);
 
     // Verify it's gone — insert should fail with table not found
-    let insert: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [{"name": "Alice"}]
-            }
-        }
-    }))
-    .unwrap();
-    let err = shamir.execute("testdb", &insert).await.unwrap_err();
+    let mut b = Batch::new();
+    b.id(2);
+    b.insert("ins", insert("users").row(doc! { "name" => "Alice" }));
+    let err = shamir.execute("testdb", &b.build()).await.unwrap_err();
     assert!(matches!(
         err,
         shamir_db::query::batch::BatchError::QueryError { .. }
