@@ -18,6 +18,7 @@ pub mod agg;
 pub mod compare;
 
 pub mod arrays;
+pub mod canonical;
 pub mod cast;
 pub mod crypto;
 pub mod datetime;
@@ -47,6 +48,7 @@ pub fn register_builtins() -> registry::ScalarRegistry {
     reg.in_folder("object", object::register);
     reg.in_folder("text", text::register);
     reg.in_folder("crypto", crypto::register);
+    reg.in_folder("crypto", canonical::register);
     reg
 }
 

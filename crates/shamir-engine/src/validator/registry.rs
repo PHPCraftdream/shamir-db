@@ -81,6 +81,20 @@ impl ValidatorRegistry {
         self.by_id.read(id, |_, v| v.clone())
     }
 
+    /// Swap the compiled artifact for an already-registered `id` in place,
+    /// preserving its name and table bindings. In-flight invocations keep the
+    /// `Arc` they captured (RCU). Returns `true` if the id existed.
+    ///
+    /// This is the validator counterpart of
+    /// [`FunctionRegistry::replace`](crate::function::FunctionRegistry::replace)
+    /// — used to substitute a live artifact (e.g. a native validator) for the
+    /// one materialised from the catalogue, without disturbing bindings.
+    pub fn replace_artifact(&self, id: &RecordId, compiled: Arc<dyn ShamirFunction>) -> bool {
+        self.by_id
+            .update(id, |_, v| *v = compiled.clone())
+            .is_some()
+    }
+
     /// Resolve a name to its `RecordId`.
     pub fn id_for_name(&self, name: &str) -> Option<RecordId> {
         self.name_to_id.read(name, |_, v| *v)
