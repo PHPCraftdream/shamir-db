@@ -57,10 +57,17 @@ impl MvccStore {
     ///
     /// Non-tx write. If active snapshots exist, saves the old value
     /// in history before overwriting main.
-    pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<()> {
+    ///
+    /// Returns the monotonic version assigned to this write (from the
+    /// shared `RepoTxGate` counter). The version is always allocated —
+    /// even on the fast path (no active snapshots) — so that callers
+    /// (e.g. the non-tx changefeed emitter) can stamp events with the
+    /// exact version the data landed at, without a second counter bump.
+    pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<u64> {
         if self.gate.active_snapshots_empty() {
             self.main.set(key, value).await?;
-            return Ok(());
+            let new_v = self.gate.assign_next_version();
+            return Ok(new_v);
         }
         // Archive old value if it exists.
         match self.main.get(key.clone()).await {
@@ -79,7 +86,7 @@ impl MvccStore {
         // so repeated writes to the same key advance the cached
         // version monotonically.
         self.version_cache.upsert_async(key, new_v).await;
-        Ok(())
+        Ok(new_v)
     }
 
     /// cancel-safe: NO — multi-step state mutation. The no-snapshot fast
@@ -111,16 +118,24 @@ impl MvccStore {
     ///   that opens mid-batch is honoured for the keys processed after it.
     ///
     /// Empty `items` is a no-op.
-    pub async fn set_versioned_many(&self, items: Vec<(Bytes, Bytes)>) -> DbResult<()> {
+    /// Returns the maximum version assigned across the batch (one
+    /// version per record when snapshots are active, one version for
+    /// the whole batch on the fast path). The returned value is the
+    /// commit-version a changefeed event should carry.
+    pub async fn set_versioned_many(&self, items: Vec<(Bytes, Bytes)>) -> DbResult<u64> {
         if items.is_empty() {
-            return Ok(());
+            // No records written — return 0. The caller should not emit
+            // a changefeed event for an empty batch.
+            return Ok(0);
         }
 
         // Fast path: no snapshots → one atomic batch to main, no history,
-        // no version_cache churn.
+        // no version_cache churn. Allocate ONE version for the whole batch.
         if self.gate.active_snapshots_empty() {
             let ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
-            return self.main.transact(ops).await;
+            self.main.transact(ops).await?;
+            let batch_v = self.gate.assign_next_version();
+            return Ok(batch_v);
         }
 
         // Snapshot-active path. Phase 1: per-key archive pre-reads. Like
@@ -158,11 +173,14 @@ impl MvccStore {
         // Phase 4: assign a fresh monotonic version per key (one version per
         // record, matching the per-record `set_versioned` loop) and upsert
         // it into the cache (CRIT-2: `upsert_async` advances monotonically).
+        // Track the maximum (= last) version for the caller (changefeed).
+        let mut max_v = 0u64;
         for (key, _value) in items {
             let new_v = self.gate.assign_next_version();
             self.version_cache.upsert_async(key, new_v).await;
+            max_v = new_v;
         }
-        Ok(())
+        Ok(max_v)
     }
 
     /// cancel-safe: NO — multi-step state mutation; same reasoning as
@@ -173,7 +191,11 @@ impl MvccStore {
     ///
     /// Non-tx delete. Similar to `set_versioned` — archives old value
     /// if snapshots are active.
-    pub async fn delete_versioned(&self, key: Bytes) -> DbResult<()> {
+    ///
+    /// Returns the monotonic version assigned to this delete (always
+    /// allocated, even on the fast path — see [`set_versioned`] for
+    /// rationale).
+    pub async fn delete_versioned(&self, key: Bytes) -> DbResult<u64> {
         if !self.gate.active_snapshots_empty() {
             match self.main.get(key.clone()).await {
                 Ok(old) => {
@@ -189,12 +211,12 @@ impl MvccStore {
         // dropped error here would let the caller see Ok() while the row is
         // still live in main (the delete silently never happened).
         self.main.remove(key.clone()).await?;
+        let new_v = self.gate.assign_next_version();
         if !self.gate.active_snapshots_empty() {
-            let new_v = self.gate.assign_next_version();
             // CRIT-2: see `set_versioned` for rationale.
             self.version_cache.upsert_async(key, new_v).await;
         }
-        Ok(())
+        Ok(new_v)
     }
 
     /// cancel-safe: yes — read-only. Fast path is a single `main.get`;

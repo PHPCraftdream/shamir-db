@@ -99,7 +99,6 @@ pub struct TableManager {
 #[derive(Clone)]
 struct NonTxChangefeed {
     repo: String,
-    gate: Arc<shamir_tx::RepoTxGate>,
     feed: Arc<shamir_tx::RepoChangefeed>,
 }
 
@@ -1281,6 +1280,17 @@ impl TableManager {
     /// under `tokio::select!` or `tokio::time::timeout` — use
     /// `insert_many(&[value])` for the WAL-covered single-record path.
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+        let (id, _version) = self.insert_returning_version(value).await?;
+        Ok(id)
+    }
+
+    /// Like [`insert`](Self::insert) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached.
+    pub(crate) async fn insert_returning_version(
+        &self,
+        value: &InnerValue,
+    ) -> DbResult<(RecordId, u64)> {
         let _guard = if self.index_manager.has_unique_indexes() {
             Some(self.unique_write_lock.lock().await)
         } else {
@@ -1302,11 +1312,12 @@ impl TableManager {
         let bytes = value.to_bytes().map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
-        if let Some(mvcc) = &self.mvcc_store {
-            mvcc.set_versioned(id.to_bytes(), bytes).await?;
+        let version = if let Some(mvcc) = &self.mvcc_store {
+            mvcc.set_versioned(id.to_bytes(), bytes).await?
         } else {
             self.table.data_store().set(id.to_bytes(), bytes).await?;
-        }
+            0
+        };
         self.counter.increment(1).await?;
 
         // 3. Update indexes AFTER write
@@ -1317,7 +1328,7 @@ impl TableManager {
         self.sorted_indexes.on_record_created(&id, value).await?;
         self.index2_on_insert(&id, value).await;
 
-        Ok(id)
+        Ok((id, version))
     }
 
     /// Batched insert of N records. Validates unique indexes first
@@ -1332,8 +1343,20 @@ impl TableManager {
     /// (transactional all-or-nothing on nebari / persy / redb;
     /// per-record on backends using the default loop impl).
     pub async fn insert_many(&self, values: &[InnerValue]) -> DbResult<Vec<RecordId>> {
+        let (ids, _version) = self.insert_many_returning_version(values).await?;
+        Ok(ids)
+    }
+
+    /// Like [`insert_many`](Self::insert_many) but also returns the
+    /// maximum MVCC version assigned across the batch (for changefeed
+    /// version alignment). Returns `0` when no `MvccStore` is attached
+    /// or the batch is empty.
+    pub(crate) async fn insert_many_returning_version(
+        &self,
+        values: &[InnerValue],
+    ) -> DbResult<(Vec<RecordId>, u64)> {
         if values.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
 
         // 1. Validate unique indexes for every value first. Two
@@ -1382,7 +1405,7 @@ impl TableManager {
         //    avoids. Without an MvccStore we keep the legacy batched path
         //    (one transaction = one fsync on backends that override
         //    `insert_many`).
-        let ids: Vec<RecordId> = if let Some(mvcc) = &self.mvcc_store {
+        let (ids, batch_version): (Vec<RecordId>, u64) = if let Some(mvcc) = &self.mvcc_store {
             let mut ids = Vec::with_capacity(values.len());
             let mut items = Vec::with_capacity(values.len());
             for v in values {
@@ -1396,10 +1419,11 @@ impl TableManager {
                 items.push((rid.to_bytes(), bytes));
                 ids.push(rid);
             }
-            mvcc.set_versioned_many(items).await?;
-            ids
+            let ver = mvcc.set_versioned_many(items).await?;
+            (ids, ver)
         } else {
-            self.table.insert_many(values).await?
+            let ids = self.table.insert_many(values).await?;
+            (ids, 0)
         };
 
         // 3. Open a WAL marker — records the record_ids we just
@@ -1448,7 +1472,7 @@ impl TableManager {
         //    effort signal.
         self.bump_write_counter(ids.len() as u64);
 
-        Ok(ids)
+        Ok((ids, batch_version))
     }
 
     /// Read-only access to the WAL — for recovery callsites and
@@ -1467,21 +1491,30 @@ impl TableManager {
     /// does not. Do NOT call this under `tokio::select!` or
     /// `tokio::time::timeout`.
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
+        let (removed, _version) = self.delete_returning_version(id).await?;
+        Ok(removed)
+    }
+
+    /// Like [`delete`](Self::delete) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached or the
+    /// record did not exist.
+    pub(crate) async fn delete_returning_version(&self, id: RecordId) -> DbResult<(bool, u64)> {
         // Get old value before deletion for index cleanup
         let old_value = self.table.get(id).await.ok();
         // Route through MvccStore when attached so the old bytes are
         // archived to history under active snapshots and `version_cache`
-        // is bumped. `delete_versioned` returns `()`; we treat the
-        // pre-read as the source of truth for "removed".
-        let removed = if let Some(mvcc) = &self.mvcc_store {
+        // is bumped.
+        let (removed, version) = if let Some(mvcc) = &self.mvcc_store {
             if old_value.is_some() {
-                mvcc.delete_versioned(id.to_bytes()).await?;
-                true
+                let v = mvcc.delete_versioned(id.to_bytes()).await?;
+                (true, v)
             } else {
-                false
+                (false, 0)
             }
         } else {
-            self.table.delete(id).await?
+            let r = self.table.delete(id).await?;
+            (r, 0)
         };
         if removed {
             self.counter.increment(-1).await?;
@@ -1494,7 +1527,7 @@ impl TableManager {
                 self.index2_on_delete(&id, old).await;
             }
         }
-        Ok(removed)
+        Ok((removed, version))
     }
 
     /// Set a record by RecordId - creates if not exists, updates if exists (with counter and index update)
@@ -1509,6 +1542,18 @@ impl TableManager {
     /// matters; do NOT call this under `tokio::select!` or
     /// `tokio::time::timeout`.
     pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
+        let (created, _version) = self.set_returning_version(id, value).await?;
+        Ok(created)
+    }
+
+    /// Like [`set`](Self::set) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached.
+    pub(crate) async fn set_returning_version(
+        &self,
+        id: RecordId,
+        value: &InnerValue,
+    ) -> DbResult<(bool, u64)> {
         let _guard = if self.index_manager.has_unique_indexes() {
             Some(self.unique_write_lock.lock().await)
         } else {
@@ -1537,11 +1582,12 @@ impl TableManager {
             shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
         })?;
         let created = old_value.is_none();
-        if let Some(mvcc) = &self.mvcc_store {
-            mvcc.set_versioned(id.to_bytes(), bytes).await?;
+        let version = if let Some(mvcc) = &self.mvcc_store {
+            mvcc.set_versioned(id.to_bytes(), bytes).await?
         } else {
             self.table.data_store().set(id.to_bytes(), bytes).await?;
-        }
+            0
+        };
 
         // 3. Update indexes AFTER write
         if created {
@@ -1564,7 +1610,7 @@ impl TableManager {
                 .await?;
             self.index2_on_update(&id, &old, value).await;
         }
-        Ok(created)
+        Ok((created, version))
     }
 
     /// Count records (uses stored counter for O(1) performance)
@@ -1830,13 +1876,8 @@ impl TableManager {
     /// Attached by `RepoInstance::create_table_context`. When absent, the
     /// non-tx write methods skip changefeed emission entirely (system tables
     /// / direct-constructed test tables).
-    pub fn with_changefeed(
-        mut self,
-        repo: String,
-        gate: Arc<shamir_tx::RepoTxGate>,
-        feed: Arc<shamir_tx::RepoChangefeed>,
-    ) -> Self {
-        self.changefeed = Some(NonTxChangefeed { repo, gate, feed });
+    pub fn with_changefeed(mut self, repo: String, feed: Arc<shamir_tx::RepoChangefeed>) -> Self {
+        self.changefeed = Some(NonTxChangefeed { repo, feed });
         self
     }
 
@@ -1846,17 +1887,21 @@ impl TableManager {
     /// the mutations are applied to the table. Best-effort and non-blocking:
     ///
     /// * No feed wired (`changefeed == None`) → no-op.
-    /// * Empty `changes` → no-op (no version is burned for an empty write).
-    /// * Otherwise allocate ONE `commit_version` from the shared per-repo
-    ///   gate (`assign_next_version` — the same atomic counter the MVCC
-    ///   commit pipeline and `MvccStore::set_versioned` bump, so the version
-    ///   is monotonic and never duplicated across non-tx and tx writes),
-    ///   build the event via [`shamir_tx::nontx_event`], and hand it to the
-    ///   feed's two non-blocking tracks (broadcast `send` + journal
-    ///   `try_send`). Neither track waits nor errors back to us.
+    /// * Empty `changes` → no-op.
+    /// * Otherwise build the event via [`shamir_tx::nontx_event`] using
+    ///   the caller-supplied `commit_version` (which is the MVCC version
+    ///   the data was written at — see `*_returning_version` helpers),
+    ///   and hand it to the feed's two non-blocking tracks (broadcast
+    ///   `send` + journal `try_send`). Neither track waits nor errors
+    ///   back to us.
     ///
-    /// One `commit_version` covers the whole batch (all `changes`), exactly
-    /// as a tx commit stamps one version over its whole write-set.
+    /// `commit_version` is the version already allocated by the data-
+    /// write path (`MvccStore::set_versioned[_many]` /
+    /// `delete_versioned`), so the event carries the EXACT same version
+    /// the record landed at — no second `assign_next_version` bump.
+    /// For batches with per-record versions the caller passes the MAX
+    /// (= last) version, matching the commit-version-per-batch semantic
+    /// the tx path uses.
     ///
     /// We deliberately do NOT call `gate.publish_committed` here. That call
     /// advances the reader-visible MVCC floor and runs under `commit_lock` on
@@ -1868,14 +1913,17 @@ impl TableManager {
     /// never consults `publish_committed`); the non-tx data's MVCC visibility
     /// is governed independently by `MvccStore::set_versioned`, which likewise
     /// bumps the counter without publishing.
-    pub(crate) async fn emit_nontx_changefeed(&self, changes: Vec<shamir_tx::RecordChange>) {
+    pub(crate) async fn emit_nontx_changefeed(
+        &self,
+        commit_version: u64,
+        changes: Vec<shamir_tx::RecordChange>,
+    ) {
         let Some(cf) = &self.changefeed else {
             return; // no feed wired (system table / test)
         };
         if changes.is_empty() {
-            return; // empty footprint — nothing to emit, no version burned
+            return; // empty footprint — nothing to emit
         }
-        let commit_version = cf.gate.assign_next_version();
         let event = shamir_tx::nontx_event(
             &cf.repo,
             commit_version,
