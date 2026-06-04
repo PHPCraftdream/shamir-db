@@ -604,6 +604,7 @@ impl ShamirDbHandler {
                 None => Err(BatchError::QueryError {
                     alias: String::new(),
                     message: "transaction is already committed or rolled back".into(),
+                    code: None,
                 }),
             }
         });
@@ -675,6 +676,7 @@ impl ShamirDbHandler {
                 None => Err(BatchError::QueryError {
                     alias: String::new(),
                     message: "transaction is already committed or rolled back".into(),
+                    code: None,
                 }),
             }
             // `it_for_commit` (holding the SnapshotGuard) drops here, AFTER
@@ -926,17 +928,27 @@ fn check_destructive_hmacs(
     Ok(())
 }
 
-/// Coarse classification of a [`BatchError`] for the wire `code` tag.
-fn error_code(e: &BatchError) -> &'static str {
+/// Classification of a [`BatchError`] for the wire `code` tag.
+///
+/// When the error carries a structured `code` (DDL / admin errors set one
+/// since §5 error-codes), that code is returned verbatim. Unclassified
+/// errors fall back to heuristic string-matching for backward compat.
+fn error_code(e: &BatchError) -> &str {
     match e {
         BatchError::TooManyQueries { .. } | BatchError::TooDeep { .. } => "limits",
         BatchError::CircularDependency { .. } | BatchError::UnknownAlias { .. } => "validation",
         BatchError::Timeout { .. } => "timeout",
         BatchError::LockTimeout { .. } => "lock_timeout",
-        BatchError::QueryError { alias, message } => {
-            // ShamirDb::execute maps "Database not found" through QueryError
-            // with empty alias — surface that distinctly so clients can
-            // tell wrong-db from wrong-query.
+        BatchError::QueryError {
+            alias,
+            message,
+            code,
+        } => {
+            // Prefer structured code when present.
+            if let Some(c) = code {
+                return c.as_str();
+            }
+            // Legacy heuristic for untagged errors.
             if alias.is_empty() && message.contains("not found") {
                 "unknown_db"
             } else if message.starts_with("access denied:") {

@@ -106,12 +106,14 @@ pub async fn execute_batch(
                     .map_err(|e| BatchError::QueryError {
                         alias: String::new(),
                         message: format!("resolve_repo({}): {}", repo_name, e),
+                        code: None,
                     })?;
             repo.synced_flush()
                 .await
                 .map_err(|e| BatchError::QueryError {
                     alias: String::new(),
                     message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
+                    code: None,
                 })?;
         }
     }
@@ -156,6 +158,7 @@ pub async fn execute_batch_with_permissions(
         .map_err(|(alias, action, resource)| BatchError::QueryError {
             alias,
             message: format!("Permission denied: {:?} on {:?}", action, resource),
+            code: None,
         })?;
 
     // Stage B-1: enforce row-level security. `row_filter()` was computed but
@@ -234,6 +237,7 @@ async fn validate_tables(
                             "Table '{}' in repo '{}' not found: {}",
                             table_ref.table, table_ref.repo, e
                         ),
+                        code: None,
                     })?;
             }
         }
@@ -284,6 +288,7 @@ fn validate_filter_depth(queries: &TMap<String, QueryEntry>) -> Result<(), Batch
                 return Err(BatchError::QueryError {
                     alias: alias.clone(),
                     message: e,
+                    code: None,
                 });
             }
         }
@@ -322,6 +327,7 @@ async fn execute_plan(
             let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
                 alias: alias.clone(),
                 message: "Query entry not found".to_string(),
+                code: None,
             })?;
 
             // Build resolved_refs with ONLY declared dependencies
@@ -368,6 +374,7 @@ async fn execute_plan_tx(
             let entry = queries.get(alias).ok_or_else(|| BatchError::QueryError {
                 alias: alias.clone(),
                 message: "Query entry not found".to_string(),
+                code: None,
             })?;
 
             let deps = plan.dependencies.get(alias);
@@ -414,6 +421,7 @@ async fn execute_transactional(
         return Err(BatchError::QueryError {
             alias: String::new(),
             message: "transactional batch has no data ops to target a repo".into(),
+            code: None,
         });
     }
 
@@ -423,6 +431,7 @@ async fn execute_transactional(
         .map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: format!("resolve_repo({}): {}", repo_name, e),
+            code: None,
         })?;
 
     // Parse isolation.
@@ -437,6 +446,7 @@ async fn execute_transactional(
         .map_err(|e| BatchError::QueryError {
             alias: String::new(),
             message: format!("begin_tx: {}", e),
+            code: None,
         })?;
     // Thread the actor into the tx for commit-time provenance (R2).
     tx.set_actor(actor.clone());
@@ -675,6 +685,7 @@ impl<'a> QueryRunner<'a> {
                 None => Err(BatchError::QueryError {
                     alias: alias.to_string(),
                     message: "Admin operations not supported in this context".to_string(),
+                    code: None,
                 }),
             };
         }
@@ -689,6 +700,7 @@ impl<'a> QueryRunner<'a> {
             .map_err(|e| BatchError::QueryError {
                 alias: alias.to_string(),
                 message: e.to_string(),
+                code: None,
             })?;
 
         let interner = table
@@ -698,6 +710,7 @@ impl<'a> QueryRunner<'a> {
             .map_err(|e| BatchError::QueryError {
                 alias: alias.to_string(),
                 message: e.to_string(),
+                code: None,
             })?;
 
         let ctx = FilterContext::new(interner, resolved_refs).with_actor(self.actor.clone());
@@ -708,6 +721,7 @@ impl<'a> QueryRunner<'a> {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
+                        code: None,
                     }
                 })?;
                 // Vector I.1: in a transactional batch route the read through
@@ -725,6 +739,7 @@ impl<'a> QueryRunner<'a> {
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
+                    code: None,
                 })
             }
 
@@ -733,6 +748,7 @@ impl<'a> QueryRunner<'a> {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
+                        code: None,
                     }
                 })?;
                 let wr = match self.tx.as_deref_mut() {
@@ -742,6 +758,7 @@ impl<'a> QueryRunner<'a> {
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
+                    code: None,
                 })?;
                 Ok(write_result_to_query_result(wr))
             }
@@ -751,6 +768,7 @@ impl<'a> QueryRunner<'a> {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
+                        code: None,
                     }
                 })?;
                 let wr = match self.tx.as_deref_mut() {
@@ -760,6 +778,7 @@ impl<'a> QueryRunner<'a> {
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
+                    code: None,
                 })?;
                 Ok(write_result_to_query_result(wr))
             }
@@ -769,6 +788,7 @@ impl<'a> QueryRunner<'a> {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
+                        code: None,
                     }
                 })?;
                 let wr = match self.tx.as_deref_mut() {
@@ -778,6 +798,7 @@ impl<'a> QueryRunner<'a> {
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
+                    code: None,
                 })?;
                 Ok(write_result_to_query_result(wr))
             }
@@ -787,6 +808,7 @@ impl<'a> QueryRunner<'a> {
                     BatchError::QueryError {
                         alias: alias.to_string(),
                         message: e.to_string(),
+                        code: None,
                     }
                 })?;
                 let wr = match self.tx.as_deref_mut() {
@@ -796,6 +818,7 @@ impl<'a> QueryRunner<'a> {
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
                     message: e.to_string(),
+                    code: None,
                 })?;
                 Ok(write_result_to_query_result(wr))
             }
