@@ -1082,6 +1082,54 @@ impl ShamirDb {
         self.function_meta.get(name).map(|r| r.value().clone())
     }
 
+    // ========================================================================
+    // Function folder lifecycle API (#118)
+    // ========================================================================
+
+    /// Create a function folder with `mkdir -p` semantics.
+    ///
+    /// For each prefix of `path_segments` that does not already have a
+    /// persisted record, a new folder record is created with `actor` as
+    /// owner. Existing folders are not overwritten.
+    ///
+    /// Returns the list of newly created path keys (slash-joined).
+    pub async fn create_function_folder_as(
+        &self,
+        path_segments: &[String],
+        actor: Actor,
+    ) -> DbResult<Vec<String>> {
+        let mut created = Vec::new();
+        for i in 1..=path_segments.len() {
+            let prefix = &path_segments[..i];
+            let path_key = prefix.join("/");
+            // Check if already exists.
+            let existing = self.system_store.load_function_folder(&path_key).await?;
+            if existing.is_some() {
+                continue;
+            }
+            let record = json!({
+                "path": path_key,
+                "segments": prefix,
+            });
+            self.system_store
+                .save_function_folder(&path_key, &record, &ResourceMeta::owned_by(actor.clone()))
+                .await?;
+            created.push(path_key);
+        }
+        Ok(created)
+    }
+
+    /// List all persisted function folder path keys.
+    pub async fn list_function_folders(&self) -> DbResult<Vec<String>> {
+        let records = self.system_store.load_function_folders().await?;
+        let mut paths: Vec<String> = records
+            .iter()
+            .filter_map(|r| r["path"].as_str().map(|s| s.to_string()))
+            .collect();
+        paths.sort();
+        Ok(paths)
+    }
+
     /// Build an [`FnCtx`] with globals, registry, net gateway, the
     /// function's secret_grants from [`function_meta`], and the given
     /// [`Actor`] (R2).
@@ -1753,9 +1801,16 @@ impl ShamirDb {
                     .map(|r| ResourceMeta::from_record(&r))
                     .unwrap_or_default()
             }
-            ResourcePath::FunctionFolder { .. } => {
-                // Folder meta persistence is a later stage; default to open.
-                ResourceMeta::open()
+            ResourcePath::FunctionFolder { path } => {
+                // Read persisted meta if the folder was explicitly created;
+                // fall back to open so functions with slash-names under
+                // implicit (never-created) folders are not denied (#118).
+                let path_key = path.join("/");
+                let rec = self.system_store.load_function_folder(&path_key).await;
+                rec.ok()
+                    .flatten()
+                    .map(|r| ResourceMeta::from_record(&r))
+                    .unwrap_or_default()
             }
             ResourcePath::FunctionNamespace => {
                 let val = self
@@ -1833,12 +1888,20 @@ impl ShamirDb {
                     .save_function_meta_record(name, &rec)
                     .await
             }
-            ResourcePath::FunctionFolder { .. } => {
-                // Folder meta persistence is a later stage.
-                Err(DbError::NotFound(format!(
-                    "resource path '{}' does not support set_resource_meta yet",
-                    path
-                )))
+            ResourcePath::FunctionFolder { path: segments } => {
+                let path_key = segments.join("/");
+                let rec = self
+                    .system_store
+                    .load_function_folder(&path_key)
+                    .await?
+                    .ok_or_else(|| {
+                        DbError::NotFound(format!("function folder '{}' not found", path_key))
+                    })?;
+                let mut rec = rec;
+                meta.inject_into(&mut rec);
+                self.system_store
+                    .save_function_folder_meta(&path_key, &rec)
+                    .await
             }
             ResourcePath::FunctionNamespace => {
                 let mut rec = serde_json::json!({"key": "fn_namespace_meta"});
