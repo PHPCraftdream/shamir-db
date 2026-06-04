@@ -650,6 +650,12 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateUser(op) => {
+                // Authorization (owner-delegation): a global admin (Manage on
+                // root) may create any user; a database owner may create users
+                // scoped to their own database. System bypasses.
+                self.authorize_user_lifecycle(op.database.as_deref())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 // Hash the password at rest with Argon2id (PHC string).
                 // This `users.password_hash` field is RBAC/admin metadata,
                 // NOT a live-auth credential — the wire login path is
@@ -665,6 +671,7 @@ impl AdminExecutor for ShamirAdminExecutor {
                     password_hash,
                     roles: op.roles.clone(),
                     profile: op.profile.clone(),
+                    database: op.database.clone(),
                 };
                 let user_json = serde_json::to_value(&user).map_err(|e| err(e.to_string()))?;
                 let table = self
@@ -704,6 +711,32 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .map_err(|e| err(e.to_string()))?;
                 let refs = crate::types::common::new_map();
                 let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+
+                // Authorization (owner-delegation): resolve the target user's
+                // stored database scope so a database owner can only drop users
+                // bound to their own database. A non-existent user resolves to
+                // `None` scope → only a global admin (or System) may proceed.
+                let scope = {
+                    let lookup = crate::query::read::ReadQuery::new("users").filter(
+                        crate::query::filter::Filter::Eq {
+                            field: vec!["name".to_string()],
+                            value: crate::query::filter::FilterValue::String(op.drop_user.clone()),
+                        },
+                    );
+                    let existing = table
+                        .read(&lookup, &ctx)
+                        .await
+                        .map_err(|e| err(e.to_string()))?;
+                    existing.records.first().and_then(|rec| {
+                        rec.get("database")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                };
+                self.authorize_user_lifecycle(scope.as_deref())
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+
                 let del_op = crate::query::write::DeleteOp {
                     delete_from: crate::query::TableRef::new("users"),
                     where_clause: crate::query::filter::Filter::Eq {
@@ -721,6 +754,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateRole(op) => {
+                // Role management is global-admin only (Manage on the root).
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let role = crate::query::auth::Role {
                     name: op.create_role.clone(),
                     permissions: op.permissions.clone(),
@@ -750,6 +788,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropRole(op) => {
+                // Role management is global-admin only (Manage on the root).
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let table = self
                     .shamir
                     .system_store()
@@ -780,6 +823,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::GrantRole(op) => {
+                // Role grants are global-admin only (Manage on the root).
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let user_lock = self
                     .shamir
                     .admin_user_locks()
@@ -841,6 +889,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::RevokeRole(op) => {
+                // Role revokes are global-admin only (Manage on the root).
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let user_lock = self
                     .shamir
                     .admin_user_locks()
@@ -1186,6 +1239,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateGroup(op) => {
+                // Groups are global; managing them requires Manage on the root.
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let group_id = self
                     .shamir
                     .create_group(&op.create_group)
@@ -1198,6 +1256,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropGroup(op) => {
+                // Groups are global; managing them requires Manage on the root.
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let group_id = self
                     .shamir
                     .resolve_group_id(&op.drop_group)
@@ -1213,6 +1276,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::AddGroupMember(op) => {
+                // Groups are global; managing them requires Manage on the root.
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let group_id = self
                     .shamir
                     .resolve_group_id(&op.add_group_member)
@@ -1229,6 +1297,11 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::RemoveGroupMember(op) => {
+                // Groups are global; managing them requires Manage on the root.
+                self.shamir
+                    .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
                 let group_id = self
                     .shamir
                     .resolve_group_id(&op.remove_group_member)
@@ -1560,6 +1633,55 @@ impl AdminExecutor for ShamirAdminExecutor {
 
             _ => Err(err("Not an admin operation".to_string())),
         }
+    }
+}
+
+impl ShamirAdminExecutor {
+    /// Authorize a user-lifecycle op (`CreateUser` / `DropUser`) under the
+    /// owner-delegation model.
+    ///
+    /// Two acceptance paths (either suffices):
+    ///   1. **Global admin** — `Manage` on [`ResourcePath::Root`]. `System`
+    ///      bypasses inside [`authorize_access`]. A global admin may manage
+    ///      any user, scoped or not.
+    ///   2. **Database owner** — when `scope == Some(db)` and the actor holds
+    ///      `Manage` on [`ResourcePath::Database`] for that `db`. Lets a
+    ///      database owner manage users bound to *their* database without
+    ///      global-admin rights.
+    ///
+    /// Returns the original root-level [`AccessError`] when neither path
+    /// admits, so the denial message reflects the admin domain.
+    async fn authorize_user_lifecycle(
+        &self,
+        scope: Option<&str>,
+    ) -> Result<(), shamir_types::access::AccessError> {
+        // Path 1: global admin (Manage on the root). System bypasses here.
+        let root_decision = self
+            .shamir
+            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+            .await;
+        if root_decision.is_ok() {
+            return Ok(());
+        }
+
+        // Path 2: database owner of the user's scope.
+        if let Some(db) = scope {
+            if self
+                .shamir
+                .authorize_access(
+                    &self.actor,
+                    &ResourcePath::Database { db: db.to_string() },
+                    Action::Manage,
+                )
+                .await
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+
+        // Neither path admits — surface the root-level denial.
+        root_decision
     }
 }
 

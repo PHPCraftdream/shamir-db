@@ -1029,6 +1029,7 @@ pub fn create_user(name: impl Into<String>, password: impl Into<String>) -> Crea
         password: password.into(),
         roles: Vec::new(),
         profile: None,
+        database: None,
     }
 }
 
@@ -1038,6 +1039,7 @@ pub struct CreateUser {
     password: String,
     roles: Vec<String>,
     profile: Option<serde_json::Value>,
+    database: Option<String>,
 }
 
 impl CreateUser {
@@ -1053,6 +1055,13 @@ impl CreateUser {
         self
     }
 
+    /// Scope the user to a database, allowing that database's owner to
+    /// manage it without global-admin rights.
+    pub fn database(mut self, database: impl Into<String>) -> Self {
+        self.database = Some(database.into());
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateUser(CreateUserOp {
@@ -1060,6 +1069,7 @@ impl CreateUser {
             password: SecretString::from(self.password),
             roles: self.roles,
             profile: self.profile,
+            database: self.database,
         })
     }
 }
