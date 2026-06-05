@@ -2,14 +2,28 @@
 
 # ShamirDB — Project State
 
-**Snapshot date:** 2026-06-01. The canonical "where we are" document — what
-ShamirDB is, what shipped, and where it goes next. Roadmap index lives in
-[`roadmap/NEXT_PHASES.md`](roadmap/NEXT_PHASES.md); per-feature plans under
-[`roadmap/`](roadmap/).
+**Snapshot date:** 2026-06-05. The canonical "where we are" document — what
+ShamirDB is, what shipped, and where it goes next. The actionable forward
+plan lives in [`roadmap/PLAN.md`](roadmap/PLAN.md); the (now historical)
+transactional index in [`roadmap/NEXT_PHASES.md`](roadmap/NEXT_PHASES.md);
+per-feature plans under [`roadmap/`](roadmap/).
 
-Since the last snapshot: a **WASM function engine** ("M") was built
-end-to-end ([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) and the
-behavior-preserving substrate of the **Shomer access fabric** landed
+Since the last snapshot, a full **write-lifecycle arc** landed
+(`016d68b`..`a620115`): **DDL completed** (idempotency, referential
+integrity, introspection, function folders, structured error codes) and
+made to read like DML via the query builder; the **Shomer access fabric
+flipped to real enforcement** (table-level DML gate + admin-op
+authorization + owner delegation + setuid "getter-only" data-firewall);
+**table validators + optimistic CAS sequenced writes** (canonical record
+hash); and a **changefeed** (hybrid live-push broadcast + durable journal,
+covering tx and non-tx writes, event version == MVCC version) — the AFTER
+half of BEFORE→commit→AFTER and the foundation for the "I" pillar. See
+[`roadmap/PLAN.md`](roadmap/PLAN.md), [`roadmap/DDL.md`](roadmap/DDL.md),
+[`roadmap/VALIDATORS.md`](roadmap/VALIDATORS.md).
+
+Earlier: a **WASM function engine** ("M") built end-to-end
+([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) and the
+behavior-preserving substrate of the **Shomer access fabric**
 ([`roadmap/ACCESS_FABRIC.md`](roadmap/ACCESS_FABRIC.md),
 [`roadmap/ACCESS_REFACTOR.md`](roadmap/ACCESS_REFACTOR.md)).
 
@@ -77,9 +91,23 @@ paths.
   / ORDER BY / LIMIT / pagination; cross-query refs (`{"$query": "@alias[].field"}`).
 - Secondary indexes + query planner; sorted indexes; **HNSW vector** search;
   **FTS**; functional indexes; index2 backend; online migration.
-- Admin DDL (Create/Drop Db/Repo/Table/Index, List), auth ops
-  (User/Role/Grant/Revoke); multi-database / multi-repo system store with
-  durable metadata.
+- **Admin DDL — complete:** Create/Drop Db/Repo/Table/Index/Function/
+  Validator/FunctionFolder, bind/unbind validators, List/introspection,
+  auth ops (User/Role/Grant/Revoke), access-control (chmod/chown/chgrp,
+  groups); idempotency (`if_not_exists`/`cascade`), referential integrity
+  (refuse drop of non-empty), structured error codes (`exists`/
+  `not_found`/`access_denied`/`still_referenced`); DDL↔DML ordering via
+  `after` edges; first-class builder methods (DDL reads like DML).
+  Multi-database / multi-repo system store with durable metadata.
+- **Validators + sequenced writes:** WASM CHECK/BEFORE-write validators
+  (per-table, priority-ordered, op-bound, fail-closed) seeing old+new
+  record; optimistic **CAS** via a canonical, key-order-independent
+  record hash (`crypto/canonical_hash`) — "blockchain-of-order" guard.
+- **Changefeed (CDC):** hybrid **live-push** (`tokio::broadcast`, never
+  blocks the commit) + **durable journal** (per-repo, keyed by
+  `commit_version`, resumable `read_changelog_from`); fires on tx and
+  non-tx writes; event version equals the data's MVCC version
+  (replication-ready). The AFTER half of the write lifecycle.
 - **Transactions — full isolation spectrum:**
   - Snapshot Isolation (SI) + Serializable Snapshot Isolation (SSI,
     write-skew) — **Phase A**.
@@ -106,16 +134,22 @@ paths.
   (`ctx.db()`, autocommit); outbound HTTP (`ctx.http_fetch`, curl wrapper,
   allowlist deny-default); per-function secret grants. See
   [`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md).
-- **Access fabric (Shomer)** — hierarchical POSIX-style DAC
-  (owner/group/mode over a resource tree + setuid-style delegation +
-  capability bits). The behavior-preserving substrate is in place (`Actor`
-  threaded everywhere; one transparent `authorize` door); enforcement +
-  metadata are the next non-refactor steps. See
+- **Access fabric (Shomer) — enforced.** Hierarchical POSIX-style DAC
+  (owner/group/mode over a resource tree). The gate is live: ancestor
+  Execute-traversal + `permits` first-match on the target, `System`
+  bypass; applied to every **DDL/admin op** and every **DML op**
+  (table-level, on both the batch and interactive-tx paths). Default mode
+  is open (`0o777`) so enforcement breaks nothing until a resource is
+  `chmod`-ed — no global flag. **Owner delegation** (a DB owner manages
+  users scoped to their DB) and **getter-only** users (setuid = SECURITY
+  DEFINER: Execute a function with no table Read → a data-firewall through
+  procedures) both proven end-to-end. See
   [`roadmap/ACCESS_FABRIC.md`](roadmap/ACCESS_FABRIC.md).
-- Quality: **15 crates, ~1050+ engine lib tests** + integration; property tests
-  (`proptest`: version codec + SSI read-set validation); green gate
-  (`fmt --all --check` · `clippy --workspace --all-targets -D warnings` ·
-  `test --workspace --lib` · `test --workspace --test '*'`).
+- Quality: **15 crates, ~2667 lib tests** + integration; property tests
+  (`proptest`: version codec + SSI read-set validation); **27 benchmarks**
+  across engine/tx/storage/connect/server; green gate (`fmt --all --check`
+  · `clippy --workspace --all-targets -D warnings` · `test --workspace
+  --lib` · `test --workspace --test '*'`).
 
 ---
 
@@ -166,27 +200,36 @@ and semantics confirmed by independent gate runs, never by agent claims).
 - Task #17 ("transactions within a batch — MemBuffer + WAL") is effectively
   **closed** by Phase A + Phase B.
 
-**Priority recommendation:** the foundation (storage + transactions +
-protocol + security) is solid, and the **WASM function engine ("M") shipped**
-end-to-end. The highest-value next steps are now:
-1. **Access enforcement (Shomer P4)** — flip the transparent door to the real
-   POSIX check; add the metadata envelope (owner/group/mode) + provenance
-   (`created_by`/`modified_by`). Substrate is already in place.
-2. **Function wire-DDL (slice 10)** — manage functions via the JSON request
-   API + a wire-level e2e.
-3. **Replication / P2P (the "I")** or **query language v2** — the remaining
-   charter pillars.
-Each taken the same way: smart-agent research → implementation → zero-trust
-verify → green CI. Discipline throughout: "don't over-build" — pull each
-slice by real need, not ahead of it.
+**Priority recommendation.** The foundation (storage + transactions +
+protocol + security), the **WASM function engine ("M")**, the **complete
+DDL surface**, **enforced access fabric**, **validators + CAS**, and the
+**changefeed** all shipped. Access enforcement (former Shomer P4) and
+function/validator wire-DDL are **DONE**. The actionable order now lives in
+[`roadmap/PLAN.md`](roadmap/PLAN.md):
+1. **Consolidate (quality)** — adversarial review of the new arc's hot
+   spots (changefeed concurrency, CAS canonicalisation, the enforcement
+   gate, the `set_versioned` always-bump invariant); `H₂` Persistable
+   refactor; `.gitignore`/fuzz debt.
+2. **Measure → accelerate (perf)** — bench the new features' overhead
+   (changefeed / enforcement / validators / CAS) to prove the hot paths
+   weren't slowed; then **sprint γ** (`Opt O` covering index — the disk
+   range-query ceiling — plus `R`/`P`, and `M1`/`M2`). See
+   [`roadmap/PERF_OPPORTUNITIES.md`](roadmap/PERF_OPPORTUNITIES.md).
+3. **Build the "I"** — network changefeed (pull-API) → leader-follower
+   replication (apply by `commit_version`) → P2P / chat. The changefeed is
+   the foundation; #179 aligned event version with data version for this.
+Each taken the same way: research → implementation → zero-trust verify →
+green CI. Discipline throughout: "don't over-build" — pull each slice by
+real need, not ahead of it. (Sharding is a separate, later direction — not
+a prerequisite for replication.)
 
 **Large directions** (per [`roadmap/`](roadmap/)):
 
 | Direction | Plan |
 |---|---|
-| WASM modules (user logic — the "M") | not started |
-| P2P / interconnected (chat — the "I") | not started |
-| Replication / sharding / backup tooling | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
+| WASM modules (user logic — the "M") | ✅ **shipped** ([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) |
+| P2P / interconnected (chat — the "I") | foundation laid (changefeed); ladder in [`roadmap/PLAN.md`](roadmap/PLAN.md) Movement C |
+| Replication / sharding / backup tooling | [`roadmap/PLAN.md`](roadmap/PLAN.md) (replication), [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
 | Query language v2 (SQL frontend); default→Serializable now phantoms are closed | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md), [`roadmap/TRANSACTIONS.md`](roadmap/TRANSACTIONS.md) |
 | Browser WASM client (Argon2id in a Web Worker) | [`roadmap/BROWSER_WASM_PLAN.md`](roadmap/BROWSER_WASM_PLAN.md) |
 | Vectors / embeddings hardening | [`roadmap/EMBEDDINGS_AND_VECTORS.md`](roadmap/EMBEDDINGS_AND_VECTORS.md) |
@@ -197,11 +240,16 @@ slice by real need, not ahead of it.
 
 The transactional foundation is complete and solid (SI → SSI → true
 serializability, single-batch + interactive, crash-safe, property-covered),
-all on one backend-agnostic dumb-KV foundation. The natural next major step is
-**WASM modules** ("M"), **replication / P2P** ("I"), or **query language v2**
-(usability over the finished engine).
+all on one backend-agnostic dumb-KV foundation. On top of it the engine
+("M"), the complete DDL surface, the enforced access fabric, validators +
+CAS, and the changefeed are now done. The natural next steps are
+**consolidate (quality) → measure/accelerate (perf, covering index) →
+build the "I" (replication → P2P)** — ordered in
+[`roadmap/PLAN.md`](roadmap/PLAN.md).
 
 ---
 
-_Maintained as the project's state snapshot. Last updated 2026-05-31 after
-Phase A hardening + Phase B (interactive tx) + Phase C (phantom protection)._
+_Maintained as the project's state snapshot. Last updated 2026-06-05 after
+the DDL → access → write-lifecycle arc (`016d68b`..`a620115`): complete
+DDL, enforced Shomer, validators + CAS, changefeed. Prior: Phase A
+hardening + Phase B (interactive tx) + Phase C (phantom protection)._
