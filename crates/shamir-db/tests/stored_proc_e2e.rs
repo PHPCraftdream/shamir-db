@@ -30,9 +30,9 @@ use shamir_engine::function::{FnBatch, FnCtx, FunctionError, Params, ShamirFunct
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
+use shamir_query_builder::q;
+use shamir_query_builder::val::qref;
 use shamir_query_builder::write::insert;
-use shamir_query_types::batch::BatchOp;
-use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_types::access::{Actor, Mode, ResourceMeta, ResourcePath};
 use shamir_types::types::common::new_map;
@@ -195,14 +195,8 @@ async fn call_returns_object() {
 
     let mut b = Batch::new();
     b.id("call_obj");
-    b.op(
-        "result",
-        BatchOp::Call(CallOp {
-            call: "add".into(),
-            params: vec![FilterValue::Int(10), FilterValue::Int(32)],
-            repo: "main".into(),
-        }),
-    );
+    // Exercises the q!(call ...) macro on the e2e path (object return).
+    b.op("result", q!(call add(10_i64, 32)));
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -230,17 +224,14 @@ async fn call_returns_array() {
 
     let mut b = Batch::new();
     b.id("call_arr");
-    b.op(
+    b.call(
         "result",
-        BatchOp::Call(CallOp {
-            call: "echo".into(),
-            params: vec![
-                FilterValue::Int(1),
-                FilterValue::String("hello".into()),
-                FilterValue::Bool(true),
-            ],
-            repo: "main".into(),
-        }),
+        "echo",
+        vec![
+            FilterValue::from(1_i64),
+            FilterValue::from("hello"),
+            FilterValue::from(true),
+        ],
     );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -263,14 +254,8 @@ async fn call_returns_scalar() {
 
     let mut b = Batch::new();
     b.id("call_scalar");
-    b.op(
-        "result",
-        BatchOp::Call(CallOp {
-            call: "forty_two".into(),
-            params: vec![],
-            repo: "main".into(),
-        }),
-    );
+    // Exercises the q!(call ...) macro on the e2e path (scalar return).
+    b.op("result", q!(call forty_two()));
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -288,14 +273,7 @@ async fn call_returns_null() {
 
     let mut b = Batch::new();
     b.id("call_null");
-    b.op(
-        "result",
-        BatchOp::Call(CallOp {
-            call: "null_fn".into(),
-            params: vec![],
-            repo: "main".into(),
-        }),
-    );
+    b.call("result", "null_fn", [] as [FilterValue; 0]);
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -386,14 +364,7 @@ async fn setuid_call_lets_stranger_read_via_owner() {
     // B invokes via batch Call.
     let mut b = Batch::new();
     b.id("setuid_call");
-    b.op(
-        "result",
-        BatchOp::Call(CallOp {
-            call: "read_secrets".into(),
-            params: vec![],
-            repo: "main".into(),
-        }),
-    );
+    b.call("result", "read_secrets", [] as [FilterValue; 0]);
     let resp = shamir
         .execute_as(user_b.clone(), "testdb", &b.to_request_via_msgpack())
         .await
@@ -430,14 +401,7 @@ async fn without_setuid_call_is_denied() {
 
     let mut b = Batch::new();
     b.id("no_setuid_call");
-    b.op(
-        "result",
-        BatchOp::Call(CallOp {
-            call: "read_secrets".into(),
-            params: vec![],
-            repo: "main".into(),
-        }),
-    );
+    b.call("result", "read_secrets", [] as [FilterValue; 0]);
     let resp = shamir
         .execute_as(user_b.clone(), "testdb", &b.to_request_via_msgpack())
         .await;
@@ -563,14 +527,7 @@ async fn phase2_params_from_read_ref() {
             .order_by_asc("id")
             .limit(1),
     );
-    b.op(
-        "p",
-        BatchOp::Call(CallOp {
-            call: "echo_first".into(),
-            params: vec![FilterValue::query_ref_with_path("@q1", "[0].id")],
-            repo: "main".into(),
-        }),
-    );
+    b.call("p", "echo_first", [qref("q1", "[0].id")]);
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -630,22 +587,8 @@ async fn phase2_params_from_call_ref() {
 
     let mut b = Batch::new();
     b.id("phase2_call_chain");
-    b.op(
-        "p1",
-        BatchOp::Call(CallOp {
-            call: "const_obj".into(),
-            params: vec![],
-            repo: "main".into(),
-        }),
-    );
-    b.op(
-        "p2",
-        BatchOp::Call(CallOp {
-            call: "echo_first".into(),
-            params: vec![FilterValue::query_ref_with_path("@p1", ".id")],
-            repo: "main".into(),
-        }),
-    );
+    b.call("p1", "const_obj", [] as [FilterValue; 0]);
+    b.call("p2", "echo_first", [qref("p1", ".id")]);
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -717,18 +660,10 @@ async fn phase2_call_result_as_read_filter_ref() {
     // Build: p (Call) -> q (Read with $query filter).
     let mut b = Batch::new();
     b.id("phase2_call_to_read");
-    b.op(
-        "p",
-        BatchOp::Call(CallOp {
-            call: "const_obj".into(),
-            params: vec![],
-            repo: "main".into(),
-        }),
-    );
+    b.call("p", "const_obj", [] as [FilterValue; 0]);
     b.op(
         "q",
-        shamir_query_builder::query::Query::from("items")
-            .where_eq("id", FilterValue::query_ref_with_path("@p", ".id")),
+        shamir_query_builder::query::Query::from("items").where_eq("id", qref("p", ".id")),
     );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -781,14 +716,7 @@ async fn phase2_unknown_alias_in_call_params() {
 
     let mut b = Batch::new();
     b.id("phase2_unknown");
-    b.op(
-        "p",
-        BatchOp::Call(CallOp {
-            call: "echo_first".into(),
-            params: vec![FilterValue::query_ref_with_path("@no_such_alias", ".x")],
-            repo: "main".into(),
-        }),
-    );
+    b.call("p", "echo_first", [qref("no_such_alias", ".x")]);
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
