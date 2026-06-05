@@ -16,14 +16,8 @@ use shamir_query_builder::Query;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
-use crate::query::batch::BatchRequest;
 use crate::ShamirDb;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 /// Helper: create an in-memory ShamirDb with `testdb` / `main` / `items`.
 async fn setup() -> ShamirDb {
@@ -57,7 +51,7 @@ async fn execute_as_user_denied_on_restricted_database() {
     let mut b = Batch::new();
     b.id("gw_read");
     b.query("r", Query::from("items"));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
 
     // System bypasses — must succeed.
     assert!(
@@ -112,7 +106,7 @@ async fn execute_as_user_denied_on_restricted_table() {
     let mut b = Batch::new();
     b.id("gw_read");
     b.query("r", Query::from("items"));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
 
     // System bypasses.
     assert!(

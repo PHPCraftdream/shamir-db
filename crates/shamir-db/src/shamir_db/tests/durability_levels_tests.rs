@@ -5,16 +5,10 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write;
 use shamir_query_builder::Query;
 
-use crate::engine::query::batch::BatchRequest;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
@@ -60,7 +54,7 @@ async fn synced_batch_survives_immediate_drop() {
                 "qty" => 42,
             }),
         );
-        let insert = to_req(&b);
+        let insert = b.to_request_via_msgpack();
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
@@ -73,7 +67,7 @@ async fn synced_batch_survives_immediate_drop() {
     let mut b = Batch::new();
     b.id(2);
     b.query("r", Query::with_repo("data", "items"));
-    let read = to_req(&b);
+    let read = b.to_request_via_msgpack();
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(records.len(), 1, "synced batch must survive immediate drop");
@@ -114,7 +108,7 @@ async fn buffered_batch_executes_successfully() {
             "qty" => 42,
         }),
     );
-    let insert = to_req(&b);
+    let insert = b.to_request_via_msgpack();
     let resp = shamir.execute("appdb", &insert).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 1);
     assert_eq!(resp.results["ins"].records[0]["name"], "widget");

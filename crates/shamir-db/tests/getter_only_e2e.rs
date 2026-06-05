@@ -33,7 +33,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{FnBatch, FnCtx, FunctionError, Params, ShamirFunction};
 use shamir_query_builder::batch::Batch;
@@ -42,11 +41,6 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_types::access::{Actor, Mode, ResourceMeta, ResourcePath};
 use shamir_types::types::value::QueryValue;
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 /// A native function that reads every row of `secrets` (in repo `main`) via
 /// the DB gateway it was handed on `FnCtx`, and returns the row count.
@@ -91,7 +85,10 @@ async fn setup_with_secrets() -> ShamirDb {
             .engine("in_memory")
             .tables(["secrets"]),
     );
-    shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     // Seed rows as System (bypasses ACLs).
     let mut seed = Batch::new();
@@ -103,7 +100,10 @@ async fn setup_with_secrets() -> ShamirDb {
             doc! { "id" => 2, "label" => "beta" },
         ]),
     );
-    shamir.execute("testdb", &to_req(&seed)).await.unwrap();
+    shamir
+        .execute("testdb", &seed.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     shamir
 }

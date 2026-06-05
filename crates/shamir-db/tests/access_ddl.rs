@@ -8,16 +8,10 @@
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_types::access::{Action, Actor, ResourcePath};
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 /// Helper: create a ShamirDb with database "testdb", repo "main", table "users".
 async fn setup() -> ShamirDb {
@@ -37,7 +31,7 @@ async fn exec_op(
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["op"].clone()
 }

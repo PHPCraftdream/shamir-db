@@ -4,6 +4,13 @@
 ///
 /// Trailing comma is allowed.
 ///
+/// **Note:** inside the `shamir-query-builder` crate itself (and other
+/// crates that import this macro into a module that also uses `#[doc]`
+/// attributes), the bare name `doc` can clash with the built-in `#[doc]`
+/// attribute path. In that case use the function form
+/// [`write::doc()`](crate::write::doc) + `.set(...)` — it is equally
+/// expressive. From downstream crates `doc!` works as shown.
+///
 /// # Example
 ///
 /// ```ignore

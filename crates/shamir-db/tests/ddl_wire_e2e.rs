@@ -8,22 +8,12 @@ use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::ddl::WriteOp;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
-
-// ═══════════════════════════════════════════════════════════════════════
-// msgpack round-trip helper
-// ═══════════════════════════════════════════════════════════════════════
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 // WAT helpers — build WASM modules that return baked msgpack bytes
@@ -146,7 +136,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         "op",
         ddl::create_validator("v_reject").wasm(wasm_b64(&rejecting_wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
     let result = &resp.results["op"].records[0];
     assert_eq!(result["created_validator"], "v_reject");
@@ -162,7 +152,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = to_req(&b);
+    let bind_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &bind_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["bound_validator"], "v_reject");
 
@@ -174,7 +164,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         shamir_query_builder::write::insert("users")
             .row(shamir_query_builder::doc! { "name" => "Alice", "age" => 10 }),
     );
-    let insert_req = to_req(&b);
+    let insert_req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &insert_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -189,7 +179,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         "op",
         ddl::unbind_validator("v_reject", "users").db("testdb"),
     );
-    let unbind_req = to_req(&b);
+    let unbind_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &unbind_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -217,7 +207,7 @@ async fn create_function_over_wire() {
         "op",
         ddl::create_function("wire_echo").wasm(wasm_b64(&wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0]["created_function"],
@@ -248,7 +238,7 @@ async fn drop_validator_while_bound_refused() {
         "op",
         ddl::create_validator("v_drop_test").wasm(wasm_b64(&wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it
@@ -261,14 +251,14 @@ async fn drop_validator_while_bound_refused() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = to_req(&b);
+    let bind_req = b.to_request_via_msgpack();
     db.execute("testdb", &bind_req).await.unwrap();
 
     // Try to drop → should be refused
     let mut b = Batch::new();
     b.id("dv");
     b.drop_validator("op", ddl::drop_validator("v_drop_test"));
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -288,7 +278,7 @@ async fn create_function_folder_over_wire() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
     let result = &resp.results["op"].records[0];
     assert_eq!(
@@ -309,7 +299,7 @@ async fn create_validator_duplicate_rejected() {
     let mut b = Batch::new();
     b.id("cv1");
     b.create_validator("op", ddl::create_validator("v_dup").wasm(wasm_b64(&wasm)));
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     // Second create with replace=false → should fail
@@ -336,13 +326,13 @@ async fn drop_function_over_wire() {
         "op",
         ddl::create_function("fn_drop_test").wasm(wasm_b64(&wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("df");
     b.drop_function("op", ddl::drop_function("fn_drop_test"));
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -366,13 +356,13 @@ async fn rename_function_over_wire() {
     let mut b = Batch::new();
     b.id("cf");
     b.create_function("op", ddl::create_function("fn_old").wasm(wasm_b64(&wasm)));
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("rf");
     b.rename_function("op", ddl::rename_function("fn_old", "fn_new"));
-    let rename_req = to_req(&b);
+    let rename_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["renamed_function"], "fn_old");
     assert_eq!(resp.results["op"].records[0]["to"], "fn_new");
@@ -394,13 +384,13 @@ async fn rename_validator_over_wire() {
     let mut b = Batch::new();
     b.id("cv");
     b.create_validator("op", ddl::create_validator("v_old").wasm(wasm_b64(&wasm)));
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("rv");
     b.rename_validator("op", ddl::rename_validator("v_old", "v_new"));
-    let rename_req = to_req(&b);
+    let rename_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["renamed_validator"], "v_old");
     assert_eq!(resp.results["op"].records[0]["to"], "v_new");
@@ -421,7 +411,7 @@ async fn list_validators_over_wire() {
         "op",
         ddl::create_validator("v_list_test").wasm(wasm_b64(&wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it
@@ -434,14 +424,14 @@ async fn list_validators_over_wire() {
             .ops([WriteOp::Insert, WriteOp::Update])
             .priority(2000),
     );
-    let bind_req = to_req(&b);
+    let bind_req = b.to_request_via_msgpack();
     db.execute("testdb", &bind_req).await.unwrap();
 
     // List
     let mut b = Batch::new();
     b.id("lv");
     b.list_validators("op", ddl::list_validators("users").db("testdb"));
-    let list_req = to_req(&b);
+    let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = &resp.results["op"].records[0];
     let validators = result["validators"].as_array().unwrap();
@@ -543,7 +533,7 @@ async fn owner_on_create_db_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_db("op", ddl::create_db("owned_db"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir
         .execute_as(user_actor.clone(), "bootstrap", &req)
         .await
@@ -592,7 +582,7 @@ async fn owner_on_create_repo_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("op", ddl::create_repo("user_repo").engine("in_memory"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -622,7 +612,7 @@ async fn owner_on_create_table_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("op", ddl::create_table("owned_table").repo("main"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -652,7 +642,7 @@ async fn owner_on_create_function_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_function("op", ddl::create_function("user_fn").wasm(wasm_b64(&wasm)));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -682,7 +672,7 @@ async fn owner_on_create_function_system_stays_system() {
     let mut b = Batch::new();
     b.id(1);
     b.create_function("op", ddl::create_function("sys_fn").wasm(wasm_b64(&wasm)));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir.execute("testdb", &req).await.unwrap();
 
     let meta = shamir
@@ -727,7 +717,7 @@ async fn create_table_then_insert_via_after_non_tx() {
             .row(shamir_query_builder::doc! { "name" => "Gadget", "qty" => 5 }),
     );
     b.after(&rows, &mk);
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
 
     let resp = db
         .execute("testdb", &req)
@@ -748,7 +738,7 @@ async fn create_table_then_insert_via_after_non_tx() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("q", shamir_query_builder::q!(from items));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
     let read_resp = db.execute("testdb", &read_req).await.unwrap();
     let records = &read_resp.results["q"].records;
     assert_eq!(records.len(), 2, "should have 2 inserted records");
@@ -766,7 +756,7 @@ async fn create_table_duplicate_without_if_not_exists_fails() {
     let mut b = Batch::new();
     b.id("ct1");
     b.create_table("op", ddl::create_table("orders").repo("main"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -791,7 +781,7 @@ async fn create_table_with_if_not_exists_idempotent() {
         "op",
         ddl::create_table("orders").repo("main").if_not_exists(),
     );
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -810,7 +800,7 @@ async fn create_db_with_if_not_exists_idempotent() {
     let mut b = Batch::new();
     b.id("cd");
     b.create_db("op", ddl::create_db("newdb").if_not_exists());
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -834,7 +824,7 @@ async fn create_repo_with_if_not_exists_idempotent() {
             .engine("in_memory")
             .if_not_exists(),
     );
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -857,7 +847,7 @@ async fn drop_db_with_repos_no_cascade_fails() {
     let mut b = Batch::new();
     b.id("dd");
     b.drop_db("op", ddl::drop_db("testdb"));
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -879,7 +869,7 @@ async fn drop_db_with_cascade_succeeds() {
     let mut b = Batch::new();
     b.id("dd");
     b.drop_db("op", ddl::drop_db("target_db").cascade());
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let resp = shamir.execute("bootstrap", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -895,7 +885,7 @@ async fn drop_repo_with_tables_no_cascade_fails() {
     let mut b = Batch::new();
     b.id("dr");
     b.drop_repo("op", ddl::drop_repo("main"));
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -912,7 +902,7 @@ async fn drop_repo_with_cascade_succeeds() {
     let mut b = Batch::new();
     b.id("dr");
     b.drop_repo("op", ddl::drop_repo("main").cascade());
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -937,7 +927,7 @@ async fn drop_table_cleans_validator_bound_in() {
         "op",
         ddl::create_validator("v_cleanup").wasm(wasm_b64(&wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
@@ -949,14 +939,14 @@ async fn drop_table_cleans_validator_bound_in() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = to_req(&b);
+    let bind_req = b.to_request_via_msgpack();
     db.execute("testdb", &bind_req).await.unwrap();
 
     // Step 2: drop the table -> should clean bound_in
     let mut b = Batch::new();
     b.id("dt");
     b.drop_table("op", ddl::drop_table("users").repo("main"));
-    let drop_req = to_req(&b);
+    let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -964,7 +954,7 @@ async fn drop_table_cleans_validator_bound_in() {
     let mut b = Batch::new();
     b.id("dv");
     b.drop_validator("op", ddl::drop_validator("v_cleanup"));
-    let drop_val_req = to_req(&b);
+    let drop_val_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_val_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0]["existed"], true,
@@ -1073,7 +1063,7 @@ async fn create_function_folder_persists_mkdir_p() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
     let result = &resp.results["op"].records[0];
     assert_eq!(
@@ -1101,7 +1091,7 @@ async fn create_function_folder_idempotent() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["utils"]));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
 
     // First create
     let resp = db.execute("testdb", &req).await.unwrap();
@@ -1130,7 +1120,7 @@ async fn create_function_folder_meta_owner_is_actor() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["owned_folder"]));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -1163,7 +1153,7 @@ async fn function_folder_meta_survives_reopen() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["persist_test"]));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir.execute("testdb", &req).await.unwrap();
 
     // Confirm meta is persisted (reads from catalogue).
@@ -1189,7 +1179,7 @@ async fn slash_named_function_works_without_explicit_folder() {
     let mut b = Batch::new();
     b.id("cf");
     b.create_function("op", ddl::create_function("math/abs").wasm(wasm_b64(&wasm)));
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     // The implicit folder "math" should return open meta (not error).
@@ -1226,14 +1216,14 @@ async fn list_functions_over_wire() {
         let mut b = Batch::new();
         b.id("cf");
         b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
-        let req = to_req(&b);
+        let req = b.to_request_via_msgpack();
         db.execute("testdb", &req).await.unwrap();
     }
 
     let mut b = Batch::new();
     b.id("lf");
     b.list_functions("op", ddl::list_functions());
-    let list_req = to_req(&b);
+    let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = &resp.results["op"].records[0];
     let fns = result["functions"].as_array().unwrap();
@@ -1253,14 +1243,14 @@ async fn list_functions_filtered_by_folder() {
         let mut b = Batch::new();
         b.id("cf");
         b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
-        let req = to_req(&b);
+        let req = b.to_request_via_msgpack();
         db.execute("testdb", &req).await.unwrap();
     }
 
     let mut b = Batch::new();
     b.id("lf");
     b.list_functions("op", ddl::list_functions().folder("math"));
-    let list_req = to_req(&b);
+    let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let fns = resp.results["op"].records[0]["functions"]
         .as_array()
@@ -1281,7 +1271,7 @@ async fn list_validators_all_over_wire() {
         "op",
         ddl::create_validator("v_list_all").wasm(wasm_b64(&wasm)),
     );
-    let create_req = to_req(&b);
+    let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it to a table so we can verify bound_in.
@@ -1294,13 +1284,13 @@ async fn list_validators_all_over_wire() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = to_req(&b);
+    let bind_req = b.to_request_via_msgpack();
     db.execute("testdb", &bind_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("lv");
     b.list_all_validators("op", ddl::list_all_validators());
-    let list_req = to_req(&b);
+    let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let items = resp.results["op"].records[0]["validators"]
         .as_array()
@@ -1323,13 +1313,13 @@ async fn list_function_folders_over_wire() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("lff");
     b.list_function_folders("op", ddl::list_function_folders());
-    let list_req = to_req(&b);
+    let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let folders = resp.results["op"].records[0]["function_folders"]
         .as_array()
@@ -1357,14 +1347,14 @@ async fn list_function_folders_filtered_by_parent() {
         let mut b = Batch::new();
         b.id("cff");
         b.create_function_folder("op", ddl::create_function_folder(path));
-        let req = to_req(&b);
+        let req = b.to_request_via_msgpack();
         db.execute("testdb", &req).await.unwrap();
     }
 
     let mut b = Batch::new();
     b.id("lff");
     b.list_function_folders("op", ddl::list_function_folders().parent("alpha"));
-    let list_req = to_req(&b);
+    let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let folders = resp.results["op"].records[0]["function_folders"]
         .as_array()
@@ -1454,7 +1444,7 @@ async fn error_code_exists_create_db_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_db("op", ddl::create_db("dup_db"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = shamir.execute("bootstrap", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1473,7 +1463,7 @@ async fn error_code_exists_create_table_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("op", ddl::create_table("users").repo("main"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1492,7 +1482,7 @@ async fn error_code_exists_create_repo_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("op", ddl::create_repo("main").engine("in_memory"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1511,7 +1501,7 @@ async fn error_code_still_referenced_drop_db() {
     let mut b = Batch::new();
     b.id(1);
     b.drop_db("op", ddl::drop_db("testdb"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1530,7 +1520,7 @@ async fn error_code_still_referenced_drop_repo() {
     let mut b = Batch::new();
     b.id(1);
     b.drop_repo("op", ddl::drop_repo("main"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1552,7 +1542,7 @@ async fn error_code_access_denied_ddl() {
     let chown_h = b.chown("chown", ddl::chown(ddl::res::database("testdb"), 1));
     let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
     b.after(&chmod_h, &chown_h);
-    let chmod_req = to_req(&b);
+    let chmod_req = b.to_request_via_msgpack();
     db.execute("testdb", &chmod_req).await.unwrap();
 
     // Non-owner user tries to create a table (needs traversal through db).
@@ -1560,7 +1550,7 @@ async fn error_code_access_denied_ddl() {
     let mut b = Batch::new();
     b.id(2);
     b.create_table("op", ddl::create_table("forbidden_table").repo("main"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = db.execute_as(user_actor, "testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1580,14 +1570,14 @@ async fn error_code_not_found_grant_role_user() {
     let mut b = Batch::new();
     b.id(1);
     b.create_role("op", ddl::create_role("testrole", vec![]));
-    let create_role = to_req(&b);
+    let create_role = b.to_request_via_msgpack();
     db.execute("testdb", &create_role).await.unwrap();
 
     // Grant to a non-existent user.
     let mut b = Batch::new();
     b.id(2);
     b.grant_role("op", ddl::grant_role("testrole", "ghost_user"));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1612,7 +1602,7 @@ async fn error_code_exists_create_index_duplicate() {
             .repo("main")
             .fields(vec![vec!["name".to_string()]]),
     );
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     db.execute("testdb", &req).await.unwrap();
 
     // Try to create the same index again.

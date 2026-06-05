@@ -29,11 +29,6 @@ use shamir_storage::error::DbError;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
-
 /// Identity-echo WAT matching the slice-2 ABI.
 ///
 /// Exports `memory` (2 pages), `shamir_alloc` (bump allocator), and
@@ -644,7 +639,10 @@ async fn setup_db_with_people_table() -> ShamirDb {
             .engine("in_memory")
             .tables(["people"]),
     );
-    shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     shamir
 }
 
@@ -680,7 +678,7 @@ async fn wasm_function_inserts_and_queries() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("all", Query::from("people"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let records = &resp.results["all"].records;
     assert_eq!(
         records.len(),
@@ -715,7 +713,7 @@ async fn wasm_function_get_by_key() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("all", Query::from("people"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["id"], json!(42));

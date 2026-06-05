@@ -5,15 +5,9 @@ use shamir_query_builder::Query;
 
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
-use crate::query::batch::BatchRequest;
 use crate::shamir_db::ShamirDb;
 use crate::shamir_db::SystemStoreConfig;
 use serde_json::json;
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 // ============================================================================
 // System store persistence tests
@@ -132,7 +126,7 @@ async fn read_count(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> usi
     let mut b = Batch::new();
     b.id(1);
     b.query("q", Query::with_repo(repo, table));
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     let resp = shamir.execute(db, &req).await.unwrap();
     resp.results["q"].records.len()
 }
@@ -197,7 +191,7 @@ async fn table_catalogue_survives_restart() {
                 "email" => "alice@example.com",
             }),
         );
-        let ins = to_req(&b);
+        let ins = b.to_request_via_msgpack();
         let resp = shamir.execute("production", &ins).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
@@ -260,7 +254,7 @@ async fn table_added_after_repo_survives_restart() {
                 "kind" => "click",
             }),
         );
-        let ins = to_req(&b);
+        let ins = b.to_request_via_msgpack();
         shamir.execute("production", &ins).await.unwrap();
     }
 

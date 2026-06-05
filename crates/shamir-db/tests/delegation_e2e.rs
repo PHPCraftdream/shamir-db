@@ -22,11 +22,6 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
-
 /// Build a ShamirDb with database "testdb"/repo "main"/table "users".
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -42,7 +37,7 @@ fn one_op(op: impl shamir_query_builder::batch::IntoBatchOp) -> BatchRequest {
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
-    to_req(&b)
+    b.to_request_via_msgpack()
 }
 
 // ===========================================================================

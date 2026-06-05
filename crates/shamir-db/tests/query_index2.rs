@@ -16,6 +16,7 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
+use shamir_query_builder::q;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 
@@ -26,12 +27,6 @@ async fn setup() -> ShamirDb {
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("posts"));
     db.add_repo(repo_config).await.unwrap();
     shamir
-}
-
-/// Round-trip a builder-assembled `Batch` through msgpack, then execute.
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
 }
 
 async fn exec_built(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
@@ -55,7 +50,7 @@ async fn fts_index_and_query() {
             .index_type("fts")
             .fts_tokenizer("whitespace"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -68,12 +63,12 @@ async fn fts_index_and_query() {
         insert("posts").row(doc! { "body" => "rust is great" }),
     );
     b.insert("w3", insert("posts").row(doc! { "body" => "hello python" }));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
     b.query("q", Query::from("posts").fts("body", "hello world", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1, "expected 1 record, got {records:?}");
@@ -95,19 +90,19 @@ async fn fts_or_query() {
             .field("body")
             .index_type("fts"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
     b.insert("w1", insert("posts").row(doc! { "body" => "apple orange" }));
     b.insert("w2", insert("posts").row(doc! { "body" => "banana pear" }));
     b.insert("w3", insert("posts").row(doc! { "body" => "cherry grape" }));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
     b.query("q", Query::from("posts").fts("body", "apple banana", "or"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 2);
@@ -130,7 +125,7 @@ async fn functional_lower_eq() {
             .index_type("functional")
             .functional_op("lower"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -142,20 +137,15 @@ async fn functional_lower_eq() {
         "w2",
         insert("posts").row(doc! { "email" => "BOB@bar.org", "name" => "bob" }),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
     b.query(
         "q",
-        Query::from("posts").where_(shamir_query_builder::filter::computed(
-            "lower",
-            "email",
-            "eq",
-            "alice@foo.com",
-        )),
+        q!(from posts where computed("lower", email, "eq", "alice@foo.com")),
     );
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["name"], "alice");
@@ -181,7 +171,7 @@ async fn vector_hnsw_similarity() {
             .vector_dim(3)
             .vector_metric("cosine"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -198,7 +188,7 @@ async fn vector_hnsw_similarity() {
         insert("posts")
             .row(doc! { "label" => "x_near" }.set_json("embedding", json!([0.95, 0.1, 0.0]))),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
@@ -210,7 +200,7 @@ async fn vector_hnsw_similarity() {
             2,
         )),
     );
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 2, "expected top-2, got {records:?}");
@@ -239,12 +229,12 @@ async fn fts_brute_force_fallback() {
         "w2",
         insert("posts").row(doc! { "body" => "no match here" }),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
     b.query("q", Query::from("posts").fts("body", "hello", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1);
@@ -286,13 +276,13 @@ async fn create_index_persists_metadata() {
             .vector_dim(3)
             .vector_metric("cosine"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     // Verify: all 3 should appear.
     let mut b = Batch::new();
     b.id(2);
     b.query("q1", Query::from("posts").fts("body", "test", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     // Even with no data, the planner should find the FTS index and return empty results
     // via the index path (not fall through to full-scan).
@@ -325,12 +315,12 @@ async fn fts_stemmed_en_query() {
             .index_type("fts")
             .fts_tokenizer("stemmed_en"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
     b.insert("w1", insert("posts").row(doc! { "body" => "running fast" }));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     // Query the INFLECTED form "running" -- the fix stems it to "run"
     // which matches the stored stem. On the old code "running" hashed
@@ -338,7 +328,7 @@ async fn fts_stemmed_en_query() {
     let mut b = Batch::new();
     b.id(3);
     b.query("q", Query::from("posts").fts("body", "running", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(
@@ -366,19 +356,19 @@ async fn fts_stopwords_filtered() {
             .index_type("fts")
             .fts_tokenizer("stemmed_en"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
     b.insert("w1", insert("posts").row(doc! { "body" => "the cat sat" }));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     // Query "the cat" -- "the" is a stopword and gets filtered both at
     // index time and query time, so the lookup matches by "cat" only.
     let mut b = Batch::new();
     b.id(3);
     b.query("q", Query::from("posts").fts("body", "the cat", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(
@@ -423,7 +413,7 @@ async fn fts_ngram_query() {
             .index_type("fts")
             .fts_tokenizer("ngram3"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -435,7 +425,7 @@ async fn fts_ngram_query() {
             doc! { "body" => "goodbye" },
         ]),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     // Query the FULL word "hello" (5 chars, NOT a single trigram).
     // The fix ngram-tokenizes the query -> [hel,ell,llo]. With mode
@@ -444,7 +434,7 @@ async fn fts_ngram_query() {
     let mut b = Batch::new();
     b.id(3);
     b.query("q", Query::from("posts").fts("body", "hello", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(
@@ -479,7 +469,7 @@ async fn fts_stemmed_fr_query() {
             .index_type("fts")
             .fts_tokenizer("stemmed_fr"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -490,7 +480,7 @@ async fn fts_stemmed_fr_query() {
             doc! { "body" => "un chien blanc" },
         ]),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     // Query the INFLECTED plural "chats" -- the fix stems it to "chat"
     // which matches the stored stem. On the old code "chats" hashed
@@ -498,7 +488,7 @@ async fn fts_stemmed_fr_query() {
     let mut b = Batch::new();
     b.id(3);
     b.query("q", Query::from("posts").fts("body", "chats", "and"));
-    let resp = exec_built(&shamir, to_req(&b)).await;
+    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let records = &resp.results["q"].records;
     assert_eq!(
