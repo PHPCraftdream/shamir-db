@@ -1,19 +1,40 @@
 //! Prelude for the ShamirDB guest function SDK.
 //!
-//! Import with `use shamir_sdk::prelude::*;`.
+//! Import with `use shamir_sdk::prelude::*;` — this single import covers
+//! **all** function kinds. The prelude is intentionally flat (not split
+//! per-kind) because the types are small and overlap heavily.
 //!
-//! To use the `#[shamir::function]` form, write:
-//! ```ignore
-//! use shamir_sdk as shamir;
-//! use shamir::prelude::*;
-//! ```
+//! # What each kind needs (all re-exported here)
 //!
-//! The canonical form is `#[shamir_sdk::function]`:
+//! | Kind | Types used |
+//! |------|-----------|
+//! | `#[scalar]` | `Params`, `Value`, `Result`, `Error` |
+//! | `#[procedure]` | `Ctx`, `Db`, `Table`, `Params`, `Value`, `Result`, `Error` |
+//! | `#[function]` | `Ctx`, `Batch`, `Db`, `Table`, `Params`, `Value`, `Result`, `Error` |
+//! | `#[validator]` | `Value`, `Ctx`, `Validation`, `ValidationError`, `IntoFieldPath` |
+//!
+//! HTTP types (`HttpRequest`, `HttpResponse`) are also exported for
+//! procedures/functions that call `ctx.http_fetch()`.
+//!
+//! # Examples
+//!
 //! ```ignore
 //! use shamir_sdk::prelude::*;
 //!
-//! #[shamir_sdk::function]
-//! pub async fn my_fn(ctx: Ctx, batch: Batch, params: Params) -> Result<Value> { ... }
+//! #[shamir_sdk::scalar]
+//! pub async fn upper(params: Params) -> Result<Value> {
+//!     Ok(Value::Str(params.str("s")?.to_uppercase()))
+//! }
+//! ```
+//!
+//! ```ignore
+//! use shamir_sdk::prelude::*;
+//!
+//! #[shamir_sdk::procedure]
+//! pub async fn list_all(ctx: Ctx, params: Params) -> Result<Value> {
+//!     let rows = ctx.db().table(params.str("table")?).query(None)?;
+//!     Ok(Value::List(rows))
+//! }
 //! ```
 
 pub use crate::{
