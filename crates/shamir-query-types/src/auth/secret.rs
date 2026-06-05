@@ -9,6 +9,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+#[cfg(feature = "crypto")]
 use zeroize::Zeroize;
 
 /// A `String` whose `Debug` output is redacted and whose contents are
@@ -63,6 +64,7 @@ impl<'de> Deserialize<'de> for SecretString {
     }
 }
 
+#[cfg(feature = "crypto")]
 impl Drop for SecretString {
     fn drop(&mut self) {
         // Zeroize the heap buffer in-place before deallocation.

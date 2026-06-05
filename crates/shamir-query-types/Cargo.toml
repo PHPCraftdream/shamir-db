@@ -20,11 +20,18 @@ fxhash     = "0.2.1"
 # `sha2` are stable, no-std-capable, already used elsewhere in the
 # workspace (shamir-connect). Keeping the helpers in this crate
 # lets both client and server share one canonical implementation.
-hmac       = "0.12"
-sha2       = "0.10"
+# Behind the `crypto` feature so that guest-core (WASM) builds can
+# skip heavy crypto deps.
+hmac       = { version = "0.12", optional = true }
+sha2       = { version = "0.10", optional = true }
 
-# Secret-bearing newtypes for password / key fields.
-zeroize    = { version = "1", features = ["derive"] }
+# Secret-bearing newtypes for password / key fields. Optional —
+# without `crypto`, SecretString still works but skips zeroize-on-drop.
+zeroize    = { version = "1", features = ["derive"], optional = true }
+
+[features]
+default = ["crypto"]
+crypto  = ["dep:hmac", "dep:sha2", "dep:zeroize"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
