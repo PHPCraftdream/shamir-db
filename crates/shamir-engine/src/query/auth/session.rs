@@ -388,6 +388,9 @@ impl SessionPermissions {
             | BatchOp::UnbindValidator(_)
             | BatchOp::ListValidators(_)
             | BatchOp::CreateFunctionFolder(_) => (Action::Alter, Resource::Global),
+
+            // Stored procedure call — execute on a function, no table_ref.
+            BatchOp::Call(_) => (Action::Read, Resource::Global),
         }
     }
 }

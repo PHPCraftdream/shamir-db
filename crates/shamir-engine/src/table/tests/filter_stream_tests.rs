@@ -401,6 +401,7 @@ async fn test_filter_stream_with_query_ref() {
             records: vec![serde_json::json!({"min_score": 70})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -482,6 +483,7 @@ async fn test_filter_stream_query_ref_in_and() {
             records: vec![serde_json::json!({"min_age": 25})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
     refs.insert(
@@ -490,6 +492,7 @@ async fn test_filter_stream_query_ref_in_and() {
             records: vec![serde_json::json!({"cutoff": 60})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -528,6 +531,7 @@ async fn test_filter_stream_query_ref_in_or_with_literal() {
             records: vec![serde_json::json!({"score_threshold": 90})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -565,6 +569,7 @@ async fn test_filter_stream_not_query_ref() {
             records: vec![serde_json::json!({"max_age": 30})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -600,6 +605,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             records: vec![serde_json::json!({"min": 24, "max": 31})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
     refs.insert(
@@ -608,6 +614,7 @@ async fn test_filter_stream_deep_nesting_with_multiple_query_refs() {
             records: vec![serde_json::json!({"allowed": "active"})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -697,6 +704,7 @@ async fn test_filter_stream_mixed_query_ref_field_ref_literal() {
             records: vec![serde_json::json!({"threshold": 50})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -798,6 +806,7 @@ async fn test_filter_stream_in_query_ref_column() {
             ],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -836,6 +845,7 @@ async fn test_filter_stream_not_in_query_ref_column() {
             ],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -879,6 +889,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             ],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
     refs.insert(
@@ -887,6 +898,7 @@ async fn test_filter_stream_in_query_ref_nested_and() {
             records: vec![serde_json::json!({"threshold": 60})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -931,6 +943,7 @@ async fn test_filter_stream_not_in_query_ref_with_or() {
             ],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 

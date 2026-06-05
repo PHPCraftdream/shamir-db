@@ -133,9 +133,10 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             return_only: None,
                             limits: Default::default(),
                         };
-                        let _ = execute_batch(&request, resolver, None, Actor::System, "bench")
-                            .await
-                            .unwrap();
+                        let _ =
+                            execute_batch(&request, resolver, None, None, Actor::System, "bench")
+                                .await
+                                .unwrap();
                     }
                 });
             });
@@ -202,9 +203,10 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                         };
 
                         let start = Instant::now();
-                        let _ = execute_batch(&request, &resolver, None, Actor::System, "bench")
-                            .await
-                            .unwrap();
+                        let _ =
+                            execute_batch(&request, &resolver, None, None, Actor::System, "bench")
+                                .await
+                                .unwrap();
                         total += start.elapsed();
                     }
                     total
@@ -430,7 +432,7 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
                     };
 
                     let start = Instant::now();
-                    let _ = execute_batch(&request, &resolver, None, Actor::System, "bench")
+                    let _ = execute_batch(&request, &resolver, None, None, Actor::System, "bench")
                         .await
                         .unwrap();
                     total += start.elapsed();

@@ -69,7 +69,7 @@ async fn test_single_read_query() {
             .row(doc().set("name", "Bob").set("age", 25)),
     );
     let insert_req = b.build();
-    let resp = execute_batch(&insert_req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&insert_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     assert_eq!(resp.results["insert"].records.len(), 2);
@@ -80,7 +80,7 @@ async fn test_single_read_query() {
     b.query("users", Query::from("users"));
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -103,7 +103,7 @@ async fn test_independent_queries_same_stage() {
     b.op_silent("s1", write::insert("users").row(doc().set("name", "Alice")));
     b.op_silent("s2", write::insert("orders").row(doc().set("item", "Book")));
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -114,7 +114,7 @@ async fn test_independent_queries_same_stage() {
     b.query("orders", Query::from("orders"));
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -143,7 +143,7 @@ async fn test_dependent_query_ref() {
             .row(doc().set("name", "Carol").set("status", "active")),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -158,7 +158,7 @@ async fn test_dependent_query_ref() {
     );
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -187,7 +187,7 @@ async fn test_insert_then_read() {
     b.query("read", Query::from("users"));
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -216,7 +216,7 @@ async fn test_return_only() {
     b.return_only(["read"]);
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -243,7 +243,7 @@ async fn test_return_result_false() {
     b.query("read", Query::from("users"));
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -270,7 +270,7 @@ async fn test_batch_with_delete() {
             .row(doc().set("name", "Bob").set("status", "inactive")),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -283,7 +283,7 @@ async fn test_batch_with_delete() {
     );
     let req = b.build();
 
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     // 1 record deleted (Bob)
@@ -321,7 +321,7 @@ async fn test_circular_dependency_error() {
     );
     let req = b.build();
 
-    let err = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap_err();
     assert!(matches!(
@@ -347,7 +347,7 @@ async fn test_unknown_table_fails_early() {
     b.query("bad", Query::from("nonexistent_table"));
     let req = b.build();
 
-    let err = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let err = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap_err();
     // Should fail with table not found error BEFORE any execution
@@ -370,7 +370,7 @@ async fn test_request_id_echoed() {
     b.id("req-42");
     b.query("q", Query::from("users"));
     let req = b.build();
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     assert_eq!(resp.id, json!("req-42"));
@@ -380,7 +380,7 @@ async fn test_request_id_echoed() {
     b.id(123);
     b.query("q", Query::from("users"));
     let req = b.build();
-    let resp = execute_batch(&req, &resolver, None, Actor::System, "test")
+    let resp = execute_batch(&req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     assert_eq!(resp.id, json!(123));
@@ -406,6 +406,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
     let mut runner = QueryRunner {
         resolver: &resolver,
         admin: None,
+        invoker: None,
         tx: None,
         actor: Actor::System,
         db_name: "test",
@@ -429,6 +430,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
     let mut runner = QueryRunner {
         resolver: &resolver,
         admin: None,
+        invoker: None,
         tx: None,
         actor: Actor::System,
         db_name: "test",
@@ -485,7 +487,7 @@ async fn execute_batch_transactional_si_happy_path() {
     );
     let request = b.build();
 
-    let response = execute_batch(&request, &resolver, None, Actor::System, "test")
+    let response = execute_batch(&request, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -609,6 +611,7 @@ impl TableResolver for GateBarrierResolver {
                     &self.writer_req,
                     &writer_resolver,
                     None,
+                    None,
                     Actor::System,
                     "test",
                 )
@@ -704,7 +707,7 @@ async fn ssi_write_skew_detected_through_execute_batch() {
     );
     let reader_req = rb.build();
 
-    let response = execute_batch(&reader_req, &resolver, None, Actor::System, "test")
+    let response = execute_batch(&reader_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -782,7 +785,7 @@ async fn ssi_write_skew_no_record_no_conflict_through_execute_batch() {
     rb.query("g", Query::from("gate"));
     let reader_req = rb.build();
 
-    let response = execute_batch(&reader_req, &resolver, None, Actor::System, "test")
+    let response = execute_batch(&reader_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     let info = response
@@ -829,9 +832,17 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
         write::insert("users").row(doc().set("name", "alice")),
     );
     let call1 = b.build();
-    let r1 = execute_in_open_tx(&call1, &resolver, None, &Actor::System, "test", &mut tx)
-        .await
-        .unwrap();
+    let r1 = execute_in_open_tx(
+        &call1,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
     assert!(
         r1.transaction.is_none(),
         "tx is still open after EXECUTE #1 — no per-call commit outcome"
@@ -855,9 +866,17 @@ async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
     b.id(2);
     b.insert("ins", write::insert("users").row(doc().set("name", "bob")));
     let call2 = b.build();
-    let r2 = execute_in_open_tx(&call2, &resolver, None, &Actor::System, "test", &mut tx)
-        .await
-        .unwrap();
+    let r2 = execute_in_open_tx(
+        &call2,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
     assert!(r2.transaction.is_none(), "tx still open after EXECUTE #2");
 
     // COMMIT — both calls' writes land together at one commit version.
@@ -904,9 +923,17 @@ async fn interactive_tx_rollback_discards_staged_writes() {
         write::insert("users").row(doc().set("name", "ghost")),
     );
     let call = b.build();
-    execute_in_open_tx(&call, &resolver, None, &Actor::System, "test", &mut tx)
-        .await
-        .unwrap();
+    execute_in_open_tx(
+        &call,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
 
     // ROLLBACK = drop the parked tx (RAII rollback, no storage side effects),
     // then release the snapshot.
@@ -988,6 +1015,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         &select_req,
         &resolver,
         None,
+        None,
         &Actor::System,
         "test",
         &mut tx_a,
@@ -1004,6 +1032,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
     let rb1 = execute_in_open_tx(
         &select_req,
         &resolver,
+        None,
         None,
         &Actor::System,
         "test",
@@ -1043,6 +1072,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
         &update_alice,
         &resolver,
         None,
+        None,
         &Actor::System,
         "test",
         &mut tx_a,
@@ -1052,6 +1082,7 @@ async fn interactive_ssi_write_skew_across_calls_one_aborts() {
     let _rb2 = execute_in_open_tx(
         &update_bob,
         &resolver,
+        None,
         None,
         &Actor::System,
         "test",
@@ -1117,7 +1148,8 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
     );
     let seed_req = sb.build();
     let seed_resp =
-        crate::query::batch::execute_batch(&seed_req, &resolver, None, Actor::System, "test").await;
+        crate::query::batch::execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
+            .await;
     assert!(
         seed_resp.is_ok(),
         "seeding baseline row failed: {:?}",
@@ -1145,18 +1177,50 @@ async fn two_interactive_si_txs_race_last_commit_wins() {
     let ins_b2 = mk_ins(4, "b2");
 
     // Interleave the calls.
-    execute_in_open_tx(&ins_a1, &resolver, None, &Actor::System, "test", &mut tx_a)
-        .await
-        .unwrap();
-    execute_in_open_tx(&ins_b1, &resolver, None, &Actor::System, "test", &mut tx_b)
-        .await
-        .unwrap();
-    execute_in_open_tx(&ins_a2, &resolver, None, &Actor::System, "test", &mut tx_a)
-        .await
-        .unwrap();
-    execute_in_open_tx(&ins_b2, &resolver, None, &Actor::System, "test", &mut tx_b)
-        .await
-        .unwrap();
+    execute_in_open_tx(
+        &ins_a1,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_a,
+    )
+    .await
+    .unwrap();
+    execute_in_open_tx(
+        &ins_b1,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_b,
+    )
+    .await
+    .unwrap();
+    execute_in_open_tx(
+        &ins_a2,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_a,
+    )
+    .await
+    .unwrap();
+    execute_in_open_tx(
+        &ins_b2,
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx_b,
+    )
+    .await
+    .unwrap();
 
     // tx_a commits first → version V_a. tx_b commits second → version V_b > V_a.
     let o_a = commit_interactive_tx(&repo, tx_a).await.unwrap();
@@ -1219,10 +1283,10 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
         b2.insert("ins", write::insert("users").row(doc().set("name", "beta")));
         let c2 = b2.build();
 
-        execute_in_open_tx(&c1, &resolver, None, &Actor::System, "test", &mut tx)
+        execute_in_open_tx(&c1, &resolver, None, None, &Actor::System, "test", &mut tx)
             .await
             .unwrap();
-        execute_in_open_tx(&c2, &resolver, None, &Actor::System, "test", &mut tx)
+        execute_in_open_tx(&c2, &resolver, None, None, &Actor::System, "test", &mut tx)
             .await
             .unwrap();
 
@@ -1299,7 +1363,7 @@ async fn r2_actor_flows_through_filter_context() {
         write::insert("users").row(doc().set("name", "Alice").set("age", 30)),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test_db")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test_db")
         .await
         .unwrap();
 
@@ -1310,9 +1374,16 @@ async fn r2_actor_flows_through_filter_context() {
     b.id(2);
     b.query("q", Query::from("users"));
     let read_req = b.build();
-    let resp = execute_batch(&read_req, &resolver, None, user_actor.clone(), "test_db")
-        .await
-        .unwrap();
+    let resp = execute_batch(
+        &read_req,
+        &resolver,
+        None,
+        None,
+        user_actor.clone(),
+        "test_db",
+    )
+    .await
+    .unwrap();
     assert_eq!(resp.results["q"].records.len(), 1);
 }
 
@@ -1372,7 +1443,7 @@ async fn rls_read_returns_only_matching_rows() {
             .row(doc().set("name", "Dave").set("status", "pending")),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -1425,7 +1496,7 @@ async fn rls_delete_only_removes_matching_rows() {
             .row(doc().set("name", "Carol").set("status", "active")),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -1454,7 +1525,7 @@ async fn rls_delete_only_removes_matching_rows() {
     b.id(3);
     b.query("remaining", Query::from("users"));
     let verify_req = b.build();
-    let verify_resp = execute_batch(&verify_req, &resolver, None, Actor::System, "test")
+    let verify_resp = execute_batch(&verify_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     let remaining = &verify_resp.results["remaining"].records;
@@ -1486,7 +1557,7 @@ async fn rls_superadmin_sees_all_rows() {
             .row(doc().set("name", "Carol").set("status", "pending")),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -1522,7 +1593,7 @@ async fn rls_update_only_affects_matching_rows() {
             .row(doc().set("name", "Bob").set("status", "inactive")),
     );
     let seed_req = b.build();
-    execute_batch(&seed_req, &resolver, None, Actor::System, "test")
+    execute_batch(&seed_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
 
@@ -1551,7 +1622,7 @@ async fn rls_update_only_affects_matching_rows() {
     b.id(3);
     b.query("check", Query::from("users").where_eq("name", "Bob"));
     let verify_req = b.build();
-    let verify_resp = execute_batch(&verify_req, &resolver, None, Actor::System, "test")
+    let verify_resp = execute_batch(&verify_req, &resolver, None, None, Actor::System, "test")
         .await
         .unwrap();
     let bob = &verify_resp.results["check"].records;

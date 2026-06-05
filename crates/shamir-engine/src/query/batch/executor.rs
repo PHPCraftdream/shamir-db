@@ -15,6 +15,7 @@ use crate::query::read::{QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use crate::table::TableManager;
+use shamir_query_types::CallOp;
 use shamir_storage::error::DbResult;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, TMap};
@@ -38,6 +39,28 @@ pub trait AdminExecutor: Send + Sync {
     async fn execute_admin(&self, op: &BatchOp) -> Result<QueryResult, BatchError>;
 }
 
+/// Trait for invoking stored procedures / callable getter-functions.
+///
+/// The engine executor does not know how to run a WASM function — that
+/// lives in `shamir-db` (`ShamirDb::invoke_function_in_db_as`). This
+/// trait is the thin channel that lets `QueryRunner::run` dispatch a
+/// `BatchOp::Call` to the facade without a circular dependency.
+///
+/// Injected alongside [`AdminExecutor`] (same pattern, same lifecycle).
+#[async_trait::async_trait]
+pub trait FunctionInvoker: Send + Sync {
+    /// Invoke a stored procedure named by `op.call` with the given
+    /// positional `op.params` (already resolved — `$query` refs
+    /// expanded by the executor) under authority of `actor`, returning
+    /// the function's `QueryValue` mapped into a `QueryResult.value`.
+    async fn invoke_call(
+        &self,
+        op: &CallOp,
+        actor: &Actor,
+        resolved_refs: &TMap<String, QueryResult>,
+    ) -> Result<QueryResult, BatchError>;
+}
+
 /// Execute a batch request against a table resolver.
 ///
 /// 1. Plans the execution (topological sort into parallel stages)
@@ -51,6 +74,7 @@ pub async fn execute_batch(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
     actor: Actor,
     db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
@@ -79,13 +103,17 @@ pub async fn execute_batch(
 
     // 3. Execute — branch on transactional.
     let (all_results, tx_info) = if request.transactional {
-        execute_transactional(request, &mut plan, resolver, admin, &actor, db_name).await?
+        execute_transactional(
+            request, &mut plan, resolver, admin, invoker, &actor, db_name,
+        )
+        .await?
     } else {
         let r = execute_plan(
             &mut plan,
             &request.queries,
             resolver,
             admin,
+            invoker,
             &actor,
             db_name,
         )
@@ -170,7 +198,7 @@ pub async fn execute_batch_with_permissions(
             apply_row_filter(&mut entry.op, rf);
         }
     }
-    execute_batch(&request, resolver, admin, Actor::System, db_name).await
+    execute_batch(&request, resolver, admin, None, Actor::System, db_name).await
 }
 
 /// AND a row-level-security filter into a data op's WHERE clause.
@@ -317,6 +345,7 @@ async fn execute_plan(
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
     db_name: &str,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
@@ -339,6 +368,7 @@ async fn execute_plan(
                 entry,
                 resolver,
                 admin,
+                invoker,
                 &resolved_refs,
                 actor,
                 db_name,
@@ -358,11 +388,13 @@ async fn execute_plan(
 /// with a shared `&TxContext` (Vector I.1), so a Serializable batch's
 /// SELECT populates the read-set and SSI write-skew detection is live
 /// end-to-end through this wire path.
+#[allow(clippy::too_many_arguments)]
 async fn execute_plan_tx(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
     db_name: &str,
     tx: &mut shamir_tx::TxContext,
@@ -383,6 +415,7 @@ async fn execute_plan_tx(
             let mut runner = QueryRunner {
                 resolver,
                 admin,
+                invoker,
                 tx: Some(&mut *tx),
                 actor: actor.clone(),
                 db_name,
@@ -404,6 +437,7 @@ async fn execute_transactional(
     plan: &mut BatchPlan,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
     db_name: &str,
 ) -> Result<
@@ -459,6 +493,7 @@ async fn execute_transactional(
         &request.queries,
         resolver,
         admin,
+        invoker,
         actor,
         db_name,
         &mut tx,
@@ -563,6 +598,7 @@ pub async fn execute_in_open_tx(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
     db_name: &str,
     tx: &mut shamir_tx::TxContext,
@@ -587,6 +623,7 @@ pub async fn execute_in_open_tx(
         &request.queries,
         resolver,
         admin,
+        invoker,
         actor,
         db_name,
         tx,
@@ -648,6 +685,7 @@ fn build_resolved_refs(
 pub struct QueryRunner<'a> {
     pub resolver: &'a dyn TableResolver,
     pub admin: Option<&'a dyn AdminExecutor>,
+    pub invoker: Option<&'a dyn FunctionInvoker>,
     pub tx: Option<&'a mut shamir_tx::TxContext>,
     pub actor: Actor,
     pub db_name: &'a str,
@@ -685,6 +723,18 @@ impl<'a> QueryRunner<'a> {
                 None => Err(BatchError::QueryError {
                     alias: alias.to_string(),
                     message: "Admin operations not supported in this context".to_string(),
+                    code: None,
+                }),
+            };
+        }
+
+        // Call ops — delegate to FunctionInvoker (autocommit, no tx).
+        if let BatchOp::Call(call_op) = &entry.op {
+            return match self.invoker {
+                Some(inv) => inv.invoke_call(call_op, &self.actor, resolved_refs).await,
+                None => Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: "Function calls not supported in this context".to_string(),
                     code: None,
                 }),
             };
@@ -832,11 +882,13 @@ impl<'a> QueryRunner<'a> {
 /// Execute a single query/operation entry.
 ///
 /// Thin wrapper around [`QueryRunner`] with `tx: None`.
+#[allow(clippy::too_many_arguments)]
 async fn execute_single(
     alias: &str,
     entry: &QueryEntry,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
     resolved_refs: &TMap<String, QueryResult>,
     actor: &Actor,
     db_name: &str,
@@ -844,6 +896,7 @@ async fn execute_single(
     let mut runner = QueryRunner {
         resolver,
         admin,
+        invoker,
         tx: None,
         actor: actor.clone(),
         db_name,
@@ -862,6 +915,7 @@ fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
             execution_time_us: wr.execution_time_us,
         }),
         pagination: None,
+        value: None,
     }
 }
 

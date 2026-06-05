@@ -11,7 +11,8 @@ use crate::engine::repo::RepoConfig;
 use crate::engine::table::{TableConfig, TableManager};
 use crate::query::batch::{
     commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, AdminExecutor,
-    BatchError, BatchOp, BatchRequest, BatchResponse, TableResolver, TransactionInfo,
+    BatchError, BatchOp, BatchRequest, BatchResponse, FunctionInvoker, TableResolver,
+    TransactionInfo,
 };
 use crate::query::read::{QueryResult, QueryStats};
 use crate::query::TableRef;
@@ -1735,6 +1736,87 @@ impl ShamirAdminExecutor {
     }
 }
 
+// ============================================================================
+// FunctionInvoker — stored procedure / callable function invocation
+// ============================================================================
+
+/// FunctionInvoker that invokes functions via `ShamirDb::invoke_function_in_db_as`.
+struct ShamirFunctionInvoker {
+    shamir: ShamirDb,
+    db_name: String,
+}
+
+#[async_trait::async_trait]
+impl FunctionInvoker for ShamirFunctionInvoker {
+    async fn invoke_call(
+        &self,
+        op: &crate::query::CallOp,
+        actor: &Actor,
+        _resolved_refs: &crate::types::common::TMap<String, QueryResult>,
+    ) -> Result<QueryResult, BatchError> {
+        // Convert positional Vec<FilterValue> params into Params.
+        //
+        // Layout:
+        //   - Each param at index i is stored under key "i" (positional access).
+        //   - The full array is stored under key "args" as QueryValue::List.
+        //
+        // Guest SDK reads: `params.get("0")` for first arg, or
+        // `params.get("args")` for the whole array.
+        let mut params = crate::engine::function::Params::new();
+        let mut args_list = Vec::with_capacity(op.params.len());
+        for (i, fv) in op.params.iter().enumerate() {
+            let qv = filter_value_to_query_value(fv);
+            let key: String = i.to_string();
+            params.set(key, qv.clone());
+            args_list.push(qv);
+        }
+        params.set("args", crate::types::value::QueryValue::List(args_list));
+
+        let qv = self
+            .shamir
+            .invoke_function_in_db_as(&self.db_name, &op.repo, &op.call, params, actor.clone())
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: String::new(),
+                message: e.to_string(),
+                code: None,
+            })?;
+
+        // Map QueryValue -> QueryResult with `value` field.
+        let json_value = serde_json::to_value(&qv).unwrap_or(serde_json::Value::Null);
+        Ok(QueryResult {
+            records: vec![],
+            stats: None,
+            pagination: None,
+            value: Some(json_value),
+        })
+    }
+}
+
+/// Convert a `FilterValue` literal to a `QueryValue`.
+///
+/// Only literal variants are converted; `$query`, `$ref`, `$fn`, `$expr`,
+/// `$cond` are left as `QueryValue::Null` for now (Phase 2 will resolve
+/// `$query` refs through `resolved_refs`).
+fn filter_value_to_query_value(fv: &crate::query::FilterValue) -> crate::types::value::QueryValue {
+    use crate::query::FilterValue;
+    use crate::types::value::QueryValue;
+
+    match fv {
+        FilterValue::Null => QueryValue::Null,
+        FilterValue::Bool(b) => QueryValue::Bool(*b),
+        FilterValue::Int(i) => QueryValue::Int(*i),
+        FilterValue::Float(f) => QueryValue::F64(*f),
+        FilterValue::String(s) => QueryValue::Str(s.clone()),
+        FilterValue::Binary(b) => QueryValue::Bin(b.clone()),
+        FilterValue::Array(arr) => {
+            QueryValue::List(arr.iter().map(filter_value_to_query_value).collect())
+        }
+        // $query, $ref, $fn, $expr, $cond — not resolved here (Phase 2).
+        _ => QueryValue::Null,
+    }
+}
+
 /// Map the wire DTO into the storage struct without dragging the
 /// storage crate's serde-compatible-by-coincidence layout into
 /// the API contract — the two types are intentionally distinct.
@@ -1817,6 +1899,7 @@ fn admin_result(data: serde_json::Value) -> QueryResult {
             execution_time_us: 0,
         }),
         pagination: None,
+        value: None,
     }
 }
 
@@ -1890,7 +1973,19 @@ impl ShamirDb {
             actor: actor.clone(),
         };
 
-        execute_batch(request, &resolver, Some(&admin), actor, db_name).await
+        let invoker = ShamirFunctionInvoker {
+            shamir: self.clone(),
+            db_name: db_name.to_string(),
+        };
+        execute_batch(
+            request,
+            &resolver,
+            Some(&admin),
+            Some(&invoker),
+            actor,
+            db_name,
+        )
+        .await
     }
 }
 
@@ -2045,7 +2140,20 @@ impl ShamirDb {
             db_name: db_name.to_string(),
             actor: actor.clone(),
         };
-        execute_in_open_tx(request, &resolver, Some(&admin), &actor, db_name, tx).await
+        let invoker = ShamirFunctionInvoker {
+            shamir: self.clone(),
+            db_name: db_name.to_string(),
+        };
+        execute_in_open_tx(
+            request,
+            &resolver,
+            Some(&admin),
+            Some(&invoker),
+            &actor,
+            db_name,
+            tx,
+        )
+        .await
     }
 
     /// COMMIT: run the Phase-A commit pipeline on a parked interactive tx and
