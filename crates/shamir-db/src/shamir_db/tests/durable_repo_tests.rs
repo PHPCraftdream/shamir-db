@@ -10,14 +10,8 @@ use shamir_query_builder::doc;
 use shamir_query_builder::write;
 use shamir_query_builder::Query;
 
-use crate::engine::query::batch::BatchRequest;
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 /// Re-open the system store, retrying briefly while the previous session's
 /// store still holds the redb file lock (the MemBuffer-wrapped store releases
@@ -54,7 +48,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
-        let create = to_req(&b);
+        let create = b.to_request_via_msgpack();
         let resp = shamir.execute("appdb", &create).await.unwrap();
         assert_eq!(resp.results["cr"].records[0]["created_repo"], "data");
 
@@ -67,7 +61,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
                 "qty" => 42,
             }),
         );
-        let insert = to_req(&b);
+        let insert = b.to_request_via_msgpack();
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
     }
@@ -83,7 +77,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
     let mut b = Batch::new();
     b.id(3);
     b.query("r", Query::with_repo("data", "items"));
-    let read = to_req(&b);
+    let read = b.to_request_via_msgpack();
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(
@@ -118,7 +112,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
                 .engine("in_memory")
                 .tables(["tmp"]),
         );
-        let create = to_req(&b);
+        let create = b.to_request_via_msgpack();
         shamir.execute("appdb", &create).await.unwrap();
 
         let mut b = Batch::new();
@@ -129,7 +123,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
                 "val" => "gone",
             }),
         );
-        let insert = to_req(&b);
+        let insert = b.to_request_via_msgpack();
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
     }
@@ -145,7 +139,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
     let mut b = Batch::new();
     b.id(3);
     b.query("r", Query::with_repo("scratch", "tmp"));
-    let read = to_req(&b);
+    let read = b.to_request_via_msgpack();
     let resp = shamir.execute("appdb", &read).await.unwrap();
     assert_eq!(
         resp.results["r"].records.len(),
@@ -169,7 +163,7 @@ async fn durable_repo_file_mirrors_db_repo_tree() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
-    let create = to_req(&b);
+    let create = b.to_request_via_msgpack();
     shamir.execute("appdb", &create).await.unwrap();
 
     let expected = dir.path().join("appdb").join("data.redb");

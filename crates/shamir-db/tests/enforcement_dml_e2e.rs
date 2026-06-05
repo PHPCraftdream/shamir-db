@@ -13,7 +13,6 @@
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::q;
@@ -23,11 +22,6 @@ use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
 // Helper: build a Batch, encode to msgpack, decode back to BatchRequest.
 // This proves the wire round-trip is lossless for every query in the file.
 // ---------------------------------------------------------------------------
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 /// Helper: create an in-memory ShamirDb with `testdb` / `main` / `items`.
 async fn setup() -> ShamirDb {
@@ -50,7 +44,7 @@ async fn seed_record(shamir: &ShamirDb) {
             "price" => 42
         }),
     );
-    let req = to_req(&b);
+    let req = b.to_request_via_msgpack();
     shamir.execute("testdb", &req).await.unwrap();
 }
 
@@ -67,7 +61,7 @@ async fn default_mode_allows_all_users() {
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
 
     let resp = shamir
         .execute_as(Actor::User(99), "testdb", &read_req)
@@ -84,7 +78,7 @@ async fn default_mode_allows_all_users() {
             "price" => 7
         }),
     );
-    let ins_req = to_req(&b);
+    let ins_req = b.to_request_via_msgpack();
 
     let resp = shamir.execute_as(Actor::User(99), "testdb", &ins_req).await;
     assert!(
@@ -116,7 +110,7 @@ async fn restricted_table_owner_allowed_stranger_denied_read() {
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
 
     // Owner User(1) reads successfully
     let resp = shamir.execute_as(Actor::User(1), "testdb", &read_req).await;
@@ -157,7 +151,7 @@ async fn restricted_table_stranger_denied_insert() {
             "price" => 7
         }),
     );
-    let ins_req = to_req(&b);
+    let ins_req = b.to_request_via_msgpack();
 
     // Owner can insert (0o750 → owner has rwx)
     let resp = shamir.execute_as(Actor::User(1), "testdb", &ins_req).await;
@@ -193,7 +187,7 @@ async fn restricted_table_stranger_denied_delete() {
     let mut b = Batch::new();
     b.id("d");
     b.delete("d", q!(delete from items where name == "widget"));
-    let del_req = to_req(&b);
+    let del_req = b.to_request_via_msgpack();
 
     // Stranger denied
     let err = shamir
@@ -230,7 +224,7 @@ async fn system_bypasses_restricted_table() {
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
 
     // System always passes
     let resp = shamir.execute_as(Actor::System, "testdb", &read_req).await;
@@ -264,7 +258,7 @@ async fn tx_execute_as_enforces_table_acl() {
     let mut b = Batch::new();
     b.id("txr");
     b.query("r", q!(from items));
-    let read_req = to_req(&b);
+    let read_req = b.to_request_via_msgpack();
 
     // Open an interactive tx as User(1) (owner) — should succeed
     let (mut tx_ok, _guard_ok) = shamir

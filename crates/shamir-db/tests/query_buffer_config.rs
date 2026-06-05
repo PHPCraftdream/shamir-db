@@ -7,16 +7,10 @@ use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::ddl::{BufConfig, BufPatch};
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -44,7 +38,10 @@ async fn get_buffer_config_returns_null_when_unset() {
     let mut b = Batch::new();
     b.id(1);
     b.get_buffer_config("cfg", ddl::get_buffer_config("users").repo("main"));
-    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let row = &resp.results["cfg"].records[0];
     assert_eq!(row["table"], json!("users"));
@@ -66,7 +63,10 @@ async fn set_then_get_buffer_config_via_ddl() {
         "set",
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
-    let set_resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let set_resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     // Set echoes back the persisted config.
     let set_row = &set_resp.results["set"].records[0];
@@ -77,7 +77,10 @@ async fn set_then_get_buffer_config_via_ddl() {
     let mut b = Batch::new();
     b.id(2);
     b.get_buffer_config("after", ddl::get_buffer_config("users").repo("main"));
-    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let got_row = &resp.results["after"].records[0];
     let cfg = &got_row["config"];
@@ -100,7 +103,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         "set",
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
-    shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     // Alter ONE knob -- flush_interval_ms -- and clear ttl_ms via
     // explicit null. Other knobs must keep their seeded values.
@@ -119,7 +125,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         .repo("main"),
     );
 
-    let alter_resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let alter_resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     let alter_row = &alter_resp.results["alter"].records[0];
     assert_eq!(alter_row["config"]["flush_interval_ms"], json!(1000));
     assert!(alter_row["config"]["ttl_ms"].is_null());
@@ -130,7 +139,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
     let mut b = Batch::new();
     b.id(3);
     b.get_buffer_config("after", ddl::get_buffer_config("users").repo("main"));
-    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     let got = &resp.results["after"].records[0]["config"];
     assert_eq!(got["flush_interval_ms"], json!(1000));
     assert!(got["ttl_ms"].is_null());
@@ -149,7 +161,10 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
         "set",
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
-    shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let mut b = Batch::new();
     b.id(2);
@@ -164,7 +179,10 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
         )
         .repo("main"),
     );
-    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let cfg = &resp.results["alter"].records[0]["config"];
     assert_eq!(cfg["max_entries"], json!(9999));
@@ -189,7 +207,10 @@ async fn alter_starts_from_default_when_no_prior_config() {
         )
         .repo("main"),
     );
-    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let cfg = &resp.results["alter"].records[0]["config"];
     assert_eq!(cfg["max_entries"], json!(42));
@@ -211,12 +232,18 @@ async fn set_buffer_config_persists_into_info_store() {
         "set",
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
-    shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let mut b = Batch::new();
     b.id(2);
     b.get_buffer_config("get", ddl::get_buffer_config("users").repo("main"));
-    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
 
     let cfg = &resp.results["get"].records[0]["config"];
     assert_eq!(cfg["max_bytes"], json!(1_048_576));
@@ -230,7 +257,7 @@ async fn get_unknown_table_errors_cleanly() {
     let mut b = Batch::new();
     b.id(1);
     b.get_buffer_config("get", ddl::get_buffer_config("nonexistent").repo("main"));
-    let resp = shamir.execute("testdb", &to_req(&b)).await;
+    let resp = shamir.execute("testdb", &b.to_request_via_msgpack()).await;
 
     // Resolver/executor error surfaces -- the batch as a whole
     // fails (no `_ignore` semantics yet). Either Err(_) or an

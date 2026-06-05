@@ -45,11 +45,6 @@ use shamir_query_builder::Query;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // The native CAS validator
 // ═══════════════════════════════════════════════════════════════════════
@@ -176,7 +171,7 @@ fn insert_request(id: &str, record: serde_json::Value) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert("docs").row(record));
-    to_req(&b)
+    b.to_request_via_msgpack()
 }
 
 /// Update the single `docs` row matched by `key`, applying `set`.
@@ -184,7 +179,7 @@ fn update_request(id: &str, key: &str, set: serde_json::Value) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.update("upd", update("docs").where_(eq("key", key)).set(set));
-    to_req(&b)
+    b.to_request_via_msgpack()
 }
 
 /// Read all `docs` rows.
@@ -192,7 +187,7 @@ fn read_all_request(id: &str) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.query("all", Query::from("docs"));
-    to_req(&b)
+    b.to_request_via_msgpack()
 }
 
 /// Convert a JSON object record into a string-keyed `QueryValue::Map`.

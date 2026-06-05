@@ -25,6 +25,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::filter;
+use shamir_query_builder::q;
 use shamir_query_builder::write::Insert;
 use shamir_query_builder::Query;
 
@@ -35,12 +36,6 @@ async fn setup() -> ShamirDb {
         .add_table(TableConfig::new("docs"));
     db.add_repo(repo_config).await.unwrap();
     shamir
-}
-
-/// Round-trip a builder-assembled `Batch` through msgpack, then execute.
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
 }
 
 async fn exec_built(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
@@ -61,7 +56,7 @@ async fn migration_preserves_fts_index() {
             .index_type("fts")
             .fts_tokenizer("whitespace"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -85,7 +80,7 @@ async fn migration_preserves_fts_index() {
         "w5",
         Insert::with_repo("src_repo", "docs").row(doc! { "body" => "hello world rust" }),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
@@ -93,7 +88,7 @@ async fn migration_preserves_fts_index() {
         "q",
         Query::with_repo("src_repo", "docs").fts("body", "hello world", "and"),
     );
-    let src_resp = exec_built(&shamir, to_req(&b)).await;
+    let src_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let src_records = &src_resp.results["q"].records;
     assert_eq!(
         src_records.len(),
@@ -109,7 +104,7 @@ async fn migration_preserves_fts_index() {
         "m",
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
-    let mig = exec_built(&shamir, to_req(&b)).await;
+    let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let migration_id = mig.results["m"].records[0]["migration_id"]
         .as_str()
         .unwrap()
@@ -118,7 +113,7 @@ async fn migration_preserves_fts_index() {
     let mut b = Batch::new();
     b.id(5);
     b.commit_migration("c", ddl::commit_migration(&migration_id));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(6);
@@ -126,7 +121,7 @@ async fn migration_preserves_fts_index() {
         "q",
         Query::with_repo("dst_repo", "docs").fts("body", "hello world", "and"),
     );
-    let dst_resp = exec_built(&shamir, to_req(&b)).await;
+    let dst_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let dst_records = &dst_resp.results["q"].records;
     assert_eq!(
         dst_records.len(),
@@ -156,7 +151,7 @@ async fn migration_preserves_functional_index() {
             .index_type("functional")
             .functional_op("lower"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -180,20 +175,15 @@ async fn migration_preserves_functional_index() {
         Insert::with_repo("src_repo", "docs")
             .row(doc! { "email" => "alice@foo.com", "name" => "alice2" }),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
     b.query(
         "q",
-        Query::with_repo("src_repo", "docs").where_(filter::computed(
-            "lower",
-            "email",
-            "eq",
-            "alice@foo.com",
-        )),
+        q!(from src_repo.docs where computed("lower", email, "eq", "alice@foo.com")),
     );
-    let src_resp = exec_built(&shamir, to_req(&b)).await;
+    let src_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let src_count = src_resp.results["q"].records.len();
     assert_eq!(src_count, 2, "src functional: expected 2");
 
@@ -203,7 +193,7 @@ async fn migration_preserves_functional_index() {
         "m",
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
-    let mig = exec_built(&shamir, to_req(&b)).await;
+    let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let migration_id = mig.results["m"].records[0]["migration_id"]
         .as_str()
         .unwrap()
@@ -212,20 +202,15 @@ async fn migration_preserves_functional_index() {
     let mut b = Batch::new();
     b.id(5);
     b.commit_migration("c", ddl::commit_migration(&migration_id));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(6);
     b.query(
         "q",
-        Query::with_repo("dst_repo", "docs").where_(filter::computed(
-            "lower",
-            "email",
-            "eq",
-            "alice@foo.com",
-        )),
+        q!(from dst_repo.docs where computed("lower", email, "eq", "alice@foo.com")),
     );
-    let dst_resp = exec_built(&shamir, to_req(&b)).await;
+    let dst_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     assert_eq!(dst_resp.results["q"].records.len(), src_count);
 }
 
@@ -244,7 +229,7 @@ async fn migration_preserves_vector_index() {
             .vector_dim(3)
             .vector_metric("cosine"),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(2);
@@ -273,7 +258,7 @@ async fn migration_preserves_vector_index() {
         Insert::with_repo("src_repo", "docs")
             .row(doc! { "label" => "x_near2" }.set_json("embedding", json!([0.9, 0.05, 0.05]))),
     );
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(3);
@@ -285,7 +270,7 @@ async fn migration_preserves_vector_index() {
             3,
         )),
     );
-    let src_resp = exec_built(&shamir, to_req(&b)).await;
+    let src_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let src_records = &src_resp.results["q"].records;
     assert_eq!(src_records.len(), 3);
     let src_labels: Vec<&str> = src_records
@@ -301,7 +286,7 @@ async fn migration_preserves_vector_index() {
         "m",
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
-    let mig = exec_built(&shamir, to_req(&b)).await;
+    let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let migration_id = mig.results["m"].records[0]["migration_id"]
         .as_str()
         .unwrap()
@@ -310,7 +295,7 @@ async fn migration_preserves_vector_index() {
     let mut b = Batch::new();
     b.id(5);
     b.commit_migration("c", ddl::commit_migration(&migration_id));
-    exec_built(&shamir, to_req(&b)).await;
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
 
     let mut b = Batch::new();
     b.id(6);
@@ -322,7 +307,7 @@ async fn migration_preserves_vector_index() {
             3,
         )),
     );
-    let dst_resp = exec_built(&shamir, to_req(&b)).await;
+    let dst_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let dst_records = &dst_resp.results["q"].records;
     assert_eq!(dst_records.len(), 3);
     let dst_labels: Vec<&str> = dst_records

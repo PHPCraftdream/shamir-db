@@ -18,7 +18,6 @@
 
 use serde_json::json;
 
-use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -26,11 +25,6 @@ use shamir_query_builder::doc;
 use shamir_query_builder::val::{col, func, lit};
 use shamir_query_builder::write::insert;
 use shamir_query_builder::{select, Query};
-
-fn to_req(b: &Batch) -> BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
 
 /// In-memory ShamirDb with db "testdb", repo "main", table "users".
 async fn setup() -> ShamirDb {
@@ -45,7 +39,10 @@ async fn setup() -> ShamirDb {
             .engine("in_memory")
             .tables(["users"]),
     );
-    shamir.execute("testdb", &to_req(&b)).await.unwrap();
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
     shamir
 }
 
@@ -86,7 +83,7 @@ async fn seed_users(shamir: &ShamirDb) {
             },
         ]),
     );
-    let insert_batch = to_req(&batch);
+    let insert_batch = batch.to_request_via_msgpack();
     shamir.execute("testdb", &insert_batch).await.unwrap();
 }
 
@@ -100,7 +97,7 @@ async fn e2e_computed_value_persisted_on_insert() {
     let mut batch = Batch::new();
     batch.id("r");
     batch.query("all", Query::from("users").where_eq("name", "alice"));
-    let read = to_req(&batch);
+    let read = batch.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["all"].records;
@@ -122,7 +119,7 @@ async fn e2e_filter_with_fn_call() {
         "match",
         Query::from("users").where_eq("name", func("strings/lower", [lit("ALICE")])),
     );
-    let read = to_req(&batch);
+    let read = batch.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["match"].records;
@@ -148,7 +145,7 @@ async fn e2e_group_by_library_aggregate() {
             ])
             .group_by("city"),
     );
-    let read = to_req(&batch);
+    let read = batch.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let groups = &resp.results["byCity"].records;
@@ -179,7 +176,7 @@ async fn e2e_select_scalar_function() {
             ])
             .where_eq("name", "alice"),
     );
-    let read = to_req(&batch);
+    let read = batch.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["rows"].records;

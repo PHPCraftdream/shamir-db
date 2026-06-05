@@ -720,6 +720,17 @@ impl Batch {
         rmp_serde::to_vec_named(&self.build())
     }
 
+    /// Build, encode to msgpack, and decode back into a `BatchRequest`.
+    ///
+    /// Round-trips the request through the wire codec (named msgpack) — the
+    /// same path a real client/server uses — so callers (notably tests)
+    /// exercise the builder AND the codec in one step. Panics on a codec
+    /// error (the builder always produces a serialisable request).
+    pub fn to_request_via_msgpack(&self) -> BatchRequest {
+        let bytes = self.to_msgpack().expect("msgpack encode");
+        rmp_serde::from_slice(&bytes).expect("msgpack decode")
+    }
+
     // ── build ──────────────────────────────────────────────────────
 
     /// Infallible build — clones accumulated state into a [`BatchRequest`].

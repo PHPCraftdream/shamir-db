@@ -10,11 +10,6 @@ use crate::shamir_db::ShamirDb;
 use serde_json::json;
 use shamir_types::access::{principal_id, Actor, ResourceMeta, ResourcePath};
 
-fn to_req(b: &Batch) -> crate::query::batch::BatchRequest {
-    let bytes = b.to_msgpack().expect("msgpack encode");
-    rmp_serde::from_slice(&bytes).expect("msgpack decode")
-}
-
 /// Find a child node by its `name`, panicking if absent. Children order
 /// is non-deterministic (dashmap iteration), so always look up by name.
 fn child<'a>(node: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
@@ -141,7 +136,7 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
     let mut b = Batch::new();
     b.id(1);
     b.access_tree("tree", ddl::access_tree());
-    let req: BatchRequest = to_req(&b);
+    let req: BatchRequest = b.to_request_via_msgpack();
 
     // The op carries the tree only when the caller is allowed.
     let tree_present = |res: &Result<BatchResponse, BatchError>| -> bool {
