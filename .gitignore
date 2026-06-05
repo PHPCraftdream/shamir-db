@@ -28,3 +28,8 @@ crates/shamir-client-node/*.node
 tests/e2e/package-lock.json
 examples/*/target/
 examples/*/Cargo.lock
+
+# local dev artifacts
+server-cert.pem
+crates/shamir-client-node/target/
+crates/shamir-client-node/Cargo.lock
