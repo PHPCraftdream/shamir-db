@@ -47,7 +47,8 @@ pub fn compile_rust_source(source: &str) -> FnResult<Vec<u8>> {
         s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/")
     };
 
-    // Write Cargo.toml.
+    // Write Cargo.toml — includes a size-optimised release profile so the
+    // guest .wasm is as small as possible (P3 of WASM_SLIMMING.md).
     let cargo_toml = format!(
         r#"[package]
 name = "{crate_name}"
@@ -59,6 +60,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 shamir-sdk = {{ path = "{sdk_display}" }}
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 "#,
     );
     fs::write(tmpdir.path().join("Cargo.toml"), cargo_toml)
@@ -100,7 +108,68 @@ shamir-sdk = {{ path = "{sdk_display}" }}
         .join(&crate_name)
         .with_extension("wasm");
 
-    fs::read(&wasm_path).map_err(|e| FunctionError::Compute(format!("read wasm output: {e}")))
+    let wasm_bytes = fs::read(&wasm_path)
+        .map_err(|e| FunctionError::Compute(format!("read wasm output: {e}")))?;
+
+    // P2 of WASM_SLIMMING.md — optional `wasm-opt -Oz` post-processing.
+    // If binaryen is not installed the unoptimized artifact is returned as-is.
+    let wasm_bytes = maybe_wasm_opt(&wasm_bytes, tmpdir.path())?;
+
+    Ok(wasm_bytes)
+}
+
+/// Run `wasm-opt -Oz` on the compiled WASM if binaryen is available.
+///
+/// Returns the optimised bytes when `wasm-opt` is found and succeeds, or the
+/// original `wasm_bytes` unchanged when the tool is absent or fails.  Never
+/// returns an error from wasm-opt itself — graceful degradation only.
+fn maybe_wasm_opt(wasm_bytes: &[u8], work_dir: &std::path::Path) -> FnResult<Vec<u8>> {
+    // Quick PATH check — same style as `check_toolchain`.
+    let probe = Command::new("wasm-opt").arg("--version").output();
+    if probe.is_err() || !probe.as_ref().unwrap().status.success() {
+        log::debug!(
+            "wasm-opt not found on PATH — skipping post-optimisation (WASM returned as-is)"
+        );
+        return Ok(wasm_bytes.to_vec());
+    }
+
+    let input = work_dir.join("raw.wasm");
+    let output = work_dir.join("opt.wasm");
+
+    fs::write(&input, wasm_bytes)
+        .map_err(|e| FunctionError::Compute(format!("write raw.wasm for wasm-opt: {e}")))?;
+
+    let result = Command::new("wasm-opt")
+        .args(["-Oz"])
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output();
+
+    match result {
+        Ok(o) if o.status.success() => {
+            let opt_bytes = fs::read(&output)
+                .map_err(|e| FunctionError::Compute(format!("read wasm-opt output: {e}")))?;
+            log::debug!(
+                "wasm-opt reduced WASM from {} to {} bytes",
+                wasm_bytes.len(),
+                opt_bytes.len(),
+            );
+            Ok(opt_bytes)
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            log::warn!(
+                "wasm-opt exited with {}: {stderr} — using unoptimised WASM",
+                o.status
+            );
+            Ok(wasm_bytes.to_vec())
+        }
+        Err(e) => {
+            log::warn!("wasm-opt invocation failed: {e} — using unoptimised WASM");
+            Ok(wasm_bytes.to_vec())
+        }
+    }
 }
 
 /// Verify that `cargo` exists and the `wasm32-unknown-unknown` target is
