@@ -353,6 +353,46 @@ fn filter_func_rhs_not_treated_as_predicate() {
     assert_same_wire(&from_macro, &from_builder);
 }
 
+// ── computed predicates ────────────────────────────────────────────
+
+#[test]
+fn filter_computed() {
+    let from_macro = filter!(computed("lower", email, "eq", "alice@foo.com"));
+    let from_builder = filter_mod::computed("lower", "email", "eq", "alice@foo.com");
+    assert_same_wire(&from_macro, &from_builder);
+}
+
+#[test]
+fn filter_computed_dotted_field() {
+    let from_macro = filter!(computed("lower", address.city, "eq", "ny"));
+    let from_builder = filter_mod::computed("lower", ["address", "city"], "eq", "ny");
+    assert_same_wire(&from_macro, &from_builder);
+}
+
+#[test]
+fn filter_computed_with_args() {
+    let from_macro = filter!(computed_with_args(
+        "substring",
+        name,
+        [lit(0_i64), lit(3_i64)],
+        "eq",
+        "ali"
+    ));
+    let from_builder =
+        filter_mod::computed_with_args("substring", "name", [lit(0_i64), lit(3_i64)], "eq", "ali");
+    assert_same_wire(&from_macro, &from_builder);
+}
+
+#[test]
+fn filter_computed_in_conjunction() {
+    let from_macro = filter!(computed("lower", email, "eq", "alice@foo.com") && age > 18);
+    let from_builder = filter_mod::and([
+        filter_mod::computed("lower", "email", "eq", "alice@foo.com"),
+        filter_mod::gt("age", 18),
+    ]);
+    assert_same_wire(&from_macro, &from_builder);
+}
+
 // ── fts with contains_any composition ─────────────────────────────
 
 #[test]

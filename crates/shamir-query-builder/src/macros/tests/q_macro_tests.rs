@@ -365,6 +365,22 @@ fn q_kitchen_sink() {
     assert_same_wire(&from_macro, &from_builder);
 }
 
+// ── where with computed predicate ────────────────────────────────
+
+#[test]
+fn q_where_computed() {
+    let from_macro = q!(from posts where computed("lower", email, "eq", "alice@foo.com"));
+    let from_builder = Query::from("posts")
+        .where_(filter_mod::computed(
+            "lower",
+            "email",
+            "eq",
+            "alice@foo.com",
+        ))
+        .build();
+    assert_same_wire(&from_macro, &from_builder);
+}
+
 // ── clause order change: select now after having ──────────────────
 
 #[test]

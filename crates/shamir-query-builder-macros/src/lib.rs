@@ -36,6 +36,8 @@ mod query_parse;
 /// - `between(field, lo, hi)`
 /// - `fts(field, query, mode)`
 /// - `vector_similarity(field, vecexpr, k)`
+/// - `computed(expr_op, field, cmp, value)`
+/// - `computed_with_args(expr_op, field, expr_args, cmp, value)`
 ///
 /// These compose freely with `&&`/`||`/`!`/parens.
 ///
@@ -113,8 +115,8 @@ pub fn filter(input: TokenStream) -> TokenStream {
 ///
 /// Both use the full `filter!` expression grammar: comparisons
 /// (`==`, `!=`, `>`, `>=`, `<`, `<=`), logical operators (`&&`, `||`,
-/// `!`), parenthesised groups, and all 17 predicate calls (`like`,
-/// `in_`, `between`, `fts`, `is_null`, `contains`, ...).
+/// `!`), parenthesised groups, and all 19 predicate calls (`like`,
+/// `in_`, `between`, `fts`, `is_null`, `contains`, `computed`, ...).
 ///
 /// ## `select` items (comma-separated)
 ///

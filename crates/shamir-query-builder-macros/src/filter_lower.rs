@@ -124,7 +124,7 @@ fn lower_predicate_call(call: &syn::ExprCall) -> syn::Result<TokenStream2> {
                 "filter!: predicate call must be a simple name \
                  (like, ilike, regex, is_null, is_not_null, exists, not_exists, \
                   contains, contains_any, contains_all, in_, not_in, between, \
-                  fts, vector_similarity)",
+                  fts, vector_similarity, computed, computed_with_args)",
             ));
         }
     };
@@ -258,13 +258,51 @@ fn lower_predicate_call(call: &syn::ExprCall) -> syn::Result<TokenStream2> {
             })
         }
 
+        // ── computed: expr_op + field + cmp + value ──────────
+        "computed" => {
+            if args.len() != 4 {
+                return Err(syn::Error::new_spanned(
+                    call,
+                    "filter!: `computed` expects 4 arguments: (expr_op, field, cmp, value)",
+                ));
+            }
+            let expr_op = args[0];
+            let field = field_path(args[1])?;
+            let cmp = args[2];
+            let val = args[3];
+            Ok(quote! {
+                ::shamir_query_builder::filter::computed(#expr_op, #field, #cmp, #val)
+            })
+        }
+
+        // ── computed_with_args: expr_op + field + expr_args + cmp + value
+        "computed_with_args" => {
+            if args.len() != 5 {
+                return Err(syn::Error::new_spanned(
+                    call,
+                    "filter!: `computed_with_args` expects 5 arguments: \
+                     (expr_op, field, expr_args, cmp, value)",
+                ));
+            }
+            let expr_op = args[0];
+            let field = field_path(args[1])?;
+            let expr_args = args[2];
+            let cmp = args[3];
+            let val = args[4];
+            Ok(quote! {
+                ::shamir_query_builder::filter::computed_with_args(
+                    #expr_op, #field, #expr_args, #cmp, #val
+                )
+            })
+        }
+
         _ => Err(syn::Error::new_spanned(
             &call.func,
             format!(
                 "filter!: unknown predicate `{name}`; supported predicates: \
                  like, ilike, regex, is_null, is_not_null, exists, not_exists, \
                  contains, contains_any, contains_all, in_, not_in, between, \
-                 fts, vector_similarity"
+                 fts, vector_similarity, computed, computed_with_args"
             ),
         )),
     }
