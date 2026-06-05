@@ -1,0 +1,13 @@
+[package]
+name = "shamir-collections"
+version = "0.1.0"
+edition = "2021"
+description = "Insertion-ordered collection aliases (TMap/TSet over IndexMap/IndexSet with FxHasher) shared by host and guest — a WASM-friendly leaf crate."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+indexmap = { version = "2.7", features = ["serde"] }
+fxhash = "0.2.1"
+
+[lib]
+doctest = false
