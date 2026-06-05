@@ -113,3 +113,37 @@ impl Table {
         &self.name
     }
 }
+
+/// Builder-in-guest execution (SDK Stage B2). Available with the
+/// `query-builder` feature.
+#[cfg(feature = "query-builder")]
+impl Db {
+    /// Run a full batch built with the query builder.
+    ///
+    /// The guest **describes** the batch (DTO); the host runs it through the
+    /// same executor a wire client uses, as this function's effective actor,
+    /// and returns the [`BatchResponse`](shamir_query_builder::BatchResponse).
+    /// The engine never enters the guest.
+    ///
+    /// ```ignore
+    /// let mut b = Batch::new();
+    /// b.id("q");
+    /// b.query("rows", Query::from("items").where_gte("n", 2_i64));
+    /// let resp = ctx.db().execute(&b)?;
+    /// let n = resp.results.get("rows").map(|r| r.records.len()).unwrap_or(0);
+    /// ```
+    pub fn execute(
+        &self,
+        batch: &shamir_query_builder::batch::Batch,
+    ) -> crate::Result<shamir_query_builder::BatchResponse> {
+        let req = batch.build();
+        let bytes = rmp_serde::to_vec_named(&req)
+            .map_err(|e| crate::Error::user(format!("execute: encode batch: {e}")))?;
+        let resp_bytes = crate::host_imports::db_execute(&bytes);
+        if resp_bytes.is_empty() {
+            return Err(crate::Error::user("execute: host returned empty response"));
+        }
+        rmp_serde::from_slice(&resp_bytes)
+            .map_err(|e| crate::Error::user(format!("execute: decode response: {e}")))
+    }
+}

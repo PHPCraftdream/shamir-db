@@ -42,5 +42,11 @@ pub use http::{HttpRequest, HttpResponse};
 pub use params::Params;
 pub use value::Value;
 
+/// The query builder (types + `q!`/`filter!` macros), available with the
+/// `query-builder` feature, for use inside a `#[procedure]` via
+/// [`Db::execute`](crate::Db::execute).
+#[cfg(feature = "query-builder")]
+pub use shamir_query_builder as builder;
+
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,13 @@ license = "MIT OR Apache-2.0"
 shamir-sdk-macros = { path = "../shamir-sdk-macros" }
 rmp-serde = "1.3"
 serde = { version = "1", features = ["derive"] }
+shamir-query-builder = { path = "../shamir-query-builder", optional = true }
+
+[features]
+# Builder-in-guest (SDK Stage B2): a procedure can build a full BatchRequest
+# with the query builder and run it via ctx.db().execute(). Off by default so
+# a scalar author pays nothing.
+query-builder = ["dep:shamir-query-builder"]
 
 [dev-dependencies]
 shamir-types = { path = "../shamir-types" }
