@@ -76,4 +76,12 @@ pub trait DbGateway: Send + Sync {
         table: &str,
         filter: Option<QueryValue>,
     ) -> Result<Vec<QueryValue>, String>;
+
+    /// Execute a full msgpack-encoded `BatchRequest`, returning the
+    /// msgpack-encoded `BatchResponse`. The general form of
+    /// get/insert/query: the guest describes a complete batch with the
+    /// query builder and the host runs it through the same executor a wire
+    /// client uses, AS the function's effective actor. Inherits the
+    /// autocommit-per-call semantics documented above.
+    async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, String>;
 }

@@ -315,6 +315,9 @@ fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<Instance
         .func_wrap_async("shamir_host", "db_query", host_db_query)
         .map_err(|e| FunctionError::Compute(format!("linker db_query: {e}")))?;
     linker
+        .func_wrap_async("shamir_host", "db_execute", host_db_execute)
+        .map_err(|e| FunctionError::Compute(format!("linker db_execute: {e}")))?;
+    linker
         .func_wrap_async("shamir_host", "http_fetch", host_http_fetch)
         .map_err(|e| FunctionError::Compute(format!("linker http_fetch: {e}")))?;
 
@@ -763,6 +766,42 @@ async fn write_value_to_guest(
     Ok(packed)
 }
 
+/// Write raw bytes into guest memory via `shamir_alloc`, returning the
+/// packed `(ptr, len)` i64. The byte-slice form of `write_value_to_guest`
+/// (the payload is already-encoded msgpack, e.g. a `BatchResponse`).
+async fn write_bytes_to_guest(
+    caller: &mut wasmtime::Caller<'_, HostState>,
+    bytes: &[u8],
+) -> Result<i64, wasmtime::Error> {
+    let alloc_fn = caller
+        .get_export("shamir_alloc")
+        .and_then(|e| e.into_func())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `shamir_alloc`"))?;
+    let alloc_typed = alloc_fn.typed::<i32, i32>(&mut *caller)?;
+    let out_len =
+        i32::try_from(bytes.len()).map_err(|_| wasmtime::Error::msg("value too large"))?;
+    let out_ptr = alloc_typed.call_async(&mut *caller, out_len).await?;
+    if out_ptr < 0 {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned negative pointer",
+        ));
+    }
+    let memory = caller
+        .get_export("memory")
+        .and_then(|e| e.into_memory())
+        .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
+    let start = out_ptr as usize;
+    let end = start.saturating_add(bytes.len());
+    if end > memory.data_size(&mut *caller) {
+        return Err(wasmtime::Error::msg(
+            "shamir_alloc returned pointer outside memory bounds",
+        ));
+    }
+    memory.data_mut(&mut *caller)[start..end].copy_from_slice(bytes);
+    let packed = ((out_ptr as i64) << 32) | (bytes.len() as i64 & 0xFFFF_FFFF);
+    Ok(packed)
+}
+
 /// Host implementation of `db_get(table_ptr, table_len, key_ptr, key_len) -> i64`.
 ///
 /// Reads a record from `repo.table` by the given key (msgpack `QueryValue`).
@@ -908,6 +947,38 @@ fn host_db_query(
         // Pack as a Value::List.
         let list_value = QueryValue::List(records);
         write_value_to_guest(&mut caller, Some(list_value)).await
+    })
+}
+
+/// Host implementation of `db_execute(req_ptr, req_len) -> i64`.
+///
+/// Reads a msgpack `BatchRequest` from guest memory, runs it through the
+/// gateway (same executor a wire client uses, as the function's effective
+/// actor) and writes the msgpack `BatchResponse` back. The general form of
+/// db_get/db_insert/db_query. Mirrors the host_db_query 3-phase dance.
+fn host_db_execute(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    (req_ptr, req_len): (i32, i32),
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    Box::new(async move {
+        let req_bytes;
+        let db;
+        {
+            let memory = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| wasmtime::Error::msg("db_execute: missing export `memory`"))?;
+            req_bytes = read_guest_mem(memory.data(&caller), req_ptr, req_len)?;
+            db = caller.data().db.clone();
+        }
+        let gateway = db.ok_or_else(|| {
+            wasmtime::Error::msg("db_execute: no db gateway (invoke via invoke_function_in_db)")
+        })?;
+        let resp_bytes = gateway
+            .execute(&req_bytes)
+            .await
+            .map_err(|e| wasmtime::Error::msg(format!("db_execute: {e}")))?;
+        write_bytes_to_guest(&mut caller, &resp_bytes).await
     })
 }
 
