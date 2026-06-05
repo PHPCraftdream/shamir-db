@@ -9,13 +9,51 @@
 //! methods here delegate to them. On non-wasm targets the imports panic
 //! (they can only be called from inside a WASM module).
 
-/// Access to the DBMS on the current transaction.
+/// Execution context available to `#[procedure]` and `#[function]` kinds.
 ///
-/// Global variables are process-lifetime and shared across all batches.
-/// The `new()` constructor creates a fresh context for backward compat on
-/// the host target (the macro always calls `new()` at the top of
-/// `shamir_call`; the real handles are injected by the host via the store
-/// data, not by the guest constructor).
+/// `Ctx` is the gateway to everything a non-pure function can do.
+/// **Scalars (`#[scalar]`) intentionally have no `Ctx`** — that is the
+/// purity guarantee.
+///
+/// # Reachable API
+///
+/// | Method | Returns | Purpose |
+/// |--------|---------|---------|
+/// | [`Ctx::db`] | [`Db`](crate::Db) | Database access (tables, queries) |
+/// | [`Ctx::call`] | [`Value`](crate::Value) | Invoke another registered function |
+/// | [`Ctx::http_fetch`] | [`Result<HttpResponse>`](crate::HttpResponse) | Egress HTTP via allowlist |
+/// | [`Ctx::http_get`] | [`Result<HttpResponse>`](crate::HttpResponse) | Convenience GET wrapper |
+/// | [`Ctx::http_post`] | [`Result<HttpResponse>`](crate::HttpResponse) | Convenience POST wrapper |
+/// | [`Ctx::global_get`] | `Option<Value>` | Read a process-lifetime global variable |
+/// | [`Ctx::global_set`] | `()` | Write a process-lifetime global variable |
+///
+/// # Examples
+///
+/// ```ignore
+/// // Database: read all users
+/// let users = ctx.db().table("users").query(None)?;
+///
+/// // Database: get one record by key
+/// let rec = ctx.db().table("orders").get(Value::Int(42));
+///
+/// // Database: insert a document
+/// ctx.db().table("logs").insert(Value::Map(vec![
+///     ("event".into(), Value::Str("login".into())),
+/// ]))?;
+///
+/// // Call another registered function
+/// let doubled = ctx.call("double", Value::Map(vec![
+///     ("n".into(), Value::Int(5)),
+/// ]));
+///
+/// // HTTP egress (subject to allowlist + SSRF guard)
+/// let resp = ctx.http_get("https://api.example.com/data")?;
+/// let body = resp.body_text();
+///
+/// // Global variables (process-lifetime, shared across batches)
+/// ctx.global_set("counter", Value::Int(1));
+/// let v = ctx.global_get("counter"); // Some(Value::Int(1))
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Ctx {
     _private: (),

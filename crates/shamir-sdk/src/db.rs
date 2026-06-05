@@ -14,7 +14,28 @@ use crate::Value;
 
 /// Database access handle (bound to the default repo).
 ///
-/// Obtained via [`crate::Ctx::db`].
+/// Obtained via [`crate::Ctx::db`]. Available to `#[procedure]` and
+/// `#[function]` kinds. **Not** available to `#[scalar]` (purity).
+///
+/// # Operations
+///
+/// ```ignore
+/// let db = ctx.db();
+///
+/// // Open a table handle
+/// let users = db.table("users");
+///
+/// // Get a single record by primary key
+/// let rec: Option<Value> = users.get(Value::Int(42));
+///
+/// // Query with optional filter (None = all rows)
+/// let rows: Vec<Value> = users.query(None)?;
+///
+/// // Insert a document (must be Value::Map)
+/// let stored = users.insert(Value::Map(vec![
+///     ("name".into(), Value::Str("Alice".into())),
+/// ]))?;
+/// ```
 #[derive(Debug, Clone)]
 pub struct Db {
     _private: (),
@@ -35,7 +56,13 @@ impl Db {
 
 /// A handle to a specific table within the default repo.
 ///
-/// Supports `get`, `insert`, and `query` operations via host imports.
+/// Obtained via [`Db::table`]. Supports three operations:
+///
+/// | Method | Signature | Purpose |
+/// |--------|-----------|---------|
+/// | [`Table::get`] | `(key: Value) -> Option<Value>` | Single-record lookup by primary key |
+/// | [`Table::insert`] | `(doc: Value) -> Result<Value>` | Insert a `Value::Map` document |
+/// | [`Table::query`] | `(filter: Option<Value>) -> Result<Vec<Value>>` | Query rows (`None` = all) |
 #[derive(Debug, Clone)]
 pub struct Table {
     name: String,
