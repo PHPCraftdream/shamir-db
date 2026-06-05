@@ -40,6 +40,22 @@ lifecycle + the foundation for "I"* (3).
 
 ---
 
+## 0.1 Since the arc — stored procedures, WASM perf, SDK slimming
+
+Three follow-on tracks landed (all committed, each zero-trust verified):
+
+| Track | What | Commits |
+|---|---|---|
+| **Stored procedures** | `BatchOp::Call` (callable getter-functions): wire+core (`value` result, FunctionInvoker), dependency-graph participation (params+result as `$query`), `Batch::call` + `q!(call …)`. See [`STORED_PROCEDURES.md`](./STORED_PROCEDURES.md). | `0c2d468` `be3ad62` `5bad954` `446d41d` |
+| **WASM runtime perf** | InstancePre (per-call **−40%**), AOT disk cache (**~2×** restart compile), pooling allocator + CoW (**+12%** concurrent). | `94d2392` `a934c59` `b53fcba` (+ bench `66e09a0`) |
+| **WASM/SDK slimming** | size profile (compiled functions **−34%**), host↔guest wire-conformance test, graceful `wasm-opt`; SDK typed kinds `#[scalar]`/`#[procedure]`, per-kind examples + reachable-API docs, query-types crypto feature-gate (guest-lean-capable). See [`WASM_SLIMMING.md`](./WASM_SLIMMING.md), [`SDK_AUTHORING.md`](./SDK_AUTHORING.md). | `e05f87a` `2a901fa` `44371a3` `c434dd8` `c0c27fe` |
+
+Resting point: *procedures are first-class batch citizens; the function
+engine is faster (hot/restart/concurrent); the guest SDK is lean and typed
+per kind.* All the **cheap, safe, no-wide-refactor** work is done.
+
+---
+
 ## 1. Maturity map
 
 **Closed and solid (foundation + engine):**
@@ -106,11 +122,46 @@ data version exactly so a replica can apply by version. Natural ladder:
 1. **Network changefeed (pull-API)** — a wire request `changefeed from
    version V` over the existing journal (`read_changelog_from`). Resumable
    cursor; the deferred Variant-2 of 3b.
-2. **Leader-follower replication** — a follower subscribes to the leader's
+2. **Live business subscriptions (server-push)** — *design task, see below.*
+   Long-lived client connections that **hang waiting** for "new data /
+   updated data" notifications — the push-to-client application layer on
+   top of (1). The client-facing consumer of the changefeed.
+3. **Leader-follower replication** — a follower subscribes to the leader's
    changefeed and applies changes by `commit_version`.
-3. **P2P / gossip → chat** — the decentralised end-state of the name.
+4. **P2P / gossip → chat** — the decentralised end-state of the name.
    *(Sharding is explicitly a separate, later direction — not a prerequisite
    for replication.)*
+
+#### Task — design "hanging" business subscriptions (live-queries / push)
+**Status: PROPOSED — design first, no code yet.** A business client opens a
+connection and *waits* to be told when data it cares about appears or
+changes (the inverse of polling). This is the user-visible payoff of the
+whole changefeed arc. Open questions to settle in a `SUBSCRIPTIONS.md`
+design doc before building:
+- **Subscription granularity** — whole-repo / per-table / per-query
+  (filtered live-query, "tell me about rows matching WHERE …") / per-record.
+  A filtered live-query is the valuable-but-hard end (needs predicate
+  evaluation on each emitted event).
+- **Transport / protocol** — over which channel does the push flow? WS is
+  the natural fit (already a transport); TCP needs a server→client frame.
+  A wire op like `subscribe(filter, from_version)` → a stream of events.
+- **Resumability** — client reconnects with `last_seen_version`; bridge the
+  live broadcast + the durable journal (exactly the 3b hybrid) so a slow /
+  disconnected client misses nothing (`read_changelog_from`).
+- **Backpressure & fan-out** — many hanging clients, one commit-path. MUST
+  stay non-blocking (`try_send` + per-subscriber journal cursor, never block
+  the writer — concurrency invariants). What happens to a `Lagged` slow
+  consumer (drop → resync from journal vs disconnect).
+- **Access control** — a subscriber only sees events for resources it may
+  read; the changefeed event must be filtered through `authorize_access`
+  per subscriber (don't leak governed data via the push channel).
+- **Initial-state semantics** — "snapshot + then live" (current matching
+  rows, then the delta stream) vs "deltas only from now". Consistent cutoff
+  via `commit_version` (the snapshot read version == the stream start).
+- **Lifecycle** — unsubscribe, connection drop cleanup, server-side resource
+  cap (max subscriptions / client), idle timeout.
+> Depends on (1) network changefeed landing first. Write `SUBSCRIPTIONS.md`
+> when this task starts; don't author ahead of need.
 > A dedicated `REPLICATION.md` design doc is **PROPOSED** — to be written
 > when Movement C starts (don't author it ahead of need).
 
@@ -120,6 +171,31 @@ WASM client ([`BROWSER_WASM_PLAN.md`](./BROWSER_WASM_PLAN.md)) · transports
 QUIC/UDP/Unix · auth v1.1+ & PQ identity ([`ROADMAP.md`](./ROADMAP.md)) ·
 vectors/FTS hardening ([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md),
 [`FULL_TEXT_SEARCH.md`](./FULL_TEXT_SEARCH.md)) · backup/restore tooling.
+
+### Deferred — expensive chains, on real need only
+- **SDK builder-in-guest (Stage B2)** — let a procedure build queries with
+  the typed builder/`q!` instead of low-level `ctx.db()`. **Costly chain:**
+  needs a host `ctx.db().execute(BatchRequest)` shim ABI **and P4** —
+  extracting `Value` into a lean `shamir-value` crate, because
+  `query-types`' `QueryValue` lives in the heavy `shamir-types`, so the
+  guest can't go lean without it. A **wide `Value` refactor** (codecs/
+  engine) for a *nice-to-have* (`ctx.db()` already works). Defer until
+  authors actually hit the low-level wall. See `SDK_AUTHORING.md` Stage B,
+  `WASM_SLIMMING.md` P4.
+- **SDK function-packs (Stage D)** · **WASM `shamir-value` ABI crate (P4)**
+  — both optional, on real need (P4 is *not* a weight win — see
+  WASM_SLIMMING.md).
+
+## 2.1 Status of the movements
+Movements A/B/C below were the **original** forward order; the recent
+stored-proc / WASM / SDK tracks (§0.1) ran first by request. A/B/C are
+**still ahead** and unstarted:
+- **A (consolidate)** — adversarial review of the arc + `H₂` + gitignore/
+  fuzz debt. Cheap; recommended next.
+- **B (perf)** — bench the new features' overhead, then sprint γ (covering
+  index `Opt O`, `R`, `P`, `M1`, `M2`).
+- **C (the "I")** — network changefeed → **live business subscriptions
+  (server-push, design task)** → leader-follower replication → P2P.
 
 ---
 
@@ -150,4 +226,6 @@ folded into Movements B/C above.
 ---
 
 _Plan revision 2026-06-05 — after the DDL → access → write-lifecycle arc
-(`016d68b`..`a620115`). Updated as movements land._
+(`016d68b`..`a620115`) plus the stored-procedures + WASM-perf + WASM/SDK-
+slimming tracks (`66e09a0`..`c0c27fe`, §0.1). Next: Movement A (consolidate)
+recommended; B2/P4 deferred. Updated as movements land._
