@@ -29,6 +29,8 @@ mod value;
 // Re-export the proc-macro at the crate root so that `#[shamir_sdk::function]`
 // resolves, and with `use shamir_sdk as shamir;` so does `#[shamir::function]`.
 pub use shamir_sdk_macros::function;
+pub use shamir_sdk_macros::procedure;
+pub use shamir_sdk_macros::scalar;
 pub use shamir_sdk_macros::validator;
 
 pub use validation::{IntoFieldPath, Validation, ValidationError};

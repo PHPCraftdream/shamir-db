@@ -21,4 +21,6 @@ pub use crate::{
     Validation, ValidationError, Value,
 };
 pub use shamir_sdk_macros::function;
+pub use shamir_sdk_macros::procedure;
+pub use shamir_sdk_macros::scalar;
 pub use shamir_sdk_macros::validator;
