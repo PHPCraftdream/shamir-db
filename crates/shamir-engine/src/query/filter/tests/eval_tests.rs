@@ -558,6 +558,7 @@ fn test_query_ref_eq() {
             records: vec![serde_json::json!({"id": 42, "name": "Alice"})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -590,6 +591,7 @@ fn test_query_ref_no_match() {
             records: vec![serde_json::json!({"id": 42})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -776,6 +778,7 @@ fn test_in_query_ref_column() {
             ],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -809,6 +812,7 @@ fn test_in_query_ref_column_no_match() {
             records: vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 
@@ -841,6 +845,7 @@ fn test_not_in_query_ref_column() {
             records: vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
             stats: None,
             pagination: None,
+            value: None,
         },
     );
 

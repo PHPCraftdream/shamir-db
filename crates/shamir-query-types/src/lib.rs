@@ -35,6 +35,7 @@
 pub mod admin;
 pub mod auth;
 pub mod batch;
+pub mod call;
 pub mod filter;
 pub mod hmac;
 pub mod read;
@@ -43,5 +44,6 @@ pub mod validator;
 pub mod wire;
 pub mod write;
 
+pub use call::CallOp;
 pub use table_ref::TableRef;
 pub use validator::{ValidationError, WriteOp};

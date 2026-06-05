@@ -19,5 +19,6 @@ pub use read::{
 };
 // `TableRef` lives in shamir-query-types now; re-exported here so
 // `crate::query::TableRef` paths inside the engine keep resolving.
+pub use shamir_query_types::call::CallOp;
 pub use shamir_query_types::TableRef;
 pub use write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect, WriteResult};

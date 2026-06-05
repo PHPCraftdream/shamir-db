@@ -16,6 +16,7 @@ use crate::admin::{
     UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
+use crate::call::CallOp;
 use crate::read::{QueryResult, ReadQuery};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_types::types::common::{TMap, TSet};
@@ -104,6 +105,9 @@ pub enum BatchOp {
 
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
+
+    /// Stored procedure / callable function invocation.
+    Call(CallOp),
 }
 
 impl Serialize for BatchOp {
@@ -154,6 +158,7 @@ impl Serialize for BatchOp {
             BatchOp::UnbindValidator(op) => op.serialize(serializer),
             BatchOp::ListValidators(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
+            BatchOp::Call(op) => op.serialize(serializer),
         }
     }
 }
@@ -341,6 +346,10 @@ impl<'de> Deserialize<'de> for BatchOp {
         } else if obj.contains_key("create_function_folder") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateFunctionFolder)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("call") {
+            serde_json::from_value(value)
+                .map(BatchOp::Call)
                 .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field

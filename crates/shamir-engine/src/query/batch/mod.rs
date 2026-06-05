@@ -145,7 +145,7 @@ mod executor;
 // here so callers keep using `shamir_db::query::batch::*` paths.
 pub use executor::{
     commit_interactive_tx, execute_batch, execute_batch_with_permissions, execute_in_open_tx,
-    open_interactive_tx, AdminExecutor, QueryRunner, TableResolver,
+    open_interactive_tx, AdminExecutor, FunctionInvoker, QueryRunner, TableResolver,
 };
 pub use shamir_query_types::batch::{
     BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,

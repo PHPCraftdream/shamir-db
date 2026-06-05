@@ -28,4 +28,11 @@ pub struct QueryResult {
     /// Pagination metadata (present when pagination was used)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pagination: Option<PaginationInfo>,
+    /// Non-tabular value returned by a stored procedure / callable function.
+    ///
+    /// When a `CallOp` returns a scalar, object, or array the answer lives
+    /// here; `records` is empty. `None` for regular DML/DDL results.
+    /// Skipped from serialization when absent (backward-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
 }

@@ -3761,6 +3761,7 @@ dependencies = [
  "shamir-engine",
  "shamir-funclib",
  "shamir-query-builder",
+ "shamir-query-types",
  "shamir-storage",
  "shamir-types",
  "tempfile",

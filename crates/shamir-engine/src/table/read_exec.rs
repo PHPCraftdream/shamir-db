@@ -358,6 +358,7 @@ impl TableManager {
                                     execution_time_us: start.elapsed().as_micros() as u64,
                                 }),
                                 pagination: None,
+                                value: None,
                             });
                         }
                     }
@@ -378,6 +379,7 @@ impl TableManager {
                         execution_time_us: start.elapsed().as_micros() as u64,
                     }),
                     pagination: None,
+                    value: None,
                 });
             }
         }
@@ -415,6 +417,7 @@ impl TableManager {
                             execution_time_us: start.elapsed().as_micros() as u64,
                         }),
                         pagination: None,
+                        value: None,
                     });
                 }
             }
@@ -460,6 +463,7 @@ impl TableManager {
                                 execution_time_us: start.elapsed().as_micros() as u64,
                             }),
                             pagination: None,
+                            value: None,
                         });
                     }
                 }
@@ -529,6 +533,7 @@ impl TableManager {
                                     execution_time_us: start.elapsed().as_micros() as u64,
                                 }),
                                 pagination: None,
+                                value: None,
                             });
                         }
                     }
@@ -744,6 +749,7 @@ impl TableManager {
                     execution_time_us: start.elapsed().as_micros() as u64,
                 }),
                 pagination,
+                value: None,
             });
         }
 
@@ -773,6 +779,7 @@ impl TableManager {
                 execution_time_us: start.elapsed().as_micros() as u64,
             }),
             pagination,
+            value: None,
         })
     }
 
@@ -894,6 +901,7 @@ impl TableManager {
                 execution_time_us: start.elapsed().as_micros() as u64,
             }),
             pagination: None,
+            value: None,
         })
     }
 
@@ -975,6 +983,7 @@ impl TableManager {
                     execution_time_us: elapsed.as_micros() as u64,
                 }),
                 pagination,
+                value: None,
             });
         }
 
@@ -1009,6 +1018,7 @@ impl TableManager {
                 execution_time_us: elapsed.as_micros() as u64,
             }),
             pagination,
+            value: None,
         })
     }
 
@@ -1094,6 +1104,7 @@ impl TableManager {
                 execution_time_us: elapsed.as_micros() as u64,
             }),
             pagination,
+            value: None,
         })
     }
 
@@ -1173,6 +1184,7 @@ impl TableManager {
                 execution_time_us: elapsed.as_micros() as u64,
             }),
             pagination,
+            value: None,
         })
     }
 
@@ -1255,6 +1267,7 @@ impl TableManager {
                 execution_time_us: elapsed.as_micros() as u64,
             }),
             pagination,
+            value: None,
         })
     }
 }
