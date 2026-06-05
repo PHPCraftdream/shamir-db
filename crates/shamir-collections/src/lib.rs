@@ -1,0 +1,36 @@
+//! Insertion-ordered collection aliases shared across ShamirDB crates.
+//!
+//! `TMap`/`TSet` are `IndexMap`/`IndexSet` keyed by a fast `FxHasher`,
+//! giving deterministic insertion-order iteration. This crate is a
+//! dependency-light leaf (`indexmap` + `fxhash` only) so guest-facing
+//! crates (query DTOs, builder) can reuse the exact same types as the
+//! host without pulling the heavy `shamir-types` graph.
+
+use fxhash::FxHasher;
+use indexmap::{IndexMap, IndexSet};
+use std::cmp::Eq;
+use std::hash::{BuildHasherDefault, Hash};
+
+pub type THasher = BuildHasherDefault<FxHasher>;
+
+/// Ordered map that maintains insertion order for predictable iteration
+pub type TMap<K, V> = IndexMap<K, V, THasher>;
+
+/// Ordered set that maintains insertion order for predictable iteration
+pub type TSet<T> = IndexSet<T, THasher>;
+
+pub fn new_map<K: Eq + Hash, V>() -> TMap<K, V> {
+    IndexMap::with_hasher(THasher::default())
+}
+
+pub fn new_map_wc<K: Eq + Hash, V>(capacity: usize) -> TMap<K, V> {
+    IndexMap::with_capacity_and_hasher(capacity, THasher::default())
+}
+
+pub fn new_set<V: Eq + Hash>() -> TSet<V> {
+    IndexSet::with_hasher(THasher::default())
+}
+
+pub fn new_set_wc<V: Eq + Hash>(capacity: usize) -> TSet<V> {
+    IndexSet::with_capacity_and_hasher(capacity, THasher::default())
+}

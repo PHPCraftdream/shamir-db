@@ -6,6 +6,8 @@ description = "Foundation types for ShamirDB — value model, IDs, codecs, inter
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+shamir-collections = { path = "../shamir-collections" }
+
 # Core data model
 smallvec = "1.11"
 serde = { version = "1.0.217", features = ["derive"] }
