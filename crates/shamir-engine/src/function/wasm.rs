@@ -62,7 +62,7 @@ use super::registry::FunctionRegistry;
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
-use wasmtime::{Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Engine, InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 // ── HostState ─────────────────────────────────────────────────────────
 
@@ -139,9 +139,52 @@ impl Default for WasmLimits {
 /// Created from either WAT text ([`WasmFunction::from_wat`]) or binary
 /// `.wasm` bytes ([`WasmFunction::from_binary`]).
 pub struct WasmFunction {
-    module: Module,
+    instance_pre: InstancePre<HostState>,
     engine: Arc<WasmEngine>,
     limits: WasmLimits,
+}
+
+/// Build a [`Linker`] with all host imports registered and pre-instantiate
+/// it against the given module. The resulting [`InstancePre`] resolves
+/// imports once; each subsequent `instantiate_async` only needs a fresh
+/// [`Store`].
+fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<InstancePre<HostState>> {
+    let mut linker: Linker<HostState> = Linker::new(engine.engine());
+
+    // Sync host imports under "shamir_host".
+    linker
+        .func_wrap("shamir_host", "batch_put", host_batch_put)
+        .map_err(|e| FunctionError::Compute(format!("linker batch_put: {e}")))?;
+    linker
+        .func_wrap("shamir_host", "batch_get", host_batch_get)
+        .map_err(|e| FunctionError::Compute(format!("linker batch_get: {e}")))?;
+    linker
+        .func_wrap("shamir_host", "global_set", host_global_set)
+        .map_err(|e| FunctionError::Compute(format!("linker global_set: {e}")))?;
+    linker
+        .func_wrap("shamir_host", "global_get", host_global_get)
+        .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
+
+    // Async host imports.
+    linker
+        .func_wrap_async("shamir_host", "call", host_call)
+        .map_err(|e| FunctionError::Compute(format!("linker call: {e}")))?;
+    linker
+        .func_wrap_async("shamir_host", "db_get", host_db_get)
+        .map_err(|e| FunctionError::Compute(format!("linker db_get: {e}")))?;
+    linker
+        .func_wrap_async("shamir_host", "db_insert", host_db_insert)
+        .map_err(|e| FunctionError::Compute(format!("linker db_insert: {e}")))?;
+    linker
+        .func_wrap_async("shamir_host", "db_query", host_db_query)
+        .map_err(|e| FunctionError::Compute(format!("linker db_query: {e}")))?;
+    linker
+        .func_wrap_async("shamir_host", "http_fetch", host_http_fetch)
+        .map_err(|e| FunctionError::Compute(format!("linker http_fetch: {e}")))?;
+
+    linker
+        .instantiate_pre(module)
+        .map_err(|e| FunctionError::Compute(format!("instantiate_pre failed: {e}")))
 }
 
 impl WasmFunction {
@@ -149,8 +192,9 @@ impl WasmFunction {
     pub fn from_wat(engine: Arc<WasmEngine>, wat: &str, limits: WasmLimits) -> FnResult<Self> {
         let module = Module::new(engine.engine(), wat)
             .map_err(|e| FunctionError::Compute(format!("WAT compile error: {e}")))?;
+        let instance_pre = build_instance_pre(&engine, &module)?;
         Ok(Self {
-            module,
+            instance_pre,
             engine,
             limits,
         })
@@ -164,8 +208,9 @@ impl WasmFunction {
     ) -> FnResult<Self> {
         let module = Module::from_binary(engine.engine(), wasm_or_cwasm_bytes)
             .map_err(|e| FunctionError::Compute(format!("WASM compile error: {e}")))?;
+        let instance_pre = build_instance_pre(&engine, &module)?;
         Ok(Self {
-            module,
+            instance_pre,
             engine,
             limits,
         })
@@ -894,7 +939,6 @@ impl ShamirFunction for WasmFunction {
 
         let engine = self.engine.clone();
         let limits = self.limits.clone();
-        let module = self.module.clone();
         let batch_ctx = batch.context().clone();
         let globals = ctx.globals().clone();
         let registry = ctx.registry().cloned();
@@ -931,46 +975,9 @@ impl ShamirFunction for WasmFunction {
             .set_fuel(limits.fuel)
             .map_err(|e| FunctionError::Compute(e.to_string()))?;
 
-        let mut linker: Linker<HostState> = Linker::new(engine.engine());
-
-        // Register sync host imports under "shamir_host". Sync host funcs are
-        // allowed under async_support — they just don't await.
-        linker
-            .func_wrap("shamir_host", "batch_put", host_batch_put)
-            .map_err(|e| FunctionError::Compute(format!("linker batch_put: {e}")))?;
-        linker
-            .func_wrap("shamir_host", "batch_get", host_batch_get)
-            .map_err(|e| FunctionError::Compute(format!("linker batch_get: {e}")))?;
-        linker
-            .func_wrap("shamir_host", "global_set", host_global_set)
-            .map_err(|e| FunctionError::Compute(format!("linker global_set: {e}")))?;
-        linker
-            .func_wrap("shamir_host", "global_get", host_global_get)
-            .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
-
-        // Register the async host import for ctx.call.
-        linker
-            .func_wrap_async("shamir_host", "call", host_call)
-            .map_err(|e| FunctionError::Compute(format!("linker call: {e}")))?;
-
-        // Register async host imports for ctx.db() (slice 8b).
-        linker
-            .func_wrap_async("shamir_host", "db_get", host_db_get)
-            .map_err(|e| FunctionError::Compute(format!("linker db_get: {e}")))?;
-        linker
-            .func_wrap_async("shamir_host", "db_insert", host_db_insert)
-            .map_err(|e| FunctionError::Compute(format!("linker db_insert: {e}")))?;
-        linker
-            .func_wrap_async("shamir_host", "db_query", host_db_query)
-            .map_err(|e| FunctionError::Compute(format!("linker db_query: {e}")))?;
-
-        // Register async host import for ctx.http_fetch (slice 8c).
-        linker
-            .func_wrap_async("shamir_host", "http_fetch", host_http_fetch)
-            .map_err(|e| FunctionError::Compute(format!("linker http_fetch: {e}")))?;
-
-        let instance = linker
-            .instantiate_async(&mut store, &module)
+        let instance = self
+            .instance_pre
+            .instantiate_async(&mut store)
             .await
             .map_err(|e| FunctionError::Compute(format!("instantiation failed: {e}")))?;
 
