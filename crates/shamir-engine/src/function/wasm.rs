@@ -93,16 +93,56 @@ struct HostState {
 /// A configured Wasmtime [`Engine`] with fuel and async support enabled.
 ///
 /// Cheap to clone-share via `Arc` — `Engine` is internally reference-counted.
+///
+/// # Compilation cache
+///
+/// The engine enables Wasmtime's built-in disk compilation cache
+/// (`wasmtime::Cache`) when possible. The cache is a **node-local
+/// derivative** — it is fully recoverable from the original `.wasm`
+/// bytecode, never replicated between nodes, and safe to delete at any
+/// time. Wasmtime automatically invalidates stale entries when the
+/// engine version or compilation target changes, so no manual
+/// housekeeping is needed.
+///
+/// If the cache cannot be initialised (missing directory, insufficient
+/// permissions, unsupported platform) the engine falls back to
+/// uncached compilation — correctness is never affected.
 #[derive(Clone)]
 pub struct WasmEngine {
     engine: Engine,
 }
 
 impl WasmEngine {
-    /// Create a new engine with fuel consumption and async support enabled.
+    /// Create a new engine with fuel consumption, async support, and
+    /// disk compilation cache enabled.
+    ///
+    /// The disk cache is a **node-local derivative** recoverable from
+    /// the original `.wasm` bytecode. It is not replicated between nodes.
+    /// On version or target mismatch Wasmtime silently recompiles;
+    /// on any cache init error the engine falls back to uncached
+    /// compilation (logged at `warn` level).
     pub fn new() -> FnResult<Self> {
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
+
+        // Enable Wasmtime's built-in disk compilation cache.
+        // `CacheConfig::new()` uses sensible defaults (OS-specific cache
+        // dir, zstd compression, background cleanup worker).
+        // `Cache::new()` validates the config and spawns the worker;
+        // on failure we log and proceed without cache.
+        match wasmtime::Cache::new(wasmtime::CacheConfig::new()) {
+            Ok(cache) => {
+                config.cache(Some(cache));
+                log::debug!("Wasmtime disk compilation cache enabled");
+            }
+            Err(e) => {
+                log::warn!(
+                    "Wasmtime disk compilation cache unavailable, \
+                     falling back to uncached compilation: {e}"
+                );
+            }
+        }
+
         // async_support is auto-detected in wasmtime 45; the `async` crate
         // feature enables the fiber-based runtime that allows host imports
         // to .await. Instantiation uses instantiate_async / call_async.
