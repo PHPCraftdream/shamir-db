@@ -293,15 +293,13 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
     // create_table and insert can NOT live in the same batch because the
     // planner runs independent ops in a single parallel stage and the
     // insert can race ahead of the create — same constraint as mvp_e2e.
-    let mk: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "ws-mk",
-        "queries": { "tb": { "create_table": "ws_items", "repo": "main" } }
-    }))
-    .expect("parse batch");
+    let mut mk_batch = shamir_query_builder::batch::Batch::new();
+    mk_batch.id("ws-mk");
+    mk_batch.create_table("tb", shamir_query_builder::ddl::create_table("ws_items"));
     let req_a = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
-        batch: mk,
+        batch: mk_batch.build(),
     };
     let env_a = RequestEnvelope::new(
         session_id,

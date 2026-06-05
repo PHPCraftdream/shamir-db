@@ -1,9 +1,19 @@
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::write;
+use shamir_query_builder::Query;
+
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::query::batch::BatchRequest;
 use crate::shamir_db::ShamirDb;
 use crate::shamir_db::SystemStoreConfig;
 use serde_json::json;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 // ============================================================================
 // System store persistence tests
@@ -79,7 +89,7 @@ async fn test_settings_persistence() {
 
     shamir
         .system_store()
-        .save_setting("max_connections", &serde_json::json!(100))
+        .save_setting("max_connections", &json!(100))
         .await
         .unwrap();
 
@@ -88,7 +98,7 @@ async fn test_settings_persistence() {
         .load_setting("max_connections")
         .await
         .unwrap();
-    assert_eq!(val, Some(serde_json::json!(100)));
+    assert_eq!(val, Some(json!(100)));
 }
 
 #[tokio::test]
@@ -119,15 +129,10 @@ async fn test_multiple_repos_persist() {
 /// Count records returned by a `{"from": <table>}` read through the
 /// high-level execute pipeline.
 async fn read_count(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> usize {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "q": {
-                "from": [repo, table]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q", Query::with_repo(repo, table));
+    let req = to_req(&b);
     let resp = shamir.execute(db, &req).await.unwrap();
     resp.results["q"].records.len()
 }
@@ -183,21 +188,16 @@ async fn table_catalogue_survives_restart() {
 
         // Durable write through the high-level execute pipeline (execute_set
         // persists interner + counter).
-        let ins: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "ins": {
-                    "insert_into": ["data", "users"],
-                    "values": [
-                        {
-                            "name": "Alice",
-                            "email": "alice@example.com"
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("data", "users").row(doc! {
+                "name" => "Alice",
+                "email" => "alice@example.com",
+            }),
+        );
+        let ins = to_req(&b);
         let resp = shamir.execute("production", &ins).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
@@ -252,20 +252,15 @@ async fn table_added_after_repo_survives_restart() {
             .await
             .unwrap();
 
-        let ins: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "ins": {
-                    "insert_into": ["data", "events"],
-                    "values": [
-                        {
-                            "kind": "click"
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("data", "events").row(doc! {
+                "kind" => "click",
+            }),
+        );
+        let ins = to_req(&b);
         shamir.execute("production", &ins).await.unwrap();
     }
 

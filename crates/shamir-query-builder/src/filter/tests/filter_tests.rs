@@ -299,6 +299,51 @@ fn test_vector_similarity() {
     );
 }
 
+// ── computed (functional index) ──────────────────────────────────────
+
+#[test]
+fn test_computed_lower_eq() {
+    assert_wire(
+        computed("lower", "email", "eq", "alice@foo.com"),
+        json!({
+            "op": "computed",
+            "expr_op": "lower",
+            "field": ["email"],
+            "cmp": "eq",
+            "value": "alice@foo.com"
+        }),
+    );
+}
+
+#[test]
+fn test_computed_with_args() {
+    assert_wire(
+        computed_with_args("substring", "name", [lit(0_i64), lit(3_i64)], "eq", "ali"),
+        json!({
+            "op": "computed",
+            "expr_op": "substring",
+            "field": ["name"],
+            "expr_args": [0, 3],
+            "cmp": "eq",
+            "value": "ali"
+        }),
+    );
+}
+
+#[test]
+fn test_computed_nested_field() {
+    assert_wire(
+        computed("lower", ["address", "city"], "eq", "ny"),
+        json!({
+            "op": "computed",
+            "expr_op": "lower",
+            "field": ["address", "city"],
+            "cmp": "eq",
+            "value": "ny"
+        }),
+    );
+}
+
 // ── free combinators ─────────────────────────────────────────────────
 
 #[test]

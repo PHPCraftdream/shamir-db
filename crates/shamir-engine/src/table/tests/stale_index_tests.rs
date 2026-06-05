@@ -14,14 +14,12 @@
 
 #![allow(deprecated)]
 
-use serde_json::json;
-
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::DeleteOp;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
+use shamir_query_builder::{filter, write};
 use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
@@ -100,15 +98,9 @@ async fn test_stale_index_entry_skipped_in_lookup_records_via_index() {
 
     // Delete WHERE status = "active" — triggers index-backed path
     // because "status_idx" covers the Eq condition.
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "users",
-        "where": {
-            "op": "eq",
-            "field": ["status"],
-            "value": "active"
-        }
-    }))
-    .unwrap();
+    let op = write::delete("users")
+        .where_(filter::eq("status", "active"))
+        .build();
 
     // This is the critical assertion: the operation must NOT error.
     // On the pre-fix code it would propagate NotFound for the stale id.

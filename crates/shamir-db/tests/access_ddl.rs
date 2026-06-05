@@ -5,13 +5,19 @@
 //! verifies that `authorize_access` actually enforces the changed
 //! metadata — the DDL is non-vacuous.
 
-use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
 use shamir_types::access::{Action, Actor, ResourcePath};
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Helper: create a ShamirDb with database "testdb", repo "main", table "users".
 async fn setup() -> ShamirDb {
@@ -26,15 +32,12 @@ async fn setup() -> ShamirDb {
 /// Execute a single-op admin batch against "testdb".
 async fn exec_op(
     shamir: &ShamirDb,
-    op_json: serde_json::Value,
+    op: impl shamir_query_builder::batch::IntoBatchOp,
 ) -> shamir_db::query::read::QueryResult {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": op_json
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.op("op", op);
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["op"].clone()
 }
@@ -51,12 +54,7 @@ async fn chmod_then_enforced() {
     // Step 1: chown the table to User(7) via DDL
     let result = exec_op(
         &shamir,
-        json!({
-            "chown": {
-                "table": ["testdb", "main", "users"]
-            },
-            "owner": 7
-        }),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 7),
     )
     .await;
     assert_eq!(result.records[0]["owner"], 7);
@@ -64,12 +62,7 @@ async fn chmod_then_enforced() {
     // Step 2: chmod the table to 0o700 (owner rwx only) via DDL
     let result = exec_op(
         &shamir,
-        json!({
-            "chmod": {
-                "table": ["testdb", "main", "users"]
-            },
-            "mode": 448   // 0o700
-        }),
+        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o700),
     )
     .await;
     assert_eq!(result.records[0]["mode"], 448);
@@ -111,58 +104,37 @@ async fn group_grant_via_ddl() {
     // Step 1: chown table to User(10)
     exec_op(
         &shamir,
-        json!({
-            "chown": {
-                "table": ["testdb", "main", "users"]
-            },
-            "owner": 10
-        }),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 10),
     )
     .await;
 
     // Step 2: create group "devs"
-    let result = exec_op(
-        &shamir,
-        json!({
-            "create_group": "devs"
-        }),
-    )
-    .await;
+    let result = exec_op(&shamir, ddl::create_group("devs")).await;
     let group_id = result.records[0]["group_id"].as_u64().unwrap();
 
     // Step 3: add User(8) to the group
     exec_op(
         &shamir,
-        json!({
-            "add_group_member": {
-                "name": "devs"
+        ddl::add_group_member(
+            ddl::GroupRef::Name {
+                name: "devs".into(),
             },
-            "user": 8
-        }),
+            8,
+        ),
     )
     .await;
 
     // Step 4: chgrp the table to that group
     exec_op(
         &shamir,
-        json!({
-            "chgrp": {
-                "table": ["testdb", "main", "users"]
-            },
-            "group": group_id
-        }),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(group_id)),
     )
     .await;
 
     // Step 5: chmod to 0o750 (owner rwx, group r-x, other ---)
     exec_op(
         &shamir,
-        json!({
-            "chmod": {
-                "table": ["testdb", "main", "users"]
-            },
-            "mode": 488   // 0o750
-        }),
+        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o750),
     )
     .await;
 
@@ -225,12 +197,7 @@ async fn chown_changes_owner() {
     // chown to User(42)
     exec_op(
         &shamir,
-        json!({
-            "chown": {
-                "table": ["testdb", "main", "users"]
-            },
-            "owner": 42
-        }),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 42),
     )
     .await;
 
@@ -240,12 +207,7 @@ async fn chown_changes_owner() {
     // chown again to User(99)
     exec_op(
         &shamir,
-        json!({
-            "chown": {
-                "table": ["testdb", "main", "users"]
-            },
-            "owner": 99
-        }),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 99),
     )
     .await;
 
@@ -263,23 +225,12 @@ async fn chgrp_clears_group() {
     let table_path = ResourcePath::table("testdb", "main", "users");
 
     // Create a group and chgrp to it
-    let result = exec_op(
-        &shamir,
-        json!({
-            "create_group": "testers"
-        }),
-    )
-    .await;
+    let result = exec_op(&shamir, ddl::create_group("testers")).await;
     let gid = result.records[0]["group_id"].as_u64().unwrap();
 
     exec_op(
         &shamir,
-        json!({
-            "chgrp": {
-                "table": ["testdb", "main", "users"]
-            },
-            "group": gid
-        }),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(gid)),
     )
     .await;
 
@@ -289,12 +240,7 @@ async fn chgrp_clears_group() {
     // Clear the group
     exec_op(
         &shamir,
-        json!({
-            "chgrp": {
-                "table": ["testdb", "main", "users"]
-            },
-            "group": null
-        }),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), None),
     )
     .await;
 
@@ -315,56 +261,35 @@ async fn drop_group_removes_access() {
     // chown to User(10)
     exec_op(
         &shamir,
-        json!({
-            "chown": {
-                "table": ["testdb", "main", "users"]
-            },
-            "owner": 10
-        }),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 10),
     )
     .await;
 
     // Create group, add User(20)
-    let result = exec_op(
-        &shamir,
-        json!({
-            "create_group": "temp"
-        }),
-    )
-    .await;
+    let result = exec_op(&shamir, ddl::create_group("temp")).await;
     let gid = result.records[0]["group_id"].as_u64().unwrap();
 
     exec_op(
         &shamir,
-        json!({
-            "add_group_member": {
-                "name": "temp"
+        ddl::add_group_member(
+            ddl::GroupRef::Name {
+                name: "temp".into(),
             },
-            "user": 20
-        }),
+            20,
+        ),
     )
     .await;
 
     // chgrp + chmod group-readable
     exec_op(
         &shamir,
-        json!({
-            "chgrp": {
-                "table": ["testdb", "main", "users"]
-            },
-            "group": gid
-        }),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(gid)),
     )
     .await;
 
     exec_op(
         &shamir,
-        json!({
-            "chmod": {
-                "table": ["testdb", "main", "users"]
-            },
-            "mode": 504   // 0o770
-        }),
+        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o770),
     )
     .await;
 
@@ -377,12 +302,12 @@ async fn drop_group_removes_access() {
     // Remove User(20) from group
     exec_op(
         &shamir,
-        json!({
-            "remove_group_member": {
-                "name": "temp"
+        ddl::remove_group_member(
+            ddl::GroupRef::Name {
+                name: "temp".into(),
             },
-            "user": 20
-        }),
+            20,
+        ),
     )
     .await;
 
@@ -406,27 +331,9 @@ async fn chmod_database_resource() {
     let db_path = ResourcePath::database("testdb");
 
     // Restrict the database to 0o700, owner User(1)
-    exec_op(
-        &shamir,
-        json!({
-            "chown": {
-                "database": "testdb"
-            },
-            "owner": 1
-        }),
-    )
-    .await;
+    exec_op(&shamir, ddl::chown(ddl::res::database("testdb"), 1)).await;
 
-    exec_op(
-        &shamir,
-        json!({
-            "chmod": {
-                "database": "testdb"
-            },
-            "mode": 448   // 0o700
-        }),
-    )
-    .await;
+    exec_op(&shamir, ddl::chmod(ddl::res::database("testdb"), 0o700)).await;
 
     let meta = shamir.resource_meta(&db_path).await;
     assert_eq!(meta.owner, Actor::User(1));

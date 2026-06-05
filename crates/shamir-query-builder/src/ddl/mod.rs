@@ -86,12 +86,40 @@ pub mod res {
 // Database DDL
 // ============================================================================
 
-/// Create a new database.
-pub fn create_db(name: impl Into<String>) -> BatchOp {
-    BatchOp::CreateDb(CreateDbOp {
-        create_db: name.into(),
+/// Create a new database. Returns a builder for optional `if_not_exists`.
+pub fn create_db(name: impl Into<String>) -> CreateDb {
+    CreateDb {
+        name: name.into(),
         if_not_exists: false,
-    })
+    }
+}
+
+/// Builder for [`CreateDbOp`].
+pub struct CreateDb {
+    name: String,
+    if_not_exists: bool,
+}
+
+impl CreateDb {
+    /// Skip error if the database already exists.
+    pub fn if_not_exists(mut self) -> Self {
+        self.if_not_exists = true;
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::CreateDb(CreateDbOp {
+            create_db: self.name,
+            if_not_exists: self.if_not_exists,
+        })
+    }
+}
+
+impl From<CreateDb> for BatchOp {
+    fn from(b: CreateDb) -> Self {
+        b.build()
+    }
 }
 
 /// Drop a database. Optionally attach an HMAC tag.
@@ -761,6 +789,76 @@ pub fn list_users() -> BatchOp {
 /// List roles.
 pub fn list_roles() -> BatchOp {
     BatchOp::List(ListOp::Roles)
+}
+
+/// List all registered functions (catalogue-wide). Optionally filter by folder.
+pub fn list_functions() -> ListFunctions {
+    ListFunctions { folder: None }
+}
+
+/// Builder for the `list functions` variant of [`ListOp`].
+pub struct ListFunctions {
+    folder: Option<String>,
+}
+
+impl ListFunctions {
+    /// Filter by folder prefix.
+    pub fn folder(mut self, folder: impl Into<String>) -> Self {
+        self.folder = Some(folder.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::List(ListOp::Functions {
+            folder: self.folder,
+        })
+    }
+}
+
+impl From<ListFunctions> for BatchOp {
+    fn from(b: ListFunctions) -> Self {
+        b.build()
+    }
+}
+
+/// List all registered validators (catalogue-wide: id + name + bound tables).
+///
+/// NOTE: This is different from `list_validators(table)` which lists
+/// per-table bindings via `ListValidatorsOp`.
+pub fn list_all_validators() -> BatchOp {
+    BatchOp::List(ListOp::Validators)
+}
+
+/// List explicitly created function folders. Optionally filter by parent.
+pub fn list_function_folders() -> ListFunctionFolders {
+    ListFunctionFolders { parent: None }
+}
+
+/// Builder for the `list function_folders` variant of [`ListOp`].
+pub struct ListFunctionFolders {
+    parent: Option<String>,
+}
+
+impl ListFunctionFolders {
+    /// Filter by parent folder.
+    pub fn parent(mut self, parent: impl Into<String>) -> Self {
+        self.parent = Some(parent.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::List(ListOp::FunctionFolders {
+            parent: self.parent,
+        })
+    }
+}
+
+impl From<ListFunctionFolders> for BatchOp {
+    fn from(b: ListFunctionFolders) -> Self {
+        b.build()
+    }
 }
 
 // ============================================================================
@@ -1637,6 +1735,24 @@ impl IntoBatchOp for UnbindValidator {
 }
 
 impl IntoBatchOp for ListValidatorsBuilder {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+impl IntoBatchOp for CreateDb {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+impl IntoBatchOp for ListFunctions {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+impl IntoBatchOp for ListFunctionFolders {
     fn into_batch_op(self) -> BatchOp {
         self.build()
     }

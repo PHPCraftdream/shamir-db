@@ -5,15 +5,29 @@
 //!
 //! Default mode is 0o777 (open) — so existing behaviour is unchanged.
 //! Enforcement activates when `chmod` restricts a resource.
-
-use serde_json::json;
+//!
+//! **Query construction** uses the `shamir-query-builder` crate (Batch +
+//! q!/doc! macros) and round-trips through msgpack to exercise the wire
+//! encoding path.
 
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::q;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
+
+// ---------------------------------------------------------------------------
+// Helper: build a Batch, encode to msgpack, decode back to BatchRequest.
+// This proves the wire round-trip is lossless for every query in the file.
+// ---------------------------------------------------------------------------
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Helper: create an in-memory ShamirDb with `testdb` / `main` / `items`.
 async fn setup() -> ShamirDb {
@@ -27,21 +41,16 @@ async fn setup() -> ShamirDb {
 
 /// Insert a record via System actor (always allowed).
 async fn seed_record(shamir: &ShamirDb) {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "seed",
-        "queries": {
-            "ins": {
-                "insert_into": "items",
-                "values": [
-                    {
-                        "name": "widget",
-                        "price": 42
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("seed");
+    b.insert(
+        "ins",
+        q!(insert into items values {
+            "name" => "widget",
+            "price" => 42
+        }),
+    );
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 }
 
@@ -55,36 +64,28 @@ async fn default_mode_allows_all_users() {
     seed_record(&shamir).await;
 
     // Read
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("r");
+    b.query("r", q!(from items));
+    let read_req = to_req(&b);
+
     let resp = shamir
         .execute_as(Actor::User(99), "testdb", &read_req)
         .await;
     assert!(resp.is_ok(), "default 0o777 should allow any user to read");
 
     // Insert
-    let ins_req: BatchRequest = serde_json::from_value(json!({
-        "id": "i",
-        "queries": {
-            "i": {
-                "insert_into": "items",
-                "values": [
-                    {
-                        "name": "gadget",
-                        "price": 7
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("i");
+    b.insert(
+        "i",
+        q!(insert into items values {
+            "name" => "gadget",
+            "price" => 7
+        }),
+    );
+    let ins_req = to_req(&b);
+
     let resp = shamir.execute_as(Actor::User(99), "testdb", &ins_req).await;
     assert!(
         resp.is_ok(),
@@ -112,15 +113,10 @@ async fn restricted_table_owner_allowed_stranger_denied_read() {
         .await
         .unwrap();
 
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("r");
+    b.query("r", q!(from items));
+    let read_req = to_req(&b);
 
     // Owner User(1) reads successfully
     let resp = shamir.execute_as(Actor::User(1), "testdb", &read_req).await;
@@ -152,21 +148,16 @@ async fn restricted_table_stranger_denied_insert() {
         .await
         .unwrap();
 
-    let ins_req: BatchRequest = serde_json::from_value(json!({
-        "id": "i",
-        "queries": {
-            "i": {
-                "insert_into": "items",
-                "values": [
-                    {
-                        "name": "gadget",
-                        "price": 7
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("i");
+    b.insert(
+        "i",
+        q!(insert into items values {
+            "name" => "gadget",
+            "price" => 7
+        }),
+    );
+    let ins_req = to_req(&b);
 
     // Owner can insert (0o750 → owner has rwx)
     let resp = shamir.execute_as(Actor::User(1), "testdb", &ins_req).await;
@@ -199,20 +190,10 @@ async fn restricted_table_stranger_denied_delete() {
         .await
         .unwrap();
 
-    let del_req: BatchRequest = serde_json::from_value(json!({
-        "id": "d",
-        "queries": {
-            "d": {
-                "delete_from": "items",
-                "where": {
-                    "op": "eq",
-                    "field": ["name"],
-                    "value": "widget"
-                }
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("d");
+    b.delete("d", q!(delete from items where name == "widget"));
+    let del_req = to_req(&b);
 
     // Stranger denied
     let err = shamir
@@ -246,15 +227,10 @@ async fn system_bypasses_restricted_table() {
         .await
         .unwrap();
 
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("r");
+    b.query("r", q!(from items));
+    let read_req = to_req(&b);
 
     // System always passes
     let resp = shamir.execute_as(Actor::System, "testdb", &read_req).await;
@@ -285,15 +261,10 @@ async fn tx_execute_as_enforces_table_acl() {
         .await
         .unwrap();
 
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "txr",
-        "queries": {
-            "r": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("txr");
+    b.query("r", q!(from items));
+    let read_req = to_req(&b);
 
     // Open an interactive tx as User(1) (owner) — should succeed
     let (mut tx_ok, _guard_ok) = shamir

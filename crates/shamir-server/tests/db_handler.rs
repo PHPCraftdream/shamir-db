@@ -8,9 +8,8 @@
 //!
 //! # Migration note
 //!
-//! Read/write batches are constructed with `shamir_query_builder`. Admin/DDL
-//! ops (`create_table`, `drop_table`, `set_resource_meta`, etc.) stay as raw
-//! `json!` because the builder has no coverage for them.
+//! All batch requests (DML + DDL) are constructed with
+//! `shamir_query_builder` and round-tripped through MessagePack.
 
 use std::sync::Arc;
 
@@ -28,6 +27,7 @@ use shamir_db::ShamirDb;
 
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::write::{insert, upsert};
 use shamir_query_builder::Query;
@@ -77,13 +77,6 @@ fn decode(bytes: &[u8]) -> DbResponse {
     rmp_serde::from_slice(bytes).expect("decode response")
 }
 
-/// Build a `DbRequest::Execute` from a JSON batch body, defaulting the
-/// query-language version to `CURRENT_QUERY_LANG_VERSION`. Keeps tests
-/// terse — each test reads like the JSON a real client would send.
-fn execute(db: &str, body: serde_json::Value) -> DbRequest {
-    execute_with_version(db, shamir_server::version::CURRENT_QUERY_LANG_VERSION, body)
-}
-
 /// Build a `DbRequest::Execute` from a pre-built [`BatchRequest`].
 fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
     DbRequest::Execute {
@@ -95,17 +88,6 @@ fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
 
 /// Same as above but with an explicit `query_version`.
 fn execute_built_with_version(db: &str, query_version: u32, batch: BatchRequest) -> DbRequest {
-    DbRequest::Execute {
-        query_version,
-        db: db.to_string(),
-        batch,
-    }
-}
-
-/// Same as [`execute`] but with an explicit `query_version` for the
-/// version-dispatch tests.
-fn execute_with_version(db: &str, query_version: u32, body: serde_json::Value) -> DbRequest {
-    let batch: BatchRequest = serde_json::from_value(body).expect("parse batch");
     DbRequest::Execute {
         query_version,
         db: db.to_string(),
@@ -359,15 +341,10 @@ async fn admin_batch_allowed_for_superuser() {
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
-    let admin = execute(
-        "prod",
-        json!({
-            "id": "ddl",
-            "queries": {
-                "mk": { "create_table": "inventory", "repo": "main" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id("ddl");
+    b.create_table("mk", ddl::create_table("inventory").repo("main"));
+    let admin = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&admin)).unwrap());
     let resp = match res {
         DbResponse::Batch { response } => response,
@@ -407,15 +384,10 @@ async fn admin_batch_denied_for_non_superuser() {
     let handler = ShamirDbHandler::new(shamir);
     let session = user_session(); // not superuser
 
-    let admin = execute(
-        "prod",
-        json!({
-            "id": "ddl",
-            "queries": {
-                "drop": { "drop_table": "items", "repo": "main" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id("ddl");
+    b.drop_table("drop", ddl::drop_table("items").repo("main"));
+    let admin = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&admin)).unwrap());
     match res {
         DbResponse::Error { code, message } => {

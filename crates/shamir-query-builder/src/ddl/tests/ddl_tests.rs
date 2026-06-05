@@ -25,7 +25,7 @@ fn roundtrip(op: &BatchOp) -> serde_json::Value {
 
 #[test]
 fn create_db_wire() {
-    let op = ddl::create_db("mydb");
+    let op = ddl::create_db("mydb").build();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -1081,6 +1081,93 @@ fn create_function_folder_single_segment() {
         j,
         json!({
             "create_function_folder": ["utils"]
+        })
+    );
+}
+
+// ============================================================================
+// create_db with if_not_exists
+// ============================================================================
+
+#[test]
+fn create_db_if_not_exists_wire() {
+    let op = ddl::create_db("newdb").if_not_exists().build();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        json!({
+            "create_db": "newdb",
+            "if_not_exists": true
+        })
+    );
+    assert!(op.is_admin());
+}
+
+// ============================================================================
+// list functions / validators / function_folders
+// ============================================================================
+
+#[test]
+fn list_functions_wire() {
+    let op = ddl::list_functions().build();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        json!({
+            "list": "functions"
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn list_functions_with_folder_wire() {
+    let op = ddl::list_functions().folder("math").build();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        json!({
+            "list": "functions",
+            "folder": "math"
+        })
+    );
+}
+
+#[test]
+fn list_all_validators_wire() {
+    let op = ddl::list_all_validators();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        json!({
+            "list": "validators"
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn list_function_folders_wire() {
+    let op = ddl::list_function_folders().build();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        json!({
+            "list": "function_folders"
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn list_function_folders_with_parent_wire() {
+    let op = ddl::list_function_folders().parent("alpha").build();
+    let j = roundtrip(&op);
+    assert_eq!(
+        j,
+        json!({
+            "list": "function_folders",
+            "parent": "alpha"
         })
     );
 }

@@ -1,12 +1,16 @@
 //! Integration tests for write operation execution.
+//!
+//! Request-building uses the typed query builder (`shamir_query_builder`).
 
 #![allow(deprecated)]
 
-use serde_json::json;
+use shamir_query_builder::filter;
+use shamir_query_builder::val::*;
+use shamir_query_builder::write::{self, doc, UpdateReturnMode};
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+use crate::query::write::InsertOp;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
@@ -72,11 +76,9 @@ async fn setup_table_with_users() -> crate::table::TableManager {
 async fn test_execute_insert_single() {
     let table = setup_empty_table().await;
 
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [{"name": "Alice", "age": 30}]
-    }))
-    .unwrap();
+    let op = write::insert("users")
+        .row(doc().set("name", "Alice").set("age", 30_i64))
+        .build();
 
     let result = table.execute_insert(&op).await.unwrap();
 
@@ -94,15 +96,11 @@ async fn test_execute_insert_single() {
 async fn test_execute_insert_multiple() {
     let table = setup_empty_table().await;
 
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [
-            {"name": "Alice", "age": 30},
-            {"name": "Bob", "age": 25},
-            {"name": "Carol", "age": 35}
-        ]
-    }))
-    .unwrap();
+    let op = write::insert("users")
+        .row(doc().set("name", "Alice").set("age", 30_i64))
+        .row(doc().set("name", "Bob").set("age", 25_i64))
+        .row(doc().set("name", "Carol").set("age", 35_i64))
+        .build();
 
     let result = table.execute_insert(&op).await.unwrap();
 
@@ -115,11 +113,7 @@ async fn test_execute_insert_multiple() {
 async fn test_execute_insert_empty() {
     let table = setup_empty_table().await;
 
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": []
-    }))
-    .unwrap();
+    let op: InsertOp = write::insert("users").build();
 
     let result = table.execute_insert(&op).await.unwrap();
 
@@ -139,12 +133,10 @@ async fn test_execute_update_with_filter() {
     let ctx = FilterContext::new(interner, &refs);
 
     // Update active users: set status = "premium"
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "set": {"status": "premium"}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .where_(filter::eq("status", "active"))
+        .set(doc().set("status", "premium"))
+        .build();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
 
@@ -163,13 +155,11 @@ async fn test_execute_update_returns_changed() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "set": {"status": "premium"},
-        "select": {"return_mode": "changed"}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .where_(filter::eq("status", "active"))
+        .set(doc().set("status", "premium"))
+        .returning(UpdateReturnMode::Changed)
+        .build();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
 
@@ -188,12 +178,10 @@ async fn test_execute_update_no_match() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "deleted"},
-        "set": {"status": "active"}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .where_(filter::eq("status", "deleted"))
+        .set(doc().set("status", "active"))
+        .build();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 0);
@@ -207,12 +195,10 @@ async fn test_execute_update_all_records() {
     let ctx = FilterContext::new(interner, &refs);
 
     // No where clause — update all
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "set": {"verified": true},
-        "select": {"return_mode": "all"}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .set(doc().set("verified", true))
+        .returning(UpdateReturnMode::All)
+        .build();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 3);
@@ -230,13 +216,11 @@ async fn test_execute_update_unchanged_mode() {
     let ctx = FilterContext::new(interner, &refs);
 
     // Set status = "active" on active users — no actual change
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "set": {"status": "active"},
-        "select": {"return_mode": "unchanged"}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .where_(filter::eq("status", "active"))
+        .set(doc().set("status", "active"))
+        .returning(UpdateReturnMode::Unchanged)
+        .build();
 
     let result = table.execute_update(&op, &ctx).await.unwrap();
     // Nothing actually changed
@@ -256,11 +240,9 @@ async fn test_execute_delete_with_filter() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "inactive"}
-    }))
-    .unwrap();
+    let op = write::delete("users")
+        .where_(filter::eq("status", "inactive"))
+        .build();
 
     let result = table.execute_delete(&op, &ctx).await.unwrap();
 
@@ -276,11 +258,9 @@ async fn test_execute_delete_no_match() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "deleted"}
-    }))
-    .unwrap();
+    let op = write::delete("users")
+        .where_(filter::eq("status", "deleted"))
+        .build();
 
     let result = table.execute_delete(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 0);
@@ -295,11 +275,9 @@ async fn test_execute_delete_multiple() {
     let ctx = FilterContext::new(interner, &refs);
 
     // Delete all active users (Alice, Bob)
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"}
-    }))
-    .unwrap();
+    let op = write::delete("users")
+        .where_(filter::eq("status", "active"))
+        .build();
 
     let result = table.execute_delete(&op, &ctx).await.unwrap();
     assert_eq!(result.affected, 2);
@@ -318,14 +296,10 @@ async fn test_insert_update_delete_pipeline() {
     let _ctx = FilterContext::new(interner, &refs);
 
     // 1. Insert
-    let insert_op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [
-            {"name": "Alice", "score": 100},
-            {"name": "Bob", "score": 50}
-        ]
-    }))
-    .unwrap();
+    let insert_op = write::insert("users")
+        .row(doc().set("name", "Alice").set("score", 100_i64))
+        .row(doc().set("name", "Bob").set("score", 50_i64))
+        .build();
     let r = table.execute_insert(&insert_op).await.unwrap();
     assert_eq!(r.affected, 2);
 
@@ -334,23 +308,19 @@ async fn test_insert_update_delete_pipeline() {
     let ctx = FilterContext::new(interner, &refs);
 
     // 2. Update: boost Bob's score
-    let update_op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "where": {"op": "eq", "field": ["name"], "value": "Bob"},
-        "set": {"score": 75},
-        "select": {"return_mode": "changed"}
-    }))
-    .unwrap();
+    let update_op = write::update("users")
+        .where_(filter::eq("name", "Bob"))
+        .set(doc().set("score", 75_i64))
+        .returning(UpdateReturnMode::Changed)
+        .build();
     let r = table.execute_update(&update_op, &ctx).await.unwrap();
     assert_eq!(r.affected, 1);
     assert_eq!(r.records[0]["score"], 75);
 
     // 3. Delete: remove low scorers
-    let delete_op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "users",
-        "where": {"op": "lt", "field": ["score"], "value": 80}
-    }))
-    .unwrap();
+    let delete_op = write::delete("users")
+        .where_(filter::lt("score", 80_i64))
+        .build();
     let r = table.execute_delete(&delete_op, &ctx).await.unwrap();
     assert_eq!(r.affected, 1); // Bob(75) deleted
 
@@ -365,12 +335,10 @@ async fn test_insert_update_delete_pipeline() {
 async fn test_execute_set_insert_new() {
     let table = setup_empty_table().await;
 
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "users",
-        "key": {"email": "alice@example.com"},
-        "value": {"email": "alice@example.com", "name": "Alice"}
-    }))
-    .unwrap();
+    let op = write::upsert("users")
+        .key(doc().set("email", "alice@example.com"))
+        .value(doc().set("email", "alice@example.com").set("name", "Alice"))
+        .build();
 
     let result = table.execute_set(&op).await.unwrap();
 
@@ -386,12 +354,15 @@ async fn test_execute_set_update_existing() {
     let _interner = table.interner().get().await.unwrap();
 
     // Alice exists with status=active. Upsert by name.
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "users",
-        "key": {"name": "Alice"},
-        "value": {"name": "Alice", "status": "vip", "score": 100}
-    }))
-    .unwrap();
+    let op = write::upsert("users")
+        .key(doc().set("name", "Alice"))
+        .value(
+            doc()
+                .set("name", "Alice")
+                .set("status", "vip")
+                .set("score", 100_i64),
+        )
+        .build();
 
     let result = table.execute_set(&op).await.unwrap();
 
@@ -407,12 +378,10 @@ async fn test_execute_set_update_existing() {
 async fn test_execute_set_no_match_inserts() {
     let table = setup_table_with_users().await;
 
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "users",
-        "key": {"name": "Zara"},
-        "value": {"name": "Zara", "age": 22}
-    }))
-    .unwrap();
+    let op = write::upsert("users")
+        .key(doc().set("name", "Zara"))
+        .value(doc().set("name", "Zara").set("age", 22_i64))
+        .build();
 
     let result = table.execute_set(&op).await.unwrap();
 
@@ -439,11 +408,10 @@ async fn test_interner_persisted_after_insert() {
     let table = db.get_table("default", "users").await.unwrap();
 
     // Insert records with new field keys ("brand_new_field" never seen before)
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [{"brand_new_field": "value1"}, {"brand_new_field": "value2"}]
-    }))
-    .unwrap();
+    let op = write::insert("users")
+        .row(doc().set("brand_new_field", "value1"))
+        .row(doc().set("brand_new_field", "value2"))
+        .build();
     table.execute_insert(&op).await.unwrap();
 
     // Verify the key was interned
@@ -470,11 +438,9 @@ async fn test_interner_persisted_after_update() {
     let ctx = FilterContext::new(interner, &refs);
 
     // Update with a brand new field key
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "set": {"completely_new_key": 42}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .set(doc().set("completely_new_key", 42_i64))
+        .build();
     table.execute_update(&op, &ctx).await.unwrap();
 
     // The new key should be persisted
@@ -494,12 +460,14 @@ async fn test_interner_persisted_after_update() {
 async fn test_interner_persisted_after_set() {
     let table = setup_empty_table().await;
 
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "users",
-        "key": {"unique_field_xyz": "val"},
-        "value": {"unique_field_xyz": "val", "another_new_field": 99}
-    }))
-    .unwrap();
+    let op = write::upsert("users")
+        .key(doc().set("unique_field_xyz", "val"))
+        .value(
+            doc()
+                .set("unique_field_xyz", "val")
+                .set("another_new_field", 99_i64),
+        )
+        .build();
     table.execute_set(&op).await.unwrap();
 
     let interner = table.interner().get().await.unwrap();
@@ -516,21 +484,13 @@ async fn test_insert_computed_field_lowercase() {
     let table = setup_empty_table().await;
 
     // email_norm = strings/lower(email), evaluated at write time.
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [
-            {
-                "email": "Alice@Example.COM",
-                "email_norm": {
-                    "$fn": {
-                        "name": "strings/lower",
-                        "args": [{ "$ref": ["email"] }]
-                    }
-                }
-            }
-        ]
-    }))
-    .unwrap();
+    let op = write::insert("users")
+        .row(
+            doc()
+                .set("email", "Alice@Example.COM")
+                .set("email_norm", func("strings/lower", [col("email")])),
+        )
+        .build();
 
     let result = table.execute_insert(&op).await.unwrap();
     assert_eq!(result.affected, 1);
@@ -543,20 +503,14 @@ async fn test_insert_computed_field_lowercase() {
 async fn test_set_computed_field() {
     let table = setup_empty_table().await;
 
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "users",
-        "key": {"email": "x@y.z"},
-        "value": {
-            "email": "X@Y.Z",
-            "email_norm": {
-                "$fn": {
-                    "name": "strings/lower",
-                    "args": [{ "$ref": ["email"] }]
-                }
-            }
-        }
-    }))
-    .unwrap();
+    let op = write::upsert("users")
+        .key(doc().set("email", "x@y.z"))
+        .value(
+            doc()
+                .set("email", "X@Y.Z")
+                .set("email_norm", func("strings/lower", [col("email")])),
+        )
+        .build();
 
     let result = table.execute_set(&op).await.unwrap();
     assert_eq!(result.records[0]["email_norm"], "x@y.z");
@@ -566,15 +520,9 @@ async fn test_set_computed_field() {
 async fn test_insert_computed_unknown_function_fails_closed() {
     let table = setup_empty_table().await;
 
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [
-            {
-                "x": { "$fn": { "name": "strings/does_not_exist", "args": [] } }
-            }
-        ]
-    }))
-    .unwrap();
+    let op = write::insert("users")
+        .row(doc().set("x", func("strings/does_not_exist", [])))
+        .build();
 
     // A broken computed value aborts the write rather than storing garbage.
     assert!(table.execute_insert(&op).await.is_err());
@@ -584,20 +532,9 @@ async fn test_insert_computed_unknown_function_fails_closed() {
 async fn test_insert_computed_bad_ref_fails_closed() {
     let table = setup_empty_table().await;
 
-    let op: InsertOp = serde_json::from_value(json!({
-        "insert_into": "users",
-        "values": [
-            {
-                "y": {
-                    "$fn": {
-                        "name": "strings/lower",
-                        "args": [{ "$ref": ["missing_field"] }]
-                    }
-                }
-            }
-        ]
-    }))
-    .unwrap();
+    let op = write::insert("users")
+        .row(doc().set("y", func("strings/lower", [col("missing_field")])))
+        .build();
 
     assert!(table.execute_insert(&op).await.is_err());
 }

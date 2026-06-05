@@ -226,6 +226,46 @@ pub fn vector_similarity(field: impl IntoFieldPath, query: Vec<f32>, k: u32) -> 
     }
 }
 
+// ── computed (functional index) ──────────────────────────────────────
+
+/// Comparison on a computed expression (for functional indexes).
+///
+/// `expr_op`: `"lower"`, `"upper"`, `"trim"`, `"length"`, `"substring"`, `"mod"`, ...
+/// `cmp`: `"eq"`, `"lt"`, `"gt"`, `"lte"`, `"gte"`
+///
+/// `expr_args` is optional and defaults to `None`.
+pub fn computed(
+    expr_op: impl Into<String>,
+    field: impl IntoFieldPath,
+    cmp: impl Into<String>,
+    value: impl Into<FilterValue>,
+) -> Filter {
+    Filter::Computed {
+        expr_op: expr_op.into(),
+        field: fp(field),
+        expr_args: None,
+        cmp: cmp.into(),
+        value: fv(value),
+    }
+}
+
+/// Like [`computed`] but with explicit `expr_args`.
+pub fn computed_with_args(
+    expr_op: impl Into<String>,
+    field: impl IntoFieldPath,
+    expr_args: impl IntoIterator<Item = impl Into<FilterValue>>,
+    cmp: impl Into<String>,
+    value: impl Into<FilterValue>,
+) -> Filter {
+    Filter::Computed {
+        expr_op: expr_op.into(),
+        field: fp(field),
+        expr_args: Some(fvs(expr_args)),
+        cmp: cmp.into(),
+        value: fv(value),
+    }
+}
+
 // ── logical combinators (free functions) ─────────────────────────────
 
 /// Combine filters with AND.

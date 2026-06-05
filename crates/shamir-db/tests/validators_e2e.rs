@@ -21,8 +21,16 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::validator::WriteOp;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::write::insert;
+use shamir_query_builder::Query;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // WAT helpers — build WASM modules that return baked msgpack bytes
@@ -220,30 +228,18 @@ async fn setup_db() -> ShamirDb {
 
 /// Helper: build an insert batch request for one record into "users".
 fn insert_request(id: &str, record: serde_json::Value) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": id,
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "repo": "main",
-                "values": [record]
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id(id);
+    b.insert("ins", insert("users").row(record));
+    to_req(&b)
 }
 
 /// Helper: build a select-all batch request for "users".
 fn read_all_request(id: &str) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": id,
-        "queries": {
-            "all": {
-                "from": "users"
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id(id);
+    b.query("all", Query::from("users"));
+    to_req(&b)
 }
 
 // ═══════════════════════════════════════════════════════════════════════

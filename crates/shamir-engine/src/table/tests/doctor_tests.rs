@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
-
 use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
+use shamir_query_builder::{filter, write};
 use shamir_storage::types::Store;
 use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
@@ -356,17 +355,14 @@ async fn auto_recovery_fires_when_table_manager_is_reopened() {
 #[tokio::test]
 async fn execute_update_clears_its_own_wal_marker_on_success() {
     use crate::query::filter::eval_context::FilterContext;
-    use crate::query::write::UpdateOp;
 
     let table = seeded(8).await;
     let interner = table.interner().get().await.unwrap();
 
-    let op: UpdateOp = serde_json::from_value(json!({
-        "update": "users",
-        "where": {"op": "eq", "field": ["city"], "value": "city_0"},
-        "set": {"score": 999}
-    }))
-    .unwrap();
+    let op = write::update("users")
+        .where_(filter::eq("city", "city_0"))
+        .set(serde_json::json!({ "score": 999 }))
+        .build();
 
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
@@ -386,16 +382,13 @@ async fn execute_update_clears_its_own_wal_marker_on_success() {
 #[tokio::test]
 async fn execute_delete_clears_its_own_wal_marker_on_success() {
     use crate::query::filter::eval_context::FilterContext;
-    use crate::query::write::DeleteOp;
 
     let table = seeded(12).await;
     let interner = table.interner().get().await.unwrap();
 
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "users",
-        "where": {"op": "eq", "field": ["city"], "value": "city_1"},
-    }))
-    .unwrap();
+    let op = write::delete("users")
+        .where_(filter::eq("city", "city_1"))
+        .build();
 
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);

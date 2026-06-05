@@ -1,12 +1,22 @@
 //! End-to-end tests for ShamirDb::execute.
 
-use serde_json::json;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::filter::eq;
+use shamir_query_builder::write::{delete, doc, insert, update, UpdateReturnMode};
+use shamir_query_builder::Query;
 
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
 use crate::engine::table::TableConfig;
 use crate::query::batch::BatchRequest;
 use crate::ShamirDb;
+
+/// Round-trip a builder `Batch` through msgpack, producing a `BatchRequest`
+/// the engine can execute. This mirrors the wire path real clients take.
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -28,19 +38,15 @@ async fn setup_shamir() -> ShamirDb {
 async fn test_execute_single_insert() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [
-                    {"name": "Alice", "age": 30},
-                    {"name": "Bob", "age": 25}
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "ins",
+        insert("users")
+            .row(doc().set("name", "Alice").set("age", 30))
+            .row(doc().set("name", "Bob").set("age", 25)),
+    );
+    let req = to_req(&b);
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
@@ -51,27 +57,22 @@ async fn test_execute_single_read() {
     let shamir = setup_shamir().await;
 
     // Seed
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "s": {
-                "insert_into": "users",
-                "values": [{"name": "Alice"}, {"name": "Bob"}],
-                "return_result": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.op_silent(
+        "s",
+        insert("users")
+            .row(doc().set("name", "Alice"))
+            .row(doc().set("name", "Bob")),
+    );
+    let seed = to_req(&b);
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Read
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "users": {"from": "users"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("users", Query::from("users"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     assert_eq!(resp.results["users"].records.len(), 2);
@@ -86,54 +87,39 @@ async fn test_execute_crud_pipeline() {
     let shamir = setup_shamir().await;
 
     // 1. Insert users
-    let q1: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [
-                    {"name": "Alice", "status": "active"},
-                    {"name": "Bob", "status": "inactive"},
-                    {"name": "Carol", "status": "active"}
-                ],
-                "return_result": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.op_silent(
+        "ins",
+        insert("users")
+            .row(doc().set("name", "Alice").set("status", "active"))
+            .row(doc().set("name", "Bob").set("status", "inactive"))
+            .row(doc().set("name", "Carol").set("status", "active")),
+    );
+    let q1 = to_req(&b);
     shamir.execute("testdb", &q1).await.unwrap();
 
     // 2. Update: activate Bob
-    let q2: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "upd": {
-                "update": "users",
-                "where": {"op": "eq", "field": ["name"], "value": "Bob"},
-                "set": {"status": "active"},
-                "select": {
-                    "return_mode": "changed"
-                }
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "upd",
+        update("users")
+            .where_(eq("name", "Bob"))
+            .set(doc().set("status", "active"))
+            .returning(UpdateReturnMode::Changed),
+    );
+    let q2 = to_req(&b);
     let resp = shamir.execute("testdb", &q2).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
     assert_eq!(resp.results["upd"].records[0]["status"], "active");
 
     // 3. Delete Carol + read remaining
-    let q3: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "del": {
-                "delete_from": "users",
-                "where": {"op": "eq", "field": ["name"], "value": "Carol"}
-            },
-            "remaining": {"from": "users"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.delete("del", delete("users").where_(eq("name", "Carol")));
+    b.query("remaining", Query::from("users"));
+    let q3 = to_req(&b);
     let resp = shamir.execute("testdb", &q3).await.unwrap();
 
     assert_eq!(resp.results["remaining"].records.len(), 2);
@@ -148,56 +134,39 @@ async fn test_execute_multi_table_with_dependency() {
     let shamir = setup_shamir().await;
 
     // Seed users and orders
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "s1": {
-                "insert_into": "users",
-                "values": [
-                    {"name": "Alice", "tier": "vip"},
-                    {"name": "Bob", "tier": "basic"}
-                ],
-                "return_result": false
-            },
-            "s2": {
-                "insert_into": "orders",
-                "values": [
-                    {"user": "Alice", "amount": 100},
-                    {"user": "Bob", "amount": 50},
-                    {"user": "Alice", "amount": 200}
-                ],
-                "return_result": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.op_silent(
+        "s1",
+        insert("users")
+            .row(doc().set("name", "Alice").set("tier", "vip"))
+            .row(doc().set("name", "Bob").set("tier", "basic")),
+    );
+    b.op_silent(
+        "s2",
+        insert("orders")
+            .row(doc().set("user", "Alice").set("amount", 100))
+            .row(doc().set("user", "Bob").set("amount", 50))
+            .row(doc().set("user", "Alice").set("amount", 200)),
+    );
+    let seed = to_req(&b);
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Query: find VIP users, then find their orders
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "vips": {
-                "from": "users",
-                "where": {"op": "eq", "field": ["tier"], "value": "vip"}
-            },
-            "vip_orders": {
-                "from": "orders",
-                "where": {
-                    "op": "eq",
-                    "field": ["user"],
-                    "value": {"$query": "vips", "path": "[0].name"}
-                }
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    let vips = b.query("vips", Query::from("users").where_eq("tier", "vip"));
+    b.query(
+        "vip_orders",
+        Query::from("orders").where_eq("user", vips.first().field("name")),
+    );
+    let req = to_req(&b);
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
-    // Stage 1: vips → Alice
+    // Stage 1: vips -> Alice
     assert_eq!(resp.results["vips"].records.len(), 1);
-    // Stage 2: vip_orders → Alice's orders (2)
+    // Stage 2: vip_orders -> Alice's orders (2)
     assert_eq!(resp.results["vip_orders"].records.len(), 2);
     assert_eq!(resp.execution_plan.len(), 2);
 }
@@ -210,13 +179,10 @@ async fn test_execute_multi_table_with_dependency() {
 async fn test_execute_unknown_db() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "r": {"from": "users"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("r", Query::from("users"));
+    let req = to_req(&b);
 
     let err = shamir.execute("nonexistent", &req).await.unwrap_err();
     assert!(matches!(
@@ -226,66 +192,53 @@ async fn test_execute_unknown_db() {
 }
 
 // ============================================================================
-// Migration ops — Phase A stubs return "not yet implemented"
+// Migration ops -- Phase A stubs return "not yet implemented"
 // ============================================================================
 
 #[tokio::test]
 async fn test_migration_lifecycle_in_memory() {
+    use shamir_query_builder::ddl;
+
     let shamir = setup_shamir().await;
 
     // Seed some data
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": 0,
-        "queries": {
-            "s": {
-                "insert_into": "users",
-                "values": [{"name": "Alice"}, {"name": "Bob"}, {"name": "Carol"}],
-                "return_result": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(0);
+    b.op_silent(
+        "s",
+        insert("users")
+            .row(doc().set("name", "Alice"))
+            .row(doc().set("name", "Bob"))
+            .row(doc().set("name", "Carol")),
+    );
+    let seed = to_req(&b);
     shamir.execute("testdb", &seed).await.unwrap();
 
-    // Start migration: users from main → cold (in_memory)
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "mig": {
-                "start_migration": "users",
-                "repo": "main",
-                "dst_repo": "cold",
-                "dst_engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    // Start migration: users from main -> cold (in_memory)
+    let mut b = Batch::new();
+    b.id(1);
+    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let mig_result = &resp.results["mig"].records[0];
     assert_eq!(mig_result["phase"], "cutover_ready");
     let migration_id = mig_result["migration_id"].as_str().unwrap().to_string();
 
     // Query status
-    let status_req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "s": {"migration_status": migration_id}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.migration_status("s", ddl::migration_status(&migration_id));
+    let status_req = to_req(&b);
     let status_resp = shamir.execute("testdb", &status_req).await.unwrap();
     let status = &status_resp.results["s"].records[0];
     assert_eq!(status["phase"], "cutover_ready");
     assert_eq!(status["records_copied"], 3);
 
     // Commit
-    let commit_req: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "c": {"commit_migration": migration_id}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.commit_migration("c", ddl::commit_migration(&migration_id));
+    let commit_req = to_req(&b);
     let commit_resp = shamir.execute("testdb", &commit_req).await.unwrap();
     let commit = &commit_resp.results["c"].records[0];
     assert_eq!(commit["phase"], "committed");
@@ -293,48 +246,35 @@ async fn test_migration_lifecycle_in_memory() {
     assert_eq!(commit["dst_records"], 3);
 
     // Read from the destination table
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": 4,
-        "queries": {
-            "r": {"from": ["cold", "users"]}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(4);
+    b.query("r", Query::with_repo("cold", "users"));
+    let read_req = to_req(&b);
     let read_resp = shamir.execute("testdb", &read_req).await.unwrap();
     assert_eq!(read_resp.results["r"].records.len(), 3);
 }
 
 #[tokio::test]
 async fn test_migration_rollback() {
+    use shamir_query_builder::ddl;
+
     let shamir = setup_shamir().await;
 
     // Seed
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": 0,
-        "queries": {
-            "s": {
-                "insert_into": "users",
-                "values": [{"name": "Alice"}],
-                "return_result": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(0);
+    b.op_silent("s", insert("users").row(doc().set("name", "Alice")));
+    let seed = to_req(&b);
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Start migration
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "mig": {
-                "start_migration": "users",
-                "repo": "main",
-                "dst_repo": "rollback_dst",
-                "dst_engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.start_migration(
+        "mig",
+        ddl::start_migration("users", "rollback_dst", "in_memory"),
+    );
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let migration_id = resp.results["mig"].records[0]["migration_id"]
         .as_str()
@@ -342,24 +282,18 @@ async fn test_migration_rollback() {
         .to_string();
 
     // Rollback
-    let rb_req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "r": {"rollback_migration": migration_id}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.rollback_migration("r", ddl::rollback_migration(&migration_id));
+    let rb_req = to_req(&b);
     let rb_resp = shamir.execute("testdb", &rb_req).await.unwrap();
     assert_eq!(rb_resp.results["r"].records[0]["phase"], "rolled_back");
 
     // Status should fail (migration removed)
-    let status_req: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "s": {"migration_status": migration_id}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.migration_status("s", ddl::migration_status(&migration_id));
+    let status_req = to_req(&b);
     let status_err = shamir.execute("testdb", &status_req).await.unwrap_err();
     assert!(matches!(
         status_err,
@@ -369,15 +303,14 @@ async fn test_migration_rollback() {
 
 #[tokio::test]
 async fn test_migration_unknown_id() {
+    use shamir_query_builder::ddl;
+
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "c": {"commit_migration": "nonexistent"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.commit_migration("c", ddl::commit_migration("nonexistent"));
+    let req = to_req(&b);
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(
         err,
@@ -393,22 +326,19 @@ async fn test_migration_unknown_id() {
 async fn test_create_user_hashes_password_at_rest() {
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
     use argon2::Argon2;
+    use shamir_query_builder::ddl;
 
     let shamir = setup_shamir().await;
     let plaintext = "correct horse battery staple";
 
     // Create a user through the wire-facing batch path.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cu": {
-                "create_user": "alice",
-                "password": plaintext,
-                "roles": ["readonly"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user(
+        "cu",
+        ddl::create_user("alice", plaintext).roles(["readonly"]),
+    );
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
     // Read the raw record straight from the system-store `users` table
@@ -477,7 +407,7 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 }
 
 /// A repo created through the wire/execute `CreateRepo` op must be persisted
-/// to the system-store catalogue and re-attached after a restart — symmetry
+/// to the system-store catalogue and re-attached after a restart -- symmetry
 /// with `CreateTable` (which already routed through the persisting
 /// `ShamirDb::add_table`).
 ///
@@ -490,6 +420,7 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 #[tokio::test]
 async fn create_repo_via_execute_persists_to_catalogue() {
     use crate::shamir_db::SystemStoreConfig;
+    use shamir_query_builder::ddl;
 
     let sys_dir = tempfile::tempdir().unwrap();
     let sys_path = sys_dir.path().join("system.redb");
@@ -501,19 +432,15 @@ async fn create_repo_via_execute_persists_to_catalogue() {
             .unwrap();
         shamir.create_db("production").await;
 
-        let req: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "cr": {
-                    "create_repo": "events_repo",
-                    "engine": "in_memory",
-                    "tables": [
-                        "events"
-                    ]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo(
+            "cr",
+            ddl::create_repo("events_repo")
+                .engine("in_memory")
+                .tables(["events"]),
+        );
+        let req = to_req(&b);
         let resp = shamir.execute("production", &req).await.unwrap();
         assert_eq!(resp.results["cr"].records[0]["created_repo"], "events_repo");
 
@@ -549,11 +476,12 @@ async fn create_repo_via_execute_persists_to_catalogue() {
 }
 
 /// A repo dropped through the wire/execute `DropRepo` op must be removed from
-/// the catalogue and must NOT resurrect after a restart — symmetry with
+/// the catalogue and must NOT resurrect after a restart -- symmetry with
 /// `CreateRepo`.
 #[tokio::test]
 async fn drop_repo_via_execute_clears_catalogue() {
     use crate::shamir_db::SystemStoreConfig;
+    use shamir_query_builder::ddl;
 
     let sys_dir = tempfile::tempdir().unwrap();
     let sys_path = sys_dir.path().join("system.redb");
@@ -564,29 +492,17 @@ async fn drop_repo_via_execute_clears_catalogue() {
             .unwrap();
         shamir.create_db("production").await;
 
-        let create: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "cr": {
-                    "create_repo": "scratch_repo",
-                    "engine": "in_memory",
-                    "tables": []
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo("cr", ddl::create_repo("scratch_repo").engine("in_memory"));
+        let create = to_req(&b);
         shamir.execute("production", &create).await.unwrap();
 
-        let drop: BatchRequest = serde_json::from_value(json!({
-            "id": 2,
-            "queries": {
-                "dr": {
-                    "drop_repo": "scratch_repo"
-                }
-            }
-        }))
-        .unwrap();
-        let resp = shamir.execute("production", &drop).await.unwrap();
+        let mut b = Batch::new();
+        b.id(2);
+        b.drop_repo("dr", ddl::drop_repo("scratch_repo"));
+        let drop_req = to_req(&b);
+        let resp = shamir.execute("production", &drop_req).await.unwrap();
         assert_eq!(resp.results["dr"].records[0]["existed"], true);
 
         let repos = shamir.system_store().load_repositories().await.unwrap();
@@ -613,15 +529,10 @@ async fn test_execute_unknown_repo() {
     let shamir = setup_shamir().await;
 
     // Use a TableRef with a nonexistent repo (array format: ["repo", "table"])
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "r": {
-                "from": ["nonexistent", "users"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("r", Query::with_repo("nonexistent", "users"));
+    let req = to_req(&b);
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(
@@ -636,17 +547,13 @@ async fn test_execute_unknown_repo() {
 
 #[tokio::test]
 async fn create_repo_rejects_dotdot_name() {
+    use shamir_query_builder::ddl;
+
     let shamir = setup_shamir().await;
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_repo": "..",
-                "engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("..").engine("in_memory"));
+    let req = to_req(&b);
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     let msg = format!("{:?}", err);
     assert!(
@@ -657,17 +564,13 @@ async fn create_repo_rejects_dotdot_name() {
 
 #[tokio::test]
 async fn create_repo_rejects_slash_in_name() {
+    use shamir_query_builder::ddl;
+
     let shamir = setup_shamir().await;
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_repo": "a/b",
-                "engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("a/b").engine("in_memory"));
+    let req = to_req(&b);
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     let msg = format!("{:?}", err);
     assert!(
@@ -678,37 +581,30 @@ async fn create_repo_rejects_slash_in_name() {
 
 #[tokio::test]
 async fn create_repo_accepts_valid_name() {
+    use shamir_query_builder::ddl;
+
     let shamir = setup_shamir().await;
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_repo": "my-repo_01",
-                "engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("my-repo_01").engine("in_memory"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cr"].records[0]["created_repo"], "my-repo_01");
 }
 
 #[tokio::test]
 async fn create_db_rejects_dotdot_name() {
+    use shamir_query_builder::ddl;
+
     let shamir = ShamirDb::init_memory().await.unwrap();
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cd": {
-                "create_db": ".."
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_db("cd", ddl::create_db(".."));
+    let req = to_req(&b);
     // Use execute_as with System actor so the unknown-db auth check
     // passes; we need to reach CreateDb validation.
     // Actually, CreateDb is an admin op so we just use execute.
-    // The db_name param here is just routing — the create_db value is
+    // The db_name param here is just routing -- the create_db value is
     // the payload. We need a db that exists.
     shamir.create_db("testdb").await;
     let err = shamir.execute("testdb", &req).await.unwrap_err();

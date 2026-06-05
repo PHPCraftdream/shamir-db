@@ -1,23 +1,22 @@
-//! Tests for BatchPlanner using JSON input
+//! Tests for BatchPlanner using query builder.
 //!
-//! All tests use JSON format with map syntax where alias is the key.
+//! All tests use the Batch builder to construct BatchRequests.
 
 use serde_json::json;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
+use shamir_query_builder::write::doc;
+use shamir_query_builder::{ddl, write};
 
 use crate::query::batch::{BatchLimits, BatchPlanner, BatchRequest};
 
-fn parse_request(json: serde_json::Value) -> BatchRequest {
-    serde_json::from_value(json).expect("Failed to parse batch request")
-}
-
 #[test]
 fn test_plan_empty() {
-    let json = json!({
-        "id": 1,
-        "queries": {}
-    });
-
-    let request = parse_request(json);
+    let b = Batch::new();
+    // Override id to match original test's numeric id
+    let mut b = b;
+    b.id(1);
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 0);
@@ -26,16 +25,10 @@ fn test_plan_empty() {
 
 #[test]
 fn test_plan_single_query() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": {
-                "from": "users"
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("users", Query::from("users"));
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 1);
@@ -45,16 +38,12 @@ fn test_plan_single_query() {
 
 #[test]
 fn test_plan_parallel_queries() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "products": { "from": "products" },
-            "orders": { "from": "orders" }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("users", Query::from("users"));
+    b.query("products", Query::from("products"));
+    b.query("orders", Query::from("orders"));
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 1);
@@ -67,22 +56,14 @@ fn test_plan_parallel_queries() {
 
 #[test]
 fn test_plan_sequential_dependencies() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "orders": {
-                "from": "orders",
-                "where": {
-                    "op": "eq",
-                    "field": ["user_id"],
-                    "value": { "$query": "users" }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    b.query(
+        "orders",
+        Query::from("orders").where_eq("user_id", users.all()),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -95,41 +76,21 @@ fn test_plan_sequential_dependencies() {
 
 #[test]
 fn test_plan_complex_dependencies() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "products": { "from": "products" },
-            "orders": {
-                "from": "orders",
-                "where": {
-                    "op": "and",
-                    "filters": [
-                        {
-                            "op": "eq",
-                            "field": ["user_id"],
-                            "value": { "$query": "users" }
-                        },
-                        {
-                            "op": "eq",
-                            "field": ["product_id"],
-                            "value": { "$query": "products" }
-                        }
-                    ]
-                }
-            },
-            "stats": {
-                "from": "stats",
-                "where": {
-                    "op": "eq",
-                    "field": ["order_count"],
-                    "value": { "$query": "orders" }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    let products = b.query("products", Query::from("products"));
+    let orders = b.query(
+        "orders",
+        Query::from("orders")
+            .where_eq("user_id", users.all())
+            .where_eq("product_id", products.all()),
+    );
+    b.query(
+        "stats",
+        Query::from("stats").where_eq("order_count", orders.all()),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 3);
@@ -144,21 +105,16 @@ fn test_plan_complex_dependencies() {
 
 #[test]
 fn test_plan_unknown_alias() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "orders": {
-                "from": "orders",
-                "where": {
-                    "op": "eq",
-                    "field": ["user_id"],
-                    "value": { "$query": "nonexistent" }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.query(
+        "orders",
+        Query::from("orders").where_eq(
+            "user_id",
+            shamir_query_builder::val::qref_all("nonexistent"),
+        ),
+    );
+    let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(
         matches!(err, crate::query::batch::BatchError::UnknownAlias { alias, .. } if alias == "nonexistent")
@@ -167,17 +123,12 @@ fn test_plan_unknown_alias() {
 
 #[test]
 fn test_plan_too_many_queries() {
-    let mut queries = serde_json::Map::new();
+    let mut b = Batch::new();
+    b.id(1);
     for i in 0..60 {
-        queries.insert(format!("q{}", i), json!({ "from": "table" }));
+        b.query(format!("q{}", i), Query::from("table"));
     }
-
-    let json = json!({
-        "id": 1,
-        "queries": queries
-    });
-
-    let request = parse_request(json);
+    let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(matches!(
         err,
@@ -187,23 +138,19 @@ fn test_plan_too_many_queries() {
 
 #[test]
 fn test_plan_custom_limits() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "a": { "from": "t" },
-            "b": { "from": "t" },
-            "c": { "from": "t" },
-            "d": { "from": "t" }
-        },
-        "limits": {
-            "max_queries": 3,
-            "max_dependency_depth": 10,
-            "max_execution_time_secs": 30,
-            "max_result_size": 10000000
-        }
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("a", Query::from("t"));
+    b.query("b", Query::from("t"));
+    b.query("c", Query::from("t"));
+    b.query("d", Query::from("t"));
+    b.limits(BatchLimits {
+        max_queries: 3,
+        max_dependency_depth: 10,
+        max_execution_time_secs: 30,
+        max_result_size: 10_000_000,
     });
-
-    let request = parse_request(json);
+    let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &request.limits).unwrap_err();
     assert!(matches!(
         err,
@@ -213,37 +160,23 @@ fn test_plan_custom_limits() {
 
 #[test]
 fn test_plan_circular_dependency() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "a": {
-                "from": "a",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": "c" }
-                }
-            },
-            "b": {
-                "from": "b",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": "a" }
-                }
-            },
-            "c": {
-                "from": "c",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": "b" }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    // Circular: a -> c -> b -> a. Must use raw qref since Handle can't
+    // express forward references to not-yet-registered aliases.
+    b.query(
+        "a",
+        Query::from("a").where_eq("x", shamir_query_builder::val::qref_all("c")),
+    );
+    b.query(
+        "b",
+        Query::from("b").where_eq("x", shamir_query_builder::val::qref_all("a")),
+    );
+    b.query(
+        "c",
+        Query::from("c").where_eq("x", shamir_query_builder::val::qref_all("b")),
+    );
+    let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(matches!(
         err,
@@ -253,21 +186,13 @@ fn test_plan_circular_dependency() {
 
 #[test]
 fn test_plan_self_dependency() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "self_ref": {
-                "from": "t",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": "self_ref" }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.query(
+        "self_ref",
+        Query::from("t").where_eq("x", shamir_query_builder::val::qref_all("self_ref")),
+    );
+    let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(matches!(
         err,
@@ -277,36 +202,25 @@ fn test_plan_self_dependency() {
 
 #[test]
 fn test_plan_dependency_depth() {
-    let mut queries = serde_json::Map::new();
-
-    queries.insert("q0".to_string(), json!({ "from": "t" }));
-
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q0", Query::from("t"));
     for i in 1..15 {
-        queries.insert(
+        b.query(
             format!("q{}", i),
-            json!({
-                "from": "t",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": format!("q{}", i - 1) }
-                }
-            }),
+            Query::from("t").where_eq(
+                "x",
+                shamir_query_builder::val::qref_all(format!("q{}", i - 1)),
+            ),
         );
     }
-
-    let json = json!({
-        "id": 1,
-        "queries": queries,
-        "limits": {
-            "max_queries": 50,
-            "max_dependency_depth": 10,
-            "max_execution_time_secs": 30,
-            "max_result_size": 10000000
-        }
+    b.limits(BatchLimits {
+        max_queries: 50,
+        max_dependency_depth: 10,
+        max_execution_time_secs: 30,
+        max_result_size: 10_000_000,
     });
-
-    let request = parse_request(json);
+    let request = b.build();
     let err = BatchPlanner::plan(&request.queries, &request.limits).unwrap_err();
     assert!(matches!(
         err,
@@ -316,25 +230,14 @@ fn test_plan_dependency_depth() {
 
 #[test]
 fn test_plan_mixed_in_filter() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "orders": {
-                "from": "orders",
-                "where": {
-                    "op": "in",
-                    "field": ["user_id"],
-                    "values": [
-                        { "$query": "users" },
-                        42
-                    ]
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    b.query(
+        "orders",
+        Query::from("orders").where_in("user_id", [users.all(), 42.into()]),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -344,33 +247,17 @@ fn test_plan_mixed_in_filter() {
 
 #[test]
 fn test_plan_or_filter() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "admins": { "from": "admins" },
-            "results": {
-                "from": "results",
-                "where": {
-                    "op": "or",
-                    "filters": [
-                        {
-                            "op": "eq",
-                            "field": ["user_id"],
-                            "value": { "$query": "users" }
-                        },
-                        {
-                            "op": "eq",
-                            "field": ["admin_id"],
-                            "value": { "$query": "admins" }
-                        }
-                    ]
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    let admins = b.query("admins", Query::from("admins"));
+    b.query(
+        "results",
+        Query::from("results")
+            .where_eq("user_id", users.all())
+            .or_where_eq("admin_id", admins.all()),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -380,48 +267,18 @@ fn test_plan_or_filter() {
 
 #[test]
 fn test_plan_diamond_dependency() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "a": { "from": "t" },
-            "b": {
-                "from": "t",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": "a" }
-                }
-            },
-            "c": {
-                "from": "t",
-                "where": {
-                    "op": "eq",
-                    "field": ["x"],
-                    "value": { "$query": "a" }
-                }
-            },
-            "d": {
-                "from": "t",
-                "where": {
-                    "op": "and",
-                    "filters": [
-                        {
-                            "op": "eq",
-                            "field": ["x"],
-                            "value": { "$query": "b" }
-                        },
-                        {
-                            "op": "eq",
-                            "field": ["y"],
-                            "value": { "$query": "c" }
-                        }
-                    ]
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let a = b.query("a", Query::from("t"));
+    let b_h = b.query("b", Query::from("t").where_eq("x", a.all()));
+    let c_h = b.query("c", Query::from("t").where_eq("x", a.all()));
+    b.query(
+        "d",
+        Query::from("t")
+            .where_eq("x", b_h.all())
+            .where_eq("y", c_h.all()),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 3);
@@ -432,25 +289,14 @@ fn test_plan_diamond_dependency() {
 
 #[test]
 fn test_plan_with_query_path() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "orders": {
-                "from": "orders",
-                "where": {
-                    "op": "eq",
-                    "field": ["user_id"],
-                    "value": {
-                        "$query": "users",
-                        "path": "[0].id"
-                    }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    b.query(
+        "orders",
+        Query::from("orders").where_eq("user_id", users.first().field("id")),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -460,23 +306,12 @@ fn test_plan_with_query_path() {
 
 #[test]
 fn test_plan_return_flags() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": {
-                "from": "users",
-                "return_result": true
-            },
-            "internal": {
-                "from": "internal",
-                "return_result": false
-            }
-        },
-        "return_all": false,
-        "return_only": ["users"]
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("users", Query::from("users"));
+    b.query_silent("internal", Query::from("internal"));
+    b.return_only(["users"]);
+    let request = b.build();
     assert_eq!(request.queries.len(), 2);
     assert!(request.queries.get("users").unwrap().return_result);
     assert!(!request.queries.get("internal").unwrap().return_result);
@@ -486,49 +321,38 @@ fn test_plan_return_flags() {
 
 #[test]
 fn test_plan_transactional_batch() {
-    let json = json!({
-        "id": 1,
-        "name": "user_order_transaction",
-        "transactional": true,
-        "queries": {
-            "users": { "from": "users" },
-            "orders": {
-                "from": "orders",
-                "where": {
-                    "op": "eq",
-                    "field": ["user_id"],
-                    "value": { "$query": "users[0].id" }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: the original test used inline "$query": "users[0].id" syntax
+    // (a single string with path embedded). The builder produces the split
+    // form {"$query": "@users", "path": "[0].id"} which is semantically
+    // identical for the planner. Using the same approach here.
+    let mut b = Batch::new();
+    b.id(1);
+    b.name("user_order_transaction");
+    b.transactional();
+    let users = b.query("users", Query::from("users"));
+    b.query(
+        "orders",
+        Query::from("orders").where_eq("user_id", users.first().field("id")),
+    );
+    let request = b.build();
     assert!(request.transactional);
     assert_eq!(request.name, Some("user_order_transaction".to_string()));
 }
 
 #[test]
 fn test_plan_not_filter() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "active_users": { "from": "users" },
-            "inactive_users": {
-                "from": "users",
-                "where": {
-                    "op": "not",
-                    "filter": {
-                        "op": "eq",
-                        "field": ["id"],
-                        "value": { "$query": "active_users[0].id" }
-                    }
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: original test used inline "$query": "active_users[0].id" syntax.
+    // Builder produces split form with @-prefix — planner handles both.
+    let mut b = Batch::new();
+    b.id(1);
+    let active = b.query("active_users", Query::from("users"));
+    b.query(
+        "inactive_users",
+        Query::from("users").where_(shamir_query_builder::filter::not(
+            shamir_query_builder::filter::eq("id", active.first().field("id")),
+        )),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -542,19 +366,13 @@ fn test_plan_not_filter() {
 
 #[test]
 fn test_plan_insert_operation() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "insert_user": {
-                "insert_into": "users",
-                "values": [
-                    { "name": "Alice", "email": "alice@example.com" }
-                ]
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "insert_user",
+        write::insert("users").row(doc().set("name", "Alice").set("email", "alice@example.com")),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 1);
@@ -564,23 +382,21 @@ fn test_plan_insert_operation() {
 
 #[test]
 fn test_plan_update_operation() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "update_orders": {
-                "update": "orders",
-                "where": {
-                    "op": "eq",
-                    "field": ["user_id"],
-                    "value": { "$query": "users[0].id" }
-                },
-                "set": { "status": "processed" }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: original test used inline "$query": "users[0].id". Builder
+    // produces split form — semantically identical for planner dep extraction.
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    b.update(
+        "update_orders",
+        write::update("orders")
+            .where_(shamir_query_builder::filter::eq(
+                "user_id",
+                users.first().field("id"),
+            ))
+            .set(doc().set("status", "processed")),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -591,19 +407,19 @@ fn test_plan_update_operation() {
 
 #[test]
 fn test_plan_set_operation() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "set_user": {
-                "set": "users",
-                "key": { "id": { "$query": "users[0].id" } },
-                "value": { "status": "updated" }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: original used inline "$query": "users[0].id" in the key object.
+    // The builder uses doc().set("id", handle.first().field("id")) which
+    // serializes to the same $query ref structure.
+    let mut b = Batch::new();
+    b.id(1);
+    let users = b.query("users", Query::from("users"));
+    b.upsert(
+        "set_user",
+        write::upsert("users")
+            .key(doc().set("id", users.first().field("id")).build())
+            .value(doc().set("status", "updated").build()),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -614,29 +430,22 @@ fn test_plan_set_operation() {
 
 #[test]
 fn test_plan_delete_operation() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "inactive_users": {
-                "from": "users",
-                "where": {
-                    "op": "eq",
-                    "field": ["status"],
-                    "value": "inactive"
-                }
-            },
-            "delete_orders": {
-                "delete_from": "orders",
-                "where": {
-                    "op": "in",
-                    "field": ["user_id"],
-                    "values": [{ "$query": "inactive_users[].id" }]
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: original used inline "$query": "inactive_users[].id" in In values.
+    // Builder uses handle.column("id") which produces "[].id" path.
+    let mut b = Batch::new();
+    b.id(1);
+    let inactive = b.query(
+        "inactive_users",
+        Query::from("users").where_eq("status", "inactive"),
+    );
+    b.delete(
+        "delete_orders",
+        write::delete("orders").where_(shamir_query_builder::filter::in_(
+            "user_id",
+            [inactive.column("id")],
+        )),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -647,22 +456,22 @@ fn test_plan_delete_operation() {
 
 #[test]
 fn test_plan_set_with_value_reference() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "source": { "from": "source_table" },
-            "set_target": {
-                "set": "target_table",
-                "key": { "id": 1 },
-                "value": {
-                    "name": { "$query": "source[0].name" },
-                    "status": "copied"
-                }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: original used inline "$query": "source[0].name" in value object.
+    let mut b = Batch::new();
+    b.id(1);
+    let source = b.query("source", Query::from("source_table"));
+    b.upsert(
+        "set_target",
+        write::upsert("target_table")
+            .key(doc().set("id", 1).build())
+            .value(
+                doc()
+                    .set("name", source.first().field("name"))
+                    .set("status", "copied")
+                    .build(),
+            ),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -671,26 +480,19 @@ fn test_plan_set_with_value_reference() {
 
 #[test]
 fn test_plan_insert_with_value_reference() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "user": {
-                "from": "users",
-                "where": { "op": "eq", "field": ["id"], "value": 1 }
-            },
-            "insert_order": {
-                "insert_into": "orders",
-                "values": [
-                    {
-                        "user_id": { "$query": "user[0].id" },
-                        "product": "Widget"
-                    }
-                ]
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    // NOTE: original used inline "$query": "user[0].id".
+    let mut b = Batch::new();
+    b.id(1);
+    let user = b.query("user", Query::from("users").where_eq("id", 1));
+    b.insert(
+        "insert_order",
+        write::insert("orders").row(
+            doc()
+                .set("user_id", user.first().field("id"))
+                .set("product", "Widget"),
+        ),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -700,24 +502,21 @@ fn test_plan_insert_with_value_reference() {
 
 #[test]
 fn test_plan_mixed_read_and_write() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "users": { "from": "users" },
-            "products": { "from": "products" },
-            "insert_order": {
-                "insert_into": "orders",
-                "values": [{ "user_id": 1, "product_id": 1 }]
-            },
-            "update_inventory": {
-                "update": "inventory",
-                "where": { "op": "eq", "field": ["product_id"], "value": 1 },
-                "set": { "quantity": 0 }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("users", Query::from("users"));
+    b.query("products", Query::from("products"));
+    b.insert(
+        "insert_order",
+        write::insert("orders").row(doc().set("user_id", 1).set("product_id", 1)),
+    );
+    b.update(
+        "update_inventory",
+        write::update("inventory")
+            .where_(shamir_query_builder::filter::eq("product_id", 1))
+            .set(doc().set("quantity", 0)),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 1);
@@ -726,17 +525,13 @@ fn test_plan_mixed_read_and_write() {
 
 #[test]
 fn test_plan_update_without_filter() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "update_all": {
-                "update": "users",
-                "set": { "status": "active" }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.update(
+        "update_all",
+        write::update("users").set(doc().set("status", "active")),
+    );
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 1);
@@ -745,31 +540,29 @@ fn test_plan_update_without_filter() {
 
 #[test]
 fn test_plan_write_operations_serialization() {
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "insert": {
-                "insert_into": "users",
-                "values": [{ "name": "Test" }]
-            },
-            "update": {
-                "update": "users",
-                "where": { "op": "eq", "field": ["name"], "value": "Test" },
-                "set": { "name": "Updated" }
-            },
-            "set": {
-                "set": "users",
-                "key": { "id": 1 },
-                "value": { "name": "Set" }
-            },
-            "delete": {
-                "delete_from": "users",
-                "where": { "op": "eq", "field": ["id"], "value": 999 }
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "insert",
+        write::insert("users").row(doc().set("name", "Test")),
+    );
+    b.update(
+        "update",
+        write::update("users")
+            .where_(shamir_query_builder::filter::eq("name", "Test"))
+            .set(doc().set("name", "Updated")),
+    );
+    b.upsert(
+        "set",
+        write::upsert("users")
+            .key(doc().set("id", 1).build())
+            .value(doc().set("name", "Set").build()),
+    );
+    b.delete(
+        "delete",
+        write::delete("users").where_(shamir_query_builder::filter::eq("id", 999)),
+    );
+    let request = b.build();
     assert_eq!(request.queries.len(), 4);
 
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
@@ -784,22 +577,12 @@ fn test_plan_write_operations_serialization() {
 #[test]
 fn test_after_orders_into_later_stage() {
     // B has `after: ["a"]` with no $query refs — should land in a later stage.
-    let json = json!({
-        "id": 1,
-        "queries": {
-            "a": {
-                "create_table": "users",
-                "repo": "main"
-            },
-            "b": {
-                "insert_into": "users",
-                "values": [{"name": "Alice"}],
-                "after": ["a"]
-            }
-        }
-    });
-
-    let request = parse_request(json);
+    let mut b = Batch::new();
+    b.id(1);
+    let a = b.create_table("a", ddl::create_table("users").repo("main"));
+    let rows = b.insert("b", write::insert("users").row(doc().set("name", "Alice")));
+    b.after(&rows, &a);
+    let request = b.build();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);
@@ -810,6 +593,11 @@ fn test_after_orders_into_later_stage() {
 
 #[test]
 fn test_after_unknown_alias_error() {
+    // Raw JSON by design: this is a planner *validation* test. The builder's
+    // `after()` takes a Handle, so it cannot construct an `after` referencing
+    // an alias that isn't registered — which is exactly the invalid input this
+    // test must feed the planner. Like the parser tests, the raw wire form is
+    // the thing under test, not a builder gap.
     let json = json!({
         "id": 1,
         "queries": {
@@ -821,7 +609,7 @@ fn test_after_unknown_alias_error() {
         }
     });
 
-    let request = parse_request(json);
+    let request: BatchRequest = serde_json::from_value(json).unwrap();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(
         matches!(
@@ -836,6 +624,10 @@ fn test_after_unknown_alias_error() {
 
 #[test]
 fn test_after_circular_dependency() {
+    // Raw JSON by design: a mutual `after` (circular) needs forward
+    // references the Handle-based `after()` cannot express — and that
+    // impossibility is the point. This validation test feeds the planner the
+    // invalid wire form directly, like the parser tests.
     let json = json!({
         "id": 1,
         "queries": {
@@ -852,7 +644,7 @@ fn test_after_circular_dependency() {
         }
     });
 
-    let request = parse_request(json);
+    let request: BatchRequest = serde_json::from_value(json).unwrap();
     let err = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap_err();
     assert!(
         matches!(
@@ -867,6 +659,8 @@ fn test_after_circular_dependency() {
 #[test]
 fn test_after_with_at_prefix_normalizes() {
     // `after: ["@a"]` should normalize to alias "a".
+    // The builder's after() always uses bare aliases, so to test the
+    // @-prefix normalization in the planner we use raw JSON for the after field.
     let json = json!({
         "id": 1,
         "queries": {
@@ -882,7 +676,7 @@ fn test_after_with_at_prefix_normalizes() {
         }
     });
 
-    let request = parse_request(json);
+    let request: BatchRequest = serde_json::from_value(json).unwrap();
     let plan = BatchPlanner::plan(&request.queries, &BatchLimits::default()).unwrap();
 
     assert_eq!(plan.stages.len(), 2);

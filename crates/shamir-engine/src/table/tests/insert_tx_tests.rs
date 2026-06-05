@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+use shamir_query_builder::{filter, write};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, TxContext, TxId};
@@ -13,7 +14,6 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use crate::table::TableManager;
 
 async fn make_table() -> TableManager {
@@ -202,14 +202,9 @@ async fn execute_insert_tx_stages_all_records() {
     let tbl = make_table().await;
     let mut tx = TxContext::new(TxId::new(40), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = InsertOp {
-        insert_into: shamir_query_types::TableRef::new("t"),
-        values: vec![
-            serde_json::json!("v1"),
-            serde_json::json!("v2"),
-            serde_json::json!("v3"),
-        ],
-    };
+    let op = write::insert("t")
+        .rows([json!("v1"), json!("v2"), json!("v3")])
+        .build();
 
     let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 3);
@@ -228,10 +223,7 @@ async fn execute_insert_tx_empty_values() {
     let tbl = make_table().await;
     let mut tx = TxContext::new(TxId::new(41), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = InsertOp {
-        insert_into: shamir_query_types::TableRef::new("t"),
-        values: vec![],
-    };
+    let op = write::insert("t").build();
     let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 0);
     assert!(result.records.is_empty());
@@ -250,12 +242,7 @@ async fn execute_update_tx_stages_via_update_tx() {
 
     let mut tx = TxContext::new(TxId::new(50), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = UpdateOp {
-        update: shamir_query_types::TableRef::new("t"),
-        set: json!({ "name": "alice" }),
-        where_clause: None,
-        select: None,
-    };
+    let op = write::update("t").set(json!({ "name": "alice" })).build();
 
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
@@ -277,12 +264,7 @@ async fn execute_update_tx_no_match_zero_affected() {
 
     let mut tx = TxContext::new(TxId::new(51), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op = UpdateOp {
-        update: shamir_query_types::TableRef::new("t"),
-        set: json!({ "name": "alice" }),
-        where_clause: None,
-        select: None,
-    };
+    let op = write::update("t").set(json!({ "name": "alice" })).build();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -299,11 +281,7 @@ async fn execute_delete_tx_stages_via_delete_tx() {
 
     let mut tx = TxContext::new(TxId::new(52), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "t",
-        "where": { "op": "and", "filters": [] }
-    }))
-    .unwrap();
+    let op = write::delete("t").where_(filter::and(vec![])).build();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -327,11 +305,7 @@ async fn execute_delete_tx_no_match_zero_affected() {
 
     let mut tx = TxContext::new(TxId::new(53), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op: DeleteOp = serde_json::from_value(json!({
-        "delete_from": "t",
-        "where": { "op": "and", "filters": [] }
-    }))
-    .unwrap();
+    let op = write::delete("t").where_(filter::and(vec![])).build();
 
     let interner = tbl.interner().get().await.unwrap();
     let refs = new_map();
@@ -346,12 +320,10 @@ async fn execute_set_tx_insert_path() {
     let tbl = make_table().await;
     let mut tx = TxContext::new(TxId::new(60), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "t",
-        "key": { "email": "a@b.c" },
-        "value": { "email": "a@b.c", "name": "alice" }
-    }))
-    .unwrap();
+    let op = write::upsert("t")
+        .key(json!({ "email": "a@b.c" }))
+        .value(json!({ "email": "a@b.c", "name": "alice" }))
+        .build();
 
     let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 1);
@@ -376,12 +348,10 @@ async fn execute_set_tx_update_path() {
 
     let mut tx = TxContext::new(TxId::new(61), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    let op: SetOp = serde_json::from_value(json!({
-        "set": "t",
-        "key": { "email": "a@b.c" },
-        "value": { "name": "bob" }
-    }))
-    .unwrap();
+    let op = write::upsert("t")
+        .key(json!({ "email": "a@b.c" }))
+        .value(json!({ "name": "bob" }))
+        .build();
 
     let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 1);

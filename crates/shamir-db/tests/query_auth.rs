@@ -5,8 +5,17 @@ use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
+use shamir_db::query::auth::{Action, Effect, Permission, Resource, Role, SessionPermissions};
 use shamir_db::query::batch::BatchRequest;
+use shamir_db::query::filter::Filter;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -25,18 +34,18 @@ async fn setup_shamir() -> ShamirDb {
 async fn test_create_user() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cu": {
-                "create_user": "alice",
-                "password": "secret123",
-                "roles": ["readonly"],
-                "profile": {"department": "engineering", "level": 3}
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user(
+        "cu",
+        ddl::create_user("alice", "secret123")
+            .roles(["readonly"])
+            .profile(json!({
+                "department": "engineering",
+                "level": 3
+            })),
+    );
+    let req = to_req(&b);
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cu"].records[0]["created_user"], "alice");
@@ -47,24 +56,18 @@ async fn test_list_users() {
     let shamir = setup_shamir().await;
 
     // Create two users
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "u1": {"create_user": "alice", "password": "pass1", "roles": ["readonly"]},
-            "u2": {"create_user": "bob", "password": "pass2", "roles": ["readwrite"]}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user("u1", ddl::create_user("alice", "pass1").roles(["readonly"]));
+    b.create_user("u2", ddl::create_user("bob", "pass2").roles(["readwrite"]));
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
     // List users
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "list": {"list": "users"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.list_users("list", ddl::list_users());
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     let users = resp.results["list"].records[0]["users"].as_array().unwrap();
@@ -81,33 +84,24 @@ async fn test_drop_user() {
     let shamir = setup_shamir().await;
 
     // Create then drop
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cu": {"create_user": "alice", "password": "pass", "roles": []}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user("cu", ddl::create_user("alice", "pass"));
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "du": {"drop_user": "alice"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.drop_user("du", ddl::drop_user("alice"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["du"].records[0]["existed"], true);
 
     // Drop non-existent
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "du": {"drop_user": "alice"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.drop_user("du", ddl::drop_user("alice"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["du"].records[0]["existed"], false);
 }
@@ -120,32 +114,33 @@ async fn test_drop_user() {
 async fn test_create_role() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_role": "analyst",
-                "permissions": [
-                    {
-                        "effect": "allow",
-                        "actions": ["read"],
-                        "resource": {"scope": "global"}
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role(
+        "cr",
+        ddl::create_role(
+            "analyst",
+            vec![
+                Permission {
+                    effect: Effect::Allow,
+                    actions: vec![Action::Read],
+                    resource: Resource::Global,
+                    row_filter: None,
+                },
+                Permission {
+                    effect: Effect::Allow,
+                    actions: vec![Action::Insert, Action::Update],
+                    resource: Resource::Table {
+                        database: "mydb".into(),
+                        repo: "main".into(),
+                        table: "reports".into(),
                     },
-                    {
-                        "effect": "allow",
-                        "actions": ["insert", "update"],
-                        "resource": {
-                            "scope": "table",
-                            "database": "mydb",
-                            "repo": "main",
-                            "table": "reports"
-                        }
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+                    row_filter: None,
+                },
+            ],
+        ),
+    );
+    let req = to_req(&b);
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cr"].records[0]["created_role"], "analyst");
@@ -156,28 +151,28 @@ async fn test_list_roles() {
     let shamir = setup_shamir().await;
 
     // Create role
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_role": "analyst",
-                "permissions": [
-                    {"effect": "allow", "actions": ["read"], "resource": {"scope": "global"}}
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role(
+        "cr",
+        ddl::create_role(
+            "analyst",
+            vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        ),
+    );
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
     // List roles
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "list": {"list": "roles"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.list_roles("list", ddl::list_roles());
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     let roles = resp.results["list"].records[0]["roles"].as_array().unwrap();
@@ -189,25 +184,16 @@ async fn test_list_roles() {
 async fn test_drop_role() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_role": "temp_role",
-                "permissions": []
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role("cr", ddl::create_role("temp_role", vec![]));
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "dr": {"drop_role": "temp_role"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.drop_role("dr", ddl::drop_role("temp_role"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["dr"].records[0]["existed"], true);
 }
@@ -221,40 +207,40 @@ async fn test_grant_and_revoke_role() {
     let shamir = setup_shamir().await;
 
     // Create user and role
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "user": {"create_user": "alice", "password": "pass", "roles": ["readonly"]},
-            "role": {
-                "create_role": "analyst",
-                "permissions": [
-                    {"effect": "allow", "actions": ["read"], "resource": {"scope": "global"}}
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user(
+        "user",
+        ddl::create_user("alice", "pass").roles(["readonly"]),
+    );
+    b.create_role(
+        "role",
+        ddl::create_role(
+            "analyst",
+            vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read],
+                resource: Resource::Global,
+                row_filter: None,
+            }],
+        ),
+    );
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
     // Grant role
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "grant": {"grant_role": "analyst", "user": "alice"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.grant_role("grant", ddl::grant_role("analyst", "alice"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["grant"].records[0]["granted_role"], "analyst");
 
     // Verify user has both roles
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "list": {"list": "users"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.list_users("list", ddl::list_users());
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let users = resp.results["list"].records[0]["users"].as_array().unwrap();
     let alice = &users[0];
@@ -263,24 +249,18 @@ async fn test_grant_and_revoke_role() {
     assert!(roles.contains(&json!("analyst")));
 
     // Revoke role
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 4,
-        "queries": {
-            "revoke": {"revoke_role": "analyst", "user": "alice"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(4);
+    b.revoke_role("revoke", ddl::revoke_role("analyst", "alice"));
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["revoke"].records[0]["revoked_role"], "analyst");
 
     // Verify role removed
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 5,
-        "queries": {
-            "list": {"list": "users"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(5);
+    b.list_users("list", ddl::list_users());
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let users = resp.results["list"].records[0]["users"].as_array().unwrap();
     let alice = &users[0];
@@ -297,40 +277,39 @@ async fn test_grant_and_revoke_role() {
 async fn test_create_role_with_row_filter() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_role": "eu_manager",
-                "permissions": [
-                    {
-                        "effect": "allow",
-                        "actions": ["read", "update"],
-                        "resource": {
-                            "scope": "table",
-                            "database": "testdb",
-                            "repo": "main",
-                            "table": "users"
-                        },
-                        "where": {"op": "eq", "field": ["region"], "value": "europe"}
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    use shamir_db::query::filter::FilterValue;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role(
+        "cr",
+        ddl::create_role(
+            "eu_manager",
+            vec![Permission {
+                effect: Effect::Allow,
+                actions: vec![Action::Read, Action::Update],
+                resource: Resource::Table {
+                    database: "testdb".into(),
+                    repo: "main".into(),
+                    table: "users".into(),
+                },
+                row_filter: Some(Filter::Eq {
+                    field: vec!["region".into()],
+                    value: FilterValue::String("europe".into()),
+                }),
+            }],
+        ),
+    );
+    let req = to_req(&b);
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["cr"].records[0]["created_role"], "eu_manager");
 
     // Verify role stored with where filter
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "list": {"list": "roles"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.list_roles("list", ddl::list_roles());
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let roles = resp.results["list"].records[0]["roles"].as_array().unwrap();
     let eu_role = &roles[0];
@@ -348,13 +327,10 @@ async fn test_create_role_with_row_filter() {
 async fn test_grant_role_to_nonexistent_user() {
     let shamir = setup_shamir().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "grant": {"grant_role": "analyst", "user": "nonexistent"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.grant_role("grant", ddl::grant_role("analyst", "nonexistent"));
+    let req = to_req(&b);
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(
@@ -366,9 +342,6 @@ async fn test_grant_role_to_nonexistent_user() {
 // ============================================================================
 // SessionPermissions — unit tests
 // ============================================================================
-
-use shamir_db::query::auth::{Action, Effect, Permission, Resource, Role, SessionPermissions};
-use shamir_db::query::filter::Filter;
 
 #[test]
 fn test_superadmin_allows_everything() {

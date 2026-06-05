@@ -292,15 +292,13 @@ where
 }
 
 fn create_table_req(name: &str) -> DbRequest {
-    let batch: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "tbl",
-        "queries": { "tb": { "create_table": name, "repo": "main" } }
-    }))
-    .expect("parse batch");
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("tbl");
+    b.create_table("tb", shamir_query_builder::ddl::create_table(name));
     DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
-        batch,
+        batch: b.build(),
     }
 }
 

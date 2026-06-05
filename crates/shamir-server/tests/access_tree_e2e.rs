@@ -9,11 +9,10 @@
 
 use std::path::PathBuf;
 
-use serde_json::json;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-use shamir_client::{BatchRequest, Client, ConnectOptions};
+use shamir_client::{Client, ConnectOptions};
 use shamir_server::access_tree::{fetch_tree, render, AccessTreeArgs};
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
@@ -88,13 +87,13 @@ async fn access_tree_over_the_wire_as_admin() {
     .await
     .expect("admin connect");
 
-    let batch: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": { "tree": { "access_tree": true } }
-    }))
-    .expect("build batch");
-
-    let resp = client.execute("default", batch).await.expect("execute");
+    let mut tree_batch = shamir_query_builder::batch::Batch::new();
+    tree_batch.id(1);
+    tree_batch.access_tree("tree", shamir_query_builder::ddl::access_tree());
+    let resp = client
+        .execute("default", tree_batch.build())
+        .await
+        .expect("execute");
     let qr = resp.results.get("tree").expect("tree result present");
     let rec = qr.records.first().expect("one record");
     let tree = rec.get("access_tree").expect("access_tree payload");

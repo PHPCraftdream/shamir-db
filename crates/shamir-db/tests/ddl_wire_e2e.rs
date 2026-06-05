@@ -4,15 +4,26 @@
 //! Verifies that every new `BatchOp` variant reaches the facade, passes
 //! the auth gate, and round-trips through the catalogue.
 
-use base64::Engine;
 use serde_json::json;
 use shamir_db::engine::repo::repo_types::BoxRepoFactory;
 use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::ddl::WriteOp;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
+
+// ═══════════════════════════════════════════════════════════════════════
+// msgpack round-trip helper
+// ═══════════════════════════════════════════════════════════════════════
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // WAT helpers — build WASM modules that return baked msgpack bytes
@@ -102,6 +113,7 @@ fn rejection_single_error() -> QueryValue {
 }
 
 fn wasm_b64(wasm: &[u8]) -> String {
+    use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(wasm)
 }
 
@@ -128,51 +140,41 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
 
     // Step 1: create_validator over the wire
     let rejecting_wasm = make_wat_returning(&rejection_single_error());
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv",
-        "queries": {
-            "op": {
-                "create_validator": "v_reject",
-                "wasm": wasm_b64(&rejecting_wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_reject").wasm(wasm_b64(&rejecting_wasm)),
+    );
+    let create_req = to_req(&b);
     let resp = db.execute("testdb", &create_req).await.unwrap();
     let result = &resp.results["op"].records[0];
     assert_eq!(result["created_validator"], "v_reject");
     assert!(result.get("id").is_some(), "should return validator id");
 
     // Step 2: bind_validator over the wire
-    let bind_req: BatchRequest = serde_json::from_value(json!({
-        "id": "bv",
-        "queries": {
-            "op": {
-                "bind_validator": "v_reject",
-                "db": "testdb",
-                "repo": "main",
-                "table": "users",
-                "ops": ["insert"],
-                "priority": 1500
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("bv");
+    b.bind_validator(
+        "op",
+        ddl::bind_validator("v_reject", "users")
+            .db("testdb")
+            .ops([WriteOp::Insert])
+            .priority(1500),
+    );
+    let bind_req = to_req(&b);
     let resp = db.execute("testdb", &bind_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["bound_validator"], "v_reject");
 
     // Step 3: insert should fail (validator rejects)
-    let insert_req: BatchRequest = serde_json::from_value(json!({
-        "id": "ins",
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [{"name": "Alice", "age": 10}]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("ins");
+    b.insert(
+        "ins",
+        shamir_query_builder::write::insert("users")
+            .row(shamir_query_builder::doc! { "name" => "Alice", "age" => 10 }),
+    );
+    let insert_req = to_req(&b);
     let err = db.execute("testdb", &insert_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -181,18 +183,13 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     );
 
     // Step 4: unbind_validator over the wire
-    let unbind_req: BatchRequest = serde_json::from_value(json!({
-        "id": "ub",
-        "queries": {
-            "op": {
-                "unbind_validator": "v_reject",
-                "db": "testdb",
-                "repo": "main",
-                "table": "users"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("ub");
+    b.unbind_validator(
+        "op",
+        ddl::unbind_validator("v_reject", "users").db("testdb"),
+    );
+    let unbind_req = to_req(&b);
     let resp = db.execute("testdb", &unbind_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -214,17 +211,13 @@ async fn create_function_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm(); // A no-op function that returns null
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cf",
-        "queries": {
-            "op": {
-                "create_function": "wire_echo",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        ddl::create_function("wire_echo").wasm(wasm_b64(&wasm)),
+    );
+    let create_req = to_req(&b);
     let resp = db.execute("testdb", &create_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0]["created_function"],
@@ -249,46 +242,33 @@ async fn drop_validator_while_bound_refused() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv",
-        "queries": {
-            "op": {
-                "create_validator": "v_drop_test",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_drop_test").wasm(wasm_b64(&wasm)),
+    );
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it
-    let bind_req: BatchRequest = serde_json::from_value(json!({
-        "id": "bv",
-        "queries": {
-            "op": {
-                "bind_validator": "v_drop_test",
-                "db": "testdb",
-                "repo": "main",
-                "table": "users",
-                "ops": ["insert"],
-                "priority": 1500
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("bv");
+    b.bind_validator(
+        "op",
+        ddl::bind_validator("v_drop_test", "users")
+            .db("testdb")
+            .ops([WriteOp::Insert])
+            .priority(1500),
+    );
+    let bind_req = to_req(&b);
     db.execute("testdb", &bind_req).await.unwrap();
 
     // Try to drop → should be refused
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dv",
-        "queries": {
-            "op": {
-                "drop_validator": "v_drop_test"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dv");
+    b.drop_validator("op", ddl::drop_validator("v_drop_test"));
+    let drop_req = to_req(&b);
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -305,15 +285,10 @@ async fn drop_validator_while_bound_refused() {
 async fn create_function_folder_over_wire() {
     let db = setup_db().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cff",
-        "queries": {
-            "op": {
-                "create_function_folder": ["reports", "daily"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cff");
+    b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
+    let req = to_req(&b);
     let resp = db.execute("testdb", &req).await.unwrap();
     let result = &resp.results["op"].records[0];
     assert_eq!(
@@ -331,17 +306,10 @@ async fn create_validator_duplicate_rejected() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv1",
-        "queries": {
-            "op": {
-                "create_validator": "v_dup",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv1");
+    b.create_validator("op", ddl::create_validator("v_dup").wasm(wasm_b64(&wasm)));
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
     // Second create with replace=false → should fail
@@ -362,28 +330,19 @@ async fn drop_function_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cf",
-        "queries": {
-            "op": {
-                "create_function": "fn_drop_test",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        ddl::create_function("fn_drop_test").wasm(wasm_b64(&wasm)),
+    );
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "df",
-        "queries": {
-            "op": {
-                "drop_function": "fn_drop_test"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("df");
+    b.drop_function("op", ddl::drop_function("fn_drop_test"));
+    let drop_req = to_req(&b);
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -404,29 +363,16 @@ async fn rename_function_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cf",
-        "queries": {
-            "op": {
-                "create_function": "fn_old",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function("op", ddl::create_function("fn_old").wasm(wasm_b64(&wasm)));
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
-    let rename_req: BatchRequest = serde_json::from_value(json!({
-        "id": "rf",
-        "queries": {
-            "op": {
-                "rename_function": "fn_old",
-                "to": "fn_new"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("rf");
+    b.rename_function("op", ddl::rename_function("fn_old", "fn_new"));
+    let rename_req = to_req(&b);
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["renamed_function"], "fn_old");
     assert_eq!(resp.results["op"].records[0]["to"], "fn_new");
@@ -445,29 +391,16 @@ async fn rename_validator_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv",
-        "queries": {
-            "op": {
-                "create_validator": "v_old",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator("op", ddl::create_validator("v_old").wasm(wasm_b64(&wasm)));
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
-    let rename_req: BatchRequest = serde_json::from_value(json!({
-        "id": "rv",
-        "queries": {
-            "op": {
-                "rename_validator": "v_old",
-                "to": "v_new"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("rv");
+    b.rename_validator("op", ddl::rename_validator("v_old", "v_new"));
+    let rename_req = to_req(&b);
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["renamed_validator"], "v_old");
     assert_eq!(resp.results["op"].records[0]["to"], "v_new");
@@ -482,48 +415,33 @@ async fn list_validators_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv",
-        "queries": {
-            "op": {
-                "create_validator": "v_list_test",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_list_test").wasm(wasm_b64(&wasm)),
+    );
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it
-    let bind_req: BatchRequest = serde_json::from_value(json!({
-        "id": "bv",
-        "queries": {
-            "op": {
-                "bind_validator": "v_list_test",
-                "db": "testdb",
-                "repo": "main",
-                "table": "users",
-                "ops": ["insert", "update"],
-                "priority": 2000
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("bv");
+    b.bind_validator(
+        "op",
+        ddl::bind_validator("v_list_test", "users")
+            .db("testdb")
+            .ops([WriteOp::Insert, WriteOp::Update])
+            .priority(2000),
+    );
+    let bind_req = to_req(&b);
     db.execute("testdb", &bind_req).await.unwrap();
 
     // List
-    let list_req: BatchRequest = serde_json::from_value(json!({
-        "id": "lv",
-        "queries": {
-            "op": {
-                "list_validators": "users",
-                "db": "testdb",
-                "repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("lv");
+    b.list_validators("op", ddl::list_validators("users").db("testdb"));
+    let list_req = to_req(&b);
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = &resp.results["op"].records[0];
     let validators = result["validators"].as_array().unwrap();
@@ -622,13 +540,10 @@ async fn owner_on_create_db_user_actor() {
     shamir.create_db("bootstrap").await;
 
     // Create a NEW database via execute_as with a user actor.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": { "create_db": "owned_db" }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_db("op", ddl::create_db("owned_db"));
+    let req = to_req(&b);
     shamir
         .execute_as(user_actor.clone(), "bootstrap", &req)
         .await
@@ -674,16 +589,10 @@ async fn owner_on_create_repo_user_actor() {
     shamir.create_db("testdb").await;
 
     // Create repo via execute_as with user actor.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_repo": "user_repo",
-                "engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("op", ddl::create_repo("user_repo").engine("in_memory"));
+    let req = to_req(&b);
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -710,16 +619,10 @@ async fn owner_on_create_table_user_actor() {
     shamir.add_repo("testdb", repo_config).await.unwrap();
 
     // Create table via execute_as with user actor.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_table": "owned_table",
-                "repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_table("op", ddl::create_table("owned_table").repo("main"));
+    let req = to_req(&b);
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -746,17 +649,10 @@ async fn owner_on_create_function_user_actor() {
     shamir.add_repo("testdb", repo_config).await.unwrap();
 
     let wasm = accept_wasm();
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_function": "user_fn",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_function("op", ddl::create_function("user_fn").wasm(wasm_b64(&wasm)));
+    let req = to_req(&b);
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -783,17 +679,10 @@ async fn owner_on_create_function_system_stays_system() {
 
     let wasm = accept_wasm();
     // Use default execute (System actor).
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_function": "sys_fn",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_function("op", ddl::create_function("sys_fn").wasm(wasm_b64(&wasm)));
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
     let meta = shamir
@@ -828,24 +717,17 @@ async fn create_table_then_insert_via_after_non_tx() {
 
     // One batch: create_table("items") + insert into "items", with
     // `after: ["mk"]` on the insert.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "phase1a",
-        "queries": {
-            "mk": {
-                "create_table": "items",
-                "repo": "main"
-            },
-            "rows": {
-                "insert_into": "items",
-                "values": [
-                    {"name": "Widget", "qty": 10},
-                    {"name": "Gadget", "qty": 5}
-                ],
-                "after": ["mk"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("phase1a");
+    let mk = b.create_table("mk", ddl::create_table("items").repo("main"));
+    let rows = b.insert(
+        "rows",
+        shamir_query_builder::write::insert("items")
+            .row(shamir_query_builder::doc! { "name" => "Widget", "qty" => 10 })
+            .row(shamir_query_builder::doc! { "name" => "Gadget", "qty" => 5 }),
+    );
+    b.after(&rows, &mk);
+    let req = to_req(&b);
 
     let resp = db
         .execute("testdb", &req)
@@ -863,15 +745,10 @@ async fn create_table_then_insert_via_after_non_tx() {
     assert_eq!(resp.execution_plan[1], vec!["rows"]);
 
     // Verify insert actually landed: read back the rows.
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "verify",
-        "queries": {
-            "q": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("verify");
+    b.query("q", shamir_query_builder::q!(from items));
+    let read_req = to_req(&b);
     let read_resp = db.execute("testdb", &read_req).await.unwrap();
     let records = &read_resp.results["q"].records;
     assert_eq!(records.len(), 2, "should have 2 inserted records");
@@ -886,16 +763,10 @@ async fn create_table_duplicate_without_if_not_exists_fails() {
     let db = setup_db().await;
 
     // First create succeeds
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "ct1",
-        "queries": {
-            "op": {
-                "create_table": "orders",
-                "repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("ct1");
+    b.create_table("op", ddl::create_table("orders").repo("main"));
+    let req = to_req(&b);
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -914,17 +785,13 @@ async fn create_table_with_if_not_exists_idempotent() {
     let db = setup_db().await;
 
     // First create
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "ct",
-        "queries": {
-            "op": {
-                "create_table": "orders",
-                "repo": "main",
-                "if_not_exists": true
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("ct");
+    b.create_table(
+        "op",
+        ddl::create_table("orders").repo("main").if_not_exists(),
+    );
+    let req = to_req(&b);
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -940,17 +807,10 @@ async fn create_db_with_if_not_exists_idempotent() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("bootstrap").await;
 
-    // Create a new db
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cd",
-        "queries": {
-            "op": {
-                "create_db": "newdb",
-                "if_not_exists": true
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cd");
+    b.create_db("op", ddl::create_db("newdb").if_not_exists());
+    let req = to_req(&b);
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -966,17 +826,15 @@ async fn create_repo_with_if_not_exists_idempotent() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cr",
-        "queries": {
-            "op": {
-                "create_repo": "archive",
-                "engine": "in_memory",
-                "if_not_exists": true
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cr");
+    b.create_repo(
+        "op",
+        ddl::create_repo("archive")
+            .engine("in_memory")
+            .if_not_exists(),
+    );
+    let req = to_req(&b);
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["created"], true);
     assert_eq!(resp.results["op"].records[0]["existed"], false);
@@ -996,15 +854,10 @@ async fn drop_db_with_repos_no_cascade_fails() {
     let db = setup_db().await;
 
     // testdb has "main" repo -> drop without cascade should fail
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dd",
-        "queries": {
-            "op": {
-                "drop_db": "testdb"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dd");
+    b.drop_db("op", ddl::drop_db("testdb"));
+    let drop_req = to_req(&b);
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -1023,16 +876,10 @@ async fn drop_db_with_cascade_succeeds() {
     shamir.add_repo("target_db", repo_config).await.unwrap();
 
     // Drop with cascade
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dd",
-        "queries": {
-            "op": {
-                "drop_db": "target_db",
-                "cascade": true
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dd");
+    b.drop_db("op", ddl::drop_db("target_db").cascade());
+    let drop_req = to_req(&b);
     let resp = shamir.execute("bootstrap", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -1045,15 +892,10 @@ async fn drop_repo_with_tables_no_cascade_fails() {
     let db = setup_db().await;
 
     // "main" repo has "users" table -> drop without cascade should fail
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dr",
-        "queries": {
-            "op": {
-                "drop_repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dr");
+    b.drop_repo("op", ddl::drop_repo("main"));
+    let drop_req = to_req(&b);
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -1067,16 +909,10 @@ async fn drop_repo_with_cascade_succeeds() {
     let db = setup_db().await;
 
     // Drop "main" with cascade (it has "users" table)
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dr",
-        "queries": {
-            "op": {
-                "drop_repo": "main",
-                "cascade": true
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dr");
+    b.drop_repo("op", ddl::drop_repo("main").cascade());
+    let drop_req = to_req(&b);
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
@@ -1095,59 +931,40 @@ async fn drop_table_cleans_validator_bound_in() {
 
     // Step 1: create a validator and bind it to "users"
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv",
-        "queries": {
-            "op": {
-                "create_validator": "v_cleanup",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_cleanup").wasm(wasm_b64(&wasm)),
+    );
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
-    let bind_req: BatchRequest = serde_json::from_value(json!({
-        "id": "bv",
-        "queries": {
-            "op": {
-                "bind_validator": "v_cleanup",
-                "db": "testdb",
-                "repo": "main",
-                "table": "users",
-                "ops": ["insert"],
-                "priority": 1500
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("bv");
+    b.bind_validator(
+        "op",
+        ddl::bind_validator("v_cleanup", "users")
+            .db("testdb")
+            .ops([WriteOp::Insert])
+            .priority(1500),
+    );
+    let bind_req = to_req(&b);
     db.execute("testdb", &bind_req).await.unwrap();
 
     // Step 2: drop the table -> should clean bound_in
-    let drop_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dt",
-        "queries": {
-            "op": {
-                "drop_table": "users",
-                "repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dt");
+    b.drop_table("op", ddl::drop_table("users").repo("main"));
+    let drop_req = to_req(&b);
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(resp.results["op"].records[0]["existed"], true);
 
     // Step 3: now drop_validator should succeed (bound_in was cleaned)
-    let drop_val_req: BatchRequest = serde_json::from_value(json!({
-        "id": "dv",
-        "queries": {
-            "op": {
-                "drop_validator": "v_cleanup"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("dv");
+    b.drop_validator("op", ddl::drop_validator("v_cleanup"));
+    let drop_val_req = to_req(&b);
     let resp = db.execute("testdb", &drop_val_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0]["existed"], true,
@@ -1253,15 +1070,10 @@ async fn create_function_folder_persists_mkdir_p() {
 
     // Create ["reports", "daily"] → should create both "reports" and
     // "reports/daily".
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cff",
-        "queries": {
-            "op": {
-                "create_function_folder": ["reports", "daily"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cff");
+    b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
+    let req = to_req(&b);
     let resp = db.execute("testdb", &req).await.unwrap();
     let result = &resp.results["op"].records[0];
     assert_eq!(
@@ -1286,15 +1098,10 @@ async fn create_function_folder_persists_mkdir_p() {
 async fn create_function_folder_idempotent() {
     let db = setup_db().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cff",
-        "queries": {
-            "op": {
-                "create_function_folder": ["utils"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cff");
+    b.create_function_folder("op", ddl::create_function_folder(["utils"]));
+    let req = to_req(&b);
 
     // First create
     let resp = db.execute("testdb", &req).await.unwrap();
@@ -1320,15 +1127,10 @@ async fn create_function_folder_meta_owner_is_actor() {
 
     let user_actor = Actor::User(55);
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cff",
-        "queries": {
-            "op": {
-                "create_function_folder": ["owned_folder"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cff");
+    b.create_function_folder("op", ddl::create_function_folder(["owned_folder"]));
+    let req = to_req(&b);
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -1358,15 +1160,10 @@ async fn function_folder_meta_survives_reopen() {
     let repo_config = RepoConfig::new("main", BoxRepoFactory::in_memory());
     shamir.add_repo("testdb", repo_config).await.unwrap();
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cff",
-        "queries": {
-            "op": {
-                "create_function_folder": ["persist_test"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cff");
+    b.create_function_folder("op", ddl::create_function_folder(["persist_test"]));
+    let req = to_req(&b);
     shamir.execute("testdb", &req).await.unwrap();
 
     // Confirm meta is persisted (reads from catalogue).
@@ -1389,17 +1186,10 @@ async fn slash_named_function_works_without_explicit_folder() {
 
     // Create a function with a slash-name — no explicit folder creation.
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cf",
-        "queries": {
-            "op": {
-                "create_function": "math/abs",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function("op", ddl::create_function("math/abs").wasm(wasm_b64(&wasm)));
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
     // The implicit folder "math" should return open meta (not error).
@@ -1433,30 +1223,17 @@ async fn list_functions_over_wire() {
     // Create two functions
     let wasm = accept_wasm();
     for name in ["fn_alpha", "fn_beta"] {
-        let req: BatchRequest = serde_json::from_value(json!({
-            "id": "cf",
-            "queries": {
-                "op": {
-                    "create_function": name,
-                    "wasm": wasm_b64(&wasm),
-                    "replace": false
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id("cf");
+        b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
+        let req = to_req(&b);
         db.execute("testdb", &req).await.unwrap();
     }
 
-    // List all functions
-    let list_req: BatchRequest = serde_json::from_value(json!({
-        "id": "lf",
-        "queries": {
-            "op": {
-                "list": "functions"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("lf");
+    b.list_functions("op", ddl::list_functions());
+    let list_req = to_req(&b);
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = &resp.results["op"].records[0];
     let fns = result["functions"].as_array().unwrap();
@@ -1473,31 +1250,17 @@ async fn list_functions_filtered_by_folder() {
 
     let wasm = accept_wasm();
     for name in ["math/add", "math/sub", "str/upper"] {
-        let req: BatchRequest = serde_json::from_value(json!({
-            "id": "cf",
-            "queries": {
-                "op": {
-                    "create_function": name,
-                    "wasm": wasm_b64(&wasm),
-                    "replace": false
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id("cf");
+        b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
+        let req = to_req(&b);
         db.execute("testdb", &req).await.unwrap();
     }
 
-    // List filtered by folder "math"
-    let list_req: BatchRequest = serde_json::from_value(json!({
-        "id": "lf",
-        "queries": {
-            "op": {
-                "list": "functions",
-                "folder": "math"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("lf");
+    b.list_functions("op", ddl::list_functions().folder("math"));
+    let list_req = to_req(&b);
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let fns = resp.results["op"].records[0]["functions"]
         .as_array()
@@ -1512,46 +1275,32 @@ async fn list_validators_all_over_wire() {
     let db = setup_db().await;
 
     let wasm = accept_wasm();
-    let create_req: BatchRequest = serde_json::from_value(json!({
-        "id": "cv",
-        "queries": {
-            "op": {
-                "create_validator": "v_list_all",
-                "wasm": wasm_b64(&wasm),
-                "replace": false
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cv");
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_list_all").wasm(wasm_b64(&wasm)),
+    );
+    let create_req = to_req(&b);
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it to a table so we can verify bound_in.
-    let bind_req: BatchRequest = serde_json::from_value(json!({
-        "id": "bv",
-        "queries": {
-            "op": {
-                "bind_validator": "v_list_all",
-                "db": "testdb",
-                "repo": "main",
-                "table": "users",
-                "ops": ["insert"],
-                "priority": 1500
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("bv");
+    b.bind_validator(
+        "op",
+        ddl::bind_validator("v_list_all", "users")
+            .db("testdb")
+            .ops([WriteOp::Insert])
+            .priority(1500),
+    );
+    let bind_req = to_req(&b);
     db.execute("testdb", &bind_req).await.unwrap();
 
-    // List ALL validators (not per-table; the new ListOp::Validators).
-    let list_req: BatchRequest = serde_json::from_value(json!({
-        "id": "lv",
-        "queries": {
-            "op": {
-                "list": "validators"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("lv");
+    b.list_all_validators("op", ddl::list_all_validators());
+    let list_req = to_req(&b);
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let items = resp.results["op"].records[0]["validators"]
         .as_array()
@@ -1571,27 +1320,16 @@ async fn list_function_folders_over_wire() {
     let db = setup_db().await;
 
     // Create folders
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "cff",
-        "queries": {
-            "op": {
-                "create_function_folder": ["reports", "daily"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("cff");
+    b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
+    let req = to_req(&b);
     db.execute("testdb", &req).await.unwrap();
 
-    // List all folders
-    let list_req: BatchRequest = serde_json::from_value(json!({
-        "id": "lff",
-        "queries": {
-            "op": {
-                "list": "function_folders"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("lff");
+    b.list_function_folders("op", ddl::list_function_folders());
+    let list_req = to_req(&b);
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let folders = resp.results["op"].records[0]["function_folders"]
         .as_array()
@@ -1616,29 +1354,17 @@ async fn list_function_folders_filtered_by_parent() {
         vec!["alpha".to_string(), "beta".to_string()],
         vec!["gamma".to_string()],
     ] {
-        let req: BatchRequest = serde_json::from_value(json!({
-            "id": "cff",
-            "queries": {
-                "op": {
-                    "create_function_folder": path
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id("cff");
+        b.create_function_folder("op", ddl::create_function_folder(path));
+        let req = to_req(&b);
         db.execute("testdb", &req).await.unwrap();
     }
 
-    // List only children of "alpha"
-    let list_req: BatchRequest = serde_json::from_value(json!({
-        "id": "lff",
-        "queries": {
-            "op": {
-                "list": "function_folders",
-                "parent": "alpha"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("lff");
+    b.list_function_folders("op", ddl::list_function_folders().parent("alpha"));
+    let list_req = to_req(&b);
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let folders = resp.results["op"].records[0]["function_folders"]
         .as_array()
@@ -1725,15 +1451,10 @@ async fn error_code_exists_create_db_duplicate() {
     shamir.create_db("bootstrap").await;
     shamir.create_db("dup_db").await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_db": "dup_db"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_db("op", ddl::create_db("dup_db"));
+    let req = to_req(&b);
     let err = shamir.execute("bootstrap", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1749,16 +1470,10 @@ async fn error_code_exists_create_db_duplicate() {
 async fn error_code_exists_create_table_duplicate() {
     let db = setup_db().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_table": "users",
-                "repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_table("op", ddl::create_table("users").repo("main"));
+    let req = to_req(&b);
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1774,16 +1489,10 @@ async fn error_code_exists_create_table_duplicate() {
 async fn error_code_exists_create_repo_duplicate() {
     let db = setup_db().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_repo": "main",
-                "engine": "in_memory"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("op", ddl::create_repo("main").engine("in_memory"));
+    let req = to_req(&b);
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1799,15 +1508,10 @@ async fn error_code_exists_create_repo_duplicate() {
 async fn error_code_still_referenced_drop_db() {
     let db = setup_db().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "drop_db": "testdb"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_db("op", ddl::drop_db("testdb"));
+    let req = to_req(&b);
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1823,15 +1527,10 @@ async fn error_code_still_referenced_drop_db() {
 async fn error_code_still_referenced_drop_repo() {
     let db = setup_db().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "drop_repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_repo("op", ddl::drop_repo("main"));
+    let req = to_req(&b);
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1848,39 +1547,20 @@ async fn error_code_access_denied_ddl() {
     let db = setup_db().await;
 
     // Restrict the database to owner-only.
-    let chmod_req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "chown": {
-                "chown": {
-                    "database": "testdb"
-                },
-                "owner": 1
-            },
-            "chmod": {
-                "chmod": {
-                    "database": "testdb"
-                },
-                "mode": 448,
-                "after": ["chown"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    let chown_h = b.chown("chown", ddl::chown(ddl::res::database("testdb"), 1));
+    let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
+    b.after(&chmod_h, &chown_h);
+    let chmod_req = to_req(&b);
     db.execute("testdb", &chmod_req).await.unwrap();
 
     // Non-owner user tries to create a table (needs traversal through db).
     let user_actor = Actor::User(999);
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "op": {
-                "create_table": "forbidden_table",
-                "repo": "main"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.create_table("op", ddl::create_table("forbidden_table").repo("main"));
+    let req = to_req(&b);
     let err = db.execute_as(user_actor, "testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1897,29 +1577,17 @@ async fn error_code_not_found_grant_role_user() {
     let db = setup_db().await;
 
     // Create a role first.
-    let create_role: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_role": "testrole",
-                "permissions": []
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_role("op", ddl::create_role("testrole", vec![]));
+    let create_role = to_req(&b);
     db.execute("testdb", &create_role).await.unwrap();
 
     // Grant to a non-existent user.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "op": {
-                "grant_role": "testrole",
-                "user": "ghost_user"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.grant_role("op", ddl::grant_role("testrole", "ghost_user"));
+    let req = to_req(&b);
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -1936,18 +1604,15 @@ async fn error_code_exists_create_index_duplicate() {
     let db = setup_db().await;
 
     // Create an index.
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": {
-                "create_index": "idx_name",
-                "repo": "main",
-                "table": "users",
-                "fields": [["name"]]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_index(
+        "op",
+        ddl::create_index("idx_name", "users")
+            .repo("main")
+            .fields(vec![vec!["name".to_string()]]),
+    );
+    let req = to_req(&b);
     db.execute("testdb", &req).await.unwrap();
 
     // Try to create the same index again.

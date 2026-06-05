@@ -1,11 +1,19 @@
 //! Tests for `ShamirDb::access_tree` — the access-control tree assembly
 //! that backs the `access_tree` DDL op and the `access-tree` CLI command.
 
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
 use serde_json::json;
 use shamir_types::access::{principal_id, Actor, ResourceMeta, ResourcePath};
+
+fn to_req(b: &Batch) -> crate::query::batch::BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Find a child node by its `name`, panicking if absent. Children order
 /// is non-deterministic (dashmap iteration), so always look up by name.
@@ -130,11 +138,10 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
         RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
     shamir.add_repo("testdb", config).await.unwrap();
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": { "tree": { "access_tree": true } }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.access_tree("tree", ddl::access_tree());
+    let req: BatchRequest = to_req(&b);
 
     // The op carries the tree only when the caller is allowed.
     let tree_present = |res: &Result<BatchResponse, BatchError>| -> bool {

@@ -11,7 +11,7 @@ use serde_json::json;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-use shamir_client::{BatchRequest, Client, ConnectOptions};
+use shamir_client::{Client, ConnectOptions};
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
 };
@@ -85,14 +85,13 @@ async fn quickstart_kv_in_default_store() {
     .expect("connect");
 
     // Step 3 — create a table in the pre-existing default/main store.
-    let mk: BatchRequest = serde_json::from_value(json!({
-        "id": "mk",
-        "queries": {
-            "t": { "create_table": "kv", "repo": "main" }
-        }
-    }))
-    .unwrap();
-    let resp = client.execute("default", mk).await.expect("create_table");
+    let mut mk_batch = shamir_query_builder::batch::Batch::new();
+    mk_batch.id("mk");
+    mk_batch.create_table("t", shamir_query_builder::ddl::create_table("kv"));
+    let resp = client
+        .execute("default", mk_batch.build())
+        .await
+        .expect("create_table");
     assert!(resp.results.contains_key("t"), "create_table ok");
 
     // Step 4a — PUT.

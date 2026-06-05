@@ -6,14 +6,14 @@
 
 #![allow(deprecated)]
 
-use serde_json::json;
-
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::read::ReadQuery;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
+use shamir_query_builder::val::col;
+use shamir_query_builder::{select, Query};
 use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::UserValue;
@@ -107,11 +107,7 @@ async fn test_read_uses_index_for_eq_filter() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users").where_eq("status", "active").build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -137,17 +133,10 @@ async fn test_read_uses_index_for_and_with_eq() {
     let ctx = FilterContext::new(interner, &refs);
 
     // status == "active" AND age > 25
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {
-            "op": "and",
-            "filters": [
-                {"op": "eq", "field": ["status"], "value": "active"},
-                {"op": "gt", "field": ["age"], "value": 25}
-            ]
-        }
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .where_gt("age", 25)
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -178,17 +167,10 @@ async fn test_read_composite_index() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {
-            "op": "and",
-            "filters": [
-                {"op": "eq", "field": ["status"], "value": "active"},
-                {"op": "eq", "field": ["city"], "value": "LA"}
-            ]
-        }
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .where_eq("city", "LA")
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -211,11 +193,7 @@ async fn test_read_no_index_for_gt() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "gt", "field": ["age"], "value": 25}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users").where_gt("age", 25).build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -237,17 +215,10 @@ async fn test_read_no_index_for_or() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {
-            "op": "or",
-            "filters": [
-                {"op": "eq", "field": ["status"], "value": "active"},
-                {"op": "eq", "field": ["status"], "value": "deleted"}
-            ]
-        }
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .or_where_eq("status", "deleted")
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
     assert_eq!(result.stats.as_ref().unwrap().index_used, None);
@@ -264,11 +235,7 @@ async fn test_read_index_with_no_results() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "banned"}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users").where_eq("status", "banned").build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -290,13 +257,11 @@ async fn test_read_index_with_pagination() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "pagination": {"mode": "LimitOffset", "limit": 2},
-        "count_total": true
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .limit(2)
+        .count_total(true)
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -322,12 +287,10 @@ async fn test_read_index_with_order_by() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "order_by": {"items": [{"field": ["age"], "direction": "desc"}]}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .order_by_desc("age")
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -359,11 +322,7 @@ async fn test_read_index_with_field_ref_falls_through() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": {"$ref": ["name"]}}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users").where_eq("status", col("name")).build();
 
     let result = table.read(&query, &ctx).await.unwrap();
     // FieldRef can't be used for index lookup -> full scan
@@ -381,11 +340,9 @@ async fn test_read_uses_index_for_in() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "in", "field": ["status"], "values": ["active", "deleted"]}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_in("status", ["active", "deleted"])
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -407,11 +364,9 @@ async fn test_read_uses_index_for_in_single_value() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "in", "field": ["status"], "values": ["inactive"]}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_in("status", ["inactive"])
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -429,11 +384,9 @@ async fn test_read_uses_index_for_in_no_match() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "in", "field": ["status"], "values": ["banned", "suspended"]}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_in("status", ["banned", "suspended"])
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -456,17 +409,10 @@ async fn test_read_uses_index_for_and_with_in() {
     let ctx = FilterContext::new(interner, &refs);
 
     // status IN ["active", "inactive"] AND age > 25
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {
-            "op": "and",
-            "filters": [
-                {"op": "in", "field": ["status"], "values": ["active", "inactive"]},
-                {"op": "gt", "field": ["age"], "value": 25}
-            ]
-        }
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .where_in("status", ["active", "inactive"])
+        .where_gt("age", 25)
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -536,12 +482,11 @@ async fn test_order_by_desc_limit_uses_sorted_index_fast_path() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "order_by": {"items": [{"field": ["score"], "direction": "desc"}]},
-        "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 0}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .order_by_desc("score")
+        .limit(5)
+        .offset(0)
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -585,19 +530,9 @@ async fn test_max_aggregate_uses_sorted_index() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "select": {
-            "items": [{
-                "type": "aggregate",
-                "func": "max",
-                "field": ["score"],
-                "alias": "max_score"
-            }],
-            "distinct": false
-        }
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .select([select::max("score", "max_score")])
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -634,12 +569,11 @@ async fn test_order_by_asc_limit_uses_sorted_index_fast_path() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let query: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "order_by": {"items": [{"field": ["score"], "direction": "asc"}]},
-        "pagination": {"mode": "LimitOffset", "limit": 5, "offset": 0}
-    }))
-    .unwrap();
+    let query: ReadQuery = Query::from("users")
+        .order_by_asc("score")
+        .limit(5)
+        .offset(0)
+        .build();
 
     let result = table.read(&query, &ctx).await.unwrap();
 
@@ -707,35 +641,19 @@ async fn test_limit_pushdown_no_order_by_matches_full_projection() {
     let ctx = FilterContext::new(interner, &refs);
 
     // Reference: full result, no pagination.
-    let q_full: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "select": {
-            "items": [
-                {"type": "field", "path": ["name"]},
-                {"type": "field", "path": ["age"]}
-            ],
-            "distinct": false
-        }
-    }))
-    .unwrap();
+    let q_full: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .select(["name", "age"])
+        .build();
     let full = table.read(&q_full, &ctx).await.unwrap();
     assert_eq!(full.records.len(), 3);
 
     // Push-down: LIMIT 2 should give the first two rows from `full`.
-    let q_lim: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "select": {
-            "items": [
-                {"type": "field", "path": ["name"]},
-                {"type": "field", "path": ["age"]}
-            ],
-            "distinct": false
-        },
-        "pagination": {"mode": "LimitOffset", "limit": 2}
-    }))
-    .unwrap();
+    let q_lim: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .select(["name", "age"])
+        .limit(2)
+        .build();
     let limited = table.read(&q_lim, &ctx).await.unwrap();
 
     assert_eq!(limited.records.len(), 2);
@@ -751,13 +669,12 @@ async fn test_limit_pushdown_preserves_count_total() {
     let refs = new_map();
     let ctx = FilterContext::new(interner, &refs);
 
-    let q: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "pagination": {"mode": "LimitOffset", "limit": 1, "offset": 0},
-        "count_total": true
-    }))
-    .unwrap();
+    let q: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .limit(1)
+        .offset(0)
+        .count_total(true)
+        .build();
     let r = table.read(&q, &ctx).await.unwrap();
 
     assert_eq!(r.records.len(), 1);
@@ -781,16 +698,12 @@ async fn test_distinct_with_limit_falls_back_and_sees_all_rows() {
     // DISTINCT, a LIMIT of 1 in the raw scan would project a single
     // city and DISTINCT would never see the second one — but the
     // expectation here is the post-DISTINCT page: still up to 2 rows.
-    let q: ReadQuery = serde_json::from_value(json!({
-        "from": "users",
-        "where": {"op": "eq", "field": ["status"], "value": "active"},
-        "select": {
-            "items": [{"type": "field", "path": ["city"]}],
-            "distinct": true
-        },
-        "pagination": {"mode": "LimitOffset", "limit": 5}
-    }))
-    .unwrap();
+    let q: ReadQuery = Query::from("users")
+        .where_eq("status", "active")
+        .select(["city"])
+        .distinct()
+        .limit(5)
+        .build();
     let r = table.read(&q, &ctx).await.unwrap();
 
     // Two unique cities for status=active: LA, NYC.
