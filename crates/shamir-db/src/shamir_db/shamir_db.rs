@@ -2597,4 +2597,15 @@ impl DbGateway for FacadeDbGateway {
             })
             .collect()
     }
+
+    async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, String> {
+        let req: BatchRequest = rmp_serde::from_slice(request)
+            .map_err(|e| format!("execute: request decode error: {e}"))?;
+        let resp = self
+            .shamir
+            .execute_as(self.actor.clone(), &self.db_name, &req)
+            .await
+            .map_err(Self::batch_err_to_string)?;
+        rmp_serde::to_vec_named(&resp).map_err(|e| format!("execute: response encode error: {e}"))
+    }
 }
