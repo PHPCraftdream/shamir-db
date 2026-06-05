@@ -7,12 +7,12 @@
 //! treats as inter-query dependencies.
 
 use serde_json::Value;
+use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
-use shamir_types::types::common::{new_map, TMap};
 
 use crate::val::{qref, qref_all, IntoFieldPath};
 

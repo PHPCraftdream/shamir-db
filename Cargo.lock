@@ -3852,9 +3852,9 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "shamir-collections",
  "shamir-query-builder-macros",
  "shamir-query-types",
- "shamir-types",
 ]
 
 [[package]]
@@ -3878,6 +3878,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "shamir-collections",
  "shamir-types",
  "zeroize",
 ]

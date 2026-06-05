@@ -45,7 +45,7 @@
 use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
 use crate::filter::Filter;
 use serde_json::Value;
-use shamir_types::types::common::{new_map, new_set, TMap, TSet};
+use shamir_collections::{new_map, new_set, TMap, TSet};
 
 /// Batch query planner.
 ///
