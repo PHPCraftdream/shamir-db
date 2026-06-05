@@ -99,6 +99,17 @@ pub fn filter(input: TokenStream) -> TokenStream {
 /// q!( upsert <table> key { "k" => v, ... } value { "k" => v, ... } )
 /// ```
 ///
+/// ## Call (stored procedure)
+///
+/// ```text
+/// q!( call <fn_name>(arg1, arg2, ...) )
+/// ```
+///
+/// `fn_name` is a bare ident (`my_proc`) or a string literal
+/// (`"reports/daily"` for folder-qualified names). Arguments are
+/// expressions that implement `Into<FilterValue>` — literals, `col()`,
+/// `func()`, `@`-style query refs, etc. Returns a [`CallOp`].
+///
 /// ## `<table>` variants
 ///
 /// - `users` — bare ident.
@@ -150,6 +161,10 @@ pub fn filter(input: TokenStream) -> TokenStream {
 ///
 /// // Upsert
 /// let ups = q!(upsert cache key { "id" => "k1" } value { "v" => 42 });
+///
+/// // Call stored procedure
+/// let res = q!(call my_proc(1, "hello"));
+/// let res = q!(call "reports/daily"(2024, "Q1"));
 /// ```
 #[proc_macro]
 pub fn q(input: TokenStream) -> TokenStream {

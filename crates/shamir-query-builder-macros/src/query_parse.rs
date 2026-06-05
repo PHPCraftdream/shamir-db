@@ -8,6 +8,7 @@
 //! q!( update <table> ...)         → UpdateOp
 //! q!( delete from <table> ...)    → DeleteOp
 //! q!( upsert <table> ...)         → SetOp (upsert)
+//! q!( call <fn>(args...) )        → CallOp
 //! ```
 //!
 //! ## Read clause order (fixed)
@@ -55,6 +56,7 @@ mod kw {
     syn::custom_keyword!(upsert);
     syn::custom_keyword!(key);
     syn::custom_keyword!(value);
+    syn::custom_keyword!(call);
 }
 
 // ── AST ────────────────────────────────────────────────────────────
@@ -152,6 +154,19 @@ struct UpsertMacro {
     value_doc: DocMapAst,
 }
 
+/// `q!(call <fn_name>(arg1, arg2, ...))`.
+struct CallMacro {
+    /// Function name — ident or string literal.
+    name: CallName,
+    /// Positional arguments (each is an expression → `FilterValue`).
+    args: Vec<Expr>,
+}
+
+enum CallName {
+    Ident(Ident),
+    Lit(LitStr),
+}
+
 /// Top-level AST: the first keyword selects the variant.
 enum QMacro {
     Read(Box<QueryMacro>),
@@ -159,6 +174,7 @@ enum QMacro {
     Update(UpdateMacro),
     Delete(DeleteMacro),
     Upsert(UpsertMacro),
+    Call(CallMacro),
 }
 
 // ── parser ─────────────────────────────────────────────────────────
@@ -175,8 +191,11 @@ impl Parse for QMacro {
             Ok(QMacro::Delete(input.parse()?))
         } else if input.peek(kw::upsert) {
             Ok(QMacro::Upsert(input.parse()?))
+        } else if input.peek(kw::call) {
+            Ok(QMacro::Call(input.parse()?))
         } else {
-            Err(input.error("q!: expected `from`, `insert`, `update`, `delete`, or `upsert`"))
+            Err(input
+                .error("q!: expected `from`, `insert`, `update`, `delete`, `upsert`, or `call`"))
         }
     }
 }
@@ -651,6 +670,43 @@ impl Parse for UpsertMacro {
     }
 }
 
+impl Parse for CallMacro {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        input.parse::<kw::call>()?;
+
+        // Function name: ident or string literal.
+        let name = if input.peek(LitStr) {
+            CallName::Lit(input.parse()?)
+        } else {
+            CallName::Ident(input.parse()?)
+        };
+
+        // Arguments in parentheses: (arg1, arg2, ...)
+        let args = if input.peek(syn::token::Paren) {
+            let content;
+            syn::parenthesized!(content in input);
+            let mut args = Vec::new();
+            while !content.is_empty() {
+                args.push(content.parse::<Expr>()?);
+                if content.peek(Token![,]) {
+                    content.parse::<Token![,]>()?;
+                } else {
+                    break;
+                }
+            }
+            args
+        } else {
+            Vec::new()
+        };
+
+        if !input.is_empty() {
+            return Err(input.error("q!(call ...): unexpected tokens after arguments"));
+        }
+
+        Ok(CallMacro { name, args })
+    }
+}
+
 // ── code generation ────────────────────────────────────────────────
 
 impl QueryMacro {
@@ -840,6 +896,30 @@ impl UpsertMacro {
     }
 }
 
+impl CallMacro {
+    fn to_tokens(&self) -> syn::Result<TokenStream2> {
+        let name_expr = match &self.name {
+            CallName::Ident(id) => {
+                let s = id.to_string();
+                quote! { #s }
+            }
+            CallName::Lit(lit) => quote! { #lit },
+        };
+
+        let args = &self.args;
+
+        Ok(quote! {
+            ::shamir_query_types::call::CallOp {
+                call: ::std::string::String::from(#name_expr),
+                params: ::std::vec![#(
+                    ::std::convert::Into::<::shamir_query_types::filter::FilterValue>::into(#args)
+                ),*],
+                repo: ::std::string::String::from("main"),
+            }
+        })
+    }
+}
+
 impl QMacro {
     fn to_tokens(&self) -> syn::Result<TokenStream2> {
         match self {
@@ -848,6 +928,7 @@ impl QMacro {
             QMacro::Update(um) => um.to_tokens(),
             QMacro::Delete(dm) => dm.to_tokens(),
             QMacro::Upsert(um) => um.to_tokens(),
+            QMacro::Call(cm) => cm.to_tokens(),
         }
     }
 }
