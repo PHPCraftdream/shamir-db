@@ -8,6 +8,18 @@
 //!   `serde_json::Value` (object / array / scalar / null — all four forms).
 //! - setuid getter-only: a user without table Read invokes a setuid
 //!   procedure and receives data; without setuid the call is denied.
+//!
+//! ## Phase 2 — Call in dependency graph
+//!
+//! Proves:
+//! - A Call with `$query` params is topologically ordered after its
+//!   dependency (execution plan shows two stages).
+//! - The resolved `$query` value arrives as a non-null param to the
+//!   procedure (echo test).
+//! - A Call's `QueryResult.value` can itself be referenced by a later
+//!   Read via `$query` in a `where` filter (call-result-as-ref).
+//! - A Call with a `$query` param referencing an unknown alias fails
+//!   at planning time with `UnknownAlias`.
 
 use std::sync::Arc;
 
@@ -452,4 +464,338 @@ async fn without_setuid_call_is_denied() {
             );
         }
     }
+}
+
+// ============================================================================
+// Phase 2 — Call in dependency graph: native test procedures
+// ============================================================================
+
+/// Echoes its first positional param back as `value`.
+/// Guest reads: `params.get("0")`.
+struct EchoFirstParamProc;
+
+#[async_trait]
+impl ShamirFunction for EchoFirstParamProc {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        match params.get("0") {
+            Ok(qv) => Ok(qv.clone()),
+            Err(_) => Ok(QueryValue::Null),
+        }
+    }
+}
+
+/// Always returns `{ "id": 5 }`.
+struct ConstObjectProc;
+
+#[async_trait]
+impl ShamirFunction for ConstObjectProc {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        let mut map = new_map();
+        map.insert("id".to_string(), QueryValue::Int(5));
+        Ok(QueryValue::Map(map))
+    }
+}
+
+// ============================================================================
+// Phase 2 tests
+// ============================================================================
+
+/// **params-from-ref**: a Read result feeds into a Call's `$query` param.
+///
+/// Batch layout:
+///   - `q1`: Read from `items` (returns rows with `id` field).
+///   - `p`:  Call `echo_first` with params `[{ "$query": "@q1[0].id" }]`.
+///
+/// Assertions:
+///   (a) `execution_plan` has two stages — q1 first, p second.
+///   (b) p's `value` equals the `id` from q1's first record (not Null).
+#[tokio::test]
+async fn phase2_params_from_read_ref() {
+    let shamir = setup_shamir().await;
+
+    // Create repo + table + seed data.
+    let mut setup = Batch::new();
+    setup.id("setup");
+    setup.create_repo(
+        "repo",
+        ddl::create_repo("main")
+            .engine("in_memory")
+            .tables(["items"]),
+    );
+    shamir
+        .execute("testdb", &setup.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut seed = Batch::new();
+    seed.id("seed");
+    seed.insert(
+        "ins",
+        insert("items").rows([
+            doc! { "id" => 7, "name" => "alpha" },
+            doc! { "id" => 9, "name" => "beta" },
+        ]),
+    );
+    shamir
+        .execute("testdb", &seed.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // Register the echo procedure.
+    register_native_fn(&shamir, "echo_first", Arc::new(EchoFirstParamProc)).await;
+
+    // Build the dependency batch: q1 (Read) -> p (Call with $query ref).
+    let mut b = Batch::new();
+    b.id("phase2_params");
+    b.op(
+        "q1",
+        shamir_query_builder::query::Query::from("items")
+            .order_by_asc("id")
+            .limit(1),
+    );
+    b.op(
+        "p",
+        BatchOp::Call(CallOp {
+            call: "echo_first".into(),
+            params: vec![FilterValue::query_ref_with_path("@q1", "[0].id")],
+            repo: "main".into(),
+        }),
+    );
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // (a) execution_plan: q1 in stage 0, p in stage 1.
+    assert!(
+        resp.execution_plan.len() >= 2,
+        "expected at least 2 stages, got: {:?}",
+        resp.execution_plan
+    );
+    assert!(
+        resp.execution_plan[0].contains(&"q1".to_string()),
+        "stage 0 must contain q1: {:?}",
+        resp.execution_plan
+    );
+    // p must be in a later stage than q1.
+    let p_stage = resp
+        .execution_plan
+        .iter()
+        .position(|stage| stage.contains(&"p".to_string()))
+        .expect("p must appear in execution_plan");
+    assert!(
+        p_stage >= 1,
+        "p must be in stage >= 1, found in stage {}: {:?}",
+        p_stage,
+        resp.execution_plan
+    );
+
+    // (b) p's value is the resolved id from q1's first record (7).
+    let p_result = &resp.results["p"];
+    let p_value = p_result
+        .value
+        .as_ref()
+        .expect("call result must have value");
+    assert_eq!(
+        p_value,
+        &serde_json::json!(7),
+        "echo_first should receive the resolved id=7 from q1[0].id"
+    );
+}
+
+/// **params-from-call-ref**: a Call result feeds into another Call's param.
+///
+/// Batch layout:
+///   - `p1`: Call `const_obj` (returns `{"id": 5}`).
+///   - `p2`: Call `echo_first` with params `[{ "$query": "@p1.id" }]`.
+///
+/// Assertions:
+///   (a) Two stages in execution_plan.
+///   (b) p2's `value` == 5.
+#[tokio::test]
+async fn phase2_params_from_call_ref() {
+    let shamir = setup_shamir().await;
+    register_native_fn(&shamir, "const_obj", Arc::new(ConstObjectProc)).await;
+    register_native_fn(&shamir, "echo_first", Arc::new(EchoFirstParamProc)).await;
+
+    let mut b = Batch::new();
+    b.id("phase2_call_chain");
+    b.op(
+        "p1",
+        BatchOp::Call(CallOp {
+            call: "const_obj".into(),
+            params: vec![],
+            repo: "main".into(),
+        }),
+    );
+    b.op(
+        "p2",
+        BatchOp::Call(CallOp {
+            call: "echo_first".into(),
+            params: vec![FilterValue::query_ref_with_path("@p1", ".id")],
+            repo: "main".into(),
+        }),
+    );
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // (a) Two stages.
+    assert!(
+        resp.execution_plan.len() >= 2,
+        "expected at least 2 stages, got: {:?}",
+        resp.execution_plan
+    );
+
+    // (b) p2 echoed the resolved value.
+    let p2_value = resp.results["p2"]
+        .value
+        .as_ref()
+        .expect("p2 must have value");
+    assert_eq!(
+        p2_value,
+        &serde_json::json!(5),
+        "echo_first should receive id=5 from p1.id"
+    );
+}
+
+/// **call-result-as-ref**: a Call's `value` is used in a Read's `where` filter.
+///
+/// Batch layout:
+///   - `p`: Call `const_obj` (returns `{"id": 5}`).
+///   - `q`: Read from `items` where `id == { "$query": "@p.id" }`.
+///
+/// Assertions:
+///   (a) Two stages.
+///   (b) q returns exactly the row with id=5.
+#[tokio::test]
+async fn phase2_call_result_as_read_filter_ref() {
+    let shamir = setup_shamir().await;
+
+    // Create repo + table + seed.
+    let mut setup = Batch::new();
+    setup.id("setup");
+    setup.create_repo(
+        "repo",
+        ddl::create_repo("main")
+            .engine("in_memory")
+            .tables(["items"]),
+    );
+    shamir
+        .execute("testdb", &setup.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    let mut seed = Batch::new();
+    seed.id("seed");
+    seed.insert(
+        "ins",
+        insert("items").rows([
+            doc! { "id" => 3, "name" => "gamma" },
+            doc! { "id" => 5, "name" => "delta" },
+            doc! { "id" => 8, "name" => "epsilon" },
+        ]),
+    );
+    shamir
+        .execute("testdb", &seed.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    register_native_fn(&shamir, "const_obj", Arc::new(ConstObjectProc)).await;
+
+    // Build: p (Call) -> q (Read with $query filter).
+    let mut b = Batch::new();
+    b.id("phase2_call_to_read");
+    b.op(
+        "p",
+        BatchOp::Call(CallOp {
+            call: "const_obj".into(),
+            params: vec![],
+            repo: "main".into(),
+        }),
+    );
+    b.op(
+        "q",
+        shamir_query_builder::query::Query::from("items")
+            .where_eq("id", FilterValue::query_ref_with_path("@p", ".id")),
+    );
+    let resp = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .unwrap();
+
+    // (a) Two stages.
+    assert!(
+        resp.execution_plan.len() >= 2,
+        "expected at least 2 stages, got: {:?}",
+        resp.execution_plan
+    );
+    let q_stage = resp
+        .execution_plan
+        .iter()
+        .position(|stage| stage.contains(&"q".to_string()))
+        .expect("q must appear in plan");
+    assert!(
+        q_stage >= 1,
+        "q must run after p: {:?}",
+        resp.execution_plan
+    );
+
+    // (b) q returned exactly the row with id=5.
+    let q_result = &resp.results["q"];
+    assert_eq!(
+        q_result.records.len(),
+        1,
+        "should match exactly one row (id=5), got: {:?}",
+        q_result.records
+    );
+    assert_eq!(
+        q_result.records[0]["id"],
+        serde_json::json!(5),
+        "matched row must have id=5"
+    );
+    assert_eq!(
+        q_result.records[0]["name"],
+        serde_json::json!("delta"),
+        "matched row must be 'delta'"
+    );
+}
+
+/// **unknown-alias in call params**: referencing a non-existent alias in
+/// a Call's `$query` param fails at planning time with `UnknownAlias`.
+#[tokio::test]
+async fn phase2_unknown_alias_in_call_params() {
+    let shamir = setup_shamir().await;
+    register_native_fn(&shamir, "echo_first", Arc::new(EchoFirstParamProc)).await;
+
+    let mut b = Batch::new();
+    b.id("phase2_unknown");
+    b.op(
+        "p",
+        BatchOp::Call(CallOp {
+            call: "echo_first".into(),
+            params: vec![FilterValue::query_ref_with_path("@no_such_alias", ".x")],
+            repo: "main".into(),
+        }),
+    );
+    let err = shamir
+        .execute("testdb", &b.to_request_via_msgpack())
+        .await
+        .expect_err("should fail with UnknownAlias");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unknown") || msg.contains("Unknown"),
+        "error should mention unknown alias, got: {msg}"
+    );
 }

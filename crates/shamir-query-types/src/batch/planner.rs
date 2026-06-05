@@ -174,6 +174,14 @@ impl BatchPlanner {
                     Self::extract_deps_from_value(value, &mut deps);
                 }
             }
+            // Stored-procedure call: scan positional params for `$query` refs
+            // so a Call participates in the topological order (runs after any
+            // query whose result it consumes as an argument).
+            BatchOp::Call(call_op) => {
+                for fv in &call_op.params {
+                    Self::extract_deps_from_filter_value(fv, &mut deps);
+                }
+            }
             // Admin ops have no query dependencies
             _ => {}
         }
