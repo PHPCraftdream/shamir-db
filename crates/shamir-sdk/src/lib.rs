@@ -48,5 +48,16 @@ pub use value::Value;
 #[cfg(feature = "query-builder")]
 pub use shamir_query_builder as builder;
 
+/// Builder macros for use inside a `#[procedure]` (with the `query-builder`
+/// feature): `q!`, `filter!`, `doc!`.
+///
+/// Note: `q!`/`filter!` are proc-macros that expand to absolute
+/// `::shamir_query_builder::…` paths, so a guest using them must **also add
+/// `shamir-query-builder` as a direct dependency** (re-exporting the names
+/// here is not enough for path resolution). The builder-method API
+/// ([`builder`]) works through `shamir-sdk` alone.
+#[cfg(feature = "query-builder")]
+pub use shamir_query_builder::{doc, filter, q};
+
 #[cfg(test)]
 mod tests;
