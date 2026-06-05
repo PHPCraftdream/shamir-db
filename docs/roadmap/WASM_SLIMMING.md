@@ -2,7 +2,10 @@
 
 # WASM slimming — guest binary & SDK weight
 
-**Status:** design / proposed (revision 2026-06-05, **post-investigation**).
+**Status:** **largely DONE** (revision 2026-06-05). P0/P1/P1b/P2/P3 landed
+earlier; the **thin-waist** (a `shamir-collections` leaf + a `server`
+feature-gate on `query-types`) then made `query-types`/`query-builder`
+guest-lean and **retired Phase 4's premise** — see the banner on Phase 4.
 
 Phased plan to shrink the **guest WASM** authors compile and the **guest
 SDK** they depend on. Each phase is step-by-step, measured (before→after),
@@ -92,11 +95,33 @@ knob. Companion: [`SDK_AUTHORING.md`](./SDK_AUTHORING.md),
 3. Re-measure (`panic="abort"` also drops unwinding tables).
 4. Commit `perf(function): size profile for the wasm scaffold build`.
 
-## Phase 4 — (optional, NOT for weight) lean `shamir-value` ABI crate
-> Do this only if **crate-graph cleanliness / a single `Value` type** is
-> worth it — it does **not** reduce guest weight (the full `Value<Key>`
-> pulls bigint/decimal/indexmap). Must be feature-gated so the guest stays
-> lean. Phase 1b already removes the drift risk more cheaply.
+## Phase 4 — (RETIRED — premise was false) lean `shamir-value` ABI crate
+> **RETIRED 2026-06-05.** This phase rested on the belief that
+> `query-types`' value type lived in the heavy `shamir-types`, so the guest
+> couldn't pull the query DTOs / builder without it. **Investigation of the
+> actual code disproved this:** `query-types` has **no `QueryValue`** — its
+> DTOs carry payloads as `serde_json::Value` and filter literals as a
+> self-contained `FilterValue`. Its *only* threads into `shamir-types` were
+> (a) the `TMap`/`TSet` aliases and (b) the host-only `ResourcePath` adapter
+> in one admin method. Both were cut by the **thin-waist** instead:
+>
+> - **`shamir-collections`** leaf crate (`indexmap`+`fxhash`) now owns
+>   `TMap`/`TSet`/`new_map`/`new_set`; `shamir-types` re-exports them
+>   (commit `52be3b3`).
+> - **`server` feature** on `query-types` gates the `ResourcePath` adapter
+>   (`ResourceRef::to_path`); `shamir-types` becomes an *optional* dep
+>   enabled only by `server` (default-on for the host). `query-builder`
+>   depends on `query-types` with `default-features = false` and is lean by
+>   construction; host workspace builds still get `crypto`+`server` via
+>   feature unification (commit `e934a2f`).
+>
+> Proof: `cargo tree -p shamir-query-types --no-default-features` pulls no
+> `shamir-types`/`dashmap`/`num-bigint`/`rust_decimal`; the builder compiles
+> to `wasm32` pulling only `indexmap`+`shamir-collections`+DTOs. This
+> unblocked SDK Stage B2 (`ctx.db().execute`) at a fraction of P4's cost —
+> **no wide `Value` refactor**. The original steps below are kept only as a
+> historical record of the (unneeded) `shamir-value` extraction; do **not**
+> pursue them for weight.
 1. Gate the serde-genericness check: confirm `Serialize`/`Deserialize` of
    `Value<Key>` carry no host-only logic beyond the self-contained
    String-prefix parsing (investigation: confirmed).
@@ -118,7 +143,8 @@ knob. Companion: [`SDK_AUTHORING.md`](./SDK_AUTHORING.md),
 ```
 P0 measure → P1 dev-deps → P1b conformance → P3 size-profile      ← cheap, safe, the real wins
            → P2 wasm-opt (when binaryen is installed)
-           → P4 shamir-value  ← optional, crate-cleanliness only, feature-gated, NOT for weight
+           → thin-waist (shamir-collections + server feature)  ← DONE; made the guest pull query-types/builder lean
+           ⊘ P4 shamir-value  ← RETIRED (premise false; the thin-waist solved it cheaper)
 ```
 
 ## Metrics
@@ -135,6 +161,8 @@ P0 measure → P1 dev-deps → P1b conformance → P3 size-profile      ← chea
 
 ## Open / user actions
 - Install **binaryen** to enable Phase 2 locally (user).
-- `query-types` is heavy (pulls `shamir-types` + hmac/sha2/zeroize) — its
-  guest-slimming for builder-in-guest is tracked in
-  [`SDK_AUTHORING.md`](./SDK_AUTHORING.md).
+- ~~`query-types` is heavy~~ **RESOLVED:** `query-types`/`query-builder`
+  are now guest-lean (thin-waist above). `--no-default-features` pulls no
+  `shamir-types`; the builder compiles to `wasm32`. Builder-in-guest
+  (`ctx.db().execute`) shipped — see [`SDK_AUTHORING.md`](./SDK_AUTHORING.md)
+  Stage B.

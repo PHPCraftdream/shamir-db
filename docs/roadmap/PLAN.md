@@ -49,6 +49,7 @@ Three follow-on tracks landed (all committed, each zero-trust verified):
 | **Stored procedures** | `BatchOp::Call` (callable getter-functions): wire+core (`value` result, FunctionInvoker), dependency-graph participation (params+result as `$query`), `Batch::call` + `q!(call …)`. See [`STORED_PROCEDURES.md`](./STORED_PROCEDURES.md). | `0c2d468` `be3ad62` `5bad954` `446d41d` |
 | **WASM runtime perf** | InstancePre (per-call **−40%**), AOT disk cache (**~2×** restart compile), pooling allocator + CoW (**+12%** concurrent). | `94d2392` `a934c59` `b53fcba` (+ bench `66e09a0`) |
 | **WASM/SDK slimming** | size profile (compiled functions **−34%**), host↔guest wire-conformance test, graceful `wasm-opt`; SDK typed kinds `#[scalar]`/`#[procedure]`, per-kind examples + reachable-API docs, query-types crypto feature-gate (guest-lean-capable). See [`WASM_SLIMMING.md`](./WASM_SLIMMING.md), [`SDK_AUTHORING.md`](./SDK_AUTHORING.md). | `e05f87a` `2a901fa` `44371a3` `c434dd8` `c0c27fe` |
+| **Thin-waist + builder-in-guest (B2)** | `shamir-collections` leaf (TMap/TSet, re-exported); `query-types`/`builder` severed from heavy `shamir-types` (`server` feature + optional dep) → guest-lean (`cargo tree --no-default-features` proves it; builder compiles to wasm32); `db_execute` host import (generalises db_get/insert/query) + SDK `query-builder` feature + `ctx.db().execute(&Batch)`. **Retired the deferred P4** — its premise (`QueryValue` in heavy `shamir-types`) was false. Example guest 337 KB. | `52be3b3` `e934a2f` `d71f9a0` `ca79b1f` |
 
 Resting point: *procedures are first-class batch citizens; the function
 engine is faster (hot/restart/concurrent); the guest SDK is lean and typed
@@ -172,19 +173,20 @@ QUIC/UDP/Unix · auth v1.1+ & PQ identity ([`ROADMAP.md`](./ROADMAP.md)) ·
 vectors/FTS hardening ([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md),
 [`FULL_TEXT_SEARCH.md`](./FULL_TEXT_SEARCH.md)) · backup/restore tooling.
 
-### Deferred — expensive chains, on real need only
-- **SDK builder-in-guest (Stage B2)** — let a procedure build queries with
-  the typed builder/`q!` instead of low-level `ctx.db()`. **Costly chain:**
-  needs a host `ctx.db().execute(BatchRequest)` shim ABI **and P4** —
-  extracting `Value` into a lean `shamir-value` crate, because
-  `query-types`' `QueryValue` lives in the heavy `shamir-types`, so the
-  guest can't go lean without it. A **wide `Value` refactor** (codecs/
-  engine) for a *nice-to-have* (`ctx.db()` already works). Defer until
-  authors actually hit the low-level wall. See `SDK_AUTHORING.md` Stage B,
-  `WASM_SLIMMING.md` P4.
-- **SDK function-packs (Stage D)** · **WASM `shamir-value` ABI crate (P4)**
-  — both optional, on real need (P4 is *not* a weight win — see
-  WASM_SLIMMING.md).
+### Done since (was "deferred — expensive chains")
+- **SDK builder-in-guest (Stage B2)** — ✅ **DONE** (§0.1). The "costly
+  chain" dissolved: contemplation found P4's premise false (`query-types`
+  has no `QueryValue` — DTOs use `serde_json::Value` + self-contained
+  `FilterValue`). The **thin-waist** (a `shamir-collections` leaf + a
+  `server` feature-gate) made the builder guest-lean with **no `Value`
+  refactor**; B2 was then a small `db_execute` shim + SDK feature. See
+  `SDK_AUTHORING.md` Stage B.
+- **WASM `shamir-value` ABI crate (P4)** — ⊘ **RETIRED** (premise false;
+  not a weight win — see `WASM_SLIMMING.md` Phase 4 banner).
+
+### Still deferred — on real need only
+- **SDK function-packs (Stage D)** — multiple functions per wasm; only when
+  libraries of related procedures actually appear. Default stays one fn/wasm.
 
 ## 2.1 Status of the movements
 Movements A/B/C below were the **original** forward order; the recent
@@ -227,5 +229,6 @@ folded into Movements B/C above.
 
 _Plan revision 2026-06-05 — after the DDL → access → write-lifecycle arc
 (`016d68b`..`a620115`) plus the stored-procedures + WASM-perf + WASM/SDK-
-slimming tracks (`66e09a0`..`c0c27fe`, §0.1). Next: Movement A (consolidate)
-recommended; B2/P4 deferred. Updated as movements land._
+slimming tracks (`66e09a0`..`c0c27fe`, §0.1) and the thin-waist +
+builder-in-guest B2 (`52be3b3`..`ca79b1f`; P4 retired). Next: Movement A
+(consolidate) recommended. Updated as movements land._
