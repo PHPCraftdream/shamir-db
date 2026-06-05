@@ -57,6 +57,43 @@ per kind.* All the **cheap, safe, no-wide-refactor** work is done.
 
 ---
 
+## 0.2 Snapshot — the inflection (2026-06-05)
+
+**Where we stand.** Foundation + engine pillars are closed; what's open is
+mostly the *roof* — the **"I"** (P2P / replication / chat), the disk perf
+ceiling (covering index), and usability (query-lang v2, browser client).
+18 crates, ~2700 lib tests, green gate, and a dependency graph that now
+**tells the truth** (the `server` / `crypto` features draw the host-only
+line precisely; guest-facing crates are honest leaves).
+
+**Narrative thread.** *"How a record is written, governed, propagated"*
+(the arc, §0) → *"how authors write code that runs inside the DB"* (stored
+procedures + SDK + builder-in-guest, §0.1). The guest is now a first-class
+**local client**: one query language, one builder, one executor, three
+callers — network client, in-process client, WASM procedure.
+
+**Health.** Gate green (fmt + clippy `--workspace --all-targets` + lib;
+`functions_lifecycle` 18/18 after the #207 trap-text fix). History hygiene
+(`.git-blame-ignore-revs` + style-sweep discipline) intact.
+
+### Quick wins — low-hanging fruit (pull anytime; each ≪ a movement)
+Cheap, low-risk, independently shippable — good warm-up / filler work, none
+blocking. (The big items live in the movements below.)
+
+| # | Item | Effort | Notes |
+|---|---|---|---|
+| **QW1** | `.gitignore` hygiene | ~5 min | add `server-cert.pem`, `crates/shamir-client-node/{target/,Cargo.lock}` — currently untracked noise in `git status`. |
+| **QW2** | CLAUDE.md crate count | ~10 min | "ships **10** crates" is stale — reality is **18** (adds sdk, sdk-macros, query-builder(+macros), funclib, wal, tx, collections). Update the count + list (or reframe as "core crates: …"). |
+| **QW3** | SDK `q!` / `filter!` reach | ~30 min | the Stage-B "remaining nicety": make `shamir_sdk::builder::{q, filter, doc}` cleanly reachable (+ a compile example), so a procedure author gets the macro sugar, not only `where_gte`. |
+| **QW4** | Targeted Miri one-shot | ~30 min | `cargo +nightly miri test -p shamir-transport-tcp -p shamir-query-types` over the pure-logic unsafe (`framing.rs` `set_len`, `secret.rs` `as_bytes_mut`). Verification-only; record the result. Needs nightly + `rustup component add miri`. |
+| **QW5** | Push `0875cb6` | ~1 min | the depth-limit test fix is committed, not yet pushed. |
+
+> Not quick (live in the movements): `H₂` Persistable (~1 day) · feature-
+> overhead benches (moderate) · covering index `Opt O` (headline perf win,
+> large) · network changefeed + subscriptions #201 (large).
+
+---
+
 ## 1. Maturity map
 
 **Closed and solid (foundation + engine):**
@@ -230,5 +267,7 @@ folded into Movements B/C above.
 _Plan revision 2026-06-05 — after the DDL → access → write-lifecycle arc
 (`016d68b`..`a620115`) plus the stored-procedures + WASM-perf + WASM/SDK-
 slimming tracks (`66e09a0`..`c0c27fe`, §0.1) and the thin-waist +
-builder-in-guest B2 (`52be3b3`..`ca79b1f`; P4 retired). Next: Movement A
-(consolidate) recommended. Updated as movements land._
+builder-in-guest B2 (`52be3b3`..`ca79b1f`; P4 retired) and the #207
+trap-text fix (`0875cb6`). Added §0.2 snapshot + a **quick-wins batch**
+(QW1–QW5). Next: Movement A (consolidate) recommended. Updated as movements
+land._
