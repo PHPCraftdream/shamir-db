@@ -1,15 +1,18 @@
-//! Guest-side `Value` type — mirrors `shamir_types::QueryValue` serde representation.
+//! Guest-side `Value` type — wire-compatible with `QueryValue` via msgpack.
 //!
-//! This is a **minimal mirror** of `shamir_types::types::value::Value<String>` with
-//! identical msgpack serialization so the host decodes guest output byte-for-byte.
+//! This is a **minimal mirror** of the host `Value<String>` with identical
+//! MessagePack serialization so the host decodes guest output byte-for-byte.
+//! The host type lives in `shamir-types` (a dev-dependency only — it never
+//! enters the guest WASM binary).
 //!
-//! **Omitted variants** (not needed for initial functions; will be added as needed):
-//! - `Dec` (rust_decimal::Decimal)
-//! - `Big` (num_bigint::BigInt)
-//! - `Set` (ordered set)
+//! **Deliberately omitted variants** (the guest sees them on the wire as
+//! simpler types — see conformance tests in `tests/value_tests.rs`):
+//! - `Dec` / `Big` — serialized by the host as strings → decoded here as `Str`.
+//! - `Set` — serialized by the host as a sequence → decoded here as `List`.
 //!
-//! `Map` uses `Vec<(String, Value)>` instead of `IndexMap` to avoid the `indexmap`
-//! dependency. Serialization order is preserved; deserialization order matches.
+//! `Map` uses `Vec<(String, Value)>` instead of `IndexMap` to avoid the
+//! `indexmap` dependency. Serialization order is preserved; deserialization
+//! order matches.
 
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};

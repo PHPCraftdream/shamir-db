@@ -11,6 +11,8 @@ serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 shamir-types = { path = "../shamir-types" }
+rust_decimal = "1.40"
+num-bigint = "0.4"
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples

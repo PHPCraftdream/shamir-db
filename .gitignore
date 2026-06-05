@@ -26,3 +26,5 @@
 crates/shamir-client-node/package-lock.json
 crates/shamir-client-node/*.node
 tests/e2e/package-lock.json
+examples/*/target/
+examples/*/Cargo.lock

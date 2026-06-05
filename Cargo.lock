@@ -3878,7 +3878,9 @@ dependencies = [
 name = "shamir-sdk"
 version = "0.1.0"
 dependencies = [
+ "num-bigint",
  "rmp-serde",
+ "rust_decimal",
  "serde",
  "shamir-sdk-macros",
  "shamir-types",
