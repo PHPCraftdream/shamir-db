@@ -37,6 +37,7 @@ pub mod auth;
 pub mod batch;
 pub mod call;
 pub mod filter;
+#[cfg(feature = "crypto")]
 pub mod hmac;
 pub mod read;
 pub mod table_ref;
