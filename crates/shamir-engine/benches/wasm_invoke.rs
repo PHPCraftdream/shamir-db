@@ -220,6 +220,57 @@ fn bench_compile_cached(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Group 5: concurrent calls (pooling vs on-demand) ────────────────
+//
+// Shares a single pre-compiled `Arc<WasmFunction>` across N parallel
+// async calls via `tokio::spawn`. Each task creates its own `FnCtx` /
+// `FnBatch` / `Store` — this is the hot path that exercises the
+// allocator under concurrency (slot reuse for pooling, mmap storm for
+// on-demand).
+//
+// Toggle allocator via `SHAMIR_WASM_NO_POOL=1`.
+
+fn bench_concurrent_calls(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let wf = Arc::new(WasmFunction::from_wat(engine, IDENTITY_WAT, WasmLimits::default()).unwrap());
+    let params = build_params();
+
+    let concurrency_levels: &[usize] = if quick() { &[16, 64] } else { &[16, 64, 128] };
+
+    let mut group = c.benchmark_group("wasm_concurrent_calls");
+    if quick() {
+        group.sample_size(10);
+        group.measurement_time(Duration::from_secs(2));
+    }
+
+    for &n in concurrency_levels {
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.to_async(&rt).iter(|| {
+                let wf = wf.clone();
+                let params = params.clone();
+                async move {
+                    let mut handles = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let wf = wf.clone();
+                        let params = params.clone();
+                        handles.push(tokio::spawn(async move {
+                            let ctx = FnCtx::new();
+                            let batch = FnBatch::new();
+                            wf.call(&ctx, &batch, &params).await.unwrap()
+                        }));
+                    }
+                    for h in handles {
+                        black_box(h.await.unwrap());
+                    }
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // ── Driver ───────────────────────────────────────────────────────────
 
 criterion_group! {
@@ -229,6 +280,7 @@ criterion_group! {
         bench_cold_first_call,
         bench_hot_repeat_call,
         bench_startup_compile_k,
-        bench_compile_cached
+        bench_compile_cached,
+        bench_concurrent_calls
 }
 criterion_main!(benches);
