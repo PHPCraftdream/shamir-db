@@ -86,6 +86,9 @@ tempfile = "3.10.1"
 serial_test = "3.3.1"
 argon2 = "0.5"            # independent KAT reference in function::tests::argon2id_tests
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+# Tests build queries via the typed query builder instead of raw JSON.
+# query-builder depends only on query-types/types — no cycle on engine.
+shamir-query-builder = { path = "../shamir-query-builder" }
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to
 # `crates/shamir-db/tests/` as integration tests instead. Keeping the

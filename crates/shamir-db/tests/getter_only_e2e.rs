@@ -32,13 +32,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::json;
 
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{FnBatch, FnCtx, FunctionError, Params, ShamirFunction};
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::doc;
+use shamir_query_builder::write::insert;
 use shamir_types::access::{Actor, Mode, ResourceMeta, ResourcePath};
 use shamir_types::types::value::QueryValue;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// A native function that reads every row of `secrets` (in repo `main`) via
 /// the DB gateway it was handed on `FnCtx`, and returns the row count.
@@ -75,40 +83,27 @@ async fn setup_with_secrets() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
 
-    let setup: BatchRequest = serde_json::from_value(json!({
-        "id": "setup",
-        "queries": {
-            "repo": {
-                "create_repo": "main",
-                "engine": "in_memory",
-                "tables": ["secrets"]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &setup).await.unwrap();
+    let mut b = Batch::new();
+    b.id("setup");
+    b.create_repo(
+        "repo",
+        ddl::create_repo("main")
+            .engine("in_memory")
+            .tables(["secrets"]),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
     // Seed rows as System (bypasses ACLs).
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": "seed",
-        "queries": {
-            "ins": {
-                "insert_into": "secrets",
-                "values": [
-                    {
-                        "id": 1,
-                        "label": "alpha"
-                    },
-                    {
-                        "id": 2,
-                        "label": "beta"
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &seed).await.unwrap();
+    let mut seed = Batch::new();
+    seed.id("seed");
+    seed.insert(
+        "ins",
+        insert("secrets").rows([
+            doc! { "id" => 1, "label" => "alpha" },
+            doc! { "id" => 2, "label" => "beta" },
+        ]),
+    );
+    shamir.execute("testdb", &to_req(&seed)).await.unwrap();
 
     shamir
 }

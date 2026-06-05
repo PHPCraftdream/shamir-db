@@ -23,10 +23,16 @@ use shamir_engine::function::{
     Visibility,
 };
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
 use shamir_query_builder::Query;
 use shamir_storage::error::DbError;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Identity-echo WAT matching the slice-2 ABI.
 ///
@@ -630,18 +636,15 @@ async fn setup_db_with_people_table() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
 
-    let setup: BatchRequest = serde_json::from_value(json!({
-        "id": "setup",
-        "queries": {
-            "repo": {
-                "create_repo": "main",
-                "engine": "in_memory",
-                "tables": ["people"]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &setup).await.unwrap();
+    let mut b = Batch::new();
+    b.id("setup");
+    b.create_repo(
+        "repo",
+        ddl::create_repo("main")
+            .engine("in_memory")
+            .tables(["people"]),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
     shamir
 }
 
@@ -677,7 +680,7 @@ async fn wasm_function_inserts_and_queries() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("all", Query::from("people"));
-    let resp = exec_built(&shamir, b.build()).await;
+    let resp = exec_built(&shamir, to_req(&b)).await;
     let records = &resp.results["all"].records;
     assert_eq!(
         records.len(),
@@ -712,7 +715,7 @@ async fn wasm_function_get_by_key() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("all", Query::from("people"));
-    let resp = exec_built(&shamir, b.build()).await;
+    let resp = exec_built(&shamir, to_req(&b)).await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["id"], json!(42));

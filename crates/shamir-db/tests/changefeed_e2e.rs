@@ -14,34 +14,36 @@
 
 use std::time::Duration;
 
-use serde_json::json;
 use tokio::time::timeout;
 
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_engine::ChangeOp;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::filter::eq;
 use shamir_query_builder::write::{delete, insert, update};
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// In-memory ShamirDb with db "testdb", repo "main", table "users".
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
 
-    let setup: BatchRequest = serde_json::from_value(json!({
-        "id": "setup",
-        "queries": {
-            "repo": {
-                "create_repo": "main",
-                "engine": "in_memory",
-                "tables": ["users"]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &setup).await.unwrap();
+    let mut b = Batch::new();
+    b.id("setup");
+    b.create_repo(
+        "repo",
+        ddl::create_repo("main")
+            .engine("in_memory")
+            .tables(["users"]),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
     shamir
 }
 
@@ -56,7 +58,7 @@ async fn insert_alice(shamir: &ShamirDb) {
             "age" => 30,
         }]),
     );
-    shamir.execute("testdb", &batch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&batch)).await.unwrap();
 }
 
 /// Insert a single named user inside a transactional batch (each call is
@@ -72,7 +74,7 @@ async fn insert_user(shamir: &ShamirDb, name: &str) {
             "age" => 20,
         }]),
     );
-    shamir.execute("testdb", &batch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&batch)).await.unwrap();
 }
 
 /// Receive the next live event within a bounded timeout (so a hang in the
@@ -119,7 +121,7 @@ async fn live_insert_update_delete_emit_expected_events() {
             "age" => 31,
         }),
     );
-    shamir.execute("testdb", &ubatch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&ubatch)).await.unwrap();
 
     let ev = recv_event(&mut rx).await;
     assert!(
@@ -139,7 +141,7 @@ async fn live_insert_update_delete_emit_expected_events() {
     dbatch.id("del");
     dbatch.transactional();
     dbatch.delete("d", delete("users").where_(eq("name", "alice")));
-    shamir.execute("testdb", &dbatch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&dbatch)).await.unwrap();
 
     let ev = recv_event(&mut rx).await;
     assert!(ev.commit_version > update_version);
@@ -300,7 +302,7 @@ async fn nontx_insert_user(shamir: &ShamirDb, name: &str, age: i64) {
             "age" => age,
         }]),
     );
-    shamir.execute("testdb", &batch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&batch)).await.unwrap();
 }
 
 #[tokio::test]
@@ -336,7 +338,7 @@ async fn nontx_insert_update_delete_emit_expected_events() {
             "age" => 31,
         }),
     );
-    shamir.execute("testdb", &ubatch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&ubatch)).await.unwrap();
 
     let ev = recv_event(&mut rx).await;
     assert!(
@@ -355,7 +357,7 @@ async fn nontx_insert_update_delete_emit_expected_events() {
     let mut dbatch = Batch::named("del");
     dbatch.id("del");
     dbatch.delete("d", delete("users").where_(eq("name", "alice")));
-    shamir.execute("testdb", &dbatch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&dbatch)).await.unwrap();
 
     let ev = recv_event(&mut rx).await;
     assert!(ev.commit_version > update_version);
@@ -520,7 +522,7 @@ async fn nontx_update_batch_version_is_max_of_per_record_writes() {
             .where_(shamir_query_builder::filter::gt("age", 0))
             .set(doc! { "age" => 99 }),
     );
-    shamir.execute("testdb", &ubatch.build()).await.unwrap();
+    shamir.execute("testdb", &to_req(&ubatch)).await.unwrap();
 
     let ev = recv_event(&mut rx).await;
     assert!(

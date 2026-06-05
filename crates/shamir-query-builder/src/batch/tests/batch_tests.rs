@@ -5,6 +5,32 @@ use crate::val::*;
 use crate::write::{self, doc};
 
 // ============================================================================
+// return_flagged → return_all=false, return_only=None
+// ============================================================================
+
+#[test]
+fn return_flagged_sets_return_all_false_and_no_return_only() {
+    let mut b = Batch::new();
+    b.query("visible", Query::from("users"));
+    b.query_silent("hidden", Query::from("temp"));
+    b.return_flagged();
+    let req = b.build();
+    assert!(!req.return_all);
+    assert!(req.return_only.is_none());
+}
+
+#[test]
+fn return_flagged_then_return_all_restores_default() {
+    let mut b = Batch::new();
+    b.return_flagged();
+    assert!(!b.build().return_all);
+    b.return_all();
+    let req = b.build();
+    assert!(req.return_all);
+    assert!(req.return_only.is_none());
+}
+
+// ============================================================================
 // Handle / RowRef path construction
 // ============================================================================
 

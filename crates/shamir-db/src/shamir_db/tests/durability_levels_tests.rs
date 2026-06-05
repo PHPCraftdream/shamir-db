@@ -1,12 +1,20 @@
 //! Tests for per-request durability levels (v1: `buffered` vs `synced`).
 
-use serde_json::json;
+use shamir_query_builder::batch::{Batch, Durability};
+use shamir_query_builder::doc;
+use shamir_query_builder::write;
+use shamir_query_builder::Query;
 
 use crate::engine::query::batch::BatchRequest;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
@@ -42,22 +50,17 @@ async fn synced_batch_survives_immediate_drop() {
             .add_table(TableConfig::new("items"));
         shamir.add_repo("appdb", config).await.unwrap();
 
-        let insert: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "durability": "synced",
-            "queries": {
-                "ins": {
-                    "insert_into": ["data", "items"],
-                    "values": [
-                        {
-                            "name": "widget",
-                            "qty": 42
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.durability(Durability::Synced);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("data", "items").row(doc! {
+                "name" => "widget",
+                "qty" => 42,
+            }),
+        );
+        let insert = to_req(&b);
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
@@ -67,15 +70,10 @@ async fn synced_batch_survives_immediate_drop() {
     // === Session 2: reopen, read back → record PRESENT ===
     let shamir = reinit_with_retry(sys_path).await;
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "r": {
-                "from": ["data", "items"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.query("r", Query::with_repo("data", "items"));
+    let read = to_req(&b);
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(records.len(), 1, "synced batch must survive immediate drop");
@@ -107,21 +105,16 @@ async fn buffered_batch_executes_successfully() {
     shamir.add_repo("appdb", config).await.unwrap();
 
     // durability absent → buffered (default).
-    let insert: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "ins": {
-                "insert_into": ["data", "items"],
-                "values": [
-                    {
-                        "name": "widget",
-                        "qty": 42
-                    }
-                ]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "ins",
+        write::Insert::with_repo("data", "items").row(doc! {
+            "name" => "widget",
+            "qty" => 42,
+        }),
+    );
+    let insert = to_req(&b);
     let resp = shamir.execute("appdb", &insert).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 1);
     assert_eq!(resp.results["ins"].records[0]["name"], "widget");

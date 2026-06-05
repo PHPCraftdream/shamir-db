@@ -18,7 +18,14 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::query::auth::CreateUserOp;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Build a ShamirDb with database "testdb"/repo "main"/table "users".
 async fn setup() -> ShamirDb {
@@ -30,15 +37,12 @@ async fn setup() -> ShamirDb {
     shamir
 }
 
-/// Parse a single-op batch request keyed by alias "op".
-fn one_op(op_json: serde_json::Value) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "op": op_json
-        }
-    }))
-    .unwrap()
+/// Build a single-op batch request keyed by alias "op".
+fn one_op(op: impl shamir_query_builder::batch::IntoBatchOp) -> BatchRequest {
+    let mut b = Batch::new();
+    b.id(1);
+    b.op("op", op);
+    to_req(&b)
 }
 
 // ===========================================================================
@@ -90,10 +94,7 @@ async fn non_admin_cannot_create_user() {
 
     // Database is open (0o777) so `execute_as` Read-gate on the db passes,
     // proving the denial comes from the user-lifecycle check, not traversal.
-    let req = one_op(json!({
-        "create_user": "mallory",
-        "password": "pw"
-    }));
+    let req = one_op(ddl::create_user("mallory", "pw"));
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -105,9 +106,7 @@ async fn non_admin_cannot_create_user() {
 async fn non_admin_cannot_create_group() {
     let shamir = setup().await;
 
-    let req = one_op(json!({
-        "create_group": "devs"
-    }));
+    let req = one_op(ddl::create_group("devs"));
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -120,21 +119,12 @@ async fn non_admin_cannot_grant_role() {
     let shamir = setup().await;
 
     // Seed a user + role as System so the grant has real targets.
-    let seed = one_op(json!({
-        "create_user": "alice",
-        "password": "pw"
-    }));
+    let seed = one_op(ddl::create_user("alice", "pw"));
     shamir.execute("testdb", &seed).await.unwrap();
-    let seed_role = one_op(json!({
-        "create_role": "analyst",
-        "permissions": []
-    }));
+    let seed_role = one_op(ddl::create_role("analyst", vec![]));
     shamir.execute("testdb", &seed_role).await.unwrap();
 
-    let req = one_op(json!({
-        "grant_role": "analyst",
-        "user": "alice"
-    }));
+    let req = one_op(ddl::grant_role("analyst", "alice"));
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -147,21 +137,13 @@ async fn system_can_create_user_role_group() {
     let shamir = setup().await;
 
     // System (admin bypass) still drives every admin op.
-    let cu = one_op(json!({
-        "create_user": "alice",
-        "password": "pw"
-    }));
+    let cu = one_op(ddl::create_user("alice", "pw"));
     assert!(shamir.execute("testdb", &cu).await.is_ok());
 
-    let cr = one_op(json!({
-        "create_role": "analyst",
-        "permissions": []
-    }));
+    let cr = one_op(ddl::create_role("analyst", vec![]));
     assert!(shamir.execute("testdb", &cr).await.is_ok());
 
-    let cg = one_op(json!({
-        "create_group": "devs"
-    }));
+    let cg = one_op(ddl::create_group("devs"));
     assert!(shamir.execute("testdb", &cg).await.is_ok());
 }
 
@@ -191,11 +173,7 @@ async fn db_owner_can_create_scoped_user() {
     make_db_owner(&shamir, owner.clone()).await;
 
     // Owner of "testdb" creates a user scoped to "testdb" → allowed.
-    let req = one_op(json!({
-        "create_user": "scoped_bob",
-        "password": "pw",
-        "database": "testdb"
-    }));
+    let req = one_op(ddl::create_user("scoped_bob", "pw").database("testdb"));
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_ok(),
@@ -214,10 +192,7 @@ async fn db_owner_cannot_create_unscoped_user() {
     make_db_owner(&shamir, owner.clone()).await;
 
     // No `database` scope → only a global admin may create → denied.
-    let req = one_op(json!({
-        "create_user": "global_user",
-        "password": "pw"
-    }));
+    let req = one_op(ddl::create_user("global_user", "pw"));
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -232,11 +207,7 @@ async fn db_owner_cannot_create_user_scoped_to_other_db() {
     make_db_owner(&shamir, owner.clone()).await;
 
     // Scope points at a database the actor does not own → denied.
-    let req = one_op(json!({
-        "create_user": "intruder",
-        "password": "pw",
-        "database": "otherdb"
-    }));
+    let req = one_op(ddl::create_user("intruder", "pw").database("otherdb"));
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -251,28 +222,18 @@ async fn db_owner_can_drop_own_scoped_user_but_not_foreign() {
     make_db_owner(&shamir, owner.clone()).await;
 
     // Owner creates a scoped user for their db.
-    let mk = one_op(json!({
-        "create_user": "scoped_bob",
-        "password": "pw",
-        "database": "testdb"
-    }));
+    let mk = one_op(ddl::create_user("scoped_bob", "pw").database("testdb"));
     shamir
         .execute_as(owner.clone(), "testdb", &mk)
         .await
         .unwrap();
 
     // System seeds a foreign-scoped user (owner does not own "otherdb").
-    let mk_foreign = one_op(json!({
-        "create_user": "foreign_carol",
-        "password": "pw",
-        "database": "otherdb"
-    }));
+    let mk_foreign = one_op(ddl::create_user("foreign_carol", "pw").database("otherdb"));
     shamir.execute("testdb", &mk_foreign).await.unwrap();
 
     // Owner drops THEIR scoped user → allowed.
-    let drop_own = one_op(json!({
-        "drop_user": "scoped_bob"
-    }));
+    let drop_own = one_op(ddl::drop_user("scoped_bob"));
     let resp = shamir.execute_as(owner.clone(), "testdb", &drop_own).await;
     assert!(
         resp.is_ok(),
@@ -280,9 +241,7 @@ async fn db_owner_can_drop_own_scoped_user_but_not_foreign() {
     );
 
     // Owner tries to drop the foreign-scoped user → denied.
-    let drop_foreign = one_op(json!({
-        "drop_user": "foreign_carol"
-    }));
+    let drop_foreign = one_op(ddl::drop_user("foreign_carol"));
     let resp = shamir
         .execute_as(owner.clone(), "testdb", &drop_foreign)
         .await;
@@ -298,11 +257,7 @@ async fn scoped_user_is_persisted_with_database_field() {
 
     // System creates a scoped user; the scope must persist on the record so
     // the drop-path can resolve it.
-    let mk = one_op(json!({
-        "create_user": "scoped_bob",
-        "password": "pw",
-        "database": "testdb"
-    }));
+    let mk = one_op(ddl::create_user("scoped_bob", "pw").database("testdb"));
     shamir.execute("testdb", &mk).await.unwrap();
 
     // Read the raw persisted user records from the system store and confirm
@@ -327,11 +282,7 @@ async fn non_owner_with_db_read_still_cannot_create_scoped_user() {
     // can Read/enter execute_as. It must still be denied the scoped create.
     make_db_owner(&shamir, Actor::User(1001)).await;
 
-    let req = one_op(json!({
-        "create_user": "x",
-        "password": "pw",
-        "database": "testdb"
-    }));
+    let req = one_op(ddl::create_user("x", "pw").database("testdb"));
     let resp = shamir.execute_as(Actor::User(2002), "testdb", &req).await;
     assert!(
         resp.is_err(),

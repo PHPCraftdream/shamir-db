@@ -10,7 +10,8 @@
 //! This test would *pass* with the old `execute()` path (System bypasses)
 //! and *fail* (correctly) only after the fix that threads the real actor.
 
-use serde_json::json;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::Query;
 
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoConfig;
@@ -18,6 +19,11 @@ use crate::engine::table::TableConfig;
 use crate::query::batch::BatchRequest;
 use crate::ShamirDb;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Helper: create an in-memory ShamirDb with `testdb` / `main` / `items`.
 async fn setup() -> ShamirDb {
@@ -48,15 +54,10 @@ async fn execute_as_user_denied_on_restricted_database() {
         .await
         .unwrap();
 
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "gw_read",
-        "queries": {
-            "r": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("gw_read");
+    b.query("r", Query::from("items"));
+    let read_req = to_req(&b);
 
     // System bypasses — must succeed.
     assert!(
@@ -108,15 +109,10 @@ async fn execute_as_user_denied_on_restricted_table() {
         .await
         .unwrap();
 
-    let read_req: BatchRequest = serde_json::from_value(json!({
-        "id": "gw_read",
-        "queries": {
-            "r": {
-                "from": "items"
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id("gw_read");
+    b.query("r", Query::from("items"));
+    let read_req = to_req(&b);
 
     // System bypasses.
     assert!(

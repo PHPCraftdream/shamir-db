@@ -338,6 +338,18 @@ impl Batch {
         self
     }
 
+    /// Return only entries whose `return_result` flag is `true`.
+    ///
+    /// Sets `return_all = false` without specifying a `return_only` list.
+    /// The executor will filter results to include only those aliases added
+    /// via non-silent methods (or whose `return_result` was explicitly set
+    /// to `true`), skipping entries added via `query_silent` / `op_silent`.
+    pub fn return_flagged(&mut self) -> &mut Self {
+        self.return_all = false;
+        self.return_only = None;
+        self
+    }
+
     /// Return only the listed aliases.
     pub fn return_only(
         &mut self,
@@ -617,6 +629,29 @@ impl Batch {
 
     /// List roles.
     pub fn list_roles(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List all registered functions (catalogue-wide).
+    pub fn list_functions(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List all registered validators (catalogue-wide).
+    pub fn list_all_validators(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+    ) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// List explicitly created function folders.
+    pub fn list_function_folders(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl IntoBatchOp,
+    ) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 

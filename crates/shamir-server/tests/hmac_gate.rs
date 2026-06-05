@@ -25,6 +25,9 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::Query;
 use shamir_query_types::hmac as canon;
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 
@@ -69,15 +72,6 @@ fn decode(bytes: &[u8]) -> DbResponse {
     rmp_serde::from_slice(bytes).expect("decode response")
 }
 
-fn execute(db: &str, body: serde_json::Value) -> DbRequest {
-    let batch: BatchRequest = serde_json::from_value(body).expect("parse batch");
-    DbRequest::Execute {
-        query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
-        db: db.to_string(),
-        batch,
-    }
-}
-
 fn execute_built(db: &str, batch: BatchRequest) -> DbRequest {
     DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
@@ -110,15 +104,10 @@ async fn drop_table_without_hmac_rejected() {
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": { "drop_table": "items", "repo": "main" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_table("d", ddl::drop_table("items").repo("main"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _msg) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -130,19 +119,15 @@ async fn drop_table_with_wrong_hmac_rejected() {
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": {
-                    "drop_table": "items",
-                    "repo": "main",
-                    "hmac": "deadbeef".repeat(8) // 64 hex chars but bogus
-                }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_table(
+        "d",
+        ddl::drop_table("items")
+            .repo("main")
+            .hmac("deadbeef".repeat(8)), // 64 hex chars but bogus
     );
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _msg) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
@@ -157,19 +142,10 @@ async fn drop_table_with_correct_hmac_accepted() {
     let key = session_key(&session);
     let tag = canon::compute_tag_hex(&key, &canon::canonical_drop_table("prod", "main", "items"));
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": {
-                    "drop_table": "items",
-                    "repo": "main",
-                    "hmac": tag
-                }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_table("d", ddl::drop_table("items").repo("main").hmac(&tag));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["d"].records[0];
@@ -194,19 +170,13 @@ async fn drop_table_tag_bound_to_target_table() {
         canon::compute_tag_hex(&key, &canon::canonical_drop_table("prod", "main", "items"));
 
     // Submit drop_table for "other" with the items-tag.
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": {
-                    "drop_table": "other",
-                    "repo": "main",
-                    "hmac": tag_for_items
-                }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_table(
+        "d",
+        ddl::drop_table("other").repo("main").hmac(&tag_for_items),
     );
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
@@ -224,13 +194,10 @@ async fn drop_db_without_hmac_rejected() {
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
-    let req = execute(
-        "scratch",
-        json!({
-            "id": 1,
-            "queries": { "d": { "drop_db": "victim" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_db("d", ddl::drop_db("victim"));
+    let req = execute_built("scratch", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -249,13 +216,10 @@ async fn drop_db_with_correct_hmac_accepted() {
     let session = root_session();
 
     let tag = canon::compute_tag_hex(&session_key(&session), &canon::canonical_drop_db("victim"));
-    let req = execute(
-        "scratch",
-        json!({
-            "id": 1,
-            "queries": { "d": { "drop_db": "victim", "hmac": tag } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_db("d", ddl::drop_db("victim").hmac(&tag));
+    let req = execute_built("scratch", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["d"].records[0];
@@ -273,26 +237,16 @@ async fn drop_index_without_hmac_rejected() {
     let session = root_session();
 
     // Pre-create an index (no HMAC needed for create_index).
-    let mk = execute(
-        "prod",
-        json!({
-            "id": 0,
-            "queries": {
-                "i": { "create_index": "by_id", "table": "items", "fields": [["id"]] }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(0);
+    b.create_index("i", ddl::create_index("by_id", "items").field("id"));
+    let mk = execute_built("prod", b.build());
     let _ = handler.handle(&session, &encode(&mk)).unwrap();
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": { "drop_index": "by_id", "table": "items" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_index("d", ddl::drop_index("by_id", "items"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -304,34 +258,20 @@ async fn drop_index_with_correct_hmac_accepted() {
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
-    let mk = execute(
-        "prod",
-        json!({
-            "id": 0,
-            "queries": {
-                "i": { "create_index": "by_id", "table": "items", "fields": [["id"]] }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(0);
+    b.create_index("i", ddl::create_index("by_id", "items").field("id"));
+    let mk = execute_built("prod", b.build());
     let _ = handler.handle(&session, &encode(&mk)).unwrap();
 
     let tag = canon::compute_tag_hex(
         &session_key(&session),
         &canon::canonical_drop_index("prod", "main", "items", "by_id", false),
     );
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": {
-                    "drop_index": "by_id",
-                    "table": "items",
-                    "hmac": tag
-                }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_index("d", ddl::drop_index("by_id", "items").hmac(&tag));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["d"].records[0];
@@ -348,16 +288,13 @@ async fn drop_index_unique_flag_changes_canonical() {
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
-    let mk = execute(
-        "prod",
-        json!({
-            "id": 0,
-            "queries": {
-                "i": { "create_index": "by_em", "table": "items",
-                       "fields": [["email"]], "unique": true }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id(0);
+    b.create_index(
+        "i",
+        ddl::create_index("by_em", "items").field("email").unique(),
     );
+    let mk = execute_built("prod", b.build());
     let _ = handler.handle(&session, &encode(&mk)).unwrap();
 
     // Tag computed for unique=false but request says unique=true.
@@ -365,20 +302,13 @@ async fn drop_index_unique_flag_changes_canonical() {
         &session_key(&session),
         &canon::canonical_drop_index("prod", "main", "items", "by_em", false),
     );
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": {
-                    "drop_index": "by_em",
-                    "table": "items",
-                    "unique": true,
-                    "hmac": mismatched
-                }
-            }
-        }),
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_index(
+        "d",
+        ddl::drop_index("by_em", "items").unique().hmac(&mismatched),
     );
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
@@ -395,13 +325,10 @@ async fn drop_user_requires_hmac() {
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
-    let req = execute(
-        "scratch",
-        json!({
-            "id": 1,
-            "queries": { "d": { "drop_user": "bob" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_user("d", ddl::drop_user("bob"));
+    let req = execute_built("scratch", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -414,13 +341,10 @@ async fn drop_role_requires_hmac() {
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
-    let req = execute(
-        "scratch",
-        json!({
-            "id": 1,
-            "queries": { "d": { "drop_role": "admin" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_role("d", ddl::drop_role("admin"));
+    let req = execute_built("scratch", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -455,13 +379,10 @@ async fn create_table_passes_without_hmac() {
     let handler = ShamirDbHandler::new(Arc::new(shamir));
     let session = root_session();
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": { "t": { "create_table": "x", "repo": "main" } }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_table("t", ddl::create_table("x").repo("main"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["t"].records[0];
@@ -479,16 +400,11 @@ async fn mixed_batch_one_drop_missing_hmac_fails_whole_batch() {
     let session = root_session();
 
     // The read op is harmless; the drop op is missing its HMAC.
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "r": { "from": "items" },
-                "d": { "drop_table": "items", "repo": "main" }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("r", Query::from("items"));
+    b.drop_table("d", ddl::drop_table("items").repo("main"));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, message) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -517,19 +433,10 @@ async fn tag_signed_with_other_session_key_rejected() {
         &canon::canonical_drop_table("prod", "main", "items"),
     );
 
-    let req = execute(
-        "prod",
-        json!({
-            "id": 1,
-            "queries": {
-                "d": {
-                    "drop_table": "items",
-                    "repo": "main",
-                    "hmac": tag
-                }
-            }
-        }),
-    );
+    let mut b = Batch::new();
+    b.id(1);
+    b.drop_table("d", ddl::drop_table("items").repo("main").hmac(&tag));
+    let req = execute_built("prod", b.build());
     let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");

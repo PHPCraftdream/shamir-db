@@ -1,6 +1,6 @@
 //! Integration tests for per-table buffer-config DDL via
-//! `ShamirDb::execute`. Exercises the JSON wire format that the
-//! TCP/WS client (Node, etc.) actually sends.
+//! `ShamirDb::execute`. All batch requests are built with
+//! `shamir_query_builder` and round-tripped through MessagePack.
 
 use serde_json::json;
 
@@ -9,6 +9,14 @@ use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::ddl::{BufConfig, BufPatch};
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
@@ -19,28 +27,25 @@ async fn setup_shamir() -> ShamirDb {
     shamir
 }
 
-fn full_cfg() -> serde_json::Value {
-    json!({
-        "max_bytes": 1_048_576usize,
-        "max_entries": 500usize,
-        "ttl_ms": 7000u64,
-        "flush_interval_ms": 333u64,
-        "flush_batch_size": 48usize,
-    })
+fn full_cfg() -> BufConfig {
+    BufConfig {
+        max_bytes: 1_048_576,
+        max_entries: 500,
+        ttl_ms: Some(7000),
+        flush_interval_ms: 333,
+        flush_batch_size: 48,
+    }
 }
 
 #[tokio::test]
 async fn get_buffer_config_returns_null_when_unset() {
     let shamir = setup_shamir().await;
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cfg": { "get_buffer_config": "users", "repo": "main" }
-        }
-    }))
-    .unwrap();
 
-    let resp = shamir.execute("testdb", &req).await.unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.get_buffer_config("cfg", ddl::get_buffer_config("users").repo("main"));
+    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
+
     let row = &resp.results["cfg"].records[0];
     assert_eq!(row["table"], json!("users"));
     assert_eq!(row["repo"], json!("main"));
@@ -51,18 +56,17 @@ async fn get_buffer_config_returns_null_when_unset() {
 async fn set_then_get_buffer_config_via_ddl() {
     let shamir = setup_shamir().await;
 
-    // Two batches — the batch planner doesn't introduce a
+    // Two batches -- the batch planner doesn't introduce a
     // dependency between admin ops on the same table by default,
     // so a co-batch SET + GET would race. Realistic clients
     // serialize DDL anyway.
-    let set_req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "set": { "set_buffer_config": "users", "repo": "main", "config": full_cfg() }
-        }
-    }))
-    .unwrap();
-    let set_resp = shamir.execute("testdb", &set_req).await.unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.set_buffer_config(
+        "set",
+        ddl::set_buffer_config("users", full_cfg()).repo("main"),
+    );
+    let set_resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
     // Set echoes back the persisted config.
     let set_row = &set_resp.results["set"].records[0];
@@ -70,14 +74,10 @@ async fn set_then_get_buffer_config_via_ddl() {
     assert_eq!(set_row["config"]["max_bytes"], json!(1_048_576));
     assert_eq!(set_row["config"]["ttl_ms"], json!(7000));
 
-    let get_req: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "after": { "get_buffer_config": "users", "repo": "main" }
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("testdb", &get_req).await.unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.get_buffer_config("after", ddl::get_buffer_config("users").repo("main"));
+    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
     let got_row = &resp.results["after"].records[0];
     let cfg = &got_row["config"];
@@ -94,33 +94,32 @@ async fn alter_buffer_config_partial_update_via_ddl() {
     let shamir = setup_shamir().await;
 
     // Seed with a known full config first.
-    let seed: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "set": { "set_buffer_config": "users", "repo": "main", "config": full_cfg() }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &seed).await.unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.set_buffer_config(
+        "set",
+        ddl::set_buffer_config("users", full_cfg()).repo("main"),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
-    // Alter ONE knob — flush_interval_ms — and clear ttl_ms via
+    // Alter ONE knob -- flush_interval_ms -- and clear ttl_ms via
     // explicit null. Other knobs must keep their seeded values.
-    let alter: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "alter": {
-                "alter_buffer_config": "users",
-                "repo": "main",
-                "patch": {
-                    "flush_interval_ms": 1000,
-                    "ttl_ms": null
-                }
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.alter_buffer_config(
+        "alter",
+        ddl::alter_buffer_config(
+            "users",
+            BufPatch {
+                flush_interval_ms: Some(1000),
+                ttl_ms: Some(None),
+                ..Default::default()
+            },
+        )
+        .repo("main"),
+    );
 
-    let alter_resp = shamir.execute("testdb", &alter).await.unwrap();
+    let alter_resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
     let alter_row = &alter_resp.results["alter"].records[0];
     assert_eq!(alter_row["config"]["flush_interval_ms"], json!(1000));
     assert!(alter_row["config"]["ttl_ms"].is_null());
@@ -128,14 +127,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
     assert_eq!(alter_row["config"]["max_bytes"], json!(1_048_576));
     assert_eq!(alter_row["config"]["max_entries"], json!(500));
 
-    let get: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "after": { "get_buffer_config": "users", "repo": "main" }
-        }
-    }))
-    .unwrap();
-    let resp = shamir.execute("testdb", &get).await.unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.get_buffer_config("after", ddl::get_buffer_config("users").repo("main"));
+    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
     let got = &resp.results["after"].records[0]["config"];
     assert_eq!(got["flush_interval_ms"], json!(1000));
     assert!(got["ttl_ms"].is_null());
@@ -148,41 +143,32 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
     // patch object MUST preserve the existing TTL, not clear it.
     let shamir = setup_shamir().await;
 
-    shamir
-        .execute(
-            "testdb",
-            &serde_json::from_value::<BatchRequest>(json!({
-                "id": 1,
-                "queries": {
-                    "set": { "set_buffer_config": "users", "repo": "main", "config": full_cfg() }
-                }
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.set_buffer_config(
+        "set",
+        ddl::set_buffer_config("users", full_cfg()).repo("main"),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
-    let resp = shamir
-        .execute(
-            "testdb",
-            &serde_json::from_value::<BatchRequest>(json!({
-                "id": 2,
-                "queries": {
-                    "alter": {
-                        "alter_buffer_config": "users",
-                        "repo": "main",
-                        "patch": { "max_entries": 9999 }
-                    }
-                }
-            }))
-            .unwrap(),
+    let mut b = Batch::new();
+    b.id(2);
+    b.alter_buffer_config(
+        "alter",
+        ddl::alter_buffer_config(
+            "users",
+            BufPatch {
+                max_entries: Some(9999),
+                ..Default::default()
+            },
         )
-        .await
-        .unwrap();
+        .repo("main"),
+    );
+    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
     let cfg = &resp.results["alter"].records[0]["config"];
     assert_eq!(cfg["max_entries"], json!(9999));
-    // ttl_ms was NOT in the patch — must equal the seeded value.
+    // ttl_ms was NOT in the patch -- must equal the seeded value.
     assert_eq!(cfg["ttl_ms"], json!(7000));
 }
 
@@ -190,23 +176,20 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
 async fn alter_starts_from_default_when_no_prior_config() {
     let shamir = setup_shamir().await;
 
-    let resp = shamir
-        .execute(
-            "testdb",
-            &serde_json::from_value::<BatchRequest>(json!({
-                "id": 1,
-                "queries": {
-                    "alter": {
-                        "alter_buffer_config": "users",
-                        "repo": "main",
-                        "patch": { "max_entries": 42 }
-                    }
-                }
-            }))
-            .unwrap(),
+    let mut b = Batch::new();
+    b.id(1);
+    b.alter_buffer_config(
+        "alter",
+        ddl::alter_buffer_config(
+            "users",
+            BufPatch {
+                max_entries: Some(42),
+                ..Default::default()
+            },
         )
-        .await
-        .unwrap();
+        .repo("main"),
+    );
+    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
     let cfg = &resp.results["alter"].records[0]["config"];
     assert_eq!(cfg["max_entries"], json!(42));
@@ -222,33 +205,18 @@ async fn set_buffer_config_persists_into_info_store() {
     // (otherwise the second batch would not find it).
     let shamir = setup_shamir().await;
 
-    shamir
-        .execute(
-            "testdb",
-            &serde_json::from_value::<BatchRequest>(json!({
-                "id": 1,
-                "queries": {
-                    "set": { "set_buffer_config": "users", "repo": "main", "config": full_cfg() }
-                }
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.set_buffer_config(
+        "set",
+        ddl::set_buffer_config("users", full_cfg()).repo("main"),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
-    let resp = shamir
-        .execute(
-            "testdb",
-            &serde_json::from_value::<BatchRequest>(json!({
-                "id": 2,
-                "queries": {
-                    "get": { "get_buffer_config": "users", "repo": "main" }
-                }
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.get_buffer_config("get", ddl::get_buffer_config("users").repo("main"));
+    let resp = shamir.execute("testdb", &to_req(&b)).await.unwrap();
 
     let cfg = &resp.results["get"].records[0]["config"];
     assert_eq!(cfg["max_bytes"], json!(1_048_576));
@@ -259,20 +227,12 @@ async fn set_buffer_config_persists_into_info_store() {
 async fn get_unknown_table_errors_cleanly() {
     let shamir = setup_shamir().await;
 
-    let resp = shamir
-        .execute(
-            "testdb",
-            &serde_json::from_value::<BatchRequest>(json!({
-                "id": 1,
-                "queries": {
-                    "get": { "get_buffer_config": "nonexistent", "repo": "main" }
-                }
-            }))
-            .unwrap(),
-        )
-        .await;
+    let mut b = Batch::new();
+    b.id(1);
+    b.get_buffer_config("get", ddl::get_buffer_config("nonexistent").repo("main"));
+    let resp = shamir.execute("testdb", &to_req(&b)).await;
 
-    // Resolver/executor error surfaces — the batch as a whole
+    // Resolver/executor error surfaces -- the batch as a whole
     // fails (no `_ignore` semantics yet). Either Err(_) or an
     // empty/missing result entry both indicate the op didn't
     // silently succeed against a phantom table.

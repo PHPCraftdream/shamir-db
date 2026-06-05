@@ -4,11 +4,20 @@
 //! survive a `ShamirDb` restart when the system store is durable, and that
 //! explicit `engine: "in_memory"` remains ephemeral even in a durable home.
 
-use serde_json::json;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::doc;
+use shamir_query_builder::write;
+use shamir_query_builder::Query;
 
 use crate::engine::query::batch::BatchRequest;
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Re-open the system store, retrying briefly while the previous session's
 /// store still holds the redb file lock (the MemBuffer-wrapped store releases
@@ -42,34 +51,23 @@ async fn wire_created_repo_is_durable_across_reopen() {
             .unwrap();
         shamir.create_db("appdb").await;
 
-        let create: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "cr": {
-                    "create_repo": "data",
-                    "tables": ["items"]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
+        let create = to_req(&b);
         let resp = shamir.execute("appdb", &create).await.unwrap();
         assert_eq!(resp.results["cr"].records[0]["created_repo"], "data");
 
-        let insert: BatchRequest = serde_json::from_value(json!({
-            "id": 2,
-            "queries": {
-                "ins": {
-                    "insert_into": ["data", "items"],
-                    "values": [
-                        {
-                            "name": "widget",
-                            "qty": 42
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(2);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("data", "items").row(doc! {
+                "name" => "widget",
+                "qty" => 42,
+            }),
+        );
+        let insert = to_req(&b);
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
     }
@@ -82,15 +80,10 @@ async fn wire_created_repo_is_durable_across_reopen() {
         "durable repo must be re-attached after restart"
     );
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "r": {
-                "from": ["data", "items"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("r", Query::with_repo("data", "items"));
+    let read = to_req(&b);
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(
@@ -117,29 +110,26 @@ async fn explicit_in_memory_repo_is_ephemeral() {
             .unwrap();
         shamir.create_db("appdb").await;
 
-        let create: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "cr": {
-                    "create_repo": "scratch",
-                    "engine": "in_memory",
-                    "tables": ["tmp"]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.create_repo(
+            "cr",
+            ddl::create_repo("scratch")
+                .engine("in_memory")
+                .tables(["tmp"]),
+        );
+        let create = to_req(&b);
         shamir.execute("appdb", &create).await.unwrap();
 
-        let insert: BatchRequest = serde_json::from_value(json!({
-            "id": 2,
-            "queries": {
-                "ins": {
-                    "insert_into": ["scratch", "tmp"],
-                    "values": [{"val": "gone"}]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(2);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("scratch", "tmp").row(doc! {
+                "val" => "gone",
+            }),
+        );
+        let insert = to_req(&b);
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
     }
@@ -152,15 +142,10 @@ async fn explicit_in_memory_repo_is_ephemeral() {
         "ephemeral repo catalogue must survive restart"
     );
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": 3,
-        "queries": {
-            "r": {
-                "from": ["scratch", "tmp"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(3);
+    b.query("r", Query::with_repo("scratch", "tmp"));
+    let read = to_req(&b);
     let resp = shamir.execute("appdb", &read).await.unwrap();
     assert_eq!(
         resp.results["r"].records.len(),
@@ -181,16 +166,10 @@ async fn durable_repo_file_mirrors_db_repo_tree() {
         .unwrap();
     shamir.create_db("appdb").await;
 
-    let create: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "cr": {
-                "create_repo": "data",
-                "tables": ["items"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
+    let create = to_req(&b);
     shamir.execute("appdb", &create).await.unwrap();
 
     let expected = dir.path().join("appdb").join("data.redb");

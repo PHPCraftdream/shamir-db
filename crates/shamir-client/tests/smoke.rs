@@ -17,10 +17,11 @@ use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use shamir_client::builder::batch::Batch;
+use shamir_client::builder::ddl;
 use shamir_client::builder::doc;
 use shamir_client::builder::write::upsert;
 use shamir_client::builder::Query;
-use shamir_client::{BatchRequest, Client, ConnectOptions};
+use shamir_client::{Client, ConnectOptions};
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
@@ -111,25 +112,22 @@ async fn sdk_full_lifecycle() {
     client.ping().await.expect("ping");
 
     // 2. create db
-    let mk_db: BatchRequest = serde_json::from_value(json!({
-        "id": "mk-db",
-        "queries": { "mk": { "create_db": "prod" } }
-    }))
-    .expect("parse mk_db");
-    let resp = client.execute("default", mk_db).await.expect("create db");
+    let mut mk_db = Batch::new();
+    mk_db.id("mk-db");
+    mk_db.create_db("mk", ddl::create_db("prod"));
+    let resp = client
+        .execute("default", mk_db.build())
+        .await
+        .expect("create db");
     assert!(resp.results.contains_key("mk"));
 
     // 3. create repo + table
-    let mk_table: BatchRequest = serde_json::from_value(json!({
-        "id": "mk-table",
-        "queries": {
-            "mr": { "create_repo": "main" },
-            "tb": { "create_table": "items", "repo": "main" }
-        }
-    }))
-    .expect("parse mk_table");
+    let mut mk_table = Batch::new();
+    mk_table.id("mk-table");
+    mk_table.create_repo("mr", ddl::create_repo("main"));
+    mk_table.create_table("tb", ddl::create_table("items").repo("main"));
     let resp = client
-        .execute("prod", mk_table)
+        .execute("prod", mk_table.build())
         .await
         .expect("create table");
     assert!(resp.results.contains_key("mr"));
@@ -145,7 +143,7 @@ async fn sdk_full_lifecycle() {
             .value(doc! { "sku" => "X1", "qty" => 42 }),
     );
     batch.query("rd", Query::from("items"));
-    let work: BatchRequest = batch.build();
+    let work = batch.build();
     let resp = client.execute("prod", work).await.expect("rw");
     let rd = resp.results.get("rd").expect("rd alias");
     assert_eq!(rd.records.len(), 1);

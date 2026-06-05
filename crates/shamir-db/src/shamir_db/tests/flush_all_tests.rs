@@ -1,13 +1,21 @@
 //! Tests for ShamirDb::flush_all — draining repo MemBuffers on graceful
 //! shutdown so buffered commits survive a drop-and-reopen cycle.
 
-use serde_json::json;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::doc;
+use shamir_query_builder::write;
+use shamir_query_builder::Query;
 
 use crate::engine::query::batch::BatchRequest;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
+
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
 
 /// Re-open the system store, retrying briefly while the previous session's
 /// store still holds the redb file lock (the MemBuffer-wrapped store releases
@@ -47,21 +55,16 @@ async fn buffered_commit_survives_graceful_flush_all() {
         shamir.add_repo("appdb", config).await.unwrap();
 
         // Insert via execute (autocommit — buffered, NOT flushed by default).
-        let insert: BatchRequest = serde_json::from_value(json!({
-            "id": 1,
-            "queries": {
-                "ins": {
-                    "insert_into": ["data", "items"],
-                    "values": [
-                        {
-                            "name": "widget",
-                            "qty": 42
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(1);
+        b.insert(
+            "ins",
+            write::Insert::with_repo("data", "items").row(doc! {
+                "name" => "widget",
+                "qty" => 42,
+            }),
+        );
+        let insert = to_req(&b);
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
@@ -77,15 +80,10 @@ async fn buffered_commit_survives_graceful_flush_all() {
         "durable repo must be re-attached after restart"
     );
 
-    let read: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "r": {
-                "from": ["data", "items"]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(2);
+    b.query("r", Query::with_repo("data", "items"));
+    let read = to_req(&b);
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(
@@ -109,16 +107,15 @@ async fn flush_all_is_safe_on_in_memory_home() {
     shamir.add_repo("testdb", config).await.unwrap();
 
     // Insert a record so the table's stores are materialised.
-    let insert: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "ins": {
-                "insert_into": ["scratch", "tmp"],
-                "values": [{"val": "hello"}]
-            }
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.insert(
+        "ins",
+        write::Insert::with_repo("scratch", "tmp").row(doc! {
+            "val" => "hello",
+        }),
+    );
+    let insert = to_req(&b);
     let resp = shamir.execute("testdb", &insert).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 1);
 

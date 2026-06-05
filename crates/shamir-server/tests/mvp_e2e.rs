@@ -376,15 +376,13 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     let mut next_rid: u32 = 1;
 
     // --- Step A: create `prod` db ---
-    let mk_db: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "mk-db",
-        "queries": { "mk": { "create_db": "prod" } }
-    }))
-    .expect("parse mk batch");
+    let mut mk_batch = shamir_query_builder::batch::Batch::new();
+    mk_batch.id("mk-db");
+    mk_batch.create_db("mk", shamir_query_builder::ddl::create_db("prod"));
     let req_a = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
-        batch: mk_db,
+        batch: mk_batch.build(),
     };
     let resp_a = roundtrip(&req_a, session_id, &mut next_rid, &mut w, &mut r).await;
     match resp_a {
@@ -395,18 +393,14 @@ async fn mvp_full_pipeline_tls_scram_batch_query() {
     }
 
     // --- Step B: create repo+table, set, then read ---
-    let work: shamir_db::query::batch::BatchRequest = serde_json::from_value(json!({
-        "id": "work",
-        "queries": {
-            "mr": { "create_repo": "main" },
-            "tb": { "create_table": "items", "repo": "main" }
-        }
-    }))
-    .expect("parse work batch");
+    let mut work_batch = shamir_query_builder::batch::Batch::new();
+    work_batch.id("work");
+    work_batch.create_repo("mr", shamir_query_builder::ddl::create_repo("main"));
+    work_batch.create_table("tb", shamir_query_builder::ddl::create_table("items"));
     let req_b = DbRequest::Execute {
         query_version: shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         db: "prod".into(),
-        batch: work,
+        batch: work_batch.build(),
     };
     let resp_b = roundtrip(&req_b, session_id, &mut next_rid, &mut w, &mut r).await;
     match resp_b {

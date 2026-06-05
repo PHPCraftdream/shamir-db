@@ -1,9 +1,10 @@
 //! Tests for the transactional cross-repo guard (Stage 4.C).
 
-use serde_json::json;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch, BatchError, BatchRequest, TableResolver};
+use crate::query::batch::{execute_batch, BatchError, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -58,14 +59,11 @@ fn distinct_repos_empty_queries() {
 
 #[test]
 fn distinct_repos_single_repo() {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "q1": {"from": "users"},
-            "q2": {"from": "orders"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q1", Query::from("users"));
+    b.query("q2", Query::from("orders"));
+    let req = b.build();
     let repos = distinct_repos(&req.queries);
     assert_eq!(repos.len(), 1);
     assert!(repos.contains("main"));
@@ -73,14 +71,11 @@ fn distinct_repos_single_repo() {
 
 #[test]
 fn distinct_repos_multiple_repos() {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "q1": {"from": "users"},
-            "q2": {"from": ["hot", "sessions"]}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q1", Query::from("users"));
+    b.query("q2", Query::with_repo("hot", "sessions"));
+    let req = b.build();
     let repos = distinct_repos(&req.queries);
     assert_eq!(repos.len(), 2);
     assert!(repos.contains("main"));
@@ -89,14 +84,13 @@ fn distinct_repos_multiple_repos() {
 
 #[test]
 fn distinct_repos_skips_admin_ops() {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "q1": {"from": "users"},
-            "q2": {"list": "tables"}
-        }
-    }))
-    .unwrap();
+    // NOTE: The list-tables admin op cannot be expressed through Query::from.
+    // Using the DDL builder via Batch::op with list_tables.
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q1", Query::from("users"));
+    b.list_tables("q2", shamir_query_builder::ddl::list_tables());
+    let req = b.build();
     let repos = distinct_repos(&req.queries);
     assert_eq!(repos.len(), 1);
     assert!(repos.contains("main"));
@@ -110,15 +104,12 @@ fn distinct_repos_skips_admin_ops() {
 async fn cross_repo_transactional_batch_rejected() {
     let resolver = setup_resolver().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "transactional": true,
-        "queries": {
-            "q1": {"from": "users"},
-            "q2": {"from": ["hot", "sessions"]}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.transactional();
+    b.query("q1", Query::from("users"));
+    b.query("q2", Query::with_repo("hot", "sessions"));
+    let req = b.build();
 
     let err = execute_batch(&req, &resolver, None, Actor::System, "test")
         .await
@@ -137,15 +128,12 @@ async fn cross_repo_transactional_batch_rejected() {
 async fn single_repo_transactional_batch_passes_guard() {
     let resolver = setup_resolver().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "transactional": true,
-        "queries": {
-            "q1": {"from": "users"},
-            "q2": {"from": "orders"}
-        }
-    }))
-    .unwrap();
+    let mut b = Batch::new();
+    b.id(1);
+    b.transactional();
+    b.query("q1", Query::from("users"));
+    b.query("q2", Query::from("orders"));
+    let req = b.build();
 
     let result = execute_batch(&req, &resolver, None, Actor::System, "test").await;
     assert!(
@@ -158,15 +146,13 @@ async fn single_repo_transactional_batch_passes_guard() {
 async fn non_transactional_cross_repo_batch_unaffected() {
     let resolver = setup_resolver().await;
 
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "transactional": false,
-        "queries": {
-            "q1": {"from": "users"},
-            "q2": {"from": ["hot", "sessions"]}
-        }
-    }))
-    .unwrap();
+    // NOTE: Batch builder defaults transactional to false, which matches the
+    // original test's "transactional": false.
+    let mut b = Batch::new();
+    b.id(1);
+    b.query("q1", Query::from("users"));
+    b.query("q2", Query::with_repo("hot", "sessions"));
+    let req = b.build();
 
     // Non-transactional: the guard should not fire.
     // This will still fail because the "hot" repo doesn't exist in the

@@ -14,7 +14,6 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tempfile::TempDir;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -286,99 +285,94 @@ fn read_batch(table: &str) -> shamir_db::query::batch::BatchRequest {
 
 /// Build a batch with a single chmod op on a table.
 fn chmod_batch(db: &str, store: &str, table: &str, mode: u16) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("chmod");
+    b.chmod(
+        "cm",
+        shamir_query_builder::ddl::chmod(
+            shamir_query_builder::ddl::res::table(db, store, table),
+            mode,
+        ),
+    );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
-        batch: serde_json::from_value(json!({
-            "id": "chmod",
-            "queries": {
-                "cm": {
-                    "chmod": { "table": [db, store, table] },
-                    "mode": mode
-                }
-            }
-        }))
-        .expect("parse chmod batch"),
+        batch: b.build(),
     }
 }
 
 /// Build a batch with a single chgrp op on a table.
 fn chgrp_batch(db: &str, store: &str, table: &str, group: u64) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("chgrp");
+    b.chgrp(
+        "cg",
+        shamir_query_builder::ddl::chgrp(
+            shamir_query_builder::ddl::res::table(db, store, table),
+            Some(group),
+        ),
+    );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
-        batch: serde_json::from_value(json!({
-            "id": "chgrp",
-            "queries": {
-                "cg": {
-                    "chgrp": { "table": [db, store, table] },
-                    "group": group
-                }
-            }
-        }))
-        .expect("parse chgrp batch"),
+        batch: b.build(),
     }
 }
 
 /// Build a batch creating a group.
 fn create_group_req(db: &str, name: &str) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("mkgrp");
+    b.create_group("mk", shamir_query_builder::ddl::create_group(name));
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
-        batch: serde_json::from_value(json!({
-            "id": "mkgrp",
-            "queries": {
-                "mk": { "create_group": name }
-            }
-        }))
-        .expect("parse create_group batch"),
+        batch: b.build(),
     }
 }
 
 /// Build a batch adding a user to a group.
 fn add_group_member_req(db: &str, group_name: &str, user_id: u64) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("addmember");
+    b.add_group_member(
+        "am",
+        shamir_query_builder::ddl::add_group_member(
+            shamir_query_builder::ddl::GroupRef::Name {
+                name: group_name.to_string(),
+            },
+            user_id,
+        ),
+    );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
-        batch: serde_json::from_value(json!({
-            "id": "addmember",
-            "queries": {
-                "am": {
-                    "add_group_member": { "name": group_name },
-                    "user": user_id
-                }
-            }
-        }))
-        .expect("parse add_group_member batch"),
+        batch: b.build(),
     }
 }
 
 /// Build a create_db request.
 fn create_db_req(db_name: &str) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("mkdb");
+    b.create_db("mk", shamir_query_builder::ddl::create_db(db_name));
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: "default".into(),
-        batch: serde_json::from_value(json!({
-            "id": "mkdb",
-            "queries": { "mk": { "create_db": db_name } }
-        }))
-        .expect("parse create_db"),
+        batch: b.build(),
     }
 }
 
 /// Build a create_repo + create_table request.
 fn create_repo_table_req(db_name: &str, table_name: &str) -> DbRequest {
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id("setup");
+    b.create_repo("mr", shamir_query_builder::ddl::create_repo("main"));
+    b.create_table("tb", shamir_query_builder::ddl::create_table(table_name));
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db_name.into(),
-        batch: serde_json::from_value(json!({
-            "id": "setup",
-            "queries": {
-                "mr": { "create_repo": "main" },
-                "tb": { "create_table": table_name, "repo": "main" }
-            }
-        }))
-        .expect("parse setup"),
+        batch: b.build(),
     }
 }
 

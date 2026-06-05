@@ -21,31 +21,31 @@ use serde_json::json;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
 use shamir_query_builder::doc;
 use shamir_query_builder::val::{col, func, lit};
 use shamir_query_builder::write::insert;
 use shamir_query_builder::{select, Query};
 
+fn to_req(b: &Batch) -> BatchRequest {
+    let bytes = b.to_msgpack().expect("msgpack encode");
+    rmp_serde::from_slice(&bytes).expect("msgpack decode")
+}
+
 /// In-memory ShamirDb with db "testdb", repo "main", table "users".
-///
-/// The `create_repo` batch is an admin op NOT covered by the builder,
-/// so it stays as raw `json!` + `serde_json::from_value`.
 async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await;
 
-    let setup: BatchRequest = serde_json::from_value(json!({
-        "id": "setup",
-        "queries": {
-            "repo": {
-                "create_repo": "main",
-                "engine": "in_memory",
-                "tables": ["users"]
-            }
-        }
-    }))
-    .unwrap();
-    shamir.execute("testdb", &setup).await.unwrap();
+    let mut b = Batch::new();
+    b.id("setup");
+    b.create_repo(
+        "repo",
+        ddl::create_repo("main")
+            .engine("in_memory")
+            .tables(["users"]),
+    );
+    shamir.execute("testdb", &to_req(&b)).await.unwrap();
     shamir
 }
 
@@ -86,7 +86,7 @@ async fn seed_users(shamir: &ShamirDb) {
             },
         ]),
     );
-    let insert_batch = batch.build();
+    let insert_batch = to_req(&batch);
     shamir.execute("testdb", &insert_batch).await.unwrap();
 }
 
@@ -100,7 +100,7 @@ async fn e2e_computed_value_persisted_on_insert() {
     let mut batch = Batch::new();
     batch.id("r");
     batch.query("all", Query::from("users").where_eq("name", "alice"));
-    let read = batch.build();
+    let read = to_req(&batch);
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["all"].records;
@@ -122,7 +122,7 @@ async fn e2e_filter_with_fn_call() {
         "match",
         Query::from("users").where_eq("name", func("strings/lower", [lit("ALICE")])),
     );
-    let read = batch.build();
+    let read = to_req(&batch);
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["match"].records;
@@ -148,7 +148,7 @@ async fn e2e_group_by_library_aggregate() {
             ])
             .group_by("city"),
     );
-    let read = batch.build();
+    let read = to_req(&batch);
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let groups = &resp.results["byCity"].records;
@@ -179,7 +179,7 @@ async fn e2e_select_scalar_function() {
             ])
             .where_eq("name", "alice"),
     );
-    let read = batch.build();
+    let read = to_req(&batch);
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["rows"].records;
