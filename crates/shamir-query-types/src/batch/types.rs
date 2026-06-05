@@ -19,7 +19,7 @@ use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleO
 use crate::call::CallOp;
 use crate::read::{QueryResult, ReadQuery};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
-use shamir_types::types::common::{TMap, TSet};
+use shamir_collections::{TMap, TSet};
 
 // ============================================================================
 // BATCH OPERATION ENUM

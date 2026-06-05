@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "server")]
 use shamir_types::access::ResourcePath;
 
 // ============================================================================
@@ -39,6 +40,7 @@ pub enum ResourceRef {
     FunctionNamespace { function_namespace: bool },
 }
 
+#[cfg(feature = "server")]
 impl ResourceRef {
     /// Convert into the engine-level [`ResourcePath`].
     pub fn to_path(&self) -> Option<ResourcePath> {
@@ -190,6 +192,7 @@ pub struct AccessTreeOp {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "server")]
     #[test]
     fn function_folder_ref_round_trip() {
         let r = ResourceRef::FunctionFolder {

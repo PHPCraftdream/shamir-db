@@ -6,7 +6,8 @@ description = "Pure DTOs for ShamirDB's SDBQL query language (Filter, ReadQuery,
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-shamir-types = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
+shamir-types = { path = "../shamir-types", optional = true }
 
 # Pure data dependencies — DTOs serialize to JSON / msgpack and use
 # ordered maps for deterministic iteration.
@@ -30,8 +31,9 @@ sha2       = { version = "0.10", optional = true }
 zeroize    = { version = "1", features = ["derive"], optional = true }
 
 [features]
-default = ["crypto"]
+default = ["crypto", "server"]
 crypto  = ["dep:hmac", "dep:sha2", "dep:zeroize"]
+server  = ["dep:shamir-types"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
