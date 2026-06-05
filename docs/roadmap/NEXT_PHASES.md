@@ -2,6 +2,13 @@
 
 # Next Phases — Overview & Index
 
+> **Historical (2026-06-05).** This was the forward index for the
+> **transactional** layer; all three phases below are now ✅ DONE, and the
+> subsequent DDL → access → write-lifecycle arc has also shipped. The
+> current actionable forward plan is **[`PLAN.md`](./PLAN.md)** (Consolidate
+> → Measure → Build the "I"). This file is kept for the transactional-phase
+> design history.
+
 **Status:** living index, revision **2026-05-29**. This is the single
 entry point to the post–Phase-A roadmap. It states where we stand, then
 points at three deep-dive design docs — one per forward phase — and
