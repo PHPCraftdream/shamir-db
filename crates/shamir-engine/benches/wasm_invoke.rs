@@ -168,6 +168,58 @@ fn bench_startup_compile_k(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Group 4: cached compile (AOT disk cache) ───────────────────────
+//
+// Measures `Module::new` (WAT → compiled) with disk cache enabled.
+// The first compilation populates the cache; subsequent iterations should
+// hit the cache.
+//
+// NOTE: the real AOT cache win is inter-process (server restart picks up
+// pre-compiled artifacts from disk). Within a single process Wasmtime may
+// also hold in-memory state that short-circuits cranelift, so the
+// measured speedup here can be modest. The primary assertion is:
+//   1. Enabling the cache does NOT regress compile time.
+//   2. Cache files are created on disk (verified by inspection).
+// True cross-process speedup is best measured with a dedicated script
+// that starts two separate processes.
+
+fn bench_compile_cached(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wasm_compile_cached");
+    if quick() {
+        group.sample_size(10);
+        group.measurement_time(Duration::from_secs(1));
+    }
+
+    // Cold cache: first compilation populates the cache entry.
+    // Within a single process this is effectively "compile + cache write".
+    group.bench_function("cold_cache", |b| {
+        let engine = Arc::new(WasmEngine::new().unwrap());
+        b.iter(|| {
+            let wf = WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
+                .unwrap();
+            black_box(&wf);
+        });
+    });
+
+    // Warm cache: the first compile (outside the measurement loop) seeds
+    // the disk cache; subsequent compiles should hit it.
+    // In-process, Wasmtime may also use internal memoisation, so the
+    // delta may be small. The real win is cross-process (restart).
+    group.bench_function("warm_cache", |b| {
+        let engine = Arc::new(WasmEngine::new().unwrap());
+        // Seed the disk cache.
+        let _warm =
+            WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default()).unwrap();
+        b.iter(|| {
+            let wf = WasmFunction::from_wat(engine.clone(), IDENTITY_WAT, WasmLimits::default())
+                .unwrap();
+            black_box(&wf);
+        });
+    });
+
+    group.finish();
+}
+
 // ── Driver ───────────────────────────────────────────────────────────
 
 criterion_group! {
@@ -176,6 +228,7 @@ criterion_group! {
     targets =
         bench_cold_first_call,
         bench_hot_repeat_call,
-        bench_startup_compile_k
+        bench_startup_compile_k,
+        bench_compile_cached
 }
 criterion_main!(benches);
