@@ -1752,9 +1752,11 @@ impl FunctionInvoker for ShamirFunctionInvoker {
         &self,
         op: &crate::query::CallOp,
         actor: &Actor,
-        _resolved_refs: &crate::types::common::TMap<String, QueryResult>,
+        resolved_refs: &crate::types::common::TMap<String, QueryResult>,
     ) -> Result<QueryResult, BatchError> {
-        // Convert positional Vec<FilterValue> params into Params.
+        // Convert positional Vec<FilterValue> params into Params, resolving
+        // `$query` references against `resolved_refs` (Phase 2). Literals
+        // pass through unchanged.
         //
         // Layout:
         //   - Each param at index i is stored under key "i" (positional access).
@@ -1765,7 +1767,7 @@ impl FunctionInvoker for ShamirFunctionInvoker {
         let mut params = crate::engine::function::Params::new();
         let mut args_list = Vec::with_capacity(op.params.len());
         for (i, fv) in op.params.iter().enumerate() {
-            let qv = filter_value_to_query_value(fv);
+            let qv = filter_value_to_query_value(fv, resolved_refs);
             let key: String = i.to_string();
             params.set(key, qv.clone());
             args_list.push(qv);
@@ -1795,10 +1797,15 @@ impl FunctionInvoker for ShamirFunctionInvoker {
 
 /// Convert a `FilterValue` literal to a `QueryValue`.
 ///
-/// Only literal variants are converted; `$query`, `$ref`, `$fn`, `$expr`,
-/// `$cond` are left as `QueryValue::Null` for now (Phase 2 will resolve
-/// `$query` refs through `resolved_refs`).
-fn filter_value_to_query_value(fv: &crate::query::FilterValue) -> crate::types::value::QueryValue {
+/// Literals (Null / Bool / Int / Float / String / Binary / Array) are mapped
+/// directly. `$query` / `QueryRef` variants are resolved against
+/// `resolved_refs` — the same value-first / records-second rules as the
+/// filter evaluator (Phase 2). Other dynamic variants (`$ref`, `$fn`, `$expr`,
+/// `$cond`) collapse to `Null` here; they are not meaningful as Call params.
+fn filter_value_to_query_value(
+    fv: &crate::query::FilterValue,
+    resolved_refs: &crate::types::common::TMap<String, QueryResult>,
+) -> crate::types::value::QueryValue {
     use crate::query::FilterValue;
     use crate::types::value::QueryValue;
 
@@ -1809,12 +1816,123 @@ fn filter_value_to_query_value(fv: &crate::query::FilterValue) -> crate::types::
         FilterValue::Float(f) => QueryValue::F64(*f),
         FilterValue::String(s) => QueryValue::Str(s.clone()),
         FilterValue::Binary(b) => QueryValue::Bin(b.clone()),
-        FilterValue::Array(arr) => {
-            QueryValue::List(arr.iter().map(filter_value_to_query_value).collect())
+        FilterValue::Array(arr) => QueryValue::List(
+            arr.iter()
+                .map(|v| filter_value_to_query_value(v, resolved_refs))
+                .collect(),
+        ),
+        FilterValue::QueryRef { alias, path } => {
+            let key = alias.strip_prefix('@').unwrap_or(alias.as_str());
+            let Some(qr) = resolved_refs.get(key) else {
+                return QueryValue::Null;
+            };
+            // Same value-first / records-second rule as the filter evaluator:
+            // a Call result lives in `value`; a Read result lives in `records`.
+            if let Some(value) = &qr.value {
+                json_value_to_query_value(value, path.as_deref())
+            } else if path.is_none() {
+                // No path + Read result: synthesize from the records array.
+                let arr: Vec<QueryValue> = qr
+                    .records
+                    .iter()
+                    .map(|r| json_value_to_query_value(r, None))
+                    .collect();
+                QueryValue::List(arr)
+            } else {
+                // Indexed/field path into records. Only the `[n]` form is
+                // meaningful without a record context; walk to the record
+                // then serialise it.
+                let path = path.as_deref().unwrap_or("");
+                if let Some(rest) = path.strip_prefix('[') {
+                    if let Some(end) = rest.find(']') {
+                        if let Ok(idx) = rest[..end].parse::<usize>() {
+                            if let Some(record) = qr.records.get(idx) {
+                                let after = &rest[end + 1..];
+                                if let Some(field_path) = after.strip_prefix('.') {
+                                    if let Some(field_val) = record.get(field_path) {
+                                        return json_value_to_query_value(field_val, None);
+                                    }
+                                    return QueryValue::Null;
+                                }
+                                return json_value_to_query_value(record, None);
+                            }
+                        }
+                    }
+                }
+                QueryValue::Null
+            }
         }
-        // $query, $ref, $fn, $expr, $cond — not resolved here (Phase 2).
+        // $ref / $fn / $expr / $cond — not meaningful as positional params.
         _ => QueryValue::Null,
     }
+}
+
+/// Convert a `serde_json::Value` (the wire representation used in
+/// `QueryResult.value` / `QueryResult.records`) into a `QueryValue`, with
+/// optional path navigation. Used to resolve `$query` refs inside Call
+/// params.
+fn json_value_to_query_value(
+    v: &serde_json::Value,
+    path: Option<&str>,
+) -> crate::types::value::QueryValue {
+    use crate::types::value::QueryValue;
+
+    let Some(target) = navigate_json_value(v, path) else {
+        return QueryValue::Null;
+    };
+    match target {
+        serde_json::Value::Null => QueryValue::Null,
+        serde_json::Value::Bool(b) => QueryValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                QueryValue::Int(i)
+            } else {
+                QueryValue::F64(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => QueryValue::Str(s.clone()),
+        serde_json::Value::Array(arr) => QueryValue::List(
+            arr.iter()
+                .map(|v| json_value_to_query_value(v, None))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => {
+            let mut out = crate::types::common::new_map();
+            for (k, vv) in map {
+                out.insert(k.clone(), json_value_to_query_value(vv, None));
+            }
+            QueryValue::Map(out)
+        }
+    }
+}
+
+/// Walk a path like `.field`, `[0]`, `[0].name` through a `serde_json::Value`.
+/// Mirrors `resolve_json_path` in the filter evaluator — duplicated here to
+/// keep `shamir-db` independent of `shamir-engine::query::filter::eval`
+/// (which is crate-private). Returns `None` on any miss / unsupported syntax.
+fn navigate_json_value<'a>(
+    mut cur: &'a serde_json::Value,
+    path: Option<&str>,
+) -> Option<&'a serde_json::Value> {
+    let Some(path) = path else {
+        return Some(cur);
+    };
+    let mut rest = path;
+    while !rest.is_empty() {
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            let end = after_dot.find(['.', '[']).unwrap_or(after_dot.len());
+            cur = cur.get(&after_dot[..end])?;
+            rest = &after_dot[end..];
+        } else if rest.starts_with('[') {
+            let bracket_end = rest.find(']')?;
+            let idx: usize = rest[1..bracket_end].parse().ok()?;
+            cur = cur.get(idx)?;
+            rest = &rest[bracket_end + 1..];
+        } else {
+            return None;
+        }
+    }
+    Some(cur)
 }
 
 /// Map the wire DTO into the storage struct without dragging the
