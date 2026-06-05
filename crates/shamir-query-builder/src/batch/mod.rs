@@ -8,6 +8,7 @@
 
 use serde_json::Value;
 use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
+use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::ReadQuery;
 use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
@@ -205,6 +206,12 @@ impl IntoBatchOp for DeleteOp {
 impl IntoBatchOp for crate::write::Delete {
     fn into_batch_op(self) -> BatchOp {
         BatchOp::Delete(self.build())
+    }
+}
+
+impl IntoBatchOp for CallOp {
+    fn into_batch_op(self) -> BatchOp {
+        BatchOp::Call(self)
     }
 }
 
@@ -682,6 +689,44 @@ impl Batch {
     /// Query the status of a migration.
     pub fn migration_status(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    // ── stored procedure call ────────────────────────────────────
+
+    /// Call a stored function with positional parameters.
+    ///
+    /// The function runs in the default repository (`"main"`).
+    /// Each parameter is converted to a [`FilterValue`], so you can pass
+    /// literals (`lit(1)`, `"hello"`) as well as `$query` references
+    /// from other batch handles.
+    pub fn call(
+        &mut self,
+        alias: impl Into<String>,
+        name: impl Into<String>,
+        params: impl IntoIterator<Item = impl Into<FilterValue>>,
+    ) -> Handle {
+        let op = CallOp {
+            call: name.into(),
+            params: params.into_iter().map(Into::into).collect(),
+            repo: "main".to_string(),
+        };
+        self.add_entry(alias, BatchOp::Call(op), true)
+    }
+
+    /// Call a stored function in a specific repository.
+    pub fn call_in_repo(
+        &mut self,
+        alias: impl Into<String>,
+        name: impl Into<String>,
+        repo: impl Into<String>,
+        params: impl IntoIterator<Item = impl Into<FilterValue>>,
+    ) -> Handle {
+        let op = CallOp {
+            call: name.into(),
+            params: params.into_iter().map(Into::into).collect(),
+            repo: repo.into(),
+        };
+        self.add_entry(alias, BatchOp::Call(op), true)
     }
 
     // ── escape hatches ────────────────────────────────────────────

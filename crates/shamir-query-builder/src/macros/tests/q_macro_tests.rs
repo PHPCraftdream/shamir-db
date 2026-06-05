@@ -601,6 +601,79 @@ fn q_write_composes_into_batch() {
     );
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Call statement tests
+// ══════════════════════════════════════════════════════════════════
+
+#[test]
+fn q_call_ident_name_with_literals() {
+    use shamir_query_types::call::CallOp;
+    use shamir_query_types::filter::FilterValue;
+
+    let op: CallOp = q!(call my_proc(1, "v"));
+    assert_eq!(op.call, "my_proc");
+    assert_eq!(op.repo, "main");
+    assert_eq!(op.params.len(), 2);
+    assert_eq!(op.params[0], FilterValue::Int(1));
+    assert_eq!(op.params[1], FilterValue::String("v".to_string()));
+}
+
+#[test]
+fn q_call_string_literal_name() {
+    use shamir_query_types::call::CallOp;
+
+    let op: CallOp = q!(call "reports/daily"(2024, "Q1"));
+    assert_eq!(op.call, "reports/daily");
+    assert_eq!(op.params.len(), 2);
+}
+
+#[test]
+fn q_call_no_args() {
+    use shamir_query_types::call::CallOp;
+
+    let op: CallOp = q!(call ping());
+    assert_eq!(op.call, "ping");
+    assert!(op.params.is_empty());
+}
+
+#[test]
+fn q_call_wire_json() {
+    use shamir_query_types::call::CallOp;
+
+    let op: CallOp = q!(call my_fn(42, "hello", true));
+    let json = serde_json::to_value(&op).unwrap();
+    let expected = serde_json::json!({
+        "call": "my_fn",
+        "params": [42, "hello", true],
+        "repo": "main"
+    });
+    assert_eq!(json, expected);
+}
+
+#[test]
+fn q_call_with_query_ref_expr() {
+    use crate::val::qref;
+    use shamir_query_types::call::CallOp;
+
+    let op: CallOp = q!(call process(qref("users", "[0].id"), 100));
+    assert_eq!(op.call, "process");
+    assert_eq!(op.params.len(), 2);
+    // First param is a $query ref
+    let json = serde_json::to_value(&op.params[0]).unwrap();
+    assert_eq!(json["$query"], "@users");
+    assert_eq!(json["path"], "[0].id");
+}
+
+#[test]
+fn q_call_composes_into_batch() {
+    use crate::batch::Batch;
+
+    let mut b = Batch::new();
+    b.op("p", q!(call my_proc(1, "x")));
+    let json = b.to_json_value().unwrap();
+    assert_eq!(json["queries"]["p"]["call"], "my_proc");
+}
+
 // ── insert with trailing comma in doc ────────────────────────────
 
 #[test]
