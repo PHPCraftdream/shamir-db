@@ -46,6 +46,10 @@ mod imp {
         fn host_db_query(tp: i32, tl: i32, fp: i32, fl: i32) -> i64;
         #[link_name = "http_fetch"]
         fn host_http_fetch(rp: i32, rl: i32) -> i64;
+
+        #[cfg(feature = "query-builder")]
+        #[link_name = "db_execute"]
+        fn host_db_execute(rp: i32, rl: i32) -> i64;
     }
 
     /// Encode `value` to msgpack, leak the bytes, and return `(ptr, len)`.
@@ -202,6 +206,24 @@ mod imp {
         let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
         rmp_serde::from_slice(bytes).unwrap_or(Value::Null)
     }
+
+    /// Execute a full msgpack-encoded `BatchRequest`; returns the msgpack
+    /// `BatchResponse` bytes (empty vec if the host returned nothing).
+    #[cfg(feature = "query-builder")]
+    pub fn db_execute(request: &[u8]) -> Vec<u8> {
+        let rp = request.as_ptr() as i32;
+        let rl = request.len() as i32;
+        // Safety: host reads the request bytes from guest memory synchronously.
+        let packed = unsafe { host_db_execute(rp, rl) };
+        let (ptr, len) = match unpack_ptr_len(packed) {
+            Some(pair) => pair,
+            None => return Vec::new(),
+        };
+        // Safety: the host wrote the response via shamir_alloc; the buffer
+        // remains valid for the rest of this call.
+        let bytes: &[u8] = unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        bytes.to_vec()
+    }
 }
 
 // ── Non-WASM target: stubs that panic ────────────────────────────────
@@ -252,6 +274,12 @@ mod imp {
 
     /// HTTP egress: send a request and get a response (host-only).
     pub fn http_fetch(_req: &Value) -> Value {
+        host_only()
+    }
+
+    /// Execute a full batch (host-only stub).
+    #[cfg(feature = "query-builder")]
+    pub fn db_execute(_request: &[u8]) -> Vec<u8> {
         host_only()
     }
 }

@@ -41,5 +41,9 @@ pub mod write;
 pub use query::{Conds, IntoSelectItem, Query};
 pub use wire::ToWire;
 
+// Re-export the batch request/response DTOs so a downstream guest (the SDK)
+// can name them without depending on shamir-query-types directly.
+pub use shamir_query_types::batch::{BatchRequest, BatchResponse};
+
 // Re-export proc-macros so users get `shamir_query_builder::{filter, q}`.
 pub use shamir_query_builder_macros::{filter, q};
