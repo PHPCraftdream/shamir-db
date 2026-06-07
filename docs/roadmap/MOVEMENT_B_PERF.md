@@ -124,6 +124,34 @@ after, when larger-dataset benches (10k on sled) provide the scale signal.
 explicit go/no-go on Opt O. **Commit:** `bench(engine): disk range-with-
 index selectivity sweep` + `docs(perf): mark Opt R/P done, re-grade O`.
 
+### B0-scale follow-up — the Opt O tripwire fired (2026-06-07)
+
+B0's narrow-1k measurement undersold O. A wide-record scale bench
+(`gen_user_wide`, ~30 fields; narrow ~1.6% range; 1-field SELECT —
+`range_query_wide_narrow_*_sled`, commit `57d6d33`) gives the missing
+signal:
+
+| N (wide records) | No index | With index | Speedup |
+|---|---|---|---|
+| 1000 | 18.16 ms | 483 µs | 37.6× |
+| 10000 | 171.8 ms | **3.03 ms** | **56.7×** |
+
+The 3.03 ms indexed path at 10k is **~83 % decode of K wide records**
+whose ~29 extra fields the 1-field SELECT throws away. A covering index
+serving `age` from the index entry eliminates that → **est. +5–10× more
+at scale/width.**
+
+**TRIPWIRE / decision rule for #218 (Opt O):**
+- **Build O** when the workload is **wide records + large dataset +
+  covered SELECT** (the shape above) — decode-of-K dominates and O
+  removes it. Justified.
+- **Don't build O** for narrow records / small datasets / `SELECT *` —
+  P + streaming already flattened the curve there (B0).
+- When built, O must compose with M2: covered query →
+  `index → projected InnerValue → inner_to_json` (streaming), touching
+  **neither data_store nor a Value tree**. `include: [...]` is a plain
+  `create_index` DTO field (OQL — no text parsing).
+
 ---
 
 ## Phase B1 — New-feature overhead guard benches (~1 day, regression-guard)
