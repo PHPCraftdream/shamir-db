@@ -295,11 +295,52 @@ projection }` in **one atomic envelope** — which is precisely the cell's
   envelope is the shared keystone for **three** wins (MVCC-2, index-only
   reads, non-tx posting consistency), which changes its cost/benefit.
 
-**Decision.** S3.3's index-only read is **deferred, gated on the atomic
-write-envelope**. The covering projection is already written and maintained
-(S3.2) and persists for free, so when the envelope lands the read-side is a
-clean, independent slice on a sound foundation. Shipping index-only before
-the envelope would be unsound under concurrent non-tx writes.
+**Decision.** S3.3's index-only read is **deferred**. The covering projection
+is already written and maintained (S3.2) and persists for free, so when the
+gating lands the read-side is a clean, independent slice on a sound
+foundation. Shipping index-only before it would be unsound under concurrent
+non-tx writes.
+
+The deterministic regression that pins this window —
+`covering_delete_window_exposes_stale_posting` (`7c09ee9`) — runs the real
+`TableManager::delete` against a `PausableInfoStore` that suspends the
+sorted-posting removal, and asserts that inside the window the record is gone
+(`count() == 0`) while the posting + its covering projection are still
+present. Green today (characterizes the bug); flips when the gating closes
+the window.
+
+### 4.2.1 — the gate is the *cheap* read-validation, not the MVCC-2 fix
+
+Refinement (2026-06-07): closing this window for index-only reads does **not**
+require the expensive MVCC-2 remedies of §4.1 (always-archive / commit-barrier
+/ version-log restructure). It requires only the **cheap, lock-free read half
+of the cell** — an **optimistic version stamp**, the in-memory analogue of
+Postgres's visibility map:
+
+- `RecordCell.version` already exists (S1.0, `2f12ba5`) — the authoritative
+  current version of the key.
+- The covering posting **embeds the version** it was written at (alongside the
+  projection in `physical_value`).
+- **Writer:** bump `cell.version` (one atomic store) as the *first* step, then
+  write data + postings. From that instant every stale posting is marked
+  distrusted.
+- **Index-only reader:** decode the posting, compare `posting.version` to
+  `cell.version` (one atomic load). Match + live ⇒ trust the projection (fast
+  path, no fetch); mismatch / tombstone ⇒ fall back to `get_many` (the existing
+  `None`-skip). In the delete window the version bump precedes the data delete,
+  so the lingering posting's version no longer matches ⇒ the reader falls back
+  ⇒ **no phantom**.
+
+This is per-key and lock-free — one atomic increment per write, one atomic load
+per read — so it preserves the zero-overhead-when-unwatched property and does
+**not** add the global barrier the §4.1 MVCC-2 fix would. It is a direct
+continuation of the already-landed S1.0 (`RecordCell.version`) + S3.2
+(projection). **So S3.3 is gated on this optimistic-version validation, which
+is cheap and buildable now — distinct from the heavier, still-deferred MVCC-2
+remedy (§4.1).** The full atomic write-tact (§1 latch) remains the deeper
+keystone for Level-3 (S2) and MVCC-2, but index-only reads do not need to wait
+for it. *(Contemplated; implementation deferred by decision — recorded here so
+the path is unambiguous when it resumes.)*
 
 ---
 
