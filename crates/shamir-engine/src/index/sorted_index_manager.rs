@@ -284,6 +284,7 @@ impl SortedIndexManager {
         &self,
         record_id: &RecordId,
         record: &InnerValue,
+        version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
         if self.indexes.is_empty() {
             return Ok(Vec::new());
@@ -294,7 +295,7 @@ impl SortedIndexManager {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
                 let value = if def.is_covering() {
-                    build_covering_projection(record, def)
+                    build_covering_projection(record, def, version)
                 } else {
                     Bytes::new()
                 };
@@ -309,7 +310,11 @@ impl SortedIndexManager {
     /// pass, snapshotting `iter_indexes()` ONCE (the per-row
     /// `plan_record_created` re-snapshots every call). Used by the
     /// tx batch insert path.
-    pub fn plan_records_created_batch<'a, I>(&self, items: I) -> DbResult<Vec<IndexWriteOp>>
+    pub fn plan_records_created_batch<'a, I>(
+        &self,
+        items: I,
+        version: u64,
+    ) -> DbResult<Vec<IndexWriteOp>>
     where
         I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
     {
@@ -323,7 +328,7 @@ impl SortedIndexManager {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
                     let key = self.build_entry_key(def.name_interned, &encoded, rid);
                     let pv = if def.is_covering() {
-                        build_covering_projection(value, def)
+                        build_covering_projection(value, def, version)
                     } else {
                         Bytes::new()
                     };
@@ -340,6 +345,7 @@ impl SortedIndexManager {
         record_id: &RecordId,
         old: &InnerValue,
         new: &InnerValue,
+        version: u64,
     ) -> DbResult<Vec<IndexWriteOp>> {
         if self.indexes.is_empty() {
             return Ok(Vec::new());
@@ -351,13 +357,16 @@ impl SortedIndexManager {
             let new_enc = extract_and_encode(new, &def.field_path)?;
             // For covering indexes, also rewrite the posting when the
             // projected values changed even if the indexed key did not.
+            // Both old and new are built with the same `version` so that
+            // the version bytes are identical and do not spuriously trigger
+            // a rewrite when only the version changed.
             let old_proj = if def.is_covering() {
-                Some(build_covering_projection(old, def))
+                Some(build_covering_projection(old, def, version))
             } else {
                 None
             };
             let new_proj = if def.is_covering() {
-                Some(build_covering_projection(new, def))
+                Some(build_covering_projection(new, def, version))
             } else {
                 None
             };
@@ -440,8 +449,9 @@ impl SortedIndexManager {
         &self,
         record_id: &RecordId,
         record: &InnerValue,
+        version: u64,
     ) -> DbResult<()> {
-        let ops = self.plan_record_created(record_id, record)?;
+        let ops = self.plan_record_created(record_id, record, version)?;
         self.apply_ops(&ops).await
     }
 
@@ -451,8 +461,9 @@ impl SortedIndexManager {
         record_id: &RecordId,
         old: &InnerValue,
         new: &InnerValue,
+        version: u64,
     ) -> DbResult<()> {
-        let ops = self.plan_record_updated(record_id, old, new)?;
+        let ops = self.plan_record_updated(record_id, old, new, version)?;
         self.apply_ops(&ops).await
     }
 
@@ -461,7 +472,7 @@ impl SortedIndexManager {
     /// `Store::set_many` call. Borrow-only — no `InnerValue` clones
     /// except for covering-index projection (unavoidable: projection
     /// requires a deep clone of the leaf value).
-    pub async fn on_records_created_batch<'a, I>(&self, items: I) -> DbResult<()>
+    pub async fn on_records_created_batch<'a, I>(&self, items: I, version: u64) -> DbResult<()>
     where
         I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
     {
@@ -475,7 +486,7 @@ impl SortedIndexManager {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
                     let key = self.build_entry_key(def.name_interned, &encoded, rid);
                     let pv = if def.is_covering() {
-                        build_covering_projection(value, def)
+                        build_covering_projection(value, def, version)
                     } else {
                         Bytes::new()
                     };
@@ -915,7 +926,19 @@ type CoveringProjection = Vec<(String, InnerValue)>;
 ///
 /// Returns `Bytes::new()` when no fields could be resolved (backward-compat:
 /// write side acts as if no projection; read side sees empty value).
-fn build_covering_projection(record: &InnerValue, def: &SortedIndexDefinition) -> Bytes {
+///
+/// When the projection is non-empty the returned bytes are a **versioned
+/// envelope**:
+/// ```text
+/// [8 bytes: version as u64 little-endian] ++ [msgpack: Vec<(String, InnerValue)>]
+/// ```
+/// The `version` parameter should be the MVCC write version for the record
+/// being indexed (pass `0` when no MVCC store is attached).
+fn build_covering_projection(
+    record: &InnerValue,
+    def: &SortedIndexDefinition,
+    version: u64,
+) -> Bytes {
     let mut projection: CoveringProjection = Vec::new();
     for (path_strs, path_ids) in def
         .included_fields
@@ -936,9 +959,30 @@ fn build_covering_projection(record: &InnerValue, def: &SortedIndexDefinition) -
     // Use MessagePack (rmp_serde) because InnerValue's Deserialize impl
     // relies on `deserialize_any`, which bincode does not support.
     match rmp_serde::to_vec_named(&projection) {
-        Ok(bytes) => Bytes::from(bytes),
+        Ok(msgpack) => {
+            let mut out = version.to_le_bytes().to_vec();
+            out.extend_from_slice(&msgpack);
+            Bytes::from(out)
+        }
         Err(_) => Bytes::new(),
     }
+}
+
+/// Decode a versioned covering-projection envelope written by
+/// `build_covering_projection`. Returns `None` for an empty value, a
+/// value shorter than 8 bytes, or one whose msgpack body fails to
+/// decode (callers treat `None` as "fall back to a full fetch").
+///
+/// Used by slice S3.3 (index-only read path). The `#[allow(dead_code)]`
+/// suppresses the lint until that slice wires the call site.
+#[allow(dead_code)]
+pub(crate) fn decode_covering_projection(value: &[u8]) -> Option<(u64, Vec<(String, InnerValue)>)> {
+    if value.len() < 8 {
+        return None;
+    }
+    let version = u64::from_le_bytes(value[..8].try_into().ok()?);
+    let projection: Vec<(String, InnerValue)> = rmp_serde::from_slice(&value[8..]).ok()?;
+    Some((version, projection))
 }
 
 /// Extract the value at `field_path` from a record and encode it via

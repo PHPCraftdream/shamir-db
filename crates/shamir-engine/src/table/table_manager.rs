@@ -853,7 +853,7 @@ impl TableManager {
                 .plan_record_created_unique(&rid, rec)
                 .await?,
         );
-        ops.extend(self.sorted_indexes.plan_record_created(&rid, rec)?);
+        ops.extend(self.sorted_indexes.plan_record_created(&rid, rec, 0)?);
         Ok(ops)
     }
 
@@ -873,7 +873,7 @@ impl TableManager {
                 .plan_record_updated_unique(&rid, old, new)
                 .await?,
         );
-        ops.extend(self.sorted_indexes.plan_record_updated(&rid, old, new)?);
+        ops.extend(self.sorted_indexes.plan_record_updated(&rid, old, new, 0)?);
         Ok(ops)
     }
 
@@ -1105,7 +1105,7 @@ impl TableManager {
                 .plan_records_created_unique_batch(pairs())
                 .await?,
         );
-        legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs())?);
+        legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
         index_ops.extend(legacy_ops);
 
         // 6. Single ensure_table_staging, then a tight set loop. We
@@ -1312,7 +1312,9 @@ impl TableManager {
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             for (id, record) in batch? {
-                self.sorted_indexes.on_record_created(&id, &record).await?;
+                self.sorted_indexes
+                    .on_record_created(&id, &record, 0)
+                    .await?;
             }
         }
         Ok(())
@@ -1389,13 +1391,15 @@ impl TableManager {
         self.index_manager
             .on_record_created_unique(&id, value)
             .await?;
-        self.sorted_indexes.on_record_created(&id, value).await?;
+        self.sorted_indexes
+            .on_record_created(&id, value, version)
+            .await?;
         self.index2_on_insert(&id, value).await;
 
         // SSI footprint: record this non-tx insert so Serializable txs see it.
         let ssi_ops = self
             .sorted_indexes
-            .plan_record_created(&id, value)
+            .plan_record_created(&id, value, version)
             .unwrap_or_default();
         self.record_nontx_ssi_footprint(version, &ssi_ops);
 
@@ -1528,7 +1532,7 @@ impl TableManager {
             .on_records_created_unique_batch(pairs_iter())
             .await?;
         self.sorted_indexes
-            .on_records_created_batch(pairs_iter())
+            .on_records_created_batch(pairs_iter(), batch_version)
             .await?;
         for (id, value) in pairs_iter() {
             self.index2_on_insert(id, value).await;
@@ -1547,7 +1551,7 @@ impl TableManager {
         // One CommitWriteRecord at batch_version with all SetPosting keys.
         let ssi_ops = self
             .sorted_indexes
-            .plan_records_created_batch(ids.iter().zip(values.iter()))
+            .plan_records_created_batch(ids.iter().zip(values.iter()), batch_version)
             .unwrap_or_default();
         self.record_nontx_ssi_footprint(batch_version, &ssi_ops);
 
@@ -1678,10 +1682,12 @@ impl TableManager {
             self.index_manager
                 .on_record_created_unique(&id, value)
                 .await?;
-            self.sorted_indexes.on_record_created(&id, value).await?;
+            self.sorted_indexes
+                .on_record_created(&id, value, version)
+                .await?;
             self.index2_on_insert(&id, value).await;
             self.sorted_indexes
-                .plan_record_created(&id, value)
+                .plan_record_created(&id, value, version)
                 .unwrap_or_default()
         } else if let Some(ref old) = old_value {
             self.index_manager
@@ -1691,11 +1697,11 @@ impl TableManager {
                 .on_record_updated_unique(&id, old, value)
                 .await?;
             self.sorted_indexes
-                .on_record_updated(&id, old, value)
+                .on_record_updated(&id, old, value, version)
                 .await?;
             self.index2_on_update(&id, old, value).await;
             self.sorted_indexes
-                .plan_record_updated(&id, old, value)
+                .plan_record_updated(&id, old, value, version)
                 .unwrap_or_default()
         } else {
             vec![]

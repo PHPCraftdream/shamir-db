@@ -26,7 +26,7 @@ use shamir_types::types::value::InnerValue;
 use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
 use crate::index2::write_ops::IndexWriteOp;
 
-// Needed for S3.2 covering-index projection decode.
+use crate::index::sorted_index_manager::decode_covering_projection;
 extern crate rmp_serde;
 
 // ---------------------------------------------------------------------------
@@ -107,7 +107,7 @@ async fn on_record_created_then_lookup_range_inclusive() {
     for score in 0..10i64 {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
         ids.push((score, id));
     }
 
@@ -133,7 +133,7 @@ async fn lookup_range_open_lower_bound() {
     for score in 1..=5i64 {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     // (-∞ .. 3] → 1, 2, 3.
@@ -153,7 +153,7 @@ async fn lookup_range_open_upper_bound() {
     for score in 1..=5i64 {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     // [3 .. ∞) → 3, 4, 5.
@@ -173,7 +173,7 @@ async fn lookup_range_fully_unbounded_returns_all() {
     for score in 1..=7i64 {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
     let result = mgr.lookup_range(101, None, None).await.unwrap();
     assert_eq!(result.len(), 7);
@@ -189,7 +189,7 @@ async fn lookup_range_handles_negative_values() {
     for &s in &scores {
         let id = RecordId::new();
         let rec = record_with_int(201, s);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     // [-10 ..= 10] → five matches: -10, -1, 0, 1, 10.
@@ -210,7 +210,7 @@ async fn lookup_range_strings_lexicographic() {
     for w in &words {
         let id = RecordId::new();
         let rec = record_with_str(201, w);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     // ["beta" ..= "gamma"] → beta, delta, epsilon, gamma (lex order).
@@ -231,7 +231,7 @@ async fn lookup_min_returns_smallest() {
     for score in [50, 10, 30, 5, 20] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
         if score == 5 {
             min_id_for_score = Some(id);
         }
@@ -260,7 +260,7 @@ async fn lookup_first_k_in_value_order() {
     for score in [50, 10, 30, 5, 20, 40] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
         score_to_id.push((score, id));
     }
     let got = mgr.lookup_first_k(101, 3).await.unwrap();
@@ -280,7 +280,7 @@ async fn lookup_first_k_zero_returns_empty() {
         .unwrap();
     let id = RecordId::new();
     let rec = record_with_int(201, 42);
-    mgr.on_record_created(&id, &rec).await.unwrap();
+    mgr.on_record_created(&id, &rec, 1).await.unwrap();
     let got = mgr.lookup_first_k(101, 0).await.unwrap();
     assert!(got.is_empty());
 }
@@ -295,7 +295,7 @@ async fn lookup_max_returns_largest() {
     for score in [50, 10, 30, 5, 20] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
         if score == 50 {
             max_id_for_score = Some(id);
         }
@@ -324,7 +324,7 @@ async fn lookup_last_k_in_value_desc_order() {
     for score in [50, 10, 30, 5, 20, 40] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
         score_to_id.push((score, id));
     }
     let got = mgr.lookup_last_k(101, 3).await.unwrap();
@@ -344,7 +344,7 @@ async fn lookup_last_k_zero_returns_empty() {
         .unwrap();
     let id = RecordId::new();
     let rec = record_with_int(201, 42);
-    mgr.on_record_created(&id, &rec).await.unwrap();
+    mgr.on_record_created(&id, &rec, 1).await.unwrap();
     let got = mgr.lookup_last_k(101, 0).await.unwrap();
     assert!(got.is_empty());
 }
@@ -359,7 +359,7 @@ async fn lookup_last_k_more_than_present_returns_all_in_desc() {
     for score in [3, 1, 2] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
         ids_by_score.push((score, id));
     }
     let got = mgr.lookup_last_k(101, 100).await.unwrap();
@@ -379,8 +379,8 @@ async fn on_record_updated_moves_the_entry() {
     let id = RecordId::new();
     let old = record_with_int(201, 10);
     let new = record_with_int(201, 100);
-    mgr.on_record_created(&id, &old).await.unwrap();
-    mgr.on_record_updated(&id, &old, &new).await.unwrap();
+    mgr.on_record_created(&id, &old, 1).await.unwrap();
+    mgr.on_record_updated(&id, &old, &new, 2).await.unwrap();
 
     // Old slot is empty; new slot contains the id.
     let r_old = mgr
@@ -403,9 +403,9 @@ async fn on_record_updated_with_same_value_is_noop() {
         .unwrap();
     let id = RecordId::new();
     let rec = record_with_int(201, 10);
-    mgr.on_record_created(&id, &rec).await.unwrap();
+    mgr.on_record_created(&id, &rec, 1).await.unwrap();
     // Identical "old" and "new" — same encoded value, skip.
-    mgr.on_record_updated(&id, &rec, &rec).await.unwrap();
+    mgr.on_record_updated(&id, &rec, &rec, 2).await.unwrap();
 
     let r = mgr
         .lookup_range(101, Some(&enc_i64(10)), Some(&enc_i64(10)))
@@ -422,7 +422,7 @@ async fn on_record_deleted_removes_entry() {
         .unwrap();
     let id = RecordId::new();
     let rec = record_with_int(201, 42);
-    mgr.on_record_created(&id, &rec).await.unwrap();
+    mgr.on_record_created(&id, &rec, 1).await.unwrap();
     mgr.on_record_deleted(&id, &rec).await.unwrap();
     let r = mgr
         .lookup_range(101, Some(&enc_i64(42)), Some(&enc_i64(42)))
@@ -443,7 +443,7 @@ async fn missing_field_is_skipped_silently() {
     m.insert(InternerKey::new(202), InnerValue::Int(99));
     let rec = InnerValue::Map(m);
     // Must not error; just no entry written.
-    mgr.on_record_created(&id, &rec).await.unwrap();
+    mgr.on_record_created(&id, &rec, 1).await.unwrap();
     let r = mgr.lookup_range(101, None, None).await.unwrap();
     assert!(
         r.is_empty(),
@@ -460,7 +460,7 @@ async fn drop_index_removes_definition_and_entries() {
     for score in 1..=5i64 {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
     let dropped = mgr.drop_index(101).await.unwrap();
     assert!(dropped);
@@ -529,10 +529,10 @@ async fn string_prefix_does_not_match_longer_value() {
     // Insert two records: one with value "a", one with value "aa".
     let rid_a = RecordId::new();
     let rid_aa = RecordId::new();
-    mgr.on_record_created(&rid_a, &record_with_str(201, "a"))
+    mgr.on_record_created(&rid_a, &record_with_str(201, "a"), 1)
         .await
         .unwrap();
-    mgr.on_record_created(&rid_aa, &record_with_str(201, "aa"))
+    mgr.on_record_created(&rid_aa, &record_with_str(201, "aa"), 1)
         .await
         .unwrap();
 
@@ -577,7 +577,7 @@ async fn lookup_range_tx_none_equals_lookup_range() {
     for score in [3, 1, 7, 5, 2] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     let a = mgr.lookup_range(101, None, None).await.unwrap();
@@ -594,7 +594,7 @@ async fn lookup_min_max_tx_none_equal_non_tx() {
     for score in [50, 10, 30, 5, 20] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     assert_eq!(
@@ -616,7 +616,7 @@ async fn lookup_first_last_k_tx_none_equal_non_tx() {
     for score in [50, 10, 30, 5, 20, 40] {
         let id = RecordId::new();
         let rec = record_with_int(201, score);
-        mgr.on_record_created(&id, &rec).await.unwrap();
+        mgr.on_record_created(&id, &rec, 1).await.unwrap();
     }
 
     assert_eq!(
@@ -641,7 +641,7 @@ async fn plan_record_created_returns_sorted_posting() {
         .unwrap();
     let rid = RecordId::new();
     let rec = record_with_int(201, 42);
-    let ops = mgr.plan_record_created(&rid, &rec).unwrap();
+    let ops = mgr.plan_record_created(&rid, &rec, 0).unwrap();
     assert_eq!(ops.len(), 1);
     match &ops[0] {
         IndexWriteOp::SetPosting { key, value } => {
@@ -687,10 +687,10 @@ async fn equivalence_plan_apply_vs_direct() {
     let rec = record_with_int(201, 77);
 
     // Direct wrapper path.
-    mgr_a.on_record_created(&rid, &rec).await.unwrap();
+    mgr_a.on_record_created(&rid, &rec, 1).await.unwrap();
 
     // Plan + manual apply path.
-    let ops = mgr_b.plan_record_created(&rid, &rec).unwrap();
+    let ops = mgr_b.plan_record_created(&rid, &rec, 1).unwrap();
     for op in &ops {
         match op {
             IndexWriteOp::SetPosting { key, value } => {
@@ -850,9 +850,11 @@ async fn all_sorted_entries(
     out
 }
 
-/// Decode the msgpack-encoded projection from a physical_value.
+/// Decode the versioned covering-projection envelope from a physical_value.
 fn decode_projection(value: &bytes::Bytes) -> Vec<(String, InnerValue)> {
-    rmp_serde::from_slice(value.as_ref()).expect("decode projection")
+    decode_covering_projection(value.as_ref())
+        .expect("decode projection")
+        .1
 }
 
 // -----------------------------------------------------------------------
@@ -866,7 +868,7 @@ async fn covering_insert_produces_nonempty_projection() {
 
     let rid = RecordId::new();
     let rec = record_score_email(42, "alice@example.com");
-    mgr.on_record_created(&rid, &rec).await.unwrap();
+    mgr.on_record_created(&rid, &rec, 1).await.unwrap();
 
     let entries = all_sorted_entries(&info_store, COVERING_INDEX_NAME).await;
     assert_eq!(entries.len(), 1, "exactly one posting");
@@ -895,8 +897,8 @@ async fn covering_update_refreshes_projection() {
     let rid = RecordId::new();
     let old = record_score_email(10, "before@example.com");
     let new = record_score_email(10, "after@example.com");
-    mgr.on_record_created(&rid, &old).await.unwrap();
-    mgr.on_record_updated(&rid, &old, &new).await.unwrap();
+    mgr.on_record_created(&rid, &old, 1).await.unwrap();
+    mgr.on_record_updated(&rid, &old, &new, 2).await.unwrap();
 
     let entries = all_sorted_entries(&info_store, COVERING_INDEX_NAME).await;
     assert_eq!(entries.len(), 1);
@@ -918,7 +920,7 @@ async fn covering_delete_removes_projection() {
 
     let rid = RecordId::new();
     let rec = record_score_email(7, "gone@example.com");
-    mgr.on_record_created(&rid, &rec).await.unwrap();
+    mgr.on_record_created(&rid, &rec, 1).await.unwrap();
     mgr.on_record_deleted(&rid, &rec).await.unwrap();
 
     let entries = all_sorted_entries(&info_store, COVERING_INDEX_NAME).await;
@@ -939,7 +941,7 @@ async fn non_covering_index_physical_value_is_empty() {
 
     let rid = RecordId::new();
     let rec = record_with_int(201, 99);
-    mgr.on_record_created(&rid, &rec).await.unwrap();
+    mgr.on_record_created(&rid, &rec, 1).await.unwrap();
 
     let entries = all_sorted_entries(&info_store, 101).await;
     assert_eq!(entries.len(), 1);
@@ -974,7 +976,7 @@ async fn covering_backfill_produces_projections() {
     mgr.register(covering_def()).await.unwrap();
     // Backfill.
     for (id, rec) in &records {
-        mgr.on_record_created(id, rec).await.unwrap();
+        mgr.on_record_created(id, rec, 1).await.unwrap();
     }
 
     let entries = all_sorted_entries(&info_store, COVERING_INDEX_NAME).await;
@@ -1008,7 +1010,7 @@ async fn covering_projection_survives_reopen() {
             .await
             .unwrap();
         mgr.register(covering_def()).await.unwrap();
-        mgr.on_record_created(&rid, &rec).await.unwrap();
+        mgr.on_record_created(&rid, &rec, 1).await.unwrap();
     }
 
     // Open a new manager on the same store — physical entries survive.
@@ -1059,7 +1061,7 @@ async fn plan_record_created_covering_returns_nonempty_value() {
 
     let rid = RecordId::new();
     let rec = record_score_email(100, "plan@test.com");
-    let ops = mgr.plan_record_created(&rid, &rec).unwrap();
+    let ops = mgr.plan_record_created(&rid, &rec, 42).unwrap();
     assert_eq!(ops.len(), 1);
     match &ops[0] {
         IndexWriteOp::SetPosting { key: _, value } => {
@@ -1067,11 +1069,55 @@ async fn plan_record_created_covering_returns_nonempty_value() {
                 !value.is_empty(),
                 "plan_record_created must embed projection for covering index"
             );
-            let proj = decode_projection(value);
+            // Verify the versioned envelope: decode_covering_projection must
+            // return the correct version AND the correct projection content.
+            let (ver, proj) =
+                decode_covering_projection(value.as_ref()).expect("envelope must decode");
+            assert_eq!(ver, 42, "version must be threaded into the envelope");
             assert_eq!(proj.len(), 1);
             assert_eq!(proj[0].0, "email");
             assert_eq!(proj[0].1, InnerValue::Str("plan@test.com".to_string()));
         }
         other => panic!("expected SetPosting, got {other:?}"),
     }
+}
+
+// -----------------------------------------------------------------------
+// Test 8: decode_covering_projection defensive cases
+// -----------------------------------------------------------------------
+
+#[test]
+fn decode_covering_projection_empty_returns_none() {
+    // Empty slice → None (no version prefix, old-format guard).
+    assert!(decode_covering_projection(&[]).is_none());
+}
+
+#[test]
+fn decode_covering_projection_too_short_returns_none() {
+    // 7 bytes — less than the 8-byte version prefix → None.
+    assert!(decode_covering_projection(&[0u8; 7]).is_none());
+}
+
+#[test]
+fn decode_covering_projection_invalid_msgpack_returns_none() {
+    // 8-byte version prefix followed by garbage bytes that are not valid msgpack.
+    let mut bad = 99u64.to_le_bytes().to_vec();
+    bad.extend_from_slice(&[0xC1u8; 16]); // 0xC1 is reserved/invalid in msgpack
+    assert!(decode_covering_projection(&bad).is_none());
+}
+
+#[test]
+fn decode_covering_projection_roundtrip() {
+    // Manually build a valid versioned envelope and verify roundtrip.
+    let projection: Vec<(String, InnerValue)> = vec![("score".to_string(), InnerValue::Int(77))];
+    let msgpack = rmp_serde::to_vec_named(&projection).unwrap();
+    let version: u64 = 0xDEAD_BEEF;
+    let mut envelope = version.to_le_bytes().to_vec();
+    envelope.extend_from_slice(&msgpack);
+
+    let (got_ver, got_proj) = decode_covering_projection(&envelope).expect("must decode");
+    assert_eq!(got_ver, version);
+    assert_eq!(got_proj.len(), 1);
+    assert_eq!(got_proj[0].0, "score");
+    assert_eq!(got_proj[0].1, InnerValue::Int(77));
 }
