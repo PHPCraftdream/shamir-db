@@ -309,6 +309,54 @@ slots in with Movement A.
 
 ---
 
+## Opt O verdict (S3.3 A4 measurement, 2026-06-07)
+
+Covering index-only read (S3.3 A0–A3) shipped and is **correct** (versioned
+posting + cell `hwm` + freshness validation ⇒ no phantom; verified). The A4
+A/B benchmark (`range_query_wide_*_with[_covering]_index_sled`, sled, warm
+MemBuffer cache) measured:
+
+| regime (n=10000) | non-covering full-fetch | covering index-only | Δ |
+|---|---|---|---|
+| narrow range (~1.6% match) | 3.63 ms | 3.79 ms | +4% slower |
+| high-K range (~100% match) | 214.9 ms | 236.1 ms | +10% slower |
+
+**Finding:** index-only is a **net CPU pessimization in the warm-cache,
+moderately-wide regime** — `get_many` is batched and records are cache-hot, so
+the fetch it avoids is nearly free, while the per-row work it adds (decode
+projection + `live_version` validate + Map alloc + re-intern) is not. The
+premise "avoiding fetch+decode is a large win" does not hold here.
+
+**What the −10% buys (the trade is real, just not latency-in-the-easy-case):**
+- **Width-independence** — full-fetch cost ∝ record width (decode all fields /
+  blobs); index-only ∝ projection size. The premium is flat ~10% at ~30 fields;
+  it inverts to a large win as records widen (blobs, 100s of fields).
+- **I/O-independence** — on a cold cache / dataset > RAM, full-fetch does K
+  random record reads; index-only reads only the index range. The CPU premium
+  becomes an I/O win when fetches are not free.
+- **Cache non-pollution** — index-only never pulls K wide records through the
+  buffer, preserving the working set under concurrent load.
+
+**Decision:** covering index-only stays **opt-in via the explicit covering
+index DDL** (`include`) — the Postgres model where a covering index is a
+deliberate cost/benefit choice. It is NOT enabled for non-covering indexes and
+does not touch the non-eligible read path → **no default regression**.
+Beautiful follow-ups, deferred until a workload needs them:
+- **terminal-form projection** (store the interned-key `InnerValue` / M2-JSON
+  fragment in the posting) to shrink the reconstruction premium toward zero;
+- **width-ratio / cardinality cost gate** so the planner engages index-only
+  only when `record_size / projection_size` (or estimated cache-miss cost) is
+  high — turning the premium into pure upside;
+- a **cold-cache / blob-wide** bench to calibrate that gate.
+
+A0–A3 commits: `76ffd81` (versioned posting), `134de11` (cell hwm + bump-first),
+`5ff26d2` (validated index-only read). The cell `hwm` + bump-first stand on
+their own as the foundation for Level-3 (S2) and the MVCC-2 fix, independent of
+the read-side verdict.
+
+---
+
 _Plan revision 2026-06-07 — Movement B re-scoped after verifying R+P
-shipped and O remains. Next: B0 (re-baseline) decides whether Opt O earns
-its week. Update as cycles land._
+shipped and O remains. Opt O (covering) implemented + measured: correct, but a
+warm-cache CPU premium → opt-in via covering DDL; gate/terminal-form deferred.
+Update as cycles land._

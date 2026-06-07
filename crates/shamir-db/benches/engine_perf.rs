@@ -288,6 +288,37 @@ async fn create_sorted_index(shamir: &ShamirDb, table: &str, index_name: &str, f
     create_index_inner(shamir, table, index_name, field, false, true).await
 }
 
+/// Like `create_sorted_index` but also sets `include: [[include_field]]` so
+/// the index stores the projected value inline. A query that SELECTs only the
+/// included fields can be answered entirely from the index (A3 covering path)
+/// without fetching or decoding the full record.
+async fn create_covering_sorted_index(
+    shamir: &ShamirDb,
+    table: &str,
+    index_name: &str,
+    field: &str,
+    include_field: &str,
+) {
+    let req: BatchRequest = serde_json::from_value(json!({
+        "id": "idx",
+        "queries": {
+            "i": {
+                "create_index": index_name,
+                "table": table,
+                "fields": [[field]],
+                "unique": false,
+                "sorted": true,
+                "include": [[include_field]]
+            }
+        }
+    }))
+    .expect("parse covering idx batch");
+    shamir
+        .execute("bench", &req)
+        .await
+        .expect("create covering index");
+}
+
 async fn create_index_inner(
     shamir: &ShamirDb,
     table: &str,
@@ -1617,6 +1648,128 @@ fn bench_range_query_wide_narrow_with_index_sled(c: &mut Criterion) {
     group.finish();
 }
 
+/// Wide-record range query WITH a **covering** sorted index on age + narrow
+/// SELECT ["age"]. The index stores the `age` value inline (`include: [["age"]]`),
+/// so the engine can answer the query entirely from the index entry without
+/// fetching or decoding the full wide record (A3 covering index-only path).
+/// Compare against `bench_range_query_wide_narrow_with_index_sled` (non-covering)
+/// to isolate the decode-wide-record cost that Opt O is designed to eliminate.
+fn bench_range_query_wide_narrow_with_covering_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_wide_narrow_with_covering_index_sled");
+
+    for &n in sweep_sizes() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users_wide(&s, n).await;
+            create_covering_sorted_index(&s, "users", "by_age_cov", "age", "age").await;
+            s
+        });
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                // Narrow SELECT ["age"] — covered by the index; A3 serves it index-only.
+                let req = req_range_age_narrow_wide();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+/// High-K narrow projection: SELECT age WHERE age BETWEEN 18 AND 77.
+/// `age = 18 + (i*37)%60` ∈ [18,77], so this matches ~100% of rows. This
+/// is the regime where a covering index should pay off: the result set is
+/// large, every matched record is wide, but only `age` is projected — so
+/// avoiding the fetch+decode of the full record for every row is a big win.
+fn req_range_age_highk_wide() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "r",
+        "queries": {
+            "r": {
+                "from": "users",
+                "where": { "op": "between", "field": ["age"], "from": 18, "to": 77 },
+                "select": {
+                    "items": [
+                        { "type": "field", "path": ["age"] }
+                    ]
+                }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+/// High-K, NON-covering sorted index on age + narrow SELECT ["age"]. The
+/// range matches ~all rows, so the engine fetches and fully decodes every
+/// wide record just to project `age`. Baseline for the covering comparison.
+fn bench_range_query_wide_highk_with_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_wide_highk_with_index_sled");
+
+    for &n in sweep_sizes() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users_wide(&s, n).await;
+            create_sorted_index(&s, "users", "by_age", "age").await;
+            s
+        });
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age_highk_wide();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+/// High-K, COVERING sorted index on age include age + narrow SELECT ["age"].
+/// The range matches ~all rows; A3 serves each from the index posting's
+/// projection without fetching/decoding the wide record. Compare against
+/// `bench_range_query_wide_highk_with_index_sled` to quantify the covering
+/// win in its intended large-result-set / narrow-projection regime.
+fn bench_range_query_wide_highk_with_covering_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_wide_highk_with_covering_index_sled");
+
+    for &n in sweep_sizes() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users_wide(&s, n).await;
+            create_covering_sorted_index(&s, "users", "by_age_cov", "age", "age").await;
+            s
+        });
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                let req = req_range_age_highk_wide();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
 /// Steady-state throughput: 10 000 inserts in one batch into a
 /// fresh MemBuffer-wrapped DB. Long enough that the flusher
 /// engages and the LRU is well past its warmup. Contrast with
@@ -1992,6 +2145,9 @@ criterion_group! {
     bench_range_query_narrow_with_index_sled,
     bench_range_query_wide_narrow_no_index_sled,
     bench_range_query_wide_narrow_with_index_sled,
+    bench_range_query_wide_narrow_with_covering_index_sled,
+    bench_range_query_wide_highk_with_index_sled,
+    bench_range_query_wide_highk_with_covering_index_sled,
     bench_batch_multi_read,
     bench_cache_hit_get,
     bench_steady_state_insert,
