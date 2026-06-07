@@ -93,16 +93,21 @@ pub struct TableManager {
     changefeed: Option<NonTxChangefeed>,
 }
 
-/// Bundle wiring the non-tx write path to the per-repo changefeed.
+/// Bundle wiring the non-tx write path to the per-repo changefeed AND the
+/// SSI commit-write log.
 ///
 /// Holds the repo name (carried into each `ChangelogEvent::repo`), the
 /// per-repo [`RepoTxGate`](shamir_tx::RepoTxGate) (the version source —
 /// shared with the tx commit pipeline so versions stay monotonic across
 /// both paths), and the [`RepoChangefeed`](shamir_tx::RepoChangefeed) the
-/// event is fanned out through. Cloned cheaply (all `Arc`/`String`).
+/// event is fanned out through. The `gate` is also used by
+/// `record_nontx_ssi_footprint` to append `CommitWriteRecord`s so that
+/// Serializable transactions see non-tx writes in their Phase 2-bis
+/// predicate-conflict window. Cloned cheaply (all `Arc`/`String`).
 #[derive(Clone)]
 struct NonTxChangefeed {
     repo: String,
+    gate: Arc<shamir_tx::RepoTxGate>,
     feed: Arc<shamir_tx::RepoChangefeed>,
 }
 
@@ -1358,6 +1363,13 @@ impl TableManager {
         self.sorted_indexes.on_record_created(&id, value).await?;
         self.index2_on_insert(&id, value).await;
 
+        // SSI footprint: record this non-tx insert so Serializable txs see it.
+        let ssi_ops = self
+            .sorted_indexes
+            .plan_record_created(&id, value)
+            .unwrap_or_default();
+        self.record_nontx_ssi_footprint(version, &ssi_ops);
+
         Ok((id, version))
     }
 
@@ -1502,6 +1514,14 @@ impl TableManager {
         //    effort signal.
         self.bump_write_counter(ids.len() as u64);
 
+        // SSI footprint: record the batch insert so Serializable txs see it.
+        // One CommitWriteRecord at batch_version with all SetPosting keys.
+        let ssi_ops = self
+            .sorted_indexes
+            .plan_records_created_batch(ids.iter().zip(values.iter()))
+            .unwrap_or_default();
+        self.record_nontx_ssi_footprint(batch_version, &ssi_ops);
+
         Ok((ids, batch_version))
     }
 
@@ -1556,6 +1576,9 @@ impl TableManager {
                 self.sorted_indexes.on_record_deleted(&id, old).await?;
                 self.index2_on_delete(&id, old).await;
             }
+            // SSI footprint: delete touches the table (coarse TableScan
+            // detection). No new index postings for a delete.
+            self.record_nontx_ssi_footprint(version, &[]);
         }
         Ok((removed, version))
     }
@@ -1620,7 +1643,7 @@ impl TableManager {
         };
 
         // 3. Update indexes AFTER write
-        if created {
+        let ssi_ops = if created {
             self.counter.increment(1).await?;
             self.index_manager.on_record_created(&id, value).await?;
             self.index_manager
@@ -1628,18 +1651,30 @@ impl TableManager {
                 .await?;
             self.sorted_indexes.on_record_created(&id, value).await?;
             self.index2_on_insert(&id, value).await;
-        } else if let Some(old) = old_value {
+            self.sorted_indexes
+                .plan_record_created(&id, value)
+                .unwrap_or_default()
+        } else if let Some(ref old) = old_value {
             self.index_manager
-                .on_record_updated(&id, &old, value)
+                .on_record_updated(&id, old, value)
                 .await?;
             self.index_manager
-                .on_record_updated_unique(&id, &old, value)
+                .on_record_updated_unique(&id, old, value)
                 .await?;
             self.sorted_indexes
-                .on_record_updated(&id, &old, value)
+                .on_record_updated(&id, old, value)
                 .await?;
-            self.index2_on_update(&id, &old, value).await;
-        }
+            self.index2_on_update(&id, old, value).await;
+            self.sorted_indexes
+                .plan_record_updated(&id, old, value)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        // SSI footprint: record this non-tx write so Serializable txs see it.
+        self.record_nontx_ssi_footprint(version, &ssi_ops);
+
         Ok((created, version))
     }
 
@@ -1894,20 +1929,27 @@ impl TableManager {
         self
     }
 
-    /// Wire this table's non-tx write path to the per-repo changefeed.
+    /// Wire this table's non-tx write path to the per-repo changefeed AND
+    /// the SSI commit-write log.
     ///
     /// Returns `self` so callers can chain after `create()` (mirrors
     /// [`with_mvcc_store`](Self::with_mvcc_store)). `gate` MUST be the same
     /// per-repo [`RepoTxGate`](shamir_tx::RepoTxGate) the tx commit pipeline
     /// uses — that is what keeps non-tx and tx `commit_version`s on one
-    /// monotonic sequence per repo. `feed` is the repo's
-    /// [`RepoChangefeed`](shamir_tx::RepoChangefeed).
+    /// monotonic sequence per repo, AND ensures non-tx writes are visible
+    /// to Serializable transactions' Phase 2-bis predicate-conflict check.
+    /// `feed` is the repo's [`RepoChangefeed`](shamir_tx::RepoChangefeed).
     ///
     /// Attached by `RepoInstance::create_table_context`. When absent, the
-    /// non-tx write methods skip changefeed emission entirely (system tables
-    /// / direct-constructed test tables).
-    pub fn with_changefeed(mut self, repo: String, feed: Arc<shamir_tx::RepoChangefeed>) -> Self {
-        self.changefeed = Some(NonTxChangefeed { repo, feed });
+    /// non-tx write methods skip changefeed emission AND SSI footprint
+    /// recording entirely (system tables / direct-constructed test tables).
+    pub fn with_changefeed(
+        mut self,
+        repo: String,
+        gate: Arc<shamir_tx::RepoTxGate>,
+        feed: Arc<shamir_tx::RepoChangefeed>,
+    ) -> Self {
+        self.changefeed = Some(NonTxChangefeed { repo, gate, feed });
         self
     }
 
@@ -1963,6 +2005,59 @@ impl TableManager {
         if let Some(event) = event {
             cf.feed.emit(event);
         }
+    }
+
+    /// Record a non-tx write footprint in the SSI commit-write log so that
+    /// Serializable transactions can detect phantom conflicts caused by
+    /// non-transactional writes (MVCC-1 fix).
+    ///
+    /// Called by the non-tx `execute_insert/update/set/delete` methods AFTER
+    /// the mutations are durable. No-op when no gate is wired (`changefeed ==
+    /// None`) or when `commit_version == 0` (no MvccStore attached).
+    ///
+    /// `index_ops` is the list of `IndexWriteOp`s planned by `sorted_indexes`
+    /// for this write — only `SetPosting` variants contribute to the
+    /// `inserted_index_keys` of the footprint (mirroring `build_footprint_from_tx`).
+    /// For deletes (no new postings), pass an empty slice; `touched = true`
+    /// still marks the table as written, which is enough for coarse `TableScan`
+    /// conflict detection.
+    pub(crate) fn record_nontx_ssi_footprint(
+        &self,
+        commit_version: u64,
+        index_ops: &[shamir_tx::IndexWriteOp],
+    ) {
+        // No gate wired → system table or test without SSI wiring.
+        // commit_version == 0 → no MvccStore (pure in-memory test without MVCC).
+        let Some(cf) = &self.changefeed else {
+            return;
+        };
+        if commit_version == 0 {
+            return;
+        }
+
+        let table_token = self.table_token();
+        let mut footprint = shamir_tx::TableWriteFootprint {
+            touched: true,
+            inserted_index_keys: Vec::new(),
+        };
+        for op in index_ops {
+            if let shamir_tx::IndexWriteOp::SetPosting { key, .. } = op {
+                footprint.inserted_index_keys.push(key.clone());
+            }
+        }
+        footprint.inserted_index_keys.sort_unstable();
+
+        let rec = shamir_tx::CommitWriteRecord {
+            commit_version,
+            per_table: std::collections::HashMap::from([(table_token, footprint)]),
+        };
+        cf.gate.record_commit_writes(rec);
+        // Advance last_committed so that new snapshots opened after this
+        // non-tx write pick up the correct baseline, and Phase 2-bis window
+        // `(snapshot, last_committed]` correctly includes this write.
+        // Uses fetch_max semantics to avoid backward movement when racing
+        // with concurrent tx commits or other non-tx writes.
+        cf.gate.publish_committed_max(commit_version);
     }
 
     /// Build one [`RecordChange`](shamir_tx::RecordChange) for a non-tx

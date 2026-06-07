@@ -177,9 +177,43 @@ impl RepoTxGate {
     }
 
     /// Publish: update `last_committed_version` atomically.
+    ///
+    /// Must be called under `commit_lock` on the tx commit path, where
+    /// monotonic ordering is guaranteed by the lock. For non-tx writes
+    /// use [`publish_committed_max`](Self::publish_committed_max) instead.
     pub fn publish_committed(&self, version: u64) {
         self.last_committed_version
             .store(version, Ordering::Release);
+    }
+
+    /// Publish: advance `last_committed_version` to `version` if it is
+    /// currently lower, using an atomic compare-and-swap loop.
+    ///
+    /// Safe to call from the non-tx write path without `commit_lock` because
+    /// it only moves the counter forwards — it never moves it backwards even
+    /// if concurrent tx commits or other non-tx writes race with this call.
+    /// The tx commit path must continue using the plain [`publish_committed`]
+    /// under `commit_lock` (which guarantees strict monotonic ordering via
+    /// the lock, not a CAS loop).
+    pub fn publish_committed_max(&self, version: u64) {
+        // Relaxed load is fine as the initial guess — the CAS will re-read
+        // on conflict. We only need Release on a successful store so the
+        // new value is visible to Acquire loads in `last_committed()`.
+        let mut current = self.last_committed_version.load(Ordering::Relaxed);
+        loop {
+            if current >= version {
+                break; // already at or past `version`
+            }
+            match self.last_committed_version.compare_exchange_weak(
+                current,
+                version,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Minimum alive snapshot version — for GC. Returns
@@ -235,21 +269,33 @@ impl RepoTxGate {
     /// `(snapshot, last_committed()]` wrote a footprint that conflicts
     /// with `dep`. Called by `pre_commit` Phase 2-bis UNDER `commit_lock`.
     ///
-    /// Walks ONLY records with `commit_version > snapshot` thanks to
-    /// `TreeIndex::range`. Uses `(snapshot + 1)..` to express the
-    /// exclusive lower bound (snapshot is always far from `u64::MAX`
-    /// in practice — versions are monotonic from a small seed).
+    /// Walks ONLY records with `snapshot < commit_version <= last_committed`.
+    /// The upper bound `last_committed` is important for non-tx footprints:
+    /// non-tx writes append to the log via `record_nontx_ssi_footprint` at
+    /// the version assigned by `set_versioned` / `delete_versioned`, but they
+    /// do NOT call `publish_committed`. So their version may be higher than
+    /// `last_committed`. Such a record is "pending" and must NOT be treated as
+    /// a concurrent committed write relative to this tx's predicate window.
+    ///
+    /// Uses `(snapshot + 1)..=last_committed` to express the exclusive lower
+    /// / inclusive upper bound (snapshot is always far from `u64::MAX` in
+    /// practice — versions are monotonic from a small seed).
     pub fn predicate_conflicts(
         &self,
         dep: &crate::predicate_set::PredicateDep,
         snapshot: u64,
     ) -> bool {
         let guard = scc::ebr::Guard::new();
+        let last = self.last_committed_version.load(Ordering::Acquire);
+        if last <= snapshot {
+            // Fast path: no new commits since snapshot.
+            return false;
+        }
         // `snapshot + 1` is safe: version 0 is the initial seed, and
         // a tx at snapshot u64::MAX cannot exist (versions are monotonic
         // from a small seed and would exhaust before reaching MAX).
         let start = snapshot.saturating_add(1);
-        for (_v, rec) in self.commit_write_log.range(start.., &guard) {
+        for (_v, rec) in self.commit_write_log.range(start..=last, &guard) {
             if record_conflicts(rec, dep) {
                 return true;
             }
@@ -492,6 +538,9 @@ mod tests {
         gate.record_commit_writes(mk(5, 42));
         gate.record_commit_writes(mk(10, 42));
         gate.record_commit_writes(mk(15, 42));
+        // Publish through v=15 so all three records are within
+        // `(snapshot, last_committed]` for appropriate snapshot values.
+        gate.publish_committed(15);
 
         // snapshot=10 -> only records with v>10 (i.e. v=15) are visible.
         assert!(gate.predicate_conflicts(&PredicateDep::TableScan { table_token: 42 }, 10));
@@ -543,6 +592,8 @@ mod tests {
             )]),
         };
         gate.record_commit_writes(rec);
+        // Publish through v=7 so the record is in the window `(0, 7]`.
+        gate.publish_committed(7);
 
         // Range covering only the LOW key.
         let hits_low = PredicateDep::IndexRange {
@@ -628,6 +679,8 @@ mod tests {
         for v in 1..=5 {
             gate.record_commit_writes(mk(v));
         }
+        // Publish through v=5 so all records are in `(snapshot, last_committed]`.
+        gate.publish_committed(5);
         assert_eq!(gate.commit_log_len(), 5);
 
         // Prune with floor=3: entries 1,2,3 dropped, 4,5 remain.
