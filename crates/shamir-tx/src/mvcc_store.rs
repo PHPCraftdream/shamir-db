@@ -1248,6 +1248,109 @@ impl MvccStore {
         }
         Ok(latest)
     }
+
+    /// T4-history: one key's full version timeline, ascending by version.
+    ///
+    /// Merges two sources:
+    /// 1. `history` — every archived prior version, stored under
+    ///    `encode_version_key(key, version)` (`<key> || 0xFF || version_be`).
+    ///    The range scan `[encode_version_key(key, 0), +∞)` yields all
+    ///    versioned entries for this key. ts-keys (`[TS_TAG][version_be]`,
+    ///    9 bytes, `TS_TAG = 0x00`) are out of this key's range and are
+    ///    additionally rejected by `decode_version_key` (which returns
+    ///    `None` when the separator byte is not `VERSION_SEP`), so they
+    ///    can never be mistaken for a version entry.
+    /// 2. `main` — the CURRENT version. Its version number is the cell's
+    ///    `version_of(key)` (0 when the key has only ever taken the fast
+    ///    path or is absent). A key that is currently DELETED contributes
+    ///    no current entry; its prior versions still appear from history.
+    ///
+    /// Each entry's commit timestamp is resolved via [`Self::lookup_ts`]
+    /// (T1c). Entries with no recorded ts carry `ts_millis = None`.
+    ///
+    /// Read-only, no cell mutation, no locking. Allocation is bounded by
+    /// the key's version count (one `VersionEntry` per archived version).
+    pub async fn history_of(&self, key: &[u8]) -> DbResult<Vec<VersionEntry>> {
+        use crate::version_codec::decode_version_key;
+
+        // Phase 1: scan this key's version range in `history`.
+        // `encode_version_key(key, 0)` is the lexically smallest key in
+        // this key's version namespace; an open upper bound (`None`) walks
+        // every version. ts-keys live in the separate `[TS_TAG]` namespace
+        // and cannot collide (see the module-level comment above).
+        let lo = encode_version_key(key, 0);
+        let stream = self.history.iter_range_stream(Some(lo), None, 64);
+        futures::pin_mut!(stream);
+
+        // Collect (version, value) for every archived entry.
+        let mut entries: Vec<(u64, Bytes)> = Vec::new();
+        while let Some(batch) = stream.next().await {
+            for (phys_key, val) in batch? {
+                // decode_version_key returns None for ts-keys (9-byte
+                // `[TS_TAG][v_be]` with separator byte 0x00 ≠ 0xFF) AND
+                // for any key not ending in `|| 0xFF || version_be`. Both
+                // guards are belt-and-braces here — the range lower bound
+                // already excludes foreign keys — but the decode also
+                // recovers the version number we need.
+                if let Some((orig, version)) = decode_version_key(&phys_key) {
+                    // Defensive: range scans are over the key's own
+                    // namespace, but a longer key sharing our prefix would
+                    // surface here. Only accept entries whose original key
+                    // matches exactly.
+                    if orig == key {
+                        entries.push((version, val));
+                    }
+                }
+            }
+        }
+
+        // Phase 2: append the CURRENT version from `main` if the key
+        // currently exists. `version_of` reads the cell's archive-routing
+        // version (0 on the fast path / absent key). `main.get` tells us
+        // whether the key is live.
+        let cur_v = self.current_version(key);
+        if cur_v > 0 {
+            match self.main.get(Bytes::copy_from_slice(key)).await {
+                Ok(cur_val) => entries.push((cur_v, cur_val)),
+                Err(DbError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Phase 3: ascending by version, resolve ts per version.
+        entries.sort_by_key(|(v, _)| *v);
+        let mut out = Vec::with_capacity(entries.len());
+        for (version, value) in entries {
+            let ts_millis = self.lookup_ts(version).await;
+            out.push(VersionEntry {
+                version,
+                value,
+                ts_millis,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// T4-history: one row in a key's version timeline.
+///
+/// Returned by [`MvccStore::history_of`]. `version` is the monotonic
+/// commit version assigned by `RepoTxGate`; `value` is the bytes that
+/// were current at that version (archived in `history` for prior
+/// versions, read from `main` for the current version); `ts_millis` is
+/// the per-version commit timestamp (T1c), or `None` when no ts was
+/// recorded for this version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionEntry {
+    /// Monotonic commit version assigned by `RepoTxGate::assign_next_version`.
+    pub version: u64,
+    /// The value bytes current at `version` (MessagePack-encoded
+    /// `InnerValue` for record keys, raw user bytes otherwise).
+    pub value: Bytes,
+    /// Per-version commit timestamp in milliseconds since UNIX_EPOCH
+    /// (T1c, recorded via [`MvccStore::record_ts`] / `ts_key`). `None`
+    /// when no ts entry exists for this version.
+    pub ts_millis: Option<u64>,
 }
 
 #[cfg(test)]
@@ -4423,5 +4526,126 @@ mod tests {
         );
 
         mvcc.set_test_now(0); // restore real clock (hygiene)
+    }
+
+    // ========================================================================
+    // T4-history — history_of
+    // ========================================================================
+
+    #[tokio::test]
+    async fn history_of_returns_empty_for_unknown_key() {
+        let mvcc = make_mvcc();
+        let timeline = mvcc.history_of(b"absent").await.unwrap();
+        assert!(timeline.is_empty(), "an unknown key has no timeline");
+    }
+
+    /// A key written three times must yield three timeline entries
+    /// (v1, v2 from `history`, v3 from `main`), ascending by version,
+    /// each carrying its value and its recorded commit timestamp.
+    #[tokio::test]
+    async fn history_of_three_writes_full_timeline_with_ts() {
+        let mvcc = make_mvcc();
+        // Default retention is CurrentOnly (max_count = 0) — vacuum
+        // reclaims every archived version right after each write. To
+        // observe a multi-version timeline we must opt into KeepHistory.
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        // Freeze the clock so each version gets a distinct, known ts.
+        mvcc.set_test_now(1_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(2_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(3_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v3"))
+            .await
+            .unwrap();
+
+        let timeline = mvcc.history_of(b"k").await.unwrap();
+        assert_eq!(
+            timeline.len(),
+            3,
+            "three writes → three timeline entries (2 archived + 1 current)"
+        );
+
+        // Ascending by version.
+        let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
+        assert_eq!(versions, vec![1, 2, 3]);
+        assert!(
+            versions.windows(2).all(|w| w[0] < w[1]),
+            "timeline must be ascending by version"
+        );
+
+        // Values line up per version.
+        let values: Vec<&[u8]> = timeline.iter().map(|e| e.value.as_ref()).collect();
+        assert_eq!(values, vec![b"v1".as_slice(), b"v2", b"v3"]);
+
+        // ts per version (T1c) — each matches the frozen clock at its write.
+        let ts: Vec<Option<u64>> = timeline.iter().map(|e| e.ts_millis).collect();
+        assert_eq!(ts, vec![Some(1_000), Some(2_000), Some(3_000)]);
+
+        mvcc.set_test_now(0);
+    }
+
+    /// A deleted key contributes no current entry — only its archived
+    /// prior versions appear, in ascending version order.
+    #[tokio::test]
+    async fn history_of_deleted_key_keeps_prior_versions() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+        // Now delete the live version. T1a archives the current v2 into
+        // history before removing it from main.
+        mvcc.delete_versioned(Bytes::from("k")).await.unwrap();
+
+        let timeline = mvcc.history_of(b"k").await.unwrap();
+        // v1 (archived when v2 was written) + v2 (archived on delete).
+        // No current entry — main no longer has the key.
+        assert_eq!(timeline.len(), 2);
+        let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
+        assert_eq!(versions, vec![1, 2]);
+        let values: Vec<&[u8]> = timeline.iter().map(|e| e.value.as_ref()).collect();
+        assert_eq!(values, vec![b"v1".as_slice(), b"v2"]);
+
+        // Sanity: main really is empty for this key.
+        match mvcc.main.get(Bytes::from("k")).await {
+            Err(DbError::NotFound(_)) => {}
+            other => panic!(
+                "expected NotFound on main, got {:?}",
+                other.map(|b| b.len())
+            ),
+        }
+    }
+
+    /// Two keys must not bleed into each other's timelines — a prefix
+    /// collision (`"k"` vs `"kk"`) must keep them separate.
+    #[tokio::test]
+    async fn history_of_isolates_prefix_collisions() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("a"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(Bytes::from("kk"), Bytes::from("b"))
+            .await
+            .unwrap();
+
+        let tl_k = mvcc.history_of(b"k").await.unwrap();
+        let tl_kk = mvcc.history_of(b"kk").await.unwrap();
+
+        assert_eq!(tl_k.len(), 1, "\"k\" has one entry");
+        assert_eq!(tl_k[0].value, Bytes::from("a"));
+        assert_eq!(tl_kk.len(), 1, "\"kk\" has one entry");
+        assert_eq!(tl_kk[0].value, Bytes::from("b"));
     }
 }
