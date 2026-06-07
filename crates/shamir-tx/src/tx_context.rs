@@ -6,7 +6,8 @@
 
 use bytes::Bytes;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -195,6 +196,29 @@ pub struct TxContext {
     /// Defaults to `Actor::System`; set from the facade when a real
     /// principal is available.
     pub actor: Actor,
+
+    /// Level-3 wound-wait abort flag. Set to `true` by an OLDER
+    /// (higher-priority) tx that wounded this one during `lock_key`.
+    /// Shared (`Arc`) so a tx blocked inside `lock_key` can observe a
+    /// wound issued by another task. Stays `false` for Snapshot /
+    /// Serializable txs (never wounded — they do not take locks).
+    pub wounded: Arc<AtomicBool>,
+
+    /// Level-3 wound wake notify. Paired with [`wounded`](Self::wounded):
+    /// a wounder sets the flag AND triggers this notify so a holder parked
+    /// in `lock_key` on a DIFFERENT key wakes up and observes the wound.
+    /// Load-bearing for deadlock-freedom (a wound on key Y must wake a tx
+    /// parked on key X). Stays unused for Snapshot / Serializable.
+    pub wound_notify: Arc<tokio::sync::Notify>,
+
+    /// Level-3 locked-key registry: every key this tx has acquired a
+    /// pessimistic lock on (across all tables). Populated ONLY for
+    /// `Pessimistic` txs; stays empty otherwise. Released as a batch on
+    /// commit AND on abort via `MvccStore::release_locks`. Each entry key
+    /// is `(table_token, key)` so release can route to the right table's
+    /// `MvccStore`. Interior-mutable (`scc::HashMap`) so the read path
+    /// (which holds `&TxContext`) can record locks without `&mut`.
+    pub locked_keys: scc::HashMap<(u64, Bytes), ()>,
 }
 
 impl TxContext {
@@ -224,6 +248,9 @@ impl TxContext {
             visibility: CommitVisibility::default(),
             async_prefix_failed: false,
             actor: Actor::System,
+            wounded: Arc::new(AtomicBool::new(false)),
+            wound_notify: Arc::new(tokio::sync::Notify::new()),
+            locked_keys: scc::HashMap::new(),
         }
     }
 
@@ -244,6 +271,59 @@ impl TxContext {
     /// The actor that initiated this transaction.
     pub fn actor(&self) -> &Actor {
         &self.actor
+    }
+
+    /// Clone of this tx's wound-wait abort flag. Pass this into
+    /// [`MvccStore::lock_key`](crate::mvcc_store::MvccStore::lock_key) so an
+    /// older (higher-priority) tx can wound this one by setting the flag.
+    pub fn wounded_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.wounded)
+    }
+
+    /// Clone of this tx's wound wake notify. Pass this into
+    /// [`MvccStore::lock_key`](crate::mvcc_store::MvccStore::lock_key) so a
+    /// wounder can wake this tx when it is parked waiting on a different key.
+    pub fn wound_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.wound_notify)
+    }
+
+    /// True if this tx was wounded by an older tx (Level-3 wound-wait).
+    /// Stays `false` for Snapshot / Serializable txs.
+    pub fn is_wounded(&self) -> bool {
+        self.wounded.load(Ordering::Acquire)
+    }
+
+    /// Abort if this tx was wounded. Called (a) at the top of each Level-3
+    /// lock acquisition and (b) at commit entry, so a wounded tx that
+    /// finished its statements still aborts instead of committing.
+    ///
+    /// Returns the tx's monotonic id on abort so the engine can wrap it into
+    /// a clear `CommitError::Wounded { tx_version }`.
+    pub fn ensure_not_wounded(&self) -> Result<(), u64> {
+        if self.wounded.load(Ordering::Acquire) {
+            Err(self.tx_id.0)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record that this tx acquired a Level-3 lock on `key` for `table_token`,
+    /// so the lock is released on commit / abort. Takes `&self` via interior
+    /// mutability (`locked_keys` is an `scc::HashMap`) so the engine's
+    /// tx-aware read path (which holds `&TxContext`) can record locks without
+    /// `&mut`. The map's dedup (same `(token, key)` inserted twice is a
+    /// no-op) mirrors `lock_key`'s re-entrant idempotency.
+    pub fn record_locked_key(&self, table_token: u64, key: Bytes) {
+        // entry_async requires await; use the sync entry on a non-async
+        // context. scc 2.x HashIndex/HashMap both expose a sync `entry` for
+        // the unconditional insert path.
+        use scc::hash_map::Entry;
+        match self.locked_keys.entry((table_token, key)) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(e) => {
+                e.insert_entry(());
+            }
+        }
     }
 
     /// Record a unique-index guard for commit-time re-validation.

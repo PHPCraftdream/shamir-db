@@ -35,12 +35,22 @@ impl std::fmt::Display for TxId {
 ///   concurrent tx after the snapshot was taken, the commit aborts.
 ///   Client is expected to retry. (The engine-side commit pipeline
 ///   surfaces this via `shamir_engine::tx::commit::TxError::SsiConflict`.)
+/// - [`Pessimistic`] — Level-3: per-key locks with wound-wait. The tx's
+///   monotonic id is its priority (smaller id = older = higher priority).
+///   Reads acquire `Shared` locks, writes acquire `Exclusive` locks, both
+///   through [`MvccStore::lock_key`](crate::mvcc_store::MvccStore::lock_key).
+///   Deadlock-free by construction: a tx only ever waits on strictly-older
+///   holders and only ever wounds strictly-younger ones, so the wait-for
+///   graph respects the total id order and cannot cycle. Snapshot and
+///   Serializable behavior are byte-identical when no `Pessimistic` tx runs
+///   (the locks registry stays empty → zero overhead on the hot paths).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationLevel {
     #[default]
     Snapshot,
     Serializable,
+    Pessimistic,
 }
 
 #[cfg(test)]
@@ -54,7 +64,11 @@ mod tests {
 
     #[test]
     fn isolation_level_serde_roundtrip() {
-        let levels = [IsolationLevel::Snapshot, IsolationLevel::Serializable];
+        let levels = [
+            IsolationLevel::Snapshot,
+            IsolationLevel::Serializable,
+            IsolationLevel::Pessimistic,
+        ];
         for lvl in &levels {
             let s = serde_json::to_string(lvl).unwrap();
             let back: IsolationLevel = serde_json::from_str(&s).unwrap();
@@ -68,6 +82,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&IsolationLevel::Serializable).unwrap(),
             r#""serializable""#
+        );
+        assert_eq!(
+            serde_json::to_string(&IsolationLevel::Pessimistic).unwrap(),
+            r#""pessimistic""#
         );
     }
 

@@ -240,6 +240,12 @@ pub enum TxError {
     /// covers it.
     #[error("phantom conflict on predicate {dep}")]
     PhantomConflict { dep: String },
+    /// Level-3 wound-wait abort: an older (higher-priority) tx wounded
+    /// this one during `lock_key`, or this tx observed its own wound flag
+    /// at commit entry. Surfaced to the wire path as `"tx_conflict"` so
+    /// existing client retry covers it.
+    #[error("tx {} wounded (wound-wait abort)", tx_version)]
+    Wounded { tx_version: u64 },
 }
 
 /// Test-only injection: when set to a non-zero tx_id, Phase 5c (index
@@ -430,7 +436,17 @@ pub async fn commit_tx(tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, 
 /// returns `Ok(TxOutcome { commit_version: snapshot_version, materialization:
 /// Complete, .. })`.
 async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOutcome, TxError> {
+    // Level-3 wound-wait: a tx wounded by an older (higher-priority) tx must
+    // abort even if it finished all its statements. The check runs at commit
+    // entry so a wounded tx can never commit. No-op for Snapshot / Serializable
+    // (their wounded flag stays false — they never take locks).
+    if let Err(tx_version) = tx.ensure_not_wounded() {
+        release_pessimistic_locks(&tx, repo).await;
+        return Err(TxError::Wounded { tx_version });
+    }
+
     if tx.is_expired(DEFAULT_MAX_TX_LIFETIME) {
+        release_pessimistic_locks(&tx, repo).await;
         repo.tx_metrics().on_tx_aborted_expired();
         return Err(TxError::Expired {
             elapsed: tx.elapsed(),
@@ -453,9 +469,9 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     let PreCommit {
         commit_version,
         uwl_guards,
-    } = match pre_commit(&mut tx, repo, gate.as_ref(), wal.as_ref()).await? {
-        Some(pc) => pc,
-        None => {
+    } = match pre_commit(&mut tx, repo, gate.as_ref(), wal.as_ref()).await {
+        Ok(Some(pc)) => pc,
+        Ok(None) => {
             // C6 empty-tx fast-path. SSI read-set validation (Phase 2) has
             // already run inside `pre_commit`, so a read-only Serializable
             // tx with a conflict has already returned `Err` above. Here the
@@ -467,6 +483,9 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             // were no projections to materialize). Counts as a committed tx
             // for metrics, consistent with the full path.
             repo.tx_metrics().on_tx_committed();
+            // Level-3 locks are released on commit too (a read-only
+            // Pessimistic tx still holds Shared locks on what it read).
+            release_pessimistic_locks(&tx, repo).await;
             drop(commit_guard);
             return Ok(TxOutcome {
                 tx_id: tx.tx_id.0,
@@ -476,6 +495,13 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
                 background: None,
             });
         }
+        Err(e) => {
+            // Pre-commit abort: nothing durable. Release any Level-3 locks
+            // the tx held so blocked txs can proceed (RAII rollback for the
+            // pessimistic dimension).
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e);
+        }
     };
 
     // === Commit point crossed: the WAL entry is durable. ===
@@ -483,6 +509,14 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     // From here there is NO abort — only materialization. Failures are
     // logged + deferred to recovery; the version is still published.
     //
+    // Level-3 pessimistic locks are released NOW: the commit is decided
+    // (Phase 4 WAL is durable), so the locks have served their purpose
+    // (2PL: locks held until commit, not until post-commit materialization).
+    // Releasing here works for both sync and async modes (tx is still in
+    // scope) and lets blocked txs proceed while materialization runs. No-op
+    // for Snapshot / Serializable (locked_keys is empty).
+    release_pessimistic_locks(&tx, repo).await;
+
     // Branch on the opt-in visibility mode (default `Synchronous` — byte-
     // identical to the historical behaviour). `AsyncIndex` performs only
     // the sync-prefix phases inline (5a data, 5b counter, 6 publish, write-
@@ -855,6 +889,33 @@ async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_version: u6
                  lags until rebuild-on-open reconciles it (tx stays COMMITTED + \
                  materialized — NOT deferred)"
             );
+        }
+    }
+}
+
+/// Release every Level-3 pessimistic lock the tx holds, grouped by table.
+///
+/// Called on BOTH the commit-success path and every abort path of
+/// [`commit_tx_inner`]. `locked_keys` is empty for Snapshot / Serializable
+/// txs (they never acquire locks), so this is a no-op for them — zero
+/// overhead on the non-Pessimistic commit paths. Each `(table_token, key)`
+/// is routed to the corresponding table's `MvccStore::release_locks`.
+pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstance) {
+    if tx.locked_keys.is_empty() {
+        return;
+    }
+    // Group keys by table_token so each MvccStore is hit once. `locked_keys`
+    // is an `scc::HashMap<(u64, Bytes), ()>`; scan into a std map (the
+    // synchronous visitor cannot await inside).
+    let mut by_table: std::collections::HashMap<u64, Vec<bytes::Bytes>> =
+        std::collections::HashMap::new();
+    tx.locked_keys.scan(|(token, key), _| {
+        by_table.entry(*token).or_default().push(key.clone());
+    });
+    let mvcc_map = repo.per_table_mvcc();
+    for (token, keys) in by_table {
+        if let Some(e) = mvcc_map.get(&token) {
+            e.get().release_locks(tx.tx_id.0, &keys).await;
         }
     }
 }

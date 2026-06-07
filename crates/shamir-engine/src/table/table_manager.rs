@@ -15,7 +15,7 @@ use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::query::filter::eval::{compile_filter, FilterCallback};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_membuffer::MemBufferConfig;
 use shamir_storage::types::{KvOp, Store};
 use shamir_types::core::interner::TouchInd;
@@ -383,6 +383,75 @@ impl TableManager {
     /// Stage 5 will replace with real repo-level interner ID.
     pub fn table_token(&self) -> u64 {
         table_token_for(&self.name)
+    }
+
+    // ========================================================================
+    // Level-3 pessimistic locking integration.
+    //
+    // These helpers are the ONLY entry points that acquire Level-3 locks.
+    // Every call site gates on `tx.isolation == Pessimistic`, so Snapshot /
+    // Serializable paths never reach here → zero overhead when no Level-3 tx
+    // runs. The lock is acquired through this table's `MvccStore`; a table
+    // without one (non-MVCC) returns a clear error for a Level-3 op.
+    // ========================================================================
+
+    /// Acquire a Level-3 `Shared` (read) lock on `key` for a Pessimistic tx.
+    ///
+    /// No-op for non-Pessimistic isolation. Records the locked key on the tx
+    /// (via interior mutability) so it is released on commit / abort. A
+    /// wound-wait abort surfaces as `DbError::Conflict`.
+    pub async fn acquire_pessimistic_read_lock(
+        &self,
+        key: bytes::Bytes,
+        tx: &shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        if tx.isolation != shamir_tx::IsolationLevel::Pessimistic {
+            return Ok(());
+        }
+        let mvcc = self.mvcc_store.as_ref().ok_or_else(|| {
+            DbError::Conflict(format!(
+                "Level-3 (Pessimistic) op on non-MVCC table '{}': no mvcc_store",
+                self.name
+            ))
+        })?;
+        mvcc.lock_key(
+            key.clone(),
+            tx.tx_id.0,
+            tx.wounded_flag(),
+            tx.wound_notify(),
+            shamir_tx::LockMode::Shared,
+        )
+        .await?;
+        tx.record_locked_key(self.table_token(), key);
+        Ok(())
+    }
+
+    /// Acquire a Level-3 `Exclusive` (write) lock on `key` for a Pessimistic
+    /// tx. Same contract as [`acquire_pessimistic_read_lock`] but exclusive.
+    pub async fn acquire_pessimistic_write_lock(
+        &self,
+        key: bytes::Bytes,
+        tx: &shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        if tx.isolation != shamir_tx::IsolationLevel::Pessimistic {
+            return Ok(());
+        }
+        let mvcc = self.mvcc_store.as_ref().ok_or_else(|| {
+            DbError::Conflict(format!(
+                "Level-3 (Pessimistic) op on non-MVCC table '{}': no mvcc_store",
+                self.name
+            ))
+        })?;
+        mvcc.lock_key(
+            key.clone(),
+            tx.tx_id.0,
+            tx.wounded_flag(),
+            tx.wound_notify(),
+            shamir_tx::LockMode::Exclusive,
+        )
+        .await?;
+        tx.record_locked_key(self.table_token(), key);
+        Ok(())
     }
 
     /// Direct access to the underlying data_store. Used by V2 WAL
@@ -935,6 +1004,14 @@ impl TableManager {
 
         let rid = RecordId::new();
 
+        // Level-3: acquire an Exclusive lock on the new record's key before
+        // staging. No-op for Snapshot / Serializable (self-gates). The lock
+        // is on the FUTURE key (the rid is fresh) so this never blocks on
+        // existing data, but it serializes against a concurrent tx that
+        // might read-then-write the same freshly-allocated rid.
+        self.acquire_pessimistic_write_lock(rid.to_bytes(), tx)
+            .await?;
+
         // HIGH-6: stage-time unique validation (read-only against
         // committed state). Optimistic fast-reject for the common
         // single-writer duplicate; the tx-concurrent case is settled by
@@ -1053,6 +1130,13 @@ impl TableManager {
             rows_bytes.push(b);
         }
 
+        // 2b. Level-3: acquire Exclusive locks on every new rid before
+        // staging. No-op for Snapshot / Serializable (self-gates).
+        for rid in &ids {
+            self.acquire_pessimistic_write_lock(rid.to_bytes(), tx)
+                .await?;
+        }
+
         // 3. Record UniqueGuards per row per unique index it claims.
         //    Same shape as `insert_tx` (one guard per claimed key,
         //    `owner = rid`) — commit_tx Phase 2.6 settles ownership
@@ -1151,6 +1235,13 @@ impl TableManager {
 
         let old = self.read_one_tx(id, Some(&*tx)).await.ok();
 
+        // Level-3: acquire an Exclusive lock on the key before staging the
+        // write. `read_one_tx` above already took a Shared lock for a
+        // Pessimistic tx; this re-entrant acquire upgrades it to Exclusive
+        // (same tx — never self-deadlocks). No-op for Snapshot / Serializable.
+        self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
+            .await?;
+
         // HIGH-6: stage-time unique validation (read-only). For an
         // existing record this excludes the record itself; for a fresh
         // insert it behaves like create-validation.
@@ -1228,6 +1319,12 @@ impl TableManager {
         let Some(old) = self.read_one_tx(id, Some(&*tx)).await.ok() else {
             return Ok(false);
         };
+
+        // Level-3: acquire an Exclusive lock on the key before staging the
+        // delete. Re-entrant upgrade from the Shared lock `read_one_tx` took.
+        // No-op for Snapshot / Serializable.
+        self.acquire_pessimistic_write_lock(id.to_bytes(), tx)
+            .await?;
 
         let tx_id = Some(tx.tx_id);
         let mut index_ops = self.plan_delete_ops(id, &old, tx_id).await;
@@ -2215,6 +2312,11 @@ impl TableManager {
     ) -> DbResult<InnerValue> {
         if let Some(tx) = tx {
             let key = id.to_bytes();
+            // Level-3: acquire a Shared lock on the key before reading.
+            // No-op for Snapshot / Serializable (the helper self-gates).
+            // A wound-wait abort surfaces as DbError::Conflict and the tx
+            // must abort (the executor / commit path handles it).
+            self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
             // Capture the version at read time, then record the SSI read
             // dependency. No-op for Snapshot isolation.
             let version = self
@@ -2357,7 +2459,51 @@ impl TableManager {
             // predicate_set.
             self.record_query_reads(query, ctx, tx).await?;
         }
+        // Level-3: acquire a Shared lock on every record the query touches
+        // BEFORE reading. Reuses the same scan streams as the Serializable
+        // recording pass (`record_query_reads`) so the locked set matches the
+        // read set. Zero-overhead: only runs for Pessimistic txs. A wound-wait
+        // abort surfaces as DbError::Conflict and propagates up.
+        if let Some(t) = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Pessimistic) {
+            self.lock_query_reads(query, ctx, t).await?;
+        }
         self.read(query, ctx).await
+    }
+
+    /// Level-3: acquire a `Shared` lock on every record matching `query`'s
+    /// WHERE clause (or the whole table when there is no WHERE), mirroring
+    /// [`record_query_reads`] but locking instead of recording. Pessimistic
+    /// only — never called for Snapshot / Serializable.
+    async fn lock_query_reads(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: &shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        let batch_size = 1000;
+        match query.r#where.as_ref() {
+            Some(filter) => {
+                let stream = self.filter_stream(batch_size, filter, ctx).await?;
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    for (rid, _) in batch? {
+                        self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
+                            .await?;
+                    }
+                }
+            }
+            None => {
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    for (rid, _) in batch? {
+                        self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
+                            .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Record SSI read dependencies for `query` into the tx read-set.

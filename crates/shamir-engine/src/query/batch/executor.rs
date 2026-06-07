@@ -476,6 +476,7 @@ async fn execute_transactional(
     // Parse isolation.
     let iso = match request.isolation.as_deref() {
         Some("serializable") => shamir_tx::IsolationLevel::Serializable,
+        Some("pessimistic") | Some("level3") => shamir_tx::IsolationLevel::Pessimistic,
         _ => shamir_tx::IsolationLevel::Snapshot,
     };
 
@@ -507,7 +508,12 @@ async fn execute_transactional(
 
     match plan_result {
         Err(plan_err) => {
-            // Drop tx without commit = RAII rollback. Build aborted info.
+            // Drop tx without commit = RAII rollback. Release any Level-3
+            // pessimistic locks the tx held so blocked txs can proceed (the
+            // locks live in the per-table MvccStore, not in TxContext, so
+            // dropping TxContext alone does not free them). No-op for
+            // Snapshot / Serializable (locked_keys is empty).
+            crate::tx::release_pessimistic_locks(&tx, &repo).await;
             let info = shamir_query_types::batch::TransactionInfo::aborted(
                 tx_id,
                 format!("{:?}", plan_err),
@@ -536,6 +542,7 @@ async fn execute_transactional(
                     let reason = match commit_err {
                         crate::tx::CommitError::SsiConflict { .. } => "tx_conflict".to_string(),
                         crate::tx::CommitError::PhantomConflict { .. } => "tx_conflict".to_string(),
+                        crate::tx::CommitError::Wounded { .. } => "tx_conflict".to_string(),
                         crate::tx::CommitError::UniqueViolation { .. } => {
                             "unique_violation".to_string()
                         }

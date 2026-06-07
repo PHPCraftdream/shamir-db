@@ -62,6 +62,13 @@ pub enum DbError {
     /// trap, undecodable return). Fail-closed: operator/deploy fault.
     #[error("Validator invalid: {0}")]
     ValidatorInvalid(String),
+
+    /// A transactional conflict aborted the operation. Carries a
+    /// human-readable description of the conflict (e.g. wound-wait abort,
+    /// lock contention that could not be resolved). The engine maps this
+    /// to a `"tx_conflict"`-style wire reason where appropriate.
+    #[error("Conflict: {0}")]
+    Conflict(String),
 }
 
 impl From<CodecError> for DbError {
