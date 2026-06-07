@@ -496,11 +496,16 @@ impl RepoInstance {
 
     /// Resumable pull: read up to `limit` durable journal events with
     /// `commit_version >= from_version`, ascending.
+    ///
+    /// Returns a [`shamir_tx::JournalRead`] which carries both the events and
+    /// a `gap_at` field. When `gap_at` is `Some(v)` the journal has a known
+    /// gap at version `v` (a prior overflow dropped that event) — callers
+    /// should treat the feed as non-contiguous from `from_version`.
     pub async fn read_changelog_from(
         &self,
         from_version: u64,
         limit: usize,
-    ) -> DbResult<Vec<shamir_tx::ChangelogEvent>> {
+    ) -> DbResult<shamir_tx::JournalRead> {
         let h = self.changefeed().await?;
         Ok(h.feed.read_from(&h.store, from_version, limit).await)
     }
