@@ -132,6 +132,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropDb(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::database(op.drop_db.clone()),
+                        Action::Delete,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 // Referential integrity: check for child repositories.
                 if let Some(db) = self.shamir.get_db(&op.drop_db) {
                     let repos = db.list_repos();
@@ -241,6 +249,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropRepo(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::store(self.db_name.clone(), op.drop_repo.clone()),
+                        Action::Delete,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 // Referential integrity: check for child tables.
                 if let Some(db) = self.shamir.get_db(&self.db_name) {
                     if let Ok(tables) = db.list_tables(&op.drop_repo) {
@@ -319,6 +335,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropTable(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.drop_table.clone(),
+                        ),
+                        Action::Delete,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let removed = self
                     .shamir
                     .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)
@@ -330,6 +358,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CreateIndex(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.table.clone(),
+                        ),
+                        Action::Write,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let db = self
                     .shamir
                     .get_db(&self.db_name)
@@ -421,6 +461,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::DropIndex(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.table.clone(),
+                        ),
+                        Action::Write,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let db = self
                     .shamir
                     .get_db(&self.db_name)
@@ -449,6 +501,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::GetBufferConfig(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.get_buffer_config.clone(),
+                        ),
+                        Action::Read,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let db = self
                     .shamir
                     .get_db(&self.db_name)
@@ -477,6 +541,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::SetBufferConfig(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.set_buffer_config.clone(),
+                        ),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let db = self
                     .shamir
                     .get_db(&self.db_name)
@@ -498,6 +574,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::AlterBufferConfig(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.alter_buffer_config.clone(),
+                        ),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let db = self
                     .shamir
                     .get_db(&self.db_name)
@@ -522,10 +610,22 @@ impl AdminExecutor for ShamirAdminExecutor {
                 use crate::query::admin::ListOp;
                 match list_op {
                     ListOp::Databases => {
+                        self.shamir
+                            .authorize_access(&self.actor, &ResourcePath::Root, Action::List)
+                            .await
+                            .map_err(err_access)?;
                         let dbs = self.shamir.list_dbs();
                         Ok(admin_result(json!({"databases": dbs})))
                     }
                     ListOp::Repos => {
+                        self.shamir
+                            .authorize_access(
+                                &self.actor,
+                                &ResourcePath::database(self.db_name.clone()),
+                                Action::List,
+                            )
+                            .await
+                            .map_err(err_access)?;
                         let db = self
                             .shamir
                             .get_db(&self.db_name)
@@ -534,6 +634,14 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"repos": repos})))
                     }
                     ListOp::Tables { repo } => {
+                        self.shamir
+                            .authorize_access(
+                                &self.actor,
+                                &ResourcePath::store(self.db_name.clone(), repo.clone()),
+                                Action::List,
+                            )
+                            .await
+                            .map_err(err_access)?;
                         let db = self
                             .shamir
                             .get_db(&self.db_name)
@@ -542,6 +650,10 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"tables": tables, "repo": repo})))
                     }
                     ListOp::Users => {
+                        self.shamir
+                            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                            .await
+                            .map_err(err_access)?;
                         let table = self
                             .shamir
                             .system_store()
@@ -574,6 +686,10 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"users": users})))
                     }
                     ListOp::Roles => {
+                        self.shamir
+                            .authorize_access(&self.actor, &ResourcePath::Root, Action::Manage)
+                            .await
+                            .map_err(err_access)?;
                         let table = self
                             .shamir
                             .system_store()
@@ -595,6 +711,18 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"roles": result.records})))
                     }
                     ListOp::Indexes { table, repo } => {
+                        self.shamir
+                            .authorize_access(
+                                &self.actor,
+                                &ResourcePath::table(
+                                    self.db_name.clone(),
+                                    repo.clone(),
+                                    table.clone(),
+                                ),
+                                Action::List,
+                            )
+                            .await
+                            .map_err(err_access)?;
                         let db = self
                             .shamir
                             .get_db(&self.db_name)
@@ -630,6 +758,14 @@ impl AdminExecutor for ShamirAdminExecutor {
                         ))
                     }
                     ListOp::Functions { folder } => {
+                        self.shamir
+                            .authorize_access(
+                                &self.actor,
+                                &ResourcePath::FunctionNamespace,
+                                Action::List,
+                            )
+                            .await
+                            .map_err(err_access)?;
                         let mut names = self
                             .shamir
                             .list_functions()
@@ -646,6 +782,14 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"functions": names})))
                     }
                     ListOp::Validators => {
+                        self.shamir
+                            .authorize_access(
+                                &self.actor,
+                                &ResourcePath::FunctionNamespace,
+                                Action::List,
+                            )
+                            .await
+                            .map_err(err_access)?;
                         let validators = self.shamir.list_validators();
                         let items: Vec<serde_json::Value> = validators
                             .iter()
@@ -661,6 +805,14 @@ impl AdminExecutor for ShamirAdminExecutor {
                         Ok(admin_result(json!({"validators": items})))
                     }
                     ListOp::FunctionFolders { parent } => {
+                        self.shamir
+                            .authorize_access(
+                                &self.actor,
+                                &ResourcePath::FunctionNamespace,
+                                Action::List,
+                            )
+                            .await
+                            .map_err(err_access)?;
                         let mut folders = self
                             .shamir
                             .list_function_folders()
@@ -988,6 +1140,18 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::StartMigration(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.start_migration.clone(),
+                        ),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let db = self
                     .shamir
                     .get_db(&self.db_name)
@@ -1109,6 +1273,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::CommitMigration(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::database(self.db_name.clone()),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let coord = self
                     .shamir
                     .active_migrations()
@@ -1174,6 +1346,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::RollbackMigration(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::database(self.db_name.clone()),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let coord = self
                     .shamir
                     .active_migrations()
@@ -1197,6 +1377,14 @@ impl AdminExecutor for ShamirAdminExecutor {
             }
 
             BatchOp::MigrationStatus(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::database(self.db_name.clone()),
+                        Action::Read,
+                    )
+                    .await
+                    .map_err(err_access)?;
                 let coord = self
                     .shamir
                     .active_migrations()
