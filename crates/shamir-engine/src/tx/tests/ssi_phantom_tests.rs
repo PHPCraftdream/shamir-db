@@ -1234,171 +1234,242 @@ async fn snapshot_skips_phase_2bis() {
 }
 
 // ============================================================================
-// MVCC-1 VERIFICATION — SSI phantom detection is blind to non-tx writes
+// MVCC-1 FIX — SSI phantom detection now sees non-tx writes
 // ============================================================================
 //
-// CLAIM: A Serializable tx that records a predicate dependency (TableScan or
-// IndexRange) and then commits WILL NOT see a phantom conflict even if a
-// concurrent NON-TX write (via `tbl.insert` / `set_versioned`) inserted a
-// row that falls under the predicate — because non-tx writes NEVER call
-// `gate.record_commit_writes`, so the `commit_write_log` is empty, and
-// Phase 2-bis has nothing to validate against.
+// After the MVCC-1 fix, non-tx writes (execute_insert / execute_update /
+// execute_delete / execute_set) call `record_nontx_ssi_footprint` which
+// appends a `CommitWriteRecord` to the gate's `commit_write_log`. Serializable
+// transactions' Phase 2-bis then correctly detects phantom conflicts caused by
+// concurrent non-transactional writes.
 //
-// VERDICT TARGET:
-//   - tx commits successfully (Ok) → CONFIRMED BUG (SSI blind to non-tx writes)
-//   - tx aborts with PhantomConflict → claim refuted
+// The previous characterisation tests (`mvcc1_ssi_phantom_blind_to_non_tx_*`)
+// asserted `result.is_ok()` (documenting the bug). They are now INVERTED to
+// assert that the tx aborts with `PhantomConflict`.
 //
-// This test is DETERMINISTIC (no race): steps are sequential.
-// 1. Open Serializable tx A at snapshot S.
-// 2. Arm tx A with a TableScan predicate on table T.
-// 3. NON-TX insert a row into T (via tbl.insert — bypasses commit_write_log).
-// 4. Commit tx A.
-// 5. Assert: Ok → BUG confirmed. PhantomConflict → claim refuted.
+// NOTE: the non-tx write path requires `with_changefeed` to be wired (only
+// happens in a full `RepoInstance`). In these tests the table IS obtained via
+// `repo.get_table`, which goes through `create_table_context`, which calls
+// `with_changefeed` — so the gate is wired and the fix applies.
 
-/// MVCC-1: SSI phantom detection is blind to non-tx writes.
+/// MVCC-1 FIXED — TableScan variant.
 ///
-/// A Serializable tx with a TableScan predicate commits successfully even
-/// after a concurrent non-tx insert into the same table, because non-tx
-/// writes do NOT record into `gate.commit_write_log` and Phase 2-bis
-/// therefore finds no conflict in the window (snapshot, last_committed].
+/// A Serializable tx arms a TableScan predicate. A concurrent non-tx insert
+/// adds a row to the same table. Phase 2-bis must now detect the phantom and
+/// abort the tx with PhantomConflict.
 ///
-/// RESULT: tx commits → SSI is blind to non-tx writes (BUG confirmed).
-/// Leave this test as a RED REGRESSION GUARD — it documents the known gap
-/// (HIGH-4 / MVCC-1) that is being tracked for a future fix.
+/// This test was previously `mvcc1_ssi_phantom_blind_to_non_tx_insert_table_scan`
+/// and asserted `result.is_ok()` (bug confirmed). After the MVCC-1 fix it is
+/// inverted: the tx MUST abort.
 #[tokio::test]
-async fn mvcc1_ssi_phantom_blind_to_non_tx_insert_table_scan() {
+async fn mvcc1_serializable_aborts_on_conflicting_non_tx_insert_table_scan() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let table_token = table_token_for("t");
 
-    // Step 1: Open Serializable tx A at the current snapshot.
+    // Open Serializable tx A.
     let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
-    let _snap_a = tx_a.snapshot_version;
 
-    // Step 2: Arm tx A with a full TableScan predicate on table T.
-    // In the real engine this is recorded by list_stream_tx / filter_stream_tx.
+    // Arm tx A with a full TableScan predicate on table T.
     tx_a.record_predicate_shared(PredicateDep::TableScan { table_token });
 
-    // Step 3: Non-tx insert — OUTSIDE tx A — adds a row to table T.
-    // This goes through tbl.insert → set_versioned → DOES NOT call
-    // gate.record_commit_writes → commit_write_log stays empty.
-    let _phantom_rid = tbl
-        .insert(&InnerValue::Str("phantom".into()))
+    // Non-tx insert — now calls record_nontx_ssi_footprint → appends to log.
+    tbl.insert(&InnerValue::Str("phantom".into()))
         .await
         .unwrap();
 
-    // Sanity: the non-tx insert is immediately visible to a direct reader.
-    let _ = tbl
-        .get(_phantom_rid)
-        .await
-        .expect("non-tx insert must land");
-
-    // Sanity: commit_write_log is empty (non-tx write never recorded there).
+    // The non-tx insert must now appear in the commit_write_log.
     let gate = repo.tx_gate().await.unwrap();
-    let log_len = gate.commit_log_len();
-    assert_eq!(
-        log_len, 0,
-        "non-tx write must NOT appear in commit_write_log (HIGH-4)"
+    assert!(
+        gate.commit_log_len() >= 1,
+        "non-tx write must appear in commit_write_log after MVCC-1 fix"
     );
 
-    // Note: non-tx fast-path writes via `tbl.insert` allocate a version but do
-    // NOT publish to `last_committed` (set_versioned fast-path only calls
-    // assign_next_version, not publish_committed). So last_committed stays at
-    // snap_a. That is fine — the test is about Phase 2-bis, not about visibility
-    // ordering. We just verify that the write actually landed (checked above)
-    // and that the log is empty.
-
-    // Step 4: Stage a durable write so tx A is non-empty (avoids C6 fast-path
-    // which would never even reach Phase 2-bis).
+    // Stage a durable write so tx A is non-empty (avoids C6 fast-path).
     tbl.insert_tx(&InnerValue::Str("own_write".into()), Some(&mut tx_a))
         .await
         .unwrap();
 
-    // Step 5: Commit tx A.
-    //
-    // EXPECTED (BUG): Ok — Phase 2-bis finds commit_write_log empty for the
-    //   window (snap_a, last_committed], so no PhantomConflict is raised.
-    //   The non-tx phantom is INVISIBLE to SSI.
-    //
-    // WOULD INDICATE FIX: Err(PhantomConflict { .. }) — non-tx write somehow
-    //   made it into the commit_write_log, and Phase 2-bis caught it.
+    // Commit tx A: must abort with PhantomConflict.
     let result = repo.commit_tx(tx_a).await;
-    assert!(
-        result.is_ok(),
-        "MVCC-1 CONFIRMED: Serializable tx committed despite a non-tx phantom \
-         insert under its TableScan predicate. SSI is blind to non-tx writes. \
-         (If this ever fails with PhantomConflict the fix for HIGH-4 has landed \
-         and this test should be inverted.) result: {:?}",
-        result.err()
-    );
-    // If the test reaches here: confirmed — SSI does NOT detect the non-tx phantom.
-    // The commit_write_log was empty for the conflict window, so Phase 2-bis
-    // found nothing. This is the documented HIGH-4 limitation.
+    match result {
+        Err(CommitError::PhantomConflict { dep }) => {
+            assert!(
+                dep.contains("TableScan"),
+                "dep summary should name TableScan: {dep}"
+            );
+        }
+        other => panic!(
+            "MVCC-1 fix: expected PhantomConflict(TableScan) but got {:?}",
+            other
+                .map(|o| format!("Ok({:?})", o.commit_version))
+                .unwrap_or_else(|e| format!("Err({e})"))
+        ),
+    }
 }
 
-/// MVCC-1 variant: same blind spot via an IndexRange predicate.
+/// MVCC-1 FIXED — IndexRange variant.
 ///
-/// A Serializable tx arms a precise `IndexRange` predicate. A non-tx insert
-/// adds a row whose (hypothetical) index posting would fall inside that range.
-/// Because non-tx writes never populate the commit_write_log, Phase 2-bis
-/// again finds no conflict and the tx commits.
+/// A Serializable tx arms an IndexRange predicate covering all values of a
+/// sorted index. A non-tx insert adds a row; because the table has no sorted
+/// index in this test, the footprint carries `touched = true` (coarse
+/// TableScan), which conflicts with any TableScan predicate.
 ///
-/// Note: we use a synthetic posting key directly in the predicate (no real
-/// sorted index is needed) to avoid the complexity of configuring an index.
-/// The point under test is the commit_write_log gap, not the index machinery.
+/// Note: for the IndexRange predicate to be caught precisely, a sorted index
+/// must exist AND the record must contain an indexed field. We test the coarse
+/// path here (no real sorted index). The precise IndexRange-via-sorted-index
+/// path is covered by `mvcc1_serializable_aborts_on_non_tx_insert_indexed_range`.
+///
+/// This test was previously `mvcc1_ssi_phantom_blind_to_non_tx_insert_index_range`
+/// and asserted `result.is_ok()` (bug confirmed). After the MVCC-1 fix, the
+/// non-tx write is visible via `touched = true` for any write into the table —
+/// however IndexRange predicate does NOT conflict with `touched = true` alone
+/// (only TableScan does). So a pure IndexRange with no sorted index does NOT
+/// abort. The test is updated to use a TableScan predicate to match the coarse
+/// footprint produced by a non-indexed insert.
 #[tokio::test]
-async fn mvcc1_ssi_phantom_blind_to_non_tx_insert_index_range() {
+async fn mvcc1_serializable_aborts_on_conflicting_non_tx_insert_index_range() {
     let repo = make_repo();
     repo.add_table(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let table_token = table_token_for("t");
-    let idx_id: u64 = 99;
 
-    // tx A (Serializable): arm an IndexRange predicate covering any age.
-    let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
-
-    // Build lo/hi bounds covering the entire index range.
-    let lo = {
-        let mut k = Vec::with_capacity(SORTED_PREFIX_LEN);
-        k.push(SORTED_TAG);
-        k.extend_from_slice(&idx_id.to_be_bytes());
-        Bytes::from(k)
-    };
-    let hi = {
-        let mut k = Vec::with_capacity(SORTED_PREFIX_LEN + 32);
-        k.push(SORTED_TAG);
-        k.extend_from_slice(&idx_id.to_be_bytes());
-        k.extend_from_slice(&[0xFFu8; 32]);
-        Bytes::from(k)
-    };
-
-    tx_a.predicate_set.push(PredicateDep::IndexRange {
-        table_token,
-        index_id: idx_id,
-        lo: Bound::Included(lo),
-        hi: Bound::Included(hi),
-    });
-
-    // Non-tx insert — doesn't write to commit_write_log.
-    let _ = tbl
-        .insert(&InnerValue::Str("non_tx_row".into()))
+    // Register a sorted index on "age" so the non-tx insert produces a
+    // SetPosting key that falls inside the IndexRange predicate.
+    let interner = tbl.interner().get().await.unwrap();
+    let age_ind = interner.touch_ind("age").unwrap().into_key();
+    let idx_id = age_ind.id();
+    tbl.sorted_indexes()
+        .register(
+            crate::index::sorted_index_manager::SortedIndexDefinition::new(idx_id, vec![idx_id]),
+        )
         .await
         .unwrap();
 
-    // Verify log is empty.
+    // tx A (Serializable): arm an IndexRange predicate covering age >= 0.
+    let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tx_a.predicate_set.push(PredicateDep::IndexRange {
+        table_token,
+        index_id: idx_id,
+        lo: Bound::Included(test_bound_key(idx_id, 0)),
+        hi: Bound::Unbounded,
+    });
+
+    // Non-tx insert with age=42 — has an indexed field that falls in the range.
+    let record = InnerValue::Map({
+        use shamir_types::types::common::new_map;
+        let mut m = new_map();
+        let age_key = shamir_types::core::interner::InternerKey::new(idx_id);
+        m.insert(age_key, InnerValue::Int(42));
+        m
+    });
+    tbl.insert(&record).await.unwrap();
+
+    // The non-tx insert must now appear in the commit_write_log with a
+    // SetPosting key for age=42.
     let gate = repo.tx_gate().await.unwrap();
-    assert_eq!(gate.commit_log_len(), 0, "non-tx write never in log");
+    assert!(
+        gate.commit_log_len() >= 1,
+        "non-tx write must appear in commit_write_log after MVCC-1 fix"
+    );
 
     // Stage a durable write (avoid C6 fast-path).
     tbl.insert_tx(&InnerValue::Str("tx_write".into()), Some(&mut tx_a))
         .await
         .unwrap();
 
+    // Commit must abort: the posting key for age=42 falls inside `age >= 0`.
+    let result = repo.commit_tx(tx_a).await;
+    match result {
+        Err(CommitError::PhantomConflict { dep }) => {
+            assert!(
+                dep.contains("IndexRange"),
+                "dep summary should name IndexRange: {dep}"
+            );
+        }
+        other => panic!(
+            "MVCC-1 fix (IndexRange): expected PhantomConflict but got {:?}",
+            other
+                .map(|o| format!("Ok({:?})", o.commit_version))
+                .unwrap_or_else(|e| format!("Err({e})"))
+        ),
+    }
+}
+
+/// MVCC-1 POSITIVE — non-tx insert into a DIFFERENT table does NOT abort a
+/// Serializable tx watching another table (no false positives).
+///
+/// Guards against the fix being too aggressive.
+#[tokio::test]
+async fn mvcc1_non_tx_insert_into_different_table_does_not_abort_serializable_tx() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("watched"));
+    repo.add_table(TableConfig::new("other"));
+    let tbl_watched = repo.get_table("watched").await.unwrap();
+    let tbl_other = repo.get_table("other").await.unwrap();
+    let table_token_watched = table_token_for("watched");
+
+    // Open Serializable tx on "watched".
+    let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
+    tx_a.record_predicate_shared(PredicateDep::TableScan {
+        table_token: table_token_watched,
+    });
+
+    // Non-tx insert into "other" — should NOT conflict with "watched".
+    tbl_other
+        .insert(&InnerValue::Str("unrelated".into()))
+        .await
+        .unwrap();
+
+    // Stage a durable write in tx_a (non-empty tx).
+    tbl_watched
+        .insert_tx(&InnerValue::Str("own_write".into()), Some(&mut tx_a))
+        .await
+        .unwrap();
+
+    // Commit must succeed: the non-tx write was in a different table.
     let result = repo.commit_tx(tx_a).await;
     assert!(
         result.is_ok(),
-        "MVCC-1 IndexRange variant CONFIRMED: SSI blind to non-tx phantom. result: {:?}",
+        "non-tx insert into a different table must not abort: {:?}",
+        result.err()
+    );
+}
+
+/// MVCC-1 SNAPSHOT CONTRAST — Snapshot-isolation tx is NOT aborted by a
+/// non-tx insert, even with a predicate dep manually armed.
+///
+/// Snapshot isolation (level 1) does not run Phase 2-bis, so the non-tx
+/// footprint in the commit_write_log is irrelevant to it.
+#[tokio::test]
+async fn mvcc1_snapshot_tx_not_aborted_by_non_tx_insert() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let table_token = table_token_for("t");
+
+    let (mut tx_snap, _gs) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    // Even if we arm a predicate dep, Snapshot skips Phase 2-bis.
+    tx_snap
+        .predicate_set
+        .push(PredicateDep::TableScan { table_token });
+
+    // Non-tx insert — now recorded in the log.
+    tbl.insert(&InnerValue::Str("phantom".into()))
+        .await
+        .unwrap();
+
+    // Stage a write.
+    tbl.insert_tx(&InnerValue::Str("snap_write".into()), Some(&mut tx_snap))
+        .await
+        .unwrap();
+
+    // Commit: Snapshot must not trigger Phase 2-bis.
+    let result = repo.commit_tx(tx_snap).await;
+    assert!(
+        result.is_ok(),
+        "Snapshot tx must not be aborted by non-tx write: {:?}",
         result.err()
     );
 }
