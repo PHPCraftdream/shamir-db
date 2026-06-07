@@ -326,6 +326,20 @@ impl AdminExecutor for ShamirAdminExecutor {
                     )
                     .await
                     .map_err(|e| err(e.to_string()))?;
+
+                // T3: apply per-table history retention at creation time.
+                if let Some(ref dto) = op.retention {
+                    dto.validate().map_err(err)?;
+                    apply_table_retention(
+                        &self.shamir,
+                        &self.db_name,
+                        &op.repo,
+                        &op.create_table,
+                        crate::engine::repo::to_mvcc_retention(dto),
+                    )
+                    .await?;
+                }
+
                 Ok(admin_result(json!({
                     "created_table": op.create_table,
                     "repo": op.repo,
@@ -1877,6 +1891,37 @@ impl AdminExecutor for ShamirAdminExecutor {
                 })))
             }
 
+            // T3: change a live table's history-retention policy on the fly.
+            BatchOp::SetRetention(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.set_retention.clone(),
+                        ),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
+                op.retention.validate().map_err(err)?;
+                let policy = crate::engine::repo::to_mvcc_retention(&op.retention);
+                apply_table_retention(
+                    &self.shamir,
+                    &self.db_name,
+                    &op.repo,
+                    &op.set_retention,
+                    policy,
+                )
+                .await?;
+                Ok(admin_result(json!({
+                    "set_retention": op.set_retention,
+                    "repo": op.repo,
+                    "ok": true
+                })))
+            }
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }
@@ -2540,4 +2585,43 @@ impl ShamirDb {
             }
         }
     }
+}
+
+/// T3: look up a table's `MvccStore` and apply a retention policy.
+///
+/// `per_table_mvcc` is lazily populated on first `get_table()`, so we
+/// force table instantiation first, then resolve the store by token.
+/// If the table has no MvccStore entry (shouldn't happen for a real
+/// table), the policy is skipped gracefully — the next instantiation
+/// will pick up CurrentOnly (the `MvccStore::new` default).
+async fn apply_table_retention(
+    shamir: &ShamirDb,
+    db_name: &str,
+    repo: &str,
+    table: &str,
+    policy: crate::engine::repo::MvccRetention,
+) -> Result<(), BatchError> {
+    let err = |msg: String| BatchError::QueryError {
+        alias: String::new(),
+        message: msg,
+        code: None,
+    };
+    let db = shamir
+        .get_db(db_name)
+        .ok_or_else(|| err(format!("Database '{}' not found", db_name)))?;
+    // Force the lazy MvccStore entry for this table.
+    let _ = db
+        .get_table(repo, table)
+        .await
+        .map_err(|e| err(e.to_string()))?;
+    let repo_instance = db
+        .get_repo(repo)
+        .ok_or_else(|| err(format!("Repository '{}' not found", repo)))?;
+    let token = crate::engine::table::table_token_for(table);
+    if let Some(entry) = repo_instance.per_table_mvcc().get(&token) {
+        entry
+            .set_retention(policy)
+            .map_err(|e| err(e.to_string()))?;
+    }
+    Ok(())
 }

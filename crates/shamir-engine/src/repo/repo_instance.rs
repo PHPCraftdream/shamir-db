@@ -128,7 +128,6 @@ impl RepoInstance {
     pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>> {
         &self.per_table_mvcc
     }
-
     /// Atomic transaction telemetry counters.
     pub fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
         &self.tx_metrics
@@ -871,5 +870,19 @@ fn register_token(token_names: &scc::HashMap<u64, String>, name: &str) {
                 attempted
             );
         }
+    }
+}
+
+/// Convert the wire DTO [`shamir_query_types::admin::Retention`] into the
+/// engine-internal [`shamir_tx::Retention`]. The orphan rule forbids a
+/// cross-crate `From` impl, so this free fn bridges the two types.
+///
+/// Call `Retention::validate()` on the DTO first; this fn performs no
+/// validation (it is a pure field copy).
+pub fn to_mvcc_retention(r: &shamir_query_types::admin::Retention) -> shamir_tx::Retention {
+    shamir_tx::Retention {
+        max_age_secs: r.max_age_secs,
+        max_count: r.max_count,
+        min_count: r.min_count,
     }
 }

@@ -327,7 +327,7 @@ impl MvccStore {
     }
 
     /// Load the current history-retention policy (RCU snapshot).
-    fn retention(&self) -> arc_swap::Guard<Arc<Retention>> {
+    pub fn retention(&self) -> arc_swap::Guard<Arc<Retention>> {
         self.retention.load()
     }
 

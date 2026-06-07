@@ -607,6 +607,13 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    // ── DDL: retention ─────────────────────────────────────────────
+
+    /// Change a live table's history-retention policy.
+    pub fn set_retention(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: list operations ──────────────────────────────────────
 
     /// List databases.
