@@ -17,8 +17,9 @@
 //! Snapshot reads via [`MvccStore::get_at`] use a fast path (version cache
 //! check → main read) and fall back to a history range scan.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use bytes::{BufMut, Bytes, BytesMut};
@@ -30,6 +31,44 @@ use shamir_storage::types::Store;
 
 use crate::repo_tx_gate::RepoTxGate;
 use crate::version_codec::encode_version_key;
+
+// ============================================================================
+// T1c — per-version commit timestamp namespace.
+//
+// The commit time of each version is stored in the EXISTING `history` store
+// under a separate 9-byte key: `[TS_TAG][version_be: 8 bytes]`. This keeps
+// value formats and `get_at` untouched and requires no constructor change.
+//
+// `TS_TAG = 0x00` is distinct from `VERSION_SEP = 0xFF` (used by
+// `encode_version_key`), and a 9-byte ts-key can never collide with a real
+// version-key: version-keys are `record_key(>=1 byte) || 0xFF || version_be(8)`
+// = at least 10 bytes. `decode_version_key` rejects ts-keys because for a
+// 9-byte ts-key `split = 0` and `physical[0] = TS_TAG = 0x00 != VERSION_SEP`.
+// ============================================================================
+
+/// Leading tag byte for a timestamp key. Chosen != `VERSION_SEP` (0xFF) and
+/// such that a 9-byte ts-key cannot be mistaken for a version-key.
+const TS_TAG: u8 = 0x00;
+
+/// Encode a timestamp key for `version`: `[TS_TAG][version_be: 8 bytes]`.
+fn ts_key(version: u64) -> Bytes {
+    let mut b = BytesMut::with_capacity(9);
+    b.put_u8(TS_TAG);
+    b.put_u64(version);
+    b.freeze()
+}
+
+/// Decode a timestamp key back into its version. Returns `None` if the input
+/// is not a 9-byte ts-key (`[TS_TAG][8 bytes]`). Used by retention tests;
+/// kept as the logical inverse of [`ts_key`].
+#[allow(dead_code)]
+fn decode_ts_key(physical: &[u8]) -> Option<u64> {
+    if physical.len() != 9 || physical[0] != TS_TAG {
+        return None;
+    }
+    let version_bytes: [u8; 8] = physical[1..].try_into().expect("just checked length");
+    Some(u64::from_be_bytes(version_bytes))
+}
 
 /// Per-key in-memory coordination state — the "record cell".
 /// The durable data stays in `main`/`history`; the cell is rebuildable
@@ -137,21 +176,25 @@ impl KeyLock {
 
 /// Per-store history retention — three ORTHOGONAL optional knobs
 /// (TEMPORAL.md §3). Default = CurrentOnly (`max_count: Some(0)`): keep only
-/// current + versions pinned by live snapshots. `max_age_secs` is parsed/
-/// stored but NOT yet enforced (T1c wires it once versions carry a timestamp).
+/// current + versions pinned by live snapshots. All three knobs are enforced
+/// by [`MvccStore::vacuum_key`] (T1c wired `max_age_secs` once versions
+/// carry a per-version commit timestamp).
 ///
 /// Stored on [`MvccStore`] via `ArcSwap<Retention>` (lock-free swappable —
 /// three fields can't be one atomic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retention {
-    /// AGE cap — stored, enforced in T1c (ignored by the vacuum for now).
+    /// AGE cap: reclaim versions whose commit timestamp is older than
+    /// `max_age_secs` seconds (a version with no recorded ts is treated as
+    /// "unknown age" and conservatively KEPT by the age axis).
     pub max_age_secs: Option<u64>,
     /// COUNT cap: keep at most N old versions per key (`None` = unlimited).
     pub max_count: Option<u64>,
-    /// COUNT floor: always keep ≥ M recent old versions per key. Inert for
-    /// count-only vacuum (validation guarantees `min_count ≤ max_count`, so
-    /// the cap already keeps ≥ min_count); only does work against the AGE
-    /// cap in T1c.
+    /// COUNT floor: always keep ≥ M newest old versions per key, EVEN IF
+    /// older than `max_age_secs` (this is `min_count`'s real job — protect
+    /// recent versions from the age cap). Inert against the count cap
+    /// (validation guarantees `min_count ≤ max_count`, so the cap already
+    /// keeps ≥ min_count).
     pub min_count: Option<u64>,
 }
 
@@ -214,6 +257,12 @@ pub struct MvccStore {
     /// Defaults to [`Retention::current_only`] (eager vacuum). Set via
     /// [`Self::set_retention`].
     retention: ArcSwap<Retention>,
+    /// T1c: wall-clock millis source for per-version commit timestamps.
+    /// `0` = use the real clock (`SystemTime`); a non-zero frozen value is
+    /// for deterministic retention tests (see [`Self::set_test_now`]).
+    /// Retention is calendar time (wall clock), so `SystemTime` is correct
+    /// here — NOT a monotonic clock (we need to reason about "60 seconds ago").
+    test_now_millis: AtomicU64,
 }
 
 impl MvccStore {
@@ -230,7 +279,42 @@ impl MvccStore {
             cells: SccHashMap::new(),
             locks: SccHashMap::new(),
             retention: ArcSwap::new(Arc::new(Retention::current_only())),
+            test_now_millis: AtomicU64::new(0),
         }
+    }
+
+    /// T1c: current wall-clock millis. If `test_now_millis` is non-zero
+    /// (set via [`Self::set_test_now`]) that frozen value is returned;
+    /// otherwise the real `SystemTime` since `UNIX_EPOCH` is used. Retention
+    /// is calendar time, so `SystemTime` (not a monotonic clock) is correct.
+    fn now_millis(&self) -> u64 {
+        let frozen = self.test_now_millis.load(Ordering::Acquire);
+        if frozen != 0 {
+            return frozen;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    /// T1c (tests): freeze the clock at `ms` millis for deterministic
+    /// retention behaviour. Pass `0` to restore the real clock.
+    pub fn set_test_now(&self, ms: u64) {
+        self.test_now_millis.store(ms, Ordering::Release);
+    }
+
+    /// T1c: record the commit timestamp for `version` under `ts_key(version)`
+    /// in `history`. Best-effort — a ts write failure is swallowed (the data
+    /// write already succeeded; a missing ts just means the age axis
+    /// conservatively keeps the version, never reclaims it wrongly). This
+    /// matches the eager-vacuum error policy.
+    async fn record_ts(&self, version: u64) {
+        let ms = self.now_millis().to_le_bytes();
+        let _ = self
+            .history
+            .set(ts_key(version), Bytes::from(ms.to_vec()))
+            .await;
     }
 
     /// Set the history-retention policy (lock-free `ArcSwap` swap).
@@ -247,54 +331,59 @@ impl MvccStore {
         self.retention.load()
     }
 
-    /// T1b.2: per-key count-aware eager vacuum. After a write/delete to
-    /// `key`, reclaim that key's OLD history versions beyond the count cap,
-    /// subject to the floor invariants. The `max_age_secs` knob is stored but
-    /// NOT yet enforced (T1c).
+    /// T1b.2 + T1c: per-key retention-aware eager vacuum. After a
+    /// write/delete to `key`, reclaim that key's OLD history versions that
+    /// BOTH the count cap AND the age cap agree to drop, subject to the
+    /// `min_count` floor and the snapshot-safety invariants.
     ///
     /// Retention model (orthogonal knobs):
-    /// * `max_count` — the CAP: keep at most N old versions per key.
-    ///   `None` = unbounded → this vacuum reclaims nothing (early return;
-    ///   `min_count` alone is a floor, not a reclaimer, and age is T1c).
-    /// * `min_count` — the FLOOR: keep at least M. Inert for count-only
-    ///   (validation guarantees `min_count ≤ max_count`, so the cap already
-    ///   keeps ≥ min_count). It only does work against the AGE cap in T1c.
-    /// * `max_age_secs` — stored, enforced in T1c.
+    /// * `max_count` — COUNT cap: keep at most N old versions per key.
+    /// * `max_age_secs` — AGE cap: reclaim versions older than this (using
+    ///   the per-version commit timestamp recorded by [`Self::record_ts`]).
+    ///   A version with no recorded ts is treated as "unknown age" and
+    ///   conservatively KEPT by the age axis.
+    /// * `min_count` — COUNT floor: always keep ≥ M newest old versions,
+    ///   EVEN IF older than `max_age_secs`. This is `min_count`'s real job —
+    ///   protect recent versions from the age cap.
+    ///
+    /// If BOTH `max_count` and `max_age_secs` are `None` (no upper bound on
+    /// either axis), there is nothing to reclaim → early return. Otherwise a
+    /// version is reclaimed only when ALL applicable caps drop it (modulo the
+    /// floor + snapshot invariants).
     ///
     /// Sacred floor (NEVER violated): a version `>= min_alive` (pinned by a
-    /// live snapshot) is never reclaimed regardless of count knobs; the
-    /// current value lives in `main` (never in `history`). The count knobs
-    /// only ever reclaim MORE-conservatively than `min_alive` allows.
+    /// live snapshot) is never reclaimed regardless of any knob; the current
+    /// value lives in `main` (never in `history`).
     ///
     /// Anchor: when a live snapshot exists below `current`, the SINGLE largest
     /// version `< min_alive` is also kept — it serves a snapshot reading a key
-    /// last-written below `min_alive`. If that version is already kept by the
-    /// count window, no extra entry is kept. When no live snapshot exists
-    /// (`min_alive == last_committed == current`), no anchor is needed: a
-    /// fresh snapshot opens at `current` and reads `main`.
+    /// last-written below `min_alive`. When no live snapshot exists, no anchor
+    /// is needed: a fresh snapshot opens at `current` and reads `main`.
     ///
-    /// Best-effort: errors are swallowed (a vacuum failure must NOT fail the
-    /// write that triggered it; the next write retries).
+    /// When a version is reclaimed, its `ts_key(version)` entry is also removed
+    /// (no orphan timestamps). Best-effort: errors are swallowed (a vacuum
+    /// failure must NOT fail the write that triggered it; the next write
+    /// retries).
     async fn vacuum_key(&self, key: &Bytes) {
         let policy = self.retention();
-        // Bug-1 fix: `max_count` is the CAP. `None` = unbounded → reclaim
-        // nothing by count (`min_count` alone is a floor, not a reclaimer;
-        // age is T1c). So if there is no count cap, there is nothing to do.
-        let Some(max_count) = policy.max_count else {
+        // No upper bound on either axis → nothing to reclaim.
+        if policy.max_count.is_none() && policy.max_age_secs.is_none() {
             return;
-        };
-        let keep_n = max_count as usize; // the cap; min_count is inert for count-only
-                                         // (validation guarantees min_count ≤ max_count, so the cap already
-                                         // keeps ≥ min_count — the floor only matters against the AGE cap in T1c).
+        }
+        let max_count = policy.max_count.map(|m| m as usize);
+        let min_count = policy.min_count.unwrap_or(0) as usize;
+        // Age cutoff in millis (None = no age cap). Saturating mul in case of
+        // an absurd config.
+        let age_cutoff_ms: Option<u64> = policy
+            .max_age_secs
+            .map(|s| s.saturating_mul(1000))
+            .map(|ms| self.now_millis().saturating_sub(ms));
         let min_alive = self.gate.min_alive();
-        // Bug-3 fix: the anchor only matters when a live snapshot exists
-        // below `current`. When `active_snapshots` is empty, `min_alive ==
-        // last_committed == current` and a fresh snapshot opens at `current`
-        // reading `main` — no old version is ever read, so no anchor needed.
         let have_live_snapshot = !self.gate.active_snapshots_empty();
 
         // Scan this key's history entries (prefix scan on the version-key
-        // encoding `key || 0xFF || version_be`).
+        // encoding `key || 0xFF || version_be`). The prefix naturally excludes
+        // ts-keys (which start with TS_TAG = 0x00, not the record key).
         let prefix = {
             let mut p = BytesMut::with_capacity(key.len() + 1);
             p.extend_from_slice(key);
@@ -314,13 +403,12 @@ impl MvccStore {
             }
         }
 
-        // Sort descending by version (newest first).
+        // Sort descending by version (newest first) so `idx` ranks by recency.
         entries.sort_by(|a, b| b.0.cmp(&a.0));
 
-        // Bug-2 fix: the anchor is the SINGLE largest version `< min_alive`,
-        // kept ONLY when a live snapshot exists (it serves a snapshot reading
-        // a key last-written below `min_alive`). If that version is already
-        // kept by the count window (idx < keep_n), no extra entry is kept.
+        // The anchor: the SINGLE largest version `< min_alive`, kept ONLY when
+        // a live snapshot exists. If already kept by the min_count/count
+        // window, no extra entry is kept.
         let anchor: Option<u64> = if have_live_snapshot {
             entries
                 .iter()
@@ -331,23 +419,62 @@ impl MvccStore {
             None
         };
 
-        // Reclaim logic: iterate newest-first. Keep a version if ANY of:
-        //   (a) idx < keep_n  — the count-retention window (user-facing cap),
-        //   (b) version >= min_alive — pinned by a live snapshot (sacred floor),
-        //   (c) Some(version) == anchor — the single anchor (largest < min_alive).
-        // Reclaim the rest (best-effort; a vacuum failure must NOT fail the
-        // write that triggered it — the next write retries).
+        // Reclaim logic: iterate newest-first. A version is reclaimed only if
+        // ALL caps agree to drop it (and the snapshot invariants don't protect
+        // it). Concretely, reclaim iff:
+        //   idx >= min_count                                  (floor keeps newest M)
+        //   AND (max_count is None OR idx >= max_count)       (count cap drops it)
+        //   AND (age_cutoff is None OR its ts < cutoff)       (age cap drops it;
+        //                                                       unknown ts → keep)
+        //   AND version < min_alive                           (sacred snapshot floor)
+        //   AND Some(version) != anchor                       (single anchor)
         for (idx, (version, phys_key)) in entries.iter().enumerate() {
-            if idx < keep_n {
-                continue; // (a) within the count-retention window
+            // (floor) min_count protects the newest M versions unconditionally.
+            if idx < min_count {
+                continue;
             }
+            // (count cap) within the count window → keep.
+            if let Some(mc) = max_count {
+                if idx < mc {
+                    continue;
+                }
+            }
+            // (age cap) newer than the cutoff (or unknown ts) → keep.
+            if let Some(cutoff) = age_cutoff_ms {
+                let ts = self.lookup_ts(*version).await;
+                match ts {
+                    Some(t) if t < cutoff => { /* older than cutoff → age drops it */ }
+                    _ => continue, // unknown ts OR within age window → keep
+                }
+            }
+            // (sacred floor) pinned by a live snapshot → keep.
             if *version >= min_alive {
-                continue; // (b) pinned by a live snapshot — sacred floor
+                continue;
             }
+            // (anchor) the single anchor serving a live snapshot → keep.
             if Some(*version) == anchor {
-                continue; // (c) the single anchor serving a live snapshot
+                continue;
             }
+            // All caps agree + not protected → reclaim the version AND its ts.
             let _ = self.history.remove(phys_key.clone()).await;
+            let _ = self.history.remove(ts_key(*version)).await;
+        }
+    }
+
+    /// T1c: look up the recorded commit timestamp (millis) for `version`.
+    /// Returns `None` if no ts entry exists (treated as "unknown age" → the
+    /// age axis conservatively keeps the version).
+    async fn lookup_ts(&self, version: u64) -> Option<u64> {
+        match self.history.get(ts_key(version)).await {
+            Ok(val) => {
+                if val.len() == 8 {
+                    let bytes: [u8; 8] = val.as_ref().try_into().ok()?;
+                    Some(u64::from_le_bytes(bytes))
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
         }
     }
 
@@ -451,6 +578,8 @@ impl MvccStore {
         self.publish_cell(key.clone(), new_v, true).await;
         let key_snapshot = key.clone();
         self.main.set(key, value).await?;
+        // T1c: record the commit timestamp for the age-retention axis.
+        self.record_ts(new_v).await;
         // Advance the reader-visible floor so a tx/snapshot opened AFTER this
         // write sees it: `publish_committed_max` is a monotonic fetch_max
         // (lock-free, safe off `commit_lock`, never moves the floor backwards).
@@ -522,9 +651,11 @@ impl MvccStore {
         // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
         // cached version advances monotonically.
         let mut max_v = 0u64;
+        let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
         for (key, _value) in &items {
             let new_v = self.gate.assign_next_version();
             self.publish_cell(key.clone(), new_v, true).await;
+            new_versions.push(new_v);
             max_v = new_v;
         }
 
@@ -532,6 +663,12 @@ impl MvccStore {
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         let main_ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
         self.main.transact(main_ops).await?;
+
+        // T1c: record the commit timestamp for every version in the batch
+        // (age-retention axis). Best-effort.
+        for &v in &new_versions {
+            self.record_ts(v).await;
+        }
 
         // Advance the reader-visible floor to the batch's max version so a
         // tx/snapshot opened AFTER the batch sees every record in it.
@@ -569,6 +706,8 @@ impl MvccStore {
         // still live in main (the delete silently never happened).
         let key_snapshot = key.clone();
         self.main.remove(key).await?;
+        // T1c: record the commit timestamp for the age-retention axis.
+        self.record_ts(new_v).await;
         // Advance the reader-visible floor so a tx/snapshot opened AFTER this
         // delete sees the post-delete state: `publish_committed_max` is a
         // monotonic fetch_max (lock-free, safe off `commit_lock`).
@@ -935,6 +1074,10 @@ impl MvccStore {
         // Phase 3: one batched write to main.
         self.main.transact(ops.clone()).await?;
 
+        // T1c: record the commit timestamp for the tx commit version (one ts
+        // per commit — all ops share `commit_version`). Best-effort.
+        self.record_ts(commit_version).await;
+
         // Phase 4: update the in-memory cell for every touched key.
         // Sets both `version` and `hwm` to `commit_version` so that
         // tx-committed keys participate in index-only freshness validation.
@@ -974,10 +1117,17 @@ impl MvccStore {
     /// See [`Self::prune_version_cache`] for the full visibility argument.
     ///
     /// Returns the number of history entries deleted.
+    ///
+    /// T1c: ts-keys (`[TS_TAG][version_be]`) are transparently skipped during
+    /// the scan — `decode_version_key` returns `None` for them (they're 9
+    /// bytes with `TS_TAG = 0x00 != VERSION_SEP`). When a version is deleted,
+    /// its `ts_key(version)` is also removed so timestamps don't outlive their
+    /// versions.
     pub async fn gc_below(&self, min_version: u64) -> DbResult<usize> {
         use crate::version_codec::decode_version_key;
 
         // Phase 1: scan all history entries, group by original key.
+        // ts-keys are skipped: decode_version_key returns None for them.
         let stream = self.history.iter_stream(256);
         futures::pin_mut!(stream);
 
@@ -999,7 +1149,7 @@ impl MvccStore {
         }
 
         // Phase 2: for each key, sort by version, keep the latest (anchor),
-        // delete the rest.
+        // delete the rest (+ each deleted version's ts-key).
         let mut deleted = 0usize;
         for (_orig_key, mut entries) in per_key {
             if entries.len() <= 1 {
@@ -1009,8 +1159,11 @@ impl MvccStore {
             entries.sort_by_key(|(v, _)| *v);
             // Keep the last (highest version < min_version), delete the rest.
             let to_delete = &entries[..entries.len() - 1];
-            for (_, phys_key) in to_delete {
+            for (version, phys_key) in to_delete {
                 let _ = self.history.remove(phys_key.clone()).await;
+                // T1c: remove the ts-key in lockstep so timestamps don't
+                // outlive their versions.
+                let _ = self.history.remove(ts_key(*version)).await;
                 deleted += 1;
             }
         }
@@ -1135,12 +1288,16 @@ mod tests {
         let val = mvcc.main.get(key.clone()).await.unwrap();
         assert_eq!(val, Bytes::from("v1"));
 
-        // history is empty
+        // history has no version-key entries (only a ts-key for the write).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
-            let batch = batch.unwrap();
-            assert!(batch.is_empty(), "history should be empty");
+            for (hk, _) in batch.unwrap() {
+                assert!(
+                    crate::version_codec::decode_version_key(&hk).is_none(),
+                    "history should have no version-key entries (only ts-keys)"
+                );
+            }
         }
     }
 
@@ -1170,7 +1327,11 @@ mod tests {
         let mut found = false;
         while let Some(batch) = stream.next().await {
             for (hk, hv) in batch.unwrap() {
-                let (orig_key, _ver) = crate::version_codec::decode_version_key(&hk).unwrap();
+                // T1c: skip ts-keys ([TS_TAG][version_be]) — only version-keys
+                // decode successfully.
+                let Some((orig_key, _ver)) = crate::version_codec::decode_version_key(&hk) else {
+                    continue;
+                };
                 assert_eq!(orig_key, &b"k1"[..]);
                 assert_eq!(hv, Bytes::from("v1"));
                 found = true;
@@ -1243,12 +1404,16 @@ mod tests {
         // main no longer has the key
         assert!(mvcc.main.get(key).await.is_err());
 
-        // history contains v1
+        // history contains v1 (skip ts-keys which have different values)
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut found = false;
         while let Some(batch) = stream.next().await {
-            for (_, hv) in batch.unwrap() {
+            for (hk, hv) in batch.unwrap() {
+                // T1c: skip ts-keys — only inspect version-key entries.
+                if crate::version_codec::decode_version_key(&hk).is_none() {
+                    continue;
+                }
                 assert_eq!(hv, Bytes::from("v1"));
                 found = true;
             }
@@ -1288,16 +1453,21 @@ mod tests {
             mvcc.set_versioned(key, Bytes::from("val")).await.unwrap();
         }
 
-        // history should be empty — no snapshots were open
+        // history should have no version-key entries — no snapshots were open
+        // (T1c: only ts-keys exist, which are not version-keys).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut count = 0usize;
         while let Some(batch) = stream.next().await {
-            count += batch.unwrap().len();
+            for (hk, _) in batch.unwrap() {
+                if crate::version_codec::decode_version_key(&hk).is_some() {
+                    count += 1;
+                }
+            }
         }
         assert_eq!(
             count, 0,
-            "history should have zero records without snapshots"
+            "history should have zero version-key entries without snapshots"
         );
     }
 
@@ -1393,7 +1563,11 @@ mod tests {
         futures::pin_mut!(stream);
         let mut found = false;
         while let Some(batch) = stream.next().await {
-            for (_, hv) in batch.unwrap() {
+            for (hk, hv) in batch.unwrap() {
+                // T1c: skip ts-keys — only inspect version-key entries.
+                if crate::version_codec::decode_version_key(&hk).is_none() {
+                    continue;
+                }
                 assert_eq!(hv, Bytes::from("old"));
                 found = true;
             }
@@ -1422,7 +1596,11 @@ mod tests {
         futures::pin_mut!(stream);
         let mut found = false;
         while let Some(batch) = stream.next().await {
-            for (_, hv) in batch.unwrap() {
+            for (hk, hv) in batch.unwrap() {
+                // T1c: skip ts-keys — only inspect version-key entries.
+                if crate::version_codec::decode_version_key(&hk).is_none() {
+                    continue;
+                }
                 assert_eq!(hv, Bytes::from("before"));
                 found = true;
             }
@@ -1474,11 +1652,17 @@ mod tests {
     }
 
     async fn count_history_entries(mvcc: &MvccStore) -> usize {
+        // T1c: count only version-keys (decode_version_key succeeds). ts-keys
+        // ([TS_TAG][version_be]) are skipped — decode returns None for them.
         let stream = mvcc.history_store().iter_stream(64);
         futures::pin_mut!(stream);
         let mut count = 0;
         while let Some(batch) = stream.next().await {
-            count += batch.unwrap().len();
+            for (phys_key, _val) in batch.unwrap() {
+                if crate::version_codec::decode_version_key(&phys_key).is_some() {
+                    count += 1;
+                }
+            }
         }
         count
     }
@@ -1567,11 +1751,16 @@ mod tests {
         futures::pin_mut!(stream);
         let mut count = 0usize;
         while let Some(batch) = stream.next().await {
-            count += batch.unwrap().len();
+            for (hk, _) in batch.unwrap() {
+                // T1c: count only version-keys (skip ts-keys).
+                if crate::version_codec::decode_version_key(&hk).is_some() {
+                    count += 1;
+                }
+            }
         }
         assert_eq!(
             count, 0,
-            "history should stay empty without active snapshots"
+            "history should stay empty (no version-key entries) without active snapshots"
         );
     }
 
@@ -1970,12 +2159,17 @@ mod tests {
             );
         }
 
-        // T1a: brand-new keys have no prior to archive → history stays empty.
+        // T1a: brand-new keys have no prior to archive → no version-key entries
+        // in history (T1c: only ts-keys exist, which are not version-keys).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut hist = 0usize;
         while let Some(batch) = stream.next().await {
-            hist += batch.unwrap().len();
+            for (hk, _) in batch.unwrap() {
+                if crate::version_codec::decode_version_key(&hk).is_some() {
+                    hist += 1;
+                }
+            }
         }
         assert_eq!(
             hist, 0,
@@ -3888,5 +4082,346 @@ mod tests {
             custom,
             "rejected swap must not change policy"
         );
+    }
+
+    // ================================================================
+    // T1c — per-version commit timestamp + max_age retention (AGE axis).
+    //
+    // All tests freeze the clock via `set_test_now` for determinism.
+    // `count_history_entries` counts only version-keys (ts-keys excluded).
+    // ================================================================
+
+    /// 1. `max_age_secs: Some(60)` (KeepHistory base, no count cap), no
+    /// snapshot: a version written 100s ago (ts=0, now=100_000) is reclaimed;
+    /// versions within the 60s window are kept.
+    #[tokio::test]
+    async fn max_age_reclaims_old_versions() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention {
+            max_age_secs: Some(60),
+            max_count: None,
+            min_count: None,
+        })
+        .unwrap();
+
+        let key = Bytes::from("age_key");
+        // v1 at an early frozen time (1ms — 0 is the "real clock" sentinel).
+        mvcc.set_test_now(1);
+        mvcc.set_versioned(key.clone(), Bytes::from("old"))
+            .await
+            .unwrap();
+        let v1 = mvcc.version_of(&key);
+
+        // 100s later (100_001ms) — v1 (ts=1) is now 100s old (> 60s cap).
+        mvcc.set_test_now(100_001);
+        mvcc.set_versioned(key.clone(), Bytes::from("new1"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(key.clone(), Bytes::from("new2"))
+            .await
+            .unwrap();
+
+        // v1 (ts=0, age 100s > 60s) reclaimed; v2 (ts=100_000, within window)
+        // kept. Exactly 1 version-key entry remains.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(hist, 1, "max_age=60s must reclaim the 100s-old v1, keep v2");
+
+        // The reclaimed v1 is no longer reachable via get_at.
+        let stale = mvcc.get_at(&key, v1).await.unwrap();
+        assert!(stale.is_none(), "reclaimed v1 must not be reachable");
+
+        // The kept v2 is reachable; current is correct.
+        let last_committed = mvcc.gate.last_committed();
+        assert_eq!(
+            mvcc.get_at(&key, last_committed).await.unwrap(),
+            Some(Bytes::from("new2"))
+        );
+    }
+
+    /// 2. `min_count` FLOOR overrides the age cap: `max_age_secs: Some(1)`,
+    /// `min_count: Some(3)` — write 5 versions all well past the age cap; the
+    /// newest 3 survive (min_count protects them from the age cap).
+    #[tokio::test]
+    async fn min_count_floor_overrides_age() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention {
+            max_age_secs: Some(1),
+            max_count: None,
+            min_count: Some(3),
+        })
+        .unwrap();
+
+        let key = Bytes::from("floor_age_key");
+        // Write v1..v5 all at frozen ts=1 (0 is the "real clock" sentinel).
+        // Vacuum runs after each write, but with clock=1 the age cutoff
+        // saturates to 0 (1 - 1000 = 0) and ts=1 is not < 0, so nothing is
+        // reclaimed yet — history accumulates v1..v4.
+        mvcc.set_test_now(1);
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        // Advance the clock to 10s (10x the 1s cap) and write once more to
+        // trigger a vacuum. Now v1..v5 (ts=1) are all past the 1s cap.
+        mvcc.set_test_now(10_000);
+        mvcc.set_versioned(key.clone(), Bytes::from("v6"))
+            .await
+            .unwrap();
+
+        // min_count=3 protects the newest 3 old versions (v3, v4, v5) from the
+        // age cap; v1, v2 (ts=1, age 10s > 1s, beyond the floor) are reclaimed.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 3,
+            "min_count=3 floor must keep the newest 3 even past the age cap"
+        );
+    }
+
+    /// 3. age ∧ count intersection: a version is reclaimed only when BOTH
+    /// caps agree to drop it (the KEEP condition is OR — within either cap's
+    /// window). Two phases:
+    ///   (a) beyond count BUT within age window → KEPT (age protects);
+    ///   (b) within count BUT beyond age window → KEPT (count protects).
+    #[tokio::test]
+    async fn age_and_count_intersect_tighter_prunes() {
+        // Phase (a): a version beyond the count cap but within the age window
+        // is KEPT — age protects it from the count cap.
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention {
+            max_age_secs: Some(60),
+            max_count: Some(1),
+            min_count: None,
+        })
+        .unwrap();
+        let key = Bytes::from("intersect_a");
+        // Write 3 versions all at the same frozen time. During accumulation
+        // the age cutoff saturates to 0 (now=50_000, cutoff=0), so age keeps
+        // everything and the count cap alone can't reclaim (AND semantics).
+        mvcc.set_test_now(50_000);
+        for i in 1..=3u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("a{i}")))
+                .await
+                .unwrap();
+        }
+        // a1 and a2 are beyond max_count=1, but within the age window → age
+        // protects them → hist == 2 (both survive).
+        let hist_a = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist_a, 2,
+            "phase (a): versions beyond count but within age window are kept (age protects)"
+        );
+
+        // Phase (b): a version within the count cap but beyond the age window
+        // is KEPT — count protects it from the age cap.
+        let mvcc2 = make_mvcc();
+        mvcc2
+            .set_retention(Retention {
+                max_age_secs: Some(60),
+                max_count: Some(3),
+                min_count: None,
+            })
+            .unwrap();
+        let key2 = Bytes::from("intersect_b");
+        // v1 at frozen ts=1 (0 is the "real clock" sentinel).
+        mvcc2.set_test_now(1);
+        mvcc2
+            .set_versioned(key2.clone(), Bytes::from("old"))
+            .await
+            .unwrap();
+        // 100s later: overwrite. v1 (ts=1) is now 100s old (> 60s cap).
+        mvcc2.set_test_now(100_001);
+        mvcc2
+            .set_versioned(key2.clone(), Bytes::from("new"))
+            .await
+            .unwrap();
+        // v1 is within the count window (idx 0 < 3) but past the age cap.
+        // Count protects it → hist == 1 (v1 survives despite age).
+        let hist_b = count_history_entries(&mvcc2).await;
+        assert_eq!(
+            hist_b, 1,
+            "phase (b): version within count but beyond age window is kept (count protects)"
+        );
+
+        // Phase (c): a version beyond BOTH caps is reclaimed.
+        let mvcc3 = make_mvcc();
+        mvcc3
+            .set_retention(Retention {
+                max_age_secs: Some(60),
+                max_count: Some(1),
+                min_count: None,
+            })
+            .unwrap();
+        let key3 = Bytes::from("intersect_c");
+        // v1, v2 at ts=1 (old); v3 at ts=100_001.
+        mvcc3.set_test_now(1);
+        mvcc3
+            .set_versioned(key3.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc3
+            .set_versioned(key3.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+        mvcc3.set_test_now(100_001);
+        mvcc3
+            .set_versioned(key3.clone(), Bytes::from("v3"))
+            .await
+            .unwrap();
+        // After v3: entries desc = [v2(ts=1), v1(ts=1)].
+        //   v2(idx0): within count (idx<1)? No. age: ts=1 < cutoff(40_001)? Yes.
+        //     Both drop → reclaim.
+        //   v1(idx1): beyond count. age drops. Both drop → reclaim.
+        // Wait — both reclaimed? Then hist=0. But v2 is idx0 < max_count=1? 0 < 1 = yes!
+        // Let me re-trace: max_count=1.
+        //   v2(idx0): idx<1? YES → keep (within count window).
+        //   v1(idx1): idx<1? No → count drops. age: ts=1<40001? Yes → age drops. → reclaim.
+        // hist == 1 (v2 kept by count, v1 reclaimed by both).
+        let hist_c = count_history_entries(&mvcc3).await;
+        assert_eq!(
+            hist_c, 1,
+            "phase (c): version beyond BOTH caps (count+age) is reclaimed"
+        );
+    }
+
+    /// 4. Under a live snapshot, an old-by-age version that is `>= min_alive`
+    /// or is the anchor is NOT reclaimed despite the age cap.
+    #[tokio::test]
+    async fn age_keeps_pinned_and_anchor() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        mvcc.set_retention(Retention {
+            max_age_secs: Some(1),
+            max_count: Some(0),
+            min_count: None,
+        })
+        .unwrap();
+
+        let key = Bytes::from("age_pinned_key");
+        // Accumulate history under KeepHistory first (the aggressive policy
+        // would reclaim on every write, leaving nothing to exercise the path).
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+        mvcc.set_test_now(1);
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+        // 4 history entries (v1..v4), all ts=1.
+
+        // Open a snapshot at v5 (last_committed) — pins min_alive=5.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+        assert_eq!(snap_v, 5);
+
+        // Switch to the aggressive age+count policy and overwrite once.
+        mvcc.set_retention(Retention {
+            max_age_secs: Some(1),
+            max_count: Some(0),
+            min_count: None,
+        })
+        .unwrap();
+        mvcc.set_test_now(10_000); // 10s later — v1..v4 all past the 1s cap.
+        mvcc.set_versioned(key.clone(), Bytes::from("v6"))
+            .await
+            .unwrap();
+
+        // Vacuum: keep_n=0, min_alive=5, live snapshot → anchor = max<5 = v4.
+        //   v5: >= min_alive(5) → kept (sacred, branch b)
+        //   v4: == anchor → kept (branch c)
+        //   v3..v1: past age, beyond count, < min_alive, not anchor → reclaimed
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 2,
+            "age cap must still honor sacred floor + anchor: {{v5 pinned, v4 anchor}}"
+        );
+
+        // The snapshot at v5 reads v5 (correct value at its version).
+        let result = mvcc.get_at(&key, snap_v).await.unwrap();
+        assert_eq!(
+            result,
+            Some(Bytes::from("v5")),
+            "snapshot at v5 must read v5 (protected by min_alive despite age cap)"
+        );
+    }
+
+    /// 5. A version with no recorded ts is conservatively KEPT by the age axis
+    /// (unknown age → do not reclaim by age).
+    #[tokio::test]
+    async fn unknown_ts_not_reclaimed_by_age() {
+        let mvcc = make_mvcc();
+        // Only an age cap (no count cap) — so the age axis is the ONLY potential
+        // reclaimer. With no count cap, the only way to reclaim is age.
+        mvcc.set_retention(Retention {
+            max_age_secs: Some(1),
+            max_count: None,
+            min_count: None,
+        })
+        .unwrap();
+
+        let key = Bytes::from("no_ts_key");
+        // Write v1, v2 with a frozen clock so they get real ts entries.
+        mvcc.set_test_now(1);
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let v1 = mvcc.version_of(&key);
+        mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+
+        // Manually delete v1's ts entry — simulate a pre-T1c version with no ts.
+        let _ = mvcc.history_store().remove(ts_key(v1)).await;
+
+        // Advance the clock well past the age cap and write once more.
+        mvcc.set_test_now(10_000);
+        mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+            .await
+            .unwrap();
+
+        // v1 has no ts → unknown age → age axis conservatively keeps it.
+        // v2 (ts=1, age 10s > 1s) → reclaimed by age.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 1,
+            "unknown-ts version kept by age axis; v2 (ts=1) reclaimed"
+        );
+        // v1 is still reachable (its version entry survived).
+        assert!(
+            mvcc.get_at(&key, v1).await.unwrap().is_some(),
+            "unknown-ts v1 must survive (conservatively kept by age axis)"
+        );
+    }
+
+    /// 6. After writing version V, `history.get(ts_key(V))` returns the frozen
+    /// now. Confirms ts is recorded per write and is decodable.
+    #[tokio::test]
+    async fn ts_recorded_on_write() {
+        let mvcc = make_mvcc();
+        mvcc.set_test_now(4242);
+
+        let key = Bytes::from("ts_record_key");
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let v1 = mvcc.version_of(&key);
+
+        // The ts-key for v1 holds the frozen now (4242), little-endian u64.
+        let ts_val = mvcc.history_store().get(ts_key(v1)).await.unwrap();
+        assert_eq!(ts_val.len(), 8, "ts value must be 8 bytes (u64 LE)");
+        let ms = u64::from_le_bytes(ts_val.as_ref().try_into().unwrap());
+        assert_eq!(ms, 4242, "recorded ts must equal the frozen now");
+
+        // decode_ts_key round-trips for the same version.
+        assert_eq!(decode_ts_key(&ts_key(v1)), Some(v1));
+        // And a version-key is NOT mistaken for a ts-key.
+        let vk = encode_version_key(&key, v1);
+        assert!(
+            decode_ts_key(&vk).is_none(),
+            "version-key must not decode as ts-key"
+        );
+
+        mvcc.set_test_now(0); // restore real clock (hygiene)
     }
 }
