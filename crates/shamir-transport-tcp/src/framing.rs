@@ -150,6 +150,12 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     payload: &[u8],
 ) -> Result<(), FrameError> {
+    if payload.len() > MAX_FRAME_SIZE_DEFAULT {
+        return Err(FrameError::TooLarge {
+            actual: payload.len(),
+            max: MAX_FRAME_SIZE_DEFAULT,
+        });
+    }
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
@@ -183,6 +189,12 @@ pub async fn write_frame_into<W: AsyncWrite + Unpin>(
     payload: &[u8],
     scratch: &mut Vec<u8>,
 ) -> Result<(), FrameError> {
+    if payload.len() > MAX_FRAME_SIZE_DEFAULT {
+        return Err(FrameError::TooLarge {
+            actual: payload.len(),
+            max: MAX_FRAME_SIZE_DEFAULT,
+        });
+    }
     let len = payload.len() as u32;
     scratch.clear();
     scratch.reserve(4 + payload.len());

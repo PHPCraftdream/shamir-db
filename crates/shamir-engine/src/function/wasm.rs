@@ -1231,7 +1231,7 @@ impl ShamirFunction for WasmFunction {
             .map_err(|e| map_wasm_error(e, "shamir_call"))?;
 
         // Unpack the result pointer/length.
-        let out_ptr = (packed >> 32) as u32 as usize;
+        let out_ptr = ((packed as u64) >> 32) as usize;
         let out_len = (packed & 0xFFFF_FFFF) as u32 as usize;
         let out_end = out_ptr.saturating_add(out_len);
         if out_end > memory.data_size(&store) {
