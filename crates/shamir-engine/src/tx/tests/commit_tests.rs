@@ -388,15 +388,17 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
     assert!(del_found, "expected WalOpV2::Delete for staged Remove");
 }
 
-// Renamed from `ssi_conflict_detected_via_repo_version_provider` —
-// the previous name implied conflict detection but the assertion (and
-// reality) is the opposite: a non-tx insert does not bump the per-key
-// version_cache, so an SSI tx that records a read at v=0 still passes
-// validation because the provider returns 0 (no entry → 0 ≤ 0).
+// Originally named `ssi_conflict_detected_via_repo_version_provider` — the
+// previous name implied conflict detection but the assertion (and reality)
+// was the opposite under the OLD model where a non-tx insert did NOT bump the
+// per-key version_cache.
 //
-// Wiring non-tx writes through MvccStore so they bump version_cache is
-// tracked as HIGH-4; once that lands this test should flip its
-// assertion to expect `CommitError::SsiConflict` and be renamed back.
+// T1a reversed the HIGH-4 assumption: a non-tx insert NOW bumps the MVCC
+// version and advances `last_committed`. The no-conflict expectation still
+// holds, but for the RIGHT reason: the non-tx write PREDATES the tx's snapshot
+// (the seed version ≤ tx.snapshot_version), so `version_of(key) ≤ snapshot`
+// and `validate_read_set` sees no advance. The read is recorded at the real
+// snapshot version (not a hardcoded 0).
 #[tokio::test]
 async fn ssi_no_conflict_when_only_non_tx_writes_predate_snapshot() {
     use crate::table::TableConfig;
@@ -413,12 +415,13 @@ async fn ssi_no_conflict_when_only_non_tx_writes_predate_snapshot() {
     let (mut tx, _g) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
 
     let token = crate::table::table_manager::table_token_for("users");
-    tx.record_read(token, rid.to_bytes(), 0);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx.record_read(token, rid.to_bytes(), tx.snapshot_version);
 
     let outcome = repo.commit_tx(tx).await;
     assert!(
         outcome.is_ok(),
-        "no conflict expected — non-tx insert doesn't bump mvcc version yet (HIGH-4)"
+        "no conflict expected — the non-tx insert predates the snapshot (version ≤ snapshot), so SSI sees no advance"
     );
 }
 

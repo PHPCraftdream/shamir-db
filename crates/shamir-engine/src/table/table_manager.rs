@@ -2114,16 +2114,16 @@ impl TableManager {
     /// (= last) version, matching the commit-version-per-batch semantic
     /// the tx path uses.
     ///
-    /// We deliberately do NOT call `gate.publish_committed` here. That call
-    /// advances the reader-visible MVCC floor and runs under `commit_lock` on
-    /// the tx path; the non-tx write path holds no such lock, and
-    /// `publish_committed` is a plain store (not a max), so calling it off the
-    /// lock could momentarily move `last_committed` backwards relative to a
-    /// concurrent tx commit. The changefeed needs only a monotonic
+    /// Both non-tx and tx commits advance the reader-visible MVCC floor via
+    /// `gate.publish_committed_max` (the monotonic fetch_max CAS): the
+    /// non-tx write path (`MvccStore::set_versioned` / `set_versioned_many` /
+    /// `delete_versioned`) publishes right after the durable write, and the
+    /// tx commit path publishes at Phase 6. This changefeed emitter does NOT
+    /// itself publish — it only needs the already-published monotonic
     /// `commit_version` (the journal is keyed by it and `read_changelog_from`
     /// never consults `publish_committed`); the non-tx data's MVCC visibility
-    /// is governed independently by `MvccStore::set_versioned`, which likewise
-    /// bumps the counter without publishing.
+    /// is governed by the `publish_committed_max` call inside
+    /// `MvccStore::set_versioned`.
     pub(crate) async fn emit_nontx_changefeed(
         &self,
         commit_version: u64,
