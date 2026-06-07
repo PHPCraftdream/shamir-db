@@ -1,6 +1,9 @@
 //! Interner manager for lazy loading and persistence
 
+use async_trait::async_trait;
+
 use crate::meta::MetaKey;
+use crate::table::persistable::Persistable;
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
@@ -291,5 +294,12 @@ impl InternerManager {
         self.last_persisted_len.store(new_high, Ordering::Release);
         drop(guard);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Persistable for InternerManager {
+    async fn persist(&self) -> DbResult<()> {
+        InternerManager::persist(self).await
     }
 }
