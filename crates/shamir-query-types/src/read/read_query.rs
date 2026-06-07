@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{GroupBy, OrderBy, Pagination, Select};
+use super::{GroupBy, OrderBy, Pagination, Select, Temporal};
 use crate::filter::Filter;
 use crate::TableRef;
 
@@ -31,6 +31,14 @@ pub struct ReadQuery {
     /// Whether to compute and return total count (expensive)
     #[serde(default, skip_serializing_if = "is_false")]
     pub count_total: bool,
+    /// Temporal selector — defaults to `Latest` (today's read).
+    #[serde(default, skip_serializing_if = "Temporal::is_latest")]
+    pub temporal: Temporal,
+    /// Opt-in: include each record's version in the result (for as_of
+    /// cursors / optimistic CAS). The result-side wiring is a later
+    /// slice; this is just the request flag.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub with_version: bool,
 }
 
 fn default_select() -> Select {
@@ -52,6 +60,8 @@ impl ReadQuery {
             order_by: None,
             pagination: Pagination::None,
             count_total: false,
+            temporal: Temporal::Latest,
+            with_version: false,
         }
     }
 
@@ -65,6 +75,8 @@ impl ReadQuery {
             order_by: None,
             pagination: Pagination::None,
             count_total: false,
+            temporal: Temporal::Latest,
+            with_version: false,
         }
     }
 

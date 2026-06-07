@@ -6,7 +6,7 @@ use crate::query::common::{
     agg_func_from_str, aggregate_field_from_value, filter_from_value, group_by_from_value,
     order_by_from_value, pagination_from_value, QueryParseError,
 };
-use crate::query::read::{Pagination, ReadQuery, Select, SelectItem};
+use crate::query::read::{Pagination, ReadQuery, Select, SelectItem, Temporal};
 use crate::query::TableRef;
 use shamir_types::types::value::{QueryValue, Value};
 
@@ -71,6 +71,8 @@ pub fn query_from_value(value: &QueryValue) -> Result<ReadQuery, QueryParseError
         order_by,
         pagination,
         count_total,
+        temporal: Temporal::Latest,
+        with_version: false,
     })
 }
 

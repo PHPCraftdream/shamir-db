@@ -9,6 +9,7 @@ pub mod query_result;
 pub mod read_query;
 pub mod select;
 pub mod select_expr;
+pub mod temporal;
 
 pub use agg::{AggFunc, AggregateField};
 pub use group_by::GroupBy;
@@ -18,3 +19,7 @@ pub use query_result::{QueryResult, QueryStats};
 pub use read_query::ReadQuery;
 pub use select::{Select, SelectItem};
 pub use select_expr::{SelectExpr, SelectExprValue};
+pub use temporal::{At, Temporal};
+
+#[cfg(test)]
+mod tests;
