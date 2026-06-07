@@ -88,15 +88,17 @@ latch(cell[key]):
 release
 ```
 
-Because the snapshot-needs-prior decision and the data write happen under
-the *same* per-key latch, a concurrent `open_snapshot` either observes the
-**whole** pre-write cell (old version + old `main`) or the **whole**
-post-write cell (new version + new `main` + archived prior). No torn
-intermediate. **The TOCTOU window cannot exist.** The fast-path optimization
-survives — "skip history when no snapshot needs the prior" is now a decision
-*inside* the atomic tact, not a check-then-act across it.
-
+The per-key latch makes the write atomic *for this key* — a reader that
+also takes the latch sees the whole pre- or post-state, never a torn one.
 The latch is the user's **#4 per-entity atomic**, given a precise home.
+
+> **⚠️ Reality check (2026-06-07): the latch alone is NOT sufficient.** See
+> §4.1 — the latch closes torn per-key reads, but **not** the *archive-
+> completeness* problem (a snapshot that opens after the write's
+> archive-decision but reads at `snap_v < new_v`). That is a cross-cutting
+> write-vs-snapshot-open race the per-key latch does not order. The clean
+> fix has a real cost; MVCC-2 is LOW and is deferred. Read §4.1 before
+> implementing S1.1.
 
 ---
 
@@ -149,12 +151,14 @@ that already exists, and adds the latch + lock slot.
 The ~100 existing `mvcc_store` tests + the `mvcc1_*`/`mvcc2_*` characterization
 tests are the safety net.
 
-1. **S1 — cell replaces `version_cache` + the atomic write-tact.** Introduce
-   `RecordCell { version }` + a per-key latch; route `set_versioned`(`_many`,
-   `apply_committed_ops`) and `get_at` through it. **MVCC-2 dissolves** —
-   flip `mvcc2_simulated_toctou_*` to "no phantom"; the stress stays green;
-   the fast-path optimization is preserved as an in-tact decision. (Closes
-   #232; the keystone of the keystone.)
+1. **S1.0 — `RecordCell` wraps `version_cache`** ✅ DONE (`2f12ba5`):
+   behaviour-identical foundation; the cell now carries `version`, ready to
+   grow a lock slot.
+   **S1.1 — the atomic write-tact that closes MVCC-2 — DEFERRED.** See §4.1:
+   the sound fix has an irreducible cost (always-archive / commit-barrier /
+   version-log restructure), unjustified for a LOW bug that does not bite
+   in-memory. The deterministic harness (`c98b343`) documents the repro for
+   when a real need (async-disk workload) or restructure (c) arrives.
 2. **S2 — lock slot + Level-3.** Add `cell.lock`; a new `IsolationLevel`
    variant (or per-batch flag) for Level-3; acquire/release on the cell;
    **wound-wait on the tx version**. (Supersedes the standalone `LOCKING.md`
@@ -164,9 +168,66 @@ tests are the safety net.
    write-amplification. Then **P3.3** (planner + index-only read via M2) is a
    separate read-side slice.
 
-**Sequence:** S1 (close TOCTOU, the safe + highest-value core change) → S3
-(covering, the perf payoff, building on P3.1's already-landed DDL/meta) →
-S2 (Level-3, on real contention need).
+**Sequence:** S3 (covering, the perf payoff, building on P3.1's
+already-landed DDL/meta — write-side is independent of the TOCTOU) → S2
+(Level-3, on real contention need) → S1's TOCTOU fix **only when a real
+need justifies its cost** (see §4.1).
+
+---
+
+## 4.1 — S1.1 reality check: closing MVCC-2 has an irreducible cost
+
+Moving to implement S1.1, two "elegant" lock-free designs were
+stress-checked against their own interleavings and **both failed** — a
+worked example of *prove, don't guess* applied to our own design:
+
+1. **Per-key latch alone (§1's first sketch).** It closes torn per-key
+   reads, but not **archive-completeness**: the write decides "archive
+   `old`?" by checking `active_snapshots`, but a snapshot can open *after*
+   that check and still read at `snap_v < new_v`. The latch is per-key;
+   `open_snapshot` is global and does not take it, so the latch does not
+   order the write's archive-decision against a later snapshot-open.
+
+2. **Snapshot-epoch + capture-old + recheck (the "beautiful" lock-free
+   protocol).** Archive happens *after* `cell.version = new_v` is visible.
+   In the window between the cell bump and the archive, a reader with
+   `snap_v < new_v` routes to `history` and finds **nothing** → `None`
+   (worse than the original stale read). Moving the archive *before* the
+   cell bump re-opens the completeness hole (late snapshots uncovered).
+   The two requirements — *archive-before-cell-bump* (reader safety) and
+   *decide-archive-after-the-write-window* (completeness) — **contradict**;
+   one epoch cannot satisfy both.
+
+**Why it's irreducible here:** the write *overwrites* `main` in place, so
+the prior value's only refuge is `history`, and the "who needs the prior?"
+question is inherently cross-cutting (it depends on snapshots that may open
+at any time before the commit becomes visible). Closing it soundly needs
+**one** of:
+- **(a) always-archive** — copy prior → history on every overwrite,
+  unconditionally. Correct by construction (no race), but **2× write per
+  overwrite** (GC reclaims it when unwatched — but the write already paid
+  the cost). Bad trade for a LOW bug.
+- **(b) a commit barrier** — a brief *exclusive* section per non-tx write
+  that `open_snapshot` also respects, so the archive-decision and the
+  version-publish are atomic against snapshot-open. Correct, but adds a
+  global serialization point to the hot write path — the very thing the
+  fast path exists to avoid.
+- **(c) a write-new-aside / version-log restructure** — never overwrite
+  `main`; write the new version to a version-keyed log and install the
+  read-cache atomically (the canonical MVCC layout). Correct and fast, but
+  a **significant architectural change** to the storage model.
+
+**Decision.** MVCC-2 is **LOW** — it does not reproduce on the in-memory
+backend (no `.await` in the fast-path window ⇒ no task switch under
+single-threaded cooperative tokio) and bites only an async-disk backend
+under true parallelism. Paying (a)'s write-amplification or (b)'s hot-path
+barrier to fix a LOW bug is the wrong trade; (c) is a real milestone, not a
+slice. **So S1.1's TOCTOU fix is deferred** until either an async-disk
+workload makes it real or we undertake (c) deliberately (with loom-grade
+verification — clever reasoning is demonstrably not enough here, as the two
+failed designs above show). The deterministic harness (`c98b343`) stays as
+the documented repro. The **rest of the cell** (S1.0 done; S3 covering;
+S2 lock slot) does **not** depend on closing MVCC-2 and proceeds.
 
 ---
 
