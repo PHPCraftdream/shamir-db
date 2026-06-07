@@ -67,6 +67,88 @@ fn gen_user(i: usize) -> JsonValue {
     })
 }
 
+/// Wide record generator — same core fields as `gen_user` PLUS ~20 extra
+/// string/numeric fields. Total payload is ~5-10x larger than a narrow
+/// record. Used to isolate "decode K wide records after index-lookup" cost
+/// and to determine whether a covering index (Opt O) would yield a
+/// significant additional win beyond the current index+get_many path.
+///
+/// Extra fields:
+///   bio          — ~200-char free-text string
+///   field_00..15 — alternating string/number extras
+///   notes        — ~100-char string
+///   priority     — integer 0..9
+///   department   — one of 8 strings
+fn gen_user_wide(i: usize) -> JsonValue {
+    const DEPARTMENTS: &[&str] = &[
+        "Engineering",
+        "Marketing",
+        "Sales",
+        "Support",
+        "Finance",
+        "Legal",
+        "HR",
+        "Operations",
+    ];
+    // ~200-char bio constructed from a repeating pattern seeded by i.
+    let bio = format!(
+        "User {} biography: works in the {} department. \
+         Joined in {}. Specialises in area {}. \
+         Contact via user{}@{} for further details.",
+        i,
+        DEPARTMENTS[i % DEPARTMENTS.len()],
+        2000 + (i % 24),
+        i % 17,
+        i,
+        DOMAINS[i % DOMAINS.len()],
+    );
+    let notes = format!(
+        "Internal note #{}: last reviewed by manager {} on day {}.",
+        i,
+        FIRST_NAMES[i % FIRST_NAMES.len()],
+        i % 365,
+    );
+    json!({
+        "id":            format!("u{:08}", i),
+        "name":          format!(
+                            "{} {}",
+                            FIRST_NAMES[i % FIRST_NAMES.len()],
+                            LAST_NAMES[(i / FIRST_NAMES.len()) % LAST_NAMES.len()]
+                        ),
+        "email":         format!("user{}@{}", i, DOMAINS[i % DOMAINS.len()]),
+        "age":           18 + ((i * 37) % 60) as i64,
+        "city":          CITIES[i % CITIES.len()],
+        "score":         ((i * 7919) % 1000) as i64,
+        "active":        !i.is_multiple_of(3),
+        "created_at_ns": 1_700_000_000_000_000_000_u64 + (i as u64 * 60_000_000_000),
+        "tags":          vec![
+                            format!("tag_{}", i % 10),
+                            format!("tag_{}", (i / 10) % 7),
+                        ],
+        // --- extra wide fields ---
+        "bio":           bio,
+        "notes":         notes,
+        "department":    DEPARTMENTS[i % DEPARTMENTS.len()],
+        "priority":      (i % 10) as i64,
+        "field_00":      format!("extra_str_field_zero_{}", i),
+        "field_01":      ((i * 3) % 10_000) as i64,
+        "field_02":      format!("extra_str_field_two_{}", i * 2),
+        "field_03":      ((i * 5) % 10_000) as i64,
+        "field_04":      format!("extra_str_field_four_{}", i),
+        "field_05":      ((i * 7) % 10_000) as i64,
+        "field_06":      format!("extra_str_field_six_{}", i),
+        "field_07":      ((i * 11) % 10_000) as i64,
+        "field_08":      format!("extra_str_field_eight_{}", i),
+        "field_09":      ((i * 13) % 10_000) as i64,
+        "field_10":      format!("extra_str_field_ten_{}", i),
+        "field_11":      ((i * 17) % 10_000) as i64,
+        "field_12":      format!("extra_str_field_twelve_{}", i),
+        "field_13":      ((i * 19) % 10_000) as i64,
+        "field_14":      format!("extra_str_field_fourteen_{}", i),
+        "field_15":      ((i * 23) % 10_000) as i64,
+    })
+}
+
 // --------------------------------------------------------------------------
 // Setup helpers
 // --------------------------------------------------------------------------
@@ -1410,6 +1492,131 @@ fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
     group.finish();
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Wide-record range query — covering-index decision benchmark
+//
+// Purpose: isolate "decode K wide records after index-lookup" cost
+// so we can decide whether a covering index (Opt O) is worth
+// implementing. A covering index would avoid fetching/decoding full
+// records for narrow projections (e.g. SELECT age only).
+//
+// Two companion groups:
+//   range_query_wide_narrow_no_index_sled  — full table scan on wide records
+//   range_query_wide_narrow_with_index_sled — sorted index on age, narrow range
+//
+// The query uses age=30 (between 30..30, ~1.6% selectivity). The
+// SELECT clause requests only ["age"] (narrow projection). This is
+// the best-case for a covering index; if decoding is still a large
+// share of total time even with the index, Opt O is worth pursuing.
+//
+// NOTE: if the engine does not currently push the narrow projection
+// down to the storage layer, it will still decode all fields — which
+// is exactly the upper-bound on covering-index benefit we want to measure.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Narrow projection on wide records: SELECT age WHERE age BETWEEN 30 AND 30.
+/// Only ~1.6% of records match. The narrow select is the ideal covering-index
+/// target; without covering index the engine decodes all fields regardless.
+fn req_range_age_narrow_wide() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "r",
+        "queries": {
+            "r": {
+                "from": "users",
+                "where": { "op": "between", "field": ["age"], "from": 30, "to": 30 },
+                "select": {
+                    "items": [
+                        { "type": "field", "path": ["age"] }
+                    ]
+                }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+/// Full projection on wide records (no select clause): WHERE age BETWEEN 30 AND 30.
+/// Used as the baseline that covering index would improve upon.
+fn req_range_age_narrow_wide_full() -> BatchRequest {
+    serde_json::from_value(json!({
+        "id": "r",
+        "queries": {
+            "r": {
+                "from": "users",
+                "where": { "op": "between", "field": ["age"], "from": 30, "to": 30 }
+            }
+        }
+    }))
+    .unwrap()
+}
+
+/// Wide-record range query WITHOUT index. Full table scan decoding all
+/// wide records (~30 fields each). Establishes the ceiling cost of
+/// decode on a wide schema. Compare to _with_index to see index savings.
+fn bench_range_query_wide_narrow_no_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_wide_narrow_no_index_sled");
+
+    for &n in sweep_sizes() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users_wide(&s, n).await;
+            s
+        });
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                // Full projection — engine decodes every field of every wide record.
+                let req = req_range_age_narrow_wide_full();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
+/// Wide-record range query WITH sorted index on age + narrow SELECT ["age"].
+/// Index prunes the scan to ~1.6% of records; the engine then fetches and
+/// decodes only the matched records (still full wide records at the storage
+/// layer — no covering index yet). Time here = index-lookup cost + decode
+/// cost of ~N*0.016 wide records. If this is still large relative to the
+/// no-index baseline, the "decode K wide records" term dominates and a
+/// covering index (Opt O) would yield a meaningful further win.
+fn bench_range_query_wide_narrow_with_index_sled(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("range_query_wide_narrow_with_index_sled");
+
+    for &n in sweep_sizes() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        let shamir = rt.block_on(async {
+            let s = fresh_db_sled(tempdir.path()).await;
+            seed_users_wide(&s, n).await;
+            create_sorted_index(&s, "users", "by_age", "age").await;
+            s
+        });
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let shamir = Arc::clone(&shamir);
+                // Narrow SELECT ["age"] — what covering index would make O(1) decode.
+                let req = req_range_age_narrow_wide();
+                async move {
+                    shamir.execute("bench", &req).await.unwrap();
+                }
+            });
+        });
+        drop(shamir);
+        drop(tempdir);
+    }
+    group.finish();
+}
+
 /// Steady-state throughput: 10 000 inserts in one batch into a
 /// fresh MemBuffer-wrapped DB. Long enough that the flusher
 /// engages and the LRU is well past its warmup. Contrast with
@@ -1783,6 +1990,8 @@ criterion_group! {
     bench_range_query_with_index_sled,
     bench_range_query_narrow_no_index_sled,
     bench_range_query_narrow_with_index_sled,
+    bench_range_query_wide_narrow_no_index_sled,
+    bench_range_query_wide_narrow_with_index_sled,
     bench_batch_multi_read,
     bench_cache_hit_get,
     bench_steady_state_insert,
@@ -2153,6 +2362,30 @@ async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
         let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user).collect();
+        let req: BatchRequest = serde_json::from_value(json!({
+            "id": chunk_start,
+            "queries": {
+                "s": {
+                    "insert_into": table,
+                    "values": values,
+                    "return_result": false
+                }
+            }
+        }))
+        .unwrap();
+        shamir.execute("bench", &req).await.unwrap();
+    }
+}
+
+/// Seed `n` **wide** records (gen_user_wide) into `table` in chunks of 50.
+async fn seed_users_wide(shamir: &ShamirDb, n: usize) {
+    seed_users_wide_inner(shamir, n, "users").await;
+}
+
+async fn seed_users_wide_inner(shamir: &ShamirDb, n: usize, table: &str) {
+    for chunk_start in (0..n).step_by(50) {
+        let chunk_end = (chunk_start + 50).min(n);
+        let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user_wide).collect();
         let req: BatchRequest = serde_json::from_value(json!({
             "id": chunk_start,
             "queries": {
