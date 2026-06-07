@@ -1791,7 +1791,9 @@ criterion_group! {
     bench_ttl_sweep_50k,
     bench_concurrent_inserts,
     bench_ddl_create_index_on_seeded,
-    bench_group_by_sum_e2e
+    bench_group_by_sum_e2e,
+    bench_changefeed_overhead,
+    bench_validator_overhead
 }
 criterion_main!(benches);
 
@@ -1961,6 +1963,189 @@ fn bench_group_by_sum_e2e(c: &mut Criterion) {
             async move { s.execute("bench", &req).await.unwrap() }
         });
     });
+    group.finish();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// B1a — changefeed emission overhead
+// ═══════════════════════════════════════════════════════════════════
+
+/// Regression guard: overhead of `emit_nontx_changefeed` on a single
+/// insert when (a) no subscriber is attached, and (b) one subscriber
+/// is holding a `broadcast::Receiver`.
+///
+/// Both scenarios go through the full `execute` → planner → table
+/// write → emit path.  The delta between (a) and (b) is the cost
+/// of a single `try_send` into a bounded broadcast channel.
+fn bench_changefeed_overhead(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("changefeed_overhead");
+
+    // Shared request: insert record with id "b1" into the bench table.
+    // Using a fixed id means repeated calls overwrite the same row
+    // (upsert), keeping the table size stable across iterations.
+    let req_insert: BatchRequest = serde_json::from_value(json!({
+        "id": "b1",
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [gen_user(999)]
+            }
+        },
+        "return_all": false
+    }))
+    .unwrap();
+
+    // (a) no_subscribers — changefeed channel has no active receivers.
+    //     emit_nontx_changefeed does try_send; with 0 receivers it still
+    //     serialises the event into Arc but the send is a no-op.
+    {
+        let shamir = rt.block_on(seeded(100, false));
+        group.bench_function("no_subscribers", |b| {
+            let shamir = Arc::clone(&shamir);
+            let req = req_insert.clone();
+            b.to_async(&rt).iter(|| {
+                let s = Arc::clone(&shamir);
+                let r = req.clone();
+                async move {
+                    s.execute("bench", &r).await.unwrap();
+                }
+            });
+        });
+    }
+
+    // (b) with_subscriber — one live broadcast::Receiver is held for
+    //     the duration of the bench.  The receiver is never polled, so
+    //     the channel will lag after the ring fills; that's intentional
+    //     — we measure the send-side cost, not the recv side.
+    {
+        let shamir = rt.block_on(seeded(100, false));
+        // subscribe_changelog returns None when the repo does not exist;
+        // if it returns None here the bench still runs but measures the
+        // no-subscriber path.
+        let _subscriber = rt.block_on(shamir.subscribe_changelog("bench", "main"));
+        group.bench_function("with_subscriber", |b| {
+            let shamir = Arc::clone(&shamir);
+            let req = req_insert.clone();
+            b.to_async(&rt).iter(|| {
+                let s = Arc::clone(&shamir);
+                let r = req.clone();
+                async move {
+                    s.execute("bench", &r).await.unwrap();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// B1b — validator dispatch overhead
+// ═══════════════════════════════════════════════════════════════════
+
+/// Regression guard: per-insert cost of `run_validators` when
+/// (a) zero validators are bound (empty-registry fast path), and
+/// (b) one no-op WASM validator is bound to the table.
+///
+/// Scenario (b) uses the minimal `(module)` WAT which compiles to
+/// a zero-function WASM module; the validator succeeds vacuously.
+/// This isolates the dispatch / fn-lookup overhead from any real
+/// WASM execution cost.
+fn bench_validator_overhead(c: &mut Criterion) {
+    use shamir_db::engine::validator::WriteOp;
+
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("validator_overhead");
+
+    let req_insert: BatchRequest = serde_json::from_value(json!({
+        "id": "b1",
+        "queries": {
+            "ins": {
+                "insert_into": "users",
+                "values": [gen_user(999)]
+            }
+        },
+        "return_all": false
+    }))
+    .unwrap();
+
+    // (a) no_validators — default state, run_validators checks an
+    //     empty binding list and returns immediately.
+    {
+        let shamir = rt.block_on(seeded(100, false));
+        group.bench_function("no_validators", |b| {
+            let shamir = Arc::clone(&shamir);
+            let req = req_insert.clone();
+            b.to_async(&rt).iter(|| {
+                let s = Arc::clone(&shamir);
+                let r = req.clone();
+                async move {
+                    s.execute("bench", &r).await.unwrap();
+                }
+            });
+        });
+    }
+
+    // (b) one_validator — a minimal WASM module (no exported functions)
+    //     is registered and bound to the `users` table for Insert ops.
+    //     The validator succeeds vacuously; cost = dispatch + WASM call
+    //     with no meaningful work.
+    {
+        // Minimal WAT that satisfies the validator ABI:
+        //   - exports `memory`
+        //   - exports `shamir_alloc` (allocator)
+        //   - exports `shamir_call` returning msgpack `null` (0xC0) = accept
+        const NOOP_VALIDATOR_WAT: &str = r#"
+(module
+  (memory (export "memory") 2)
+  (global $bump (mut i32) (i32.const 1024))
+  (data (i32.const 512) "\c0")
+  (func (export "shamir_alloc") (param $len i32) (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $bump))
+    (global.set $bump (i32.add (global.get $bump) (local.get $len)))
+    (local.get $ptr)
+  )
+  (func (export "shamir_call") (param $ptr i32) (param $len i32) (result i64)
+    (i64.or
+      (i64.shl (i64.const 512) (i64.const 32))
+      (i64.const 1)
+    )
+  )
+)
+"#;
+        let shamir = rt.block_on(async {
+            let s = seeded(100, false).await;
+            let noop_wasm = wat::parse_str(NOOP_VALIDATOR_WAT).unwrap();
+            s.create_validator_from_wasm("v_bench_noop", &noop_wasm, false)
+                .await
+                .expect("create validator");
+            s.bind_validator(
+                "bench",
+                "main",
+                "users",
+                "v_bench_noop",
+                vec![WriteOp::Insert],
+                1000,
+            )
+            .await
+            .expect("bind validator");
+            s
+        });
+        group.bench_function("one_validator", |b| {
+            let shamir = Arc::clone(&shamir);
+            let req = req_insert.clone();
+            b.to_async(&rt).iter(|| {
+                let s = Arc::clone(&shamir);
+                let r = req.clone();
+                async move {
+                    s.execute("bench", &r).await.unwrap();
+                }
+            });
+        });
+    }
+
     group.finish();
 }
 
