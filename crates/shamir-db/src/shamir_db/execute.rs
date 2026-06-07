@@ -2527,6 +2527,7 @@ impl ShamirDb {
                     crate::engine::tx::CommitError::PhantomConflict { .. } => {
                         "tx_conflict".to_string()
                     }
+                    crate::engine::tx::CommitError::Wounded { .. } => "tx_conflict".to_string(),
                     crate::engine::tx::CommitError::UniqueViolation { .. } => {
                         "unique_violation".to_string()
                     }

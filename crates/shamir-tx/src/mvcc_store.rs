@@ -13,6 +13,7 @@
 //! Snapshot reads via [`MvccStore::get_at`] use a fast path (version cache
 //! check → main read) and fall back to a history range scan.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -41,6 +42,94 @@ struct RecordCell {
     hwm: u64,
 }
 
+// ============================================================================
+// Level-3 pessimistic locking — wound-wait, deadlock-free by construction.
+//
+// Locks live in a SEPARATE map (`MvccStore::locks`), NOT in the hot-path
+// `RecordCell`. The map is populated ONLY for keys locked by a Pessimistic
+// (Level-3) transaction; it stays empty when no Level-3 tx runs, so the
+// snapshot/serializable read/write paths pay zero overhead.
+//
+// Wound-wait: a requester only ever *waits* on strictly-older holders and
+// only ever *wounds* strictly-younger ones (the tx's monotonic id is its
+// priority — smaller id = older = higher priority). The wait-for graph
+// therefore respects the total id order and cannot cycle, so no deadlock
+// detector is needed.
+// ============================================================================
+
+/// Lock mode for a Level-3 pessimistic lock.
+///
+/// `Shared` is compatible with other `Shared` holders (multiple readers);
+/// `Exclusive` is compatible with nothing but the same tx (re-entrant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockMode {
+    Shared,
+    Exclusive,
+}
+
+/// A single lock holder: the holding tx's monotonic id, its shared
+/// `wounded` flag, and a per-tx `Notify` the wounder triggers so the
+/// holder — which may be parked waiting on a DIFFERENT key — wakes up
+/// and observes the wound. This is load-bearing for deadlock-freedom:
+/// a wound issued on key Y must wake a tx parked on key X, so the wake
+/// cannot be keyed on the lock where the wound happened.
+#[derive(Debug)]
+struct Holder {
+    tx_version: u64,
+    wounded: Arc<AtomicBool>,
+    wound_notify: Arc<tokio::sync::Notify>,
+}
+/// The mutable state of one key's lock: the set of current holders plus
+/// the aggregate mode (`None` when unheld). Invariant: when `mode` is
+/// `Some(Exclusive)`, `holders` has exactly one entry; when `Some(Shared)`,
+/// every holder is a distinct tx (no duplicate ids).
+#[derive(Debug, Default)]
+struct KeyLockState {
+    holders: Vec<Holder>,
+    mode: Option<LockMode>,
+}
+
+impl KeyLockState {
+    /// True if `tx_version` already holds this key in ANY mode. Used for
+    /// re-entrant upgrades/re-locks: a same-tx re-acquire is always allowed
+    /// and never self-deadlocks.
+    fn held_by(&self, tx_version: u64) -> bool {
+        self.holders.iter().any(|h| h.tx_version == tx_version)
+    }
+
+    /// Recompute `mode` from the surviving holders. `None` when empty;
+    /// `Shared` when more than one holder (the invariant guarantees the
+    /// only multi-holder mode is Shared); otherwise leave the existing
+    /// mode (a lone holder is whatever the caller last requested).
+    fn recompute_mode(&mut self) {
+        match self.holders.len() {
+            0 => self.mode = None,
+            1 => {}
+            _ => self.mode = Some(LockMode::Shared),
+        }
+    }
+}
+
+/// Per-key pessimistic lock. Guards [`KeyLockState`] under a `tokio::sync`
+/// `Mutex` (the sanctioned exception — the guard lives across the
+/// `.await` on `notify.notified()` and contention is bounded by the
+/// wound-wait protocol). `Notify` wakes every waiter on each release/wound
+/// so they re-evaluate compatibility.
+#[derive(Debug)]
+pub struct KeyLock {
+    state: tokio::sync::Mutex<KeyLockState>,
+    notify: tokio::sync::Notify,
+}
+
+impl KeyLock {
+    fn new() -> Self {
+        Self {
+            state: tokio::sync::Mutex::new(KeyLockState::default()),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 /// Versioned layer over two dumb-KV stores.
 ///
 /// See [module-level documentation](self) for the design rationale.
@@ -51,6 +140,11 @@ pub struct MvccStore {
     /// In-memory coordination state: key → record cell (latest committed version).
     /// Cold start: first `get_at` for a key does a range scan, populates cache.
     cells: SccHashMap<Bytes, RecordCell>,
+    /// Level-3 pessimistic lock registry. Populated ONLY for keys locked by a
+    /// `Pessimistic` tx; stays empty otherwise → zero overhead on the snapshot
+    /// / serializable read/write hot paths. Each entry is an `Arc<KeyLock>`
+    /// shared between concurrent requesters of the same key.
+    locks: SccHashMap<Bytes, Arc<KeyLock>>,
 }
 
 impl MvccStore {
@@ -61,6 +155,7 @@ impl MvccStore {
             history,
             gate,
             cells: SccHashMap::new(),
+            locks: SccHashMap::new(),
         }
     }
 
@@ -375,6 +470,215 @@ impl MvccStore {
     /// consistent). Distinct from `version_of` (archive-routing).
     pub fn live_version(&self, key: &[u8]) -> Option<u64> {
         self.cells.read(key, |_, c| c.hwm)
+    }
+
+    // ========================================================================
+    // Level-3 pessimistic locking (wound-wait, deadlock-free).
+    //
+    // These methods are ONLY called from `IsolationLevel::Pessimistic` code
+    // paths (see `table_manager` / `write_exec`). The snapshot / serializable
+    // read/write paths never touch `locks`, so when no Level-3 tx runs the
+    // registry stays empty and there is zero overhead on the hot paths.
+    // ========================================================================
+
+    /// Number of keys currently holding a Level-3 lock entry. Used by tests
+    /// to assert the zero-overhead invariant (snapshot/serializable txs never
+    /// populate `locks`).
+    pub fn locks_len(&self) -> usize {
+        self.locks.len()
+    }
+
+    /// Acquire a Level-3 pessimistic lock on `key` for tx `tx_version` in
+    /// `mode`, using the wound-wait protocol.
+    ///
+    /// `wounded` is the requesting tx's shared abort flag. If a strictly
+    /// older (higher-priority) tx wounds THIS tx while it is waiting, the
+    /// flag is set and this call returns
+    /// [`DbError::Conflict`](shamir_storage::error::DbError::Conflict) so the
+    /// tx aborts instead of acquiring the lock.
+    ///
+    /// Algorithm (loop):
+    /// 1. Lock `state`.
+    /// 2. If the requested `mode` is compatible with the current holders
+    ///    (Shared+Shared compatible; anything with Exclusive incompatible;
+    ///    a holder with the SAME `tx_version` is always compatible —
+    ///    re-entrant), add the holder, set `mode`, return `Ok(())`.
+    /// 3. Otherwise, for every CONFLICTING holder `H`:
+    ///    - `tx_version < H.tx_version` (requester OLDER / higher priority):
+    ///      WOUND `H` — set `H.wounded`, remove `H` from holders. After
+    ///      wounding all conflicting younger holders, `notify_waiters()` and
+    ///      loop again (the requester may now fit).
+    ///    - `tx_version > H.tx_version` (requester YOUNGER): the requester
+    ///      must WAIT. Drop the state lock, await `notify.notified()`, loop.
+    ///    - `tx_version == H.tx_version`: same tx — compatible, skip.
+    /// 4. Before waiting AND after being woken, check `wounded.load()`: if
+    ///    this tx was wounded while waiting, return the conflict error.
+    ///
+    /// Correctness: a requester only ever waits on strictly-older holders
+    /// and only ever wounds strictly-younger ones, so the wait-for graph
+    /// respects the total version order and cannot cycle (deadlock-free by
+    /// construction — no detector needed).
+    pub async fn lock_key(
+        &self,
+        key: Bytes,
+        tx_version: u64,
+        wounded: Arc<AtomicBool>,
+        wound_notify: Arc<tokio::sync::Notify>,
+        mode: LockMode,
+    ) -> DbResult<()> {
+        // Get-or-insert the KeyLock for this key. The Arc is shared between
+        // concurrent requesters so they coordinate on the same Mutex/Notify.
+        let lock = match self.locks.entry_async(key).await {
+            scc::hash_map::Entry::Occupied(e) => Arc::clone(e.get()),
+            scc::hash_map::Entry::Vacant(e) => {
+                let arc = Arc::new(KeyLock::new());
+                e.insert_entry(Arc::clone(&arc));
+                arc
+            }
+        };
+
+        loop {
+            // (4) Abort early if this tx was already wounded by an older tx.
+            if wounded.load(Ordering::Acquire) {
+                return Err(DbError::Conflict(format!(
+                    "tx {} wounded (wound-wait abort) before acquiring lock",
+                    tx_version
+                )));
+            }
+
+            let mut state = lock.state.lock().await;
+
+            // (2) Compatibility check.
+            //
+            // - Re-entrant (this tx already holds the key): always compatible.
+            // - Shared request vs Shared holders: compatible (multiple readers).
+            // - Anything else (Exclusive involved, or Shared vs Exclusive):
+            //   incompatible.
+            let re_entrant = state.held_by(tx_version);
+            let compatible = re_entrant
+                || state.mode.is_none()
+                || (mode == LockMode::Shared && state.mode == Some(LockMode::Shared));
+
+            if compatible {
+                // Re-entrant re-acquire: if this tx already holds the key,
+                // do NOT push a duplicate holder (would violate the
+                // distinct-id invariant and skew mode recomputation). Just
+                // return Ok — the existing holder already grants access.
+                if !re_entrant {
+                    state.holders.push(Holder {
+                        tx_version,
+                        wounded: Arc::clone(&wounded),
+                        wound_notify: Arc::clone(&wound_notify),
+                    });
+                }
+                // Set the mode. An Exclusive requester that re-enters a key
+                // it already holds Shared upgrades the recorded mode so a
+                // later third-tx Shared requester correctly sees conflict.
+                state.mode = Some(mode);
+                return Ok(());
+            }
+
+            // (3) Incompatible. Partition the conflicting holders.
+            //
+            // Younger holders (tx_version < H.tx_version) get WOUNDED and
+            // removed. If ANY holder is strictly OLDER than the requester
+            // (tx_version > H.tx_version) and conflicts, the requester must
+            // WAIT (it cannot wound the older holder). Same-tx holders are
+            // never conflicting (handled by the re-entrant branch above).
+            let mut must_wait = false;
+            let mut wounded_any = false;
+            // Collect indices of younger holders to remove (wound them).
+            // Iterate back-to-front so swap_remove preserves indices.
+            let mut i = state.holders.len();
+            while i > 0 {
+                i -= 1;
+                let h = &state.holders[i];
+                // Skip same-tx holders (re-entrant, never conflicting).
+                if h.tx_version == tx_version {
+                    continue;
+                }
+                // This holder conflicts with the request (we're in the
+                // incompatible branch). Decide wound vs wait by age.
+                if tx_version < h.tx_version {
+                    // Requester is OLDER → wound the younger holder. Set
+                    // the flag AND wake the holder's per-tx notify so it
+                    // observes the wound even if it is parked waiting on
+                    // a DIFFERENT key (load-bearing for deadlock-freedom:
+                    // a wound on key Y must wake a tx parked on key X).
+                    h.wounded.store(true, Ordering::Release);
+                    h.wound_notify.notify_one();
+                    wounded_any = true;
+                    state.holders.swap_remove(i);
+                } else {
+                    // Requester is YOUNGER → must wait for the older holder.
+                    must_wait = true;
+                }
+            }
+
+            if wounded_any {
+                // Recompute the aggregate mode from surviving holders.
+                state.recompute_mode();
+                // Wake any waiters so they observe the wounds / freed slots.
+                lock.notify.notify_waiters();
+            }
+
+            if must_wait {
+                // (4) Re-check wounded before suspending — an older tx may
+                // have wounded this one between the top-of-loop check and
+                // here (we held the state lock the whole time, so in fact
+                // only wounds issued before we acquired the lock could have
+                // landed; still, the check is cheap and correct).
+                if wounded.load(Ordering::Acquire) {
+                    return Err(DbError::Conflict(format!(
+                        "tx {} wounded (wound-wait abort) while waiting",
+                        tx_version
+                    )));
+                }
+                // Register the key-notify waiter BEFORE dropping the state
+                // lock. `tokio::sync::Notify::notify_waiters` only wakes
+                // futures already in the notified() queue — it does NOT store
+                // a permit. If we created the future after `drop(state)`, a
+                // `release_locks` → `notify_waiters()` firing in the window
+                // between the drop and the first poll would be LOST, and the
+                // waiting tx could hang forever on a multi-threaded runtime.
+                // `enable()` enters the waiter queue synchronously while we
+                // still hold `state`, closing that window.
+                let mut notified = Box::pin(lock.notify.notified());
+                notified.as_mut().enable();
+                drop(state);
+                tokio::select! {
+                    _ = notified.as_mut() => {}
+                    _ = wound_notify.notified() => {}
+                }
+                continue;
+            }
+
+            // We wounded everyone conflicting and nobody older remains. Loop
+            // to re-acquire the state lock and retry the compatibility check
+            // (the freed slots should now let us in).
+        }
+    }
+
+    /// Release every lock held by `tx_version` on the given `keys`.
+    ///
+    /// Called on BOTH commit and abort/drop of a Level-3 tx. For each key,
+    /// locks the state, removes all holders with the given `tx_version`,
+    /// recomputes the mode, and wakes waiters. Leftover empty entries are
+    /// kept in the map (cheap; GC is intentionally not done here).
+    pub async fn release_locks(&self, tx_version: u64, keys: &[Bytes]) {
+        for key in keys {
+            let Some(lock) = self.locks.get(key).map(|e| Arc::clone(e.get())) else {
+                continue;
+            };
+            let mut state = lock.state.lock().await;
+            let before = state.holders.len();
+            state.holders.retain(|h| h.tx_version != tx_version);
+            if state.holders.len() != before {
+                state.recompute_mode();
+                // Wake waiters so a blocked tx can re-evaluate.
+                lock.notify.notify_waiters();
+            }
+        }
     }
 
     /// cancel-safe: yes — a single `version_cache.upsert_async`, which is
@@ -2524,5 +2828,392 @@ mod tests {
         //
         // The test PASSES either way and reports the observation.
         let _ = anomalies; // observation recorded; no hard assertion
+    }
+
+    // ----------------------------------------------------------------
+    // S2 — Level-3 pessimistic locking (wound-wait).
+    // ----------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicBool, Ordering as AOrdering};
+    use std::sync::Arc;
+
+    /// Test bundle: a tx's wound flag + wake notify. Each test tx gets one
+    /// and passes clones into every `lock_key` call so a wound issued on
+    /// one key wakes a wait parked on another.
+    struct TxWound {
+        wounded: Arc<AtomicBool>,
+        notify: Arc<tokio::sync::Notify>,
+    }
+
+    impl TxWound {
+        fn new() -> Self {
+            Self {
+                wounded: Arc::new(AtomicBool::new(false)),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+        fn flag(&self) -> Arc<AtomicBool> {
+            Arc::clone(&self.wounded)
+        }
+        fn notify(&self) -> Arc<tokio::sync::Notify> {
+            Arc::clone(&self.notify)
+        }
+        fn is_wounded(&self) -> bool {
+            self.wounded.load(AOrdering::Acquire)
+        }
+    }
+
+    /// Wound-wait basic: an OLDER tx (smaller version) requesting a
+    /// conflicting lock WOUNDS the younger holder (younger's `wounded`
+    /// becomes true, older acquires). A YOUNGER requester against an older
+    /// holder WAITS (asserted via timeout).
+    #[tokio::test]
+    async fn lock_key_wound_wait_basic() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("lk");
+
+        // Younger tx (version 20) holds Exclusive.
+        let younger = TxWound::new();
+        mvcc.lock_key(
+            key.clone(),
+            20,
+            younger.flag(),
+            younger.notify(),
+            LockMode::Exclusive,
+        )
+        .await
+        .unwrap();
+        assert!(!younger.is_wounded());
+
+        // Older tx (version 10) requests Exclusive → must WOUND the younger
+        // holder and acquire immediately.
+        let older = TxWound::new();
+        mvcc.lock_key(
+            key.clone(),
+            10,
+            older.flag(),
+            older.notify(),
+            LockMode::Exclusive,
+        )
+        .await
+        .unwrap();
+        assert!(
+            younger.is_wounded(),
+            "older tx must wound the younger holder"
+        );
+        assert!(!older.is_wounded());
+    }
+
+    /// A younger requester against an older holder WAITS — it must not
+    /// acquire while the older holds the lock. Bounded by a timeout so a
+    /// bug (e.g. acquiring anyway) fails the test instead of hanging.
+    #[tokio::test]
+    async fn lock_key_younger_waits_for_older() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("wait");
+
+        // Older tx (version 5) holds Exclusive.
+        let older = TxWound::new();
+        mvcc.lock_key(
+            key.clone(),
+            5,
+            older.flag(),
+            older.notify(),
+            LockMode::Exclusive,
+        )
+        .await
+        .unwrap();
+
+        // Younger tx (version 9) requests Exclusive → must WAIT. Wrap in a
+        // timeout: if it acquired (bug) the test fails; if it correctly
+        // waits, the timeout fires.
+        let younger = TxWound::new();
+        let wait_future = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            mvcc.lock_key(
+                key.clone(),
+                9,
+                younger.flag(),
+                younger.notify(),
+                LockMode::Exclusive,
+            ),
+        )
+        .await;
+        assert!(
+            wait_future.is_err(),
+            "younger tx must WAIT on older holder (timeout expected, not acquisition)"
+        );
+        assert!(
+            !younger.is_wounded(),
+            "younger waiter must not be wounded by the older holder"
+        );
+    }
+
+    /// Deadlock-freedom: two Level-3 txs lock keys in OPPOSITE order (T1:
+    /// A then B; T2: B then A) concurrently. Both runs must terminate
+    /// (bounded by a generous timeout) and neither deadlocks. This is the
+    /// core invariant: wound-wait on the total version order cannot cycle.
+    #[tokio::test]
+    async fn lock_key_deadlock_freedom_opposite_order() {
+        let mvcc = Arc::new(make_mvcc());
+        let key_a = Bytes::from("deadlock_a");
+        let key_b = Bytes::from("deadlock_b");
+
+        // T1 = version 1 (older), T2 = version 2 (younger). T1 has higher
+        // priority. When they conflict, T2 gets wounded and T1 proceeds.
+        // Each tx uses ONE TxWound across all its lock_key calls so a wound
+        // issued on one key wakes a wait parked on another (mirrors the
+        // real TxContext.wound_notify invariant).
+        let t1 = TxWound::new();
+        let t2 = TxWound::new();
+
+        // Clone the flag/notify TWICE per tx (one per lock_key call) so
+        // both calls share the same underlying Arcs.
+        let t1 = (t1.flag(), t1.notify(), t1.flag(), t1.notify());
+        let t2 = (t2.flag(), t2.notify(), t2.flag(), t2.notify());
+
+        let mvcc1 = Arc::clone(&mvcc);
+        let mvcc2 = Arc::clone(&mvcc);
+        let key_a1 = key_a.clone();
+        let key_b1 = key_b.clone();
+        let key_a2 = key_a.clone();
+        let key_b2 = key_b.clone();
+
+        // T1: lock A (Exclusive), then B (Exclusive). Same wound/notify.
+        let t1_handle = tokio::spawn(async move {
+            let (f1, n1, f2, n2) = t1;
+            mvcc1
+                .lock_key(key_a1, 1, f1, n1, LockMode::Exclusive)
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            mvcc1.lock_key(key_b1, 1, f2, n2, LockMode::Exclusive).await
+        });
+
+        // T2: lock B (Exclusive), then A (Exclusive). Same wound/notify.
+        let t2_handle = tokio::spawn(async move {
+            let (f1, n1, f2, n2) = t2;
+            mvcc2
+                .lock_key(key_b2, 2, f1, n1, LockMode::Exclusive)
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+            mvcc2.lock_key(key_a2, 2, f2, n2, LockMode::Exclusive).await
+        });
+
+        // Bound with a generous timeout: a real deadlock hangs CI and fails.
+        let (r1, r2) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            (t1_handle.await.unwrap(), t2_handle.await.unwrap())
+        })
+        .await
+        .expect("deadlock-freedom: both txs must terminate within timeout");
+
+        // At least one completes by wounding/serialization. T2 (younger) is
+        // the one that gets wounded when it tries to take A (held by T1):
+        // a wound means T2's second lock_key returns Err. T1 (older) wounds
+        // T2 and succeeds.
+        let _ = r1; // T1 result
+        let _ = r2; // T2 result (may be Ok or Err depending on interleaving)
+    }
+
+    /// Re-entrant: the same tx_version acquiring the same key twice (e.g.
+    /// read then write) does NOT self-deadlock. A Shared acquire followed
+    /// by an Exclusive acquire for the same tx succeeds.
+    #[tokio::test]
+    async fn lock_key_reentrant_same_tx_no_self_deadlock() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("reent");
+        let w = TxWound::new();
+
+        // First acquire Shared.
+        mvcc.lock_key(key.clone(), 42, w.flag(), w.notify(), LockMode::Shared)
+            .await
+            .unwrap();
+        // Re-acquire Exclusive (upgrade) — same tx, must not deadlock.
+        mvcc.lock_key(key.clone(), 42, w.flag(), w.notify(), LockMode::Exclusive)
+            .await
+            .unwrap();
+        // And again — idempotent.
+        mvcc.lock_key(key.clone(), 42, w.flag(), w.notify(), LockMode::Exclusive)
+            .await
+            .unwrap();
+
+        // The tx still holds exactly one holder entry (no duplicates).
+        let lock = mvcc.locks.get(&key).map(|e| Arc::clone(e.get())).unwrap();
+        let state = lock.state.lock().await;
+        assert_eq!(
+            state.holders.len(),
+            1,
+            "re-entrant re-acquire must not duplicate holders"
+        );
+        assert_eq!(state.holders[0].tx_version, 42);
+        assert_eq!(state.mode, Some(LockMode::Exclusive));
+    }
+
+    /// Release on commit and on abort: after a Level-3 tx's locks are
+    /// released, the holders are empty (mode None). Both the commit path
+    /// and the abort path call `release_locks`.
+    #[tokio::test]
+    async fn release_locks_clears_holders() {
+        let mvcc = make_mvcc();
+        let key_a = Bytes::from("rel_a");
+        let key_b = Bytes::from("rel_b");
+        let w = TxWound::new();
+
+        // Acquire Exclusive on both keys.
+        mvcc.lock_key(key_a.clone(), 7, w.flag(), w.notify(), LockMode::Exclusive)
+            .await
+            .unwrap();
+        mvcc.lock_key(key_b.clone(), 7, w.flag(), w.notify(), LockMode::Shared)
+            .await
+            .unwrap();
+
+        // Confirm held.
+        let la = mvcc.locks.get(&key_a).map(|e| Arc::clone(e.get())).unwrap();
+        {
+            let s = la.state.lock().await;
+            assert_eq!(s.holders.len(), 1);
+            assert_eq!(s.mode, Some(LockMode::Exclusive));
+        }
+
+        // Release (as commit/abort would).
+        mvcc.release_locks(7, &[key_a.clone(), key_b.clone()]).await;
+
+        // Both keys now empty.
+        {
+            let s = la.state.lock().await;
+            assert!(s.holders.is_empty(), "holders must be empty after release");
+            assert_eq!(s.mode, None, "mode must be None after release");
+        }
+        let lb = mvcc.locks.get(&key_b).map(|e| Arc::clone(e.get())).unwrap();
+        {
+            let s = lb.state.lock().await;
+            assert!(s.holders.is_empty());
+            assert_eq!(s.mode, None);
+        }
+    }
+
+    /// Zero-overhead invariant: a Snapshot and a Serializable tx never
+    /// populate `locks`. The locks registry stays empty when no Level-3
+    /// lock is acquired (the snapshot/serializable paths never call
+    /// `lock_key`). This is verified at the MvccStore level: regular
+    /// set_versioned/get_at leave `locks` untouched.
+    #[tokio::test]
+    async fn locks_registry_empty_without_pessimistic_acquire() {
+        let mvcc = make_mvcc();
+        // Snapshot-style writes (no lock_key calls).
+        mvcc.set_versioned(Bytes::from("z"), Bytes::from("v"))
+            .await
+            .unwrap();
+        let _ = mvcc.get_at(b"z", 0).await.unwrap();
+        assert_eq!(
+            mvcc.locks_len(),
+            0,
+            "locks registry must stay empty without an explicit Level-3 acquire"
+        );
+    }
+
+    /// Shared+Shared compatibility: two DISTINCT txs can both hold Shared
+    /// on the same key (multiple readers). A third Exclusive request
+    /// conflicts and wounds the younger Shared holders.
+    #[tokio::test]
+    async fn lock_key_shared_shared_compatible() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("ss");
+
+        // T1 (version 1) Shared.
+        let t1 = TxWound::new();
+        mvcc.lock_key(key.clone(), 1, t1.flag(), t1.notify(), LockMode::Shared)
+            .await
+            .unwrap();
+        // T2 (version 2) Shared — compatible, both hold.
+        let t2 = TxWound::new();
+        mvcc.lock_key(key.clone(), 2, t2.flag(), t2.notify(), LockMode::Shared)
+            .await
+            .unwrap();
+
+        let lock = mvcc.locks.get(&key).map(|e| Arc::clone(e.get())).unwrap();
+        {
+            let s = lock.state.lock().await;
+            assert_eq!(s.holders.len(), 2, "two Shared holders");
+            assert_eq!(s.mode, Some(LockMode::Shared));
+        }
+
+        // T0 (version 0, OLDEST) Exclusive → wounds both younger Shared
+        // holders and acquires.
+        let t0 = TxWound::new();
+        mvcc.lock_key(key.clone(), 0, t0.flag(), t0.notify(), LockMode::Exclusive)
+            .await
+            .unwrap();
+        assert!(t1.is_wounded(), "younger Shared holder T1 wounded");
+        assert!(t2.is_wounded(), "younger Shared holder T2 wounded");
+        let lock = mvcc.locks.get(&key).map(|e| Arc::clone(e.get())).unwrap();
+        let s = lock.state.lock().await;
+        assert_eq!(
+            s.holders.len(),
+            1,
+            "older Exclusive wounds younger Shared holders"
+        );
+        assert_eq!(s.holders[0].tx_version, 0);
+        assert_eq!(s.mode, Some(LockMode::Exclusive));
+    }
+
+    /// When a tx is wounded while WAITING (on a different key than where
+    /// the wound is issued), its `lock_key` returns `DbError::Conflict`
+    /// instead of acquiring. This exercises the per-tx `wound_notify`:
+    /// the wound is triggered via the flag + the tx's own notify, waking
+    /// it from a wait parked on the key's notify.
+    #[tokio::test]
+    async fn lock_key_wounded_waiter_aborts() {
+        let mvcc = Arc::new(make_mvcc());
+        let key = Bytes::from("wabort");
+
+        // Older tx (version 1) holds Exclusive.
+        let older = TxWound::new();
+        mvcc.lock_key(
+            key.clone(),
+            1,
+            older.flag(),
+            older.notify(),
+            LockMode::Exclusive,
+        )
+        .await
+        .unwrap();
+
+        // Younger tx (version 2) starts waiting.
+        let younger = TxWound::new();
+        let younger_notify = younger.notify();
+        let mvcc_c = Arc::clone(&mvcc);
+        let key_c = key.clone();
+        let yw_flag = younger.flag();
+        let yw_notify = younger.notify();
+        let wait = tokio::spawn(async move {
+            mvcc_c
+                .lock_key(key_c, 2, yw_flag, yw_notify, LockMode::Exclusive)
+                .await
+        });
+
+        // Give the waiter a chance to park, then wound it via its own
+        // notify (simulating a wound issued on a DIFFERENT key).
+        tokio::task::yield_now().await;
+        younger.set_wounded();
+        younger_notify.notify_one();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), wait)
+            .await
+            .expect("wounded waiter must return (not hang)")
+            .unwrap();
+
+        assert!(
+            matches!(result, Err(DbError::Conflict(_))),
+            "wounded waiter must return Conflict error, got {:?}",
+            result
+        );
+    }
+
+    impl TxWound {
+        fn set_wounded(&self) {
+            self.wounded.store(true, AOrdering::Release);
+        }
     }
 }
