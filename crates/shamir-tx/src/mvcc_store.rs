@@ -17,10 +17,11 @@
 //! Snapshot reads via [`MvccStore::get_at`] use a fast path (version cache
 //! check → main read) and fall back to a history range scan.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use bytes::Bytes;
+use arc_swap::ArcSwap;
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::StreamExt;
 use scc::HashMap as SccHashMap;
 use shamir_storage::error::{DbError, DbResult};
@@ -134,40 +135,63 @@ impl KeyLock {
     }
 }
 
-/// Per-store history-retention mode (T1b.1).
+/// Per-store history retention — three ORTHOGONAL optional knobs
+/// (TEMPORAL.md §3). Default = CurrentOnly (`max_count: Some(0)`): keep only
+/// current + versions pinned by live snapshots. `max_age_secs` is parsed/
+/// stored but NOT yet enforced (T1c wires it once versions carry a timestamp).
 ///
-/// `CurrentOnly` (the default) bounds `history` to ~current by eagerly
-/// reclaiming superseded versions that no live snapshot needs, via the
-/// existing `gc_below(min_alive)` path invoked on every write. `KeepHistory`
-/// retains all versions (no eager vacuum here — bounded by T1b.2 knobs later).
-///
-/// Stored as a lock-free `AtomicU8` on `MvccStore` (no `std::sync::Mutex`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RetentionMode {
-    /// Default: keep only the current version + versions pinned by live
-    /// snapshots. Eager vacuum runs after every superseding write.
-    #[default]
-    CurrentOnly,
-    /// Opt-in: retain all history (no eager vacuum). Bounded by T1b.2.
-    KeepHistory,
+/// Stored on [`MvccStore`] via `ArcSwap<Retention>` (lock-free swappable —
+/// three fields can't be one atomic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    /// AGE cap — stored, enforced in T1c (ignored by the vacuum for now).
+    pub max_age_secs: Option<u64>,
+    /// COUNT cap: keep at most N old versions per key (`None` = unlimited).
+    pub max_count: Option<u64>,
+    /// COUNT floor: always keep ≥ M recent old versions per key. Inert for
+    /// count-only vacuum (validation guarantees `min_count ≤ max_count`, so
+    /// the cap already keeps ≥ min_count); only does work against the AGE
+    /// cap in T1c.
+    pub min_count: Option<u64>,
 }
 
-impl RetentionMode {
-    const CURRENT_ONLY: u8 = 0;
-    const KEEP_HISTORY: u8 = 1;
+impl Default for Retention {
+    fn default() -> Self {
+        // CurrentOnly: keep 0 old versions (current + live-snapshot-pinned only).
+        Self {
+            max_age_secs: None,
+            max_count: Some(0),
+            min_count: None,
+        }
+    }
+}
 
-    fn to_u8(self) -> u8 {
-        match self {
-            RetentionMode::CurrentOnly => Self::CURRENT_ONLY,
-            RetentionMode::KeepHistory => Self::KEEP_HISTORY,
+impl Retention {
+    /// CurrentOnly: keep only current + versions pinned by live snapshots.
+    pub fn current_only() -> Self {
+        Self::default()
+    }
+
+    /// KeepHistory (Forever): retain all versions — no count cap.
+    pub fn keep_history() -> Self {
+        Self {
+            max_age_secs: None,
+            max_count: None,
+            min_count: None,
         }
     }
 
-    fn from_u8(v: u8) -> Self {
-        match v {
-            Self::KEEP_HISTORY => RetentionMode::KeepHistory,
-            _ => RetentionMode::CurrentOnly,
+    /// Validate: `min_count` must be `<= max_count` when both are `Some`.
+    /// Returns `Err(message)` on violation.
+    pub fn validate(&self) -> Result<(), String> {
+        if let (Some(mc), Some(maxc)) = (self.min_count, self.max_count) {
+            if mc > maxc {
+                return Err(format!(
+                    "retention: min_count ({mc}) must be <= max_count ({maxc})"
+                ));
+            }
         }
+        Ok(())
     }
 }
 
@@ -186,16 +210,18 @@ pub struct MvccStore {
     /// / serializable read/write hot paths. Each entry is an `Arc<KeyLock>`
     /// shared between concurrent requesters of the same key.
     locks: SccHashMap<Bytes, Arc<KeyLock>>,
-    /// T1b.1: history-retention mode (lock-free `AtomicU8`). Defaults to
-    /// `CurrentOnly` (eager vacuum). Set via [`Self::set_retention`].
-    retention: AtomicU8,
+    /// T1b.2: history-retention policy (lock-free `ArcSwap<Retention>`).
+    /// Defaults to [`Retention::current_only`] (eager vacuum). Set via
+    /// [`Self::set_retention`].
+    retention: ArcSwap<Retention>,
 }
 
 impl MvccStore {
     /// Create a new MVCC store from two backing stores and a gate.
     ///
-    /// Defaults to [`RetentionMode::CurrentOnly`] (eager vacuum). Use
-    /// [`Self::set_retention`] to opt into [`RetentionMode::KeepHistory`].
+    /// Defaults to [`Retention::current_only`] (eager vacuum). Use
+    /// [`Self::set_retention`] to opt into [`Retention::keep_history`] or a
+    /// custom [`Retention`].
     pub fn new(main: Arc<dyn Store>, history: Arc<dyn Store>, gate: Arc<RepoTxGate>) -> Self {
         Self {
             main,
@@ -203,36 +229,126 @@ impl MvccStore {
             gate,
             cells: SccHashMap::new(),
             locks: SccHashMap::new(),
-            retention: AtomicU8::new(RetentionMode::CurrentOnly.to_u8()),
+            retention: ArcSwap::new(Arc::new(Retention::current_only())),
         }
     }
 
-    /// Set the history-retention mode (lock-free, no mutex).
-    pub fn set_retention(&self, mode: RetentionMode) {
-        self.retention.store(mode.to_u8(), Ordering::Release);
+    /// Set the history-retention policy (lock-free `ArcSwap` swap).
+    /// Validates first; on invalid `min_count > max_count` the old policy is
+    /// kept (no panic). Returns `Err(message)` on validation failure.
+    pub fn set_retention(&self, policy: Retention) -> Result<(), String> {
+        policy.validate()?;
+        self.retention.store(Arc::new(policy));
+        Ok(())
     }
 
-    /// Read the current history-retention mode.
-    fn retention(&self) -> RetentionMode {
-        RetentionMode::from_u8(self.retention.load(Ordering::Acquire))
+    /// Load the current history-retention policy (RCU snapshot).
+    fn retention(&self) -> arc_swap::Guard<Arc<Retention>> {
+        self.retention.load()
     }
 
-    /// T1b.1: eager vacuum for [`RetentionMode::CurrentOnly`]. Reclaims
-    /// superseded history versions that no live snapshot needs by calling the
-    /// existing safe [`gc_below`](Self::gc_below) with `gate.min_alive()`.
-    /// No-op for [`RetentionMode::KeepHistory`]. Errors are swallowed
-    /// (best-effort reclaim — a failure here must NOT fail the write that
-    /// triggered it; the next write retries).
-    async fn maybe_eager_vacuum(&self) {
-        if self.retention() != RetentionMode::CurrentOnly {
+    /// T1b.2: per-key count-aware eager vacuum. After a write/delete to
+    /// `key`, reclaim that key's OLD history versions beyond the count cap,
+    /// subject to the floor invariants. The `max_age_secs` knob is stored but
+    /// NOT yet enforced (T1c).
+    ///
+    /// Retention model (orthogonal knobs):
+    /// * `max_count` — the CAP: keep at most N old versions per key.
+    ///   `None` = unbounded → this vacuum reclaims nothing (early return;
+    ///   `min_count` alone is a floor, not a reclaimer, and age is T1c).
+    /// * `min_count` — the FLOOR: keep at least M. Inert for count-only
+    ///   (validation guarantees `min_count ≤ max_count`, so the cap already
+    ///   keeps ≥ min_count). It only does work against the AGE cap in T1c.
+    /// * `max_age_secs` — stored, enforced in T1c.
+    ///
+    /// Sacred floor (NEVER violated): a version `>= min_alive` (pinned by a
+    /// live snapshot) is never reclaimed regardless of count knobs; the
+    /// current value lives in `main` (never in `history`). The count knobs
+    /// only ever reclaim MORE-conservatively than `min_alive` allows.
+    ///
+    /// Anchor: when a live snapshot exists below `current`, the SINGLE largest
+    /// version `< min_alive` is also kept — it serves a snapshot reading a key
+    /// last-written below `min_alive`. If that version is already kept by the
+    /// count window, no extra entry is kept. When no live snapshot exists
+    /// (`min_alive == last_committed == current`), no anchor is needed: a
+    /// fresh snapshot opens at `current` and reads `main`.
+    ///
+    /// Best-effort: errors are swallowed (a vacuum failure must NOT fail the
+    /// write that triggered it; the next write retries).
+    async fn vacuum_key(&self, key: &Bytes) {
+        let policy = self.retention();
+        // Bug-1 fix: `max_count` is the CAP. `None` = unbounded → reclaim
+        // nothing by count (`min_count` alone is a floor, not a reclaimer;
+        // age is T1c). So if there is no count cap, there is nothing to do.
+        let Some(max_count) = policy.max_count else {
             return;
+        };
+        let keep_n = max_count as usize; // the cap; min_count is inert for count-only
+                                         // (validation guarantees min_count ≤ max_count, so the cap already
+                                         // keeps ≥ min_count — the floor only matters against the AGE cap in T1c).
+        let min_alive = self.gate.min_alive();
+        // Bug-3 fix: the anchor only matters when a live snapshot exists
+        // below `current`. When `active_snapshots` is empty, `min_alive ==
+        // last_committed == current` and a fresh snapshot opens at `current`
+        // reading `main` — no old version is ever read, so no anchor needed.
+        let have_live_snapshot = !self.gate.active_snapshots_empty();
+
+        // Scan this key's history entries (prefix scan on the version-key
+        // encoding `key || 0xFF || version_be`).
+        let prefix = {
+            let mut p = BytesMut::with_capacity(key.len() + 1);
+            p.extend_from_slice(key);
+            p.put_u8(crate::version_codec::VERSION_SEP);
+            p.freeze()
+        };
+        let stream = self.history.scan_prefix_stream(prefix, 256);
+        futures::pin_mut!(stream);
+
+        // Collect (version, physical_key) for all history entries of this key.
+        let mut entries: Vec<(u64, Bytes)> = Vec::new();
+        while let Some(batch) = stream.next().await {
+            for (phys_key, _val) in batch.unwrap_or_default() {
+                if let Some((_, version)) = crate::version_codec::decode_version_key(&phys_key) {
+                    entries.push((version, phys_key));
+                }
+            }
         }
-        // Correctness comes entirely from gc_below's `min_alive` floor, NOT
-        // from the trigger. We pass min_alive so gc_below self-limits to
-        // versions strictly below the oldest live snapshot (or last_committed
-        // when none are open). The call is best-effort: a GC error is
-        // swallowed — it must not fail the write.
-        let _ = self.gc_below(self.gate.min_alive()).await;
+
+        // Sort descending by version (newest first).
+        entries.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Bug-2 fix: the anchor is the SINGLE largest version `< min_alive`,
+        // kept ONLY when a live snapshot exists (it serves a snapshot reading
+        // a key last-written below `min_alive`). If that version is already
+        // kept by the count window (idx < keep_n), no extra entry is kept.
+        let anchor: Option<u64> = if have_live_snapshot {
+            entries
+                .iter()
+                .map(|(v, _)| *v)
+                .filter(|v| *v < min_alive)
+                .max()
+        } else {
+            None
+        };
+
+        // Reclaim logic: iterate newest-first. Keep a version if ANY of:
+        //   (a) idx < keep_n  — the count-retention window (user-facing cap),
+        //   (b) version >= min_alive — pinned by a live snapshot (sacred floor),
+        //   (c) Some(version) == anchor — the single anchor (largest < min_alive).
+        // Reclaim the rest (best-effort; a vacuum failure must NOT fail the
+        // write that triggered it — the next write retries).
+        for (idx, (version, phys_key)) in entries.iter().enumerate() {
+            if idx < keep_n {
+                continue; // (a) within the count-retention window
+            }
+            if *version >= min_alive {
+                continue; // (b) pinned by a live snapshot — sacred floor
+            }
+            if Some(*version) == anchor {
+                continue; // (c) the single anchor serving a live snapshot
+            }
+            let _ = self.history.remove(phys_key.clone()).await;
+        }
     }
 
     // ========================================================================
@@ -333,14 +449,15 @@ impl MvccStore {
         // cached version monotonically.
         let new_v = self.gate.assign_next_version();
         self.publish_cell(key.clone(), new_v, true).await;
+        let key_snapshot = key.clone();
         self.main.set(key, value).await?;
         // Advance the reader-visible floor so a tx/snapshot opened AFTER this
         // write sees it: `publish_committed_max` is a monotonic fetch_max
         // (lock-free, safe off `commit_lock`, never moves the floor backwards).
         self.gate.publish_committed_max(new_v);
-        // T1b.1: eager vacuum (CurrentOnly default) reclaims superseded
-        // history versions no live snapshot needs.
-        self.maybe_eager_vacuum().await;
+        // T1b.2: per-key count-aware vacuum reclaims superseded history
+        // versions beyond the retention bound (floor: min_alive).
+        self.vacuum_key(&key_snapshot).await;
         Ok(new_v)
     }
 
@@ -412,6 +529,7 @@ impl MvccStore {
         }
 
         // Phase 4: one batched write to main.
+        let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         let main_ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
         self.main.transact(main_ops).await?;
 
@@ -421,9 +539,10 @@ impl MvccStore {
         if max_v > 0 {
             self.gate.publish_committed_max(max_v);
         }
-        // T1b.1: eager vacuum (CurrentOnly default) reclaims superseded
-        // history versions no live snapshot needs.
-        self.maybe_eager_vacuum().await;
+        // T1b.2: per-key count-aware vacuum for every key in the batch.
+        for key in &keys {
+            self.vacuum_key(key).await;
+        }
         Ok(max_v)
     }
 
@@ -448,14 +567,15 @@ impl MvccStore {
         // Propagate a backend I/O failure instead of swallowing it — a
         // dropped error here would let the caller see Ok() while the row is
         // still live in main (the delete silently never happened).
+        let key_snapshot = key.clone();
         self.main.remove(key).await?;
         // Advance the reader-visible floor so a tx/snapshot opened AFTER this
         // delete sees the post-delete state: `publish_committed_max` is a
         // monotonic fetch_max (lock-free, safe off `commit_lock`).
         self.gate.publish_committed_max(new_v);
-        // T1b.1: eager vacuum (CurrentOnly default) reclaims superseded
-        // history versions no live snapshot needs.
-        self.maybe_eager_vacuum().await;
+        // T1b.2: per-key count-aware vacuum reclaims superseded history
+        // versions beyond the retention bound (floor: min_alive).
+        self.vacuum_key(&key_snapshot).await;
         Ok(new_v)
     }
 
@@ -1828,7 +1948,7 @@ mod tests {
     #[tokio::test]
     async fn set_versioned_many_batches_no_snapshot() {
         let mvcc = make_mvcc();
-        mvcc.set_retention(RetentionMode::KeepHistory);
+        mvcc.set_retention(Retention::keep_history()).unwrap();
 
         let n = 50u32;
         let items: Vec<(Bytes, Bytes)> = (0..n)
@@ -2750,7 +2870,7 @@ mod tests {
     #[tokio::test]
     async fn set_versioned_many_sets_hwm_fast_path() {
         let mvcc = make_mvcc();
-        mvcc.set_retention(RetentionMode::KeepHistory);
+        mvcc.set_retention(Retention::keep_history()).unwrap();
 
         let items: Vec<(Bytes, Bytes)> = vec![
             (Bytes::from("bk1"), Bytes::from("v1")),
@@ -3246,7 +3366,7 @@ mod tests {
 
     /// CurrentOnly store, no snapshots: write the same key 5 times; eager
     /// vacuum reclaims superseded history on every write, so `history` holds
-    /// ~0 old versions afterward while `get_at` at the floor still returns
+    /// 0 old versions afterward while `get_at` at the floor still returns
     /// the current value.
     #[tokio::test]
     async fn eager_vacuum_currentonly_bounds_history() {
@@ -3259,13 +3379,12 @@ mod tests {
                 .unwrap();
         }
 
-        // Eager vacuum ran after each write (CurrentOnly default, no
-        // snapshots → min_alive == last_committed). gc_below keeps the
-        // anchor (latest < min_alive), so at most 1 history entry survives.
+        // T1b.2: per-key vacuum_key is precise — keep_n=0 (max_count=0), no
+        // snapshot → no anchor → exactly 0 history entries survive.
         let hist = count_history_entries(&mvcc).await;
-        assert!(
-            hist <= 1,
-            "CurrentOnly eager vacuum should leave ≤1 history entry (anchor), got {hist}"
+        assert_eq!(
+            hist, 0,
+            "CurrentOnly eager vacuum must leave 0 history entries (no anchor without a snapshot), got {hist}"
         );
 
         // The current value is still readable at the floor.
@@ -3407,7 +3526,7 @@ mod tests {
     #[tokio::test]
     async fn keephistory_no_eager_vacuum() {
         let mvcc = make_mvcc();
-        mvcc.set_retention(RetentionMode::KeepHistory);
+        mvcc.set_retention(Retention::keep_history()).unwrap();
 
         let key = Bytes::from("keep_key");
         for i in 1..=5u32 {
@@ -3427,5 +3546,347 @@ mod tests {
         let last_committed = mvcc.gate.last_committed();
         let result = mvcc.get_at(&key, last_committed).await.unwrap();
         assert_eq!(result, Some(Bytes::from("v5")));
+    }
+
+    // ================================================================
+    // T1b.2 — orthogonal retention knobs (per-key count vacuum).
+    //
+    // All counts below assume NO live snapshot unless the test opens one.
+    // With no snapshot: min_alive == last_committed == current, so the
+    // anchor is None (a fresh snapshot opens at `current` and reads `main`).
+    // ================================================================
+
+    /// 1. `max_count: Some(3)`, 6 writes (5 old), no snapshot → exactly 3 old
+    /// remain; the 2 oldest are reclaimed; kept versions are reachable.
+    #[tokio::test]
+    async fn retention_count_only_keeps_last_n() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention {
+            max_age_secs: None,
+            max_count: Some(3),
+            min_count: None,
+        })
+        .unwrap();
+
+        let key = Bytes::from("count_key");
+        let mut versions = Vec::new();
+        for i in 1..=6u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+            versions.push(mvcc.version_of(&key));
+        }
+
+        // 5 old versions archived (v1..v5). keep_n=3 keeps the newest 3
+        // (v3, v4, v5); v1, v2 reclaimed. No snapshot → no anchor.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(hist, 3, "max_count=3 must keep exactly 3 old versions");
+
+        // The newest 3 are reachable via get_at.
+        for &v in &versions[versions.len() - 3..] {
+            let result = mvcc.get_at(&key, v).await.unwrap();
+            assert!(result.is_some(), "kept version {v} must be reachable");
+        }
+        // Current value is correct.
+        let last_committed = mvcc.gate.last_committed();
+        assert_eq!(
+            mvcc.get_at(&key, last_committed).await.unwrap(),
+            Some(Bytes::from("v6"))
+        );
+    }
+
+    /// 2. Default `max_count: Some(0)` (CurrentOnly), 4 writes, no snapshot →
+    /// 0 old versions remain (only current in `main`).
+    #[tokio::test]
+    async fn retention_current_only_is_max_count_zero() {
+        let mvcc = make_mvcc(); // default = CurrentOnly
+
+        let key = Bytes::from("co_key");
+        for i in 1..=4u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        // keep_n=0, no snapshot → no anchor → all old versions reclaimed.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(hist, 0, "max_count=0 reclaims all old versions");
+
+        let last_committed = mvcc.gate.last_committed();
+        assert_eq!(
+            mvcc.get_at(&key, last_committed).await.unwrap(),
+            Some(Bytes::from("v4"))
+        );
+    }
+
+    /// 3. `max_count: None, min_count: Some(2)`, 5 writes (4 old) → all 4 old
+    /// remain. No count cap → early return; `min_count` alone is a satisfied
+    /// floor, not a reclaimer.
+    #[tokio::test]
+    async fn retention_min_count_standalone_keeps_all() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention {
+            max_age_secs: None,
+            max_count: None,
+            min_count: Some(2),
+        })
+        .unwrap();
+
+        let key = Bytes::from("floor_key");
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        // max_count=None → vacuum_key returns early (no count reclaim). All 4
+        // old versions survive — min_count is inert without a cap.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 4,
+            "max_count=None must keep ALL old versions (min_count alone reclaims nothing)"
+        );
+    }
+
+    /// 4. `max_count: Some(0)` with a live snapshot: the versions the snapshot
+    /// may read survive (protected by `>= min_alive`, branch (b)). After
+    /// dropping the snapshot, a further write reclaims everything (current
+    /// only). No anchor is needed in either phase of this scenario.
+    #[tokio::test]
+    async fn retention_keeps_pinned_and_anchor_with_snapshot() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        let key = Bytes::from("pin_key");
+        // Write v1 — main=v1, last_committed=v1.
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let v1 = mvcc.version_of(&key);
+
+        // Open a snapshot at v1 — pins min_alive=v1.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+        assert_eq!(snap_v, v1);
+
+        // Overwrite to v2, v3. Each vacuum runs with min_alive=v1: v1 (then
+        // v1,v2) are `>= min_alive` → sacred (branch b), never reclaimed.
+        mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+            .await
+            .unwrap();
+
+        // The snapshot at v1 still reads v1 via history (slow path).
+        let result = mvcc.get_at(&key, snap_v).await.unwrap();
+        assert_eq!(
+            result,
+            Some(Bytes::from("v1")),
+            "live snapshot must still read the pinned prior version"
+        );
+
+        // Drop the snapshot → min_alive advances to last_committed. A further
+        // write's vacuum now reclaims every old version (no anchor: no live
+        // snapshot remains).
+        drop(snap);
+        mvcc.set_versioned(key.clone(), Bytes::from("v4"))
+            .await
+            .unwrap();
+
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 0,
+            "unpinned old versions must be reclaimed (current only)"
+        );
+    }
+
+    /// 5. The case the anchor is FOR: with `max_count: Some(0)` and a snapshot
+    /// pinned BELOW the most recent write, the single largest version
+    /// `< min_alive` (the anchor) survives alongside every version
+    /// `>= min_alive`; strictly-below-anchor versions are reclaimed; the
+    /// snapshot reads the correct value at its version.
+    #[tokio::test]
+    async fn retention_anchor_below_min_alive() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        let key = Bytes::from("anchor_key");
+        // Accumulate full history first under KeepHistory (the default
+        // CurrentOnly policy would reclaim on every write, leaving nothing to
+        // exercise the anchor path).
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+        // Write 10 times → history has v1..v9 (9 entries), main=v10,
+        // last_committed=10.
+        for i in 1..=10u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+        let hist_before = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist_before, 9,
+            "KeepHistory must retain all 9 prior versions"
+        );
+
+        // Open a snapshot at v10 — pins min_alive=10.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+        assert_eq!(snap_v, 10);
+
+        // Switch to the aggressive policy JUST before the reclaiming write.
+        mvcc.set_retention(Retention {
+            max_age_secs: None,
+            max_count: Some(0),
+            min_count: None,
+        })
+        .unwrap();
+
+        // Overwrite once more: archives v10 → history@v10, assigns v11.
+        // Vacuum: keep_n=0, min_alive=10, live snapshot → anchor = max<10 = v9.
+        //   v10: >= min_alive → kept (b)
+        //   v9: == anchor → kept (c)
+        //   v8..v1: reclaimed
+        mvcc.set_versioned(key.clone(), Bytes::from("v11"))
+            .await
+            .unwrap();
+
+        // Exactly 2 history entries survive: the pinned v10 and the anchor v9.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 2,
+            "max_count=0 + live snapshot: keep pinned (>=min_alive) + single anchor"
+        );
+
+        // The snapshot at v10 reads v10 (the value current at its version).
+        let result = mvcc.get_at(&key, snap_v).await.unwrap();
+        assert_eq!(
+            result,
+            Some(Bytes::from("v10")),
+            "snapshot at v10 must read v10 (pinned by min_alive)"
+        );
+
+        // Verify the surviving entries are exactly {v9, v10} by reading them.
+        let v9 = 9u64;
+        let v10 = 10u64;
+        assert!(
+            mvcc.get_at(&key, v9).await.unwrap().is_some(),
+            "anchor v9 (largest < min_alive) must survive"
+        );
+        assert!(
+            mvcc.get_at(&key, v10).await.unwrap().is_some(),
+            "pinned v10 (>= min_alive) must survive"
+        );
+        // A strictly-below-anchor version was reclaimed.
+        let v8 = 8u64;
+        assert!(
+            mvcc.get_at(&key, v8).await.unwrap().is_none(),
+            "v8 (below anchor) must be reclaimed"
+        );
+    }
+
+    /// 6. Deterministic interleaving (PausableStore): a write+count-vacuum
+    /// interleaved with an `open_snapshot`. The snapshot must NEVER read None
+    /// for a version it should see — the min_alive floor holds above the count
+    /// knobs. (§4.1-class race; loom sweep deferred to T1d.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retention_race_open_snapshot_with_count() {
+        let key = Bytes::from("race_key");
+        let old_val = Bytes::from("OLD");
+        let new_val = Bytes::from("NEW");
+
+        let pausable = Arc::new(PausableStore::new());
+        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let gate = make_gate();
+        let mvcc = Arc::new(MvccStore::new(
+            pausable.clone() as Arc<dyn Store>,
+            history,
+            gate.clone(),
+        ));
+        // Aggressive vacuum — but min_alive must still protect pinned versions.
+        mvcc.set_retention(Retention {
+            max_age_secs: None,
+            max_count: Some(0),
+            min_count: None,
+        })
+        .unwrap();
+
+        // Seed OLD.
+        mvcc.set_versioned(key.clone(), old_val.clone())
+            .await
+            .unwrap();
+        let v_seed = mvcc.version_of(&key);
+        gate.publish_committed(v_seed);
+
+        // Arm: the next `main.set` pauses.
+        pausable.arm();
+
+        let mvcc_w = Arc::clone(&mvcc);
+        let key_w = key.clone();
+        let new_val_w = new_val.clone();
+        let write_handle = tokio::spawn(async move {
+            mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
+        });
+
+        // Wait for the write to pause inside main.set (after archive_prior +
+        // publish_cell, before publish_committed_max + vacuum_key).
+        pausable.entered.notified().await;
+
+        // Open a snapshot mid-write — registers before usable.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+
+        // Release: write completes → publish_committed_max → vacuum_key runs
+        // with min_alive that now includes snap_v.
+        pausable.release();
+        write_handle.await.unwrap();
+
+        let seen = mvcc.get_at(&key, snap_v).await.unwrap();
+        assert!(
+            seen.is_some(),
+            "snapshot opened mid-write must never read None for a version it should see"
+        );
+        assert_eq!(
+            seen,
+            Some(old_val),
+            "snapshot predating NEW must see OLD (pinned by min_alive above max_count=0)"
+        );
+    }
+
+    /// 7. `set_retention` swaps the whole struct; `retention()` reflects it;
+    /// `validate` rejects `min_count > max_count`.
+    #[tokio::test]
+    async fn retention_patch_independent() {
+        let mvcc = make_mvcc();
+
+        // Default is CurrentOnly (max_count: Some(0)).
+        assert_eq!(**mvcc.retention(), Retention::current_only());
+
+        // Swap to keep_history.
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+        assert_eq!(**mvcc.retention(), Retention::keep_history());
+
+        // Swap to a custom policy.
+        let custom = Retention {
+            max_age_secs: Some(3600),
+            max_count: Some(10),
+            min_count: Some(2),
+        };
+        mvcc.set_retention(custom).unwrap();
+        assert_eq!(**mvcc.retention(), custom);
+
+        // validate rejects min_count > max_count — old policy kept.
+        let invalid = Retention {
+            max_age_secs: None,
+            max_count: Some(1),
+            min_count: Some(5),
+        };
+        assert!(mvcc.set_retention(invalid).is_err(), "min>max must reject");
+        // Previous (custom) policy survives the rejected swap.
+        assert_eq!(
+            **mvcc.retention(),
+            custom,
+            "rejected swap must not change policy"
+        );
     }
 }

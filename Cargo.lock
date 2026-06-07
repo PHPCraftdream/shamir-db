@@ -4027,6 +4027,7 @@ dependencies = [
 name = "shamir-tx"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bincode",
  "bytes",
