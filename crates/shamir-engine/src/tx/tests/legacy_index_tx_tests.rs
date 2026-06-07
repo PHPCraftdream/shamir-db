@@ -278,7 +278,7 @@ async fn staged_keys_match_non_tx_planner_output() {
     }
     for op in tbl
         .sorted_indexes()
-        .plan_record_created(&rid, &rec)
+        .plan_record_created(&rid, &rec, 0)
         .unwrap()
     {
         if let IndexWriteOp::SetPosting { key, value } = op {

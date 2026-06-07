@@ -222,7 +222,9 @@ impl TableManager {
             while let Some(batch) = stream.next().await {
                 let pairs = batch?;
                 for (id, value) in &pairs {
-                    self.sorted_indexes().on_record_created(id, value).await?;
+                    self.sorted_indexes()
+                        .on_record_created(id, value, 0)
+                        .await?;
                 }
             }
         }
@@ -354,7 +356,7 @@ impl TableManager {
                 .on_records_created_unique_batch(pairs_iter())
                 .await?;
             self.sorted_indexes()
-                .on_records_created_batch(pairs_iter())
+                .on_records_created_batch(pairs_iter(), 0)
                 .await?;
         }
 
@@ -380,7 +382,7 @@ impl TableManager {
                 .on_records_created_unique_batch(pairs_iter())
                 .await?;
             self.sorted_indexes()
-                .on_records_created_batch(pairs_iter())
+                .on_records_created_batch(pairs_iter(), 0)
                 .await?;
         }
 
