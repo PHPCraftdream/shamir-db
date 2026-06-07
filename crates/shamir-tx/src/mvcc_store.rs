@@ -1951,6 +1951,274 @@ mod tests {
         );
     }
 
+    // ================================================================
+    // PausableStore — test double for MVCC-2 deterministic harness.
+    // ================================================================
+    //
+    // Wraps an inner Store and adds a pause point inside `set()`:
+    // when `armed` is true the first `set()` call signals `entered`
+    // (so the test knows it is inside the gap) and then blocks on
+    // `pause_gate` until the test calls `release()`.  This lets the
+    // test deterministically open a snapshot INSIDE the fast-path
+    // window between `active_snapshots_empty()` and the actual write.
+    //
+    // All other Store methods are delegated to `inner`.
+    mod pausable_store {
+        use async_trait::async_trait;
+        use bytes::Bytes;
+        use futures::stream::Stream;
+        use shamir_storage::error::{DbError, DbResult};
+        use shamir_storage::storage_in_memory::InMemoryStore;
+        use shamir_storage::types::{KvOp, RecordKey, Store};
+        use std::pin::Pin;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering::SeqCst},
+            Arc,
+        };
+        use tokio::sync::Notify;
+
+        pub struct PausableStore {
+            pub inner: InMemoryStore,
+            /// When `true`, the next `set()` call will pause.
+            pub armed: Arc<AtomicBool>,
+            /// Notified when `set()` has entered the pause point (before
+            /// the actual write) — the test waits on this to know the
+            /// write task is suspended in the window.
+            pub entered: Arc<Notify>,
+            /// The write task blocks here until the test calls `release()`.
+            pub pause_gate: Arc<Notify>,
+        }
+
+        impl PausableStore {
+            pub fn new() -> Self {
+                Self {
+                    inner: InMemoryStore::new(),
+                    armed: Arc::new(AtomicBool::new(false)),
+                    entered: Arc::new(Notify::new()),
+                    pause_gate: Arc::new(Notify::new()),
+                }
+            }
+
+            /// Arm: the next `set()` call will pause.
+            pub fn arm(&self) {
+                self.armed.store(true, SeqCst);
+            }
+
+            /// Release: unblock the paused `set()`.
+            pub fn release(&self) {
+                self.pause_gate.notify_one();
+            }
+        }
+
+        #[async_trait]
+        impl Store for PausableStore {
+            async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+                if self.armed.swap(false, SeqCst) {
+                    // Signal to the test that we have reached the pause point
+                    // (BEFORE the actual write — i.e., we are inside the
+                    // fast-path window between active_snapshots_empty() and
+                    // main.set()).
+                    self.entered.notify_one();
+                    // Block until the test calls release().
+                    self.pause_gate.notified().await;
+                }
+                self.inner.set(key, value).await
+            }
+
+            async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+                self.inner.insert(value).await
+            }
+
+            async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+                self.inner.get(key).await
+            }
+
+            async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+                self.inner.remove(key).await
+            }
+
+            async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+                for op in ops {
+                    match op {
+                        KvOp::Set(k, v) => {
+                            let _ = self.set(k, v).await?;
+                        }
+                        KvOp::Remove(k) => {
+                            let _ = self.remove(k).await?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            fn iter_stream(
+                &self,
+                batch_size: usize,
+            ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>
+            {
+                self.inner.iter_stream(batch_size)
+            }
+
+            fn scan_prefix_stream(
+                &self,
+                prefix: Bytes,
+                batch_size: usize,
+            ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>
+            {
+                self.inner.scan_prefix_stream(prefix, batch_size)
+            }
+        }
+    }
+
+    // ================================================================
+    // MVCC-2 deterministic characterization via PausableStore.
+    // ================================================================
+
+    use pausable_store::PausableStore;
+
+    /// MVCC-2 characterization: real interleaving TOCTOU via PausableStore.
+    ///
+    /// Uses `PausableStore` to suspend `main.set()` BEFORE the write
+    /// commits — exactly inside the fast-path window of `set_versioned`:
+    ///
+    ///   [fast-path check] active_snapshots_empty() → true
+    ///        ↓  (no .await here in prod code, but PausableStore adds one)
+    ///   [write task suspends] → test opens snapshot at snap_v = v_after_seed
+    ///        ↓  (test calls release)
+    ///   [write commits to main] → assign_next_version()
+    ///        ↓
+    ///   [get_at(key, snap_v)] → cur_v=0 (cells not updated) ≤ snap_v
+    ///        → fast path → main.get() → ???
+    ///
+    /// The `PausableStore.set()` adds the `.await` that gives tokio's
+    /// scheduler a preemption point, making the interleaving deterministic
+    /// and reproducible without sleep/retry loops.
+    ///
+    /// OBSERVATION documented by assert below.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mvcc2_real_interleaving_toctou_characterization() {
+        use std::sync::Arc;
+
+        let key = Bytes::from("toctou_key");
+        let old_val = Bytes::from("OLD");
+        let new_val = Bytes::from("NEW");
+
+        // --- Setup ---
+        // Build the MvccStore with a PausableStore as `main`.
+        let pausable = Arc::new(PausableStore::new());
+        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let gate = make_gate();
+        let mvcc = Arc::new(MvccStore::new(
+            pausable.clone() as Arc<dyn Store>,
+            history,
+            gate.clone(),
+        ));
+
+        // Seed: write OLD with no snapshots open → fast path, version_cache empty.
+        mvcc.set_versioned(key.clone(), old_val.clone())
+            .await
+            .unwrap();
+        // Publish so a snapshot can capture the current committed version.
+        let v_after_seed = gate.assign_next_version();
+        gate.publish_committed(v_after_seed);
+
+        // Confirm cells is empty after the fast-path seed write.
+        assert_eq!(
+            mvcc.version_of(&key),
+            0,
+            "precondition: fast-path seed must NOT populate cells"
+        );
+        // Confirm no snapshots are open (fast-path will be taken).
+        assert!(
+            gate.active_snapshots_empty(),
+            "precondition: no snapshots open before arming"
+        );
+
+        // --- Arm PausableStore ---
+        // The next `set()` call on `main` will pause before writing.
+        pausable.arm();
+
+        // Clone refs for the write task.
+        let mvcc_w = Arc::clone(&mvcc);
+        let key_w = key.clone();
+        let new_val_w = new_val.clone();
+
+        // --- Spawn write task ---
+        // This calls set_versioned(key, NEW). The fast-path check
+        // (active_snapshots_empty) will return true (no snapshot open yet),
+        // then main.set() will pause — signalling `entered`.
+        let write_handle = tokio::spawn(async move {
+            mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
+        });
+
+        // --- Wait for write to be inside the gap ---
+        // `entered` fires after the armed set() confirms armed=true and
+        // BEFORE the actual inner.set() executes. We are now inside the
+        // TOCTOU window: fast-path decided "no snapshot, skip archival",
+        // but the write has NOT yet landed in main.
+        pausable.entered.notified().await;
+
+        // --- Open snapshot inside the window ---
+        // snap_v = last_committed = v_after_seed (published above).
+        // From this snapshot's perspective, the write of NEW has NOT
+        // happened yet — it should see OLD.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+        assert_eq!(
+            snap_v, v_after_seed,
+            "snapshot must open at v_after_seed (the gap version)"
+        );
+
+        // --- Release: let the write commit to main ---
+        pausable.release();
+        write_handle.await.unwrap();
+
+        // NEW is now in main. cells is still empty (fast-path).
+        assert_eq!(
+            mvcc.version_of(&key),
+            0,
+            "fast-path write must NOT update cells even after commit"
+        );
+
+        // --- The characterization moment ---
+        // get_at(key, snap_v):
+        //   cur_v = cells.read(key) → 0   (cells never updated on fast path)
+        //   0 <= snap_v → FAST PATH → main.get(key) → ??? (NEW or OLD?)
+        //
+        // main now holds NEW (the write just landed). OLD is not in history
+        // (fast-path never archives). So the only thing stored is NEW.
+        // get_at cannot return OLD — there is no OLD anywhere in the store
+        // (the seed write itself was a fast-path write; OLD is only in main
+        // until overwritten, and it was just overwritten by NEW).
+        //
+        // RESULT: seen == Some(NEW).
+        //
+        // Is this a bug? The snapshot was opened at snap_v which was set
+        // BEFORE NEW was written. Correct MVCC would return OLD (or None
+        // if OLD was also a fast-path write that was never archived). But
+        // since OLD is no longer in main and was never in history, there is
+        // no OLD to return. The TOCTOU window produces a PHANTOM READ of NEW.
+        let seen = mvcc.get_at(&key, snap_v).await.unwrap();
+
+        // MVCC-2 reproduced via the REAL set_versioned path (PausableStore opens a
+        // snapshot inside the fast-path window). The snapshot opened at v_after_seed
+        // WRONGLY observes NEW (written after it opened). This asserts the CURRENT
+        // buggy behaviour. When S1.1 (atomic write-tact, MVCC_CELL.md) lands, this
+        // MUST become `seen == Some(OLD)` (or None if old value is also unarchived);
+        // flip the assert and rename to `mvcc2_real_interleaving_toctou_fixed`.
+        //
+        // Root cause: fast-path (active_snapshots_empty → true) skips both:
+        //   (a) archiving OLD to history, and
+        //   (b) updating cells with the new version.
+        // When a snapshot opens in the gap and then reads, cur_v=0 routes to
+        // main, which now has NEW — phantom read confirmed.
+        assert_eq!(
+            seen,
+            Some(new_val.clone()),
+            "MVCC-2: snapshot wrongly sees NEW (bug — fix in S1.1)"
+        );
+    }
+
     /// MVCC-2 stress: concurrent set_versioned + open_snapshot, 1000 iterations.
     ///
     /// Tries to trigger the TOCTOU by racing `set_versioned` against
