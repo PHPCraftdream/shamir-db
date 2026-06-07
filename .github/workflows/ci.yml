@@ -21,9 +21,17 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  # Lint on every supported OS. Crucial for cross-platform correctness:
+  # `#[cfg(windows)]` / `#[cfg(target_os = "macos")]` branches (service
+  # installers, runtime, signal handling) are ONLY compiled — and therefore
+  # only linted — on the matching OS. An ubuntu-only clippy never saw them.
   clippy:
-    name: cargo clippy
-    runs-on: ubuntu-latest
+    name: cargo clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.93.0
@@ -32,14 +40,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # Fast primary signal: the ~1500 library unit tests. Matches the
-  # project's stated pre-commit gate in CLAUDE.md ("Code quality
+  # Fast primary signal: the ~2700 library unit tests, on every OS. Matches
+  # the project's stated pre-commit gate in CLAUDE.md ("Code quality
   # (MANDATORY)"): `cargo test --workspace --lib`. Kept as its own job so
   # the dominant signal stays fast and is not held hostage by the slower,
-  # heavier integration build below.
+  # heavier integration build below. Matrixed across OSes so Windows /
+  # macOS regressions (path handling, file locking, fsync) are caught.
   test:
-    name: cargo test (lib)
-    runs-on: ubuntu-latest
+    name: cargo test lib (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.93.0
@@ -79,11 +92,21 @@ jobs:
   # from the workspace) — too heavy for a per-PR gate. Run it manually per
   # `tests/e2e/README.md`; promoting it to a scheduled/nightly workflow is
   # a follow-up.
+  # Matrixed across OSes — this is the suite that actually exercises sockets,
+  # TLS+SCRAM, fsync-durability-across-restart, and the storage backends'
+  # on-disk file locking, where OS differences bite hardest.
   integration:
-    name: cargo test (integration)
-    runs-on: ubuntu-latest
+    name: cargo test integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
+      # bash on every runner (Git Bash on Windows) so the `--test '*'` glob
+      # target selector is passed to cargo identically across OSes.
       - run: cargo test --workspace --test '*'
+        shell: bash
