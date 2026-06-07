@@ -6,9 +6,13 @@
 //! - `history` — old versions stored under `<key>::0xFF::<version_be>`
 //!   keys (see [`version_codec`]).
 //!
-//! Zero-overhead when no transaction is active: [`MvccStore::set_versioned`]
-//! checks `gate.active_snapshots_empty()` and skips history archival
-//! entirely, writing directly to `main`.
+//! T1a (always-archive): every write/delete runs the snapshot-active
+//! "slow" path unconditionally — the prior value is archived to `history`
+//! before `main` is touched. With the no-snapshot fast path gone, the
+//! MVCC-2 TOCTOU window (`active_snapshots_empty()` then `main.set`)
+//! cannot occur: a snapshot opening at any time finds the prior version
+//! archived in `history`. `history` is the universal version-log (see
+//! docs/roadmap/TEMPORAL.md §1); `main` is the current-value cache.
 //!
 //! Snapshot reads via [`MvccStore::get_at`] use a fast path (version cache
 //! check → main read) and fall back to a history range scan.
@@ -234,31 +238,22 @@ impl MvccStore {
         self.scan_history_for_version(key, snapshot_version).await
     }
 
-    /// cancel-safe: NO — multi-step state mutation. When snapshots are
-    /// active the sequence is: read old from `main`, archive to `history`,
-    /// write new to `main`, allocate version and update `version_cache`.
-    /// Cancellation between archive and main-write can leave history
-    /// containing a value while main still has the old one (or a stale
-    /// version_cache). Recovery is by caller-side retry / WAL replay.
-    ///
-    /// Non-tx write. If active snapshots exist, saves the old value
-    /// in history before overwriting main.
+    /// cancel-safe: NO — multi-step state mutation. T1a (always-archive):
+    /// every write runs the snapshot-active "slow" path unconditionally —
+    /// archive the prior value to `history`, then write `main`, then
+    /// publish the cell. Removing the no-snapshot fast path closes the
+    /// MVCC-2 TOCTOU window by construction: a snapshot opening at any
+    /// time finds the prior version archived in `history`. Cancellation
+    /// between archive and main-write can leave `history` containing a
+    /// value while `main` still has the old one. Recovery is by
+    /// caller-side retry / WAL replay.
     ///
     /// Returns the monotonic version assigned to this write (from the
-    /// shared `RepoTxGate` counter). The version is always allocated —
-    /// even on the fast path (no active snapshots) — so that callers
-    /// (e.g. the non-tx changefeed emitter) can stamp events with the
-    /// exact version the data landed at, without a second counter bump.
+    /// shared `RepoTxGate` counter).
     pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<u64> {
-        if self.gate.active_snapshots_empty() {
-            // Fast path: bump-first — assign version, update hwm (version stays
-            // 0/unchanged), then perform the physical write.
-            let new_v = self.gate.assign_next_version();
-            self.publish_cell(key.clone(), new_v, false).await;
-            self.main.set(key, value).await?;
-            return Ok(new_v);
-        }
-        // Slow path: archive pre-read must see the OLD version (before bump).
+        // T1a: always archive — the prior version must live in `history`
+        // before the new value lands in `main`, so any snapshot (including
+        // one opening mid-write) finds it.
         self.archive_prior(&key).await?;
         // Bump-first: assign version, update cell (both version and hwm), then
         // perform the physical write. CRIT-2: `publish_cell` uses entry_async
@@ -267,16 +262,19 @@ impl MvccStore {
         let new_v = self.gate.assign_next_version();
         self.publish_cell(key.clone(), new_v, true).await;
         self.main.set(key, value).await?;
+        // Advance the reader-visible floor so a tx/snapshot opened AFTER this
+        // write sees it: `publish_committed_max` is a monotonic fetch_max
+        // (lock-free, safe off `commit_lock`, never moves the floor backwards).
+        self.gate.publish_committed_max(new_v);
         Ok(new_v)
     }
 
-    /// cancel-safe: NO — multi-step state mutation. The no-snapshot fast
-    /// path is a single `main.transact`, but the snapshot-active path runs
-    /// the same archive → main-write → version_cache sequence as
-    /// [`set_versioned`], batched: per-key old-value pre-reads, one history
-    /// `transact`, one main `transact`, then per-key `version_cache`
-    /// updates. Cancellation mid-sequence leaves the store partial; recovery
-    /// is caller-side retry / WAL replay.
+    /// cancel-safe: NO — multi-step state mutation. T1a (always-archive):
+    /// every batch runs the archive → main-write → cell-publish sequence
+    /// unconditionally — the no-snapshot fast path is gone, so the MVCC-2
+    /// TOCTOU window cannot occur for batch writes either. Cancellation
+    /// mid-sequence leaves the store partial; recovery is caller-side
+    /// retry / WAL replay.
     ///
     /// Batched non-tx write of many `(key, value)` pairs — the bulk-load
     /// twin of [`set_versioned`]. III.4: a non-tx `insert_many` that loops
@@ -287,22 +285,15 @@ impl MvccStore {
     /// persy, nebari, canopy).
     ///
     /// Semantics match calling [`set_versioned`] once per pair, in order:
-    /// - **No active snapshots** (fast path): forward straight to
-    ///   `main.transact(Set ops)`; `version_cache` is left untouched
-    ///   (exactly like `set_versioned`'s fast path — no versioned read can
-    ///   observe these writes while no snapshot is open).
-    /// - **Snapshots active**: archive any existing old value per key into
-    ///   history, write all news to main in one `transact`, and assign a
-    ///   fresh monotonic version per key in `version_cache` (one version per
-    ///   record, identical to the per-record loop). The snapshot flag is
-    ///   re-sampled per key for the archive decision (HIGH-2): a snapshot
-    ///   that opens mid-batch is honoured for the keys processed after it.
+    /// archive any existing old value per key into history, write all
+    /// news to main in one `transact`, and assign a fresh monotonic
+    /// version per key (one version per record, identical to the
+    /// per-record loop).
     ///
     /// Empty `items` is a no-op.
     /// Returns the maximum version assigned across the batch (one
-    /// version per record when snapshots are active, one version for
-    /// the whole batch on the fast path). The returned value is the
-    /// commit-version a changefeed event should carry.
+    /// version per record). The returned value is the commit-version a
+    /// changefeed event should carry.
     pub async fn set_versioned_many(&self, items: Vec<(Bytes, Bytes)>) -> DbResult<u64> {
         if items.is_empty() {
             // No records written — return 0. The caller should not emit
@@ -310,27 +301,14 @@ impl MvccStore {
             return Ok(0);
         }
 
-        // Fast path: no snapshots → bump-first (assign ONE version, set hwm for
-        // every key), then one atomic batch to main, no history.
-        if self.gate.active_snapshots_empty() {
-            let batch_v = self.gate.assign_next_version();
-            for (key, _) in &items {
-                self.publish_cell(key.clone(), batch_v, false).await;
-            }
-            let ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
-            self.main.transact(ops).await?;
-            return Ok(batch_v);
-        }
-
-        // Snapshot-active path. Phase 1: per-key archive pre-reads. Like
+        // T1a (always-archive): Phase 1 — per-key archive pre-reads. The
+        // prior value of EVERY key must be archived to `history` before
+        // the batch overwrites `main`, so a snapshot opening at any time
+        // (mid-batch included) finds the prior version. Like
         // `apply_committed_ops`, the old-value read can't be batched (it
-        // depends on each key's current main value), and the snapshot flag
-        // is re-sampled per key so a snapshot opening mid-batch is honoured.
+        // depends on each key's current main value).
         let mut history_ops: Vec<KvOp> = Vec::new();
         for (key, _value) in &items {
-            if self.gate.active_snapshots_empty() {
-                continue;
-            }
             match self.main.get(key.clone()).await {
                 Ok(old) => {
                     let cur_v = self.current_version(key);
@@ -362,43 +340,41 @@ impl MvccStore {
         let main_ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
         self.main.transact(main_ops).await?;
 
+        // Advance the reader-visible floor to the batch's max version so a
+        // tx/snapshot opened AFTER the batch sees every record in it.
+        // `publish_committed_max` is monotonic (fetch_max) and safe off-lock.
+        if max_v > 0 {
+            self.gate.publish_committed_max(max_v);
+        }
         Ok(max_v)
     }
 
     /// cancel-safe: NO — multi-step state mutation; same reasoning as
-    /// `set_versioned`. Sequence is archive-old → remove from main →
-    /// allocate version and update `version_cache`. Cancellation mid-
-    /// sequence leaves the store in a partial state; caller-side retry
-    /// / WAL replay is the recovery path.
-    ///
-    /// Non-tx delete. Similar to `set_versioned` — archives old value
-    /// if snapshots are active.
+    /// `set_versioned`. T1a (always-archive): the archive runs
+    /// unconditionally, then `main.remove`, then version allocation +
+    /// cell publish. Cancellation mid-sequence leaves the store in a
+    /// partial state; caller-side retry / WAL replay is the recovery path.
     ///
     /// Returns the monotonic version assigned to this delete (always
-    /// allocated, even on the fast path — see [`set_versioned`] for
-    /// rationale).
+    /// allocated — see [`set_versioned`] for rationale).
     pub async fn delete_versioned(&self, key: Bytes) -> DbResult<u64> {
-        if !self.gate.active_snapshots_empty() {
-            // Slow path: archive pre-read must see OLD version (before bump).
-            self.archive_prior(&key).await?;
-            // Bump-first: assign version, update cell (version+hwm), then remove.
-            // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
-            // cached version advances monotonically.
-            let new_v = self.gate.assign_next_version();
-            self.publish_cell(key.clone(), new_v, true).await;
-            // Propagate a backend I/O failure instead of swallowing it.
-            self.main.remove(key).await?;
-            return Ok(new_v);
-        }
-        // Fast path: bump-first — assign version, set hwm (version stays 0),
-        // then remove. Previously the fast path assigned AFTER remove and did
-        // not update the cell at all.
+        // T1a: always archive — the prior value must live in `history`
+        // before the key is removed from `main`, so any snapshot (including
+        // one opening mid-delete) finds it.
+        self.archive_prior(&key).await?;
+        // Bump-first: assign version, update cell (version+hwm), then remove.
+        // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
+        // cached version advances monotonically.
         let new_v = self.gate.assign_next_version();
-        self.publish_cell(key.clone(), new_v, false).await;
+        self.publish_cell(key.clone(), new_v, true).await;
         // Propagate a backend I/O failure instead of swallowing it — a
         // dropped error here would let the caller see Ok() while the row is
         // still live in main (the delete silently never happened).
         self.main.remove(key).await?;
+        // Advance the reader-visible floor so a tx/snapshot opened AFTER this
+        // delete sees the post-delete state: `publish_committed_max` is a
+        // monotonic fetch_max (lock-free, safe off `commit_lock`).
+        self.gate.publish_committed_max(new_v);
         Ok(new_v)
     }
 
@@ -1759,14 +1735,11 @@ mod tests {
     // III.4 — `set_versioned_many` batched bulk write.
     // ----------------------------------------------------------------
 
-    /// Fast path (no active snapshots): a batch of N pairs lands in `main`
-    /// in one shot, leaving history empty and the version_cache untouched
-    /// (no versioned read can observe these writes while no snapshot is
-    /// open) — mirroring `set_versioned`'s fast path. The single
-    /// `main.transact` collapses what was N per-record write-txs; an exact
-    /// "one transact" assertion would need a counting `Store`, which
-    /// `shamir-tx` can't build without an `async_trait` dev-dep, so we
-    /// assert the observable fast-path side-effects instead.
+    /// T1a: always-archive — `set_versioned_many` always runs the slow
+    /// batch path (archive → main → per-key publish). The no-snapshot fast
+    /// path is gone. For a batch of brand-new keys there is no prior to
+    /// archive, so history stays empty; every key still gets its own cell
+    /// entry carrying its assigned version (one version per record).
     #[tokio::test]
     async fn set_versioned_many_batches_no_snapshot() {
         let mvcc = make_mvcc();
@@ -1786,25 +1759,28 @@ mod tests {
         for i in 0..n {
             let k = Bytes::copy_from_slice(&i.to_be_bytes());
             assert_eq!(
-                mvcc.main.get(k).await.unwrap(),
+                mvcc.main.get(k.clone()).await.unwrap(),
                 Bytes::from(format!("val{i}"))
             );
         }
 
-        // History stayed empty (no snapshots → no archival).
+        // T1a: brand-new keys have no prior to archive → history stays empty.
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut hist = 0usize;
         while let Some(batch) = stream.next().await {
             hist += batch.unwrap().len();
         }
-        assert_eq!(hist, 0, "fast path must not archive to history");
+        assert_eq!(
+            hist, 0,
+            "T1a always-archive: brand-new keys archive nothing"
+        );
 
-        // Fast path now populates hwm cells (version stays 0); all n keys present.
+        // T1a: every key is published into the cells (one entry per key).
         assert_eq!(
             mvcc.cells.len(),
             n as usize,
-            "fast path populates hwm cells for every key"
+            "T1a always-archive: every batch key gets a cell entry"
         );
     }
 
@@ -2212,34 +2188,32 @@ mod tests {
     /// MVCC-2 deterministic: sequential check → set → open_snapshot → read.
     ///
     /// Verifies that when the snapshot is opened AFTER `set_versioned`
-    /// completes (the normal sequential case), `get_at` correctly routes
-    /// to history (version_cache is 0 because the write went through the
-    /// fast path, so cur_v=0 ≤ snap → fast path reads main → gets the
-    /// latest value, not the pre-write value).
+    /// completes (the normal sequential case), `get_at` correctly returns
+    /// the value visible at the snapshot version.
     ///
-    /// Note: fast-path writes (no active snapshots) do NOT update
-    /// version_cache, so version_of returns 0. A later snapshot opening
-    /// at snap=last_committed sees cur_v=0 ≤ snap → fast path → reads main.
-    /// This is CORRECT because the snapshot was opened AFTER the write.
+    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
+    /// now asserts snapshot-correct visibility (flipped from the pre-fix
+    /// characterization). `version_of` is now populated on every write
+    /// (always-slow path), so a snapshot opened after the write at
+    /// `snap_v == v` routes correctly.
     #[tokio::test]
     async fn mvcc2_fast_path_version_cache_not_updated() {
         let gate = make_gate();
         let mvcc = make_mvcc_with_gate(gate.clone());
         let key = Bytes::from("toctou_key");
 
-        // Write with no snapshot active — takes the fast path.
-        // version_cache is NOT updated.
+        // Write with no snapshot active — always-archive path now runs.
         let v = mvcc
             .set_versioned(key.clone(), Bytes::from("v1"))
             .await
             .unwrap();
         assert!(v > 0);
 
-        // version_cache stays empty after fast-path write.
+        // T1a: always-archive populates the cell with the assigned version.
         assert_eq!(
             mvcc.version_of(&key),
-            0,
-            "fast-path write must NOT update version_cache"
+            v,
+            "T1a always-archive: every write publishes its version into the cell"
         );
 
         // Now publish and open a snapshot.
@@ -2248,7 +2222,7 @@ mod tests {
         let snap_v = snap.version();
         assert_eq!(snap_v, v, "snapshot must open at the published version");
 
-        // get_at: cur_v=0 ≤ snap_v → fast path → reads main → sees v1.
+        // get_at: cur_v=v ≤ snap_v=v → fast path → reads main → sees v1.
         // This is correct: the snapshot was opened AFTER the write landed.
         let result = mvcc.get_at(&key, snap_v).await.unwrap();
         assert_eq!(
@@ -2258,77 +2232,71 @@ mod tests {
         );
     }
 
-    /// MVCC-2 simulated TOCTOU: manually simulate the race window.
+    /// MVCC-2 simulated TOCTOU — now asserts the fix.
     ///
-    /// This test manually reproduces what would happen if a snapshot opened
-    /// BETWEEN `active_snapshots_empty()` returning `true` and `main.set()`
-    /// completing — i.e., the exact TOCTOU scenario:
+    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
+    /// now asserts snapshot-correct visibility (flipped from the pre-fix
+    /// characterization). Previously this test manually wrote to `main`
+    /// bypassing the slow path to demonstrate the phantom read. With the
+    /// fast path gone, the real `set_versioned` always archives, so we
+    /// drive the write through it and confirm a snapshot opened BEFORE
+    /// the write does NOT see the post-snapshot value — it sees the
+    /// pre-write value (OLD), which was archived.
     ///
-    ///   1. `active_snapshots_empty()` returns true (gate is empty).
-    ///   2. <<< snapshot opens HERE, interleaved >>>
-    ///   3. `main.set(key, value)` completes — version_cache NOT updated.
-    ///   4. `get_at(key, snap)` is called: cur_v=0 ≤ snap → fast path
-    ///      → reads main → sees the PHANTOM value.
-    ///
-    /// We simulate this by: (a) checking the gate is empty, (b) opening a
-    /// snapshot manually, (c) writing directly to main (bypassing the slow
-    /// path), (d) NOT updating version_cache, (e) calling get_at.
-    ///
-    /// VERDICT: get_at returns the PHANTOM value. This confirms the TOCTOU
-    /// window exists and WOULD produce incorrect results if it were triggered.
-    /// The window is real (the code is non-atomic) but requires a preemption
-    /// point between two synchronous operations, which does NOT occur with
-    /// InMemoryStore in a single-threaded tokio runtime.
+    /// Sequence:
+    ///   1. Seed OLD via `set_versioned` (no snapshot) — archived on the
+    ///      next overwrite.
+    ///   2. Open a snapshot at `v_old`.
+    ///   3. Overwrite with NEW via `set_versioned` — OLD is archived to
+    ///      `history`, cell advances to `v_new`.
+    ///   4. `get_at(key, v_old)`: `cur_v = v_new > v_old` → slow path →
+    ///      scans history → finds OLD. Correct.
     #[tokio::test]
     async fn mvcc2_simulated_toctou_snapshot_sees_phantom() {
         let gate = make_gate();
         let mvcc = make_mvcc_with_gate(gate.clone());
         let key = Bytes::from("toctou_key");
 
-        // Step 1: confirm no snapshots active (fast-path condition).
-        assert!(
-            gate.active_snapshots_empty(),
-            "precondition: no snapshots active"
-        );
-
-        // Step 2: <<< simulate interleaved snapshot open >>>
-        // In the real race this would happen between the check and the set.
-        let snap = gate.open_snapshot().await;
-        let snap_v = snap.version();
-        // version_cache is empty — no version has been published yet.
-        assert_eq!(snap_v, 0, "snapshot at version 0 (nothing published yet)");
-
-        // Step 3: Write directly to main WITHOUT going through the slow path
-        // (simulating what set_versioned does after the fast-path check — it
-        // proceeds to `main.set` even though a snapshot has now opened).
-        // version_cache is intentionally NOT updated.
-        mvcc.main
-            .set(key.clone(), Bytes::from("phantom_value"))
+        // Step 1: seed OLD with no snapshot active. Always-archive path runs
+        // but there is no prior value, so nothing is archived yet.
+        let old_val = Bytes::from("OLD");
+        let v_old = mvcc
+            .set_versioned(key.clone(), old_val.clone())
             .await
             .unwrap();
+        assert!(v_old > 0);
+        gate.publish_committed(v_old);
 
-        // version_cache is still empty (not updated — this is the bug).
+        // Step 2: open a snapshot at v_old — from its perspective NEW has
+        // not happened yet.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+        assert_eq!(snap_v, v_old, "snapshot opens at the published v_old");
+
+        // Step 3: overwrite with NEW via the REAL set_versioned (always-
+        // archive). OLD is now archived to history; the cell advances.
+        let new_val = Bytes::from("NEW");
+        let v_new = mvcc
+            .set_versioned(key.clone(), new_val.clone())
+            .await
+            .unwrap();
+        assert!(v_new > v_old);
         assert_eq!(
             mvcc.version_of(&key),
-            0,
-            "version_cache not updated (fast-path omission)"
+            v_new,
+            "T1a always-archive: cell carries the latest assigned version"
         );
 
         // Step 4: get_at for the snapshot.
-        // cur_v = version_of(key) = 0.
-        // Since 0 <= snap_v (0 <= 0), the FAST PATH is taken → reads main.
-        // main now has "phantom_value" — the snapshot SEES the phantom.
+        // cur_v = v_new > snap_v → SLOW path → scan history → finds OLD.
+        // The snapshot does NOT see the phantom NEW; it sees the value that
+        // was current at snap_v. MVCC-2 is closed by construction.
         let result = mvcc.get_at(&key, snap_v).await.unwrap();
         assert_eq!(
             result,
-            Some(Bytes::from("phantom_value")),
-            "MVCC-2 SIMULATED TOCTOU CONFIRMED: snapshot at version 0 sees \
-             a value written AFTER the snapshot opened, because version_cache \
-             was not updated and get_at takes the fast path (cur_v=0 <= snap=0). \
-             This documents the theoretical TOCTOU window. The window is NOT \
-             triggered by InMemoryStore in a single-threaded runtime because \
-             active_snapshots_empty() and main.set() have no .await between \
-             them and cannot be interleaved."
+            Some(old_val),
+            "T1a: snapshot opened before the overwrite sees OLD (archived), \
+             not the post-snapshot NEW — MVCC-2 cannot occur"
         );
     }
 
@@ -2457,25 +2425,22 @@ mod tests {
 
     use pausable_store::PausableStore;
 
-    /// MVCC-2 characterization: real interleaving TOCTOU via PausableStore.
+    /// MVCC-2 characterization via PausableStore — now asserts the fix.
     ///
-    /// Uses `PausableStore` to suspend `main.set()` BEFORE the write
-    /// commits — exactly inside the fast-path window of `set_versioned`:
+    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
+    /// now asserts snapshot-correct visibility (flipped from the pre-fix
+    /// characterization). `PausableStore` suspends `main.set()` — which is
+    /// now AFTER `archive_prior` (OLD archived to history) and
+    /// `publish_cell` (cell advanced to `v_new`). A snapshot opened inside
+    /// this pause therefore sees `cur_v = v_new > snap_v` → slow path →
+    /// scans history → finds OLD. The phantom read cannot occur.
     ///
-    ///   [fast-path check] active_snapshots_empty() → true
-    ///        ↓  (no .await here in prod code, but PausableStore adds one)
-    ///   [write task suspends] → test opens snapshot at snap_v = v_after_seed
-    ///        ↓  (test calls release)
-    ///   [write commits to main] → assign_next_version()
-    ///        ↓
-    ///   [get_at(key, snap_v)] → cur_v=0 (cells not updated) ≤ snap_v
-    ///        → fast path → main.get() → ???
-    ///
-    /// The `PausableStore.set()` adds the `.await` that gives tokio's
-    /// scheduler a preemption point, making the interleaving deterministic
-    /// and reproducible without sleep/retry loops.
-    ///
-    /// OBSERVATION documented by assert below.
+    /// Sequence:
+    ///   [set_versioned(NEW)] archive_prior → publish_cell(v_new) → main.set
+    ///                                                  ↑ pause here
+    ///   [snapshot opens at v_after_seed]
+    ///   [release → main.set commits NEW]
+    ///   [get_at(key, v_after_seed)] → cur_v=v_new > v_after_seed → history → OLD
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mvcc2_real_interleaving_toctou_characterization() {
         use std::sync::Arc;
@@ -2495,21 +2460,25 @@ mod tests {
             gate.clone(),
         ));
 
-        // Seed: write OLD with no snapshots open → fast path, version_cache empty.
+        // Seed: write OLD with no snapshots open. T1a always-archive runs,
+        // but there is no prior value, so nothing is archived; the cell IS
+        // published with the seed version.
         mvcc.set_versioned(key.clone(), old_val.clone())
             .await
             .unwrap();
+        let v_seed = mvcc.version_of(&key);
+        assert!(v_seed > 0);
         // Publish so a snapshot can capture the current committed version.
         let v_after_seed = gate.assign_next_version();
         gate.publish_committed(v_after_seed);
 
-        // Confirm cells is empty after the fast-path seed write.
+        // T1a: the seed write published its version into the cell.
         assert_eq!(
             mvcc.version_of(&key),
-            0,
-            "precondition: fast-path seed must NOT populate cells"
+            v_seed,
+            "T1a always-archive: seed write publishes its version into the cell"
         );
-        // Confirm no snapshots are open (fast-path will be taken).
+        // Confirm no snapshots are open before arming.
         assert!(
             gate.active_snapshots_empty(),
             "precondition: no snapshots open before arming"
@@ -2525,18 +2494,17 @@ mod tests {
         let new_val_w = new_val.clone();
 
         // --- Spawn write task ---
-        // This calls set_versioned(key, NEW). The fast-path check
-        // (active_snapshots_empty) will return true (no snapshot open yet),
-        // then main.set() will pause — signalling `entered`.
+        // This calls set_versioned(key, NEW). With T1a the sequence is:
+        //   archive_prior (OLD → history) → publish_cell(v_new) → main.set (PAUSE).
+        // So when `entered` fires, OLD is already archived and the cell
+        // already carries v_new.
         let write_handle = tokio::spawn(async move {
             mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
         });
 
-        // --- Wait for write to be inside the gap ---
-        // `entered` fires after the armed set() confirms armed=true and
-        // BEFORE the actual inner.set() executes. We are now inside the
-        // TOCTOU window: fast-path decided "no snapshot, skip archival",
-        // but the write has NOT yet landed in main.
+        // --- Wait for write to be inside the pause ---
+        // `entered` fires inside `main.set`, which is AFTER archive_prior
+        // and publish_cell. OLD is now in history; the cell holds v_new.
         pausable.entered.notified().await;
 
         // --- Open snapshot inside the window ---
@@ -2550,67 +2518,59 @@ mod tests {
             "snapshot must open at v_after_seed (the gap version)"
         );
 
+        // T1a: by the time the snapshot opens, publish_cell has already
+        // advanced the cell to v_new (the NEW write's version).
+        let v_new = mvcc.version_of(&key);
+        assert!(
+            v_new > snap_v,
+            "T1a: cell already carries v_new > snap_v (archive+publish ran before the pause)"
+        );
+
         // --- Release: let the write commit to main ---
         pausable.release();
         write_handle.await.unwrap();
 
-        // NEW is now in main. cells is still empty (fast-path).
+        // NEW is now in main. The cell still carries v_new (T1a always-slow).
         assert_eq!(
             mvcc.version_of(&key),
-            0,
-            "fast-path write must NOT update cells even after commit"
+            v_new,
+            "T1a always-archive: cell carries v_new after the write commits"
         );
 
-        // --- The characterization moment ---
+        // --- The (now-correct) characterization moment ---
         // get_at(key, snap_v):
-        //   cur_v = cells.read(key) → 0   (cells never updated on fast path)
-        //   0 <= snap_v → FAST PATH → main.get(key) → ??? (NEW or OLD?)
+        //   cur_v = v_new > snap_v → SLOW PATH → scan history → finds OLD.
         //
-        // main now holds NEW (the write just landed). OLD is not in history
-        // (fast-path never archives). So the only thing stored is NEW.
-        // get_at cannot return OLD — there is no OLD anywhere in the store
-        // (the seed write itself was a fast-path write; OLD is only in main
-        // until overwritten, and it was just overwritten by NEW).
-        //
-        // RESULT: seen == Some(NEW).
-        //
-        // Is this a bug? The snapshot was opened at snap_v which was set
-        // BEFORE NEW was written. Correct MVCC would return OLD (or None
-        // if OLD was also a fast-path write that was never archived). But
-        // since OLD is no longer in main and was never in history, there is
-        // no OLD to return. The TOCTOU window produces a PHANTOM READ of NEW.
+        // OLD was archived by archive_prior BEFORE the pause, so it is in
+        // history. The snapshot opened at v_after_seed (< v_new) correctly
+        // sees OLD — the value that was current at snap_v. The phantom read
+        // of NEW cannot occur: MVCC-2 is closed by construction.
         let seen = mvcc.get_at(&key, snap_v).await.unwrap();
-
-        // MVCC-2 reproduced via the REAL set_versioned path (PausableStore opens a
-        // snapshot inside the fast-path window). The snapshot opened at v_after_seed
-        // WRONGLY observes NEW (written after it opened). This asserts the CURRENT
-        // buggy behaviour. When S1.1 (atomic write-tact, MVCC_CELL.md) lands, this
-        // MUST become `seen == Some(OLD)` (or None if old value is also unarchived);
-        // flip the assert and rename to `mvcc2_real_interleaving_toctou_fixed`.
-        //
-        // Root cause: fast-path (active_snapshots_empty → true) skips both:
-        //   (a) archiving OLD to history, and
-        //   (b) updating cells with the new version.
-        // When a snapshot opens in the gap and then reads, cur_v=0 routes to
-        // main, which now has NEW — phantom read confirmed.
         assert_eq!(
             seen,
-            Some(new_val.clone()),
-            "MVCC-2: snapshot wrongly sees NEW (bug — fix in S1.1)"
+            Some(old_val),
+            "T1a: snapshot opened inside the write window sees OLD (archived), \
+             not the post-snapshot NEW — MVCC-2 cannot occur"
         );
     }
 
     // ================================================================
     // A1+A2 — live_version (hwm) tests.
-    // ================================================================
+    // =================================================================
+    //
+    // T1a (always-archive): the fast path is gone — every write runs the
+    // slow path, so `version` and `hwm` are always equal (both carry the
+    // assigned version). These tests now assert that equality directly
+    // (flipped from the pre-fix fast-path/hwm distinction).
 
-    /// Fast-path write sets hwm but leaves version (archive-routing) at 0.
+    /// T1a: always-archive — every write publishes its version into both
+    /// cell fields, so `live_version` and `version_of` agree.
     #[tokio::test]
     async fn live_version_tracks_fast_path_write() {
         let mvcc = make_mvcc();
         let key = Bytes::from("k_hwm_fast");
 
-        // No snapshot open → fast path.
+        // T1a: always-slow path — no fast-path branch remains.
         let v = mvcc
             .set_versioned(key.clone(), Bytes::from("val"))
             .await
@@ -2620,20 +2580,19 @@ mod tests {
         assert_eq!(
             mvcc.live_version(&key),
             Some(v),
-            "live_version must equal the assigned version on fast path"
+            "live_version must equal the assigned version"
         );
-        // version_of (archive-routing) stays 0 on the fast path.
+        // T1a: version_of (archive-routing) now equals v too (always-slow).
         assert_eq!(
             mvcc.version_of(&key),
-            0,
-            "version_of must stay 0 on fast path (archive-routing untouched)"
+            v,
+            "T1a always-archive: version_of equals the assigned version (no fast-path split)"
         );
-        // get_at at 0 (fast path: cur_v=0 ≤ 0) still returns the current value.
+        // get_at at 0 (cur_v=v > 0 → slow path → history empty → None).
         let result = mvcc.get_at(&key, 0).await.unwrap();
         assert_eq!(
-            result,
-            Some(Bytes::from("val")),
-            "get_at fast-path routing unchanged after hwm addition"
+            result, None,
+            "T1a: get_at(0) scans history (empty for a brand-new key) → None"
         );
     }
 
@@ -2695,8 +2654,9 @@ mod tests {
         );
     }
 
-    /// set_versioned_many fast path: each key's live_version == Some(batch_v);
-    /// version_of each == 0 (archive-routing untouched).
+    /// T1a: always-archive — `set_versioned_many` assigns one version per
+    /// key (like the per-record `set_versioned` loop), so each key's
+    /// `live_version` and `version_of` carry that key's own version.
     #[tokio::test]
     async fn set_versioned_many_sets_hwm_fast_path() {
         let mvcc = make_mvcc();
@@ -2706,39 +2666,35 @@ mod tests {
             (Bytes::from("bk2"), Bytes::from("v2")),
             (Bytes::from("bk3"), Bytes::from("v3")),
         ];
-        let batch_v = mvcc.set_versioned_many(items.clone()).await.unwrap();
-        assert!(batch_v > 0);
+        let max_v = mvcc.set_versioned_many(items.clone()).await.unwrap();
+        assert!(max_v > 0);
 
+        // T1a: every key gets its own monotonic version (one per record);
+        // both live_version and version_of carry it.
+        let mut prev = 0u64;
         for (key, _) in &items {
-            assert_eq!(
-                mvcc.live_version(key),
-                Some(batch_v),
-                "every key in the batch must have live_version == batch_v"
-            );
+            let v = mvcc.live_version(key).expect("key present");
+            assert!(v > prev, "T1a always-archive: per-key monotonic versions");
             assert_eq!(
                 mvcc.version_of(key),
-                0,
-                "version_of must stay 0 on fast path for batch keys"
+                v,
+                "T1a always-archive: version_of == live_version (no fast-path split)"
             );
+            prev = v;
         }
+        assert_eq!(prev, max_v, "returned max_v is the last assigned version");
     }
 
-    /// MVCC-2 stress: concurrent set_versioned + open_snapshot, 1000 iterations.
+    /// MVCC-2 stress: concurrent set_versioned + open_snapshot, 500 iterations.
     ///
-    /// Tries to trigger the TOCTOU by racing `set_versioned` against
-    /// `open_snapshot`. An anomaly would be: a snapshot opens, version_cache
-    /// is not updated, the snapshot calls get_at and sees a value that was
-    /// written AFTER the snapshot version (i.e. cur_v=0 ≤ snap → fast path
-    /// gives a phantom).
-    ///
-    /// With InMemoryStore's synchronous set() and tokio's cooperative scheduler,
-    /// the window between `active_snapshots_empty()` and `main.set()` cannot
-    /// be interleaved. This test documents that the race is NOT triggered in
-    /// practice with the current runtime.
-    ///
-    /// Detection method: after each write, check that any snapshot opened at
-    /// a version BEFORE the write does NOT observe the new value via get_at
-    /// unless version_cache says so.
+    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
+    /// now asserts snapshot-correct visibility (flipped from the pre-fix
+    /// characterization). With always-archive every write publishes its
+    /// version into the cell, so the old anomaly predicate
+    /// (`version_of == 0` after a write) can never hold — there is no
+    /// fast-path omission to exploit. The stress runs as a no-anomaly
+    /// guard: any anomaly would now indicate a regression of the
+    /// always-archive invariant.
     #[tokio::test]
     async fn mvcc2_stress_race_not_triggered_with_in_memory_store() {
         use std::sync::atomic::{AtomicUsize, Ordering as AO};
@@ -2775,15 +2731,14 @@ mod tests {
                 // Small yield to increase interleaving odds.
                 tokio::task::yield_now().await;
                 let result = mvcc_r.get_at(&key_r, snap_v).await.unwrap();
-                // An anomaly: snapshot sees a value, but version_of says 0
-                // (fast-path write, version_cache not updated) AND snap_v == 0
-                // (snapshot was opened before any publish).
-                // In a correct system: if snap_v < write_version, get_at should
-                // return None (value didn't exist at snapshot time).
-                // With TOCTOU: get_at returns Some because cur_v=0 ≤ snap_v=0
-                // routes to main which has the new value.
-                if result.is_some() && snap_v == 0 && mvcc_r.version_of(&key_r) == 0 {
-                    // Phantom: snapshot at v=0 sees value not yet published.
+                // T1a: every write publishes its version, so version_of is
+                // never 0 after a write lands. An anomaly here would mean a
+                // snapshot observed a value whose version is strictly greater
+                // than snap_v AND version_of disagrees — i.e. a regression
+                // of the always-archive invariant. With the fast path gone
+                // this predicate should never fire.
+                let write_v = mvcc_r.version_of(&key_r);
+                if result.is_some() && snap_v == 0 && write_v == 0 {
                     anomaly.fetch_add(1, AO::Relaxed);
                 }
                 drop(snap);
@@ -2798,17 +2753,13 @@ mod tests {
         }
 
         let anomalies = anomaly_count.load(AO::Relaxed);
-        // Document the result. With InMemoryStore + tokio single-threaded,
-        // anomalies should be 0 (race not triggered). But if the runtime is
-        // multi-threaded or I/O is blocking, anomalies may appear.
-        //
-        // We do NOT assert anomalies == 0 unconditionally because:
-        //   (a) The theoretical window exists (see mvcc2_simulated_toctou_*),
-        //   (b) A multi-threaded backend would trigger it,
-        //   (c) We document the observation, not enforce impossibility.
-        //
-        // The test PASSES either way and reports the observation.
-        let _ = anomalies; // observation recorded; no hard assertion
+        // T1a: with always-archive the anomaly predicate (version_of == 0
+        // after a write) can never hold, so anomalies must be 0. A non-zero
+        // count would indicate the always-archive invariant regressed.
+        assert_eq!(
+            anomalies, 0,
+            "T1a always-archive: no phantom-read anomaly (version_of is never 0 after a write)"
+        );
     }
 
     // ----------------------------------------------------------------

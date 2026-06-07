@@ -619,7 +619,13 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             //     deferral relies on (`recover_v2_inflight`).
             apply_data_phase(&mut tx, repo, commit_version).await;
             apply_counter_phase(&tx, repo).await;
-            gate.publish_committed(commit_version);
+            // publish_committed_max (monotonic fetch_max): now that non-tx
+            // writes also advance `last_committed` off-lock via the same call,
+            // the tx path must use the CAS form too so a concurrent non-tx
+            // publish can never be overwritten by a plain store. For tx-only
+            // workloads commit_versions are strictly monotonic under
+            // `commit_lock`, so max == plain → behaviour unchanged.
+            gate.publish_committed_max(commit_version);
             gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
 
             // Crash seam (test-only): version published in-memory but the

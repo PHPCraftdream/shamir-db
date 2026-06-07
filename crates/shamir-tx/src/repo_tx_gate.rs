@@ -227,8 +227,13 @@ impl RepoTxGate {
     /// Publish: update `last_committed_version` atomically.
     ///
     /// Must be called under `commit_lock` on the tx commit path, where
-    /// monotonic ordering is guaranteed by the lock. For non-tx writes
-    /// use [`publish_committed_max`](Self::publish_committed_max) instead.
+    /// monotonic ordering is guaranteed by the lock. Both tx commits and
+    /// non-tx writes now advance `last_committed` via
+    /// [`publish_committed_max`](Self::publish_committed_max) (the monotonic
+    /// fetch_max CAS), so every committed version becomes visible to
+    /// subsequently-opened snapshots. Prefer `publish_committed_max` for any
+    /// new publish site; this plain store is retained for the
+    /// `commit_lock`-guarded tx path where strict monotonicity already holds.
     pub fn publish_committed(&self, version: u64) {
         self.last_committed_version
             .store(version, Ordering::Release);
@@ -237,12 +242,13 @@ impl RepoTxGate {
     /// Publish: advance `last_committed_version` to `version` if it is
     /// currently lower, using an atomic compare-and-swap loop.
     ///
-    /// Safe to call from the non-tx write path without `commit_lock` because
-    /// it only moves the counter forwards — it never moves it backwards even
-    /// if concurrent tx commits or other non-tx writes race with this call.
-    /// The tx commit path must continue using the plain [`publish_committed`]
-    /// under `commit_lock` (which guarantees strict monotonic ordering via
-    /// the lock, not a CAS loop).
+    /// Safe to call without `commit_lock` because it only moves the counter
+    /// forwards — it never moves it backwards even if concurrent tx commits
+    /// or other non-tx writes race with this call. Both the non-tx write path
+    /// (`MvccStore::set_versioned` / `set_versioned_many` /
+    /// `delete_versioned`) and the tx commit path call this, so every
+    /// committed version advances the reader-visible floor and becomes visible
+    /// to snapshots/txs opened afterwards.
     pub fn publish_committed_max(&self, version: u64) {
         // Relaxed load is fine as the initial guess — the CAS will re-read
         // on conflict. We only need Release on a successful store so the

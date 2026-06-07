@@ -219,13 +219,16 @@ async fn ssi_conflict_detected_on_concurrent_tx_writes() {
     let token = table_token_for("t");
     let key = rid.to_bytes();
 
-    // tx1 (SSI): read the record at version 0.
+    // tx1 (SSI): read the record at the snapshot version (the seed write
+    // committed before tx1 opened, so the read version equals tx1.snapshot_version).
     let (mut tx1, _g1) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
-    tx1.record_read(token, key.clone(), 0);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx1.record_read(token, key.clone(), tx1.snapshot_version);
 
-    // tx2 (SSI): read the same record at version 0.
+    // tx2 (SSI): read the same record at its snapshot version.
     let (mut tx2, _g2) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
-    tx2.record_read(token, key.clone(), 0);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx2.record_read(token, key.clone(), tx2.snapshot_version);
 
     // tx1 writes to the same record (update) and commits — bumps version_cache for key.
     tbl.update_tx(rid, &InnerValue::Str("tx1-write".into()), Some(&mut tx1))
@@ -238,7 +241,8 @@ async fn ssi_conflict_detected_on_concurrent_tx_writes() {
     );
 
     // tx2 writes to the same record and tries to commit — must fail with SsiConflict
-    // because the key it read (version 0) now has a higher version.
+    // because the key it read (at tx2.snapshot_version) now has a higher version
+    // after tx1's commit bumped it past tx2's snapshot.
     tbl.update_tx(rid, &InnerValue::Str("tx2-write".into()), Some(&mut tx2))
         .await
         .unwrap();
@@ -487,16 +491,20 @@ async fn ssi_write_skew_one_aborts() {
 
     // tx_a (SSI): reads both doctors, plans to set d1 = off_call.
     let (mut tx_a, _ga) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
-    tx_a.record_read(token, d1.to_bytes(), 0);
-    tx_a.record_read(token, d2.to_bytes(), 0);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx_a.record_read(token, d1.to_bytes(), tx_a.snapshot_version);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx_a.record_read(token, d2.to_bytes(), tx_a.snapshot_version);
     tbl.update_tx(d1, &InnerValue::Str("off_call".into()), Some(&mut tx_a))
         .await
         .unwrap();
 
     // tx_b (SSI): reads both doctors, plans to set d2 = off_call.
     let (mut tx_b, _gb) = repo.begin_tx(IsolationLevel::Serializable).await.unwrap();
-    tx_b.record_read(token, d1.to_bytes(), 0);
-    tx_b.record_read(token, d2.to_bytes(), 0);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx_b.record_read(token, d1.to_bytes(), tx_b.snapshot_version);
+    // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+    tx_b.record_read(token, d2.to_bytes(), tx_b.snapshot_version);
     tbl.update_tx(d2, &InnerValue::Str("off_call".into()), Some(&mut tx_b))
         .await
         .unwrap();
@@ -614,7 +622,8 @@ async fn concurrent_ssi_storm_exactly_one_wins() {
         let key = rid.to_bytes();
         handles.push(tokio::spawn(async move {
             let (mut tx, _g) = r.begin_tx(IsolationLevel::Serializable).await.unwrap();
-            tx.record_read(token, key, 0);
+            // T1a: non-tx writes now bump the MVCC version + advance last_committed (the HIGH-4 "non-tx doesn't bump" assumption is intentionally reversed), so record the read at the actual snapshot version, not a hardcoded 0.
+            tx.record_read(token, key, tx.snapshot_version);
             t.update_tx(rid, &InnerValue::Int(i as i64), Some(&mut tx))
                 .await
                 .unwrap();
