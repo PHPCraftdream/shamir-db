@@ -17,7 +17,7 @@
 //! Snapshot reads via [`MvccStore::get_at`] use a fast path (version cache
 //! check → main read) and fall back to a history range scan.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -134,6 +134,43 @@ impl KeyLock {
     }
 }
 
+/// Per-store history-retention mode (T1b.1).
+///
+/// `CurrentOnly` (the default) bounds `history` to ~current by eagerly
+/// reclaiming superseded versions that no live snapshot needs, via the
+/// existing `gc_below(min_alive)` path invoked on every write. `KeepHistory`
+/// retains all versions (no eager vacuum here — bounded by T1b.2 knobs later).
+///
+/// Stored as a lock-free `AtomicU8` on `MvccStore` (no `std::sync::Mutex`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetentionMode {
+    /// Default: keep only the current version + versions pinned by live
+    /// snapshots. Eager vacuum runs after every superseding write.
+    #[default]
+    CurrentOnly,
+    /// Opt-in: retain all history (no eager vacuum). Bounded by T1b.2.
+    KeepHistory,
+}
+
+impl RetentionMode {
+    const CURRENT_ONLY: u8 = 0;
+    const KEEP_HISTORY: u8 = 1;
+
+    fn to_u8(self) -> u8 {
+        match self {
+            RetentionMode::CurrentOnly => Self::CURRENT_ONLY,
+            RetentionMode::KeepHistory => Self::KEEP_HISTORY,
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            Self::KEEP_HISTORY => RetentionMode::KeepHistory,
+            _ => RetentionMode::CurrentOnly,
+        }
+    }
+}
+
 /// Versioned layer over two dumb-KV stores.
 ///
 /// See [module-level documentation](self) for the design rationale.
@@ -149,10 +186,16 @@ pub struct MvccStore {
     /// / serializable read/write hot paths. Each entry is an `Arc<KeyLock>`
     /// shared between concurrent requesters of the same key.
     locks: SccHashMap<Bytes, Arc<KeyLock>>,
+    /// T1b.1: history-retention mode (lock-free `AtomicU8`). Defaults to
+    /// `CurrentOnly` (eager vacuum). Set via [`Self::set_retention`].
+    retention: AtomicU8,
 }
 
 impl MvccStore {
     /// Create a new MVCC store from two backing stores and a gate.
+    ///
+    /// Defaults to [`RetentionMode::CurrentOnly`] (eager vacuum). Use
+    /// [`Self::set_retention`] to opt into [`RetentionMode::KeepHistory`].
     pub fn new(main: Arc<dyn Store>, history: Arc<dyn Store>, gate: Arc<RepoTxGate>) -> Self {
         Self {
             main,
@@ -160,7 +203,36 @@ impl MvccStore {
             gate,
             cells: SccHashMap::new(),
             locks: SccHashMap::new(),
+            retention: AtomicU8::new(RetentionMode::CurrentOnly.to_u8()),
         }
+    }
+
+    /// Set the history-retention mode (lock-free, no mutex).
+    pub fn set_retention(&self, mode: RetentionMode) {
+        self.retention.store(mode.to_u8(), Ordering::Release);
+    }
+
+    /// Read the current history-retention mode.
+    fn retention(&self) -> RetentionMode {
+        RetentionMode::from_u8(self.retention.load(Ordering::Acquire))
+    }
+
+    /// T1b.1: eager vacuum for [`RetentionMode::CurrentOnly`]. Reclaims
+    /// superseded history versions that no live snapshot needs by calling the
+    /// existing safe [`gc_below`](Self::gc_below) with `gate.min_alive()`.
+    /// No-op for [`RetentionMode::KeepHistory`]. Errors are swallowed
+    /// (best-effort reclaim — a failure here must NOT fail the write that
+    /// triggered it; the next write retries).
+    async fn maybe_eager_vacuum(&self) {
+        if self.retention() != RetentionMode::CurrentOnly {
+            return;
+        }
+        // Correctness comes entirely from gc_below's `min_alive` floor, NOT
+        // from the trigger. We pass min_alive so gc_below self-limits to
+        // versions strictly below the oldest live snapshot (or last_committed
+        // when none are open). The call is best-effort: a GC error is
+        // swallowed — it must not fail the write.
+        let _ = self.gc_below(self.gate.min_alive()).await;
     }
 
     // ========================================================================
@@ -266,6 +338,9 @@ impl MvccStore {
         // write sees it: `publish_committed_max` is a monotonic fetch_max
         // (lock-free, safe off `commit_lock`, never moves the floor backwards).
         self.gate.publish_committed_max(new_v);
+        // T1b.1: eager vacuum (CurrentOnly default) reclaims superseded
+        // history versions no live snapshot needs.
+        self.maybe_eager_vacuum().await;
         Ok(new_v)
     }
 
@@ -346,6 +421,9 @@ impl MvccStore {
         if max_v > 0 {
             self.gate.publish_committed_max(max_v);
         }
+        // T1b.1: eager vacuum (CurrentOnly default) reclaims superseded
+        // history versions no live snapshot needs.
+        self.maybe_eager_vacuum().await;
         Ok(max_v)
     }
 
@@ -375,6 +453,9 @@ impl MvccStore {
         // delete sees the post-delete state: `publish_committed_max` is a
         // monotonic fetch_max (lock-free, safe off `commit_lock`).
         self.gate.publish_committed_max(new_v);
+        // T1b.1: eager vacuum (CurrentOnly default) reclaims superseded
+        // history versions no live snapshot needs.
+        self.maybe_eager_vacuum().await;
         Ok(new_v)
     }
 
@@ -1740,9 +1821,14 @@ mod tests {
     /// path is gone. For a batch of brand-new keys there is no prior to
     /// archive, so history stays empty; every key still gets its own cell
     /// entry carrying its assigned version (one version per record).
+    ///
+    /// T1b.1: uses `KeepHistory` so the eager vacuum does not prune the
+    /// cells before the assertions (this test checks cell-population, not
+    /// vacuum behaviour).
     #[tokio::test]
     async fn set_versioned_many_batches_no_snapshot() {
         let mvcc = make_mvcc();
+        mvcc.set_retention(RetentionMode::KeepHistory);
 
         let n = 50u32;
         let items: Vec<(Bytes, Bytes)> = (0..n)
@@ -2657,9 +2743,14 @@ mod tests {
     /// T1a: always-archive — `set_versioned_many` assigns one version per
     /// key (like the per-record `set_versioned` loop), so each key's
     /// `live_version` and `version_of` carry that key's own version.
+    ///
+    /// T1b.1: uses `KeepHistory` so the eager vacuum does not prune the
+    /// cells before the assertions (this test checks cell-population, not
+    /// vacuum behaviour).
     #[tokio::test]
     async fn set_versioned_many_sets_hwm_fast_path() {
         let mvcc = make_mvcc();
+        mvcc.set_retention(RetentionMode::KeepHistory);
 
         let items: Vec<(Bytes, Bytes)> = vec![
             (Bytes::from("bk1"), Bytes::from("v1")),
@@ -3147,5 +3238,194 @@ mod tests {
         fn set_wounded(&self) {
             self.wounded.store(true, AOrdering::Release);
         }
+    }
+
+    // ================================================================
+    // T1b.1 — eager vacuum (CurrentOnly default) tests.
+    // ================================================================
+
+    /// CurrentOnly store, no snapshots: write the same key 5 times; eager
+    /// vacuum reclaims superseded history on every write, so `history` holds
+    /// ~0 old versions afterward while `get_at` at the floor still returns
+    /// the current value.
+    #[tokio::test]
+    async fn eager_vacuum_currentonly_bounds_history() {
+        let mvcc = make_mvcc();
+
+        let key = Bytes::from("vacuum_key");
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        // Eager vacuum ran after each write (CurrentOnly default, no
+        // snapshots → min_alive == last_committed). gc_below keeps the
+        // anchor (latest < min_alive), so at most 1 history entry survives.
+        let hist = count_history_entries(&mvcc).await;
+        assert!(
+            hist <= 1,
+            "CurrentOnly eager vacuum should leave ≤1 history entry (anchor), got {hist}"
+        );
+
+        // The current value is still readable at the floor.
+        let last_committed = mvcc.gate.last_committed();
+        let result = mvcc.get_at(&key, last_committed).await.unwrap();
+        assert_eq!(
+            result,
+            Some(Bytes::from("v5")),
+            "get_at at last_committed must return the current value"
+        );
+    }
+
+    /// A live snapshot pins the version it needs: overwriting the key does
+    /// NOT reclaim the version the snapshot may still read. Dropping the
+    /// snapshot unpins it, and a subsequent write's eager vacuum reclaims.
+    #[tokio::test]
+    async fn eager_vacuum_keeps_versions_pinned_by_live_snapshot() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+
+        let key = Bytes::from("pinned_key");
+
+        // Write v1 (no snapshot) — publishes last_committed = v1.
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let v1 = mvcc.version_of(&key);
+
+        // Open a snapshot at v1 — pins min_alive to v1.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+        assert_eq!(snap_v, v1);
+
+        // Overwrite with v2. Eager vacuum runs but min_alive == v1 protects
+        // the v1 history entry (gc_below only removes < min_alive).
+        mvcc.set_versioned(key.clone(), Bytes::from("v2"))
+            .await
+            .unwrap();
+
+        // The snapshot at v1 still reads v1 via history (slow path).
+        let result = mvcc.get_at(&key, snap_v).await.unwrap();
+        assert_eq!(
+            result,
+            Some(Bytes::from("v1")),
+            "live snapshot must still read the pinned prior version"
+        );
+
+        // Drop the snapshot → min_alive advances. A further write's eager
+        // vacuum can now reclaim the unpinned old version.
+        drop(snap);
+        mvcc.set_versioned(key.clone(), Bytes::from("v3"))
+            .await
+            .unwrap();
+
+        // After reclaim, a read at the OLD snapshot version (v1) should no
+        // longer find the reclaimed entry (it was < min_alive). The current
+        // value is still correct.
+        let last_committed = mvcc.gate.last_committed();
+        let current = mvcc.get_at(&key, last_committed).await.unwrap();
+        assert_eq!(current, Some(Bytes::from("v3")));
+    }
+
+    /// Deterministic interleaving (PausableStore): a write+eager-reclaim
+    /// interleaved with an `open_snapshot`. The just-opened snapshot must
+    /// NEVER read `None` for a version it should see — the register-before-use
+    /// ordering + min_alive floor protect it. (§4.1-class race; loom sweep
+    /// deferred to T1d.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn eager_vacuum_race_open_snapshot() {
+        let key = Bytes::from("race_key");
+        let old_val = Bytes::from("OLD");
+        let new_val = Bytes::from("NEW");
+
+        // Build the MvccStore with a PausableStore as `main` (CurrentOnly
+        // default — eager vacuum active).
+        let pausable = Arc::new(PausableStore::new());
+        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let gate = make_gate();
+        let mvcc = Arc::new(MvccStore::new(
+            pausable.clone() as Arc<dyn Store>,
+            history,
+            gate.clone(),
+        ));
+
+        // Seed OLD (no snapshot) — lands in main, cell published.
+        mvcc.set_versioned(key.clone(), old_val.clone())
+            .await
+            .unwrap();
+        let v_seed = mvcc.version_of(&key);
+        gate.publish_committed(v_seed);
+
+        // Arm: the next `main.set` (inside the NEW write) will pause BEFORE
+        // the physical write. The write sequence is:
+        //   archive_prior → publish_cell → main.set(PAUSE) → publish_committed_max → eager_vacuum
+        pausable.arm();
+
+        let mvcc_w = Arc::clone(&mvcc);
+        let key_w = key.clone();
+        let new_val_w = new_val.clone();
+        let write_handle = tokio::spawn(async move {
+            mvcc_w.set_versioned(key_w, new_val_w).await.unwrap();
+        });
+
+        // Wait until the write is paused inside main.set — OLD is already
+        // archived and the cell already advanced to v_new.
+        pausable.entered.notified().await;
+
+        // Open a snapshot HERE — interleaved between the write landing and
+        // the eager vacuum. The snapshot registers in active_snapshots
+        // BEFORE it is usable, so the eager vacuum's min_alive will include
+        // this snapshot's version.
+        let snap = gate.open_snapshot().await;
+        let snap_v = snap.version();
+
+        // Release: the write completes (main.set), then publish_committed_max,
+        // then eager_vacuum runs with min_alive that now includes snap_v.
+        pausable.release();
+        write_handle.await.unwrap();
+
+        // The snapshot must NOT read None for a version it should see.
+        // snap_v == v_seed (the published floor before the NEW write).
+        // The snapshot predates NEW, so it should see OLD (archived before
+        // the pause). The eager vacuum cannot have reclaimed it because
+        // min_alive ≤ snap_v (the snapshot is registered).
+        let seen = mvcc.get_at(&key, snap_v).await.unwrap();
+        assert!(
+            seen.is_some(),
+            "snapshot opened mid-write must never read None for a version it should see"
+        );
+        assert_eq!(
+            seen,
+            Some(old_val),
+            "snapshot predating NEW must see OLD (archived, pinned by min_alive)"
+        );
+    }
+
+    /// KeepHistory store: write the key 5 times; all old versions remain in
+    /// history (no eager reclaim).
+    #[tokio::test]
+    async fn keephistory_no_eager_vacuum() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(RetentionMode::KeepHistory);
+
+        let key = Bytes::from("keep_key");
+        for i in 1..=5u32 {
+            mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        // KeepHistory: no eager vacuum — all 4 prior versions remain.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(
+            hist, 4,
+            "KeepHistory must retain all prior versions (no eager vacuum), got {hist}"
+        );
+
+        // Current value still correct.
+        let last_committed = mvcc.gate.last_committed();
+        let result = mvcc.get_at(&key, last_committed).await.unwrap();
+        assert_eq!(result, Some(Bytes::from("v5")));
     }
 }
