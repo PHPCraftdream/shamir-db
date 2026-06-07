@@ -1254,6 +1254,18 @@ impl TableManager {
     /// recovery path. Do NOT call under `tokio::select!` /
     /// `tokio::time::timeout`.
     pub async fn create_sorted_index(&self, index_name: &str, field_path: &[&str]) -> DbResult<()> {
+        self.create_sorted_index_with_include(index_name, field_path, Vec::new())
+            .await
+    }
+
+    /// Create a sorted index, optionally recording covering-index `included_fields`
+    /// in the persisted metadata.
+    pub async fn create_sorted_index_with_include(
+        &self,
+        index_name: &str,
+        field_path: &[&str],
+        included_fields: Vec<Vec<String>>,
+    ) -> DbResult<()> {
         use crate::index::sorted_index_manager::SortedIndexDefinition;
         let interner = self.interner.get().await?;
         let name_interned = interner
@@ -1272,7 +1284,7 @@ impl TableManager {
                 path_ids.push(id);
             }
         }
-        let def = SortedIndexDefinition::new(name_interned, path_ids);
+        let def = SortedIndexDefinition::with_included(name_interned, path_ids, included_fields);
         self.sorted_indexes.register(def).await?;
         self.interner.persist().await?;
 

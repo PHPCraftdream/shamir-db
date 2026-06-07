@@ -253,6 +253,28 @@ fn create_index_sorted() {
 }
 
 #[test]
+fn create_index_sorted_with_include() {
+    let op = ddl::create_index("score_sorted", "users")
+        .field("score")
+        .sorted()
+        .include(vec![vec!["email".to_string()], vec!["name".to_string()]])
+        .build();
+    let j = roundtrip(&op);
+    assert_eq!(j["sorted"], true);
+    assert_eq!(j["include"], json!([["email"], ["name"]]));
+    // `include` must be absent when empty (skip_serializing_if).
+    let op_no_include = ddl::create_index("score_sorted2", "users")
+        .field("score")
+        .sorted()
+        .build();
+    let j2 = serde_json::to_value(&op_no_include).unwrap();
+    assert!(
+        j2.get("include").is_none(),
+        "empty include should be omitted from JSON"
+    );
+}
+
+#[test]
 fn drop_index_wire() {
     let op = ddl::drop_index("name_idx", "users").build();
     let j = roundtrip(&op);

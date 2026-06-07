@@ -97,6 +97,7 @@ async fn index2_round_trip_through_redb() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        include: Vec::new(),
         if_not_exists: false,
     };
 
@@ -114,6 +115,7 @@ async fn index2_round_trip_through_redb() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        include: Vec::new(),
         if_not_exists: false,
     };
 
@@ -131,6 +133,7 @@ async fn index2_round_trip_through_redb() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        include: Vec::new(),
         if_not_exists: false,
     };
 
