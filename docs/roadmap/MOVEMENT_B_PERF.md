@@ -74,15 +74,39 @@ Per `/opti` and the catalogue's "ground truth" rule:
 
 ---
 
-## Phase B0 — Re-baseline + catalogue sync (½–1 day, decides B2)
+## Phase B0 — Re-baseline + catalogue sync ✅ DONE
 
 **Goal:** replace stale assumptions with measured truth; this phase's
 output gates Opt O.
 
-1. **Sync the catalogue to reality (doc-only):** in
-   `PERF_OPPORTUNITIES.md` mark **Opt R DONE** and **Opt P DONE** (with the
-   evidence above), and re-open Opt O's win estimate as "to be re-measured
-   post-P". Remove R/P from "sprint γ — NEXT".
+### Measured (sled, 1000 records, `BENCH_QUICK=1`, post-P baseline)
+
+| Scenario | No index | With sorted index | Speedup |
+|---|---|---|---|
+| Wide range (age 30–35, ~10% sel.) | 6.38 ms | **1.37 ms** | **4.7×** |
+| Narrow range (age=30, ~1.6% sel.) | 7.40 ms | **360 µs** | **20.6×** |
+| (comparison: in-memory, wide) | 5.53 ms | **1.16 ms** | **4.8×** |
+
+**Verdict.** On sled the indexed path with `get_many` is already within
+~18 % of in-memory (1.37 ms vs 1.16 ms) — **disk I/O is no longer the
+bottleneck** at this scale. The residual is engine decode + projection.
+Covering index (O) would eliminate the `get_many` + decode for covered
+queries → estimated **~3–5× more** on wide range, **~2×** on narrow
+(where the absolute cost is already 360 µs). On larger datasets (10k+)
+and wider records, O's win grows — but the old "100–1000×" was an
+artefact of the pre-P world and **no longer holds**.
+
+**Decision:** Opt O is **still worth doing** (it unlocks true index-only
+scans — zero data-store touch, the path to Postgres-class latency at
+scale), but it is **no longer the single dominant item**. B3 (columnar
+ORDER BY, 85 % of that hot path) and B1 (overhead guards) are now
+competitive in ROI. Proceed with B1 → B3 first; B2 (covering index)
+after, when larger-dataset benches (10k on sled) provide the scale signal.
+
+1. **Sync the catalogue to reality (doc-only):** ✅ DONE —
+   `PERF_OPPORTUNITIES.md` marks Opt R DONE, Opt P DONE (native in all 7
+   backends + read_exec wiring), sprint γ → partially shipped, Opt O
+   re-graded with post-P note.
 2. **Add a disk range-with-index bench group** to
    `crates/shamir-db/benches/engine_perf.rs`: `range_with_index_sled`
    (and `_redb`), parameterised by **selectivity** (e.g. 1 %, 6 %, 10 %,

@@ -432,25 +432,19 @@ range-scan performance.
 
 The single most impactful item left.
 
-### Opt P — vectored / batched data-store get
+### Opt P — vectored / batched data-store get ✅ DONE
 
-**File:** `crates/shamir-storage/src/types.rs` + backend impls.
+`Store::get_many` shipped with **native overrides in all 7 backends**
+(sled, redb, fjall, nebari, persy, canopy, membuffer) plus a default
+loop-over-get fallback. Wired into the hot read path
+(`table/read_exec.rs:716` — "avoid N round trips via `Store::get_many`").
 
-**Symptom.** Where Opt O isn't applicable (query needs fields not in
-the index), we still do N independent `data_store.get(id)` calls.
-On sled each is a B-tree walk from root = ~125 µs. For K=1000
-matches, 125 ms purely in random reads.
-
-**Fix.** Add `Store::get_many(keys: Vec<Bytes>) -> Vec<DbResult<Bytes>>`
-to the trait, with native impls on backends that can fold multiple
-gets into a single B-tree pass:
-
-- **sled** has `Tree::iter` from any starting point — sort keys,
-  iter once, pick up each.
-- **redb** allows multiple `get`s inside one read transaction —
-  amortises txn setup cost.
-- **fjall / nebari / persy** — similar patterns.
-- Default impl: loop over `get` — same as today.
+> **Impact on Opt O's estimate.** O's headline "100–1000×" was measured
+> against pre-P baseline (K independent `get(id)` × ~125 µs each).
+> With P in place the K reads now batch into one vectored pass, so the
+> penalty O would eliminate is smaller. **O must be re-baselined
+> before committing the week-long implementation** — see
+> `MOVEMENT_B_PERF.md` Phase B0.
 
 **Effort.** 2-3 days. Trait extension + 5 backend impls + engine
 hook into `lookup_records_via_index`.
@@ -490,26 +484,13 @@ filter; overhead is negligible.
 Same speedup magnitude as the existing Gte/Lte path. Pure
 capability fill-in.
 
-### Opt R — reverse iteration on `Store` trait
+### Opt R — reverse iteration on `Store` trait ✅ DONE
 
-**File:** `crates/shamir-storage/src/types.rs` + backend impls.
-
-**Symptom.** `MAX(field)` and `ORDER BY field DESC + LIMIT K` need
-to read the index from the end. Today no `Store` method supports
-reverse iteration; both queries fall back to full scan + in-memory
-sort.
-
-**Fix.** Add `iter_range_stream_reverse(start_inclusive,
-end_inclusive, batch_size)` to the trait. Default impl: collect to
-Vec, reverse, yield. Native impls: sled `tree.range(...).rev()`,
-redb `range(...).rev()`, etc. — they all support it cheaply.
-
-**Effort.** ~1 day (mirror of the forward range work; 28 tests
-ported with `_reverse` suffix).
-
-**Realistic win.** Unlocks Q1 (MAX), and `ORDER BY DESC + LIMIT K`
-on indexed columns — same magnitude as the existing ascending fast
-path (Opt #1 from the earlier sprint plan).
+`Store::iter_range_stream_reverse` shipped with native overrides in all
+7 backends (sled, redb, fjall, nebari, persy, canopy, membuffer) + a
+default collect-reverse fallback. The engine uses it in
+`sorted_index_manager` (`lookup_last`/`lookup_last_k`) and `read_exec`.
+MAX / `ORDER BY DESC LIMIT K` on indexed columns now takes the fast path.
 
 ---
 
@@ -531,16 +512,14 @@ path (Opt #1 from the earlier sprint plan).
    1.25× on set_existing_with_index. Three new invalidation tests
    pin the create / update / delete paths.
 
-### Sprint γ — the big disk story (~1 week) — NEXT
+### Sprint γ — the big disk story — PARTIALLY SHIPPED
 
-6. **Opt R** — reverse iter on Store. Unblocks MAX / DESC LIMIT
-   asymptotics.
-7. **Opt O** — covering index. **THE** path to Postgres-class
-   range-query latency on disk.
-8. **Opt P** — vectored multi-get for non-covered queries.
+6. **Opt R** — ✅ DONE (reverse iter, all backends + engine wiring).
+7. **Opt O** — covering index. Still open; **gated on re-baseline**
+   (Opt P changed the cost model — see `MOVEMENT_B_PERF.md` B0).
+8. **Opt P** — ✅ DONE (vectored `get_many`, all backends + read_exec).
 
-This is the single most impactful chunk left in the whole
-performance picture.
+R and P shipped; O is the remaining item, pending re-measurement.
 
 ### Sprint δ — architectural cleanup (1 day)
 
