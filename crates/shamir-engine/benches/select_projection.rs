@@ -23,7 +23,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use serde_json as json;
 
-use shamir_engine::query::read::exec::apply_select;
+use shamir_engine::query::read::exec::{apply_select, apply_select_to_bytes};
 use shamir_engine::query::read::{Select, SelectItem};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
@@ -149,6 +149,22 @@ fn bench(c: &mut Criterion) {
         )
     });
     g3.finish();
+
+    // ── Scenario 4: streaming path (SELECT * only) ────────────────
+    let mut g4 = c.benchmark_group("select_streaming");
+    g4.throughput(Throughput::Elements(n_records));
+    g4.sample_size(10);
+    g4.bench_function("select_all_streaming_100k", |b| {
+        b.iter_batched(
+            || (),
+            |_| {
+                let bytes = apply_select_to_bytes(&raw_records, &select_all, &interner);
+                black_box(bytes);
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    g4.finish();
 }
 
 criterion_group!(benches, bench);
