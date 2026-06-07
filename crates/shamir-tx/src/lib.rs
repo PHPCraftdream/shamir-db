@@ -46,7 +46,7 @@ pub mod version_codec;
 pub mod version_provider;
 
 pub use changefeed::{
-    nontx_event, project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore,
+    nontx_event, project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, JournalRead,
     RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
 pub use id_remap::{remap_inner_value_bytes, remap_value};

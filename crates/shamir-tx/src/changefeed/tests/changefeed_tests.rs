@@ -169,7 +169,7 @@ async fn journal_persists_and_read_from_returns_in_order() {
     // Poll until the writer has flushed all 5 (background task).
     let mut events = Vec::new();
     for _ in 0..50 {
-        events = feed.read_from(&store, 0, 100).await;
+        events = feed.read_from(&store, 0, 100).await.events;
         if events.len() == 5 {
             break;
         }
@@ -182,12 +182,12 @@ async fn journal_persists_and_read_from_returns_in_order() {
     assert_eq!(versions, vec![1, 2, 3, 4, 5]);
 
     // Resumable: read from version 3 onward.
-    let tail = feed.read_from(&store, 3, 100).await;
+    let tail = feed.read_from(&store, 3, 100).await.events;
     let tail_versions: Vec<u64> = tail.iter().map(|e| e.commit_version).collect();
     assert_eq!(tail_versions, vec![3, 4, 5]);
 
     // Limit respected.
-    let limited = feed.read_from(&store, 0, 2).await;
+    let limited = feed.read_from(&store, 0, 2).await.events;
     assert_eq!(limited.len(), 2);
     assert_eq!(limited[0].commit_version, 1);
     assert_eq!(limited[1].commit_version, 2);
@@ -208,7 +208,7 @@ async fn late_subscriber_catches_up_via_journal_then_live() {
     // Wait for the journal to hold all 3.
     let mut past = Vec::new();
     for _ in 0..50 {
-        past = feed.read_from(&store, 0, 100).await;
+        past = feed.read_from(&store, 0, 100).await.events;
         if past.len() == 3 {
             break;
         }
@@ -268,4 +268,146 @@ fn version_key_is_big_endian_and_ordered() {
     assert!(k1 < k2);
     assert!(k2 < k256);
     assert_eq!(k1.as_ref(), &[0, 0, 0, 0, 0, 0, 0, 1]);
+}
+
+// --- CF-2: last_persisted_version heartbeat ---
+
+/// After emitting events and letting the background writer drain, the
+/// durability watermark (`last_persisted_version`) must advance to the
+/// highest emitted `commit_version`.
+#[tokio::test]
+async fn cf2_last_persisted_version_advances_after_writer_drains() {
+    let store: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
+    let feed = RepoChangefeed::new(Arc::clone(&store));
+
+    // Emit 4 events with commit_versions 10, 20, 30, 40.
+    let versions = [10u64, 20, 30, 40];
+    for &v in &versions {
+        let tx = tx_with_writes(v).await;
+        feed.emit(project_event(&tx, "main", v).unwrap());
+    }
+    feed.shutdown(); // trigger drain + stop
+
+    // Spin until the writer has persisted everything or we time out.
+    for _ in 0..100 {
+        if feed.last_persisted_version() == 40 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let lpv = feed.last_persisted_version();
+    assert!(
+        lpv > 0,
+        "last_persisted_version must be non-zero after writes"
+    );
+    assert_eq!(
+        lpv, 40,
+        "last_persisted_version must equal the highest commit_version persisted"
+    );
+}
+
+/// Before any events are emitted `last_persisted_version` starts at 0.
+#[tokio::test]
+async fn cf2_last_persisted_version_starts_at_zero() {
+    let store: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
+    let feed = RepoChangefeed::new(store);
+    assert_eq!(
+        feed.last_persisted_version(),
+        0,
+        "watermark is 0 before any events are persisted"
+    );
+}
+
+// --- CF-1: first_gap_version + JournalRead gap signal ---
+
+/// `read_from` returns `gap_at = Some(g)` when `first_gap_version` is set
+/// and `g >= from_version`.
+#[tokio::test]
+async fn cf1_read_from_signals_gap_at_when_gap_version_set() {
+    let store: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
+    let feed = RepoChangefeed::new(Arc::clone(&store));
+
+    // Emit a few events normally so the journal has some content.
+    for v in 1u64..=3 {
+        let tx = tx_with_writes(v).await;
+        feed.emit(project_event(&tx, "main", v).unwrap());
+    }
+    feed.flush_hint();
+
+    // Simulate a gap: manually emit an event whose version is "dropped" by
+    // reading the first_gap_version indirectly.  We use the public getter to
+    // verify the happy-path first (no gap yet).
+    let jr_no_gap = feed.read_from(&store, 1, 100).await;
+    assert_eq!(
+        jr_no_gap.gap_at, None,
+        "no gap before any drop has occurred"
+    );
+
+    // Now saturate the journal channel artificially by emitting events while
+    // the writer is stopped (shutdown flag set, notify not fired so drain
+    // hasn't happened yet).  Instead of doing that (which is race-prone),
+    // we test the unit-level invariant: `read_from` returns `gap_at = Some(g)`
+    // when `first_gap_version` is non-zero and >= from_version.
+    // We set the gap field by invoking `emit` on a *new* feed with a
+    // saturated channel — channel capacity is 4096, so we fill it.
+    let store2: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
+    let feed2 = RepoChangefeed::new(Arc::clone(&store2));
+
+    // Fill channel to JOURNAL_CHANNEL_CAPACITY (4096) + push one more to
+    // trigger the Full branch and set first_gap_version.
+    use crate::changefeed::JOURNAL_CHANNEL_CAPACITY;
+    for v in 1u64..=(JOURNAL_CHANNEL_CAPACITY as u64 + 1) {
+        let tx = tx_with_writes(v).await;
+        feed2.emit(project_event(&tx, "main", v).unwrap());
+    }
+
+    // At this point journal_dropped >= 1 and first_gap_version is set.
+    assert!(
+        feed2.journal_dropped() >= 1,
+        "at least one event must have been dropped"
+    );
+    let gap = feed2.first_gap_version();
+    assert!(gap > 0, "first_gap_version must be set after a drop");
+
+    // read_from with from_version <= gap must return Some(gap).
+    let jr = feed2.read_from(&store2, 1, 10).await;
+    assert_eq!(
+        jr.gap_at,
+        Some(gap),
+        "gap_at must be Some when gap >= from_version"
+    );
+
+    // read_from with from_version > gap must return None.
+    let jr_past = feed2.read_from(&store2, gap + 1, 10).await;
+    assert_eq!(
+        jr_past.gap_at, None,
+        "gap_at must be None when from_version > gap"
+    );
+}
+
+/// `journal_dropped` counter still increments correctly alongside
+/// `first_gap_version` being set (CF-1 + existing counter — both observability
+/// paths must work together).
+#[tokio::test]
+async fn cf1_journal_dropped_still_counted_alongside_gap() {
+    let store: Arc<dyn ChangelogStore> = Arc::new(MemChangelogStore::default());
+    let feed = RepoChangefeed::new(Arc::clone(&store));
+
+    use crate::changefeed::JOURNAL_CHANNEL_CAPACITY;
+    // Overfill by exactly 5 events.
+    let total = JOURNAL_CHANNEL_CAPACITY as u64 + 5;
+    for v in 1u64..=total {
+        let tx = tx_with_writes(v).await;
+        feed.emit(project_event(&tx, "main", v).unwrap());
+    }
+
+    assert!(
+        feed.journal_dropped() >= 5,
+        "at least 5 events must have been dropped"
+    );
+    assert!(
+        feed.first_gap_version() > 0,
+        "first_gap_version must be set when events are dropped"
+    );
 }
