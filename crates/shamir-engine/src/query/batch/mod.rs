@@ -144,13 +144,17 @@ mod executor;
 // all pure-data and live in `shamir-query-types::batch` — re-exported
 // here so callers keep using `shamir_db::query::batch::*` paths.
 pub use executor::{
-    commit_interactive_tx, execute_batch, execute_batch_with_permissions, execute_in_open_tx,
-    open_interactive_tx, AdminExecutor, FunctionInvoker, QueryRunner, TableResolver,
+    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, AdminExecutor,
+    FunctionInvoker, QueryRunner, TableResolver,
 };
 pub use shamir_query_types::batch::{
     BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,
     QueryEntry, QueryPath, QueryReference, ReferenceParseError, TransactionInfo,
 };
+
+// Retained for engine-level unit tests; not accessible outside test builds.
+#[cfg(test)]
+pub(crate) use executor::execute_batch_with_permissions;
 
 #[cfg(test)]
 mod tests;

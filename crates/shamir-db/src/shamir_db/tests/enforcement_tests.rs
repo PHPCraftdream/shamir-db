@@ -371,3 +371,24 @@ async fn effective_fn_actor_switches_on_setuid() {
     let effective = shamir.effective_fn_actor("suid_fn", &caller).await;
     assert_eq!(effective, Actor::User(10));
 }
+
+// Verify fail-closed: a missing (or unreadable) function record must
+// never escalate the caller to Actor::System via an open()-default.
+#[tokio::test]
+async fn effective_fn_actor_missing_meta_returns_caller_not_system() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let caller = Actor::User(99);
+
+    // "ghost_fn" was never registered — load_function returns Ok(None).
+    let effective = shamir.effective_fn_actor("ghost_fn", &caller).await;
+    assert_eq!(
+        effective,
+        Actor::User(99),
+        "missing meta must return caller, never Actor::System"
+    );
+    assert_ne!(
+        effective,
+        Actor::System,
+        "escalation to System via open()-default must be impossible"
+    );
+}

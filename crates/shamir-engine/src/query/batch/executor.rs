@@ -5,10 +5,12 @@
 
 use std::time::Instant;
 
+#[cfg(test)]
 use crate::query::auth::SessionPermissions;
 use crate::query::batch::{
     BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
 };
+#[cfg(test)]
 use crate::query::filter::Filter;
 use crate::query::filter::FilterContext;
 use crate::query::read::{QueryResult, QueryStats};
@@ -173,6 +175,7 @@ pub async fn execute_batch(
 /// `permits`. Groups replace roles; row-level security will be a
 /// future Shomer `ResourcePath::Record`-level feature. This
 /// function is retained for engine-level unit tests only.
+#[cfg(test)]
 pub async fn execute_batch_with_permissions(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
@@ -204,6 +207,7 @@ pub async fn execute_batch_with_permissions(
 /// AND a row-level-security filter into a data op's WHERE clause.
 /// Read/Update/Delete are restricted; other ops are left unchanged
 /// (Insert/Set row-match validation is a separate follow-up).
+#[cfg(test)]
 fn apply_row_filter(op: &mut BatchOp, rf: Filter) {
     match op {
         BatchOp::Read(q) => q.r#where = Some(and_combine(q.r#where.take(), rf)),
@@ -219,6 +223,7 @@ fn apply_row_filter(op: &mut BatchOp, rf: Filter) {
 }
 
 /// Combine an optional existing filter with a row filter via AND.
+#[cfg(test)]
 fn and_combine(existing: Option<Filter>, rf: Filter) -> Filter {
     match existing {
         Some(f) => Filter::And {
