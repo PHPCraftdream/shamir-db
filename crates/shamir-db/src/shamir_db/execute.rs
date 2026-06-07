@@ -430,6 +430,9 @@ impl AdminExecutor for ShamirAdminExecutor {
                 if op.sorted && op.unique {
                     return Err(err("Index cannot be both sorted and unique".to_string()));
                 }
+                if !op.include.is_empty() && !op.sorted {
+                    return Err(err("include is only valid for sorted indexes".to_string()));
+                }
                 if op.sorted {
                     if op.fields.len() != 1 {
                         return Err(err(
@@ -437,7 +440,11 @@ impl AdminExecutor for ShamirAdminExecutor {
                         ));
                     }
                     table
-                        .create_sorted_index(&op.create_index, &path_refs)
+                        .create_sorted_index_with_include(
+                            &op.create_index,
+                            &path_refs,
+                            op.include.clone(),
+                        )
                         .await
                         .map_err(|e| err(e.to_string()))?;
                 } else if op.unique {

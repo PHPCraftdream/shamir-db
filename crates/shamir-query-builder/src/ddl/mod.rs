@@ -394,6 +394,7 @@ pub fn create_index(name: impl Into<String>, table: impl Into<String>) -> Create
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        include: Vec::new(),
         if_not_exists: false,
     }
 }
@@ -413,6 +414,7 @@ pub struct CreateIndex {
     functional_args: Option<Vec<serde_json::Value>>,
     vector_dim: Option<u32>,
     vector_metric: Option<String>,
+    include: Vec<Vec<String>>,
     if_not_exists: bool,
 }
 
@@ -492,6 +494,15 @@ impl CreateIndex {
         self
     }
 
+    /// Set the covering-index included field paths (sorted indexes only).
+    ///
+    /// Each element is a field path, e.g. `vec!["email"]` or
+    /// `vec!["address", "city"]`. Only meaningful when `.sorted()` is set.
+    pub fn include(mut self, paths: impl IntoIterator<Item = Vec<String>>) -> Self {
+        self.include = paths.into_iter().collect();
+        self
+    }
+
     /// Skip error if the index already exists.
     pub fn if_not_exists(mut self) -> Self {
         self.if_not_exists = true;
@@ -514,6 +525,7 @@ impl CreateIndex {
             functional_args: self.functional_args,
             vector_dim: self.vector_dim,
             vector_metric: self.vector_metric,
+            include: self.include,
             if_not_exists: self.if_not_exists,
         })
     }

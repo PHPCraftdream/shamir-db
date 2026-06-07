@@ -68,6 +68,12 @@ pub struct SortedIndexDefinition {
     /// Single field path, expressed as interner keys (matches the
     /// regular `IndexInfoItem::path`).
     pub field_path: Vec<u64>,
+    /// Covering index: extra field paths (as raw string segments) whose
+    /// values will be projected into the index entry in a future slice.
+    /// Stored here so the metadata survives restarts; inert until
+    /// Phase 3.2 implements the physical projection.
+    #[serde(default)]
+    pub included_fields: Vec<Vec<String>>,
 }
 
 impl SortedIndexDefinition {
@@ -75,6 +81,38 @@ impl SortedIndexDefinition {
         Self {
             name_interned,
             field_path,
+            included_fields: Vec::new(),
+        }
+    }
+
+    /// Construct with covering-index included field paths.
+    pub fn with_included(
+        name_interned: u64,
+        field_path: Vec<u64>,
+        included_fields: Vec<Vec<String>>,
+    ) -> Self {
+        Self {
+            name_interned,
+            field_path,
+            included_fields,
+        }
+    }
+}
+
+/// Legacy on-disk layout without `included_fields`. Used only during
+/// backward-compatible load of pre-covering-index persisted data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SortedIndexDefinitionV1 {
+    name_interned: u64,
+    field_path: Vec<u64>,
+}
+
+impl From<SortedIndexDefinitionV1> for SortedIndexDefinition {
+    fn from(v1: SortedIndexDefinitionV1) -> Self {
+        Self {
+            name_interned: v1.name_interned,
+            field_path: v1.field_path,
+            included_fields: Vec::new(),
         }
     }
 }
@@ -721,10 +759,22 @@ impl SortedIndexManager {
         if bytes.is_empty() {
             return Ok(());
         }
+        // Try the current format first; on failure fall back to the legacy
+        // V1 format (no `included_fields`) for backward-compat with existing
+        // persisted data written before the covering-index DDL slice.
         let defs: Vec<SortedIndexDefinition> =
-            bincode::deserialize(bytes.as_ref()).map_err(|e| {
-                shamir_storage::error::DbError::Codec(format!("sorted-index defs decode: {e}"))
-            })?;
+            match bincode::deserialize::<Vec<SortedIndexDefinition>>(bytes.as_ref()) {
+                Ok(d) => d,
+                Err(_) => {
+                    let v1s: Vec<SortedIndexDefinitionV1> = bincode::deserialize(bytes.as_ref())
+                        .map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "sorted-index defs decode: {e}"
+                            ))
+                        })?;
+                    v1s.into_iter().map(SortedIndexDefinition::from).collect()
+                }
+            };
         for d in defs {
             self.indexes.insert(d.name_interned, d);
         }

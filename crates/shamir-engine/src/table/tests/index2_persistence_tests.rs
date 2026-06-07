@@ -50,6 +50,7 @@ async fn vector_index_survives_reopen() {
         functional_args: None,
         vector_dim: Some(3),
         vector_metric: Some("cosine".into()),
+        include: Vec::new(),
         if_not_exists: false,
     };
     mgr1.create_index_v2(&op).await.unwrap();
@@ -223,6 +224,7 @@ async fn fts_ranked_index_survives_reopen() {
         functional_args: None,
         vector_dim: None,
         vector_metric: None,
+        include: Vec::new(),
         if_not_exists: false,
     };
     mgr1.create_index_v2(&op).await.unwrap();

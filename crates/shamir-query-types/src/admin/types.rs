@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod tests;
+
 /// Serde skip-serializing-if helper: omit `false` booleans from the wire.
 fn is_false(b: &bool) -> bool {
     !*b
@@ -145,6 +148,12 @@ pub struct CreateIndexOp {
     /// Vector metric: "l2", "cosine" (default), "dot".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector_metric: Option<String>,
+
+    /// Covering index: extra fields whose values are stored directly in the
+    /// index entry so a covered range query is served from the index alone
+    /// (no data-store fetch). Only meaningful for `sorted` indexes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<Vec<String>>,
 
     /// When `true`, a pre-existing index with the same name is NOT an
     /// error — the operation returns `{"created": false, "existed": true}`.

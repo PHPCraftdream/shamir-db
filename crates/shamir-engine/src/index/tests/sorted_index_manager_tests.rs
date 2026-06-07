@@ -706,3 +706,86 @@ async fn equivalence_plan_apply_vs_direct() {
     assert_eq!(r_a, r_b);
     assert!(r_a.contains(&rid));
 }
+
+// ============================================================================
+// Covering-index: included_fields persist and reload
+// ============================================================================
+
+#[tokio::test]
+async fn included_fields_persist_and_reload() {
+    // Create a sorted-index definition WITH included_fields, persist,
+    // reopen on the same store, and verify the field survives.
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    {
+        let mgr = SortedIndexManager::new(Arc::clone(&info_store))
+            .await
+            .unwrap();
+        let def = SortedIndexDefinition::with_included(
+            101,
+            vec![201],
+            vec![vec!["email".to_string()], vec!["name".to_string()]],
+        );
+        mgr.register(def).await.unwrap();
+    }
+
+    let mgr2 = SortedIndexManager::new(Arc::clone(&info_store))
+        .await
+        .unwrap();
+    let loaded = mgr2.find_by_field(&[201]).expect("definition must reload");
+    assert_eq!(
+        loaded.included_fields,
+        vec![vec!["email".to_string()], vec!["name".to_string()],]
+    );
+}
+
+#[tokio::test]
+async fn backward_compat_v1_defs_load_with_empty_included_fields() {
+    // Simulate data written by the old code (no `included_fields` field)
+    // by serialising a V1-equivalent struct (2-field: u64, Vec<u64>) and
+    // writing it directly to the info_store.  The new manager must load
+    // it without error, producing `included_fields = []`.
+    use bytes::Bytes;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    struct OldDef {
+        name_interned: u64,
+        field_path: Vec<u64>,
+    }
+
+    let old_bytes = {
+        let old_defs = vec![
+            OldDef {
+                name_interned: 101,
+                field_path: vec![201],
+            },
+            OldDef {
+                name_interned: 102,
+                field_path: vec![300, 301],
+            },
+        ];
+        bincode::serialize(&old_defs).expect("encode old defs")
+    };
+
+    let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let sys_id = crate::meta::MetaKey::SortedIndexes.as_record_id();
+    info_store
+        .set(sys_id.to_bytes(), Bytes::from(old_bytes))
+        .await
+        .unwrap();
+
+    let mgr = SortedIndexManager::new(Arc::clone(&info_store))
+        .await
+        .unwrap();
+
+    let def1 = mgr.find_by_field(&[201]).expect("def1 must load");
+    assert_eq!(def1.name_interned, 101);
+    assert!(
+        def1.included_fields.is_empty(),
+        "backward-compat: included_fields must default to empty"
+    );
+
+    let def2 = mgr.find_by_field(&[300, 301]).expect("def2 must load");
+    assert_eq!(def2.name_interned, 102);
+    assert!(def2.included_fields.is_empty());
+}

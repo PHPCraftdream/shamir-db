@@ -498,3 +498,69 @@ async fn fts_stemmed_fr_query() {
     );
     assert_eq!(records[0]["body"], "les chats noirs");
 }
+
+// ============================================================================
+// Covering index: include field DDL (Phase 3.1)
+// ============================================================================
+
+async fn setup_users() -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let db = shamir.create_db("testdb").await;
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
+    db.add_repo(repo_config).await.unwrap();
+    shamir
+}
+
+/// Create a sorted index with `include` and verify that `included_fields`
+/// is recorded in the in-memory meta (no physical side-effects yet).
+#[tokio::test]
+async fn covering_index_include_stored_in_meta() {
+    let shamir = setup_users().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_index(
+        "mk",
+        ddl::create_index("score_sorted", "users")
+            .field("score")
+            .sorted()
+            .include(vec![vec!["email".to_string()], vec!["name".to_string()]]),
+    );
+    exec_built(&shamir, b.to_request_via_msgpack()).await;
+
+    // Inspect the in-memory sorted-index catalogue.
+    let table = shamir.get_table("testdb", "main", "users").await.unwrap();
+    let defs = table.sorted_indexes().iter_indexes();
+    assert_eq!(defs.len(), 1, "expected exactly one sorted index");
+    let def = &defs[0];
+    assert_eq!(
+        def.included_fields,
+        vec![vec!["email".to_string()], vec!["name".to_string()],],
+        "included_fields must be stored in the sorted-index meta"
+    );
+}
+
+/// `include` on a non-sorted (hash/btree) index must return an error.
+#[tokio::test]
+async fn covering_index_include_on_non_sorted_is_error() {
+    let shamir = setup_users().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_index(
+        "mk",
+        ddl::create_index("email_idx", "users")
+            .field("email")
+            // NOT sorted — include is invalid here.
+            .include(vec![vec!["name".to_string()]]),
+    );
+    let req = b.to_request_via_msgpack();
+    // DDL errors are returned as Err(DbError) from execute().
+    let err = shamir.execute("testdb", &req).await.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("include") || msg.contains("sorted"),
+        "error message should mention 'include' or 'sorted': {msg}"
+    );
+}
