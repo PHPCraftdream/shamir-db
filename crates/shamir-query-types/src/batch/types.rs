@@ -13,7 +13,7 @@ use crate::admin::{
     DropFunctionOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp,
     GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp, RollbackMigrationOp,
-    SetBufferConfigOp, StartMigrationOp, UnbindValidatorOp,
+    SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -110,6 +110,9 @@ pub enum BatchOp {
     /// Imperative history purge (temporal T2).
     PurgeHistory(PurgeHistoryOp),
 
+    /// Change a live table's history-retention policy (temporal T3).
+    SetRetention(SetRetentionOp),
+
     /// Stored procedure / callable function invocation.
     Call(CallOp),
 }
@@ -163,6 +166,7 @@ impl Serialize for BatchOp {
             BatchOp::ListValidators(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
             BatchOp::PurgeHistory(op) => op.serialize(serializer),
+            BatchOp::SetRetention(op) => op.serialize(serializer),
             BatchOp::Call(op) => op.serialize(serializer),
         }
     }
@@ -356,6 +360,10 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::PurgeHistory)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("set_retention") {
+            serde_json::from_value(value)
+                .map(BatchOp::SetRetention)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("call") {
             serde_json::from_value(value)
                 .map(BatchOp::Call)
@@ -429,6 +437,7 @@ impl BatchOp {
                 | BatchOp::ListValidators(_)
                 | BatchOp::CreateFunctionFolder(_)
                 | BatchOp::PurgeHistory(_)
+                | BatchOp::SetRetention(_)
         )
     }
 }

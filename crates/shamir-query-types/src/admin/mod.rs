@@ -13,5 +13,5 @@ pub use types::{
     CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropIndexOp, DropRepoOp,
     DropTableOp, DropValidatorOp, GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp,
     PurgeHistoryOp, PurgeScope, RenameFunctionOp, RenameValidatorOp, Retention,
-    RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp, UnbindValidatorOp,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
 };

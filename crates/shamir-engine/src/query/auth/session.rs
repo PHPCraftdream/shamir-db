@@ -399,6 +399,19 @@ impl SessionPermissions {
                 },
             ),
 
+            // On-the-fly history-retention change — table-scoped alter.
+            // The live DAC path (execute.rs) enforces Action::Manage; this
+            // pre-resolved cache uses the query-types Action enum which has
+            // Alter as the closest admin-class action.
+            BatchOp::SetRetention(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.set_retention.clone(),
+                },
+            ),
+
             // Stored procedure call — execute on a function, no table_ref.
             BatchOp::Call(_) => (Action::Read, Resource::Global),
         }

@@ -78,6 +78,11 @@ pub struct CreateTableOp {
     /// error — the operation returns `{"created": false, "existed": true}`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_not_exists: bool,
+    /// Optional per-table history retention applied at creation time.
+    /// `None` (absent on the wire) = CurrentOnly — today's default
+    /// behaviour (no history retained). See [`Retention`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
 }
 
 fn default_repo() -> String {
@@ -533,6 +538,23 @@ pub struct PurgeHistoryOp {
     #[serde(default = "default_repo")]
     pub repo: String,
     pub scope: PurgeScope,
+}
+
+/// Change a live table's history-retention policy on the fly (T3).
+///
+/// The discriminator key `set_retention` holds the table name. The
+/// policy is applied via a lock-free `ArcSwap` swap — no data migration,
+/// no reshape; subsequent writes are governed by the new policy.
+///
+/// ```json
+/// { "set_retention": "users", "repo": "main", "retention": { "max_count": 5 } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetRetentionOp {
+    pub set_retention: String,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+    pub retention: Retention,
 }
 
 /// List databases / repos / tables / indexes / functions / validators / function_folders.

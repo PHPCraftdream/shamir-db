@@ -19,7 +19,7 @@ use shamir_query_types::admin::{
     CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
     DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, ListOp, ListValidatorsOp,
     MigrationStatusOp, RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp,
-    RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp, UnbindValidatorOp,
+    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
 };
 use shamir_query_types::auth::{
     CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, Permission, RevokeRoleOp,
@@ -30,6 +30,7 @@ pub use shamir_query_types::WriteOp;
 
 // Re-export wire types that callers need to assemble resource / group
 // references and buffer configs.
+pub use shamir_query_types::admin::Retention;
 pub use shamir_query_types::admin::{BufferConfigDto as BufConfig, BufferConfigPatch as BufPatch};
 pub use shamir_query_types::admin::{GroupRef, ResourceRef};
 
@@ -289,6 +290,7 @@ pub fn create_table(name: impl Into<String>) -> CreateTable {
         name: name.into(),
         repo: "main".to_owned(),
         if_not_exists: false,
+        retention: None,
     }
 }
 
@@ -297,6 +299,7 @@ pub struct CreateTable {
     name: String,
     repo: String,
     if_not_exists: bool,
+    retention: Option<shamir_query_types::admin::Retention>,
 }
 
 impl CreateTable {
@@ -312,12 +315,20 @@ impl CreateTable {
         self
     }
 
+    /// Attach a per-table history-retention policy applied at creation
+    /// time. `None` (default) = CurrentOnly.
+    pub fn retention(mut self, retention: shamir_query_types::admin::Retention) -> Self {
+        self.retention = Some(retention);
+        self
+    }
+
     /// Finalize into a [`BatchOp`].
     pub fn build(self) -> BatchOp {
         BatchOp::CreateTable(CreateTableOp {
             create_table: self.name,
             repo: self.repo,
             if_not_exists: self.if_not_exists,
+            retention: self.retention,
         })
     }
 }
@@ -1765,6 +1776,58 @@ impl IntoBatchOp for ListFunctions {
 }
 
 impl IntoBatchOp for ListFunctionFolders {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+// ============================================================================
+// Retention DDL (temporal T3)
+// ============================================================================
+
+/// Change a live table's history-retention policy. `repo` defaults to `"main"`.
+pub fn set_retention(
+    table: impl Into<String>,
+    retention: shamir_query_types::admin::Retention,
+) -> SetRetention {
+    SetRetention {
+        table: table.into(),
+        repo: "main".to_owned(),
+        retention,
+    }
+}
+
+/// Builder for [`SetRetentionOp`].
+pub struct SetRetention {
+    table: String,
+    repo: String,
+    retention: shamir_query_types::admin::Retention,
+}
+
+impl SetRetention {
+    /// Override the target repo (default `"main"`).
+    pub fn repo(mut self, repo: impl Into<String>) -> Self {
+        self.repo = repo.into();
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::SetRetention(SetRetentionOp {
+            set_retention: self.table,
+            repo: self.repo,
+            retention: self.retention,
+        })
+    }
+}
+
+impl From<SetRetention> for BatchOp {
+    fn from(b: SetRetention) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for SetRetention {
     fn into_batch_op(self) -> BatchOp {
         self.build()
     }
