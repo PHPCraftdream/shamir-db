@@ -49,12 +49,17 @@ pub const PREV_HASH_FIELD: &str = "_prev_hash";
 
 // Type tags. Distinct leading bytes keep two values of different types from
 // ever colliding on their payloads (e.g. the empty string vs. an empty list).
+//
+// NOTE: 0x04 (formerly T_DEC) and 0x05 (formerly T_BIG) are intentionally
+// absent. Dec and Big are both wire-serialised as plain strings (Serialize
+// emits `d.to_string()` / `b.to_string()`), so they are hashed with T_STR.
+// This preserves round-trip invariance: after a msgpack round-trip,
+// Value::Dec(d) becomes Value::Str(d.to_string()), and the hash is unchanged.
+// The 0x04/0x05 values are reserved and must NOT be reused.
 const T_NULL: u8 = 0x00;
 const T_BOOL: u8 = 0x01;
 const T_INT: u8 = 0x02;
 const T_F64: u8 = 0x03;
-const T_DEC: u8 = 0x04;
-const T_BIG: u8 = 0x05;
 const T_STR: u8 = 0x06;
 const T_BIN: u8 = 0x07;
 const T_LIST: u8 = 0x08;
@@ -95,11 +100,18 @@ where
             out.extend_from_slice(&bits.to_be_bytes());
         }
         Value::Dec(d) => {
-            out.push(T_DEC);
+            // Round-trip invariant: Dec is serialised to the wire as a plain
+            // string (Value::Serialize uses `d.to_string()`), so on read-back
+            // the value is Value::Str(d.to_string()).  We must hash Dec
+            // identically to that Str — same tag (T_STR) and same bytes —
+            // otherwise canonical_hash(in-memory Dec) != canonical_hash(same
+            // record after a storage/wire round-trip), breaking CAS.
+            out.push(T_STR);
             write_bytes(out, d.to_string().as_bytes());
         }
         Value::Big(b) => {
-            out.push(T_BIG);
+            // Same invariant as Dec: BigInt survives the wire as Value::Str.
+            out.push(T_STR);
             write_bytes(out, b.to_string().as_bytes());
         }
         Value::Str(s) => {
