@@ -357,8 +357,121 @@ the path is unambiguous when it resumes.)*
 
 ---
 
+## 6. Per-table write strategy: consensus (seqlock) vs escape (version-log)
+
+Closing MVCC-2 has two legitimate shapes, and they express different souls.
+
+**Seqlock — consensus.** Keep overwrite-in-place + `history`, but make the
+fast-path archive decision *correct* with an optimistic per-key handshake:
+the writer reads the old value, marks the key "write-in-flight", records a
+global snapshot-epoch, overwrites `main`, publishes the version, then
+re-reads the epoch — if a snapshot opened during the window the writer
+retroactively archives the old value; a reader that needs the key **waits on
+the in-flight flag** until the writer (and its retro-archive) completes. The
+contested moment is *met and resolved*: two actors detect each other and
+agree (archive-or-not, wait-or-proceed). Cost is paid **only on a true
+same-key collision** (rare); it is the per-key, optimistic form of §4.1's
+"commit-barrier" (b). The catch: this is a consensus protocol → memory
+ordering / ABA / lost-wakeup corners (we hit a real lost-wakeup in S2's
+`lock_key`) → **loom-verified, no hand-waving**.
+
+**Version-log — escape.** Never overwrite; append each write as a new
+version (`key::version → value`); "current" = max version; a snapshot at `Vs`
+reads the largest version `≤ Vs`. There is no contested point → the race is
+**structurally impossible**. Visibility ("which version?") is no new
+complexity — it is exactly what `get_at` already computes; append merely
+*merges* `main`+`history` into one log so the "main or history?" fork
+disappears. The genuine new cost is **background vacuum** (reclaim versions
+no snapshot needs), off the hot path. The canonical MVCC layout (Postgres
+heap / log-structured).
+
+**The optionality (decision).** Both are valid; the choice is a property of
+the **table's physical layout**, therefore:
+- **NOT per-transaction** — a tx chooses *isolation* (Snapshot / Serializable
+  / Pessimistic), which rides on top of *either* substrate. The substrate is
+  the store, not the tx.
+- **NOT runtime-auto** — switching a live table's strategy is a data
+  migration (reshape main+history ↔ log) + adaptive unpredictability.
+- **YES per-table, chosen by the schema author at DDL** — like a storage
+  engine or index type; same opt-in philosophy as the covering index.
+
+| pick **seqlock** (consensus / overwrite) | pick **version-log** (escape / append) |
+|---|---|
+| live mutable state | immutable ledger / facts |
+| frequent writes, short/rare snapshots | long/concurrent snapshots, time-travel |
+| point reads of "current" | "as-of" reads, audit, historical analytics |
+| want minimal storage | append-natural data, accept vacuum |
+| *e.g.* presence, balance, session | *e.g.* chat history, event log, audit-trail |
+
+**Domain alignment.** An **Interconnected** DB (the *I* in S.H.A.M.I.R. —
+chat / P2P) naturally holds *both*: ephemeral live state (presence →
+seqlock) and immutable history (messages → version-log). Per-table
+optionality is not a crutch — it acknowledges the system has two natures and
+lets each table take the one matching its data.
+
+**Mechanism (the seam):** one `WriteStrategy` trait, two impls
+(`OverwriteSeqlock`, `AppendVersionLog`), selected from table config at open.
+Everything above — tx, Level-3 locks, covering, cell version/`hwm`, the
+visibility rule "largest version ≤ snapshot" — is **identical** for both, so
+the rest of the engine never knows which is underneath.
+
+**Cost honesty.** Two strategies = **2× the most bug-prone core** to
+loom/test/maintain. So: **design the seam now (§7); build the second impl
+only when a real table needs it.** Today's overwrite+`history` lives; seqlock
+*completes* it (closes MVCC-2). Version-log is added when a table genuinely
+needs time-travel / long snapshots. An optional future "advisor" may *measure*
+contention / snapshot-longevity and *recommend* a switch — but the decision
+and migration stay with the human; no auto-switching of a live store.
+
+## 7. Refactor to the strategy seam — no new functionality
+
+Before either strategy is built, shape `MvccStore` so the future
+`WriteStrategy` cut is clean and obvious — **behaviour-identical, zero new
+features, every `mvcc_store` test green unchanged.**
+
+**The seam line.** Three layers, today tangled in `MvccStore`:
+1. **Coordination** — `cell` (version/`hwm`), the `gate` (version assignment,
+   snapshots). *Shared by both strategies — stays.*
+2. **Level-3 locks** — `locks` map, `lock_key`/`release_locks`. *Strategy-
+   agnostic (locks keys, not values) — stays on `MvccStore`.*
+3. **Versioning substrate** — how a value is persisted and how a versioned
+   read resolves: `set_versioned[_many]`, `delete_versioned`, `get_at`,
+   `scan_history_for_version`, `apply_committed_ops`, the `main`/`history`
+   stores. *This is the strategy.*
+
+**R1 — clarify in place (do first; pure health + seam-readiness).**
+The four write paths (`set_versioned`, `set_versioned_many`,
+`delete_versioned`, `apply_committed_ops`) duplicate the same shape:
+archive-prior-if-needed → write → assign version → publish cell (bump-first).
+Extract that duplication into named private helpers —
+`archive_prior(key, prev_v)`, `publish_cell(key, v, slow)`,
+`resolve_read(key, snap_v, cur_v)` — and group the substrate methods into one
+clearly-marked region, separate from coordination and locks. This **reduces
+the bug surface** of the most dangerous subsystem (one archive path, not
+four) *and* makes each helper a ready future strategy-method. Behaviour-
+identical; no trait yet.
+
+**R2 — extract the trait (do when version-log is imminent, not speculatively).**
+Lift the substrate region behind `trait WriteStrategy`; move today's bodies
+verbatim into `OverwriteHistoryStrategy`; `MvccStore` holds
+`Box<dyn WriteStrategy>` + `locks` + delegates. Keep the GC/recovery
+accessors (`main_store`/`history_store`) concrete on the overwrite impl for
+now — they differ per strategy and genericizing them blind risks the wrong
+boundary (the classic "don't extract an interface until you have two impls").
+R1 makes R2 mechanical; doing R2 only with the second impl in hand avoids a
+mis-cut seam.
+
+**Discipline.** R1/R2 add **no behaviour** — they are the preparation, not
+the feature. The features (seqlock completion of MVCC-2, version-log) land
+*after*, each loom-verified. Keep the durable truth in the stores/WAL; the
+cell stays in-memory and rebuildable.
+
+---
+
 _Plan revision 2026-06-07 — the record cell folds P2 + P4 + P3.2's
 write-side into one atomic per-key write-tact. Supersedes the standalone
 MVCC-2 (#232) and LOCKING.md (#234) framings; covering index (#218)
-continues on the P3.1 foundation. Next: slice S1 (cell + atomic tact,
-TOCTOU dissolved)._
+continues on the P3.1 foundation. §6 records the per-table consensus/escape
+write-strategy optionality; §7 the behaviour-preserving refactor to its seam
+(R1 clarify now, R2 extract on need). Next: slice S1 (cell + atomic tact,
+TOCTOU dissolved) via the chosen strategy._
