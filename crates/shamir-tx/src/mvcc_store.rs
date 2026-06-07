@@ -25,6 +25,16 @@ use shamir_storage::types::Store;
 use crate::repo_tx_gate::RepoTxGate;
 use crate::version_codec::encode_version_key;
 
+/// Per-key in-memory coordination state — the "record cell".
+/// Today it carries only the latest committed `version` (what
+/// `version_cache` held); future slices add a lock slot and visibility
+/// hints (see docs/roadmap/MVCC_CELL.md). The durable data stays in
+/// `main`/`history`; the cell is rebuildable in-memory coordination.
+#[derive(Debug, Clone, Copy)]
+struct RecordCell {
+    version: u64,
+}
+
 /// Versioned layer over two dumb-KV stores.
 ///
 /// See [module-level documentation](self) for the design rationale.
@@ -32,9 +42,9 @@ pub struct MvccStore {
     main: Arc<dyn Store>,
     history: Arc<dyn Store>,
     gate: Arc<RepoTxGate>,
-    /// In-memory cache: key → latest committed version.
+    /// In-memory coordination state: key → record cell (latest committed version).
     /// Cold start: first `get_at` for a key does a range scan, populates cache.
-    version_cache: SccHashMap<Bytes, u64>,
+    cells: SccHashMap<Bytes, RecordCell>,
 }
 
 impl MvccStore {
@@ -44,7 +54,7 @@ impl MvccStore {
             main,
             history,
             gate,
-            version_cache: SccHashMap::new(),
+            cells: SccHashMap::new(),
         }
     }
 
@@ -85,7 +95,9 @@ impl MvccStore {
         // it returns the existing entry unchanged. Use `upsert_async`
         // so repeated writes to the same key advance the cached
         // version monotonically.
-        self.version_cache.upsert_async(key, new_v).await;
+        self.cells
+            .upsert_async(key, RecordCell { version: new_v })
+            .await;
         Ok(new_v)
     }
 
@@ -177,7 +189,9 @@ impl MvccStore {
         let mut max_v = 0u64;
         for (key, _value) in items {
             let new_v = self.gate.assign_next_version();
-            self.version_cache.upsert_async(key, new_v).await;
+            self.cells
+                .upsert_async(key, RecordCell { version: new_v })
+                .await;
             max_v = new_v;
         }
         Ok(max_v)
@@ -214,7 +228,9 @@ impl MvccStore {
         let new_v = self.gate.assign_next_version();
         if !self.gate.active_snapshots_empty() {
             // CRIT-2: see `set_versioned` for rationale.
-            self.version_cache.upsert_async(key, new_v).await;
+            self.cells
+                .upsert_async(key, RecordCell { version: new_v })
+                .await;
         }
         Ok(new_v)
     }
@@ -264,7 +280,7 @@ impl MvccStore {
     /// previous `Bytes::copy_from_slice(key)` heap-alloc+copy on every probe
     /// (one per `get_at`, one per `version_of` read-set entry) is gone.
     fn current_version(&self, key: &[u8]) -> u64 {
-        self.version_cache.read(key, |_, v| *v).unwrap_or(0)
+        self.cells.read(key, |_, c| c.version).unwrap_or(0)
     }
 
     /// Public accessor: current committed version for `key`, or `0` if
@@ -301,7 +317,7 @@ impl MvccStore {
     /// `upsert_async` (not `insert`) so a re-replay of the same key
     /// advances monotonically rather than silently keeping a stale value.
     pub async fn seed_version(&self, key: Bytes, version: u64) {
-        self.version_cache.upsert_async(key, version).await;
+        self.cells.upsert_async(key, RecordCell { version }).await;
     }
 
     /// cancel-safe: NO — applies a batch of `KvOp` via multi-step
@@ -365,7 +381,14 @@ impl MvccStore {
                 KvOp::Set(k, _) => k,
                 KvOp::Remove(k) => k,
             };
-            self.version_cache.upsert_async(key, commit_version).await;
+            self.cells
+                .upsert_async(
+                    key,
+                    RecordCell {
+                        version: commit_version,
+                    },
+                )
+                .await;
         }
         Ok(())
     }
@@ -486,8 +509,8 @@ impl MvccStore {
     /// after this prune simply re-populates its entry via the next upsert.
     async fn prune_version_cache(&self) {
         let min_alive = self.gate.min_alive();
-        self.version_cache
-            .retain_async(|_key, v| *v >= min_alive)
+        self.cells
+            .retain_async(|_key, c| c.version >= min_alive)
             .await;
     }
 
@@ -731,7 +754,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cached = mvcc.version_cache.read(&key, |_, v| *v);
+        let cached = mvcc.cells.read(&key, |_, c| c.version);
         assert!(
             cached.is_some(),
             "version_cache should contain key after set"
@@ -1151,7 +1174,7 @@ mod tests {
         assert!(v_fresh > v_old_a && v_fresh > v_old_b);
 
         // Cache currently holds all three.
-        assert_eq!(mvcc.version_cache.len(), 3);
+        assert_eq!(mvcc.cells.len(), 3);
 
         // Advance min_alive to sit strictly above the old keys but at/below
         // the fresh key. With the snapshot still open at version 0, min_alive
@@ -1184,7 +1207,7 @@ mod tests {
             v_fresh,
             "fresh key (cv >= min_alive) must NOT be evicted"
         );
-        assert_eq!(mvcc.version_cache.len(), 1, "cache should have shrunk to 1");
+        assert_eq!(mvcc.cells.len(), 1, "cache should have shrunk to 1");
 
         // CURRENT values in main are still correct after eviction. With the
         // entries gone, get_at takes the fast path and reads main.
@@ -1398,7 +1421,7 @@ mod tests {
 
         // version_cache untouched on the fast path.
         assert_eq!(
-            mvcc.version_cache.len(),
+            mvcc.cells.len(),
             0,
             "fast path must not populate version_cache"
         );
@@ -1462,7 +1485,7 @@ mod tests {
         assert!(mvcc.version_of(&k0) > 0);
         assert!(mvcc.version_of(b"k1") > 0);
         assert!(mvcc.version_of(b"k2") > 0);
-        assert_eq!(mvcc.version_cache.len(), 3);
+        assert_eq!(mvcc.cells.len(), 3);
     }
 
     /// Empty input is a no-op (no panic, no writes).
@@ -1470,7 +1493,7 @@ mod tests {
     async fn set_versioned_many_empty_is_noop() {
         let mvcc = make_mvcc();
         mvcc.set_versioned_many(Vec::new()).await.unwrap();
-        assert_eq!(mvcc.version_cache.len(), 0);
+        assert_eq!(mvcc.cells.len(), 0);
     }
 
     /// Regression guard for the NotFound-vs-IO-error conflation bug.
