@@ -359,6 +359,15 @@ the path is unambiguous when it resumes.)*
 
 ## 6. Per-table write strategy: consensus (seqlock) vs escape (version-log)
 
+> **⚠️ Superseded / refined by [`TEMPORAL.md`](./TEMPORAL.md) §1 (2026-06-07).**
+> The "on-the-fly switchable type" requirement resolved this fork: the
+> substrate is a **single version-log** (escape), and a table's "type" is a
+> runtime **retention policy** on top — not two physical layouts behind a
+> trait. So the seqlock/consensus handshake is **not built** (the version-log
+> dissolves MVCC-2 by construction, leaving nothing to coordinate), and §7's
+> R2 (extract a two-impl `WriteStrategy` trait) is **dropped**. The framing
+> below is kept for the reasoning trail; the decision lives in `TEMPORAL.md`.
+
 Closing MVCC-2 has two legitimate shapes, and they express different souls.
 
 **Seqlock — consensus.** Keep overwrite-in-place + `history`, but make the
@@ -451,7 +460,10 @@ the bug surface** of the most dangerous subsystem (one archive path, not
 four) *and* makes each helper a ready future strategy-method. Behaviour-
 identical; no trait yet.
 
-**R2 — extract the trait (do when version-log is imminent, not speculatively).**
+**R2 — extract the trait.** ⚠️ **DROPPED** (see `TEMPORAL.md` §1): there are
+not two layouts to abstract over — the substrate is a single version-log and
+"type" is a runtime retention policy. R2 is replaced by the version-log +
+retention substrate work (TEMPORAL.md T1). Original (now-moot) framing:
 Lift the substrate region behind `trait WriteStrategy`; move today's bodies
 verbatim into `OverwriteHistoryStrategy`; `MvccStore` holds
 `Box<dyn WriteStrategy>` + `locks` + delegates. Keep the GC/recovery
