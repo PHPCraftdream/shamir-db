@@ -2,8 +2,11 @@
 
 use crate::canonical::{canonical_hash, register, PREV_HASH_FIELD};
 use crate::registry::ScalarRegistry;
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
+use std::str::FromStr;
 
 /// Build a string-keyed map from `(key, value)` pairs in the given order.
 fn map(pairs: &[(&str, QueryValue)]) -> QueryValue {
@@ -177,5 +180,74 @@ fn scalar_registered_under_crypto_folder() {
     assert_eq!(
         r.call("crypto/canonical_hash", &[]).unwrap_err().code,
         "arity"
+    );
+}
+
+// ── COR-1 fix: round-trip invariance for Dec and Big ─────────────────────────
+
+/// Dec is serialised to the wire as `d.to_string()` (Value::Serialize), so
+/// after a msgpack round-trip it becomes Value::Str(d.to_string()).
+/// canonical_hash must be identical before and after that round-trip.
+#[test]
+fn dec_hash_equals_its_wire_str_hash() {
+    let d = Decimal::from_str("1.50").unwrap();
+    let wire_str = d.to_string(); // exactly what Serialize produces
+
+    let hash_dec = canonical_hash(&QueryValue::Dec(d));
+    let hash_str = canonical_hash(&QueryValue::Str(wire_str));
+
+    assert_eq!(
+        hash_dec, hash_str,
+        "Dec hash must equal the hash of its wire-string form (round-trip invariance)"
+    );
+}
+
+/// Same invariant for BigInt.
+#[test]
+fn big_hash_equals_its_wire_str_hash() {
+    let b: BigInt = "123456789012345678901234567890".parse().unwrap();
+    let wire_str = b.to_string();
+
+    let hash_big = canonical_hash(&QueryValue::Big(b));
+    let hash_str = canonical_hash(&QueryValue::Str(wire_str));
+
+    assert_eq!(
+        hash_big, hash_str,
+        "Big hash must equal the hash of its wire-string form (round-trip invariance)"
+    );
+}
+
+/// Full end-to-end round-trip: record with a Dec field → msgpack bytes →
+/// deserialise (Dec becomes Str) → canonical_hash unchanged.
+#[test]
+fn dec_field_hash_survives_msgpack_round_trip() {
+    let d = Decimal::from_str("3.14").unwrap();
+    let record_before = map(&[("id", Value::Int(1)), ("price", QueryValue::Dec(d))]);
+
+    // Serialise → deserialise: Dec survives as Str on the wire.
+    let bytes = record_before.to_bytes().expect("serialise");
+    let record_after: QueryValue = QueryValue::from_bytes(&bytes).expect("deserialise");
+
+    assert_eq!(
+        canonical_hash(&record_before),
+        canonical_hash(&record_after),
+        "canonical_hash must be identical before and after a msgpack round-trip for Dec fields"
+    );
+}
+
+/// Full end-to-end round-trip: record with a Big field → msgpack bytes →
+/// deserialise (Big becomes Str) → canonical_hash unchanged.
+#[test]
+fn big_field_hash_survives_msgpack_round_trip() {
+    let b: BigInt = "99999999999999999999".parse().unwrap();
+    let record_before = map(&[("id", Value::Int(2)), ("amount", QueryValue::Big(b))]);
+
+    let bytes = record_before.to_bytes().expect("serialise");
+    let record_after: QueryValue = QueryValue::from_bytes(&bytes).expect("deserialise");
+
+    assert_eq!(
+        canonical_hash(&record_before),
+        canonical_hash(&record_after),
+        "canonical_hash must be identical before and after a msgpack round-trip for Big fields"
     );
 }
