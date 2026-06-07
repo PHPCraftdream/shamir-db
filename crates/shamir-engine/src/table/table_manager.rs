@@ -195,6 +195,20 @@ impl TableManager {
             changefeed: None,
         };
 
+        // Resolve covering-index included_fields string paths to interned ids.
+        // The sorted_indexes manager loads definitions from disk with
+        // `included_fields_interned = []` (serde skip), so we rebuild the
+        // transient cache here, right after open, before any write path runs.
+        //
+        // Skip if no sorted indexes exist — avoids forcing early interner
+        // initialization, which would prevent `replicate_interner_from`
+        // from loading persisted state into the OnceCell.
+        if mgr.sorted_indexes.has_covering_indexes() {
+            if let Ok(interner) = mgr.interner.get().await {
+                mgr.sorted_indexes.intern_included_paths(interner);
+            }
+        }
+
         // Hot-load persisted buffer config (if any) and apply
         // it to both stores. If no DDL has set one, the stores
         // keep whatever default the factory wrapped them with.
@@ -1286,6 +1300,9 @@ impl TableManager {
         }
         let def = SortedIndexDefinition::with_included(name_interned, path_ids, included_fields);
         self.sorted_indexes.register(def).await?;
+        // Intern the included_fields paths so the covering projection is
+        // active immediately (before backfill).
+        self.sorted_indexes.intern_included_paths(interner);
         self.interner.persist().await?;
 
         // Backfill: stream existing records and add each to the new
