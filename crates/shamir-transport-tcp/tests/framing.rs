@@ -186,6 +186,69 @@ async fn write_frame_into_round_trip_reuses_buffer() {
     );
 }
 
+// ── Miri-safe tests ──────────────────────────────────────────────────────────
+//
+// These two tests use `std::io::Cursor` (always `Poll::Ready`, no mio/IOCP)
+// and a current-thread Tokio runtime built WITHOUT `.enable_io()`.  That means
+// the mio `Selector` is never created, so `cargo miri test` can run them.
+//
+// Run with:
+//   cargo +nightly miri test -p shamir-transport-tcp read_frame_into_miri
+//
+// They vet the `unsafe set_len` path in `read_frame_into`:
+//   • happy path  — fully-initialized bytes reach the caller.
+//   • error path  — truncated payload → `UnexpectedEof` → buf left empty.
+
+/// Happy-path: bytes written through `unsafe set_len` are provably initialized.
+#[test]
+fn read_frame_into_miri_roundtrip_no_io_driver() {
+    // Current-thread runtime WITHOUT .enable_io() — mio Selector never created.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let payload: &[u8] = b"hello shamir";
+        let mut framed: Vec<u8> = Vec::new();
+        framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        framed.extend_from_slice(payload);
+
+        let mut cursor = std::io::Cursor::new(framed);
+        let mut buf = Vec::new();
+        read_frame_into(&mut cursor, 1024, &mut buf).await.unwrap();
+
+        // Proves every byte in the set_len region was overwritten.
+        assert_eq!(&buf[..], payload);
+    });
+}
+
+/// Error-path: truncated payload triggers `UnexpectedEof`; buf must be empty.
+#[test]
+fn read_frame_into_miri_partial_read_clears_buf() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        // Claim 32 bytes but only supply 4 — `read_exact` will hit EOF.
+        let mut framed: Vec<u8> = Vec::new();
+        framed.extend_from_slice(&32u32.to_be_bytes());
+        framed.extend_from_slice(&[0xffu8; 4]); // only 4 bytes instead of 32
+
+        let mut cursor = std::io::Cursor::new(framed);
+        let mut buf = Vec::new();
+        let result = read_frame_into(&mut cursor, 1024, &mut buf).await;
+
+        assert!(
+            result.is_err(),
+            "expected an error due to truncated payload"
+        );
+        assert!(
+            buf.is_empty(),
+            "buf must be cleared after error; found {} bytes",
+            buf.len()
+        );
+    });
+}
+
 /// Optim #7: write_frame produces byte-identical wire output to
 /// write_frame_into (single concatenated write vs two separate writes
 /// from the original implementation).
