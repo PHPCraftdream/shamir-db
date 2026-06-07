@@ -8,8 +8,9 @@ Future features beyond v1 spec. Не нормативные, не binding обе
 > [`../PROJECT_STATE.md`](../PROJECT_STATE.md) for the full snapshot and
 > [`NEXT_PHASES.md`](./NEXT_PHASES.md) for the post-Phase-A index. The items
 > below are still-future (auth v1.1+, transports, PQ, cluster) plus the
-> Database-Engine section (replication / sharding / query-language-v2 /
-> backup tooling — not started).
+> Database-Engine section (replication / sharding / backup tooling — not
+> started). *(No "query-language v2": the query language is OQL by
+> principle — see [`PLAN.md`](./PLAN.md) §3.)*
 
 ## Auth Protocol
 
@@ -41,8 +42,15 @@ Future features beyond v1 spec. Не нормативные, не binding обе
 
 ## Database Engine (вне scope auth spec)
 
+> **Query language: OQL — окончательно, никакого «v2».** Язык запросов —
+> объектный (DTO: `Filter`/`ReadQuery`/`BatchRequest`), msgpack/JSON,
+> строится типизированным билдером / `q!` / `filter!`. Текстового/SQL-
+> фронтенда не будет **никогда** — это принцип, а не отсутствие парсера:
+> «запрос-как-текст» порождает инъекции, парсер-баги/DoS, prepared-
+> statement-церемонию и parse/plan-кеши; OQL делает их *структурно
+> невозможными*. См. [`PLAN.md`](./PLAN.md) §3 (Resolved forks).
+
 См. отдельные документы (TBD):
-- Query language v2
 - Replication
 - Sharding
 - Backup tooling

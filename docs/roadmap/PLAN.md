@@ -61,7 +61,8 @@ per kind.* All the **cheap, safe, no-wide-refactor** work is done.
 
 **Where we stand.** Foundation + engine pillars are closed; what's open is
 mostly the *roof* — the **"I"** (P2P / replication / chat), the disk perf
-ceiling (covering index), and usability (query-lang v2, browser client).
+ceiling (covering index), and usability (browser client). *(There is no
+"query-language v2" — OQL is the interface, by principle; see §3.)*
 18 crates, ~2700 lib tests, green gate, and a dependency graph that now
 **tells the truth** (the `server` / `crypto` features draw the host-only
 line precisely; guest-facing crates are honest leaves).
@@ -107,7 +108,7 @@ tickets, audit-HMAC, RBAC, rate-limit) · TCP / WS transports · ~2667 lib
 tests + property tests + **27 benchmarks**.
 
 **Open (charter pillars + usability + perf-ceiling):** the **"I"**
-(P2P / replication / chat) · query-language v2 · browser WASM client ·
+(P2P / replication / chat) · browser WASM client ·
 QUIC/UDP/Unix transports · auth v1.1+ / PQ identity · vectors/FTS
 hardening · backup tooling · the disk perf ceiling (covering index).
 
@@ -204,7 +205,7 @@ design doc before building:
 > when Movement C starts (don't author it ahead of need).
 
 ### Parallel — on demand, not ahead of need
-Query-language v2 (SQL/OQL frontend over the finished engine) · browser
+Browser
 WASM client ([`BROWSER_WASM_PLAN.md`](./BROWSER_WASM_PLAN.md)) · transports
 QUIC/UDP/Unix · auth v1.1+ & PQ identity ([`ROADMAP.md`](./ROADMAP.md)) ·
 vectors/FTS hardening ([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md),
@@ -245,6 +246,25 @@ stored-proc / WASM / SDK tracks (§0.1) ran first by request. A/B/C are
   System bypasses as root.
 - **DDL↔DML ordering:** *variant 1* — an op declares an explicit `after`
   dependency on another alias (no implicit auto-ordering of admin ops).
+- **Query language is OQL — forever; no text language, no SQL, no "v2".**
+  A query is a typed object (DTO: `Filter`/`ReadQuery`/`BatchRequest`),
+  carried as msgpack/JSON, built by the typed builder / `q!` / `filter!`.
+  This is *by principle*, not by lack of a parser. Queries-as-text is the
+  single root mistake that spawns SQL injection, parser/grammar bugs &
+  DoS, prepared-statement/bind ceremony, dialect drift, and parse/plan
+  caches. OQL doesn't *solve* those — it makes them **structurally
+  impossible**:
+  - injection (CWE-89): data lives in `value` fields, never concatenated
+    into a command string — there is no context where data becomes code;
+  - "parsing" is total, deterministic msgpack deserialisation into typed
+    structs — no grammar attack surface;
+  - every query is already parameterised — no prepared statements;
+  - the DTO **is** the wire **is** the AST — one representation, not three,
+    so no re-parse cost to cache (this also retires PERF Opt N).
+  OQL may *grow* (more operators, `$fn`, richer filters) — that is
+  evolving the same object language, never a textual frontend. A textual
+  "v2" would only parse back into these DTOs and would fracture the
+  "one language, one builder, three callers" symmetry. **Do not build it.**
 
 ---
 

@@ -230,7 +230,7 @@ a prerequisite for replication.)
 | WASM modules (user logic — the "M") | ✅ **shipped** ([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) |
 | P2P / interconnected (chat — the "I") | foundation laid (changefeed); ladder in [`roadmap/PLAN.md`](roadmap/PLAN.md) Movement C |
 | Replication / sharding / backup tooling | [`roadmap/PLAN.md`](roadmap/PLAN.md) (replication), [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
-| Query language v2 (SQL frontend); default→Serializable now phantoms are closed | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md), [`roadmap/TRANSACTIONS.md`](roadmap/TRANSACTIONS.md) |
+| Query language: **OQL is final — no textual/SQL frontend, ever** (principle, see [`roadmap/PLAN.md`](roadmap/PLAN.md) §3); default→Serializable now phantoms are closed | [`roadmap/PLAN.md`](roadmap/PLAN.md), [`roadmap/TRANSACTIONS.md`](roadmap/TRANSACTIONS.md) |
 | Browser WASM client (Argon2id in a Web Worker) | [`roadmap/BROWSER_WASM_PLAN.md`](roadmap/BROWSER_WASM_PLAN.md) |
 | Vectors / embeddings hardening | [`roadmap/EMBEDDINGS_AND_VECTORS.md`](roadmap/EMBEDDINGS_AND_VECTORS.md) |
 | Full-text search hardening | [`roadmap/FULL_TEXT_SEARCH.md`](roadmap/FULL_TEXT_SEARCH.md) |
