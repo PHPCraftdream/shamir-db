@@ -400,6 +400,34 @@ Query Language (SDBQL - S.H.A.M.I.R. Database Query Language)
 - Index-aware: Query planner uses indexes automatically
 - Pipeline-based: Composable operations
 
+**Principle: OQL (Object Query Language) — no text language, ever.**
+SDBQL is an *object* query language: a query is a typed data structure
+(`Filter` / `ReadQuery` / `BatchRequest` DTO) carried as msgpack/JSON and
+built by the typed builder / `q!` / `filter!`. There will **never** be a
+textual / SQL frontend or a "v2" parser. This is a deliberate, permanent
+decision, not a missing feature. Queries-as-text is the single root
+mistake behind SQL injection, parser/grammar bugs and DoS, prepared-
+statement/bind ceremony, dialect drift, and parse/plan caching. OQL does
+not *mitigate* those — it makes them **structurally impossible**:
+
+- **Injection (CWE-89): impossible.** Values live in `value` fields; they
+  are never concatenated into a command string. There is no context in
+  which data could be reinterpreted as code, so there is nothing to escape.
+- **No parser, no parser bugs.** "Parsing" is total, deterministic msgpack
+  deserialisation into typed structs — no grammar, no lexer, no
+  catastrophic-backtracking DoS, no dialect drift.
+- **No prepared statements.** Every query is already parameterised — code
+  and data were never mixed, so there is no binding apparatus to add.
+- **No parse/plan cache.** The DTO *is* the wire *is* the AST — one
+  representation, not three (text → AST → plan), so there is no re-parse
+  cost to cache.
+
+OQL may *grow* (more operators, `$fn`, richer filters) — that is evolving
+the same object language, never adding a textual frontend. The builder,
+the wire, and guest procedures all speak the identical DTOs (one language,
+one builder, three callers); a text "v2" would only parse back into these
+DTOs and would fracture that symmetry.
+
 **Query Types:**
 
 ### Special Value References

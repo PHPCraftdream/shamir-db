@@ -364,11 +364,18 @@ too small relative to F / G / Q1 / Q2.
 
 Defer.
 
-### Opt N — prepared-query plan cache ❌ DEFER
+### Opt N — prepared-query plan cache ❌ DEFER (mostly moot under OQL)
 
 **Conditional.** Only meaningful on stationary workloads (UI
 dashboards reusing same query shape). Effort ~1 week (AST
 parameterisation is non-trivial). Wait for profile evidence.
+
+> **Note (OQL principle).** The "re-parse the same query text" premise is
+> already moot: queries are objects, not text — "parsing" is structural
+> msgpack deserialisation (cheap), there is no AST to parameterise. The
+> only conceivable residual is caching the *compiled plan* (index
+> selection / dep graph), a separate idea with no measured pressure yet.
+> See `PLAN.md` §3 (query language is OQL — forever).
 
 ---
 
