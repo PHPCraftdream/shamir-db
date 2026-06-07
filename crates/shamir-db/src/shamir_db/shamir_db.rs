@@ -2139,8 +2139,22 @@ impl ShamirDb {
     /// If the function's metadata has the setuid flag set, the function
     /// runs with its owner's authority (definer rights). Otherwise the
     /// caller's actor is used unchanged.
+    ///
+    /// # Fail-closed guarantee
+    ///
+    /// Privilege escalation only happens when the function record is
+    /// **definitively loaded** from the catalogue with both `setuid` set
+    /// and a real (non-default) owner stored. On any error or
+    /// not-found the caller is returned unchanged — never `Actor::System`
+    /// via a `ResourceMeta::open()` default.
     pub async fn effective_fn_actor(&self, fn_name: &str, caller: &Actor) -> Actor {
-        let meta = self.resource_meta(&ResourcePath::function(fn_name)).await;
+        // Load the raw function record directly so we can distinguish
+        // "record found" from "error / not present" (the latter must not
+        // escalate the caller to the open()-default owner of System).
+        let Ok(Some(rec)) = self.system_store.load_function(fn_name).await else {
+            return caller.clone();
+        };
+        let meta = ResourceMeta::from_record(&rec);
         if Mode::is_setuid(meta.mode) {
             meta.owner
         } else {
