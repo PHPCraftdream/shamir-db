@@ -230,12 +230,79 @@ vectors/FTS hardening ([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md
 Movements A/B/C below were the **original** forward order; the recent
 stored-proc / WASM / SDK tracks (§0.1) ran first by request. A/B/C are
 **still ahead** and unstarted:
-- **A (consolidate)** — adversarial review of the arc + `H₂` + gitignore/
-  fuzz debt. Cheap; recommended next.
-- **B (perf)** — bench the new features' overhead, then sprint γ (covering
-  index `Opt O`, `R`, `P`, `M1`, `M2`).
-- **C (the "I")** — network changefeed → **live business subscriptions
-  (server-push, design task)** → leader-follower replication → P2P.
+- **A (consolidate)** — ✅ **DONE**: adversarial 5-lens review of the arc;
+  all 8 findings remediated (`H₂`/gitignore earlier; SEC-1/2/3, COR-1,
+  MVCC-1, CF-1/2, truncations this arc) + Miri-able framing test.
+- **B (perf)** — ✅ **mostly DONE**: R/P shipped pre-arc, M1/M2 + H₂ + the
+  overhead guards landed; **only Opt O (covering index) remains** (tripwire
+  fired — build at wide+large, see §2.2 P3).
+- **C (the "I")** — **parked by request**; network changefeed →
+  subscriptions #201 resume later. CF-1 `gap_at` + CF-2 watermark already
+  laid its resume-protocol foundation.
+
+---
+
+## 2.2 Now — solving "the rest" (subscriptions #201 parked)
+
+The review arc is closed. What's left is **composition of primitives we
+already built** (monotonic version · footprint · journal+gap+watermark ·
+streaming serializer+index · the filter engine) — *not* new subsystems,
+except Level-3 locking. Ordered cheap→heavy:
+
+### P1 — SSI-footprint overhead gate (#233) · ~½ day
+MVCC-1 records an SSI footprint on **every** non-tx write; it is only
+needed while a Serializable tx watches.
+- Gate gains `active_serializable_count: AtomicU64` (++ when a Serializable
+  snapshot opens, −− in the `SnapshotGuard` Drop — the guard carries an
+  `is_serializable` flag). (`active_snapshots` today doesn't distinguish
+  isolation, so this is a new counter.)
+- `record_nontx_ssi_footprint` early-returns when the count is 0 (one
+  relaxed load).
+- Verify: B1 changefeed-overhead bench — non-tx write baseline restored
+  when no Serializable tx is alive; the `mvcc1_*` tests stay green
+  (footprint still recorded while a Serializable tx IS alive).
+- Honours level-1's "no watchers → no overhead."
+
+### P2 — close the fast-path TOCTOU (MVCC-2 / #232) · ~½ day · pair with P1
+- `MvccStore::set_versioned` fast path **always** upserts `version_cache`
+  (drop the skip). The version_cache *is* the per-entity atomic the design
+  wanted; a snapshot opened mid-write then reads the correct version.
+- Flip the `mvcc2_simulated_toctou_*` test to "no phantom"; the stress test
+  stays green. Closes the last MVCC structural smell (LOW — bites only
+  async-disk today).
+
+### P3 — covering index (Opt O / #218) · ~1 week · see `MOVEMENT_B_PERF.md` §B2
+Tripwire fired: at 10k/wide records the indexed path is **56×** full scan,
+and **~83 %** of that is decode of K wide records the narrow SELECT throws
+away. Composition of the sorted index + M2:
+1. DDL `"include": [...]` + per-index meta.
+2. index entry `physical_value = bincode(projected fields)` (was empty).
+3. write-path maintenance (refresh the projection on every record change)
+   — **measure the write-amplification** (re-run write benches).
+4. planner recognises a *covered* query (filter on the indexed field +
+   `SELECT ⊆ include`).
+5. index-only read **reusing M2**: index → projected `InnerValue` →
+   `inner_to_json` streaming — zero `data_store` touch, zero `Value` tree.
+6. bench covered vs non-covered vs full scan; report read-win **and**
+   write-cost together. `include:[...]` is a plain `create_index` DTO field
+   (OQL — no text parsing).
+
+### P4 — Level-3 pessimistic locking · **DESIGN now, BUILD on real need**
+The one genuinely-new subsystem (the user's isolation level 3 — "watch,
+interfere, drive to completion"). First deliverable = a `LOCKING.md`
+design:
+- level-3 = **block** conflictors instead of aborting self;
+- **wound-wait on the monotonic version** → deadlock-free *by
+  construction* (the version is a total order; no wait-cycle can form; no
+  deadlock detector needed — Rosenkrantz et al.);
+- lock granularity = the same **footprint** (table / index-range) SSI uses;
+- honest caveat: wound-wait still *wounds* younger txns (rare), so "always
+  completes" means "block-not-abort where possible," not absolute.
+- **Build deferred:** SI (L1) + SSI (L2) cover almost everything; pull L3
+  only when a high-contention workload makes retry costlier than blocking.
+
+**Sequence:** **P1 → P2** (cheap MVCC follow-ups, one wave) → **P3**
+(the week-long scale win) → **P4** (write the design doc; defer the build).
 
 ---
 
