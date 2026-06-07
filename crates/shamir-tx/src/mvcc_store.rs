@@ -159,6 +159,81 @@ impl MvccStore {
         }
     }
 
+    // ========================================================================
+    // Versioning substrate (future WriteStrategy seam — see
+    // docs/roadmap/MVCC_CELL.md §7).
+    //
+    // This region groups the durable-versioned-KV operations over the
+    // `main`/`history` stores: the write/delete paths, the snapshot-read
+    // resolver, and the committed-ops applier. R1 extracts three private
+    // helpers (`publish_cell`, `archive_prior`, `resolve_read`) that name
+    // repeated patterns; the bodies are byte-identical to the inline blocks
+    // they replace. A future slice will lift this region behind a
+    // `trait WriteStrategy` (R2 — out of scope here).
+    //
+    // The coordination accessors below (`current_version` / `version_of` /
+    // `live_version` / `seed_version`) and the Level-3 lock region are
+    // deliberately kept separate from this substrate.
+    // ========================================================================
+
+    /// Publish `version` into the key's cell. `slow` = a snapshot was active
+    /// at write time (also advances the archive-routing `version`); otherwise
+    /// only the always-maintained `hwm` advances. Atomic modify-or-insert;
+    /// preserves `version` on the fast path. (Bump-first ordering is the
+    /// CALLER's job — this only performs the cell mutation.)
+    async fn publish_cell(&self, key: Bytes, version: u64, slow: bool) {
+        match self.cells.entry_async(key).await {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                if slow {
+                    e.get_mut().version = version;
+                }
+                e.get_mut().hwm = version;
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(RecordCell {
+                    version: if slow { version } else { 0 },
+                    hwm: version,
+                });
+            }
+        }
+    }
+
+    /// Archive the current `main` value of `key` into `history` under its
+    /// current version, if it exists. No-op if the key is absent. Used by the
+    /// snapshot-active (slow) single-key write/delete paths.
+    async fn archive_prior(&self, key: &Bytes) -> DbResult<()> {
+        match self.main.get(key.clone()).await {
+            Ok(old) => {
+                let cur_v = self.current_version(key);
+                let h_key = encode_version_key(key, cur_v);
+                self.history.set(h_key, old).await?;
+                Ok(())
+            }
+            Err(DbError::NotFound(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Resolve a versioned read of `key` visible at `snapshot_version`, given
+    /// its current cached version `cur_v`. Fast path (`cur_v <= snapshot`):
+    /// read `main`; slow path: range-scan `history` for the newest version
+    /// `<= snapshot`. Behaviour-identical to the inline routing in `get_at`.
+    async fn resolve_read(
+        &self,
+        key: &[u8],
+        snapshot_version: u64,
+        cur_v: u64,
+    ) -> DbResult<Option<Bytes>> {
+        if cur_v <= snapshot_version {
+            return match self.main.get(Bytes::copy_from_slice(key)).await {
+                Ok(v) => Ok(Some(v)),
+                Err(DbError::NotFound(_)) => Ok(None),
+                Err(e) => Err(e),
+            };
+        }
+        self.scan_history_for_version(key, snapshot_version).await
+    }
+
     /// cancel-safe: NO — multi-step state mutation. When snapshots are
     /// active the sequence is: read old from `main`, archive to `history`,
     /// write new to `main`, allocate version and update `version_cache`.
@@ -179,47 +254,18 @@ impl MvccStore {
             // Fast path: bump-first — assign version, update hwm (version stays
             // 0/unchanged), then perform the physical write.
             let new_v = self.gate.assign_next_version();
-            match self.cells.entry_async(key.clone()).await {
-                scc::hash_map::Entry::Occupied(mut e) => {
-                    e.get_mut().hwm = new_v;
-                }
-                scc::hash_map::Entry::Vacant(e) => {
-                    e.insert_entry(RecordCell {
-                        version: 0,
-                        hwm: new_v,
-                    });
-                }
-            }
+            self.publish_cell(key.clone(), new_v, false).await;
             self.main.set(key, value).await?;
             return Ok(new_v);
         }
         // Slow path: archive pre-read must see the OLD version (before bump).
-        match self.main.get(key.clone()).await {
-            Ok(old) => {
-                let cur_v = self.current_version(&key);
-                let h_key = encode_version_key(&key, cur_v);
-                self.history.set(h_key, old).await?;
-            }
-            Err(DbError::NotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
+        self.archive_prior(&key).await?;
         // Bump-first: assign version, update cell (both version and hwm), then
-        // perform the physical write.
+        // perform the physical write. CRIT-2: `publish_cell` uses entry_async
+        // (modify-or-insert) so repeated writes to the same key advance the
+        // cached version monotonically.
         let new_v = self.gate.assign_next_version();
-        // CRIT-2: use entry_async (modify-or-insert) so repeated writes to the
-        // same key advance the cached version monotonically.
-        match self.cells.entry_async(key.clone()).await {
-            scc::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().version = new_v;
-                e.get_mut().hwm = new_v;
-            }
-            scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell {
-                    version: new_v,
-                    hwm: new_v,
-                });
-            }
-        }
+        self.publish_cell(key.clone(), new_v, true).await;
         self.main.set(key, value).await?;
         Ok(new_v)
     }
@@ -269,17 +315,7 @@ impl MvccStore {
         if self.gate.active_snapshots_empty() {
             let batch_v = self.gate.assign_next_version();
             for (key, _) in &items {
-                match self.cells.entry_async(key.clone()).await {
-                    scc::hash_map::Entry::Occupied(mut e) => {
-                        e.get_mut().hwm = batch_v;
-                    }
-                    scc::hash_map::Entry::Vacant(e) => {
-                        e.insert_entry(RecordCell {
-                            version: 0,
-                            hwm: batch_v,
-                        });
-                    }
-                }
+                self.publish_cell(key.clone(), batch_v, false).await;
             }
             let ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
             self.main.transact(ops).await?;
@@ -313,22 +349,12 @@ impl MvccStore {
 
         // Phase 3 (bump-first): assign a fresh version per key and update the
         // cell (both version and hwm) BEFORE the physical main write.
-        // CRIT-2: entry_async modify-or-insert advances monotonically.
+        // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
+        // cached version advances monotonically.
         let mut max_v = 0u64;
         for (key, _value) in &items {
             let new_v = self.gate.assign_next_version();
-            match self.cells.entry_async(key.clone()).await {
-                scc::hash_map::Entry::Occupied(mut e) => {
-                    e.get_mut().version = new_v;
-                    e.get_mut().hwm = new_v;
-                }
-                scc::hash_map::Entry::Vacant(e) => {
-                    e.insert_entry(RecordCell {
-                        version: new_v,
-                        hwm: new_v,
-                    });
-                }
-            }
+            self.publish_cell(key.clone(), new_v, true).await;
             max_v = new_v;
         }
 
@@ -354,30 +380,12 @@ impl MvccStore {
     pub async fn delete_versioned(&self, key: Bytes) -> DbResult<u64> {
         if !self.gate.active_snapshots_empty() {
             // Slow path: archive pre-read must see OLD version (before bump).
-            match self.main.get(key.clone()).await {
-                Ok(old) => {
-                    let cur_v = self.current_version(&key);
-                    let h_key = encode_version_key(&key, cur_v);
-                    self.history.set(h_key, old).await?;
-                }
-                Err(DbError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
+            self.archive_prior(&key).await?;
             // Bump-first: assign version, update cell (version+hwm), then remove.
+            // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
+            // cached version advances monotonically.
             let new_v = self.gate.assign_next_version();
-            // CRIT-2: entry_async modify-or-insert advances monotonically.
-            match self.cells.entry_async(key.clone()).await {
-                scc::hash_map::Entry::Occupied(mut e) => {
-                    e.get_mut().version = new_v;
-                    e.get_mut().hwm = new_v;
-                }
-                scc::hash_map::Entry::Vacant(e) => {
-                    e.insert_entry(RecordCell {
-                        version: new_v,
-                        hwm: new_v,
-                    });
-                }
-            }
+            self.publish_cell(key.clone(), new_v, true).await;
             // Propagate a backend I/O failure instead of swallowing it.
             self.main.remove(key).await?;
             return Ok(new_v);
@@ -386,17 +394,7 @@ impl MvccStore {
         // then remove. Previously the fast path assigned AFTER remove and did
         // not update the cell at all.
         let new_v = self.gate.assign_next_version();
-        match self.cells.entry_async(key.clone()).await {
-            scc::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().hwm = new_v;
-            }
-            scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell {
-                    version: 0,
-                    hwm: new_v,
-                });
-            }
-        }
+        self.publish_cell(key.clone(), new_v, false).await;
         // Propagate a backend I/O failure instead of swallowing it — a
         // dropped error here would let the caller see Ok() while the row is
         // still live in main (the delete silently never happened).
@@ -415,14 +413,7 @@ impl MvccStore {
     /// Slow path: range scan history `[key::0, key::snapshot]`, take last.
     pub async fn get_at(&self, key: &[u8], snapshot_version: u64) -> DbResult<Option<Bytes>> {
         let cur_v = self.current_version(key);
-        if cur_v <= snapshot_version {
-            return match self.main.get(Bytes::copy_from_slice(key)).await {
-                Ok(v) => Ok(Some(v)),
-                Err(DbError::NotFound(_)) => Ok(None),
-                Err(e) => Err(e),
-            };
-        }
-        self.scan_history_for_version(key, snapshot_version).await
+        self.resolve_read(key, snapshot_version, cur_v).await
     }
 
     /// Direct access to main store (for non-tx reads).
@@ -770,25 +761,15 @@ impl MvccStore {
         // Phase 4: update the in-memory cell for every touched key.
         // Sets both `version` and `hwm` to `commit_version` so that
         // tx-committed keys participate in index-only freshness validation.
-        // Uses entry_async modify-or-insert (CRIT-2): `upsert_async` was
-        // previously used; entry_async is equivalent and preserves both fields.
+        // Uses `publish_cell` (entry_async modify-or-insert, CRIT-2):
+        // `upsert_async` was previously used; entry_async is equivalent and
+        // preserves both fields.
         for op in ops {
             let key = match op {
                 KvOp::Set(k, _) => k,
                 KvOp::Remove(k) => k,
             };
-            match self.cells.entry_async(key).await {
-                scc::hash_map::Entry::Occupied(mut e) => {
-                    e.get_mut().version = commit_version;
-                    e.get_mut().hwm = commit_version;
-                }
-                scc::hash_map::Entry::Vacant(e) => {
-                    e.insert_entry(RecordCell {
-                        version: commit_version,
-                        hwm: commit_version,
-                    });
-                }
-            }
+            self.publish_cell(key, commit_version, true).await;
         }
         Ok(())
     }
