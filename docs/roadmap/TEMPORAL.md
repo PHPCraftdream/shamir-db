@@ -417,8 +417,24 @@ with its reason.
 
 ---
 
+### 7.7 Decision policy at forks (standing directive for this arc)
+At every fork under this goal, **decide toward perfection by construction,
+not the pragmatic compromise** — as we chose the universal version-log
+(correct everywhere) over the cheaper retention-gated path. Perfection
+*includes* loom-grade verification — reach the clean end-state via verified
+slices, never a reckless leap. Concrete elevations this implies:
+- **Collapse `main` into the single version-log** is a TARGET (not a
+  perpetually-deferred "optional"); T1a's keep-`main`-as-cache is the
+  verified stepping-stone, the single clean log is the destination.
+- **loom on every concurrency-touching slice**, not only T1d.
+- the sacred floor/current invariants enforced rigorously — no "good enough".
+I decide forks myself (no asking) and report each decision transparently.
+
+---
+
 _Plan revision 2026-06-07 — time becomes an optional dimension over a single
 version-log substrate, governed by the "simple by default" law. Supersedes
 `MVCC_CELL.md` §6's two-impl write-strategy framing and §7's R2. §7 here is
-the architect's /crush-orchestration runbook. Next, on need: T1 (version-log
-+ retention, loom) — which also closes #232._
+the architect's /crush-orchestration runbook (incl §7.7: decide forks toward
+perfection-by-construction). Next, on need: T1 (version-log + retention,
+loom) — which also closes #232._
