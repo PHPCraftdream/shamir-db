@@ -163,15 +163,25 @@ tests are the safety net.
    variant (or per-batch flag) for Level-3; acquire/release on the cell;
    **wound-wait on the tx version**. (Supersedes the standalone `LOCKING.md`
    from #234 — the design lives here; build on real contention need.)
-3. **S3 — covering projection rides the tact** (P3.2): the index write +
-   covered-projection update join the same ordered write envelope; measure
-   write-amplification. Then **P3.3** (planner + index-only read via M2) is a
-   separate read-side slice.
+3. **S3.2 — covering projection write-side** ✅ DONE (`e288976`): the
+   sorted-index entry's `physical_value` is populated from `included_fields`
+   and maintained on insert/update/delete + backfill; read path untouched.
+   **S3.3 — planner + index-only read — GATED on the atomic write-envelope.**
+   See §4.2: the non-tx write path orders `data.delete` *before*
+   `on_record_deleted` (and `data.set` before `on_record_updated`), so a
+   sorted posting can be **stale w.r.t. the record** in a concurrent window.
+   The full-fetch path closes this with `get_many → None → skip` + residual
+   re-filter; an index-only read **skips that invariant** and would return a
+   phantom (deleted) or stale-projection record. Sound only once non-tx
+   writes apply data+postings in one atomic envelope (the cell tact, S1.1's
+   option (a)/(b)) — i.e. S3.3 is gated on the same write-atomicity S1.1 needs.
 
-**Sequence:** S3 (covering, the perf payoff, building on P3.1's
-already-landed DDL/meta — write-side is independent of the TOCTOU) → S2
-(Level-3, on real contention need) → S1's TOCTOU fix **only when a real
-need justifies its cost** (see §4.1).
+**Sequence:** S3.2 (covering write-side) ✅ → S2 (Level-3, on real
+contention need) → the **atomic write-envelope** (S1.1 tact) — which now
+has a *second* justification beyond the LOW MVCC-2 bug: it is the
+prerequisite that unlocks the covering-index read-side payoff (S3.3) by
+making postings non-stale w.r.t. data. → S3.3 (index-only read) rides on
+top of that envelope.
 
 ---
 
@@ -226,8 +236,70 @@ slice. **So S1.1's TOCTOU fix is deferred** until either an async-disk
 workload makes it real or we undertake (c) deliberately (with loom-grade
 verification — clever reasoning is demonstrably not enough here, as the two
 failed designs above show). The deterministic harness (`c98b343`) stays as
-the documented repro. The **rest of the cell** (S1.0 done; S3 covering;
-S2 lock slot) does **not** depend on closing MVCC-2 and proceeds.
+the documented repro. The **rest of the cell** (S1.0 done; S3.2 covering
+write-side done; S2 lock slot) does **not** depend on closing MVCC-2 and
+proceeds; **S3.3 (index-only read) does** — see §4.2.
+
+---
+
+## 4.2 — S3.3 reality check: index-only read is gated on write-atomicity
+
+Moving to implement S3.3 (the read-side payoff — skip the record fetch and
+serve a covered query straight from the index entry's `physical_value`),
+the non-tx write path was traced and **proves a stale-posting window** that
+index-only reads cannot tolerate. Another *prove, don't guess* result.
+
+**The proof (non-tx path, `table_manager.rs`).** Delete:
+
+```text
+1595  let r = self.table.delete(id).await?;          // 1. data gone
+1601  self.index_manager.on_record_deleted(...).await?;     // 2. postings removed
+1605  self.sorted_indexes.on_record_deleted(...).await?;    // 3. sorted postings removed
+```
+
+Update with a changed indexed key is the mirror image: `data_store.set`
+(line ~1670) runs *before* `sorted_indexes.on_record_updated` (line ~1694),
+which emits `RemovePosting(old) + SetPosting(new)`. In both cases the data
+store is mutated **before** the sorted posting is reconciled, so between the
+two steps a concurrent reader observes a posting whose record is **deleted**
+(delete) or **changed** (update). This is a normal-operation concurrency
+window, not merely a crash-recovery one.
+
+**Why the full-fetch path is safe and index-only is not.** The full-fetch
+read (`read_sorted_index_scan`) does `get_many` on the looked-up ids:
+> "stale index entries materialise as `None` and are silently skipped"
+> (read_exec.rs ~712), and a surviving record is re-checked by the residual
+> filter.
+
+That `None`-skip + residual re-filter **is the invariant** that closes the
+window. An index-only read serves the row from the posting's
+`physical_value` and **never fetches the record**, so it skips the
+invariant and would return a phantom (deleted) row or a stale projection.
+This is the session's recurring bug-class exactly — *two diverged paths,
+the cheap one skips the invariant* — and building index-only now would
+re-introduce it.
+
+**Why it's irreducible here.** The transactional commit path already applies
+data + index ops **atomically** (commit pipeline, "a dropped tx leaves no
+ghost postings", `table_manager.rs` ~906) — so under tx writes there is no
+window. The **non-tx** path does not. Making index-only sound therefore
+requires the non-tx write to apply `{ data, version, postings, covered
+projection }` in **one atomic envelope** — which is precisely the cell's
+**atomic write-tact** (§1, S1.1). So:
+
+- **S3.3 is gated on the atomic write-envelope** (S1.1 option (a) always-
+  archive-style ordering / (b) commit-barrier / (c) version-log restructure).
+- This **raises the value** of building that envelope: §4.1 deferred it as
+  serving only a LOW bug (MVCC-2); it now *also* unlocks the covering-index
+  read-side perf payoff (S3.3) and removes the non-tx phantom window. The
+  envelope is the shared keystone for **three** wins (MVCC-2, index-only
+  reads, non-tx posting consistency), which changes its cost/benefit.
+
+**Decision.** S3.3's index-only read is **deferred, gated on the atomic
+write-envelope**. The covering projection is already written and maintained
+(S3.2) and persists for free, so when the envelope lands the read-side is a
+clean, independent slice on a sound foundation. Shipping index-only before
+the envelope would be unsound under concurrent non-tx writes.
 
 ---
 
