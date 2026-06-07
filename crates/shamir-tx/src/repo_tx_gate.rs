@@ -82,6 +82,13 @@ pub struct RepoTxGate {
     /// ≥ `min(active_snapshots)`.
     active_snapshots: Arc<scc::HashMap<u64, ()>>,
 
+    /// Count of currently-open Serializable snapshots. Incremented when
+    /// a Serializable tx opens a snapshot; decremented when its
+    /// `SnapshotGuard` drops. Non-tx writes check this atomically:
+    /// if zero, no Serializable tx can observe the footprint, so the
+    /// `record_nontx_ssi_footprint` path is skipped entirely.
+    active_serializable_count: Arc<AtomicU64>,
+
     /// PROPOSED (Phase C). Ring of recently-committed write footprints.
     /// Keyed by `commit_version` (monotonic), so a `range(snapshot..]`
     /// scan visits exactly the tx's conflict window. `scc::TreeIndex`
@@ -92,9 +99,16 @@ pub struct RepoTxGate {
 }
 
 /// RAII guard that removes a snapshot from `active_snapshots` on drop.
+/// If the snapshot was opened for a Serializable transaction, also
+/// decrements `active_serializable_count` so non-tx writes stop paying
+/// the SSI-footprint overhead once no Serializable tx is watching.
 pub struct SnapshotGuard {
     version: u64,
     snapshots: Arc<scc::HashMap<u64, ()>>,
+    /// Non-None iff this guard was opened for a Serializable tx.
+    /// Holds the shared counter so Drop can decrement it without
+    /// holding a reference back to the `RepoTxGate`.
+    serializable_count: Option<Arc<AtomicU64>>,
 }
 
 impl SnapshotGuard {
@@ -107,6 +121,9 @@ impl SnapshotGuard {
 impl Drop for SnapshotGuard {
     fn drop(&mut self) {
         let _ = self.snapshots.remove(&self.version);
+        if let Some(cnt) = &self.serializable_count {
+            cnt.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -120,6 +137,7 @@ impl RepoTxGate {
             last_committed_version: AtomicU64::new(last_committed),
             next_tx_id: AtomicU64::new(next_tx_id_seed),
             active_snapshots: Arc::new(scc::HashMap::new()),
+            active_serializable_count: Arc::new(AtomicU64::new(0)),
             commit_write_log: scc::TreeIndex::new(),
         }
     }
@@ -148,12 +166,42 @@ impl RepoTxGate {
     ///
     /// Register a snapshot at the current `last_committed` version and
     /// return a RAII guard. On drop the snapshot is removed.
+    /// Use [`open_snapshot_serializable`](Self::open_snapshot_serializable)
+    /// when the transaction's isolation level is `Serializable`.
     pub async fn open_snapshot(&self) -> SnapshotGuard {
         let version = self.last_committed();
         let _ = self.active_snapshots.insert_async(version, ()).await;
         SnapshotGuard {
             version,
             snapshots: Arc::clone(&self.active_snapshots),
+            serializable_count: None,
+        }
+    }
+
+    /// Like [`open_snapshot`](Self::open_snapshot) but also increments
+    /// `active_serializable_count` for the lifetime of the guard.
+    ///
+    /// Must be called instead of `open_snapshot` when opening a snapshot
+    /// for a `Serializable` transaction so that non-tx writes know at
+    /// least one Serializable observer is alive and must record their
+    /// SSI footprint.
+    ///
+    /// cancel-safe: same guarantee as `open_snapshot`.
+    pub async fn open_snapshot_serializable(&self) -> SnapshotGuard {
+        let version = self.last_committed();
+        let _ = self.active_snapshots.insert_async(version, ()).await;
+        // Increment AFTER the snapshot version is registered so that
+        // any concurrent non-tx write that races with this path already
+        // sees the snapshot version in `active_snapshots` (GC safety).
+        // The increment is AcqRel so it is visible to the non-tx write
+        // that does a Relaxed load — a conservative over-approximation
+        // is fine (the footprint is cheap to write).
+        self.active_serializable_count
+            .fetch_add(1, Ordering::AcqRel);
+        SnapshotGuard {
+            version,
+            snapshots: Arc::clone(&self.active_snapshots),
+            serializable_count: Some(Arc::clone(&self.active_serializable_count)),
         }
     }
 
@@ -235,6 +283,20 @@ impl RepoTxGate {
     /// True if no transaction has an open snapshot.
     pub fn active_snapshots_empty(&self) -> bool {
         self.active_snapshots.is_empty()
+    }
+
+    /// Number of currently-open Serializable snapshots.
+    ///
+    /// Non-tx write paths use this to skip the SSI footprint recording
+    /// when there is no Serializable observer to detect a conflict.
+    /// The load is `Relaxed` — a stale read of zero means a non-tx write
+    /// may skip a footprint that a just-opening Serializable tx has not
+    /// yet registered.  That window is harmless: the tx opened AFTER the
+    /// non-tx write committed, so the write was already committed at the
+    /// tx's snapshot and will be visible as historical data, not as a
+    /// phantom in the predicate window.
+    pub fn active_serializable_count(&self) -> u64 {
+        self.active_serializable_count.load(Ordering::Relaxed)
     }
 
     /// Peek at the `next_tx_id` counter (for durable snapshot).
