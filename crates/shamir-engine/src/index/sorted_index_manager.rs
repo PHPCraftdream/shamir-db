@@ -47,6 +47,7 @@ use crate::index2::write_ops::IndexWriteOp;
 use crate::meta::MetaKey;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -69,11 +70,16 @@ pub struct SortedIndexDefinition {
     /// regular `IndexInfoItem::path`).
     pub field_path: Vec<u64>,
     /// Covering index: extra field paths (as raw string segments) whose
-    /// values will be projected into the index entry in a future slice.
-    /// Stored here so the metadata survives restarts; inert until
-    /// Phase 3.2 implements the physical projection.
+    /// values are projected into the index entry's physical_value.
+    /// Persisted so the metadata survives restarts.
     #[serde(default)]
     pub included_fields: Vec<Vec<String>>,
+    /// Pre-interned form of `included_fields` — transient, not
+    /// persisted. Populated at registration time (see
+    /// `SortedIndexManager::intern_included_paths`) or rebuilt after
+    /// load from disk. Empty means "no covering projection".
+    #[serde(skip)]
+    pub included_fields_interned: Vec<Vec<u64>>,
 }
 
 impl SortedIndexDefinition {
@@ -82,10 +88,13 @@ impl SortedIndexDefinition {
             name_interned,
             field_path,
             included_fields: Vec::new(),
+            included_fields_interned: Vec::new(),
         }
     }
 
-    /// Construct with covering-index included field paths.
+    /// Construct with covering-index included field paths (string form only;
+    /// call `SortedIndexManager::intern_included_paths` or use
+    /// `with_included_interned` to populate the interned form).
     pub fn with_included(
         name_interned: u64,
         field_path: Vec<u64>,
@@ -95,7 +104,29 @@ impl SortedIndexDefinition {
             name_interned,
             field_path,
             included_fields,
+            included_fields_interned: Vec::new(),
         }
+    }
+
+    /// Construct with covering-index included field paths, providing
+    /// both the string and pre-interned forms.
+    pub fn with_included_interned(
+        name_interned: u64,
+        field_path: Vec<u64>,
+        included_fields: Vec<Vec<String>>,
+        included_fields_interned: Vec<Vec<u64>>,
+    ) -> Self {
+        Self {
+            name_interned,
+            field_path,
+            included_fields,
+            included_fields_interned,
+        }
+    }
+
+    /// True if this is a covering index (has included fields).
+    pub fn is_covering(&self) -> bool {
+        !self.included_fields_interned.is_empty()
     }
 }
 
@@ -113,6 +144,7 @@ impl From<SortedIndexDefinitionV1> for SortedIndexDefinition {
             name_interned: v1.name_interned,
             field_path: v1.field_path,
             included_fields: Vec::new(),
+            included_fields_interned: Vec::new(),
         }
     }
 }
@@ -150,6 +182,15 @@ impl SortedIndexManager {
     /// True if at least one sorted index exists.
     pub fn has_indexes(&self) -> bool {
         !self.indexes.is_empty()
+    }
+
+    /// True if at least one sorted index has non-empty `included_fields`
+    /// (i.e. is a covering index). Used to skip early interner
+    /// initialization on open when no covering projections are needed.
+    pub fn has_covering_indexes(&self) -> bool {
+        self.indexes
+            .iter()
+            .any(|e| !e.value().included_fields.is_empty())
     }
 
     /// Iterate over all sorted-index definitions.
@@ -199,6 +240,42 @@ impl SortedIndexManager {
     }
 
     // ============================================================================
+    // Covering-index helpers
+    // ============================================================================
+
+    /// Resolve `included_fields` string paths to interned u64 ids for every
+    /// definition that has at least one included field. Call this:
+    ///   1. After `register()` when the caller already has an interner, OR
+    ///   2. After construction (load from disk) to rebuild the transient
+    ///      `included_fields_interned` caches.
+    ///
+    /// Unknown strings are silently skipped (they produce an empty inner vec
+    /// for that path, which `build_covering_projection` will treat as absent).
+    pub fn intern_included_paths(&self, interner: &Interner) {
+        let keys: Vec<u64> = self.indexes.iter().map(|e| e.key().to_owned()).collect();
+        for key in keys {
+            self.indexes.alter(&key, |_, mut def| {
+                if def.included_fields.is_empty() {
+                    return def;
+                }
+                def.included_fields_interned = def
+                    .included_fields
+                    .iter()
+                    .map(|path_segs| {
+                        path_segs
+                            .iter()
+                            .filter_map(|seg| {
+                                interner.touch_ind(seg.as_str()).ok().map(|t| t.key().id())
+                            })
+                            .collect::<Vec<u64>>()
+                    })
+                    .collect();
+                def
+            });
+        }
+    }
+
+    // ============================================================================
     // Planner methods — return Vec<IndexWriteOp> without side effects
     // ============================================================================
 
@@ -216,10 +293,12 @@ impl SortedIndexManager {
         for def in &defs {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
-                ops.push(IndexWriteOp::SetPosting {
-                    key,
-                    value: Bytes::new(),
-                });
+                let value = if def.is_covering() {
+                    build_covering_projection(record, def)
+                } else {
+                    Bytes::new()
+                };
+                ops.push(IndexWriteOp::SetPosting { key, value });
             }
         }
         Ok(ops)
@@ -243,10 +322,12 @@ impl SortedIndexManager {
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
                     let key = self.build_entry_key(def.name_interned, &encoded, rid);
-                    ops.push(IndexWriteOp::SetPosting {
-                        key,
-                        value: Bytes::new(),
-                    });
+                    let pv = if def.is_covering() {
+                        build_covering_projection(value, def)
+                    } else {
+                        Bytes::new()
+                    };
+                    ops.push(IndexWriteOp::SetPosting { key, value: pv });
                 }
             }
         }
@@ -268,19 +349,40 @@ impl SortedIndexManager {
         for def in &defs {
             let old_enc = extract_and_encode(old, &def.field_path)?;
             let new_enc = extract_and_encode(new, &def.field_path)?;
-            if old_enc == new_enc {
+            // For covering indexes, also rewrite the posting when the
+            // projected values changed even if the indexed key did not.
+            let old_proj = if def.is_covering() {
+                Some(build_covering_projection(old, def))
+            } else {
+                None
+            };
+            let new_proj = if def.is_covering() {
+                Some(build_covering_projection(new, def))
+            } else {
+                None
+            };
+            let key_changed = old_enc != new_enc;
+            let proj_changed = old_proj != new_proj;
+            if !key_changed && !proj_changed {
                 continue;
             }
-            if let Some(ref ov) = old_enc {
-                let key = self.build_entry_key(def.name_interned, ov, record_id);
-                ops.push(IndexWriteOp::RemovePosting { key });
-            }
-            if let Some(ref nv) = new_enc {
-                let key = self.build_entry_key(def.name_interned, nv, record_id);
-                ops.push(IndexWriteOp::SetPosting {
-                    key,
-                    value: Bytes::new(),
-                });
+            if key_changed {
+                if let Some(ref ov) = old_enc {
+                    let key = self.build_entry_key(def.name_interned, ov, record_id);
+                    ops.push(IndexWriteOp::RemovePosting { key });
+                }
+                if let Some(ref nv) = new_enc {
+                    let key = self.build_entry_key(def.name_interned, nv, record_id);
+                    let value = new_proj.clone().unwrap_or(Bytes::new());
+                    ops.push(IndexWriteOp::SetPosting { key, value });
+                }
+            } else {
+                // Key is the same but projection changed — overwrite in place.
+                if let Some(ref nv) = new_enc {
+                    let key = self.build_entry_key(def.name_interned, nv, record_id);
+                    let value = new_proj.clone().unwrap_or(Bytes::new());
+                    ops.push(IndexWriteOp::SetPosting { key, value });
+                }
             }
         }
         Ok(ops)
@@ -356,7 +458,9 @@ impl SortedIndexManager {
 
     /// Batched version of `on_record_created` — collects all entry
     /// writes across all sorted indexes for N records into one
-    /// `Store::set_many` call. Borrow-only — no `InnerValue` clones.
+    /// `Store::set_many` call. Borrow-only — no `InnerValue` clones
+    /// except for covering-index projection (unavoidable: projection
+    /// requires a deep clone of the leaf value).
     pub async fn on_records_created_batch<'a, I>(&self, items: I) -> DbResult<()>
     where
         I: IntoIterator<Item = (&'a RecordId, &'a InnerValue)> + Clone,
@@ -370,7 +474,12 @@ impl SortedIndexManager {
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
                     let key = self.build_entry_key(def.name_interned, &encoded, rid);
-                    writes.push((key, Bytes::new()));
+                    let pv = if def.is_covering() {
+                        build_covering_projection(value, def)
+                    } else {
+                        Bytes::new()
+                    };
+                    writes.push((key, pv));
                 }
             }
         }
@@ -779,6 +888,56 @@ impl SortedIndexManager {
             self.indexes.insert(d.name_interned, d);
         }
         Ok(())
+    }
+}
+
+/// Serialised covering-index projection type: a list of
+/// `(field_path_dotted, InnerValue)` pairs, encoded with MessagePack.
+///
+/// The field_path_dotted key is the segments joined with "." so the
+/// read-side (S3.3) can reconstruct the projection without the interner.
+///
+/// A leaf `InnerValue` that is a `Map` will carry `InternerKey` map keys —
+/// that's fine because the read-side will join it back with the interner.
+///
+/// Format: `rmp_serde::to_vec_named(&Vec<(String, InnerValue)>)` — bincode is
+/// not usable because `InnerValue`'s `Deserialize` relies on `deserialize_any`,
+/// which bincode does not support.
+type CoveringProjection = Vec<(String, InnerValue)>;
+
+/// Build the covering-index projection value for one record and one
+/// `SortedIndexDefinition` that has non-empty `included_fields_interned`.
+///
+/// For each included field path:
+///   - Walk `record` by the interned path segments using `resolve_path_ref`.
+///   - If the leaf is present, push `(path_joined_with_dots, leaf.clone())`.
+///   - Missing paths are silently skipped.
+///
+/// Returns `Bytes::new()` when no fields could be resolved (backward-compat:
+/// write side acts as if no projection; read side sees empty value).
+fn build_covering_projection(record: &InnerValue, def: &SortedIndexDefinition) -> Bytes {
+    let mut projection: CoveringProjection = Vec::new();
+    for (path_strs, path_ids) in def
+        .included_fields
+        .iter()
+        .zip(def.included_fields_interned.iter())
+    {
+        if path_ids.is_empty() {
+            continue;
+        }
+        if let Some(leaf) = resolve_path_ref(record, path_ids) {
+            let key_str = path_strs.join(".");
+            projection.push((key_str, leaf.clone()));
+        }
+    }
+    if projection.is_empty() {
+        return Bytes::new();
+    }
+    // Use MessagePack (rmp_serde) because InnerValue's Deserialize impl
+    // relies on `deserialize_any`, which bincode does not support.
+    match rmp_serde::to_vec_named(&projection) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(_) => Bytes::new(),
     }
 }
 
