@@ -11,9 +11,9 @@ mod parser;
 // Re-export DTOs from the shared types crate.
 pub use parser::query_from_value;
 pub use shamir_query_types::read::{
-    AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection, Pagination,
-    PaginationInfo, QueryResult, QueryStats, ReadQuery, Select, SelectExpr, SelectExprValue,
-    SelectItem,
+    AggFunc, AggregateField, At, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
+    Pagination, PaginationInfo, QueryResult, QueryStats, ReadQuery, Select, SelectExpr,
+    SelectExprValue, SelectItem, Temporal,
 };
 
 #[cfg(test)]

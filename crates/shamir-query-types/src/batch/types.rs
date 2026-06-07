@@ -11,9 +11,9 @@ use crate::admin::{
     ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
     CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, CreateValidatorOp, DropDbOp,
     DropFunctionOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp,
-    GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp, RemoveGroupMemberOp,
-    RenameFunctionOp, RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, StartMigrationOp,
-    UnbindValidatorOp,
+    GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
+    RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp, RollbackMigrationOp,
+    SetBufferConfigOp, StartMigrationOp, UnbindValidatorOp,
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
@@ -34,6 +34,7 @@ use shamir_collections::{TMap, TSet};
 /// - `set` (without `update`) → Set (upsert)
 /// - `delete_from` → Delete
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // dispatch enum: rarely on the stack; boxing cascades through the engine
 pub enum BatchOp {
     /// Read query (SELECT).
     Read(ReadQuery),
@@ -106,6 +107,9 @@ pub enum BatchOp {
     // Function folder DDL
     CreateFunctionFolder(CreateFunctionFolderOp),
 
+    /// Imperative history purge (temporal T2).
+    PurgeHistory(PurgeHistoryOp),
+
     /// Stored procedure / callable function invocation.
     Call(CallOp),
 }
@@ -158,6 +162,7 @@ impl Serialize for BatchOp {
             BatchOp::UnbindValidator(op) => op.serialize(serializer),
             BatchOp::ListValidators(op) => op.serialize(serializer),
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
+            BatchOp::PurgeHistory(op) => op.serialize(serializer),
             BatchOp::Call(op) => op.serialize(serializer),
         }
     }
@@ -347,6 +352,10 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::CreateFunctionFolder)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("purge_history") {
+            serde_json::from_value(value)
+                .map(BatchOp::PurgeHistory)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("call") {
             serde_json::from_value(value)
                 .map(BatchOp::Call)
@@ -419,6 +428,7 @@ impl BatchOp {
                 | BatchOp::UnbindValidator(_)
                 | BatchOp::ListValidators(_)
                 | BatchOp::CreateFunctionFolder(_)
+                | BatchOp::PurgeHistory(_)
         )
     }
 }

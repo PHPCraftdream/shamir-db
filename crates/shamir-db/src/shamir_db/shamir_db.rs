@@ -8,7 +8,7 @@ use crate::access::{
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::function::DbGateway;
 use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry};
-use crate::engine::query::read::ReadQuery;
+use crate::engine::query::read::{ReadQuery, Temporal};
 use crate::engine::query::write::InsertOp;
 use crate::engine::query::TableRef;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
@@ -2460,6 +2460,8 @@ impl DbGateway for FacadeDbGateway {
             order_by: None,
             pagination: crate::engine::query::read::Pagination::None,
             count_total: false,
+            temporal: Temporal::Latest,
+            with_version: false,
         };
 
         let mut queries = new_map();
@@ -2596,6 +2598,8 @@ impl DbGateway for FacadeDbGateway {
             order_by: None,
             pagination: crate::engine::query::read::Pagination::None,
             count_total: false,
+            temporal: Temporal::Latest,
+            with_version: false,
         };
 
         let mut queries = new_map();

@@ -27,7 +27,7 @@
 
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{
-    GroupBy, OrderBy, OrderByItem, Pagination, ReadQuery, Select, SelectItem,
+    GroupBy, OrderBy, OrderByItem, Pagination, ReadQuery, Select, SelectItem, Temporal,
 };
 use shamir_query_types::TableRef;
 
@@ -555,6 +555,8 @@ impl Query {
             order_by,
             pagination: self.pagination,
             count_total: self.count_total,
+            temporal: Temporal::Latest,
+            with_version: false,
         }
     }
 }

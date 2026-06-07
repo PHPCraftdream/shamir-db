@@ -389,6 +389,16 @@ impl SessionPermissions {
             | BatchOp::ListValidators(_)
             | BatchOp::CreateFunctionFolder(_) => (Action::Alter, Resource::Global),
 
+            // Imperative history purge — table-scoped alter.
+            BatchOp::PurgeHistory(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.purge_history.clone(),
+                },
+            ),
+
             // Stored procedure call — execute on a function, no table_ref.
             BatchOp::Call(_) => (Action::Read, Resource::Global),
         }
