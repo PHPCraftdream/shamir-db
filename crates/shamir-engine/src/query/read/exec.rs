@@ -176,6 +176,46 @@ pub fn apply_select(
         .collect()
 }
 
+/// Streaming variant of `apply_select`: projects records and serialises
+/// each directly to JSON bytes via `inner_to_json` — bypassing the
+/// intermediate `json::Value` tree. Returns the same content as
+/// `serde_json::to_vec(&apply_select(...))` but in one pass for SELECT *.
+///
+/// Fast path: when `select` is `SELECT *` (all fields, no
+/// aggregates/functions), each record is serialised directly from its
+/// `InnerValue` via `inner_to_json`, which uses `InternedRef` (a zero-copy
+/// streaming Serialize) and never builds a `json::Value` tree.
+///
+/// General path (non-* selects): falls back to `apply_select` + `to_vec`.
+pub fn apply_select_to_bytes(
+    records: &[(RecordId, InnerValue)],
+    select: &Select,
+    interner: &Interner,
+) -> Vec<u8> {
+    use shamir_types::codecs::interned::json::inner_to_json;
+    // Fast path: SELECT * — serialise InnerValue directly, no json::Value.
+    let is_all =
+        select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
+    if is_all {
+        let mut buf = Vec::with_capacity(records.len() * 200 + 2);
+        buf.push(b'[');
+        for (i, (_, record)) in records.iter().enumerate() {
+            if i > 0 {
+                buf.push(b',');
+            }
+            match inner_to_json(interner, record) {
+                Ok(bytes) => buf.extend_from_slice(&bytes),
+                Err(_) => buf.extend_from_slice(b"null"),
+            }
+        }
+        buf.push(b']');
+        return buf;
+    }
+    // General path: project to json::Value tree, then serialise.
+    let projected = apply_select(records, select, interner);
+    json::to_vec(&projected).unwrap_or_default()
+}
+
 // ============================================================================
 // Aggregation helpers
 // ============================================================================
