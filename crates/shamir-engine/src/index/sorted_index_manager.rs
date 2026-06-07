@@ -206,6 +206,13 @@ impl SortedIndexManager {
             .map(|e| e.value().clone())
     }
 
+    /// Look up a definition by its interned name id.
+    /// Used by the index-only read path (slice A3) to check
+    /// whether the scanned index is a covering index.
+    pub fn find_by_name_interned(&self, name_interned: u64) -> Option<SortedIndexDefinition> {
+        self.indexes.get(&name_interned).map(|e| e.value().clone())
+    }
+
     /// Register a new sorted index. Persists the updated definitions
     /// blob, but does NOT backfill — the caller scans the table and
     /// calls `insert_entry` for each existing record.
@@ -541,6 +548,39 @@ impl SortedIndexManager {
             for (k, _) in batch? {
                 if let Some(id) = decode_record_id_suffix(k.as_ref()) {
                     out.insert(id);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Range lookup with physical values: identical to [`lookup_range`] but
+    /// returns `(RecordId, Bytes)` pairs (preserving scan / value order in a
+    /// `Vec`, NOT de-duplicating into a `BTreeSet`).  The `Bytes` is the
+    /// raw physical_value stored in the index entry — for covering indexes
+    /// that is the versioned projection envelope written by
+    /// `build_covering_projection`; for non-covering indexes it is empty.
+    ///
+    /// Used by the index-only read path (slice A3).
+    pub async fn lookup_range_with_values(
+        &self,
+        name_interned: u64,
+        start_encoded: Option<&[u8]>,
+        end_encoded: Option<&[u8]>,
+    ) -> DbResult<Vec<(RecordId, Bytes)>> {
+        let prefix = self.entry_prefix(name_interned);
+        let (lower, upper) = self.range_bounds(&prefix, start_encoded, end_encoded);
+
+        let stream = self
+            .info_store
+            .iter_range_stream(Some(lower), Some(upper), 256);
+        futures::pin_mut!(stream);
+
+        let mut out: Vec<(RecordId, Bytes)> = Vec::new();
+        while let Some(batch) = stream.next().await {
+            for (k, v) in batch? {
+                if let Some(id) = decode_record_id_suffix(k.as_ref()) {
+                    out.push((id, v));
                 }
             }
         }
@@ -973,9 +1013,7 @@ fn build_covering_projection(
 /// value shorter than 8 bytes, or one whose msgpack body fails to
 /// decode (callers treat `None` as "fall back to a full fetch").
 ///
-/// Used by slice S3.3 (index-only read path). The `#[allow(dead_code)]`
-/// suppresses the lint until that slice wires the call site.
-#[allow(dead_code)]
+/// Used by slice A3 (index-only read path).
 pub(crate) fn decode_covering_projection(value: &[u8]) -> Option<(u64, Vec<(String, InnerValue)>)> {
     if value.len() < 8 {
         return None;

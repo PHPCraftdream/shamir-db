@@ -1964,6 +1964,13 @@ impl TableManager {
         self
     }
 
+    /// Borrow the attached [`MvccStore`](shamir_tx::MvccStore), if any.
+    /// Used by the index-only read path (slice A3) to validate covering-index
+    /// posting freshness without fetching the record from the data store.
+    pub(crate) fn mvcc_store_ref(&self) -> Option<&Arc<shamir_tx::MvccStore>> {
+        self.mvcc_store.as_ref()
+    }
+
     /// Wire this table's non-tx write path to the per-repo changefeed AND
     /// the SSI commit-write log.
     ///
