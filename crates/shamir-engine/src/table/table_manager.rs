@@ -5,6 +5,7 @@ use futures::StreamExt;
 
 use super::buffer_config;
 use super::interner_manager::InternerManager;
+use super::persistable::PersistRegistry;
 use super::record_counter::RecordCounter;
 use super::table::Table;
 use crate::index::index_definition::IndexDefinition;
@@ -49,6 +50,9 @@ pub struct TableManager {
     info_store: Arc<dyn Store>,
     interner: InternerManager,
     counter: Arc<RecordCounter>,
+    /// Registry of metadata blobs that are flushed together at the end
+    /// of each write operation via `flush_metadata()`.
+    persist_registry: PersistRegistry,
     index_manager: IndexManager,
     sorted_indexes: SortedIndexManager,
     wal: Arc<WalManager>,
@@ -116,6 +120,7 @@ impl Clone for TableManager {
             info_store: Arc::clone(&self.info_store),
             interner: self.interner.clone(),
             counter: Arc::clone(&self.counter),
+            persist_registry: self.persist_registry.clone(),
             index_manager: self.index_manager.clone(),
             sorted_indexes: self.sorted_indexes.clone(),
             wal: Arc::clone(&self.wal),
@@ -143,6 +148,15 @@ impl TableManager {
     ) -> DbResult<Self> {
         let interner = InternerManager::new(Arc::clone(&info_store));
         let counter = Arc::new(RecordCounter::new(Arc::clone(&info_store)));
+
+        // Build the persist registry — cloning interner shares all its
+        // internal Arcs (same underlying data), wrapping in Arc<dyn Persistable>
+        // gives the uniform flush surface.
+        let mut persist_registry = PersistRegistry::new();
+        persist_registry
+            .register(Arc::new(interner.clone()) as Arc<dyn super::persistable::Persistable>);
+        persist_registry.register(Arc::clone(&counter) as Arc<dyn super::persistable::Persistable>);
+
         let index_manager =
             IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
         let sorted_indexes = SortedIndexManager::new(Arc::clone(&info_store)).await?;
@@ -162,6 +176,7 @@ impl TableManager {
             info_store: Arc::clone(&info_store),
             interner,
             counter,
+            persist_registry,
             index_manager,
             sorted_indexes,
             wal,
@@ -258,12 +273,17 @@ impl TableManager {
             futures::executor::block_on(SortedIndexManager::new(info_store.clone()))
                 .expect("sorted index manager init for test");
         let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
+        let mut persist_registry = PersistRegistry::new();
+        persist_registry
+            .register(Arc::new(interner.clone()) as Arc<dyn super::persistable::Persistable>);
+        persist_registry.register(Arc::clone(&counter) as Arc<dyn super::persistable::Persistable>);
         Self {
             name,
             table: Arc::new(table),
             info_store,
             interner,
             counter,
+            persist_registry,
             index_manager,
             sorted_indexes,
             wal,
@@ -610,6 +630,16 @@ impl TableManager {
     /// fast-path for `COUNT(*)` without filter (Opt #2).
     pub fn counter(&self) -> &Arc<RecordCounter> {
         &self.counter
+    }
+
+    /// Flush all metadata blobs (interner + counter) in one call.
+    ///
+    /// Replaces the repeated `self.interner().persist().await?` /
+    /// `self.counter().persist().await?` pairs that used to appear after
+    /// every write operation. Items that are not dirty short-circuit
+    /// immediately; only genuinely changed blobs pay the I/O cost.
+    pub async fn flush_metadata(&self) -> DbResult<()> {
+        self.persist_registry.flush_all().await
     }
 
     #[cfg(test)]

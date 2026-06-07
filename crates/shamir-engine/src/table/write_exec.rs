@@ -245,8 +245,7 @@ impl TableManager {
         }
 
         // Persist any newly interned keys.
-        self.interner().persist().await?;
-        self.counter().persist().await?;
+        self.flush_metadata().await?;
 
         // Changefeed: emit one Put per inserted record. The event carries
         // the same MVCC version the data was written at (batch_version).
@@ -480,8 +479,7 @@ impl TableManager {
 
         // Persist any newly interned keys (set fields may have new keys)
         if affected > 0 {
-            self.interner().persist().await?;
-            self.counter().persist().await?;
+            self.flush_metadata().await?;
         }
 
         // Changefeed: emit one Put per changed record. The event carries
@@ -703,7 +701,7 @@ impl TableManager {
 
         // Flush the counter cache (delete decremented it).
         if affected > 0 {
-            self.counter().persist().await?;
+            self.flush_metadata().await?;
         }
 
         // Changefeed: emit one Delete per removed record. The event carries
@@ -891,8 +889,7 @@ impl TableManager {
         result_obj.insert("_created".to_string(), json::Value::Bool(created));
 
         // Persist any newly interned keys
-        self.interner().persist().await?;
-        self.counter().persist().await?;
+        self.flush_metadata().await?;
 
         // Changefeed: emit the single Put. The event carries the MVCC
         // version the data was written at (best-effort, non-blocking).

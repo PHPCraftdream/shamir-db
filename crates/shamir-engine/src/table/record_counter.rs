@@ -11,7 +11,10 @@
 //! persist call the engine already makes (and is itself a no-op when
 //! nothing changed).
 
+use async_trait::async_trait;
+
 use crate::meta::MetaKey;
+use crate::table::persistable::Persistable;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
 use shamir_types::codecs::basic::bincode;
@@ -179,7 +182,18 @@ impl RecordCounter {
             .await;
         Ok(self.cache.get().unwrap())
     }
+}
 
+#[async_trait]
+impl Persistable for RecordCounter {
+    async fn persist(&self) -> DbResult<()> {
+        // Delegates to the inherent method; the trait just provides a
+        // uniform flushing surface for `PersistRegistry`.
+        RecordCounter::persist(self).await
+    }
+}
+
+impl RecordCounter {
     async fn write_through(&self, count: u64) -> DbResult<()> {
         let key_bytes = count_key().to_bytes();
         let bytes = bincode::to_bytes(&count)
