@@ -2035,6 +2035,12 @@ impl TableManager {
             return;
         }
 
+        // No Serializable tx watching → nothing can observe this footprint;
+        // skip the record entirely (honours Snapshot/level-1 "no overhead").
+        if cf.gate.active_serializable_count() == 0 {
+            return;
+        }
+
         let table_token = self.table_token();
         let mut footprint = shamir_tx::TableWriteFootprint {
             touched: true,

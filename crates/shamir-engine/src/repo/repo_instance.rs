@@ -414,7 +414,14 @@ impl RepoInstance {
     ) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
         self.tx_metrics.on_tx_start();
         let gate = self.tx_gate().await?;
-        let guard = gate.open_snapshot().await;
+        // Open the snapshot BEFORE constructing TxContext so that any
+        // concurrent non-tx write sees active_serializable_count > 0 for
+        // the full lifetime of this tx's predicate window.
+        let guard = if isolation == shamir_tx::IsolationLevel::Serializable {
+            gate.open_snapshot_serializable().await
+        } else {
+            gate.open_snapshot().await
+        };
         let snapshot_version = guard.version();
         let tx_id = gate.fresh_tx_id();
         let mut tx =
