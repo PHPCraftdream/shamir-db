@@ -194,8 +194,10 @@ pub async fn handle_connection<F>(
     }
 
     // Per-connection scratch buffers (Optim #1 / Optim #7 zero-alloc loop).
-    let mut frame_buf: Vec<u8> = Vec::with_capacity(4096);
-    let mut write_scratch: Vec<u8> = Vec::with_capacity(4096);
+    let mut frame_buf: Vec<u8> =
+        Vec::with_capacity(shamir_tunables::instance_defaults::IO_FRAME_BUFFER_CAP);
+    let mut write_scratch: Vec<u8> =
+        Vec::with_capacity(shamir_tunables::instance_defaults::IO_FRAME_BUFFER_CAP);
 
     // Latency padding starts here — covers the entire auth flow so
     // negative paths can't be timed (spec §8.5).
