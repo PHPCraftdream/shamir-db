@@ -8,6 +8,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::codecs::basic::bincode;
 use shamir_types::core::interner::{Interner, InternerKey, UserKey};
 use shamir_types::types::record_id::RecordId;
@@ -161,7 +162,7 @@ impl InternerManager {
                 //    zero-padded decimal index ensures
                 //    lexicographic order == numeric order.
                 let prefix = chunk_scan_prefix();
-                let mut stream = info_store.scan_prefix_stream(prefix, 256);
+                let mut stream = info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
                 let mut chunk_count: usize = 0;
                 while let Some(batch_res) = stream.next().await {
                     match batch_res {

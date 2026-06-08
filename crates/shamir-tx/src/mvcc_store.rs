@@ -14,6 +14,7 @@
 //! read the log at `key‖0xFF‖version`; otherwise range-scan the log for the
 //! newest version ≤ snapshot (see [`MvccStore::resolve_read`]).
 
+use shamir_tunables::store_defaults::{HISTORY_SCAN_BATCH, MAINT_SCAN_BATCH};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -388,7 +389,7 @@ impl MvccStore {
             p.put_u8(crate::version_codec::VERSION_SEP);
             p.freeze()
         };
-        let stream = self.history.scan_prefix_stream(prefix, 256);
+        let stream = self.history.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         // Collect (version, physical_key) for all history entries of this key.
@@ -1119,7 +1120,7 @@ impl MvccStore {
 
         // Phase 1: scan all history entries, group by original key.
         // ts-keys are skipped: decode_version_key returns None for them.
-        let stream = self.history.iter_stream(256);
+        let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         // Collect: original_key → Vec<(version, physical_key)>
@@ -1205,7 +1206,7 @@ impl MvccStore {
         // Phase 1: scan all history version entries, group by key.
         // ts-keys ([TS_TAG][v_be], 9 bytes) are skipped: decode_version_key
         // returns None for them (separator 0x00 != VERSION_SEP).
-        let stream = self.history.iter_stream(256);
+        let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         let mut per_key: std::collections::HashMap<Vec<u8>, Vec<(u64, Bytes)>> =
@@ -1335,7 +1336,9 @@ impl MvccStore {
     async fn scan_history_for_version(&self, key: &[u8], snapshot: u64) -> DbResult<Option<Bytes>> {
         let lo = encode_version_key(key, 0);
         let hi = encode_version_key(key, snapshot);
-        let stream = self.history.iter_range_stream(Some(lo), Some(hi), 64);
+        let stream = self
+            .history
+            .iter_range_stream(Some(lo), Some(hi), HISTORY_SCAN_BATCH);
         futures::pin_mut!(stream);
         let mut latest: Option<Bytes> = None;
         while let Some(batch) = stream.next().await {
@@ -1358,7 +1361,9 @@ impl MvccStore {
         let lo = encode_version_key(key, 0);
         // Use u64::MAX to cover all possible versions.
         let hi = encode_version_key(key, u64::MAX);
-        let stream = self.history.iter_range_stream(Some(lo), Some(hi), 64);
+        let stream = self
+            .history
+            .iter_range_stream(Some(lo), Some(hi), HISTORY_SCAN_BATCH);
         futures::pin_mut!(stream);
         let mut max_v: Option<u64> = None;
         while let Some(batch) = stream.next().await {
@@ -1396,7 +1401,7 @@ impl MvccStore {
     pub async fn version_at_or_before_ts(&self, ts_millis: u64) -> Option<u64> {
         use futures::StreamExt;
 
-        let stream = self.history.iter_stream(256);
+        let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         let mut best: Option<u64> = None;
@@ -1468,7 +1473,9 @@ impl MvccStore {
         // every version. ts-keys live in the separate `[TS_TAG]` namespace
         // and cannot collide (see the module-level comment above).
         let lo = encode_version_key(key, 0);
-        let stream = self.history.iter_range_stream(Some(lo), None, 64);
+        let stream = self
+            .history
+            .iter_range_stream(Some(lo), None, HISTORY_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         // Collect (version, value) for every archived entry.

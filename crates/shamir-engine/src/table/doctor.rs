@@ -24,6 +24,7 @@ use std::time::Instant;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::DbResult;
+use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 
 use crate::index::index_definition::IndexDefinition;
 use crate::index::index_manager::IndexManager;
@@ -97,7 +98,7 @@ impl TableManager {
         let mut expected_unique = vec![0u64; unique_defs.len()];
         let mut expected_sorted = vec![0u64; sorted_defs.len()];
 
-        let stream = self.list_stream(1000);
+        let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             for (_id, value) in batch? {
@@ -222,7 +223,7 @@ impl TableManager {
             self.sorted_indexes().register(def.clone()).await?;
         }
         if !sorted_defs.is_empty() {
-            let stream = self.list_stream(1000);
+            let stream = self.list_stream(FULL_SCAN_BATCH);
             futures::pin_mut!(stream);
             while let Some(batch) = stream.next().await {
                 let pairs = batch?;
@@ -236,7 +237,7 @@ impl TableManager {
 
         // Recount counter from the data store.
         let mut counter_after: u64 = 0;
-        let stream = self.list_stream(1000);
+        let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             counter_after += batch?.len() as u64;
@@ -408,7 +409,7 @@ impl TableManager {
         // to `counter.increment`.
         let mut count: u64 = 0;
         use futures::StreamExt;
-        let stream = self.list_stream(1000);
+        let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             count += batch?.len() as u64;

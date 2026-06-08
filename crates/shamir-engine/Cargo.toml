@@ -17,6 +17,7 @@ shamir-query-types = { path = "../shamir-query-types" }
 # Built-in scalar + aggregate function library. Dispatched from the
 # filter / set / group-by paths via the engine's shared registries.
 shamir-funclib = { path = "../shamir-funclib" }
+shamir-tunables = { path = "../shamir-tunables" }
 shamir-wal = { path = "../shamir-wal" }
 shamir-tx = { path = "../shamir-tx" }
 

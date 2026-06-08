@@ -24,6 +24,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, Store};
+use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -329,7 +330,7 @@ impl IndexManager {
 
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_index_from_records.
-        let mut stream = self.data_store.iter_stream(1000);
+        let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
         let mut records: Vec<(RecordId, InnerValue)> = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
@@ -417,7 +418,10 @@ impl IndexManager {
         let prefix = IndexRecordKey::new(false, name_interned).to_prefix_bytes();
         use futures::StreamExt;
         let mut to_remove: Vec<Bytes> = Vec::new();
-        let mut stream = self.info_store.scan_prefix_stream(prefix.clone(), 1000);
+        // tunables: prefix scan currently uses FULL_SCAN_BATCH(1000); profile is arguably MAINT(256) — revisit under /opti.
+        let mut stream = self
+            .info_store
+            .scan_prefix_stream(prefix.clone(), FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
             for (key, _) in batch_result? {
                 to_remove.push(key);
@@ -897,6 +901,7 @@ impl IndexManager {
 
         // Scan the 25-byte index prefix; every match is a posting
         // entry whose final 16 bytes are the record_id.
+        // tunables: one-off prefix-scan batch (512); fold into a named knob under /opti.
         let mut record_ids: BTreeSet<RecordId> = BTreeSet::new();
         let mut stream = self.info_store.scan_prefix_stream(index_key.clone(), 512);
         while let Some(batch) = stream.next().await {
@@ -1261,7 +1266,7 @@ impl IndexManager {
 
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_unique_index_from_records.
-        let mut stream = self.data_store.iter_stream(1000);
+        let mut stream = self.data_store.iter_stream(FULL_SCAN_BATCH);
         let mut records: Vec<(RecordId, InnerValue)> = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
@@ -1387,7 +1392,8 @@ impl IndexManager {
         let prefix = IndexRecordKey::new(true, name_interned).to_prefix_bytes();
         use futures::StreamExt;
         let mut to_remove: Vec<Bytes> = Vec::new();
-        let mut stream = self.info_store.scan_prefix_stream(prefix, 1000);
+        // tunables: prefix scan currently uses FULL_SCAN_BATCH(1000); profile is arguably MAINT(256) — revisit under /opti.
+        let mut stream = self.info_store.scan_prefix_stream(prefix, FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
             for (key, _) in batch_result? {
                 to_remove.push(key);
