@@ -2103,6 +2103,13 @@ impl TableManager {
         self.mvcc_store.as_ref()
     }
 
+    /// Public accessor for the attached MvccStore (the version-log handle).
+    /// Used by the migration coordinator (Q1) to read the source snapshot
+    /// through the log seam (`current_stream`) instead of the raw data_store.
+    pub fn mvcc_store(&self) -> Option<Arc<shamir_tx::MvccStore>> {
+        self.mvcc_store_ref().cloned()
+    }
+
     /// Wire this table's non-tx write path to the per-repo changefeed AND
     /// the SSI commit-write log.
     ///

@@ -80,6 +80,13 @@ pub struct MigrationCoordinator {
     shadow_log: Arc<MigrationShadowLog>,
     src_data: Arc<dyn Store>,
     dst_data: Arc<dyn Store>,
+    /// Optional handle to the source table's MvccStore (version-log seam).
+    /// When present, `run_snapshot` reads the snapshot via `current_stream`
+    /// (the log seam) instead of the raw `src_data` store.  This ensures the
+    /// snapshot remains correct after `main`-store dual-writes are removed.
+    /// `None` preserves the raw-store fallback path used by unit tests that
+    /// construct the coordinator with plain in-memory stores.
+    src_mvcc: Option<Arc<shamir_tx::MvccStore>>,
 }
 
 impl MigrationCoordinator {
@@ -101,12 +108,14 @@ impl MigrationCoordinator {
         shadow_log: Arc<MigrationShadowLog>,
         src_data: Arc<dyn Store>,
         dst_data: Arc<dyn Store>,
+        src_mvcc: Option<Arc<shamir_tx::MvccStore>>,
     ) -> Self {
         Self {
             state: Mutex::new(state),
             shadow_log,
             src_data,
             dst_data,
+            src_mvcc,
         }
     }
 
@@ -139,17 +148,37 @@ impl MigrationCoordinator {
             s.phase = MigrationPhase::Snapshotting;
         }
 
-        let mut stream = self.src_data.iter_stream(256);
         let mut copied = 0u64;
-        while let Some(batch) = stream.next().await {
-            let records = batch?;
-            if records.is_empty() {
-                break;
+        if let Some(mvcc) = &self.src_mvcc {
+            // Read the snapshot through the MVCC log seam (current_stream).
+            // Suppresses tombstones and yields the current value per key —
+            // behaviour-equivalent to reading the source's current data_store
+            // while main is still dual-written.
+            let mut stream = mvcc.current_stream(256);
+            while let Some(batch) = stream.next().await {
+                let records = batch?;
+                if records.is_empty() {
+                    break;
+                }
+                let items: Vec<(RecordKey, Bytes)> = records.into_iter().collect();
+                let count = items.len() as u64;
+                self.dst_data.set_many(items).await?;
+                copied += count;
             }
-            let items: Vec<(RecordKey, Bytes)> = records.into_iter().collect();
-            let count = items.len() as u64;
-            self.dst_data.set_many(items).await?;
-            copied += count;
+        } else {
+            // Fallback: read from the raw data_store (used by unit tests that
+            // construct the coordinator with plain in-memory stores).
+            let mut stream = self.src_data.iter_stream(256);
+            while let Some(batch) = stream.next().await {
+                let records = batch?;
+                if records.is_empty() {
+                    break;
+                }
+                let items: Vec<(RecordKey, Bytes)> = records.into_iter().collect();
+                let count = items.len() as u64;
+                self.dst_data.set_many(items).await?;
+                copied += count;
+            }
         }
 
         {
@@ -339,7 +368,8 @@ mod tests {
             "redb".into(),
             None,
         );
-        let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone());
+        let coord =
+            MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone(), None);
 
         assert_eq!(coord.phase().await, MigrationPhase::ShadowStarted);
 
@@ -395,7 +425,7 @@ mod tests {
             "redb".into(),
             None,
         );
-        let coord = MigrationCoordinator::new(state, shadow.clone(), src, dst);
+        let coord = MigrationCoordinator::new(state, shadow.clone(), src, dst, None);
 
         coord.run_snapshot().await.unwrap();
         coord.rollback().await.unwrap();
@@ -416,7 +446,7 @@ mod tests {
             "redb".into(),
             None,
         );
-        let coord = MigrationCoordinator::new(state, shadow, src, dst);
+        let coord = MigrationCoordinator::new(state, shadow, src, dst, None);
 
         coord.run_snapshot().await.unwrap();
         coord.mark_cutover_ready().await.unwrap();
@@ -439,7 +469,7 @@ mod tests {
             "redb".into(),
             None,
         );
-        let coord = MigrationCoordinator::new(state, shadow, src, dst);
+        let coord = MigrationCoordinator::new(state, shadow, src, dst, None);
 
         // Can't drain before snapshot
         assert!(coord.drain_shadow_log().await.is_err());
@@ -463,7 +493,8 @@ mod tests {
             "redb".into(),
             None,
         );
-        let coord = MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone());
+        let coord =
+            MigrationCoordinator::new(state, shadow.clone(), src.clone(), dst.clone(), None);
 
         coord.run_snapshot().await.unwrap();
 
