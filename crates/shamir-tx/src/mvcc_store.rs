@@ -30,7 +30,7 @@ use shamir_storage::types::KvOp;
 use shamir_storage::types::Store;
 
 use crate::repo_tx_gate::RepoTxGate;
-use crate::version_codec::encode_version_key;
+use crate::version_codec::{decode_version_key, encode_version_key};
 
 // ============================================================================
 // T1c — per-version commit timestamp namespace.
@@ -535,18 +535,20 @@ impl MvccStore {
     }
 
     /// Resolve a versioned read of `key` visible at `snapshot_version`, given
-    /// its current cached version `cur_v`. Fast path (`cur_v <= snapshot`):
-    /// read `main`; slow path: range-scan `history` for the newest version
-    /// `<= snapshot`. Behaviour-identical to the inline routing in `get_at`.
+    /// its current cached version `cur_v`. Fast path (`cur_v > 0 && cur_v <= snapshot`):
+    /// read `history` at `encode_version_key(key, cur_v)`; slow path: range-scan
+    /// `history` for the newest version `<= snapshot`. C2: reads exclusively from
+    /// the log (no `main` read).
     async fn resolve_read(
         &self,
         key: &[u8],
         snapshot_version: u64,
         cur_v: u64,
     ) -> DbResult<Option<Bytes>> {
-        if cur_v <= snapshot_version {
-            return match self.main.get(Bytes::copy_from_slice(key)).await {
-                Ok(v) => Ok(Some(v)),
+        if cur_v > 0 && cur_v <= snapshot_version {
+            return match self.history.get(encode_version_key(key, cur_v)).await {
+                Ok(val) if val.is_empty() => Ok(None),
+                Ok(val) => Ok(Some(val)),
                 Err(DbError::NotFound(_)) => Ok(None),
                 Err(e) => Err(e),
             };
@@ -739,29 +741,78 @@ impl MvccStore {
         &self.history
     }
 
-    /// P1 (pre-refactor seam — "MVCC owns current state"): read the CURRENT
-    /// value of `key`, or `None` if the key is absent. Behaviour-identical to
-    /// today's `main.get` (the current-value cache): `NotFound` → `None`, every
-    /// other backend error propagates. This NAMES the seam through which all
-    /// current-state reads will flow; a later collapse-main slice reimplements
-    /// the body over the single version-log WITHOUT changing any caller.
+    /// C2: flip get_current to the single version log. Returns `None` for
+    /// tombstones (empty value) and absent keys. Cold-start: when the cell is
+    /// absent (`current_version == 0`), scans the log for the latest version
+    /// via `seek_latest_version`.
     pub async fn get_current(&self, key: Bytes) -> DbResult<Option<Bytes>> {
-        match self.main.get(key).await {
-            Ok(v) => Ok(Some(v)),
+        let cur_v = self.current_version(&key);
+        let v = if cur_v > 0 {
+            cur_v
+        } else {
+            match self.seek_latest_version(&key).await? {
+                Some(v) => {
+                    self.seed_version(key.clone(), v).await;
+                    v
+                }
+                None => return Ok(None),
+            }
+        };
+        match self.history.get(encode_version_key(&key, v)).await {
+            Ok(val) if val.is_empty() => Ok(None),
+            Ok(val) => Ok(Some(val)),
             Err(DbError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
         }
     }
 
-    /// P1 seam: stream every CURRENT `(key, value)` pair in batches of `batch`.
-    /// Behaviour-identical to `main.iter_stream(batch)` today. The raw
-    /// `(Bytes, Bytes)` shape mirrors `Store::iter_stream` so existing decode
-    /// loops are unchanged. Reimplemented over the single log by collapse-main.
+    /// C2: stream every CURRENT `(key, value)` pair from the single version
+    /// log. The log is key-major, version-ascending; a streaming group-by tracks
+    /// the last (highest) version per key — that is the current. Tombstones
+    /// (empty value) are suppressed. Emits in batches of `batch`.
     pub fn current_stream(
         &self,
         batch: usize,
     ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
-        self.main.iter_stream(batch)
+        use futures::stream::unfold;
+
+        let history = Arc::clone(&self.history);
+        // Box::pin so the returned stream is `Unpin` — callers (e.g.
+        // `TableManager::list_stream`) consume it via `.next()` without
+        // pinning, matching the P1 `Pin<Box<dyn Stream>>` contract. A raw
+        // `Unfold` over an async closure is NOT `Unpin`.
+        Box::pin(unfold(
+            StreamingGroupByState::Start {
+                history,
+                batch_size: batch,
+            },
+            |state| async move {
+                match state {
+                    StreamingGroupByState::Start {
+                        history,
+                        batch_size,
+                    } => {
+                        let stream = history.iter_stream(batch_size);
+                        let pin = Box::pin(stream);
+                        let s = StreamingGroupByState::Streaming {
+                            stream: pin,
+                            batch_size,
+                            cur_key: None,
+                            last_val: None,
+                            out_batch: Vec::new(),
+                        };
+                        s.drain_and_emit().await
+                    }
+                    // C2 fix: a Streaming state returned by a prior
+                    // drain_and_emit (when out_batch filled to batch_size, or
+                    // on a stream error) must CONTINUE draining — not panic.
+                    // The previous `unreachable!()` paniced on the second pull
+                    // whenever the current-key set exceeded one batch.
+                    s @ StreamingGroupByState::Streaming { .. } => s.drain_and_emit().await,
+                    StreamingGroupByState::Done => None,
+                }
+            },
+        ))
     }
 
     /// Look up the latest committed version for `key` in the in-memory cache.
@@ -1343,6 +1394,7 @@ impl MvccStore {
     }
 
     /// Slow path: range scan history for the latest version ≤ `snapshot`.
+    /// C2: if the latest value is a tombstone (empty), returns `None`.
     async fn scan_history_for_version(&self, key: &[u8], snapshot: u64) -> DbResult<Option<Bytes>> {
         let lo = encode_version_key(key, 0);
         let hi = encode_version_key(key, snapshot);
@@ -1354,7 +1406,37 @@ impl MvccStore {
                 latest = Some(val);
             }
         }
-        Ok(latest)
+        match latest {
+            Some(val) if val.is_empty() => Ok(None),
+            other => Ok(other),
+        }
+    }
+
+    /// C2: cold-start helper for when the cell is absent after restart.
+    /// Reverse/scan the log for the largest version of `key`.
+    /// Range `[encode_version_key(key,0) .. encode_version_key(key,u64::MAX)]`,
+    /// decode each entry, filter `orig == key`, take the MAX version.
+    /// Returns `None` if the key was never written. Read-only.
+    async fn seek_latest_version(&self, key: &[u8]) -> DbResult<Option<u64>> {
+        let lo = encode_version_key(key, 0);
+        // Use u64::MAX to cover all possible versions.
+        let hi = encode_version_key(key, u64::MAX);
+        let stream = self.history.iter_range_stream(Some(lo), Some(hi), 64);
+        futures::pin_mut!(stream);
+        let mut max_v: Option<u64> = None;
+        while let Some(batch) = stream.next().await {
+            for (phys_key, _) in batch? {
+                if let Some((orig, v)) = decode_version_key(&phys_key) {
+                    if orig == key {
+                        max_v = Some(match max_v {
+                            None => v,
+                            Some(prev) => prev.max(v),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(max_v)
     }
 
     /// T4-asof: resolve a wall-clock timestamp to the largest committed
@@ -1498,6 +1580,112 @@ impl MvccStore {
             });
         }
         Ok(out)
+    }
+}
+
+/// One `current_stream` output batch (raw `(key, value)` pairs).
+type LogBatch = DbResult<Vec<(Bytes, Bytes)>>;
+/// A boxed, `Unpin`, `Send` stream of log batches — the inner stream the
+/// group-by drains.
+type BoxedLogStream = std::pin::Pin<Box<dyn futures::Stream<Item = LogBatch> + Send>>;
+
+/// C2 streaming group-by state for `current_stream`. The log is key-major,
+/// version-ascending; this state tracks the last (highest) version per key
+/// and emits the current value once all versions of a key have been seen.
+enum StreamingGroupByState {
+    Start {
+        history: Arc<dyn Store>,
+        batch_size: usize,
+    },
+    Streaming {
+        stream: BoxedLogStream,
+        batch_size: usize,
+        /// `(original_key_bytes, last_value)` — the group being accumulated.
+        cur_key: Option<Bytes>,
+        last_val: Option<Bytes>,
+        /// Output batch being built.
+        out_batch: Vec<(Bytes, Bytes)>,
+    },
+    Done,
+}
+
+impl StreamingGroupByState {
+    /// Drain log batches through the group-by, emitting whenever the
+    /// output batch reaches `batch_size` or the stream ends.
+    /// Returns `Option<(Item, NextState)>` for `futures::stream::unfold`.
+    async fn drain_and_emit(self) -> Option<(Result<Vec<(Bytes, Bytes)>, DbError>, Self)> {
+        // Pull the streaming fields out; re-pack on return.
+        let (stream, batch_size, mut cur_key, mut last_val, mut out_batch) = match self {
+            StreamingGroupByState::Streaming {
+                stream,
+                batch_size,
+                cur_key,
+                last_val,
+                out_batch,
+            } => (stream, batch_size, cur_key, last_val, out_batch),
+            _ => return None,
+        };
+        let mut stream = stream;
+        loop {
+            match stream.next().await {
+                Some(Ok(batch)) => {
+                    for (phys_key, val) in batch {
+                        if let Some((orig, _v)) = decode_version_key(&phys_key) {
+                            let orig_bytes = Bytes::copy_from_slice(orig);
+                            if cur_key.as_deref() != Some(orig) {
+                                // Flush previous group.
+                                if let (Some(ck), Some(lv)) = (cur_key.take(), last_val.take()) {
+                                    if !lv.is_empty() {
+                                        out_batch.push((ck, lv));
+                                    }
+                                }
+                                cur_key = Some(orig_bytes);
+                            }
+                            last_val = Some(val);
+                        }
+                        // ts-keys and non-version keys are silently skipped.
+                    }
+                    if out_batch.len() >= batch_size {
+                        let emit = std::mem::take(&mut out_batch);
+                        return Some((
+                            Ok(emit),
+                            StreamingGroupByState::Streaming {
+                                stream,
+                                batch_size,
+                                cur_key,
+                                last_val,
+                                out_batch,
+                            },
+                        ));
+                    }
+                }
+                Some(Err(e)) => {
+                    return Some((
+                        Err(e),
+                        StreamingGroupByState::Streaming {
+                            stream,
+                            batch_size,
+                            cur_key,
+                            last_val,
+                            out_batch,
+                        },
+                    ))
+                }
+                None => {
+                    // Stream ended — flush final group.
+                    if let (Some(ck), Some(lv)) = (cur_key.take(), last_val.take()) {
+                        if !lv.is_empty() {
+                            out_batch.push((ck, lv));
+                        }
+                    }
+                    if out_batch.is_empty() {
+                        return None;
+                    }
+                    let emit: Vec<_> = out_batch;
+                    return Some((Ok(emit), StreamingGroupByState::Done));
+                }
+            }
+        }
     }
 }
 
@@ -4079,6 +4267,187 @@ mod tests {
             tombstone,
             Bytes::new(),
             "C1: delete tombstone must survive vacuum"
+        );
+    }
+
+    // ================================================================
+    // C2 — reads resolve from the single LOG, not `main`.
+    // ================================================================
+
+    /// C2: `get_current` reads the log, not `main`. Clearing `main` after a
+    /// write must NOT change what `get_current` returns.
+    #[tokio::test]
+    async fn c2_get_current_reads_log_not_main() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("c2_k");
+        let val = Bytes::from("c2_v");
+        mvcc.set_versioned(key.clone(), val.clone()).await.unwrap();
+
+        // Wipe main — if get_current still read main this would break.
+        mvcc.main_store().remove(key.clone()).await.unwrap();
+
+        let got = mvcc.get_current(key.clone()).await.unwrap();
+        assert_eq!(
+            got,
+            Some(val),
+            "C2: get_current must read the log, not main"
+        );
+    }
+
+    /// C2: `current_stream` reads the log, not `main`. It also picks the
+    /// MAX version per key (the current), suppressing older versions.
+    #[tokio::test]
+    async fn c2_current_stream_reads_log_not_main() {
+        use std::collections::BTreeMap;
+
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        // k1 written twice (consecutively) → log holds v1(old) AND v2(current).
+        mvcc.set_versioned(Bytes::from("k1"), Bytes::from("a"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(Bytes::from("k1"), Bytes::from("b"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(Bytes::from("k2"), Bytes::from("c"))
+            .await
+            .unwrap();
+        mvcc.set_versioned(Bytes::from("k3"), Bytes::from("d"))
+            .await
+            .unwrap();
+
+        // Wipe main entirely — current_stream must rebuild from the log.
+        for k in ["k1", "k2", "k3"] {
+            let _ = mvcc.main_store().remove(Bytes::from(k)).await;
+        }
+
+        let mut got: BTreeMap<Vec<u8>, Bytes> = BTreeMap::new();
+        let stream = mvcc.current_stream(64);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, v) in batch.unwrap() {
+                got.insert(k.to_vec(), v);
+            }
+        }
+
+        assert_eq!(got.len(), 3, "C2: exactly 3 current keys");
+        // k1's CURRENT is "b" (the max version), NOT the old "a".
+        assert_eq!(
+            got.get(&b"k1"[..]),
+            Some(&Bytes::from("b")),
+            "C2: max version"
+        );
+        assert_eq!(got.get(&b"k2"[..]), Some(&Bytes::from("c")));
+        assert_eq!(got.get(&b"k3"[..]), Some(&Bytes::from("d")));
+    }
+
+    /// C2: `get_current` of a deleted key returns `None` (reads the tombstone).
+    #[tokio::test]
+    async fn c2_get_current_none_for_tombstone() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("c2_del");
+        mvcc.set_versioned(key.clone(), Bytes::from("v"))
+            .await
+            .unwrap();
+        mvcc.delete_versioned(key.clone()).await.unwrap();
+
+        let got = mvcc.get_current(key).await.unwrap();
+        assert!(got.is_none(), "C2: deleted key → None (tombstone)");
+    }
+
+    /// C2: `get_at` at the delete version → `None`; at a pre-delete snapshot →
+    /// the old value. KeepHistory so the pre-delete version is not vacuumed.
+    #[tokio::test]
+    async fn c2_get_at_tombstone_is_none() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        let key = Bytes::from("c2_asof");
+        let va = mvcc
+            .set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        let vd = mvcc.delete_versioned(key.clone()).await.unwrap();
+
+        // As-of the delete version → deleted (None).
+        let at_delete = mvcc.get_at(&key, vd).await.unwrap();
+        assert!(at_delete.is_none(), "C2: as-of delete version → None");
+
+        // As-of the pre-delete version → the old value.
+        let at_before = mvcc.get_at(&key, va).await.unwrap();
+        assert_eq!(
+            at_before,
+            Some(Bytes::from("v1")),
+            "C2: pre-delete snapshot sees the old value"
+        );
+    }
+
+    /// C2: cold-start — a fresh MvccStore over the SAME log (empty cell cache)
+    /// resolves `get_current` by seeking the latest version in the log.
+    #[tokio::test]
+    async fn c2_cold_start_seek() {
+        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let key = Bytes::from("c2_cold");
+        let val = Bytes::from("cold_val");
+
+        // First store writes the value into the shared log.
+        let mvcc1 = MvccStore::new(
+            Arc::new(InMemoryStore::new()),
+            Arc::clone(&history),
+            make_gate(),
+        );
+        mvcc1.set_versioned(key.clone(), val.clone()).await.unwrap();
+
+        // Second store over the SAME log has an empty cell cache → cur_v == 0
+        // → must seek the latest version from the log.
+        let mvcc2 = MvccStore::new(
+            Arc::new(InMemoryStore::new()),
+            Arc::clone(&history),
+            make_gate(),
+        );
+        assert_eq!(
+            mvcc2.version_of(&key),
+            0,
+            "precondition: cold cell (no cached version)"
+        );
+        let got = mvcc2.get_current(key).await.unwrap();
+        assert_eq!(
+            got,
+            Some(val),
+            "C2: cold-start get_current must seek the log"
+        );
+    }
+
+    /// C2 regression: `current_stream` must NOT panic when the current-key set
+    /// exceeds one batch. The first streaming-group-by implementation paniced
+    /// (`unreachable!()`) on the second pull whenever `out_batch` filled to
+    /// `batch_size` and returned a `Streaming` continuation state.
+    #[tokio::test]
+    async fn c2_current_stream_exceeds_batch_no_panic() {
+        use std::collections::BTreeSet;
+
+        let mvcc = make_mvcc();
+        // 5 distinct current keys, streamed with batch_size = 2 (3 output
+        // batches: 2 + 2 + 1). The buggy code paniced on the 2nd pull.
+        for i in 0..5u32 {
+            mvcc.set_versioned(Bytes::from(format!("bk{i}")), Bytes::from(format!("v{i}")))
+                .await
+                .unwrap();
+        }
+
+        let mut keys: BTreeSet<Vec<u8>> = BTreeSet::new();
+        let stream = mvcc.current_stream(2);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            for (k, _v) in batch.unwrap() {
+                keys.insert(k.to_vec());
+            }
+        }
+        assert_eq!(
+            keys.len(),
+            5,
+            "C2: current_stream must yield all 5 keys across batches without panicking"
         );
     }
 

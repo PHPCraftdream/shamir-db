@@ -121,6 +121,19 @@ async fn recover_v2_inflight_replays_delete_removes_from_data_store() {
     let rid = tbl.insert(&InnerValue::Str("doomed".into())).await.unwrap();
     let _ = tbl.get(rid).await.unwrap();
 
+    // C2: reads resolve from the version log. A committed delete supersedes the
+    // record's prior versions, so its `commit_version` is a monotonic value
+    // ABOVE the insert's — the real commit path stamps it via
+    // `with_commit_version`. The bare `WalEntryV2::new(..)` leaves
+    // `commit_version = 0` (its 2nd arg is `repo_id_interned`, NOT the version),
+    // which would place the recovery tombstone at version 0 — BELOW the insert
+    // (version 1) — so the log's max version would still be the insert and the
+    // delete would not supersede it. Stamp a realistic commit version.
+    let insert_v = tbl
+        .mvcc_store_ref()
+        .expect("mvcc attached")
+        .version_of(rid.to_bytes().as_ref());
+
     let wal = repo.repo_wal().await.unwrap();
     let token = table_token_for("t");
     let entry = WalEntryV2::new(
@@ -130,7 +143,8 @@ async fn recover_v2_inflight_replays_delete_removes_from_data_store() {
             table_id_interned: token,
             rid,
         }],
-    );
+    )
+    .with_commit_version(insert_v + 1);
     wal.begin(entry).await.unwrap();
 
     repo.recover_v2_inflight().await.unwrap();

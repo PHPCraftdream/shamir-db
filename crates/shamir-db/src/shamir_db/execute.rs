@@ -1344,6 +1344,19 @@ impl AdminExecutor for ShamirAdminExecutor {
                     .get_table(&state.dst_repo, &state.table_name)
                     .await
                     .map_err(|e| err(e.to_string()))?;
+
+                // C2 (collapse-main bridge): the migration coordinator copies
+                // records straight into the dst `data_store` (raw, bypassing the
+                // version log). Reads now resolve from the log, so seed the dst
+                // log from `data_store` here so migrated records become current
+                // versions in the log (visible to reads AND to the log-backed
+                // `bulk_populate_index2` seam). The coordinator will write the log
+                // directly in a later slice (C5); this bridges it at cutover.
+                dst_table
+                    .seed_log_from_data_store()
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+
                 dst_table
                     .bulk_populate_index2()
                     .await

@@ -2710,6 +2710,32 @@ impl TableManager {
         Ok(())
     }
 
+    /// C2 (collapse-main bridge): seed the version log from this table's raw
+    /// `data_store`. A migration cutover copies records straight into
+    /// `data_store` (the coordinator's `final_drain_and_commit` writes
+    /// data_store only, bypassing the version log). Reads now resolve from the
+    /// log, so this pushes every record through `set_versioned_many` to make it
+    /// a current version in the log (+ cell). No-op when no `MvccStore` is
+    /// attached (system/test tables). The migration coordinator will write the
+    /// log directly in a later slice (C5); this bridges it at cutover. Call it
+    /// after `final_drain_and_commit` and before `bulk_populate_index2` (which
+    /// streams via the log-backed seam).
+    pub async fn seed_log_from_data_store(&self) -> DbResult<()> {
+        let Some(mvcc) = self.mvcc_store_ref() else {
+            return Ok(());
+        };
+        use futures::StreamExt;
+        let stream = self.table.data_store().iter_stream(256);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            let items = batch?;
+            if !items.is_empty() {
+                mvcc.set_versioned_many(items).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Bulk-populate all index2 backends by streaming records from this
     /// TableManager's data_store and calling `plan_insert + apply_index_ops`
     /// for each record on every registered backend.
