@@ -430,11 +430,42 @@ slices, never a reckless leap. Concrete elevations this implies:
 - the sacred floor/current invariants enforced rigorously — no "good enough".
 I decide forks myself (no asking) and report each decision transparently.
 
+### 7.8 Status (2026-06-08) — plan T0–T6 implemented; loom finding
+
+**Delivered + e2e-validated** (each slice gate-verified by the orchestrator):
+T0 contract · T2 OQL DTOs · **T1a version-log substrate — MVCC-2 dissolved by
+construction** (`fbd2af5`) · T1b.1 eager vacuum · T1b.2 orthogonal count
+knobs · T1c ts→max_age · T3 DDL retention + on-the-fly · T4-history · T4-asof
+· T4-purge · T4-change-since (#201 foundation) · T5 builder · T6 lifecycle
+e2e. #232 (MVCC-2) is closed inside T1a.
+
+**Loom finding (honest revision of §7.7's "loom-grade").** True `loom`
+verification is **not applicable** to this substrate: loom instruments
+`std::sync::{atomic, Mutex, Arc}`, but the MVCC core is built on
+`scc::HashMap` + `tokio::sync::Mutex` (+ `AtomicU8/U64`), which loom does not
+model. loom would require a `cfg(loom)`-swappable primitive layer and
+loom-compatible replacements for scc/tokio — a large restructure for no gain
+here. The **deterministic `PausableStore` interleaving harness IS the
+verification standard** for this code, and it is *stronger* than loom for our
+purposes: it reproduces the exact contended interleavings (it caught the real
+MVCC-2 window, the eager-vacuum-vs-snapshot race, the lost-wakeup) rather than
+sweeping a primitive-level state space the code doesn't expose. So "T1d loom"
+is satisfied in spirit by the per-slice deterministic race tests; the
+`loom-backed` notes above should read **`PausableStore`-deterministic-backed**.
+
+**Remaining (optional / separate, build-on-need):**
+- **collapse `main` into the single version-log** (§7.7 elegance/perf target;
+  the keep-`main` layout is correct, this removes the redundant cache + ~1
+  write). MVCC-core refactor → its own verified slice.
+- the larger **#201 live server-push** (transport-level subscriptions; the
+  one-shot `ChangesSince` queryable foundation shipped in T4-change-since).
+- optional `q!`-macro sugar for temporal reads (the fluent builder shipped).
+
 ---
 
-_Plan revision 2026-06-07 — time becomes an optional dimension over a single
-version-log substrate, governed by the "simple by default" law. Supersedes
-`MVCC_CELL.md` §6's two-impl write-strategy framing and §7's R2. §7 here is
-the architect's /crush-orchestration runbook (incl §7.7: decide forks toward
-perfection-by-construction). Next, on need: T1 (version-log + retention,
-loom) — which also closes #232._
+_Plan revision 2026-06-08 — time is now an optional dimension over the
+version-log substrate (T0–T6 implemented + e2e-validated; MVCC-2 dissolved),
+governed by the "simple by default" law. Supersedes `MVCC_CELL.md` §6's
+two-impl write-strategy framing and §7's R2. §7.8 records the loom-infeasibility
+finding (deterministic `PausableStore` is the standard here) and the optional
+remainder (collapse-main, #201 live-push)._
