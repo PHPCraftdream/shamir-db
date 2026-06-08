@@ -3,7 +3,8 @@
 
 use serde_json::json;
 
-use crate::admin::{PurgeHistoryOp, PurgeScope, Retention};
+use crate::admin::{ChangesSinceOp, PurgeHistoryOp, PurgeScope, Retention};
+use crate::batch::BatchOp;
 
 // ---------------------------------------------------------------------------
 // Retention — serde + helpers
@@ -216,4 +217,95 @@ fn purge_history_op_repo_defaults_to_main() {
     assert_eq!(op.purge_history, "events");
     assert_eq!(op.repo, "main");
     assert_eq!(op.scope, PurgeScope::OlderThanAge { age_secs: 3600 });
+}
+
+// ---------------------------------------------------------------------------
+// ChangesSinceOp — serde + BatchOp dispatch (T4-changes-since)
+// ---------------------------------------------------------------------------
+
+/// `ChangesSinceOp` round-trips with an explicit repo and limit.
+#[test]
+fn changes_since_op_round_trip() {
+    let op = ChangesSinceOp {
+        changes_since: 42,
+        repo: "main".to_string(),
+        limit: Some(500),
+    };
+    let json_val = serde_json::to_value(&op).expect("serialize");
+    assert_eq!(
+        json_val,
+        json!({
+            "changes_since": 42,
+            "repo": "main",
+            "limit": 500
+        })
+    );
+
+    let back: ChangesSinceOp = serde_json::from_value(json_val).expect("deserialize");
+    assert_eq!(back, op);
+}
+
+/// `ChangesSinceOp` omits `limit` when `None` and defaults `repo` to `"main"`.
+#[test]
+fn changes_since_op_defaults_repo_and_omits_limit() {
+    let op = ChangesSinceOp {
+        changes_since: 7,
+        repo: "main".to_string(),
+        limit: None,
+    };
+    let json_val = serde_json::to_value(&op).expect("serialize");
+    // `limit` is skipped; `repo` is present (default_fn only affects decode).
+    assert_eq!(json_val["changes_since"], json!(7));
+    assert_eq!(json_val["repo"], json!("main"));
+    assert!(json_val.get("limit").is_none(), "limit must be omitted");
+
+    // JSON without `repo` deserializes with repo == "main".
+    let minimal = json!({ "changes_since": 7 });
+    let back: ChangesSinceOp = serde_json::from_value(minimal).expect("deserialize");
+    assert_eq!(back.repo, "main");
+    assert_eq!(back.limit, None);
+    assert_eq!(back.changes_since, 7);
+}
+
+/// JSON with a `changes_since` key deserializes to `BatchOp::ChangesSince`.
+#[test]
+fn batch_op_dispatch_changes_since() {
+    let j = json!({
+        "changes_since": 10,
+        "repo": "main",
+        "limit": 100
+    });
+    let op: BatchOp = serde_json::from_value(j).expect("deserialize BatchOp");
+    match &op {
+        BatchOp::ChangesSince(cs) => {
+            assert_eq!(cs.changes_since, 10);
+            assert_eq!(cs.repo, "main");
+            assert_eq!(cs.limit, Some(100));
+        }
+        other => panic!("expected ChangesSince, got {other:?}"),
+    }
+    assert!(op.is_admin(), "ChangesSince is an admin op");
+    assert!(op.table_ref().is_none(), "ChangesSince has no table_ref");
+
+    // Round-trip back through serialize.
+    let back = serde_json::to_value(&op).expect("serialize");
+    let op2: BatchOp = serde_json::from_value(back).expect("deserialize");
+    assert_eq!(op, op2);
+}
+
+/// The new `changes_since` discriminator does not disturb existing BatchOp
+/// parsing — an `insert_into` payload still parses to `BatchOp::Insert`, and
+/// a `purge_history` payload still parses to `BatchOp::PurgeHistory`.
+#[test]
+fn changes_since_does_not_break_existing_batch_op_parsing() {
+    let ins = json!({ "insert_into": "users", "values": [] });
+    let ins_op: BatchOp = serde_json::from_value(ins).expect("deserialize Insert");
+    assert!(matches!(ins_op, BatchOp::Insert(_)));
+
+    let ph = json!({
+        "purge_history": "events",
+        "scope": { "older_than_age": { "age_secs": 60 } }
+    });
+    let ph_op: BatchOp = serde_json::from_value(ph).expect("deserialize PurgeHistory");
+    assert!(matches!(ph_op, BatchOp::PurgeHistory(_)));
 }

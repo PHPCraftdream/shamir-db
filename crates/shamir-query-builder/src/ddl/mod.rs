@@ -14,7 +14,7 @@
 
 use shamir_query_types::admin::{
     AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, BindValidatorOp, BufferConfigDto,
-    BufferConfigPatch, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
+    BufferConfigPatch, ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp,
     CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreateRepoOp,
     CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
     DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, ListOp, ListValidatorsOp,
@@ -1879,6 +1879,68 @@ impl From<PurgeHistory> for BatchOp {
 }
 
 impl IntoBatchOp for PurgeHistory {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// One-shot "changes since version V" journal read (temporal T4-changes-since).
+/// `repo` defaults to `"main"`.
+///
+/// Returns the durable-journal events with `commit_version > from`, plus the
+/// CF-1 `gap_at` re-sync marker. Read-only — the queryable foundation of #201.
+///
+/// ```ignore
+/// // fetch everything after the client's cursor v=42
+/// ddl::changes_since(42)
+/// // override the repo and cap the result
+/// ddl::changes_since(42).repo("archive").limit(500)
+/// ```
+pub fn changes_since(from: u64) -> ChangesSince {
+    ChangesSince {
+        from,
+        repo: "main".to_owned(),
+        limit: None,
+    }
+}
+
+/// Builder for [`ChangesSinceOp`].
+pub struct ChangesSince {
+    from: u64,
+    repo: String,
+    limit: Option<u64>,
+}
+
+impl ChangesSince {
+    /// Override the target repo (default `"main"`).
+    pub fn repo(mut self, repo: impl Into<String>) -> Self {
+        self.repo = repo.into();
+        self
+    }
+
+    /// Cap the number of returned events (default 1000 at execute time).
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::ChangesSince(ChangesSinceOp {
+            changes_since: self.from,
+            repo: self.repo,
+            limit: self.limit,
+        })
+    }
+}
+
+impl From<ChangesSince> for BatchOp {
+    fn from(b: ChangesSince) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for ChangesSince {
     fn into_batch_op(self) -> BatchOp {
         self.build()
     }

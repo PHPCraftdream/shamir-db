@@ -540,6 +540,27 @@ pub struct PurgeHistoryOp {
     pub scope: PurgeScope,
 }
 
+/// One-shot "changes since version V" read (temporal T4-changes-since).
+///
+/// A read-style admin op that returns the durable-journal events committed
+/// STRICTLY AFTER the client's cursor `changes_since` (i.e. events with
+/// `commit_version > changes_since`), plus the CF-1 gap marker. This is the
+/// queryable foundation of #201 (live subscriptions); the live server-push
+/// transport is a separate, larger piece.
+///
+/// ```json
+/// { "changes_since": 0, "repo": "main", "limit": 1000 }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChangesSinceOp {
+    /// Cursor: return events with `commit_version > this` (discriminator key).
+    pub changes_since: u64,
+    #[serde(default = "default_repo")]
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
 /// Change a live table's history-retention policy on the fly (T3).
 ///
 /// The discriminator key `set_retention` holds the table name. The

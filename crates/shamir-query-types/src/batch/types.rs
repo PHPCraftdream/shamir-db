@@ -7,8 +7,8 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{
-    AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, BindValidatorOp, ChgrpOp, ChmodOp,
-    ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
+    AccessTreeOp, AddGroupMemberOp, AlterBufferConfigOp, BindValidatorOp, ChangesSinceOp, ChgrpOp,
+    ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
     CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, CreateValidatorOp, DropDbOp,
     DropFunctionOp, DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, DropValidatorOp,
     GetBufferConfigOp, ListOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
@@ -113,6 +113,9 @@ pub enum BatchOp {
     /// Change a live table's history-retention policy (temporal T3).
     SetRetention(SetRetentionOp),
 
+    /// One-shot "changes since version V" journal read (temporal T4-changes-since).
+    ChangesSince(ChangesSinceOp),
+
     /// Stored procedure / callable function invocation.
     Call(CallOp),
 }
@@ -167,6 +170,7 @@ impl Serialize for BatchOp {
             BatchOp::CreateFunctionFolder(op) => op.serialize(serializer),
             BatchOp::PurgeHistory(op) => op.serialize(serializer),
             BatchOp::SetRetention(op) => op.serialize(serializer),
+            BatchOp::ChangesSince(op) => op.serialize(serializer),
             BatchOp::Call(op) => op.serialize(serializer),
         }
     }
@@ -364,6 +368,10 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::SetRetention)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("changes_since") {
+            serde_json::from_value(value)
+                .map(BatchOp::ChangesSince)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("call") {
             serde_json::from_value(value)
                 .map(BatchOp::Call)
@@ -438,6 +446,7 @@ impl BatchOp {
                 | BatchOp::CreateFunctionFolder(_)
                 | BatchOp::PurgeHistory(_)
                 | BatchOp::SetRetention(_)
+                | BatchOp::ChangesSince(_)
         )
     }
 }

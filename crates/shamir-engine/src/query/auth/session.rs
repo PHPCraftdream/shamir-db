@@ -412,6 +412,17 @@ impl SessionPermissions {
                 },
             ),
 
+            // One-shot "changes since version V" journal read — repo-scoped
+            // read. Read-only op: the live DAC path enforces Action::Read on
+            // the repo (Store) resource.
+            BatchOp::ChangesSince(op) => (
+                Action::Read,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                },
+            ),
+
             // Stored procedure call — execute on a function, no table_ref.
             BatchOp::Call(_) => (Action::Read, Resource::Global),
         }
