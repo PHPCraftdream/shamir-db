@@ -1260,8 +1260,13 @@ impl AdminExecutor for ShamirAdminExecutor {
                         op.dst_engine.clone(),
                         op.dst_path.clone(),
                     );
-                    let coord =
-                        Arc::new(MigrationCoordinator::new(state, shadow, src_data, dst_data));
+                    // Q1: capture the source's MvccStore handle so
+                    // run_snapshot reads through the log seam
+                    // (current_stream) instead of the raw data_store.
+                    let src_mvcc = src_table.mvcc_store();
+                    let coord = Arc::new(MigrationCoordinator::new(
+                        state, shadow, src_data, dst_data, src_mvcc,
+                    ));
 
                     coord.run_snapshot().await?;
                     coord.drain_until_caught_up(0).await?;
