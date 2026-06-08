@@ -1922,6 +1922,50 @@ impl AdminExecutor for ShamirAdminExecutor {
                 })))
             }
 
+            // T4-purge: imperative one-shot history purge by a time
+            // predicate. Mirrors SetRetention's table-scoped auth +
+            // per_table_mvcc lookup, then resolves the cutoff against
+            // the MvccStore's OWN clock (so OlderThanAge is
+            // deterministic under set_test_now) and calls
+            // purge_below_ts. Sacred MVCC invariants (snapshot floor,
+            // anchor, unknown-ts-kept) are enforced inside the store.
+            BatchOp::PurgeHistory(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::table(
+                            self.db_name.clone(),
+                            op.repo.clone(),
+                            op.purge_history.clone(),
+                        ),
+                        Action::Manage,
+                    )
+                    .await
+                    .map_err(err_access)?;
+                let mvcc =
+                    resolve_table_mvcc(&self.shamir, &self.db_name, &op.repo, &op.purge_history)
+                        .await?;
+                // Resolve the cutoff from the scope. OlderThan is an
+                // absolute epoch-millis; OlderThanAge is subtracted
+                // from the store's clock so tests freeze the clock via
+                // set_test_now and get a deterministic cutoff.
+                let cutoff = match op.scope {
+                    crate::query::admin::PurgeScope::OlderThan { timestamp } => timestamp,
+                    crate::query::admin::PurgeScope::OlderThanAge { age_secs } => mvcc
+                        .clock_millis()
+                        .saturating_sub(age_secs.saturating_mul(1000)),
+                };
+                let purged = mvcc
+                    .purge_below_ts(cutoff)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                Ok(admin_result(json!({
+                    "purge_history": op.purge_history,
+                    "repo": op.repo,
+                    "purged": purged
+                })))
+            }
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }
@@ -2624,4 +2668,46 @@ async fn apply_table_retention(
             .map_err(|e| err(e.to_string()))?;
     }
     Ok(())
+}
+
+/// T4-purge: resolve the live `MvccStore` for `(db, repo, table)`.
+///
+/// Mirrors [`apply_table_retention`]'s lookup but RETURNS the store
+/// (needed so the caller can read its clock and run the purge). Forces
+/// table instantiation first (`per_table_mvcc` is lazily populated on
+/// first `get_table`). Errors clearly on unknown db / repo / table or
+/// a table with no MvccStore entry.
+async fn resolve_table_mvcc(
+    shamir: &ShamirDb,
+    db_name: &str,
+    repo: &str,
+    table: &str,
+) -> Result<Arc<shamir_tx::MvccStore>, BatchError> {
+    let err = |msg: String| BatchError::QueryError {
+        alias: String::new(),
+        message: msg,
+        code: None,
+    };
+    let db = shamir
+        .get_db(db_name)
+        .ok_or_else(|| err(format!("Database '{}' not found", db_name)))?;
+    // Force the lazy MvccStore entry for this table.
+    let _ = db
+        .get_table(repo, table)
+        .await
+        .map_err(|e| err(e.to_string()))?;
+    let repo_instance = db
+        .get_repo(repo)
+        .ok_or_else(|| err(format!("Repository '{}' not found", repo)))?;
+    let token = crate::engine::table::table_token_for(table);
+    repo_instance
+        .per_table_mvcc()
+        .get(&token)
+        .map(|entry| Arc::clone(&entry))
+        .ok_or_else(|| {
+            err(format!(
+                "Table '{}.{}' has no MvccStore (History/Purge require an MVCC-backed table)",
+                repo, table
+            ))
+        })
 }

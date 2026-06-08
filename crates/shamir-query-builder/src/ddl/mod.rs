@@ -18,8 +18,9 @@ use shamir_query_types::admin::{
     CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp, CreateIndexOp, CreateRepoOp,
     CreateTableOp, CreateValidatorOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp,
     DropRepoOp, DropTableOp, DropValidatorOp, GetBufferConfigOp, ListOp, ListValidatorsOp,
-    MigrationStatusOp, RemoveGroupMemberOp, RenameFunctionOp, RenameValidatorOp,
-    RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, StartMigrationOp, UnbindValidatorOp,
+    MigrationStatusOp, PurgeHistoryOp, PurgeScope, RemoveGroupMemberOp, RenameFunctionOp,
+    RenameValidatorOp, RollbackMigrationOp, SetBufferConfigOp, SetRetentionOp, StartMigrationOp,
+    UnbindValidatorOp,
 };
 use shamir_query_types::auth::{
     CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, Permission, RevokeRoleOp,
@@ -1828,6 +1829,56 @@ impl From<SetRetention> for BatchOp {
 }
 
 impl IntoBatchOp for SetRetention {
+    fn into_batch_op(self) -> BatchOp {
+        self.build()
+    }
+}
+
+/// Imperative history purge. `repo` defaults to `"main"`.
+///
+/// ```ignore
+/// // purge versions older than 86_400 seconds (1 day)
+/// ddl::purge_history("users", PurgeScope::OlderThanAge { age_secs: 86_400 })
+/// ```
+pub fn purge_history(table: impl Into<String>, scope: PurgeScope) -> PurgeHistory {
+    PurgeHistory {
+        table: table.into(),
+        repo: "main".to_owned(),
+        scope,
+    }
+}
+
+/// Builder for [`PurgeHistoryOp`].
+pub struct PurgeHistory {
+    table: String,
+    repo: String,
+    scope: PurgeScope,
+}
+
+impl PurgeHistory {
+    /// Override the target repo (default `"main"`).
+    pub fn repo(mut self, repo: impl Into<String>) -> Self {
+        self.repo = repo.into();
+        self
+    }
+
+    /// Finalize into a [`BatchOp`].
+    pub fn build(self) -> BatchOp {
+        BatchOp::PurgeHistory(PurgeHistoryOp {
+            purge_history: self.table,
+            repo: self.repo,
+            scope: self.scope,
+        })
+    }
+}
+
+impl From<PurgeHistory> for BatchOp {
+    fn from(b: PurgeHistory) -> Self {
+        b.build()
+    }
+}
+
+impl IntoBatchOp for PurgeHistory {
     fn into_batch_op(self) -> BatchOp {
         self.build()
     }

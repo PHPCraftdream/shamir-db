@@ -7,5 +7,5 @@ pub use shamir_query_types::admin::{
     AddGroupMemberOp, AlterBufferConfigOp, BufferConfigDto, BufferConfigPatch, ChgrpOp, ChmodOp,
     ChownOp, CreateDbOp, CreateGroupOp, CreateIndexOp, CreateRepoOp, CreateTableOp, DropDbOp,
     DropGroupOp, DropIndexOp, DropRepoOp, DropTableOp, GetBufferConfigOp, GroupRef, ListOp,
-    RemoveGroupMemberOp, ResourceRef, SetBufferConfigOp,
+    PurgeScope, RemoveGroupMemberOp, ResourceRef, SetBufferConfigOp,
 };
