@@ -53,7 +53,7 @@ impl CachedStore {
         let cache = Arc::new(new_dash_map());
 
         // Load ALL data from inner store into cache (streaming to avoid double allocation)
-        let mut stream = inner.iter_stream(1000);
+        let mut stream = inner.iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key, value) in batch {
@@ -115,7 +115,9 @@ impl CachedStore {
         self.cache.clear();
 
         // Reload all data from inner (streaming)
-        let mut stream = self.inner.iter_stream(1000);
+        let mut stream = self
+            .inner
+            .iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key, value) in batch {

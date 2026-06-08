@@ -28,7 +28,8 @@ canopy = ["dep:canopydb"]
 
 [dependencies]
 # Foundation
-shamir-types = { path = "../shamir-types" }
+shamir-types    = { path = "../shamir-types" }
+shamir-tunables = { path = "../shamir-tunables" }
 
 # Backends — `optional = true` makes each one pulled in only when the
 # matching feature is enabled.
