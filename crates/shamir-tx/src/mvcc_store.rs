@@ -751,6 +751,31 @@ impl MvccStore {
         &self.history
     }
 
+    /// P1 (pre-refactor seam — "MVCC owns current state"): read the CURRENT
+    /// value of `key`, or `None` if the key is absent. Behaviour-identical to
+    /// today's `main.get` (the current-value cache): `NotFound` → `None`, every
+    /// other backend error propagates. This NAMES the seam through which all
+    /// current-state reads will flow; a later collapse-main slice reimplements
+    /// the body over the single version-log WITHOUT changing any caller.
+    pub async fn get_current(&self, key: Bytes) -> DbResult<Option<Bytes>> {
+        match self.main.get(key).await {
+            Ok(v) => Ok(Some(v)),
+            Err(DbError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// P1 seam: stream every CURRENT `(key, value)` pair in batches of `batch`.
+    /// Behaviour-identical to `main.iter_stream(batch)` today. The raw
+    /// `(Bytes, Bytes)` shape mirrors `Store::iter_stream` so existing decode
+    /// loops are unchanged. Reimplemented over the single log by collapse-main.
+    pub fn current_stream(
+        &self,
+        batch: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
+        self.main.iter_stream(batch)
+    }
+
     /// Look up the latest committed version for `key` in the in-memory cache.
     /// Returns 0 if the key is not cached (meaning "initial / no version tracked").
     ///
@@ -1709,6 +1734,139 @@ mod tests {
         // get_at after delete → fast path (cur_v=2 <= 15) → main.get → NotFound → None
         let result = mvcc.get_at(b"k1", 15).await.unwrap();
         assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // P1 — "MVCC owns current state" read-seam (get_current / current_stream).
+    // These tests pin the behaviour-identical contract: both methods must
+    // return EXACTLY what `main` (the current-value cache) returns today.
+    // A later collapse-main slice rewrites the bodies over the single version
+    // log; these tests are the regression net that catches any divergence.
+    // ========================================================================
+
+    /// `get_current` mirrors `main.get`: a written key returns `Some(v)`, an
+    /// absent key returns `Ok(None)` (NOT an error). Both assertions compare
+    /// the seam against a direct `main_store().get` so they fail if the body
+    /// ever diverges from the current-value cache.
+    #[tokio::test]
+    async fn get_current_matches_main_get() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("cur-k1");
+        let val = Bytes::from("cur-v1");
+
+        mvcc.set_versioned(key.clone(), val.clone()).await.unwrap();
+
+        // Seam returns the written value.
+        let via_seam = mvcc.get_current(key.clone()).await.unwrap();
+        assert_eq!(via_seam, Some(val.clone()));
+
+        // Seam equals a direct main read — diverges if get_current ever stops
+        // routing through `main`.
+        let via_main = mvcc.main_store().get(key.clone()).await.unwrap();
+        assert_eq!(
+            via_seam.as_ref().map(|b| b.as_ref()),
+            Some(via_main.as_ref())
+        );
+
+        // A key never written → Ok(None), NOT an Err. Diverges if get_current
+        // propagates `NotFound` instead of mapping it to `None`.
+        let absent = mvcc
+            .get_current(Bytes::from("never-written"))
+            .await
+            .unwrap();
+        assert!(
+            absent.is_none(),
+            "absent key must be Ok(None), not an error"
+        );
+    }
+
+    /// After `delete_versioned`, `main` has no entry and `get_current` must
+    /// return `Ok(None)`. Fails if the seam ever returns a stale value or
+    /// surfaces `NotFound` as an error.
+    #[tokio::test]
+    async fn get_current_none_after_delete() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("del-k1");
+
+        mvcc.set_versioned(key.clone(), Bytes::from("v1"))
+            .await
+            .unwrap();
+        // Sanity: present before delete.
+        assert_eq!(
+            mvcc.get_current(key.clone()).await.unwrap(),
+            Some(Bytes::from("v1"))
+        );
+
+        mvcc.delete_versioned(key.clone()).await.unwrap();
+
+        // main has no current entry for this key.
+        assert!(
+            mvcc.main_store().get(key.clone()).await.is_err(),
+            "main must have no entry after delete_versioned"
+        );
+        // Seam agrees: Ok(None).
+        let after = mvcc.get_current(key.clone()).await.unwrap();
+        assert!(after.is_none(), "get_current must be Ok(None) after delete");
+    }
+
+    /// `current_stream(batch)` yields exactly the same `(key, value)` set as
+    /// `main.iter_stream(batch)`. Collects both into maps and compares — any
+    /// divergence (missing key, extra key, wrong value) fails the equality.
+    #[tokio::test]
+    async fn current_stream_lists_all_current() {
+        use std::collections::BTreeMap;
+
+        let mvcc = make_mvcc();
+
+        let pairs: &[(Bytes, Bytes)] = &[
+            (Bytes::from("s-a"), Bytes::from("va")),
+            (Bytes::from("s-b"), Bytes::from("vb")),
+            (Bytes::from("s-c"), Bytes::from("vc")),
+        ];
+        for (k, v) in pairs {
+            mvcc.set_versioned(k.clone(), v.clone()).await.unwrap();
+        }
+
+        // Collect the seam stream into a map.
+        let mut via_seam: BTreeMap<Vec<u8>, Bytes> = BTreeMap::new();
+        let seam_stream = mvcc.current_stream(64);
+        futures::pin_mut!(seam_stream);
+        while let Some(batch) = seam_stream.next().await {
+            for (k, v) in batch.unwrap() {
+                via_seam.insert(k.to_vec(), v);
+            }
+        }
+
+        // Collect a direct main stream into a map.
+        let mut via_main: BTreeMap<Vec<u8>, Bytes> = BTreeMap::new();
+        let main_stream = mvcc.main_store().iter_stream(64);
+        futures::pin_mut!(main_stream);
+        while let Some(batch) = main_stream.next().await {
+            for (k, v) in batch.unwrap() {
+                via_main.insert(k.to_vec(), v);
+            }
+        }
+
+        // The two maps must be identical — diverges if current_stream ever
+        // reads from anywhere other than `main`.
+        assert_eq!(
+            via_seam, via_main,
+            "current_stream must equal main.iter_stream"
+        );
+
+        // Non-vacuous: exactly the 3 written current values are present.
+        assert_eq!(
+            via_seam.len(),
+            3,
+            "exactly the 3 written keys must be current"
+        );
+        for (k, v) in pairs {
+            assert_eq!(
+                via_seam.get(k.as_ref()),
+                Some(v),
+                "missing current value for {k:?}"
+            );
+        }
     }
 
     #[tokio::test]
