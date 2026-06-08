@@ -15,6 +15,7 @@ pub mod interner_manager_tests;
 pub mod persistence_tests;
 pub mod read_one_tx_tests;
 pub mod record_counter_tests;
+pub mod seam_read_tests;
 pub mod stale_index_tests;
 pub mod stream_tx_tests;
 pub mod stream_utils;

@@ -1681,7 +1681,7 @@ impl TableManager {
     /// record did not exist.
     pub(crate) async fn delete_returning_version(&self, id: RecordId) -> DbResult<(bool, u64)> {
         // Get old value before deletion for index cleanup
-        let old_value = self.table.get(id).await.ok();
+        let old_value = self.get(id).await.ok();
         // Route through MvccStore when attached so the old bytes are
         // archived to history under active snapshots and `version_cache`
         // is bumped.
@@ -1744,7 +1744,7 @@ impl TableManager {
         };
 
         // Get old value before update for index maintenance
-        let old_value = self.table.get(id).await.ok();
+        let old_value = self.get(id).await.ok();
 
         // 1. Validate unique indexes BEFORE write
         if let Some(ref old) = old_value {
@@ -1828,8 +1828,32 @@ impl TableManager {
     pub fn list_stream(
         &self,
         batch_size: usize,
-    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
-        self.table.list_stream(batch_size)
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Send + 'a>,
+        >;
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch(batch_bytes) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let s: DynStream<'_> = Box::pin(self.table.list_stream(batch_size));
+            s
+        }
     }
 
     /// Stream records filtered by a compiled filter callback.
@@ -1844,14 +1868,14 @@ impl TableManager {
     /// * `filter` - Filter AST to compile and apply
     /// * `ctx` - Filter context with interner and resolved query refs
     pub async fn filter_stream<'a>(
-        &self,
+        &'a self,
         batch_size: usize,
         filter: &Filter,
         ctx: &'a FilterContext<'a>,
     ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
         let interner = self.interner.get().await?;
         let callback = compile_filter(filter, interner);
-        let table_stream = self.table.list_stream(batch_size);
+        let table_stream = self.list_stream(batch_size);
 
         Ok(async_stream::stream! {
             futures::pin_mut!(table_stream);
@@ -1876,12 +1900,12 @@ impl TableManager {
     ///
     /// Use this when you want to compile the filter once and reuse it.
     pub fn filter_stream_with_callback<'a>(
-        &self,
+        &'a self,
         batch_size: usize,
         callback: &'a dyn FilterCallback,
         ctx: &'a FilterContext<'a>,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
-        let table_stream = self.table.list_stream(batch_size);
+        let table_stream = self.list_stream(batch_size);
 
         async_stream::stream! {
             futures::pin_mut!(table_stream);
@@ -2048,7 +2072,15 @@ impl TableManager {
 
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
-        self.table.get(id).await
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            match mvcc.get_current(id.to_bytes()).await? {
+                Some(bytes) => InnerValue::from_bytes(bytes)
+                    .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))),
+                None => Err(DbError::NotFound(format!("record not found: {id:?}"))),
+            }
+        } else {
+            self.table.get(id).await
+        }
     }
 
     /// Attach an MvccStore for tx-aware reads. Returns `self` so callers
@@ -2371,7 +2403,7 @@ impl TableManager {
                 }
             }
         }
-        self.table.get(id).await
+        self.get(id).await
     }
 
     /// tx-aware read-query execution (Vector I.1).
