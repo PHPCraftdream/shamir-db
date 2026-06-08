@@ -1,5 +1,8 @@
 /**
- * Shared type definitions used by the core and exported from entry points.
+ * Connection wire types.
+ *
+ * Pure type declarations; the connecting code lives in `../client.ts` and
+ * the platform entry points (`../../index.ts`, `../../browser.ts`).
  *
  * PLATFORM-AGNOSTIC.
  */
