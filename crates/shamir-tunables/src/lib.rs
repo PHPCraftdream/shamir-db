@@ -1,10 +1,12 @@
-//! Centralized tunable constants for ShamirDB.
+//! Centralized tunable constants and runtime-overridable knobs for ShamirDB.
 //!
 //! One home for build-time tunables, organized by their owner level in the
 //! (future) Instance→Repo→Table→Store config cascade. Today these are plain
 //! `const`s (change = edit here + rebuild + benchmark via /opti); a later
 //! phase promotes selected knobs to a runtime cascade where these become
 //! the defaults.
+
+pub mod runtime;
 
 use std::time::Duration;
 
