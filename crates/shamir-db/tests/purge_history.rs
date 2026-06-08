@@ -268,11 +268,7 @@ async fn purge_respects_live_snapshot() {
     use std::sync::Arc;
 
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = MvccStore::new(
-        Arc::new(InMemoryStore::new()),
-        Arc::new(InMemoryStore::new()),
-        Arc::clone(&gate),
-    );
+    let mvcc = MvccStore::new(Arc::new(InMemoryStore::new()), Arc::clone(&gate));
     // Keep history so auto-vacuum does not remove old versions.
     mvcc.set_retention(shamir_tx::Retention::keep_history())
         .unwrap();

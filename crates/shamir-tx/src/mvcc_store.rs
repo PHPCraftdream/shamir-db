@@ -1,9 +1,7 @@
-//! Versioned KV layer over two dumb-KV stores (main + history).
+//! Versioned KV layer over the history version log.
 //!
-//! [`MvccStore`] wraps two [`Store`] instances:
-//! - `main` — legacy field; no longer written by any MvccStore write path
-//!   (FINAL-A). Retained for recovery.rs (C5 removes it).
-//! - `history` — the single version log. Every write appends a version-key
+//! [`MvccStore`] wraps a single [`Store`] instance:
+//! - `history` — the sole version log. Every write appends a version-key
 //!   entry `<key>::0xFF::<version_be>` (see [`version_codec`]). All reads
 //!   resolve from this log.
 //!
@@ -72,7 +70,7 @@ fn decode_ts_key(physical: &[u8]) -> Option<u64> {
 }
 
 /// Per-key in-memory coordination state — the "record cell".
-/// The durable data stays in `main`/`history`; the cell is rebuildable
+/// The durable data stays in `history`; the cell is rebuildable
 /// in-memory coordination.
 #[derive(Debug, Clone, Copy)]
 struct RecordCell {
@@ -239,11 +237,10 @@ impl Retention {
     }
 }
 
-/// Versioned layer over two dumb-KV stores.
+/// Versioned layer over the history version log.
 ///
 /// See [module-level documentation](self) for the design rationale.
 pub struct MvccStore {
-    main: Arc<dyn Store>,
     history: Arc<dyn Store>,
     gate: Arc<RepoTxGate>,
     /// In-memory coordination state: key → record cell (latest committed version).
@@ -267,14 +264,13 @@ pub struct MvccStore {
 }
 
 impl MvccStore {
-    /// Create a new MVCC store from two backing stores and a gate.
+    /// Create a new MVCC store from a history store and a gate.
     ///
     /// Defaults to [`Retention::current_only`] (eager vacuum). Use
     /// [`Self::set_retention`] to opt into [`Retention::keep_history`] or a
     /// custom [`Retention`].
-    pub fn new(main: Arc<dyn Store>, history: Arc<dyn Store>, gate: Arc<RepoTxGate>) -> Self {
+    pub fn new(history: Arc<dyn Store>, gate: Arc<RepoTxGate>) -> Self {
         Self {
-            main,
             history,
             gate,
             cells: SccHashMap::new(),
@@ -362,8 +358,7 @@ impl MvccStore {
     /// floor + snapshot invariants).
     ///
     /// Sacred floor (NEVER violated): a version `>= min_alive` (pinned by a
-    /// live snapshot) is never reclaimed regardless of any knob; the current
-    /// value lives in `main` (never in `history`).
+    /// live snapshot) is never reclaimed regardless of any knob.
     ///
     /// Anchor: when a live snapshot exists below `current`, the SINGLE largest
     /// version `< min_alive` is also kept — it serves a snapshot reading a key
@@ -709,11 +704,6 @@ impl MvccStore {
         self.resolve_read(key, snapshot_version, cur_v).await
     }
 
-    /// Direct access to main store (for non-tx reads).
-    pub fn main_store(&self) -> &Arc<dyn Store> {
-        &self.main
-    }
-
     /// Direct access to history store (for GC, recovery).
     pub fn history_store(&self) -> &Arc<dyn Store> {
         &self.history
@@ -1046,8 +1036,8 @@ impl MvccStore {
     ///
     /// V2 WAL recovery (`crate`-external; see
     /// `shamir_engine::tx::recovery`) replays a committed tx by writing
-    /// the record body directly to the backing `main` store, bypassing
-    /// [`apply_committed_ops`]. That keeps `main` correct but leaves
+    /// entries directly into the history log, bypassing
+    /// [`apply_committed_ops`]. That keeps the log correct but leaves
     /// `version_cache` empty, so a later `get_at(key, snap)` for a
     /// snapshot *below* `commit_version` would take the fast path
     /// (`current_version == 0 ≤ snap`) and return the recovered (latest)
@@ -1486,10 +1476,10 @@ impl MvccStore {
     ///    additionally rejected by `decode_version_key` (which returns
     ///    `None` when the separator byte is not `VERSION_SEP`), so they
     ///    can never be mistaken for a version entry.
-    /// 2. `main` — the CURRENT version. Its version number is the cell's
-    ///    `version_of(key)` (0 when the key has only ever taken the fast
-    ///    path or is absent). A key that is currently DELETED contributes
-    ///    no current entry; its prior versions still appear from history.
+    /// 2. The current version already lives in the log (C1), so the Phase-1
+    ///    scan above already includes it — no separate read needed. A key
+    ///    that is currently DELETED contributes a tombstone; its prior
+    ///    versions still appear from the log.
     ///
     /// Each entry's commit timestamp is resolved via [`Self::lookup_ts`]
     /// (T1c). Entries with no recorded ts carry `ts_millis = None`.
@@ -1689,19 +1679,11 @@ mod tests {
 
     fn make_mvcc() -> MvccStore {
         let gate = make_gate();
-        MvccStore::new(
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryStore::new()),
-            gate,
-        )
+        MvccStore::new(Arc::new(InMemoryStore::new()), gate)
     }
 
     fn make_mvcc_with_gate(gate: Arc<RepoTxGate>) -> MvccStore {
-        MvccStore::new(
-            Arc::new(InMemoryStore::new()),
-            Arc::new(InMemoryStore::new()),
-            gate,
-        )
+        MvccStore::new(Arc::new(InMemoryStore::new()), gate)
     }
 
     #[tokio::test]
@@ -1712,16 +1694,10 @@ mod tests {
             .await
             .unwrap();
 
-        // FINAL-A: the value is in the log (sole write), not main.
+        // FINAL-A: the value is in the log (sole write).
         // Assert via the seam — the single authoritative source.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("v1")));
-
-        // main must NOT have the value (no main write after FINAL-A).
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty after set_versioned (log is sole write)"
-        );
 
         // Exactly 1 version-key entry exists in the log alongside ts-keys.
         let stream = mvcc.history.iter_stream(64);
@@ -1933,12 +1909,6 @@ mod tests {
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(val.clone()));
 
-        // FINAL-A: main must NOT have the key (no main write).
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty — log is the sole write"
-        );
-
         // A key never written → Ok(None), NOT an Err.
         let absent = mvcc
             .get_current(Bytes::from("never-written"))
@@ -1969,11 +1939,6 @@ mod tests {
 
         mvcc.delete_versioned(key.clone()).await.unwrap();
 
-        // FINAL-A: main was never written, so it never has the key.
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty (log is sole write)"
-        );
         // Seam reads tombstone from the log → Ok(None).
         let after = mvcc.get_current(key.clone()).await.unwrap();
         assert!(after.is_none(), "get_current must be Ok(None) after delete");
@@ -2006,20 +1971,6 @@ mod tests {
                 via_seam.insert(k.to_vec(), v);
             }
         }
-
-        // FINAL-A: main must be empty (no main write).
-        let mut via_main: BTreeMap<Vec<u8>, Bytes> = BTreeMap::new();
-        let main_stream = mvcc.main_store().iter_stream(64);
-        futures::pin_mut!(main_stream);
-        while let Some(batch) = main_stream.next().await {
-            for (k, v) in batch.unwrap() {
-                via_main.insert(k.to_vec(), v);
-            }
-        }
-        assert!(
-            via_main.is_empty(),
-            "FINAL-A: main must be empty after set_versioned (log is sole write)"
-        );
 
         // Non-vacuous: exactly the 3 written current values are present in the log.
         assert_eq!(
@@ -2082,19 +2033,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_store_accessor() {
-        let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let gate = make_gate();
-
-        let mvcc = MvccStore::new(Arc::clone(&main), Arc::clone(&history), gate);
-
-        // Verify that main_store() returns the same Arc
-        assert!(Arc::ptr_eq(&main, mvcc.main_store()));
-        assert!(Arc::ptr_eq(&history, mvcc.history_store()));
-    }
-
-    #[tokio::test]
     async fn version_of_returns_zero_for_unknown_key() {
         let mvcc = make_mvcc();
         let v = mvcc.version_of(b"never_written");
@@ -2126,13 +2064,9 @@ mod tests {
 
         assert_eq!(mvcc.version_of(&key), 42);
 
-        // FINAL-A: value is in the log, not main.
+        // FINAL-A: value is in the log.
         let val = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(val, Some(Bytes::from("val")));
-        assert!(
-            mvcc.main_store().get(key).await.is_err(),
-            "FINAL-A: main must be empty after apply_committed_ops"
-        );
     }
 
     #[tokio::test]
@@ -2146,13 +2080,9 @@ mod tests {
         let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
         mvcc.apply_committed_ops(ops, 10).await.unwrap();
 
-        // FINAL-A: value is in the log, not main. Assert via the seam.
+        // FINAL-A: value is in the log. Assert via the seam.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("new")));
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty after apply_committed_ops"
-        );
 
         // The log contains the new value at the commit version.
         let stream = mvcc.history.iter_stream(64);
@@ -2182,16 +2112,11 @@ mod tests {
         let ops = vec![KvOp::Remove(key.clone())];
         mvcc.apply_committed_ops(ops, 20).await.unwrap();
 
-        // FINAL-A: Remove writes a tombstone to the log; get_current reads it
-        // as None. Main was never written, so it's always empty.
+        // FINAL-A: Remove writes a tombstone to the log; get_current reads it as None.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert!(
             via_seam.is_none(),
             "FINAL-A: Remove tombstone → None from seam"
-        );
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty"
         );
 
         // Remove writes a tombstone (empty value) into the log at commit version.
@@ -2340,13 +2265,9 @@ mod tests {
         let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
         mvcc.apply_committed_ops(ops, 5).await.unwrap();
 
-        // FINAL-A: value is in the log, not main. Assert via the seam.
+        // FINAL-A: value is in the log. Assert via the seam.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("new")));
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty after apply_committed_ops"
-        );
 
         assert_eq!(mvcc.version_of(&key), 5);
 
@@ -2754,16 +2675,11 @@ mod tests {
             .collect();
         mvcc.set_versioned_many(items).await.unwrap();
 
-        // FINAL-A: every record is in the log (sole write), not main.
-        // Assert via the seam.
+        // FINAL-A: every record is in the log (sole write). Assert via the seam.
         for i in 0..n {
             let k = Bytes::copy_from_slice(&i.to_be_bytes());
             let val = mvcc.get_current(k.clone()).await.unwrap();
             assert_eq!(val, Some(Bytes::from(format!("val{i}"))));
-            assert!(
-                mvcc.main_store().get(k).await.is_err(),
-                "FINAL-A: main must be empty after set_versioned_many"
-            );
         }
 
         // Every write puts the current version into the log, so n version-key
@@ -2823,10 +2739,6 @@ mod tests {
             mvcc.get_current(Bytes::from("k2")).await.unwrap(),
             Some(Bytes::from("v2"))
         );
-        // main must be empty.
-        assert!(mvcc.main_store().get(k0.clone()).await.is_err());
-        assert!(mvcc.main_store().get(Bytes::from("k1")).await.is_err());
-        assert!(mvcc.main_store().get(Bytes::from("k2")).await.is_err());
 
         // The log contains the new values at their assigned versions.
         let stream = mvcc.history.iter_stream(64);
@@ -2880,13 +2792,9 @@ mod tests {
             .await
             .unwrap();
 
-        // FINAL-A: key is readable via the seam (log), not main.
+        // FINAL-A: key is readable via the seam (log).
         let val = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(val, Some(Bytes::from("v1")));
-        assert!(
-            mvcc.main_store().get(key.clone()).await.is_err(),
-            "FINAL-A: main must be empty (log is sole write)"
-        );
 
         // C1: current version is in the log (dual-write), so 1 entry.
         let count = count_history_entries(&mvcc).await;
@@ -3014,9 +2922,8 @@ mod tests {
     /// FINAL-A: history is the sole write target, so I/O error injection
     /// must be applied here.
     fn make_failing_history_mvcc(gate: Arc<RepoTxGate>) -> (MvccStore, Arc<FailingStore>) {
-        let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let history = Arc::new(FailingStore::new());
-        let mvcc = MvccStore::new(main, history.clone() as Arc<dyn Store>, gate);
+        let mvcc = MvccStore::new(history.clone() as Arc<dyn Store>, gate);
         (mvcc, history)
     }
 
@@ -3408,11 +3315,9 @@ mod tests {
 
         // --- Setup ---
         // FINAL-A: PausableStore is wired as `history` (the sole write target).
-        let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let pausable = Arc::new(PausableStore::new());
         let gate = make_gate();
         let mvcc = Arc::new(MvccStore::new(
-            main,
             pausable.clone() as Arc<dyn Store>,
             gate.clone(),
         ));
@@ -4209,8 +4114,8 @@ mod tests {
     // C2 — reads resolve from the single LOG, not `main`.
     // ================================================================
 
-    /// C2: `get_current` reads the log, not `main`. Clearing `main` after a
-    /// write must NOT change what `get_current` returns.
+    /// C2: `get_current` reads the log. The structural guarantee that there is
+    /// no `main` makes this invariant enforcement permanent.
     #[tokio::test]
     async fn c2_get_current_reads_log_not_main() {
         let mvcc = make_mvcc();
@@ -4218,19 +4123,12 @@ mod tests {
         let val = Bytes::from("c2_v");
         mvcc.set_versioned(key.clone(), val.clone()).await.unwrap();
 
-        // Wipe main — if get_current still read main this would break.
-        mvcc.main_store().remove(key.clone()).await.unwrap();
-
         let got = mvcc.get_current(key.clone()).await.unwrap();
-        assert_eq!(
-            got,
-            Some(val),
-            "C2: get_current must read the log, not main"
-        );
+        assert_eq!(got, Some(val), "C2: get_current must read the log");
     }
 
-    /// C2: `current_stream` reads the log, not `main`. It also picks the
-    /// MAX version per key (the current), suppressing older versions.
+    /// C2: `current_stream` reads the log. It picks the MAX version per key
+    /// (the current), suppressing older versions.
     #[tokio::test]
     async fn c2_current_stream_reads_log_not_main() {
         use std::collections::BTreeMap;
@@ -4251,11 +4149,6 @@ mod tests {
         mvcc.set_versioned(Bytes::from("k3"), Bytes::from("d"))
             .await
             .unwrap();
-
-        // Wipe main entirely — current_stream must rebuild from the log.
-        for k in ["k1", "k2", "k3"] {
-            let _ = mvcc.main_store().remove(Bytes::from(k)).await;
-        }
 
         let mut got: BTreeMap<Vec<u8>, Bytes> = BTreeMap::new();
         let stream = mvcc.current_stream(64);
@@ -4327,20 +4220,12 @@ mod tests {
         let val = Bytes::from("cold_val");
 
         // First store writes the value into the shared log.
-        let mvcc1 = MvccStore::new(
-            Arc::new(InMemoryStore::new()),
-            Arc::clone(&history),
-            make_gate(),
-        );
+        let mvcc1 = MvccStore::new(Arc::clone(&history), make_gate());
         mvcc1.set_versioned(key.clone(), val.clone()).await.unwrap();
 
         // Second store over the SAME log has an empty cell cache → cur_v == 0
         // → must seek the latest version from the log.
-        let mvcc2 = MvccStore::new(
-            Arc::new(InMemoryStore::new()),
-            Arc::clone(&history),
-            make_gate(),
-        );
+        let mvcc2 = MvccStore::new(Arc::clone(&history), make_gate());
         assert_eq!(
             mvcc2.version_of(&key),
             0,
@@ -4491,11 +4376,9 @@ mod tests {
 
         // FINAL-A: PausableStore wired as `history` (sole write target).
         // CurrentOnly default — eager vacuum active.
-        let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let pausable = Arc::new(PausableStore::new());
         let gate = make_gate();
         let mvcc = Arc::new(MvccStore::new(
-            main,
             pausable.clone() as Arc<dyn Store>,
             gate.clone(),
         ));
@@ -4844,11 +4727,9 @@ mod tests {
         let new_val = Bytes::from("NEW");
 
         // FINAL-A: PausableStore wired as `history` (sole write target).
-        let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
         let pausable = Arc::new(PausableStore::new());
         let gate = make_gate();
         let mvcc = Arc::new(MvccStore::new(
-            main,
             pausable.clone() as Arc<dyn Store>,
             gate.clone(),
         ));
@@ -5368,15 +5249,6 @@ mod tests {
         assert_eq!(versions, vec![1, 2, 3]);
         let values: Vec<&[u8]> = timeline.iter().map(|e| e.value.as_ref()).collect();
         assert_eq!(values, vec![b"v1".as_slice(), b"v2", b""]);
-
-        // Sanity: main really is empty for this key.
-        match mvcc.main.get(Bytes::from("k")).await {
-            Err(DbError::NotFound(_)) => {}
-            other => panic!(
-                "expected NotFound on main, got {:?}",
-                other.map(|b| b.len())
-            ),
-        }
     }
 
     /// Two keys must not bleed into each other's timelines — a prefix

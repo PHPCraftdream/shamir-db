@@ -37,11 +37,7 @@ async fn make_mvcc_table() -> (TableManager, Arc<MvccStore>) {
         .unwrap();
 
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = Arc::new(MvccStore::new(
-        Arc::clone(&data),
-        history,
-        Arc::clone(&gate),
-    ));
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     // Keep full history so prior versions survive vacuum.
     mvcc.set_retention(Retention::keep_history()).unwrap();
 

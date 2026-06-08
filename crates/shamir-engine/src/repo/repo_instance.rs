@@ -178,11 +178,7 @@ impl RepoInstance {
             .await?;
 
         let gate = self.tx_gate().await?;
-        let mvcc = Arc::new(shamir_tx::MvccStore::new(
-            Arc::clone(&data_store),
-            history_store,
-            Arc::clone(&gate),
-        ));
+        let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
 
         let token = table_token_for(table_name);
         let _ = self.per_table_mvcc.insert(token, Arc::clone(&mvcc));

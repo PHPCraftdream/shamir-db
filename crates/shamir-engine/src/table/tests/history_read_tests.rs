@@ -45,11 +45,7 @@ async fn make_mvcc_table() -> (TableManager, Arc<MvccStore>) {
         .unwrap();
 
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = Arc::new(MvccStore::new(
-        Arc::clone(&data),
-        history,
-        Arc::clone(&gate),
-    ));
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     // Default retention is CurrentOnly (max_count = 0): vacuum reclaims
     // every archived version immediately, leaving no timeline to read.
     // Opt into KeepHistory so prior versions survive.
