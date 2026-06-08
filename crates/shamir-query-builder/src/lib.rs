@@ -45,5 +45,9 @@ pub use wire::ToWire;
 // can name them without depending on shamir-query-types directly.
 pub use shamir_query_types::batch::{BatchRequest, BatchResponse};
 
+// Re-export temporal read types so guest/SDK code can build temporal queries
+// without a direct shamir-query-types dependency.
+pub use shamir_query_types::read::{At, OrderDirection, Temporal};
+
 // Re-export proc-macros so users get `shamir_query_builder::{filter, q}`.
 pub use shamir_query_builder_macros::{filter, q};
