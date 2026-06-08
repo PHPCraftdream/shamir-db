@@ -421,7 +421,7 @@ impl TableManager {
                     ),
                 };
                 if !rids_vec.is_empty() {
-                    let inner_records = self.table().get_many(&rids_vec).await?;
+                    let inner_records = self.get_many(&rids_vec).await?;
                     let mut records = Vec::with_capacity(inner_records.len());
                     for inner in inner_records.into_iter().flatten() {
                         if let Ok(json) =
@@ -1166,7 +1166,7 @@ impl TableManager {
                             // A `None` result means the record was deleted after the
                             // posting was written — silently skip it (no phantom).
                             if !fallback.is_empty() {
-                                let recs = self.table().get_many(&fallback).await?;
+                                let recs = self.get_many(&fallback).await?;
                                 for (id, opt) in fallback.iter().zip(recs) {
                                     if let Some(record) = opt {
                                         matched.push((*id, record));
@@ -1238,7 +1238,7 @@ impl TableManager {
         //    index entries materialise as `None` and are silently
         //    skipped (same semantic as the previous NotFound branch).
         let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
-        let records = self.table().get_many(&id_vec).await?;
+        let records = self.get_many(&id_vec).await?;
         let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
         for (id, opt) in id_vec.iter().zip(records) {
             if let Some(record) = opt {
@@ -1403,7 +1403,7 @@ impl TableManager {
         // pre-take). Stale ids → None; we collect Some until we hit
         // `take`. One trip to the data store, regardless of K.
         let needed: Vec<RecordId> = ids.into_iter().skip(skip).collect();
-        let fetched = self.table().get_many(&needed).await?;
+        let fetched = self.get_many(&needed).await?;
         let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(take);
         for (id, opt) in needed.iter().zip(fetched) {
             if matched.len() == take {
@@ -1467,7 +1467,7 @@ impl TableManager {
         // 3. Vectored fetch + per-record residual filter. Stale
         //    index entries materialise as None and are skipped.
         let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
-        let records = self.table().get_many(&id_vec).await?;
+        let records = self.get_many(&id_vec).await?;
         let mut matched: Vec<(RecordId, InnerValue)> = Vec::with_capacity(id_vec.len());
         for (id, opt) in id_vec.iter().zip(records) {
             if let Some(record) = opt {

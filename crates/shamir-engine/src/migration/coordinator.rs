@@ -316,11 +316,25 @@ impl MigrationCoordinator {
     }
 
     pub async fn verify_record_count(&self) -> DbResult<(u64, u64)> {
-        let mut src_count = 0u64;
-        let mut stream = self.src_data.iter_stream(256);
-        while let Some(batch) = stream.next().await {
-            src_count += batch?.len() as u64;
-        }
+        // FINAL-A: when a src_mvcc is available, count via the version-log
+        // seam (current_stream) — the raw src_data store is no longer written
+        // by the MVCC write paths. Fall back to src_data.iter_stream when no
+        // MvccStore is present (e.g. plain unit-test stores).
+        let src_count = if let Some(mvcc) = &self.src_mvcc {
+            let mut count = 0u64;
+            let mut stream = mvcc.current_stream(256);
+            while let Some(batch) = stream.next().await {
+                count += batch?.len() as u64;
+            }
+            count
+        } else {
+            let mut count = 0u64;
+            let mut stream = self.src_data.iter_stream(256);
+            while let Some(batch) = stream.next().await {
+                count += batch?.len() as u64;
+            }
+            count
+        };
 
         let mut dst_count = 0u64;
         let mut stream = self.dst_data.iter_stream(256);

@@ -200,14 +200,29 @@ impl TableManager {
             let _ = self.sorted_indexes().drop_index(def.name_interned).await?;
         }
 
-        // Recreate regular + unique via the existing create_index
-        // path — it scans data + adds entries.
+        // FINAL-A: Recreate regular + unique via the seam (list_stream) so
+        // backfill reads from the version log instead of the empty data_store.
+        let all_records: Vec<(
+            shamir_types::types::record_id::RecordId,
+            shamir_types::types::value::InnerValue,
+        )> = {
+            use futures::StreamExt;
+            let mut out = Vec::new();
+            let s = self.list_stream(1000);
+            futures::pin_mut!(s);
+            while let Some(batch) = s.next().await {
+                out.extend(batch?);
+            }
+            out
+        };
         for def in regular_defs.iter() {
-            self.index_manager_ref().create_index(def.clone()).await?;
+            self.index_manager_ref()
+                .create_index_from_records(def.clone(), all_records.clone())
+                .await?;
         }
         for def in unique_defs.iter() {
             self.index_manager_ref()
-                .create_unique_index(def.clone())
+                .create_unique_index_from_records(def.clone(), all_records.clone())
                 .await?;
         }
         // Sorted indexes don't have a create+backfill helper —
@@ -338,7 +353,7 @@ impl TableManager {
         //     records that exist in data.
         let mut records_processed: u64 = 0;
         if !created_ids.is_empty() {
-            let values = self.table().get_many(&created_ids).await?;
+            let values = self.get_many(&created_ids).await?;
             let pairs: Vec<(
                 shamir_types::types::record_id::RecordId,
                 shamir_types::types::value::InnerValue,
@@ -364,7 +379,7 @@ impl TableManager {
         //     OLD-value orphans if the indexed field changed; step
         //     3 catches them.
         if !updated_ids.is_empty() {
-            let values = self.table().get_many(&updated_ids).await?;
+            let values = self.get_many(&updated_ids).await?;
             let pairs: Vec<(
                 shamir_types::types::record_id::RecordId,
                 shamir_types::types::value::InnerValue,

@@ -2073,6 +2073,20 @@ impl TableManager {
         }
     }
 
+    /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
+    /// Used by `create_index` / `create_unique_index` to backfill from the seam
+    /// rather than the raw `data_store` when an MvccStore is attached.
+    async fn collect_all_current_records(&self) -> DbResult<Vec<(RecordId, InnerValue)>> {
+        use futures::StreamExt;
+        let mut out = Vec::new();
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            out.extend(batch?);
+        }
+        Ok(out)
+    }
+
     /// Get a record by RecordId
     pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
         if let Some(mvcc) = self.mvcc_store_ref() {
@@ -2083,6 +2097,33 @@ impl TableManager {
             }
         } else {
             self.table.get(id).await
+        }
+    }
+
+    /// Vectored current-version read through the seam. FINAL-A: when an
+    /// MvccStore is attached, reads from the version log (`get_current`);
+    /// otherwise falls through to the raw `table.get_many` (data_store).
+    /// Returns `None` for a slot when the key is absent or tombstoned.
+    pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                match mvcc.get_current(id.to_bytes()).await? {
+                    Some(bytes) => {
+                        let v = InnerValue::from_bytes(bytes).map_err(|e| {
+                            DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))
+                        })?;
+                        out.push(Some(v));
+                    }
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        } else {
+            self.table.get_many(ids).await
         }
     }
 
@@ -2982,7 +3023,16 @@ impl TableManager {
 
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        self.index_manager.create_index(index_def).await
+        // FINAL-A: when an MvccStore is attached, read from the log seam for
+        // backfill (data_store is no longer written by the MVCC write paths).
+        if self.mvcc_store_ref().is_some() {
+            let records = self.collect_all_current_records().await?;
+            self.index_manager
+                .create_index_from_records(index_def, records)
+                .await
+        } else {
+            self.index_manager.create_index(index_def).await
+        }
     }
 
     /// Create a unique index on specified paths.
@@ -2995,7 +3045,15 @@ impl TableManager {
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        self.index_manager.create_unique_index(index_def).await
+        // FINAL-A: read from the log seam for backfill when MvccStore attached.
+        if self.mvcc_store_ref().is_some() {
+            let records = self.collect_all_current_records().await?;
+            self.index_manager
+                .create_unique_index_from_records(index_def, records)
+                .await
+        } else {
+            self.index_manager.create_unique_index(index_def).await
+        }
     }
 
     /// Drop a regular index by name.

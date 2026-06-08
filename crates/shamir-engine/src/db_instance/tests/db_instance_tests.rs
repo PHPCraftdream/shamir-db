@@ -114,7 +114,7 @@ async fn test_table_context_components() {
     let record_id = ctx.insert(&value).await.unwrap();
     assert_eq!(ctx.count().await.unwrap(), 1);
 
-    let retrieved = ctx.table().get(record_id).await.unwrap();
+    let retrieved = ctx.get(record_id).await.unwrap();
     assert_eq!(retrieved, value);
 }
 
