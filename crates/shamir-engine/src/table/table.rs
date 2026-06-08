@@ -198,35 +198,68 @@ impl Table {
             // Transform each batch
             while let Some(batch_result) = storage_stream.next().await {
                 let batch_bytes = batch_result?;
-
-                // Transform batch
-                let mut batch = Vec::new();
-
-                for (key_bytes, bytes) in batch_bytes {
-                    // Convert Bytes to RecordId
-                    let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
-                        Ok(a) => a,
-                        Err(_) => {
-                            yield Err(DbError::Internal("Failed to convert key bytes to RecordId".to_string()));
-                            continue;
-                        }
-                    };
-                    let id = RecordId(arr);
-
-                    match InnerValue::from_bytes(bytes) {
-                        Ok(inner_value) => {
-                            batch.push((id, inner_value));
-                        }
-                        Err(e) => {
-                            yield Err(DbError::Codec(format!("Failed to deserialize record: {}", e)));
-                        }
-                    }
-                }
-
-                if !batch.is_empty() {
-                    yield Ok(batch);
+                for decoded in Self::decode_raw_batch(batch_bytes) {
+                    yield decoded;
                 }
             }
         }
+    }
+}
+
+impl Table {
+    /// Decode one raw `(key, value)` batch (`Store::iter_stream` /
+    /// `MvccStore::current_stream` shape) into `Vec<(RecordId, InnerValue)>`
+    /// yields, preserving the EXACT skip/yield-empty semantics of the former
+    /// inline `list_stream` decode: a bad key is skipped (after yielding its
+    /// `Internal` error), a deserialisation failure yields its `Codec` error
+    /// WITHOUT aborting the batch (later keys in the same batch are still
+    /// decoded), and a batch that decodes to zero entries yields nothing.
+    ///
+    /// Shared by [`Table::list_stream`] (unattached tables) and the
+    /// `MvccStore`-attached branch of [`TableManager::list_stream`] so there is
+    /// ONE decode implementation (no copy-paste drift). Behaviour-identical to
+    /// the inline decode it replaces.
+    pub(super) fn decode_raw_batch(
+        batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
+    ) -> impl Iterator<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
+        let mut batch = Vec::new();
+        let mut errors: Vec<DbError> = Vec::new();
+
+        for (key_bytes, bytes) in batch_bytes {
+            // Convert Bytes to RecordId
+            let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                Ok(a) => a,
+                Err(_) => {
+                    errors.push(DbError::Internal(
+                        "Failed to convert key bytes to RecordId".to_string(),
+                    ));
+                    continue;
+                }
+            };
+            let id = RecordId(arr);
+
+            match InnerValue::from_bytes(bytes) {
+                Ok(inner_value) => {
+                    batch.push((id, inner_value));
+                }
+                Err(e) => {
+                    errors.push(DbError::Codec(format!(
+                        "Failed to deserialize record: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        // Preserve the EXACT yield order of the former inline stream! body:
+        // each error yields as its own item, then a non-empty decoded batch
+        // yields once at the end. An empty decoded batch yields nothing
+        // (matching the former `if !batch.is_empty() { yield Ok(batch) }`).
+        let mut out: Vec<DbResult<Vec<(RecordId, InnerValue)>>> =
+            errors.into_iter().map(Err).collect();
+        if !batch.is_empty() {
+            out.push(Ok(batch));
+        }
+        out.into_iter()
     }
 }
