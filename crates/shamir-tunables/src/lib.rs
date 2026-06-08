@@ -15,6 +15,9 @@ pub mod store_defaults {
     /// migration drain / metadata prefix scans (smaller batch keeps memory
     /// and CPU spikes modest, avoids starving foreground work).
     pub const MAINT_SCAN_BATCH: usize = 256;
+    /// Batch size for version-log history range reads (get_at slow path,
+    /// history-of, seek-latest) — small bounded reads.
+    pub const HISTORY_SCAN_BATCH: usize = 64;
 }
 
 /// Knobs whose natural owner is the instance / deployment level.

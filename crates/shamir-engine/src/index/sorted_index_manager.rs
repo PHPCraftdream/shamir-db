@@ -47,6 +47,7 @@ use crate::index2::write_ops::IndexWriteOp;
 use crate::meta::MetaKey;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
 use shamir_types::types::record_id::RecordId;
@@ -230,7 +231,7 @@ impl SortedIndexManager {
         }
         // Sweep entries.
         let prefix = self.entry_prefix(name_interned);
-        let stream = self.info_store.scan_prefix_stream(prefix, 256);
+        let stream = self.info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
         let mut to_drop: Vec<Bytes> = Vec::new();
         while let Some(batch) = stream.next().await {
@@ -540,7 +541,7 @@ impl SortedIndexManager {
 
         let stream = self
             .info_store
-            .iter_range_stream(Some(lower), Some(upper), 256);
+            .iter_range_stream(Some(lower), Some(upper), MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         let mut out: BTreeSet<RecordId> = BTreeSet::new();
@@ -573,7 +574,7 @@ impl SortedIndexManager {
 
         let stream = self
             .info_store
-            .iter_range_stream(Some(lower), Some(upper), 256);
+            .iter_range_stream(Some(lower), Some(upper), MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         let mut out: Vec<(RecordId, Bytes)> = Vec::new();
@@ -656,9 +657,9 @@ impl SortedIndexManager {
         }
         let prefix = self.entry_prefix(name_interned);
         let (lower, upper) = self.range_bounds(&prefix, None, None);
-        let stream = self
-            .info_store
-            .iter_range_stream(Some(lower), Some(upper), k.min(256));
+        let stream =
+            self.info_store
+                .iter_range_stream(Some(lower), Some(upper), k.min(MAINT_SCAN_BATCH));
         futures::pin_mut!(stream);
         let mut out = Vec::with_capacity(k);
         while let Some(batch) = stream.next().await {

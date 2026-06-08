@@ -3,6 +3,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -154,7 +155,7 @@ impl MigrationCoordinator {
             // Suppresses tombstones and yields the current value per key —
             // behaviour-equivalent to reading the source's current data_store
             // while main is still dual-written.
-            let mut stream = mvcc.current_stream(256);
+            let mut stream = mvcc.current_stream(MAINT_SCAN_BATCH);
             while let Some(batch) = stream.next().await {
                 let records = batch?;
                 if records.is_empty() {
@@ -168,7 +169,7 @@ impl MigrationCoordinator {
         } else {
             // Fallback: read from the raw data_store (used by unit tests that
             // construct the coordinator with plain in-memory stores).
-            let mut stream = self.src_data.iter_stream(256);
+            let mut stream = self.src_data.iter_stream(MAINT_SCAN_BATCH);
             while let Some(batch) = stream.next().await {
                 let records = batch?;
                 if records.is_empty() {
@@ -322,14 +323,14 @@ impl MigrationCoordinator {
         // MvccStore is present (e.g. plain unit-test stores).
         let src_count = if let Some(mvcc) = &self.src_mvcc {
             let mut count = 0u64;
-            let mut stream = mvcc.current_stream(256);
+            let mut stream = mvcc.current_stream(MAINT_SCAN_BATCH);
             while let Some(batch) = stream.next().await {
                 count += batch?.len() as u64;
             }
             count
         } else {
             let mut count = 0u64;
-            let mut stream = self.src_data.iter_stream(256);
+            let mut stream = self.src_data.iter_stream(MAINT_SCAN_BATCH);
             while let Some(batch) = stream.next().await {
                 count += batch?.len() as u64;
             }
@@ -337,7 +338,7 @@ impl MigrationCoordinator {
         };
 
         let mut dst_count = 0u64;
-        let mut stream = self.dst_data.iter_stream(256);
+        let mut stream = self.dst_data.iter_stream(MAINT_SCAN_BATCH);
         while let Some(batch) = stream.next().await {
             dst_count += batch?.len() as u64;
         }

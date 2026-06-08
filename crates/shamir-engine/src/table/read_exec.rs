@@ -17,6 +17,7 @@ use crate::query::read::{
     Temporal,
 };
 use shamir_storage::error::DbResult;
+use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::core::sort_codec;
 use shamir_types::types::common::{new_map, new_set};
@@ -694,7 +695,7 @@ impl TableManager {
         //
         //       NOTE: secondary/sorted indexes reflect the CURRENT state and are
         //       intentionally NOT used here. A versioned index is a later slice.
-        let stream = self.list_stream(1000);
+        let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
 
         let mut matched: Vec<(RecordId, InnerValue)> = Vec::new();
@@ -828,7 +829,7 @@ impl TableManager {
         let filter_cb: Option<FilterNode> =
             query.r#where.as_ref().map(|f| compile_filter(f, interner));
 
-        let stream = self.list_stream(1000);
+        let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);
         let mut matched_ids: Vec<RecordId> = Vec::new();
         while let Some(batch_result) = stream.next().await {

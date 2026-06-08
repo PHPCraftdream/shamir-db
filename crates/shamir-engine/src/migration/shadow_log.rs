@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Store;
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -45,7 +46,7 @@ impl MigrationShadowLog {
     pub async fn recover(migration_id: String, store: Arc<dyn Store>) -> DbResult<Self> {
         let prefix = Self::key_prefix_static(&migration_id);
         let mut max_lsn = 0u64;
-        let mut stream = store.scan_prefix_stream(prefix, 256);
+        let mut stream = store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         use futures::StreamExt;
         while let Some(batch) = stream.next().await {
             for (key, _) in batch? {
@@ -104,7 +105,7 @@ impl MigrationShadowLog {
     pub async fn read_from(&self, start_lsn: u64) -> DbResult<Vec<ShadowEntry>> {
         let prefix = self.key_prefix();
         let mut entries = Vec::new();
-        let mut stream = self.store.scan_prefix_stream(prefix, 256);
+        let mut stream = self.store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         use futures::StreamExt;
         while let Some(batch) = stream.next().await {
             for (key, value) in batch? {
@@ -124,7 +125,7 @@ impl MigrationShadowLog {
     pub async fn purge(&self) -> DbResult<u64> {
         let prefix = self.key_prefix();
         let mut keys = Vec::new();
-        let mut stream = self.store.scan_prefix_stream(prefix, 256);
+        let mut stream = self.store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         use futures::StreamExt;
         while let Some(batch) = stream.next().await {
             for (key, _) in batch? {
