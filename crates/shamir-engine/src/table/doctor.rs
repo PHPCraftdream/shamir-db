@@ -200,21 +200,11 @@ impl TableManager {
             let _ = self.sorted_indexes().drop_index(def.name_interned).await?;
         }
 
-        // FINAL-A: Recreate regular + unique via the seam (list_stream) so
-        // backfill reads from the version log instead of the empty data_store.
+        // Use the shared seam helper: routes attached→log / unattached→data_store.
         let all_records: Vec<(
             shamir_types::types::record_id::RecordId,
             shamir_types::types::value::InnerValue,
-        )> = {
-            use futures::StreamExt;
-            let mut out = Vec::new();
-            let s = self.list_stream(1000);
-            futures::pin_mut!(s);
-            while let Some(batch) = s.next().await {
-                out.extend(batch?);
-            }
-            out
-        };
+        )> = self.collect_all_current_records().await?;
         for def in regular_defs.iter() {
             self.index_manager_ref()
                 .create_index_from_records(def.clone(), all_records.clone())
