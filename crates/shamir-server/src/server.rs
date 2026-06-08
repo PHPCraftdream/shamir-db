@@ -34,6 +34,8 @@ use shamir_connect::server::rate_limit::{
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
 
+use shamir_tunables::runtime::RuntimeTunables;
+
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
@@ -158,6 +160,11 @@ pub struct ServerHandle {
     /// `BootError::AlreadyRunning` instead of silently corrupting the
     /// redb stores. Do NOT explicitly unlock — drop is the release.
     _data_dir_lock: std::fs::File,
+    /// Instance-level runtime tunables. Initialized from `instance_defaults`
+    /// consts — reads are a single atomic load (instant, non-blocking).
+    /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
+    /// slice to keep this slice small and behaviour-identical.
+    pub tunables: Arc<RuntimeTunables>,
 }
 
 /// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
@@ -775,6 +782,7 @@ impl ServerLauncher {
             interactive_tx_reaper,
             shamir,
             _data_dir_lock: data_dir_lock,
+            tunables: Arc::new(RuntimeTunables::new()),
         })
     }
 }
