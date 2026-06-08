@@ -172,6 +172,31 @@ sizes) — local allocation hints, **not config**. Out of scope.
 const becomes each promoted knob's `Default`. Promote per genuine need only
 (§0: defaults work untouched). `SchedulerConfig` is the existing precedent.
 
+**Status (CE1 done):** the runtime foundation
+`shamir_tunables::runtime::RuntimeTunables` exists — Instance-level knobs as
+atomics initialized from the `instance_defaults` consts; reads are a single
+`Relaxed` load (the zero-overhead contract). A `ServerHandle` holds one
+(default-initialized). Consumer wiring, file/env source, and the
+Repo/Table/Store scope-cascade are **build-on-need** — deferred until a
+concrete tunable needs runtime/per-scope override (none does yet; scan batches
+as consts are fine).
+
+### Phase 3 — config-file + logging: ALREADY EXISTS (L0 finding)
+The L0 audit found this phase is **already implemented** — nothing to build:
+- **Config-file source**: `shamir_server::config::Config::from_file` (the
+  `ktav` format) loads the whole `Config` (incl. its `logging` section) at
+  boot; `main` loads it via `--config`; **SIGHUP** re-loads it.
+- **Logging subsystem** (`shamir-server/src/logging.rs`): non-blocking, batched
+  (bounded MPSC + background writer, lossy on overflow); per-namespace masks
+  (`LogMask`: default level + longest-prefix overrides) in an `ArcSwap` — the
+  log path is a single `ArcSwap::load` (the zero-overhead read contract);
+  runtime API `set_mask` / `set_namespace_level` / `reload`; env source via
+  `env_filter`. Built on `tracing`.
+
+So "logging (file/env + non-blocking batched)" is done. The only thing NOT
+done is sourcing the *generic* tunables (scan batches etc.) from the ktav file
+— that is the Phase-2 cascade, which is YAGNI until a tunable needs it.
+
 ---
 
 ## 5. Orchestration discipline
