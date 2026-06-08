@@ -6,7 +6,9 @@
 //!
 //! Per stage 7.1 plan in docs/pre-transactional/08-tests-landing.md.
 
+use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_tx::version_codec::encode_version_key;
 use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
@@ -309,16 +311,16 @@ pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance
 async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) {
     let v = entry.commit_version;
     for op in &entry.ops {
-        let (table_id, rid) = match op {
+        let (table_id, rid, maybe_body) = match op {
             WalOpV2::Put {
                 table_id_interned,
                 rid,
-                ..
-            } => (*table_id_interned, *rid),
+                body,
+            } => (*table_id_interned, *rid, Some(body.clone())),
             WalOpV2::Delete {
                 table_id_interned,
                 rid,
-            } => (*table_id_interned, *rid),
+            } => (*table_id_interned, *rid, None),
             _ => continue,
         };
         if let Some(mvcc) = repo
@@ -326,6 +328,14 @@ async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &Rep
             .read_async(&table_id, |_, m| std::sync::Arc::clone(m))
             .await
         {
+            // C2: write the log so recovery populates the single version
+            // timeline. For a Put the body is the record; for a Delete
+            // the tombstone is empty Bytes.
+            let log_val = maybe_body.unwrap_or_else(Bytes::new);
+            let _ = mvcc
+                .history_store()
+                .set(encode_version_key(&rid.to_bytes(), v), log_val)
+                .await;
             mvcc.seed_version(rid.to_bytes(), v).await;
         }
     }
