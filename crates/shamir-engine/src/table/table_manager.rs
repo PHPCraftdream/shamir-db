@@ -2076,7 +2076,9 @@ impl TableManager {
     /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
     /// Used by `create_index` / `create_unique_index` to backfill from the seam
     /// rather than the raw `data_store` when an MvccStore is attached.
-    async fn collect_all_current_records(&self) -> DbResult<Vec<(RecordId, InnerValue)>> {
+    pub(super) async fn collect_all_current_records(
+        &self,
+    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
         use futures::StreamExt;
         let mut out = Vec::new();
         let stream = self.list_stream(1000);
@@ -3023,16 +3025,13 @@ impl TableManager {
 
     pub async fn create_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        // FINAL-A: when an MvccStore is attached, read from the log seam for
-        // backfill (data_store is no longer written by the MVCC write paths).
-        if self.mvcc_store_ref().is_some() {
-            let records = self.collect_all_current_records().await?;
-            self.index_manager
-                .create_index_from_records(index_def, records)
-                .await
-        } else {
-            self.index_manager.create_index(index_def).await
-        }
+        // Always use the seam: collect_all_current_records routes
+        // attached→log / unattached→data_store, so it is correct for
+        // both cases.
+        let records = self.collect_all_current_records().await?;
+        self.index_manager
+            .create_index_from_records(index_def, records)
+            .await
     }
 
     /// Create a unique index on specified paths.
@@ -3045,15 +3044,13 @@ impl TableManager {
     /// Returns `DbError::UniqueIndexCreationFailed` if duplicate values exist.
     pub async fn create_unique_index(&self, name: &str, paths: &[&str]) -> DbResult<()> {
         let index_def = self.build_index_definition(name, paths).await?;
-        // FINAL-A: read from the log seam for backfill when MvccStore attached.
-        if self.mvcc_store_ref().is_some() {
-            let records = self.collect_all_current_records().await?;
-            self.index_manager
-                .create_unique_index_from_records(index_def, records)
-                .await
-        } else {
-            self.index_manager.create_unique_index(index_def).await
-        }
+        // Always use the seam: collect_all_current_records routes
+        // attached→log / unattached→data_store, so it is correct for
+        // both cases.
+        let records = self.collect_all_current_records().await?;
+        self.index_manager
+            .create_unique_index_from_records(index_def, records)
+            .await
     }
 
     /// Drop a regular index by name.

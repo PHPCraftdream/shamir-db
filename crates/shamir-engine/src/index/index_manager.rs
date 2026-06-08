@@ -327,21 +327,12 @@ impl IndexManager {
     pub async fn create_index(&self, index_def: IndexDefinition) -> DbResult<()> {
         use futures::StreamExt;
 
-        let name_interned = index_def.name_interned;
-
-        // Backfill in one batched info_store.set_many per page —
-        // 1000 records → 1 transactional commit on backends that
-        // support it. Compared to the previous per-record
-        // add_index_entry it amortises N spawn_blocking calls
-        // (and N transaction setups on redb/persy/nebari) down to
-        // ~one per page.
+        // Scan data_store into a decoded vec, then delegate to the
+        // shared build logic in create_index_from_records.
         let mut stream = self.data_store.iter_stream(1000);
-        let mut count = 0usize;
+        let mut records: Vec<(RecordId, InnerValue)> = Vec::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
-
-            let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
-            let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
             for (key_bytes, value_bytes) in batch {
                 let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
                     Ok(a) => a,
@@ -352,29 +343,11 @@ impl IndexManager {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
-                    let index_key = Self::build_index_key(false, name_interned, &values).to_bytes();
-                    let posting_key = Self::build_posting_key(&index_key, &record_id);
-                    posting_writes.push((posting_key, Bytes::new()));
-                    cache_keys.push((name_interned, values));
-                    count += 1;
-                }
-            }
-            if !posting_writes.is_empty() {
-                self.info_store.set_many(posting_writes).await?;
-            }
-            for (name, vals) in cache_keys {
-                self.invalidate_posting_cache(name, &vals);
+                records.push((record_id, value));
             }
         }
 
-        // Добавляем определение индекса в метаданные и сохраняем
-        self.indexes.add_index(index_def);
-        self.has_indexes.store(true, Ordering::Release);
-        self.save_index_info().await?;
-
-        log::info!("Created index '{}' with {} entries", name_interned, count);
-        Ok(())
+        self.create_index_from_records(index_def, records).await
     }
 
     /// FINAL-A: create index and backfill from an already-decoded record
@@ -1284,93 +1257,30 @@ impl IndexManager {
     ///   - количество записей с дублирующимися значениями
     ///   - пример дублирующегося значения
     pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use shamir_types::types::common::new_map;
-        use shamir_types::types::common::TMap;
+        use futures::StreamExt;
 
-        let name_interned = index_def.name_interned;
-        // TMap для отслеживания количества каждого значения
-        let mut value_counts: TMap<Vec<u8>, usize> = new_map();
-        // Записи для добавления в индекс (RecordId, values_key)
-        let mut entries: Vec<(RecordId, Vec<u8>, Vec<InnerValue>)> = Vec::new();
-
-        // Первый проход: подсчёт значений
-        {
-            use futures::StreamExt;
-            let mut stream = self.data_store.iter_stream(1000);
-
-            while let Some(batch_result) = stream.next().await {
-                let batch = batch_result?;
-
-                for (key_bytes, value_bytes) in batch {
-                    let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
-                        Ok(a) => a,
-                        Err(_) => continue,
-                    };
-                    let record_id = RecordId(arr);
-
-                    let value = match InnerValue::from_bytes(value_bytes) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    if let Some(values) = Self::extract_index_values(&value, &index_def.paths) {
-                        let values_key = bincode::serialize(&values)
-                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
-
-                        *value_counts.entry(values_key.clone()).or_insert(0) += 1;
-                        entries.push((record_id, values_key, values));
-                    }
-                }
+        // Scan data_store into a decoded vec, then delegate to the
+        // shared build logic in create_unique_index_from_records.
+        let mut stream = self.data_store.iter_stream(1000);
+        let mut records: Vec<(RecordId, InnerValue)> = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            for (key_bytes, value_bytes) in batch {
+                let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                let record_id = RecordId(arr);
+                let value = match InnerValue::from_bytes(value_bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                records.push((record_id, value));
             }
         }
 
-        // Проверяем наличие дубликатов
-        let duplicates: Vec<(&Vec<u8>, &usize)> =
-            value_counts.iter().filter(|(_, &c)| c > 1).collect();
-
-        if !duplicates.is_empty() {
-            // Считаем общее количество записей с дублирующимися значениями
-            let duplicate_record_count: usize = duplicates.iter().map(|(_, &c)| c).sum();
-
-            // Получаем пример дублирующегося значения для сообщения об ошибке
-            let sample_key = duplicates[0].0;
-            let sample_values: Vec<InnerValue> =
-                bincode::deserialize(sample_key).unwrap_or_else(|_| vec![InnerValue::Null]);
-
-            // Форматируем пример значения
-            let sample_str = Self::format_values_for_error(&sample_values);
-
-            return Err(shamir_storage::error::DbError::UniqueIndexCreationFailed(
-                name_interned.to_string(),
-                duplicate_record_count,
-                sample_str,
-            ));
-        }
-
-        // Дубликатов нет — добавляем записи в индекс одним
-        // батчем (один set_many == один backend commit на
-        // транзакционных store'ах).
-        let count = entries.len();
-        let mut writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(count);
-        for (record_id, _values_key, values) in entries {
-            let index_key = Self::build_index_key(true, name_interned, &values).to_bytes();
-            writes.push((index_key, Bytes::copy_from_slice(record_id.as_bytes())));
-        }
-        if !writes.is_empty() {
-            self.info_store.set_many(writes).await?;
-        }
-
-        // Добавляем определение индекса в метаданные и сохраняем
-        self.indexes_unique.add_index(index_def);
-        self.has_indexes_unique.store(true, Ordering::Release);
-        self.save_index_info_unique().await?;
-
-        log::info!(
-            "Created unique index '{}' with {} entries",
-            name_interned,
-            count
-        );
-        Ok(())
+        self.create_unique_index_from_records(index_def, records)
+            .await
     }
 
     /// FINAL-A: create unique index and backfill from pre-decoded records
