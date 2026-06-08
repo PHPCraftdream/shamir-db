@@ -1966,6 +1966,55 @@ impl AdminExecutor for ShamirAdminExecutor {
                 })))
             }
 
+            // T4-changes-since: one-shot "changes since version V" journal
+            // read. A read-style admin op: authorizes Action::Read on the
+            // repo (Store) resource, then range-reads the durable changelog
+            // journal for events with commit_version strictly greater than
+            // the client's cursor, and surfaces the CF-1 `gap_at` re-sync
+            // marker. Read-only — no live push, no journal-write change.
+            BatchOp::ChangesSince(op) => {
+                self.shamir
+                    .authorize_access(
+                        &self.actor,
+                        &ResourcePath::store(self.db_name.clone(), op.repo.clone()),
+                        Action::Read,
+                    )
+                    .await
+                    .map_err(err_access)?;
+                // cursor + 1: read_from returns events with commit_version >=
+                // from_version, and the contract is "strictly after the cursor".
+                let from_version = op
+                    .changes_since
+                    .checked_add(1)
+                    .ok_or_else(|| err("changes_since cursor overflow".to_string()))?;
+                let limit = op.limit.unwrap_or(1000) as usize;
+                let jr = match self
+                    .shamir
+                    .read_changelog_from_journal(&self.db_name, &op.repo, from_version, limit)
+                    .await
+                {
+                    Some(jr) => jr,
+                    None => {
+                        return Err(err(format!(
+                            "Repository '{}.{}' not found",
+                            self.db_name, op.repo
+                        )))
+                    }
+                };
+                // Serialize the events via serde_json (ChangelogEvent is
+                // Serialize). gap_at is surfaced verbatim (null when no gap).
+                let events_json: Vec<serde_json::Value> = jr
+                    .events
+                    .iter()
+                    .map(|e| serde_json::to_value(e).map_err(|e| err(e.to_string())))
+                    .collect::<Result<_, _>>()?;
+                Ok(admin_result(json!({
+                    "changes_since": op.changes_since,
+                    "events": events_json,
+                    "gap_at": jr.gap_at,
+                })))
+            }
+
             _ => Err(err("Not an admin operation".to_string())),
         }
     }

@@ -619,6 +619,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// One-shot "changes since version V" journal read (temporal T4-changes-since).
+    pub fn changes_since(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: list operations ──────────────────────────────────────
 
     /// List databases.
