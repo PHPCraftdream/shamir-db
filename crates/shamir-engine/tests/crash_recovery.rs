@@ -40,11 +40,9 @@
 //! before Phase 4 leaves zero of each; a crash at/after it recovers both.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use futures::StreamExt;
 use shamir_query_types::admin::CreateIndexOp;
-use shamir_storage::types::Store;
 use shamir_tx::IsolationLevel;
 use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
@@ -132,15 +130,20 @@ async fn open_repo(path: &Path) -> RepoInstance {
     .expect("open redb repo")
 }
 
-/// Count records physically present in a table store by draining its
-/// `iter_stream`. Bypasses the table counter (which recovery
-/// intentionally does NOT replay), so it measures the true materialized
-/// data set.
-async fn store_record_count(store: &Arc<dyn Store>) -> usize {
-    let mut stream = store.iter_stream(256);
+/// Count records present in a table by draining its `list_stream` (the
+/// MvccStore seam). When an MvccStore is attached, `list_stream` reads
+/// from the version log (`current_stream`), which is the sole write target
+/// after FINAL-A. When no MvccStore is attached (impossible after
+/// `get_table`), it falls back to `data_store().iter_stream`.
+///
+/// Bypasses the table counter (which recovery intentionally does NOT
+/// replay), so it measures the true materialized data set.
+async fn store_record_count(tbl: &TableManager) -> usize {
+    let stream = tbl.list_stream(256);
+    futures::pin_mut!(stream);
     let mut n = 0usize;
     while let Some(batch) = stream.next().await {
-        n += batch.expect("iter_stream batch").len();
+        n += batch.expect("list_stream batch").len();
     }
     n
 }
@@ -255,7 +258,7 @@ async fn crash_then_recover(phase: &str) -> (usize, usize, usize) {
     // child's original id) and reads the RECOVERED postings — no
     // re-indexing happens here.
     let tbl = repo.get_table(TABLE).await.unwrap();
-    let data = store_record_count(tbl.data_store()).await;
+    let data = store_record_count(&tbl).await;
     let fts = fts_hit_count(&tbl).await;
 
     // tempdir drops here — the child process is already dead so the file
@@ -468,8 +471,8 @@ async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
 
     let tbl_a = repo.get_table(TABLE).await.unwrap();
     let tbl_b = repo.get_table(TABLE_B).await.unwrap();
-    let count_a = store_record_count(tbl_a.data_store()).await;
-    let count_b = store_record_count(tbl_b.data_store()).await;
+    let count_a = store_record_count(&tbl_a).await;
+    let count_b = store_record_count(&tbl_b).await;
     assert_eq!(count_a, 1, "table A materialized by WAL replay");
     assert_eq!(count_b, 1, "table B materialized by WAL replay");
 

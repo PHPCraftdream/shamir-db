@@ -670,7 +670,7 @@ impl TableManager {
             bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
         };
         if has_delete_validators && !to_delete.is_empty() {
-            let records = self.table().get_many(&to_delete).await?;
+            let records = self.get_many(&to_delete).await?;
             for rec in records.iter().flatten() {
                 // TODO actor threading — use Actor::System for now.
                 self.run_validators(WriteOp::Delete, None, Some(rec), &Actor::System)
@@ -759,7 +759,7 @@ impl TableManager {
             bindings.iter().any(|b| b.ops.contains(&WriteOp::Delete))
         };
         if has_delete_validators && !to_delete.is_empty() {
-            let records = self.table().get_many(&to_delete).await?;
+            let records = self.get_many(&to_delete).await?;
             for rec in records.iter().flatten() {
                 // TODO actor threading — use Actor::System for now.
                 self.run_validators(WriteOp::Delete, None, Some(rec), &Actor::System)
@@ -1084,7 +1084,9 @@ impl TableManager {
         // cross-layer setup heavier than justified for a guard-scope fix).
         let mut result = Vec::with_capacity(record_ids.len());
         let id_vec: Vec<RecordId> = record_ids.into_iter().collect();
-        let records = self.table().get_many(&id_vec).await?;
+        // FINAL-A: use the seam-level get_many (reads from the log when
+        // an MvccStore is attached) instead of the raw data_store path.
+        let records = self.get_many(&id_vec).await?;
         for (id, record_opt) in id_vec.into_iter().zip(records) {
             let Some(record) = record_opt else { continue };
             let matches = match &residual_cb {

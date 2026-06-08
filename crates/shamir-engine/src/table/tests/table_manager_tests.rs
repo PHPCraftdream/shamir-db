@@ -69,7 +69,7 @@ async fn test_table_manager_components() {
     let record_id = ctx.insert(&value).await.unwrap();
     assert_eq!(ctx.count().await.unwrap(), 1);
 
-    let retrieved = ctx.table().get(record_id).await.unwrap();
+    let retrieved = ctx.get(record_id).await.unwrap();
     assert_eq!(retrieved, value);
 }
 
@@ -95,7 +95,7 @@ async fn test_table_manager_insert_many_no_index() {
 
     // Each id resolves to its corresponding value in input order.
     for (id, expected) in ids.iter().zip(values.iter()) {
-        let got = ctx.table().get(*id).await.unwrap();
+        let got = ctx.get(*id).await.unwrap();
         assert_eq!(&got, expected);
     }
 

@@ -377,6 +377,48 @@ impl IndexManager {
         Ok(())
     }
 
+    /// FINAL-A: create index and backfill from an already-decoded record
+    /// stream instead of `data_store.iter_stream`. Used by `TableManager`
+    /// when an MvccStore is attached — the seam (`list_stream`) is the
+    /// sole source of truth after FINAL-A.
+    pub async fn create_index_from_records(
+        &self,
+        index_def: IndexDefinition,
+        records: Vec<(RecordId, InnerValue)>,
+    ) -> DbResult<()> {
+        let name_interned = index_def.name_interned;
+        let mut count = 0usize;
+
+        let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut cache_keys: Vec<(u64, Vec<InnerValue>)> = Vec::new();
+        for (record_id, value) in &records {
+            if let Some(values) = Self::extract_index_values(value, &index_def.paths) {
+                let index_key = Self::build_index_key(false, name_interned, &values).to_bytes();
+                let posting_key = Self::build_posting_key(&index_key, record_id);
+                posting_writes.push((posting_key, Bytes::new()));
+                cache_keys.push((name_interned, values));
+                count += 1;
+            }
+        }
+        if !posting_writes.is_empty() {
+            self.info_store.set_many(posting_writes).await?;
+        }
+        for (name, vals) in cache_keys {
+            self.invalidate_posting_cache(name, &vals);
+        }
+
+        self.indexes.add_index(index_def);
+        self.has_indexes.store(true, Ordering::Release);
+        self.save_index_info().await?;
+
+        log::info!(
+            "Created index '{}' with {} entries (from seam)",
+            name_interned,
+            count
+        );
+        Ok(())
+    }
+
     /// Удаляет индекс по его имени.
     ///
     /// Процесс удаления:
@@ -1325,6 +1367,66 @@ impl IndexManager {
 
         log::info!(
             "Created unique index '{}' with {} entries",
+            name_interned,
+            count
+        );
+        Ok(())
+    }
+
+    /// FINAL-A: create unique index and backfill from pre-decoded records
+    /// instead of `data_store.iter_stream`. Used by `TableManager` when an
+    /// MvccStore is attached.
+    pub async fn create_unique_index_from_records(
+        &self,
+        index_def: IndexDefinition,
+        records: Vec<(RecordId, InnerValue)>,
+    ) -> DbResult<()> {
+        use shamir_types::types::common::{new_map, TMap};
+
+        let name_interned = index_def.name_interned;
+        let mut value_counts: TMap<Vec<u8>, usize> = new_map();
+        let mut entries: Vec<(RecordId, Vec<u8>, Vec<InnerValue>)> = Vec::new();
+
+        for (record_id, value) in &records {
+            if let Some(values) = Self::extract_index_values(value, &index_def.paths) {
+                let values_key = bincode::serialize(&values)
+                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                *value_counts.entry(values_key.clone()).or_insert(0) += 1;
+                entries.push((*record_id, values_key, values));
+            }
+        }
+
+        let duplicates: Vec<(&Vec<u8>, &usize)> =
+            value_counts.iter().filter(|(_, &c)| c > 1).collect();
+        if !duplicates.is_empty() {
+            let duplicate_record_count: usize = duplicates.iter().map(|(_, &c)| c).sum();
+            let sample_key = duplicates[0].0;
+            let sample_values: Vec<InnerValue> =
+                bincode::deserialize(sample_key).unwrap_or_else(|_| vec![InnerValue::Null]);
+            let sample_str = Self::format_values_for_error(&sample_values);
+            return Err(shamir_storage::error::DbError::UniqueIndexCreationFailed(
+                name_interned.to_string(),
+                duplicate_record_count,
+                sample_str,
+            ));
+        }
+
+        let count = entries.len();
+        let mut writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(count);
+        for (record_id, _values_key, values) in entries {
+            let index_key = Self::build_index_key(true, name_interned, &values).to_bytes();
+            writes.push((index_key, Bytes::copy_from_slice(record_id.as_bytes())));
+        }
+        if !writes.is_empty() {
+            self.info_store.set_many(writes).await?;
+        }
+
+        self.indexes_unique.add_index(index_def);
+        self.has_indexes_unique.store(true, Ordering::Release);
+        self.save_index_info_unique().await?;
+
+        log::info!(
+            "Created unique index '{}' with {} entries (from seam)",
             name_interned,
             count
         );
