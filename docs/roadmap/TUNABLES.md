@@ -13,6 +13,49 @@ value — the same literal can be several distinct knobs), with each knob's
 > *inconsistent* (a prefix-scan is `256` in some places, `1000` in others).
 > Centralizing forces one principled choice and removes the inconsistency.
 
+---
+
+## ✅ Phase 1 — IMPLEMENTED (knob index)
+
+All production scan/iter batch sizes + the server stragglers now resolve from
+the `shamir-tunables` leaf crate (zero-dep, organized by owner level). Values
+are **unchanged** from the literals they replaced (behaviour-identical); tuning
+the *values* is a later measured `/opti` pass.
+
+| Const (`shamir_tunables::…`) | Value | Level | Meaning / where |
+|---|---|---|---|
+| `store_defaults::FULL_SCAN_BATCH` | 1000 | Store | foreground/read full scans + index backfill (index_manager, doctor, read_exec AsOf/History) |
+| `store_defaults::MAINT_SCAN_BATCH` | 256 | Store | background maintenance + prefix/range scans (mvcc gc/vacuum/purge/scan_history, sorted_index ranges, interner, migration coordinator/shadow) |
+| `store_defaults::HISTORY_SCAN_BATCH` | 64 | Store | version-log history range reads (scan_history_for_version, seek_latest_version, history_of) |
+| `instance_defaults::IO_FRAME_BUFFER_CAP` | 4096 | Instance | transport frame/scratch buffers (server connection) |
+| `instance_defaults::SERVER_POLL_INTERVAL` | 50ms | Instance | server accept-loop backoff sleeps |
+
+**How to tune (today):** edit the const here → rebuild → benchmark via `/opti`.
+**How to tune (later, Phase 2):** the const becomes the cascade default; runtime
+overrides via the cascade engine (§ Phase 2).
+
+**Known-remaining literal (by design):** `index_manager.rs:906` — a one-off
+prefix-scan batch of `512`, left a literal with a `// tunables:` flag; fold
+into a named knob under `/opti` if it matters. The `index_manager.rs:421` /
+`:1390` prefix scans use `FULL_SCAN_BATCH` (1000) but are flagged as
+profile-arguably-`MAINT` — also `/opti` territory.
+
+**Already-managed (NOT extracted):** timeouts that are already named consts or
+config-struct fields — `DEFAULT_MAX_TX_LIFETIME`, `INTERACTIVE_TX_MAX_LIFETIME`,
+`tx_registry` TTLs, `LOCKOUT_SNAPSHOT_INTERVAL`, `SHUTDOWN_DEADLINE`,
+`SchedulerConfig.*_gc_period`. These already have homes; promote to the cascade
+on genuine need.
+
+**Audit-completeness note (lesson):** the first M0 grep (`_stream([^)]*N)`)
+missed calls whose batch literal sat behind nested parens / range-stream tails
+(`scan_prefix_stream(prefix.clone(), N)`, `iter_range_stream(.., N)`). A robust
+re-audit (`.*` match) caught them (index_manager:421/902, sorted_index ranges,
+the whole mvcc 64-cluster). Lesson for future boundary audits: enumerate by a
+regex that tolerates nested parens, and verify by reading — a narrow grep
+silently under-counts.
+
+---
+
 Tiers: **A** = invariant (never runtime; named const, leave). **B** =
 build-time tunable (named const in `tunables`, `/opti`-benchmarked, rebuild to
 change). **C** = runtime/deployment knob (eventually a config field with a
