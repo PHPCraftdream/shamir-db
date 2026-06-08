@@ -27,7 +27,8 @@
 
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{
-    GroupBy, OrderBy, OrderByItem, Pagination, ReadQuery, Select, SelectItem, Temporal,
+    At, GroupBy, OrderBy, OrderByItem, OrderDirection, Pagination, ReadQuery, Select, SelectItem,
+    Temporal,
 };
 use shamir_query_types::TableRef;
 
@@ -370,6 +371,8 @@ pub struct Query {
     order_by_items: Vec<OrderByItem>,
     pagination: Pagination,
     count_total: bool,
+    temporal: Temporal,
+    with_version: bool,
 }
 
 impl Query {
@@ -384,6 +387,8 @@ impl Query {
             order_by_items: Vec::new(),
             pagination: Pagination::None,
             count_total: false,
+            temporal: Temporal::Latest,
+            with_version: false,
         }
     }
 
@@ -398,6 +403,8 @@ impl Query {
             order_by_items: Vec::new(),
             pagination: Pagination::None,
             count_total: false,
+            temporal: Temporal::Latest,
+            with_version: false,
         }
     }
 
@@ -526,6 +533,86 @@ impl Query {
         self
     }
 
+    // ── temporal ────────────────────────────────────────────────
+
+    /// Read the state of the table as it was at a specific version.
+    ///
+    /// Sets `temporal = AsOf { at: At::Version(version) }`.
+    pub fn as_of_version(mut self, version: u64) -> Self {
+        self.temporal = Temporal::AsOf {
+            at: At::Version(version),
+        };
+        self
+    }
+
+    /// Read the state of the table as it was at a specific timestamp
+    /// (epoch-milliseconds).
+    ///
+    /// Sets `temporal = AsOf { at: At::Timestamp(ts_millis) }`.
+    pub fn as_of_timestamp(mut self, ts_millis: u64) -> Self {
+        self.temporal = Temporal::AsOf {
+            at: At::Timestamp(ts_millis),
+        };
+        self
+    }
+
+    /// Scan the full version history of the table (oldest → newest).
+    ///
+    /// Sets `temporal = History { from: None, to: None, limit: None,
+    /// order: OrderDirection::Asc }`. Use [`history_range`](Query::history_range)
+    /// for bounded or reordered scans.
+    pub fn history(mut self) -> Self {
+        self.temporal = Temporal::History {
+            from: None,
+            to: None,
+            limit: None,
+            order: OrderDirection::Asc,
+        };
+        self
+    }
+
+    /// Scan a bounded window of the version history.
+    ///
+    /// All four arguments are optional at the type level; pass `None` for
+    /// open bounds / no cap / default order (`Asc`).
+    ///
+    /// ```rust
+    /// use shamir_query_builder::{Query};
+    /// use shamir_query_types::read::{At, OrderDirection};
+    ///
+    /// let rq = Query::from("events")
+    ///     .history_range(
+    ///         Some(At::Version(10)),
+    ///         Some(At::Version(50)),
+    ///         Some(100),
+    ///         OrderDirection::Desc,
+    ///     )
+    ///     .build();
+    /// ```
+    pub fn history_range(
+        mut self,
+        from: Option<At>,
+        to: Option<At>,
+        limit: Option<u64>,
+        order: OrderDirection,
+    ) -> Self {
+        self.temporal = Temporal::History {
+            from,
+            to,
+            limit,
+            order,
+        };
+        self
+    }
+
+    /// Include the record version number in query results.
+    ///
+    /// Sets `with_version = true`.
+    pub fn with_version(mut self) -> Self {
+        self.with_version = true;
+        self
+    }
+
     // ── terminal ────────────────────────────────────────────────
 
     /// Consume the builder and produce the wire-ready [`ReadQuery`].
@@ -555,8 +642,8 @@ impl Query {
             order_by,
             pagination: self.pagination,
             count_total: self.count_total,
-            temporal: Temporal::Latest,
-            with_version: false,
+            temporal: self.temporal,
+            with_version: self.with_version,
         }
     }
 }
