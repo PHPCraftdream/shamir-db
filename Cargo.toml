@@ -9,7 +9,9 @@ resolver = "2"
 # host's `windows-gnu` toolchain don't fail trying to link `libnode.dll`.
 # Build it explicitly via `cargo build -p shamir-client-node` (its own
 # `rust-toolchain.toml` pins MSVC) or `napi build` from `npm`.
-exclude = ["crates/shamir-client-node"]
+# `shamir-client-ts` is a pure-TypeScript package (no Cargo.toml); exclude it
+# so the `crates/*` glob doesn't try to load it as a workspace member.
+exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
 [profile.dev]
 opt-level = 0
