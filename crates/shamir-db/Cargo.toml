@@ -30,6 +30,11 @@ canopy = ["shamir-storage/canopy", "shamir-engine/canopy"]
 shamir-types   = { path = "../shamir-types" }
 shamir-storage = { path = "../shamir-storage", default-features = false }
 shamir-engine  = { path = "../shamir-engine",  default-features = false }
+# T4-purge: the execute arm resolves the per-table MvccStore directly
+# (per_table_mvcc) to call purge_below_ts / read its clock. Already a
+# transitive build dep via shamir-engine; declared explicitly so the
+# facade can name `shamir_tx::MvccStore`.
+shamir-tx      = { path = "../shamir-tx" }
 
 # Direct deps for what's still here: the `db::shamir_db` facade
 # (ShamirDb + SystemStore + execute) and the small `api/` shim.
@@ -53,6 +58,7 @@ tokio-rustls = "0.26"
 rcgen        = "0.13"
 
 [dev-dependencies]
+bytes       = "1"
 tempfile    = "3.10.1"
 serial_test = "3.3.1"
 criterion   = { version = "0.5", features = ["async_tokio", "html_reports"] }

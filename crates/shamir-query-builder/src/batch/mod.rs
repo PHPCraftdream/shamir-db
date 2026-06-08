@@ -614,6 +614,11 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Imperative one-shot history purge (temporal T4).
+    pub fn purge_history(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     // ── DDL: list operations ──────────────────────────────────────
 
     /// List databases.

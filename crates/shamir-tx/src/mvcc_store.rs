@@ -304,6 +304,15 @@ impl MvccStore {
         self.test_now_millis.store(ms, Ordering::Release);
     }
 
+    /// T4-purge: the store's current wall-clock millis (test-overridable
+    /// via [`Self::set_test_now`]). Exposed so the PurgeHistory executor
+    /// can resolve `OlderThanAge { age_secs }` against the SAME clock
+    /// that stamped each version's commit ts — keeping age-based purge
+    /// deterministic under `set_test_now`.
+    pub fn clock_millis(&self) -> u64 {
+        self.now_millis()
+    }
+
     /// T1c: record the commit timestamp for `version` under `ts_key(version)`
     /// in `history`. Best-effort — a ts write failure is swallowed (the data
     /// write already succeeded; a missing ts just means the age axis
@@ -1172,6 +1181,100 @@ impl MvccStore {
         // gate's `min_alive()`, independent of the `min_version` history
         // threshold (see `prune_version_cache` for why).
         self.prune_version_cache().await;
+
+        Ok(deleted)
+    }
+
+    /// T4-purge: imperative one-shot history purge by a wall-clock
+    /// timestamp predicate.
+    ///
+    /// Reclaims every archived history version whose recorded commit
+    /// timestamp is strictly older than `cutoff_millis` — the
+    /// imperative twin of retention [`vacuum_key`] (§3). Unlike
+    /// vacuum, it IGNORES the retention `min_count` / `max_count`
+    /// knobs (an explicit user override) but NEVER violates the
+    /// SACRED MVCC invariants:
+    ///
+    /// 1. **ts predicate** — a version is reclaim-eligible ONLY if its
+    ///    commit ts is known (`lookup_ts`) AND `ts < cutoff_millis`.
+    ///    A version of UNKNOWN age is always KEPT (never purge what
+    ///    you can't prove is old enough).
+    /// 2. **snapshot floor** — a version `>= min_alive` (pinned by a
+    ///    live snapshot) is NEVER reclaimed, regardless of its ts.
+    /// 3. **anchor** — the single largest version `< min_alive` per
+    ///    key is kept so the oldest live snapshot can still resolve a
+    ///    read of a key last-written below `min_alive`.
+    ///
+    /// Current versions live in `main` (never in `history`), so they
+    /// are inherently safe and never appear in the reclaim set.
+    ///
+    /// When a version is reclaimed, its `ts_key(version)` is removed in
+    /// lockstep so timestamps never outlive their versions. Returns the
+    /// number of history version entries deleted.
+    pub async fn purge_below_ts(&self, cutoff_millis: u64) -> DbResult<usize> {
+        use crate::version_codec::decode_version_key;
+
+        // Phase 1: scan all history version entries, group by key.
+        // ts-keys ([TS_TAG][v_be], 9 bytes) are skipped: decode_version_key
+        // returns None for them (separator 0x00 != VERSION_SEP).
+        let stream = self.history.iter_stream(256);
+        futures::pin_mut!(stream);
+
+        let mut per_key: std::collections::HashMap<Vec<u8>, Vec<(u64, Bytes)>> =
+            std::collections::HashMap::new();
+
+        while let Some(batch) = stream.next().await {
+            for (phys_key, _value) in batch? {
+                if let Some((orig, version)) = decode_version_key(&phys_key) {
+                    per_key
+                        .entry(orig.to_vec())
+                        .or_default()
+                        .push((version, phys_key));
+                }
+            }
+        }
+
+        // Sacred floor: the oldest version a live snapshot may need.
+        let min_alive = self.gate.min_alive();
+
+        // Phase 2: per key, sort ascending, compute the anchor (largest
+        // version < min_alive), then reclaim eligible versions.
+        let mut deleted = 0usize;
+        for (_orig_key, mut entries) in per_key {
+            entries.sort_by_key(|(v, _)| *v);
+            // anchor = largest version < min_alive (None if all are
+            // >= min_alive). Keeping a single such version lets the
+            // oldest live snapshot still read a key last-written below
+            // min_alive via a history range scan.
+            let anchor: Option<u64> = entries
+                .iter()
+                .map(|(v, _)| *v)
+                .filter(|v| *v < min_alive)
+                .max();
+
+            for (version, phys_key) in &entries {
+                // Sacred: never reclaim a snapshot-pinned version.
+                if *version >= min_alive {
+                    continue;
+                }
+                // Sacred: never reclaim the single anchor.
+                if Some(*version) == anchor {
+                    continue;
+                }
+                // ts predicate: unknown ts ⇒ KEEP (can't prove old enough).
+                let ts = self.lookup_ts(*version).await;
+                let Some(ts_val) = ts else {
+                    continue;
+                };
+                if ts_val >= cutoff_millis {
+                    continue;
+                }
+                // All guards pass → reclaim the version AND its ts-key.
+                let _ = self.history.remove(phys_key.clone()).await;
+                let _ = self.history.remove(ts_key(*version)).await;
+                deleted += 1;
+            }
+        }
 
         Ok(deleted)
     }
@@ -4647,5 +4750,193 @@ mod tests {
         assert_eq!(tl_k[0].value, Bytes::from("a"));
         assert_eq!(tl_kk.len(), 1, "\"kk\" has one entry");
         assert_eq!(tl_kk[0].value, Bytes::from("b"));
+    }
+
+    // ========================================================================
+    // T4-purge — purge_below_ts
+    // ========================================================================
+
+    /// Helper: count this key's archived history versions (the entries
+    /// `history_of` returns minus the current main entry). Used to
+    /// assert post-purge state.
+    async fn archived_count(mvcc: &MvccStore, key: &[u8]) -> usize {
+        let timeline = mvcc.history_of(key).await.unwrap();
+        // history_of includes the current main entry when the key is
+        // live. Archived versions = total − (1 if current live else 0).
+        let cur_v = mvcc.current_version(key);
+        if cur_v > 0 {
+            timeline.len().saturating_sub(1)
+        } else {
+            timeline.len()
+        }
+    }
+
+    /// Core case: a key written three times (v1, v2 archived; v3
+    /// current). Purging with a cutoff that falls BETWEEN v1's and
+    /// v2's commit ts reclaims v1 only — v2 (newer than cutoff) and
+    /// v3 (current, in main) survive.
+    #[tokio::test]
+    async fn purge_below_ts_reclaims_only_older_than_cutoff() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        // v1 @ ts=1_000, v2 @ ts=2_000, v3 @ ts=3_000 (all same key).
+        mvcc.set_test_now(1_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(2_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(3_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v3"))
+            .await
+            .unwrap();
+
+        // Before purge: two archived versions (v1, v2).
+        assert_eq!(archived_count(&mvcc, b"k").await, 2);
+
+        // Cutoff at 1_500: v1 (ts=1_000) is older, v2 (ts=2_000) is newer.
+        let deleted = mvcc.purge_below_ts(1_500).await.unwrap();
+        assert_eq!(deleted, 1, "only v1 is older than the cutoff");
+
+        // v2 survives; v1 is gone.
+        let timeline = mvcc.history_of(b"k").await.unwrap();
+        let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
+        assert_eq!(versions, vec![2, 3], "v2 (archived) + v3 (current) remain");
+        assert!(!versions.contains(&1), "v1 must be purged");
+
+        mvcc.set_test_now(0);
+    }
+
+    /// Sacred floor: with a live snapshot pinning `min_alive`, purge
+    /// does NOT reclaim any snapshot-protected version — even one
+    /// whose ts is older than the cutoff.
+    #[tokio::test]
+    async fn purge_below_ts_respects_live_snapshot_floor() {
+        let gate = make_gate();
+        let mvcc = make_mvcc_with_gate(gate.clone());
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        // v1 @ ts=1_000.
+        mvcc.set_test_now(1_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        // Open a snapshot NOW (at version 1) → min_alive = 1. Every
+        // subsequent version is >= min_alive, hence sacred.
+        let _guard = gate.open_snapshot().await;
+
+        // v2 @ ts=2_000 archives v1 into history.
+        mvcc.set_test_now(2_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+
+        // Cutoff far in the future — would reclaim v1 by ts alone.
+        let deleted = mvcc.purge_below_ts(u64::MAX / 2).await.unwrap();
+        assert_eq!(
+            deleted, 0,
+            "live snapshot pins every version >= min_alive; nothing reclaimable"
+        );
+
+        // Both archived v1 and current v2 survive.
+        let timeline = mvcc.history_of(b"k").await.unwrap();
+        let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
+        assert_eq!(versions, vec![1, 2], "snapshot floor protects v1");
+
+        mvcc.set_test_now(0);
+    }
+
+    /// Unknown-ts version: a version whose ts-key is missing is NEVER
+    /// purged (can't prove it's old enough).
+    #[tokio::test]
+    async fn purge_below_ts_keeps_unknown_ts_versions() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        // v1, v2 (history archives v1; both get ts-keys via record_ts).
+        mvcc.set_test_now(1_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(2_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+
+        // Surgically remove v1's ts-key so its age becomes unknown.
+        let v1 = mvcc.version_of(b"k") - 1; // v1 is one below the current version
+        let _ = mvcc.history_store().remove(ts_key(v1)).await;
+
+        // Even an aggressive cutoff can't reclaim v1 — unknown age.
+        let deleted = mvcc.purge_below_ts(u64::MAX / 2).await.unwrap();
+        assert_eq!(
+            deleted, 0,
+            "unknown-ts version must be kept (can't prove it's old)"
+        );
+
+        mvcc.set_test_now(0);
+    }
+
+    /// Anchor protection: with two archived versions below min_alive,
+    /// the non-anchor (older) one is reclaimed but the anchor (newest
+    /// below min_alive) survives even though its ts is older than the
+    /// cutoff.
+    #[tokio::test]
+    async fn purge_below_ts_keeps_anchor_reclaims_older() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        // v1 @ ts=1_000, v2 @ ts=2_000, v3 @ ts=3_000.
+        // After three writes: history = {v1, v2}, main = v3,
+        // min_alive = last_committed = 3 (no snapshot).
+        mvcc.set_test_now(1_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(2_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(3_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v3"))
+            .await
+            .unwrap();
+
+        // Cutoff far in the future: both v1 and v2 are older. v1 is
+        // reclaimed, but v2 — the anchor (largest < min_alive=3) —
+        // survives.
+        let deleted = mvcc.purge_below_ts(u64::MAX / 2).await.unwrap();
+        assert_eq!(deleted, 1, "v1 reclaimed, v2 kept as anchor");
+
+        let timeline = mvcc.history_of(b"k").await.unwrap();
+        let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
+        assert_eq!(versions, vec![2, 3], "anchor v2 + current v3 remain");
+
+        mvcc.set_test_now(0);
+    }
+
+    /// An empty / future cutoff reclaims nothing.
+    #[tokio::test]
+    async fn purge_below_ts_zero_cutoff_reclaims_nothing() {
+        let mvcc = make_mvcc();
+        mvcc.set_retention(Retention::keep_history()).unwrap();
+
+        mvcc.set_test_now(1_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
+            .await
+            .unwrap();
+        mvcc.set_test_now(2_000);
+        mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
+            .await
+            .unwrap();
+
+        // cutoff = 0: no version has ts < 0.
+        let deleted = mvcc.purge_below_ts(0).await.unwrap();
+        assert_eq!(deleted, 0);
+
+        mvcc.set_test_now(0);
     }
 }
