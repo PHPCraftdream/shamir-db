@@ -8,7 +8,7 @@
  */
 
 import type { Platform } from './platform.js';
-import type { ConnectOptions } from './types.js';
+import type { ConnectOptions } from './types/index.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
 

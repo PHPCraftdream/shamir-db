@@ -7,7 +7,7 @@
 
 import { ShamirClient } from './core/client.js';
 import { BrowserPlatform } from './platform/browser.js';
-import type { ConnectOptions } from './core/types.js';
+import type { ConnectOptions } from './core/types/index.js';
 
 /**
  * Open an authenticated ShamirDB connection from a browser.
@@ -18,4 +18,7 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
 }
 
 export { ShamirClient };
-export type { ConnectOptions };
+
+// Query builders + the wire type model (platform-agnostic core).
+export { Query, atVersion, atTimestamp, filter, select } from './core/builders/index.js';
+export type * from './core/types/index.js';
