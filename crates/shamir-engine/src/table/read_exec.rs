@@ -312,10 +312,10 @@ impl TableManager {
         // current-state pipeline below.
         match &query.temporal {
             Temporal::Latest => {}
-            Temporal::AsOf { .. } => {
-                return Err(shamir_storage::error::DbError::Validation(
-                    "AsOf temporal read is not yet supported (T4-asof)".to_string(),
-                ));
+            Temporal::AsOf { at } => {
+                return self
+                    .read_as_of(query, ctx, interner, at.clone(), start)
+                    .await;
             }
             Temporal::History { .. } => {
                 return self.read_history(query, ctx, interner, start).await;
@@ -633,6 +633,153 @@ impl TableManager {
             self.read_streaming(query, interner, filter_cb.as_ref(), ctx, batch_size, start)
                 .await
         }
+    }
+
+    /// T4-asof: point-in-time read — return table state as it existed at
+    /// the given `at` version or timestamp.
+    ///
+    /// Strategy: full-scan-at-version. Secondary/sorted indexes reflect the
+    /// CURRENT state and cannot be used here — a record that matches a WHERE
+    /// condition NOW may not have matched at `at`, and vice versa. We
+    /// enumerate every record id, read each record AT the as-of version via
+    /// `MvccStore::get_at`, apply the WHERE filter to the as-of value, then
+    /// project. O(n) — versioned indexes are a later performance slice.
+    ///
+    /// Requires an MVCC-backed table; a non-MVCC table returns a clear error.
+    ///
+    /// `At::Version(v)` is used directly.
+    /// `At::Timestamp(t)` is resolved via `MvccStore::version_at_or_before_ts`;
+    /// if no version has a recorded ts ≤ `t` this returns a clear error rather
+    /// than silently treating it as Latest.
+    ///
+    /// `Latest` and `History` arms are NOT handled here — `read()` routes them
+    /// before reaching this method.
+    async fn read_as_of(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        interner: &Interner,
+        at: At,
+        start: Instant,
+    ) -> DbResult<QueryResult> {
+        let mvcc = self.mvcc_store_ref().ok_or_else(|| {
+            shamir_storage::error::DbError::Validation(
+                "AsOf temporal read requires an MVCC-backed table".to_string(),
+            )
+        })?;
+
+        // ── 1. Resolve `at` to a concrete version number. ──────────────────
+        let version: u64 = match at {
+            At::Version(v) => v,
+            At::Timestamp(t) => match mvcc.version_at_or_before_ts(t).await {
+                Some(v) => v,
+                None => {
+                    return Err(shamir_storage::error::DbError::Validation(format!(
+                            "AsOf(Timestamp({t})): no committed version with recorded ts ≤ {t}ms found; \
+                             ensure the table has MVCC history and the timestamp is not earlier than all \
+                             recorded versions"
+                        )));
+                }
+            },
+        };
+
+        // ── 2. Compile the WHERE filter (will be applied to AS-OF values). ──
+        let filter_cb: Option<FilterNode> =
+            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+
+        // ── 3. Enumerate every record id via the same full-scan streaming that
+        //       the normal no-index read path uses. For each id, read the AS-OF
+        //       value from the MVCC history (`get_at`). Records that did not yet
+        //       exist at `version` return `None` and are excluded.
+        //
+        //       NOTE: secondary/sorted indexes reflect the CURRENT state and are
+        //       intentionally NOT used here. A versioned index is a later slice.
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
+
+        let mut matched: Vec<(RecordId, InnerValue)> = Vec::new();
+        let mut records_scanned: u64 = 0;
+
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result?;
+            records_scanned += batch.len() as u64;
+            for (id, _current_value) in batch {
+                // Read the AS-OF value — this is NOT the current value; it is
+                // the value the record had at `version` (or None if it did not
+                // exist yet / was already deleted at that point).
+                let asof_bytes = mvcc.get_at(&id.to_bytes(), version).await?;
+                let Some(bytes) = asof_bytes else {
+                    // Record did not exist at this version — exclude it.
+                    continue;
+                };
+                let inner = match InnerValue::from_bytes(&bytes) {
+                    Ok(v) => v,
+                    Err(_) => continue, // corrupt entry — skip defensively
+                };
+                // Apply the WHERE filter to the AS-OF value (NOT the current
+                // value). This ensures `AsOf` semantics: the filter evaluates
+                // the world as it was at `version`.
+                let passes = match filter_cb.as_ref() {
+                    Some(cb) => cb.matches(&inner, ctx),
+                    None => true,
+                };
+                if passes {
+                    matched.push((id, inner));
+                }
+            }
+        }
+
+        // ── 4. Pipeline tail — same helpers as the collecting / index-scan
+        //       paths. Apply projection, aggregates, order, pagination.
+        let has_group_by = query.group_by.is_some();
+        let has_agg = exec::has_aggregates(&query.select);
+
+        if let Some((paged, pagination)) = try_project_page_only(query, &matched, interner) {
+            let records_returned = paged.len() as u64;
+            return Ok(QueryResult {
+                records: paged,
+                stats: Some(QueryStats {
+                    index_used: Some("temporal_asof".to_string()),
+                    records_scanned,
+                    records_returned,
+                    execution_time_us: start.elapsed().as_micros() as u64,
+                }),
+                pagination,
+                value: None,
+            });
+        }
+
+        let mut result = if has_group_by {
+            let group_by = query.group_by.as_ref().unwrap();
+            exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
+        } else if has_agg {
+            exec::apply_aggregate_all(&matched, &query.select, interner)
+        } else {
+            exec::apply_select(&matched, &query.select, interner)
+        };
+
+        if query.select.distinct {
+            result = exec::apply_distinct(result);
+        }
+        if let Some(ref order_by) = query.order_by {
+            exec::apply_order_by(&mut result, order_by);
+        }
+
+        let (records, pagination) =
+            exec::apply_pagination(result, &query.pagination, query.count_total);
+
+        let records_returned = records.len() as u64;
+        Ok(QueryResult {
+            records,
+            stats: Some(QueryStats {
+                index_used: Some("temporal_asof".to_string()),
+                records_scanned,
+                records_returned,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            }),
+            pagination,
+            value: None,
+        })
     }
 
     /// T4-history: the per-record version timeline.
