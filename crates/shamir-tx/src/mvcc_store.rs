@@ -74,15 +74,10 @@ fn decode_ts_key(physical: &[u8]) -> Option<u64> {
 /// in-memory coordination.
 #[derive(Debug, Clone, Copy)]
 struct RecordCell {
-    /// Archive-routing version: set ONLY when a snapshot was active at
-    /// write time (slow path). Read by get_at / current_version / version_of.
-    /// Semantics unchanged from before this slice.
+    /// The latest version assigned to this key. Set on every write path
+    /// before the physical store mutation. Read by get_at / current_version /
+    /// version_of / live_version.
     version: u64,
-    /// High-water mark: the latest version assigned to ANY write of this
-    /// key, maintained on EVERY write path (fast AND slow), set BEFORE the
-    /// physical main-store mutation. Read only by `live_version` (index-only
-    /// freshness validation). Never consulted by get_at.
-    hwm: u64,
 }
 
 // ============================================================================
@@ -508,24 +503,17 @@ impl MvccStore {
     // deliberately kept separate from this substrate.
     // ========================================================================
 
-    /// Publish `version` into the key's cell. `slow` = a snapshot was active
-    /// at write time (also advances the archive-routing `version`); otherwise
-    /// only the always-maintained `hwm` advances. Atomic modify-or-insert;
-    /// preserves `version` on the fast path. (Bump-first ordering is the
-    /// CALLER's job — this only performs the cell mutation.)
-    async fn publish_cell(&self, key: Bytes, version: u64, slow: bool) {
+    /// Publish `version` into the key's cell. Atomic modify-or-insert;
+    /// advances the cell's version to `version` on every write path.
+    /// (Bump-first ordering is the CALLER's job — this only performs the
+    /// cell mutation.)
+    async fn publish_cell(&self, key: Bytes, version: u64) {
         match self.cells.entry_async(key).await {
             scc::hash_map::Entry::Occupied(mut e) => {
-                if slow {
-                    e.get_mut().version = version;
-                }
-                e.get_mut().hwm = version;
+                e.get_mut().version = version;
             }
             scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell {
-                    version: if slow { version } else { 0 },
-                    hwm: version,
-                });
+                e.insert_entry(RecordCell { version });
             }
         }
     }
@@ -569,7 +557,7 @@ impl MvccStore {
         // (modify-or-insert) so repeated writes to the same key advance the
         // cached version monotonically.
         let new_v = self.gate.assign_next_version();
-        self.publish_cell(key.clone(), new_v, true).await;
+        self.publish_cell(key.clone(), new_v).await;
         let key_snapshot = key.clone();
         // Single log write: the current version goes into the log (sole write).
         self.history
@@ -625,7 +613,7 @@ impl MvccStore {
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
             let new_v = self.gate.assign_next_version();
-            self.publish_cell(key.clone(), new_v, true).await;
+            self.publish_cell(key.clone(), new_v).await;
             new_versions.push(new_v);
             max_v = new_v;
             history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
@@ -672,7 +660,7 @@ impl MvccStore {
         // the tombstone. CRIT-2: `publish_cell` uses entry_async
         // modify-or-insert so the cached version advances monotonically.
         let new_v = self.gate.assign_next_version();
-        self.publish_cell(key.clone(), new_v, true).await;
+        self.publish_cell(key.clone(), new_v).await;
         // Single log write: tombstone (empty value — MessagePack records are
         // never zero-length, so empty is unambiguously a delete).
         self.history
@@ -810,14 +798,13 @@ impl MvccStore {
         self.current_version(key)
     }
 
-    /// The high-water-mark version for `key` — the latest version any write
-    /// assigned to it — or `None` if no write has touched this key through
-    /// this store in-process. Used by the index-only read path to validate a
-    /// covering posting: a posting whose embedded version equals this hwm is
-    /// fresh; `None` means "no in-process mutation" (the durable posting is
-    /// consistent). Distinct from `version_of` (archive-routing).
+    /// The latest version assigned to `key` — or `None` if no write has
+    /// touched this key through this store in-process. Used by the index-only
+    /// read path to validate a covering posting: a posting whose embedded
+    /// version equals this value is fresh; `None` means "no in-process
+    /// mutation" (the durable posting is consistent).
     pub fn live_version(&self, key: &[u8]) -> Option<u64> {
-        self.cells.read(key, |_, c| c.hwm)
+        self.cells.read(key, |_, c| c.version)
     }
 
     // ========================================================================
@@ -1053,15 +1040,7 @@ impl MvccStore {
     /// `upsert_async` (not `insert`) so a re-replay of the same key
     /// advances monotonically rather than silently keeping a stale value.
     pub async fn seed_version(&self, key: Bytes, version: u64) {
-        self.cells
-            .upsert_async(
-                key,
-                RecordCell {
-                    version,
-                    hwm: version,
-                },
-            )
-            .await;
+        self.cells.upsert_async(key, RecordCell { version }).await;
     }
 
     /// cancel-safe: NO — applies a batch of `KvOp` via multi-step
@@ -1108,7 +1087,7 @@ impl MvccStore {
                 KvOp::Set(k, _) => k,
                 KvOp::Remove(k) => k,
             };
-            self.publish_cell(key, commit_version, true).await;
+            self.publish_cell(key, commit_version).await;
         }
         Ok(())
     }
