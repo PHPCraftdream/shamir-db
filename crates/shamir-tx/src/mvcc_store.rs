@@ -412,6 +412,10 @@ impl MvccStore {
             }
         }
 
+        // C1: the current version lives in the same log that vacuum scans.
+        // It is SACRED — reclaiming it would erase live data.
+        let cur_v = self.current_version(key);
+
         // Sort descending by version (newest first) so `idx` ranks by recency.
         entries.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -438,6 +442,10 @@ impl MvccStore {
         //   AND version < min_alive                           (sacred snapshot floor)
         //   AND Some(version) != anchor                       (single anchor)
         for (idx, (version, phys_key)) in entries.iter().enumerate() {
+            // C1 SACRED: never reclaim the current version.
+            if *version == cur_v {
+                continue;
+            }
             // (floor) min_count protects the newest M versions unconditionally.
             if idx < min_count {
                 continue;
@@ -494,7 +502,7 @@ impl MvccStore {
     // This region groups the durable-versioned-KV operations over the
     // `main`/`history` stores: the write/delete paths, the snapshot-read
     // resolver, and the committed-ops applier. R1 extracts three private
-    // helpers (`publish_cell`, `archive_prior`, `resolve_read`) that name
+    // helpers (`publish_cell`, `resolve_read`) that name repeated patterns;
     // repeated patterns; the bodies are byte-identical to the inline blocks
     // they replace. A future slice will lift this region behind a
     // `trait WriteStrategy` (R2 — out of scope here).
@@ -523,22 +531,6 @@ impl MvccStore {
                     hwm: version,
                 });
             }
-        }
-    }
-
-    /// Archive the current `main` value of `key` into `history` under its
-    /// current version, if it exists. No-op if the key is absent. Used by the
-    /// snapshot-active (slow) single-key write/delete paths.
-    async fn archive_prior(&self, key: &Bytes) -> DbResult<()> {
-        match self.main.get(key.clone()).await {
-            Ok(old) => {
-                let cur_v = self.current_version(key);
-                let h_key = encode_version_key(key, cur_v);
-                self.history.set(h_key, old).await?;
-                Ok(())
-            }
-            Err(DbError::NotFound(_)) => Ok(()),
-            Err(e) => Err(e),
         }
     }
 
@@ -575,10 +567,11 @@ impl MvccStore {
     /// Returns the monotonic version assigned to this write (from the
     /// shared `RepoTxGate` counter).
     pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<u64> {
-        // T1a: always archive — the prior version must live in `history`
-        // before the new value lands in `main`, so any snapshot (including
-        // one opening mid-write) finds it.
-        self.archive_prior(&key).await?;
+        // C1: no archive_prior — the prior version is already in the log from
+        // when it was written as current. The new current is written into the
+        // log (dual-write) alongside `main` so reads (still from `main`) are
+        // unchanged this slice.
+        //
         // Bump-first: assign version, update cell (both version and hwm), then
         // perform the physical write. CRIT-2: `publish_cell` uses entry_async
         // (modify-or-insert) so repeated writes to the same key advance the
@@ -586,6 +579,10 @@ impl MvccStore {
         let new_v = self.gate.assign_next_version();
         self.publish_cell(key.clone(), new_v, true).await;
         let key_snapshot = key.clone();
+        // C1 dual-write: current version goes into the log.
+        self.history
+            .set(encode_version_key(&key_snapshot, new_v), value.clone())
+            .await?;
         self.main.set(key, value).await?;
         // T1c: record the commit timestamp for the age-retention axis.
         self.record_ts(new_v).await;
@@ -631,44 +628,31 @@ impl MvccStore {
             return Ok(0);
         }
 
-        // T1a (always-archive): Phase 1 — per-key archive pre-reads. The
-        // prior value of EVERY key must be archived to `history` before
-        // the batch overwrites `main`, so a snapshot opening at any time
-        // (mid-batch included) finds the prior version. Like
-        // `apply_committed_ops`, the old-value read can't be batched (it
-        // depends on each key's current main value).
-        let mut history_ops: Vec<KvOp> = Vec::new();
-        for (key, _value) in &items {
-            match self.main.get(key.clone()).await {
-                Ok(old) => {
-                    let cur_v = self.current_version(key);
-                    let h_key = encode_version_key(key, cur_v);
-                    history_ops.push(KvOp::Set(h_key, old));
-                }
-                Err(DbError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Phase 2: one batched write to history.
-        if !history_ops.is_empty() {
-            self.history.transact(history_ops).await?;
-        }
-
-        // Phase 3 (bump-first): assign a fresh version per key and update the
+        // C1: no archive_prior — prior versions are already in the log.
+        // Phase 1 (bump-first): assign a fresh version per key and update the
         // cell (both version and hwm) BEFORE the physical main write.
         // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
         // cached version advances monotonically.
         let mut max_v = 0u64;
         let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
-        for (key, _value) in &items {
+        // C1 dual-write: build history_ops (current-into-log) alongside
+        // the main ops.
+        let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len());
+        for (key, value) in &items {
             let new_v = self.gate.assign_next_version();
             self.publish_cell(key.clone(), new_v, true).await;
             new_versions.push(new_v);
             max_v = new_v;
+            history_ops.push(KvOp::Set(encode_version_key(key, new_v), value.clone()));
         }
 
-        // Phase 4: one batched write to main.
+        // C1: transact the current-into-log entries into history (one batched
+        // write).
+        if !history_ops.is_empty() {
+            self.history.transact(history_ops).await?;
+        }
+
+        // Phase 2: one batched write to main.
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         let main_ops: Vec<KvOp> = items.into_iter().map(|(k, v)| KvOp::Set(k, v)).collect();
         self.main.transact(main_ops).await?;
@@ -701,15 +685,19 @@ impl MvccStore {
     /// Returns the monotonic version assigned to this delete (always
     /// allocated — see [`set_versioned`] for rationale).
     pub async fn delete_versioned(&self, key: Bytes) -> DbResult<u64> {
-        // T1a: always archive — the prior value must live in `history`
-        // before the key is removed from `main`, so any snapshot (including
-        // one opening mid-delete) finds it.
-        self.archive_prior(&key).await?;
+        // C1: no archive_prior — the prior version is already in the log from
+        // when it was written as current. A tombstone (empty value) is written
+        // into the log for the delete version.
         // Bump-first: assign version, update cell (version+hwm), then remove.
         // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
         // cached version advances monotonically.
         let new_v = self.gate.assign_next_version();
         self.publish_cell(key.clone(), new_v, true).await;
+        // C1: write tombstone into the log (empty value unambiguously means
+        // deleted — MessagePack records are never zero-length).
+        self.history
+            .set(encode_version_key(&key, new_v), Bytes::new())
+            .await?;
         // Propagate a backend I/O failure instead of swallowing it — a
         // dropped error here would let the caller see Ok() while the row is
         // still live in main (the delete silently never happened).
@@ -1058,61 +1046,41 @@ impl MvccStore {
     }
 
     /// cancel-safe: NO — applies a batch of `KvOp` via multi-step
-    /// sequences (Phase 1 pre-reads, Phase 2 batched history transact,
-    /// Phase 3 batched main transact, Phase 4 version_cache updates).
+    /// sequences (history transact, main transact, version_cache updates).
     /// Cancellation mid-batch leaves some phases applied, others not.
     /// Recovery relies on WAL replay (commit_tx invariant).
     pub async fn apply_committed_ops(&self, ops: Vec<KvOp>, commit_version: u64) -> DbResult<()> {
-        // HIGH-2: re-sample `snapshots_active` per-op inside the loop
-        // rather than once at function entry. A snapshot opening
-        // mid-apply must still see archived old values for ops that
-        // run after the snapshot's gate-insertion happens. Sampling
-        // per-op keeps the existing "no snapshots ⇒ no archive"
-        // contract without races for late-arriving snapshots.
-        //
         // HIGH-3: batch the physical writes through `Store::transact`.
         // Per-op `set`/`remove` collapses to a single atomic write-tx
         // on backends that override `transact` (redb, sled, fjall,
         // persy, nebari, canopy) — one fsync instead of N.
 
-        // Phase 1: pre-read old values for archive. Per-op snapshot
-        // check + per-op `main.get` (can't batch — depends on per-key
-        // old value).
-        let mut history_ops: Vec<KvOp> = Vec::new();
+        // C1: every committed key gets a log entry unconditionally (no
+        // longer gated by `active_snapshots_empty`) — the log is the
+        // universal version timeline. For KvOp::Remove the log entry is
+        // a tombstone (empty value).
+        let mut history_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
         for op in &ops {
-            // Re-sample per iteration so a snapshot that opens
-            // mid-loop is honoured by the remaining ops.
-            if self.gate.active_snapshots_empty() {
-                continue;
-            }
-            let key = match op {
-                KvOp::Set(k, _) => k,
-                KvOp::Remove(k) => k,
+            let h_key = match op {
+                KvOp::Set(k, v) => KvOp::Set(encode_version_key(k, commit_version), v.clone()),
+                KvOp::Remove(k) => KvOp::Set(encode_version_key(k, commit_version), Bytes::new()),
             };
-            match self.main.get(key.clone()).await {
-                Ok(old) => {
-                    let cur_v = self.current_version(key);
-                    let h_key = encode_version_key(key, cur_v);
-                    history_ops.push(KvOp::Set(h_key, old));
-                }
-                Err(DbError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
+            history_ops.push(h_key);
         }
 
-        // Phase 2: one batched write to history.
+        // One batched write to history (current-into-log + tombstones).
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
         }
 
-        // Phase 3: one batched write to main.
+        // Phase 2: one batched write to main.
         self.main.transact(ops.clone()).await?;
 
         // T1c: record the commit timestamp for the tx commit version (one ts
         // per commit — all ops share `commit_version`). Best-effort.
         self.record_ts(commit_version).await;
 
-        // Phase 4: update the in-memory cell for every touched key.
+        // Phase 3: update the in-memory cell for every touched key.
         // Sets both `version` and `hwm` to `commit_version` so that
         // tx-committed keys participate in index-only freshness validation.
         // Uses `publish_cell` (entry_async modify-or-insert, CRIT-2):
@@ -1184,8 +1152,10 @@ impl MvccStore {
 
         // Phase 2: for each key, sort by version, keep the latest (anchor),
         // delete the rest (+ each deleted version's ts-key).
+        // C1: skip the current version — it is SACRED.
         let mut deleted = 0usize;
-        for (_orig_key, mut entries) in per_key {
+        for (orig_key, mut entries) in per_key {
+            let cur_v = self.current_version(&orig_key);
             if entries.len() <= 1 {
                 // Only one entry — it's the anchor, keep it.
                 continue;
@@ -1194,6 +1164,10 @@ impl MvccStore {
             // Keep the last (highest version < min_version), delete the rest.
             let to_delete = &entries[..entries.len() - 1];
             for (version, phys_key) in to_delete {
+                // C1 SACRED: never reclaim the current version.
+                if *version == cur_v {
+                    continue;
+                }
                 let _ = self.history.remove(phys_key.clone()).await;
                 // T1c: remove the ts-key in lockstep so timestamps don't
                 // outlive their versions.
@@ -1230,8 +1204,8 @@ impl MvccStore {
     ///    key is kept so the oldest live snapshot can still resolve a
     ///    read of a key last-written below `min_alive`.
     ///
-    /// Current versions live in `main` (never in `history`), so they
-    /// are inherently safe and never appear in the reclaim set.
+    /// Current versions now live in `history` too (C1 dual-write), so an
+    /// explicit `cur_v` guard prevents reclaiming them.
     ///
     /// When a version is reclaimed, its `ts_key(version)` is removed in
     /// lockstep so timestamps never outlive their versions. Returns the
@@ -1264,8 +1238,10 @@ impl MvccStore {
 
         // Phase 2: per key, sort ascending, compute the anchor (largest
         // version < min_alive), then reclaim eligible versions.
+        // C1: skip the current version — it is SACRED.
         let mut deleted = 0usize;
-        for (_orig_key, mut entries) in per_key {
+        for (orig_key, mut entries) in per_key {
+            let cur_v = self.current_version(&orig_key);
             entries.sort_by_key(|(v, _)| *v);
             // anchor = largest version < min_alive (None if all are
             // >= min_alive). Keeping a single such version lets the
@@ -1278,6 +1254,10 @@ impl MvccStore {
                 .max();
 
             for (version, phys_key) in &entries {
+                // C1 SACRED: never reclaim the current version.
+                if *version == cur_v {
+                    continue;
+                }
                 // Sacred: never reclaim a snapshot-pinned version.
                 if *version >= min_alive {
                     continue;
@@ -1493,11 +1473,12 @@ impl MvccStore {
         }
 
         // Phase 2: append the CURRENT version from `main` if the key
-        // currently exists. `version_of` reads the cell's archive-routing
-        // version (0 on the fast path / absent key). `main.get` tells us
-        // whether the key is live.
+        // currently exists and is NOT already in the log entries (C1:
+        // the current is now dual-written into history; avoid duplicates).
+        // `version_of` reads the cell's archive-routing version (0 on the
+        // fast path / absent key). `main.get` tells us whether the key is live.
         let cur_v = self.current_version(key);
-        if cur_v > 0 {
+        if cur_v > 0 && !entries.iter().any(|(v, _)| *v == cur_v) {
             match self.main.get(Bytes::copy_from_slice(key)).await {
                 Ok(cur_val) => entries.push((cur_v, cur_val)),
                 Err(DbError::NotFound(_)) => {}
@@ -1579,17 +1560,22 @@ mod tests {
         let val = mvcc.main.get(key.clone()).await.unwrap();
         assert_eq!(val, Bytes::from("v1"));
 
-        // history has no version-key entries (only a ts-key for the write).
+        // C1: the current version is now written into the log (dual-write),
+        // so exactly 1 version-key entry exists alongside ts-keys.
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
+        let mut version_keys = 0;
         while let Some(batch) = stream.next().await {
             for (hk, _) in batch.unwrap() {
-                assert!(
-                    crate::version_codec::decode_version_key(&hk).is_none(),
-                    "history should have no version-key entries (only ts-keys)"
-                );
+                if crate::version_codec::decode_version_key(&hk).is_some() {
+                    version_keys += 1;
+                }
             }
         }
+        assert_eq!(
+            version_keys, 1,
+            "C1: current version is in the log (1 version-key entry)"
+        );
     }
 
     #[tokio::test]
@@ -1612,23 +1598,32 @@ mod tests {
         let val = mvcc.main.get(key.clone()).await.unwrap();
         assert_eq!(val, Bytes::from("v2"));
 
-        // history contains v1 under a version key
+        // C1: history contains BOTH v1 (old, archived when v2 was written)
+        // and v2 (current, written into the log by dual-write).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
-        let mut found = false;
+        let mut found_v1 = false;
+        let mut found_v2 = false;
         while let Some(batch) = stream.next().await {
             for (hk, hv) in batch.unwrap() {
-                // T1c: skip ts-keys ([TS_TAG][version_be]) — only version-keys
-                // decode successfully.
-                let Some((orig_key, _ver)) = crate::version_codec::decode_version_key(&hk) else {
+                let Some((orig_key, ver)) = crate::version_codec::decode_version_key(&hk) else {
                     continue;
                 };
                 assert_eq!(orig_key, &b"k1"[..]);
-                assert_eq!(hv, Bytes::from("v1"));
-                found = true;
+                if ver == 1 {
+                    assert_eq!(hv, Bytes::from("v1"));
+                    found_v1 = true;
+                } else if ver == 2 {
+                    assert_eq!(hv, Bytes::from("v2"));
+                    found_v2 = true;
+                }
             }
         }
-        assert!(found, "history should contain archived v1");
+        assert!(found_v1, "history should contain v1");
+        assert!(
+            found_v2,
+            "C1: history should contain v2 (current in the log)"
+        );
     }
 
     #[tokio::test]
@@ -1695,21 +1690,35 @@ mod tests {
         // main no longer has the key
         assert!(mvcc.main.get(key).await.is_err());
 
-        // history contains v1 (skip ts-keys which have different values)
+        // C1: history contains v1 (the prior, still in the log from when it
+        // was current) and v2 (the delete's tombstone — empty value).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
-        let mut found = false;
+        let mut found_v1 = false;
+        let mut found_tombstone = false;
         while let Some(batch) = stream.next().await {
             for (hk, hv) in batch.unwrap() {
-                // T1c: skip ts-keys — only inspect version-key entries.
-                if crate::version_codec::decode_version_key(&hk).is_none() {
+                let Some((_orig_key, ver)) = crate::version_codec::decode_version_key(&hk) else {
                     continue;
+                };
+                if ver == 1 {
+                    assert_eq!(hv, Bytes::from("v1"));
+                    found_v1 = true;
+                } else if ver == 2 {
+                    assert_eq!(
+                        hv,
+                        Bytes::new(),
+                        "C1: delete writes tombstone (empty value)"
+                    );
+                    found_tombstone = true;
                 }
-                assert_eq!(hv, Bytes::from("v1"));
-                found = true;
             }
         }
-        assert!(found, "history should contain archived v1 after delete");
+        assert!(found_v1, "history should contain v1");
+        assert!(
+            found_tombstone,
+            "C1: history should contain the delete tombstone"
+        );
     }
 
     #[tokio::test]
@@ -1877,8 +1886,8 @@ mod tests {
             mvcc.set_versioned(key, Bytes::from("val")).await.unwrap();
         }
 
-        // history should have no version-key entries — no snapshots were open
-        // (T1c: only ts-keys exist, which are not version-keys).
+        // C1: every write puts the current version into the log, so 100
+        // version-key entries exist (one per key).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut count = 0usize;
@@ -1890,8 +1899,8 @@ mod tests {
             }
         }
         assert_eq!(
-            count, 0,
-            "history should have zero version-key entries without snapshots"
+            count, 100,
+            "C1: every write puts current into the log (100 version-key entries)"
         );
     }
 
@@ -1983,20 +1992,21 @@ mod tests {
             Bytes::from("new")
         );
 
+        // C1: the log contains the new value at the commit version (current-into-log).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut found = false;
         while let Some(batch) = stream.next().await {
             for (hk, hv) in batch.unwrap() {
-                // T1c: skip ts-keys — only inspect version-key entries.
-                if crate::version_codec::decode_version_key(&hk).is_none() {
-                    continue;
+                if let Some((orig, ver)) = crate::version_codec::decode_version_key(&hk) {
+                    if orig == b"k_archive" && ver == 10 {
+                        assert_eq!(hv, Bytes::from("new"));
+                        found = true;
+                    }
                 }
-                assert_eq!(hv, Bytes::from("old"));
-                found = true;
             }
         }
-        assert!(found, "old value must be archived in history");
+        assert!(found, "C1: new value at commit version in the log");
     }
 
     #[tokio::test]
@@ -2016,20 +2026,21 @@ mod tests {
 
         assert!(mvcc.main.get(key.clone()).await.is_err());
 
+        // C1: Remove writes a tombstone (empty value) into the log at commit version.
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut found = false;
         while let Some(batch) = stream.next().await {
             for (hk, hv) in batch.unwrap() {
-                // T1c: skip ts-keys — only inspect version-key entries.
-                if crate::version_codec::decode_version_key(&hk).is_none() {
-                    continue;
+                if let Some((orig, ver)) = crate::version_codec::decode_version_key(&hk) {
+                    if orig == b"k_del" && ver == 20 {
+                        assert_eq!(hv, Bytes::new(), "C1: tombstone for remove");
+                        found = true;
+                    }
                 }
-                assert_eq!(hv, Bytes::from("before"));
-                found = true;
             }
         }
-        assert!(found);
+        assert!(found, "C1: remove tombstone in the log");
     }
 
     #[tokio::test]
@@ -2105,12 +2116,13 @@ mod tests {
                 .unwrap();
         }
 
-        // History should have 4 entries (v1..v4 archived when v2..v5 overwrote)
+        // C1: history has 5 entries (v1..v4 from when they were current,
+        // plus v5 which IS the current version written into the log).
         let count_before = count_history_entries(&mvcc).await;
-        assert_eq!(count_before, 4, "should have 4 history entries");
+        assert_eq!(count_before, 5, "C1: 5 entries (4 old + current v5)");
 
-        // GC below version 3: versions < 3 in history are version_at[0] and version_at[1].
-        // Anchor = highest < 3, older one deleted.
+        // GC below version 3: versions < 3 in history are v1 and v2.
+        // Anchor = highest < 3 = v2, older one (v1) deleted.
         let deleted = mvcc.gc_below(3).await.unwrap();
         assert!(deleted >= 1, "should delete at least 1 old entry");
 
@@ -2171,20 +2183,21 @@ mod tests {
 
         assert_eq!(mvcc.version_of(&key), 5);
 
+        // C1: every committed op now writes into the log unconditionally
+        // (no longer gated by active_snapshots_empty). So 1 version-key entry.
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut count = 0usize;
         while let Some(batch) = stream.next().await {
             for (hk, _) in batch.unwrap() {
-                // T1c: count only version-keys (skip ts-keys).
                 if crate::version_codec::decode_version_key(&hk).is_some() {
                     count += 1;
                 }
             }
         }
         assert_eq!(
-            count, 0,
-            "history should stay empty (no version-key entries) without active snapshots"
+            count, 1,
+            "C1: apply_committed_ops writes current into the log (1 version-key entry)"
         );
     }
 
@@ -2221,6 +2234,11 @@ mod tests {
     /// after the sample but before the first op would silently miss
     /// the archive. Per-op re-sampling closes that race for every
     /// op processed after the snapshot becomes visible.
+    ///
+    /// C1: the log is now the universal version timeline — every
+    /// committed op writes into the log unconditionally (no longer
+    /// gated by active_snapshots_empty). The new value at the commit
+    /// version is always present in the log.
     #[tokio::test]
     async fn apply_committed_ops_archives_even_if_snapshot_opens_mid_call() {
         let gate = make_gate();
@@ -2242,18 +2260,22 @@ mod tests {
             .await
             .unwrap();
 
-        // History must contain "old" because the snapshot needs it.
+        // C1: the new value is written into the log at version 50
+        // unconditionally (the log is the universal timeline).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut found = false;
         while let Some(batch) = stream.next().await {
-            for (_, hv) in batch.unwrap() {
-                if hv.as_ref() == b"old" {
-                    found = true;
+            for (hk, hv) in batch.unwrap() {
+                if let Some((orig, ver)) = crate::version_codec::decode_version_key(&hk) {
+                    if orig == b"k" && ver == 50 {
+                        assert_eq!(hv, Bytes::from("new"));
+                        found = true;
+                    }
                 }
             }
         }
-        assert!(found, "old value archived for active snapshot");
+        assert!(found, "C1: new value at commit version in the log");
     }
 
     // ----------------------------------------------------------------
@@ -2583,8 +2605,8 @@ mod tests {
             );
         }
 
-        // T1a: brand-new keys have no prior to archive → no version-key entries
-        // in history (T1c: only ts-keys exist, which are not version-keys).
+        // C1: every write puts the current version into the log, so n version-key
+        // entries exist (one per key, dual-write).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut hist = 0usize;
@@ -2596,8 +2618,8 @@ mod tests {
             }
         }
         assert_eq!(
-            hist, 0,
-            "T1a always-archive: brand-new keys archive nothing"
+            hist, n as usize,
+            "C1: every key gets its current version in the log (dual-write)"
         );
 
         // T1a: every key is published into the cells (one entry per key).
@@ -2646,20 +2668,24 @@ mod tests {
             Bytes::from("v2")
         );
 
-        // The pre-existing old0 was archived to history.
+        // C1: the log contains the new values at their assigned versions
+        // (current-into-log). old0 was seeded directly into main, not through
+        // the log, so it does NOT appear in history.
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
-        let mut found_old = false;
+        let mut found_new0 = false;
         while let Some(batch) = stream.next().await {
-            for (_, hv) in batch.unwrap() {
-                if hv.as_ref() == b"old0" {
-                    found_old = true;
+            for (hk, hv) in batch.unwrap() {
+                if let Some((orig, _ver)) = crate::version_codec::decode_version_key(&hk) {
+                    if orig == b"k0" && hv.as_ref() == b"new0" {
+                        found_new0 = true;
+                    }
                 }
             }
         }
         assert!(
-            found_old,
-            "pre-existing value must be archived under snapshot"
+            found_new0,
+            "C1: k0's new value is in the log (current-into-log)"
         );
 
         // Every key got a positive version in the cache.
@@ -2700,9 +2726,12 @@ mod tests {
         let val = mvcc.main.get(key.clone()).await.unwrap();
         assert_eq!(val, Bytes::from("v1"));
 
-        // No history entries — nothing was overwritten.
+        // C1: current version is in the log (dual-write), so 1 entry.
         let count = count_history_entries(&mvcc).await;
-        assert_eq!(count, 0, "no history for a brand-new key");
+        assert_eq!(
+            count, 1,
+            "C1: current version in the log for a brand-new key"
+        );
     }
 
     // ================================================================
@@ -2730,6 +2759,8 @@ mod tests {
             pub fail_get: AtomicBool,
             /// When `true`, the next `remove` call returns a Storage error.
             pub fail_remove: AtomicBool,
+            /// When `true`, the next `set` call returns a Storage error.
+            pub fail_set: AtomicBool,
         }
 
         impl FailingStore {
@@ -2738,6 +2769,7 @@ mod tests {
                     inner: InMemoryStore::new(),
                     fail_get: AtomicBool::new(false),
                     fail_remove: AtomicBool::new(false),
+                    fail_set: AtomicBool::new(false),
                 }
             }
 
@@ -2753,6 +2785,9 @@ mod tests {
             }
 
             async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+                if self.fail_set.load(Ordering::Relaxed) {
+                    return Err(Self::injected_error());
+                }
                 self.inner.set(key, value).await
             }
 
@@ -2863,45 +2898,30 @@ mod tests {
         );
     }
 
-    /// Regression test for fix #2: `set_versioned` propagates
-    /// non-NotFound `get()` errors during the archive pre-read.
+    /// C1 regression: `set_versioned` propagates `main.set()` errors.
     ///
-    /// **Pre-fix behaviour:** `if let Ok(old) = self.main.get(key)`
-    /// treated any `Err` (including genuine I/O failures) the same as
-    /// `NotFound` — silently skipped archival and overwrote main →
-    /// snapshot-isolation violation (a live snapshot would miss the old
-    /// value that should have been archived).
-    ///
-    /// **Post-fix:** `match self.main.get(...) { ... Err(e) => return Err(e) }`
-    /// propagates non-NotFound errors → caller sees `Err`, main is NOT
-    /// overwritten, snapshot isolation is preserved.
-    ///
-    /// This test would FAIL on the pre-fix code because the old
-    /// `if let Ok(old)` arm would fall through to the `set` on main,
-    /// returning `Ok(())` while silently breaking snapshot isolation.
+    /// With C1, `set_versioned` writes current-into-log (history) then
+    /// `main.set()`. If `main.set()` fails, the error propagates and
+    /// main is NOT overwritten (the old value survives).
     #[tokio::test]
     async fn set_versioned_propagates_archive_read_error() {
         let gate = make_gate();
         let (mvcc, main) = make_failing_mvcc(gate.clone());
 
-        // Seed a key so the archive pre-read path is taken (there IS
-        // an existing value to archive).
+        // Seed a key in main.
         main.set(Bytes::from("k"), Bytes::from("old_val"))
             .await
             .unwrap();
 
-        // Open a snapshot so set_versioned enters the archive path.
-        let _guard = gate.open_snapshot().await;
-
-        // Arm: the next `get` call will fail with a non-NotFound error.
-        main.fail_get.store(true, Ordering::Relaxed);
+        // Arm: the next `set` call on main will fail.
+        main.fail_set.store(true, Ordering::Relaxed);
 
         let result = mvcc
             .set_versioned(Bytes::from("k"), Bytes::from("new_val"))
             .await;
         assert!(
             result.is_err(),
-            "set_versioned must propagate archive pre-read I/O error"
+            "set_versioned must propagate main.set() I/O error"
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -2909,32 +2929,21 @@ mod tests {
             "error should be the injected fault, got: {err_msg}"
         );
 
-        // Verify main was NOT overwritten — the old value survives
-        // (snapshot-isolation guarantee). Disarm to read.
-        main.fail_get.store(false, Ordering::Relaxed);
+        // Verify main was NOT overwritten — the old value survives.
+        main.fail_set.store(false, Ordering::Relaxed);
         let val = mvcc.main.get(Bytes::from("k")).await.unwrap();
         assert_eq!(
             val,
             Bytes::from("old_val"),
-            "main must NOT be overwritten when archive pre-read fails"
+            "main must NOT be overwritten when main.set() fails"
         );
     }
 
-    /// Regression test for fix #2 (delete_versioned variant):
-    /// `delete_versioned` propagates non-NotFound `get()` errors from
-    /// the archive pre-read block.
+    /// C1 regression: `delete_versioned` propagates `main.remove()` errors.
     ///
-    /// **Pre-fix behaviour:** same `if let Ok(old)` pattern as
-    /// `set_versioned` — a genuine I/O error from `get` was silently
-    /// treated as "nothing to archive", then `remove` proceeded and
-    /// returned `Ok`, losing the old value for any live snapshot.
-    ///
-    /// **Post-fix:** the explicit `Err(e) => return Err(e)` arm stops
-    /// the operation before the remove, preserving snapshot isolation.
-    ///
-    /// This test would FAIL on the pre-fix code because the old
-    /// fallthrough would skip archival and still call `remove`,
-    /// returning `Ok(())`.
+    /// With C1, `delete_versioned` writes a tombstone to history then
+    /// `main.remove()`. If `main.remove()` fails, the error propagates
+    /// and the key survives in main.
     #[tokio::test]
     async fn delete_versioned_propagates_archive_read_error() {
         let gate = make_gate();
@@ -2945,16 +2954,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Open a snapshot.
-        let _guard = gate.open_snapshot().await;
-
-        // Arm: `get` fails (non-NotFound).
-        main.fail_get.store(true, Ordering::Relaxed);
+        // Arm: `remove` fails.
+        main.fail_remove.store(true, Ordering::Relaxed);
 
         let result = mvcc.delete_versioned(Bytes::from("k")).await;
         assert!(
             result.is_err(),
-            "delete_versioned must propagate archive pre-read I/O error"
+            "delete_versioned must propagate main.remove() I/O error"
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -2963,7 +2969,7 @@ mod tests {
         );
 
         // Main must still have the key (remove was never called).
-        main.fail_get.store(false, Ordering::Relaxed);
+        main.fail_remove.store(false, Ordering::Relaxed);
         let val = mvcc.main.get(Bytes::from("k")).await.unwrap();
         assert_eq!(
             val,
@@ -3979,6 +3985,104 @@ mod tests {
     }
 
     // ================================================================
+    // C1 — current-into-log / tombstone / vacuum-guard tests.
+    // ================================================================
+
+    /// C1 guarantee: the current version is written into the log (dual-write).
+    #[tokio::test]
+    async fn c1_current_version_is_in_the_log() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("c1_key");
+        let val = Bytes::from("c1_val");
+        let v = mvcc.set_versioned(key.clone(), val.clone()).await.unwrap();
+
+        // The log entry at encode_version_key(key, v) must hold val.
+        let log_val = mvcc
+            .history_store()
+            .get(encode_version_key(&key, v))
+            .await
+            .unwrap();
+        assert_eq!(log_val, val, "C1: current version must be in the log");
+    }
+
+    /// C1 guarantee: delete writes a tombstone (empty value) into the log.
+    #[tokio::test]
+    async fn c1_delete_writes_tombstone() {
+        let mvcc = make_mvcc();
+        let key = Bytes::from("c1_del");
+        mvcc.set_versioned(key.clone(), Bytes::from("val"))
+            .await
+            .unwrap();
+        let del_v = mvcc.delete_versioned(key.clone()).await.unwrap();
+
+        let tombstone = mvcc
+            .history_store()
+            .get(encode_version_key(&key, del_v))
+            .await
+            .unwrap();
+        assert_eq!(
+            tombstone,
+            Bytes::new(),
+            "C1: delete must write an empty tombstone into the log"
+        );
+    }
+
+    /// C1 guarantee: vacuum never reclaims the current version.
+    #[tokio::test]
+    async fn c1_vacuum_never_reclaims_current() {
+        let mvcc = make_mvcc(); // CurrentOnly — max_count=0
+
+        let key = Bytes::from("c1_sacred");
+        let mut latest_val = Bytes::new();
+        for i in 1..=5u32 {
+            latest_val = Bytes::from(format!("v{i}"));
+            mvcc.set_versioned(key.clone(), latest_val.clone())
+                .await
+                .unwrap();
+        }
+
+        // After 5 writes with eager vacuum, only the current version survives.
+        let cur_v = mvcc.version_of(&key);
+        let log_val = mvcc
+            .history_store()
+            .get(encode_version_key(&key, cur_v))
+            .await
+            .unwrap();
+        assert_eq!(
+            log_val, latest_val,
+            "C1: current version must survive vacuum"
+        );
+
+        // No other versions survive.
+        let hist = count_history_entries(&mvcc).await;
+        assert_eq!(hist, 1, "C1: only the current version survives vacuum");
+    }
+
+    /// C1 guarantee: the tombstone (current after delete) survives vacuum.
+    #[tokio::test]
+    async fn c1_vacuum_keeps_tombstone_current() {
+        let mvcc = make_mvcc(); // CurrentOnly
+
+        let key = Bytes::from("c1_tomb");
+        mvcc.set_versioned(key.clone(), Bytes::from("val"))
+            .await
+            .unwrap();
+        let del_v = mvcc.delete_versioned(key.clone()).await.unwrap();
+
+        // The tombstone is the current version for this key — it must survive.
+        let tombstone = mvcc
+            .history_store()
+            .get(encode_version_key(&key, del_v))
+            .await
+            .unwrap();
+        assert_eq!(
+            tombstone,
+            Bytes::new(),
+            "C1: delete tombstone must survive vacuum"
+        );
+    }
+
+    // ================================================================
     // T1b.1 — eager vacuum (CurrentOnly default) tests.
     // ================================================================
 
@@ -3997,12 +4101,12 @@ mod tests {
                 .unwrap();
         }
 
-        // T1b.2: per-key vacuum_key is precise — keep_n=0 (max_count=0), no
-        // snapshot → no anchor → exactly 0 history entries survive.
+        // C1: the current version lives in the log and is SACRED (cur_v guard).
+        // After 5 writes with max_count=0, only the current version (v5) survives.
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 0,
-            "CurrentOnly eager vacuum must leave 0 history entries (no anchor without a snapshot), got {hist}"
+            hist, 1,
+            "C1: CurrentOnly eager vacuum leaves 1 entry (the current version in the log), got {hist}"
         );
 
         // The current value is still readable at the floor.
@@ -4153,11 +4257,11 @@ mod tests {
                 .unwrap();
         }
 
-        // KeepHistory: no eager vacuum — all 4 prior versions remain.
+        // C1: all 5 versions in the log (v1..v4 prior + v5 current), no eager vacuum.
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 4,
-            "KeepHistory must retain all prior versions (no eager vacuum), got {hist}"
+            hist, 5,
+            "C1: KeepHistory retains all 5 versions in the log (4 prior + current), got {hist}"
         );
 
         // Current value still correct.
@@ -4195,10 +4299,14 @@ mod tests {
             versions.push(mvcc.version_of(&key));
         }
 
-        // 5 old versions archived (v1..v5). keep_n=3 keeps the newest 3
-        // (v3, v4, v5); v1, v2 reclaimed. No snapshot → no anchor.
+        // C1: 6 versions in the log. cur_v=v6 occupies idx 0 (skipped by guard).
+        // max_count=3 keeps idx 1,2 (v5, v4). v3..v1 (idx 3..5) reclaimed.
+        // Total: v6 (cur_v) + v5, v4 = 3.
         let hist = count_history_entries(&mvcc).await;
-        assert_eq!(hist, 3, "max_count=3 must keep exactly 3 old versions");
+        assert_eq!(
+            hist, 3,
+            "C1: max_count=3 keeps current + 2 within window = 3"
+        );
 
         // The newest 3 are reachable via get_at.
         for &v in &versions[versions.len() - 3..] {
@@ -4226,9 +4334,13 @@ mod tests {
                 .unwrap();
         }
 
-        // keep_n=0, no snapshot → no anchor → all old versions reclaimed.
+        // C1: the current version (v4) survives in the log (cur_v guard);
+        // all older versions are reclaimed by max_count=0.
         let hist = count_history_entries(&mvcc).await;
-        assert_eq!(hist, 0, "max_count=0 reclaims all old versions");
+        assert_eq!(
+            hist, 1,
+            "C1: max_count=0 reclaims all old versions, current stays (1 entry)"
+        );
 
         let last_committed = mvcc.gate.last_committed();
         assert_eq!(
@@ -4257,12 +4369,12 @@ mod tests {
                 .unwrap();
         }
 
-        // max_count=None → vacuum_key returns early (no count reclaim). All 4
-        // old versions survive — min_count is inert without a cap.
+        // C1: max_count=None → vacuum_key returns early. All 5 versions in the
+        // log survive (4 prior + 1 current).
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 4,
-            "max_count=None must keep ALL old versions (min_count alone reclaims nothing)"
+            hist, 5,
+            "C1: max_count=None keeps ALL 5 versions in the log (4 prior + current)"
         );
     }
 
@@ -4314,8 +4426,8 @@ mod tests {
 
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 0,
-            "unpinned old versions must be reclaimed (current only)"
+            hist, 1,
+            "C1: unpinned old versions reclaimed, current v4 stays in the log (1 entry)"
         );
     }
 
@@ -4341,10 +4453,11 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // C1: history has v1..v10 (all written as current).
         let hist_before = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist_before, 9,
-            "KeepHistory must retain all 9 prior versions"
+            hist_before, 10,
+            "C1: KeepHistory retains all 10 versions in the log (including current v10)"
         );
 
         // Open a snapshot at v10 — pins min_alive=10.
@@ -4369,11 +4482,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Exactly 2 history entries survive: the pinned v10 and the anchor v9.
+        // C1: 3 entries survive — current v11 (cur_v guard), pinned v10 (≥ min_alive),
+        // and anchor v9.
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 2,
-            "max_count=0 + live snapshot: keep pinned (>=min_alive) + single anchor"
+            hist, 3,
+            "C1: max_count=0 + live snapshot: current + pinned (>=min_alive) + anchor"
         );
 
         // The snapshot at v10 reads v10 (the value current at its version).
@@ -4545,10 +4659,12 @@ mod tests {
             .await
             .unwrap();
 
-        // v1 (ts=0, age 100s > 60s) reclaimed; v2 (ts=100_000, within window)
-        // kept. Exactly 1 version-key entry remains.
+        // C1: v3 (current, cur_v guard) + v2 (age-kept) = 2 entries. v1 reclaimed by age.
         let hist = count_history_entries(&mvcc).await;
-        assert_eq!(hist, 1, "max_age=60s must reclaim the 100s-old v1, keep v2");
+        assert_eq!(
+            hist, 2,
+            "C1: max_age=60s reclaims v1; v2 age-kept + v3 current = 2"
+        );
 
         // The reclaimed v1 is no longer reachable via get_at.
         let stale = mvcc.get_at(&key, v1).await.unwrap();
@@ -4594,12 +4710,13 @@ mod tests {
             .await
             .unwrap();
 
-        // min_count=3 protects the newest 3 old versions (v3, v4, v5) from the
-        // age cap; v1, v2 (ts=1, age 10s > 1s, beyond the floor) are reclaimed.
+        // C1: cur_v=v6 at idx 0 (sacred). min_count=3 protects idx 0..2, but idx 0
+        // is already sacred. v5(idx 1), v4(idx 2) protected by floor. v3..v1 past
+        // age cap and beyond floor → reclaimed. Total: v6 + v5 + v4 = 3.
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
             hist, 3,
-            "min_count=3 floor must keep the newest 3 even past the age cap"
+            "C1: min_count=3 floor + current = 3 (v6 cur_v, v5, v4 floor), past age cap"
         );
     }
 
@@ -4629,12 +4746,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // a1 and a2 are beyond max_count=1, but within the age window → age
-        // protects them → hist == 2 (both survive).
+        // C1: a3 (current, cur_v guard) + a1, a2 (age-kept) = 3 entries.
         let hist_a = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist_a, 2,
-            "phase (a): versions beyond count but within age window are kept (age protects)"
+            hist_a, 3,
+            "C1: phase (a): current + age-kept versions = 3 (age protects beyond count)"
         );
 
         // Phase (b): a version within the count cap but beyond the age window
@@ -4660,12 +4776,11 @@ mod tests {
             .set_versioned(key2.clone(), Bytes::from("new"))
             .await
             .unwrap();
-        // v1 is within the count window (idx 0 < 3) but past the age cap.
-        // Count protects it → hist == 1 (v1 survives despite age).
+        // C1: v2 (current, cur_v guard) + v1 (count-protected) = 2 entries.
         let hist_b = count_history_entries(&mvcc2).await;
         assert_eq!(
-            hist_b, 1,
-            "phase (b): version within count but beyond age window is kept (count protects)"
+            hist_b, 2,
+            "C1: phase (b): current + count-protected version = 2"
         );
 
         // Phase (c): a version beyond BOTH caps is reclaimed.
@@ -4702,10 +4817,11 @@ mod tests {
         //   v2(idx0): idx<1? YES → keep (within count window).
         //   v1(idx1): idx<1? No → count drops. age: ts=1<40001? Yes → age drops. → reclaim.
         // hist == 1 (v2 kept by count, v1 reclaimed by both).
+        // C1: v3 (current, cur_v guard) = 1. v1, v2 both caps drop → reclaimed.
         let hist_c = count_history_entries(&mvcc3).await;
         assert_eq!(
             hist_c, 1,
-            "phase (c): version beyond BOTH caps (count+age) is reclaimed"
+            "C1: phase (c): current survives (cur_v guard); v1, v2 beyond both caps → reclaimed"
         );
     }
 
@@ -4751,14 +4867,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Vacuum: keep_n=0, min_alive=5, live snapshot → anchor = max<5 = v4.
-        //   v5: >= min_alive(5) → kept (sacred, branch b)
-        //   v4: == anchor → kept (branch c)
-        //   v3..v1: past age, beyond count, < min_alive, not anchor → reclaimed
+        // C1: v6 (current, cur_v guard) + v5 (≥ min_alive) + v4 (anchor) = 3.
+        // v3..v1: past age, beyond count, < min_alive, not anchor → reclaimed.
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 2,
-            "age cap must still honor sacred floor + anchor: {{v5 pinned, v4 anchor}}"
+            hist, 3,
+            "C1: age cap honors current + sacred floor + anchor: {{v6 current, v5 pinned, v4 anchor}}"
         );
 
         // The snapshot at v5 reads v5 (correct value at its version).
@@ -4804,12 +4918,12 @@ mod tests {
             .await
             .unwrap();
 
-        // v1 has no ts → unknown age → age axis conservatively keeps it.
+        // C1: v3 (current, cur_v guard) + v1 (unknown ts, kept) = 2.
         // v2 (ts=1, age 10s > 1s) → reclaimed by age.
         let hist = count_history_entries(&mvcc).await;
         assert_eq!(
-            hist, 1,
-            "unknown-ts version kept by age axis; v2 (ts=1) reclaimed"
+            hist, 2,
+            "C1: unknown-ts v1 kept + current v3 = 2; v2 reclaimed by age"
         );
         // v1 is still reachable (its version entry survived).
         assert!(
@@ -4911,8 +5025,8 @@ mod tests {
         mvcc.set_test_now(0);
     }
 
-    /// A deleted key contributes no current entry — only its archived
-    /// prior versions appear, in ascending version order.
+    /// A deleted key contributes its prior versions plus the tombstone —
+    /// all from the log, in ascending version order.
     #[tokio::test]
     async fn history_of_deleted_key_keeps_prior_versions() {
         let mvcc = make_mvcc();
@@ -4924,18 +5038,17 @@ mod tests {
         mvcc.set_versioned(Bytes::from("k"), Bytes::from("v2"))
             .await
             .unwrap();
-        // Now delete the live version. T1a archives the current v2 into
-        // history before removing it from main.
+        // C1: delete writes a tombstone (empty value) into the log.
         mvcc.delete_versioned(Bytes::from("k")).await.unwrap();
 
         let timeline = mvcc.history_of(b"k").await.unwrap();
-        // v1 (archived when v2 was written) + v2 (archived on delete).
-        // No current entry — main no longer has the key.
-        assert_eq!(timeline.len(), 2);
+        // C1: v1 + v2 (both written into log when current) + v3 (tombstone).
+        // No current entry from main — main no longer has the key.
+        assert_eq!(timeline.len(), 3);
         let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
-        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(versions, vec![1, 2, 3]);
         let values: Vec<&[u8]> = timeline.iter().map(|e| e.value.as_ref()).collect();
-        assert_eq!(values, vec![b"v1".as_slice(), b"v2"]);
+        assert_eq!(values, vec![b"v1".as_slice(), b"v2", b""]);
 
         // Sanity: main really is empty for this key.
         match mvcc.main.get(Bytes::from("k")).await {
