@@ -870,7 +870,7 @@ async fn accept_loop_tcp(
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(?e, "tcp accept failed; sleeping briefly");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(shamir_tunables::instance_defaults::SERVER_POLL_INTERVAL).await;
                         continue;
                     }
                 };
@@ -932,7 +932,7 @@ async fn accept_loop_ws_native(
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(?e, "ws accept failed; sleeping briefly");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(shamir_tunables::instance_defaults::SERVER_POLL_INTERVAL).await;
                         continue;
                     }
                 };
@@ -1001,7 +1001,7 @@ async fn accept_loop_ws_browser(
                     Ok(v) => v,
                     Err(e) => {
                         tracing::warn!(?e, "ws-browser accept failed; sleeping briefly");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        tokio::time::sleep(shamir_tunables::instance_defaults::SERVER_POLL_INTERVAL).await;
                         continue;
                     }
                 };

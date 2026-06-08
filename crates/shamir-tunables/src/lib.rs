@@ -6,6 +6,8 @@
 //! phase promotes selected knobs to a runtime cascade where these become
 //! the defaults.
 
+use std::time::Duration;
+
 /// Knobs whose natural owner is the storage backend / store level.
 pub mod store_defaults {
     /// Batch size for foreground / read-path full scans and index backfill
@@ -22,6 +24,12 @@ pub mod store_defaults {
 
 /// Knobs whose natural owner is the instance / deployment level.
 pub mod instance_defaults {
+    use super::Duration;
+
     /// Initial capacity for transport frame / scratch byte buffers.
     pub const IO_FRAME_BUFFER_CAP: usize = 4096;
+
+    /// Poll/backoff interval for server housekeeping loops (sleep between
+    /// non-blocking checks).
+    pub const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 }
