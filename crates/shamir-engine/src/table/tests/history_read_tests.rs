@@ -300,10 +300,12 @@ async fn history_order_desc_reverses() {
     assert_eq!(versions, vec![3, 2, 1], "Desc newest-first");
 }
 
-/// `AsOf` must return the clear "not yet supported (T4-asof)" error —
-/// never silently fall back to Latest.
+/// `AsOf(Version(v))` on an MVCC table must succeed (T4-asof is now
+/// implemented). An empty table with no records returns 0 rows — the
+/// read succeeds and does NOT return an error or silently fall back to
+/// Latest behaviour.
 #[tokio::test]
-async fn asof_returns_unsupported_error() {
+async fn asof_returns_ok_on_mvcc_table() {
     let (tbl, _mvcc) = make_mvcc_table().await;
     intern_fields(&tbl).await;
 
@@ -316,17 +318,27 @@ async fn asof_returns_unsupported_error() {
         .filter(eq_name("alice"));
     q.temporal = Temporal::AsOf { at: At::Version(1) };
 
-    let err = tbl.read(&q, &ctx).await.unwrap_err();
-    match err {
-        DbError::Validation(msg) => {
-            assert!(
-                msg.contains("T4-asof"),
-                "error must mention T4-asof; got {:?}",
-                msg
-            );
-        }
-        other => panic!("expected DbError::Validation, got {:?}", other),
-    }
+    // AsOf is implemented — must succeed, not error.
+    let result = tbl.read(&q, &ctx).await.unwrap();
+    // Empty table → 0 rows (no records existed at version 1 or at all).
+    assert_eq!(
+        result.records.len(),
+        0,
+        "AsOf on an empty table returns 0 rows"
+    );
+    // Stats tag must indicate the asof path was taken.
+    let tag = result
+        .stats
+        .as_ref()
+        .unwrap()
+        .index_used
+        .as_deref()
+        .unwrap_or("");
+    assert!(
+        tag.contains("temporal_asof"),
+        "index_used must be temporal_asof; got {:?}",
+        tag
+    );
 }
 
 /// Regression: the default `Latest` path is unchanged — a normal read

@@ -1352,6 +1352,66 @@ impl MvccStore {
         Ok(latest)
     }
 
+    /// T4-asof: resolve a wall-clock timestamp to the largest committed
+    /// version whose recorded commit timestamp is ≤ `ts_millis`.
+    ///
+    /// Algorithm: scan ALL ts-keys (`[TS_TAG][version_be: 8]`) stored in
+    /// the `history` store — each was written by [`Self::record_ts`] when
+    /// the corresponding version was committed. Pick the maximum version
+    /// whose recorded ts ≤ `ts_millis`. Returns `None` when no eligible
+    /// version exists (e.g. the store is empty, or `ts_millis` is earlier
+    /// than all recorded versions).
+    ///
+    /// This is O(total versions) — acceptable for the point-in-time read
+    /// slice; a dedicated ts-ordered index is a later performance slice.
+    ///
+    /// Read-only; no cell mutation; no locking. Best-effort: if a ts entry
+    /// was never recorded for a version (it was written before T1c landed)
+    /// that version is invisible to this scan — the conservative choice,
+    /// consistent with how `vacuum_key` treats unknown-age versions.
+    pub async fn version_at_or_before_ts(&self, ts_millis: u64) -> Option<u64> {
+        use futures::StreamExt;
+
+        let stream = self.history.iter_stream(256);
+        futures::pin_mut!(stream);
+
+        let mut best: Option<u64> = None;
+
+        while let Some(batch) = stream.next().await {
+            let batch = match batch {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            for (phys_key, val) in batch {
+                // ts-keys are exactly 9 bytes: [TS_TAG][version_be: 8].
+                if phys_key.len() != 9 || phys_key[0] != TS_TAG {
+                    continue;
+                }
+                // Decode the recorded commit ts (little-endian u64, 8 bytes).
+                if val.len() != 8 {
+                    continue;
+                }
+                let ts_bytes: [u8; 8] = match val.as_ref().try_into() {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let recorded_ts = u64::from_le_bytes(ts_bytes);
+                if recorded_ts > ts_millis {
+                    continue;
+                }
+                // Decode the version from the ts-key: bytes [1..9].
+                let v_bytes: [u8; 8] = phys_key[1..9].try_into().expect("checked len==9");
+                let version = u64::from_be_bytes(v_bytes);
+                best = Some(match best {
+                    None => version,
+                    Some(prev) => prev.max(version),
+                });
+            }
+        }
+
+        best
+    }
+
     /// T4-history: one key's full version timeline, ascending by version.
     ///
     /// Merges two sources:
