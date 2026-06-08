@@ -26,10 +26,9 @@ fn bench_mvcc_set_versioned_no_snapshots(c: &mut Criterion) {
     let mut group = c.benchmark_group("mvcc_set_versioned_no_snapshots");
     let rt = rt();
 
-    let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = MvccStore::new(main, history, gate);
+    let mvcc = MvccStore::new(history, gate);
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("zero_overhead_write", |b| {
@@ -51,10 +50,9 @@ fn bench_mvcc_get_at_fast_path(c: &mut Criterion) {
     let mut group = c.benchmark_group("mvcc_get_at_fast_path");
     let rt = rt();
 
-    let main: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let history: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = MvccStore::new(main, history, gate);
+    let mvcc = MvccStore::new(history, gate);
 
     rt.block_on(async {
         for i in 0..1000u32 {

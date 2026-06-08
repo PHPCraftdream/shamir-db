@@ -57,11 +57,7 @@ async fn read_one_tx_routes_through_mvcc_when_attached() {
         .await
         .unwrap();
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = Arc::new(MvccStore::new(
-        Arc::clone(&data),
-        history,
-        Arc::clone(&gate),
-    ));
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     let tbl = tbl.with_mvcc_store(Arc::clone(&mvcc));
 
     let value = InnerValue::Str("x".to_string());
@@ -82,11 +78,7 @@ async fn read_one_tx_with_mvcc_not_found_maps_to_error() {
         .await
         .unwrap();
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = Arc::new(MvccStore::new(
-        Arc::clone(&data),
-        history,
-        Arc::clone(&gate),
-    ));
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     let tbl = tbl.with_mvcc_store(mvcc);
 
     let id = RecordId::new();

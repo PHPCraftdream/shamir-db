@@ -27,11 +27,7 @@ async fn make_mvcc_table() -> TableManager {
         .await
         .unwrap();
     let gate = Arc::new(RepoTxGate::fresh());
-    let mvcc = Arc::new(MvccStore::new(
-        Arc::clone(&data),
-        history,
-        Arc::clone(&gate),
-    ));
+    let mvcc = Arc::new(MvccStore::new(history, Arc::clone(&gate)));
     tbl.with_mvcc_store(mvcc)
 }
 
