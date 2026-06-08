@@ -3978,6 +3978,7 @@ dependencies = [
  "redb",
  "serde",
  "serial_test",
+ "shamir-tunables",
  "shamir-types",
  "sled",
  "tempfile",
@@ -4024,6 +4025,10 @@ dependencies = [
  "tokio-tungstenite",
  "tungstenite",
 ]
+
+[[package]]
+name = "shamir-tunables"
+version = "0.1.0"
 
 [[package]]
 name = "shamir-tx"

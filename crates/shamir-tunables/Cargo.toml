@@ -1,0 +1,9 @@
+[package]
+name = "shamir-tunables"
+version = "0.1.0"
+edition = "2021"
+description = "Centralized tunable constants for ShamirDB — one home for build-time knobs organized by their owner level in the Instance→Repo→Table→Store config cascade."
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
