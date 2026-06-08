@@ -1404,8 +1404,11 @@ impl TableManager {
 
         // Backfill: stream existing records and add each to the new
         // sorted index. Avoids materialising the whole table.
+        // P4 (pre-refactor boundary): read CURRENT state through the seam
+        // (`self.list_stream` → MvccStore::current_stream when attached), not
+        // `self.table.list_stream` directly, so collapse-main swaps one place.
         use futures::StreamExt;
-        let stream = self.table.list_stream(1000);
+        let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch) = stream.next().await {
             for (id, record) in batch? {
@@ -2731,7 +2734,10 @@ impl TableManager {
             return Ok(());
         }
 
-        let stream = self.table.list_stream(1000);
+        // P4 (pre-refactor boundary): read CURRENT state through the seam
+        // (`self.list_stream` → MvccStore::current_stream when attached) so
+        // collapse-main reroutes index2 backfill in one place.
+        let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
