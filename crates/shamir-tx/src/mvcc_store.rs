@@ -1554,19 +1554,11 @@ impl MvccStore {
             }
         }
 
-        // Phase 2: append the CURRENT version from `main` if the key
-        // currently exists and is NOT already in the log entries (C1:
-        // the current is now dual-written into history; avoid duplicates).
-        // `version_of` reads the cell's archive-routing version (0 on the
-        // fast path / absent key). `main.get` tells us whether the key is live.
-        let cur_v = self.current_version(key);
-        if cur_v > 0 && !entries.iter().any(|(v, _)| *v == cur_v) {
-            match self.main.get(Bytes::copy_from_slice(key)).await {
-                Ok(cur_val) => entries.push((cur_v, cur_val)),
-                Err(DbError::NotFound(_)) => {}
-                Err(e) => return Err(e),
-            }
-        }
+        // Phase 2 (C1+): the current version already lives in the log (written
+        // by set_versioned/apply_committed_ops), so the Phase-1 scan above
+        // already includes it — no separate `main` read is needed. This is the
+        // last residual `main` read on the read side; removing it completes the
+        // pre-refactor (history_of resolves purely from the log).
 
         // Phase 3: ascending by version, resolve ts per version.
         entries.sort_by_key(|(v, _)| *v);
