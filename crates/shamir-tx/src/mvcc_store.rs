@@ -5,16 +5,14 @@
 //!   entry `<key>::0xFF::<version_be>` (see [`version_codec`]). All reads
 //!   resolve from this log.
 //!
-//! FINAL-A (single-append): every write (set/delete/batch/apply_committed)
-//! performs exactly ONE durable write — to the history log. The prior
-//! dual-write to `main` is removed. `history` is the universal version-log
-//! (see docs/roadmap/TEMPORAL.md §1); MVCC-2 cannot occur because
-//! `publish_cell` fires BEFORE the log write, so any snapshot opened
-//! mid-write sees the bumped cell and takes the slow path → finds the prior
-//! version in the log.
+//! Every write (set/delete/batch/apply_committed) performs exactly ONE
+//! durable append to `history`. MVCC-2 cannot occur because `publish_cell`
+//! fires BEFORE the log write, so any snapshot opened mid-write sees the
+//! bumped cell version and correctly range-scans the log for the prior entry.
 //!
-//! Snapshot reads via [`MvccStore::get_at`] use a fast path (version cache
-//! check → history read) and fall back to a history range scan.
+//! Snapshot reads via [`MvccStore::get_at`]: if the cached version ≤ snapshot,
+//! read the log at `key‖0xFF‖version`; otherwise range-scan the log for the
+//! newest version ≤ snapshot (see [`MvccStore::resolve_read`]).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -70,8 +68,8 @@ fn decode_ts_key(physical: &[u8]) -> Option<u64> {
 }
 
 /// Per-key in-memory coordination state — the "record cell".
-/// The durable data stays in `history`; the cell is rebuildable
-/// in-memory coordination.
+/// The durable data lives in the single `history` version-log; the cell
+/// is rebuildable from the log and held in memory for fast coordination.
 #[derive(Debug, Clone, Copy)]
 struct RecordCell {
     /// The latest version assigned to this key. Set on every write path
@@ -358,7 +356,7 @@ impl MvccStore {
     /// Anchor: when a live snapshot exists below `current`, the SINGLE largest
     /// version `< min_alive` is also kept — it serves a snapshot reading a key
     /// last-written below `min_alive`. When no live snapshot exists, no anchor
-    /// is needed: a fresh snapshot opens at `current` and reads `main`.
+    /// is needed: a fresh snapshot opens at `current` and reads the log directly.
     ///
     /// When a version is reclaimed, its `ts_key(version)` entry is also removed
     /// (no orphan timestamps). Best-effort: errors are swallowed (a vacuum
@@ -487,18 +485,15 @@ impl MvccStore {
     }
 
     // ========================================================================
-    // Versioning substrate (future WriteStrategy seam — see
-    // docs/roadmap/MVCC_CELL.md §7).
+    // Versioning substrate — durable operations over the single `history` log.
     //
-    // This region groups the durable-versioned-KV operations over the
-    // `main`/`history` stores: the write/delete paths, the snapshot-read
-    // resolver, and the committed-ops applier. R1 extracts three private
-    // helpers (`publish_cell`, `resolve_read`) that name repeated patterns;
-    // repeated patterns; the bodies are byte-identical to the inline blocks
-    // they replace. A future slice will lift this region behind a
-    // `trait WriteStrategy` (R2 — out of scope here).
+    // This region groups the version-log operations: the write path
+    // (`set_versioned`, `set_versioned_many`, `delete_versioned`), the
+    // snapshot-read resolver (`resolve_read`), and the committed-ops applier
+    // (`apply_committed_ops`). The in-memory helper `publish_cell` names the
+    // cell-update step shared across all write paths.
     //
-    // The coordination accessors below (`current_version` / `version_of` /
+    // The coordination accessors (`current_version` / `version_of` /
     // `live_version` / `seed_version`) and the Level-3 lock region are
     // deliberately kept separate from this substrate.
     // ========================================================================
@@ -519,10 +514,10 @@ impl MvccStore {
     }
 
     /// Resolve a versioned read of `key` visible at `snapshot_version`, given
-    /// its current cached version `cur_v`. Fast path (`cur_v > 0 && cur_v <= snapshot`):
-    /// read `history` at `encode_version_key(key, cur_v)`; slow path: range-scan
-    /// `history` for the newest version `<= snapshot`. C2: reads exclusively from
-    /// the log (no `main` read).
+    /// its current cached version `cur_v`. Direct path (`cur_v > 0 && cur_v <= snapshot`):
+    /// read the log at `encode_version_key(key, cur_v)`. Fallback: range-scan
+    /// the log for the newest version `<= snapshot`. Reads exclusively from
+    /// the single `history` log in both cases.
     async fn resolve_read(
         &self,
         key: &[u8],
@@ -540,22 +535,21 @@ impl MvccStore {
         self.scan_history_for_version(key, snapshot_version).await
     }
 
-    /// cancel-safe: NO — multi-step state mutation. FINAL-A: log is the
-    /// sole durable write. Cancellation after `publish_cell` but before the
+    /// cancel-safe: NO — multi-step state mutation. The log is the sole
+    /// durable write. Cancellation after `publish_cell` but before
     /// `history.set` leaves the in-memory cell advanced but the log not yet
     /// written; the caller must retry or WAL-replay to converge.
     ///
     /// Returns the monotonic version assigned to this write (from the
     /// shared `RepoTxGate` counter).
     pub async fn set_versioned(&self, key: Bytes, value: Bytes) -> DbResult<u64> {
-        // FINAL-A: log is the sole durable write — main is no longer written.
-        // The prior version is already in the log from when it was written as
-        // current (C1). A single append to the log is all that is needed.
+        // Single log append: every prior version is already in the log from
+        // when it was written as current. No other store is written.
         //
-        // Bump-first: assign version, update cell (both version and hwm), then
-        // perform the physical write. CRIT-2: `publish_cell` uses entry_async
-        // (modify-or-insert) so repeated writes to the same key advance the
-        // cached version monotonically.
+        // Bump-first: assign version, update cell, then perform the physical
+        // write. CRIT-2: `publish_cell` uses entry_async (modify-or-insert)
+        // so repeated writes to the same key advance the cached version
+        // monotonically.
         let new_v = self.gate.assign_next_version();
         self.publish_cell(key.clone(), new_v).await;
         let key_snapshot = key.clone();
@@ -575,15 +569,15 @@ impl MvccStore {
         Ok(new_v)
     }
 
-    /// cancel-safe: NO — multi-step state mutation. FINAL-A: log is the
-    /// sole durable write. Cancellation mid-sequence (after some cells
-    /// are published but before the single history `transact` completes)
-    /// leaves the store partial; recovery is caller-side retry / WAL replay.
+    /// cancel-safe: NO — multi-step state mutation. The log is the sole
+    /// durable write. Cancellation mid-sequence (after some cells are published
+    /// but before the single history `transact` completes) leaves the store
+    /// partial; recovery is caller-side retry / WAL replay.
     ///
     /// Batched non-tx write of many `(key, value)` pairs — the bulk-load
-    /// twin of [`set_versioned`]. FINAL-A: collapses all log writes into a
-    /// single `history.transact` (one atomic write-tx, one fsync on backends
-    /// that override `transact`). No main write occurs.
+    /// twin of [`set_versioned`]. Collapses all log writes into a single
+    /// `history.transact` (one atomic write-tx, one fsync on backends
+    /// that override `transact`). No other store is written.
     ///
     /// Semantics match calling [`set_versioned`] once per pair, in order:
     /// assign a fresh monotonic version per key, then append all version-key
@@ -601,14 +595,14 @@ impl MvccStore {
             return Ok(0);
         }
 
-        // C1: no archive_prior — prior versions are already in the log.
         // Phase 1 (bump-first): assign a fresh version per key and update the
-        // cell (both version and hwm) BEFORE the physical main write.
+        // cell BEFORE the physical log write. Prior versions are already in
+        // the log from when they were written as current.
         // CRIT-2: `publish_cell` uses entry_async modify-or-insert so the
         // cached version advances monotonically.
         let mut max_v = 0u64;
         let mut new_versions: Vec<u64> = Vec::with_capacity(items.len());
-        // FINAL-A: single log write — build history_ops only (no main_ops).
+        // Single log write — build history_ops (the sole durable write target).
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len());
         let keys: Vec<Bytes> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
@@ -644,21 +638,20 @@ impl MvccStore {
     }
 
     /// cancel-safe: NO — multi-step state mutation; same reasoning as
-    /// `set_versioned`. FINAL-A: log is the sole durable write. Cancellation
-    /// after `publish_cell` but before the tombstone `history.set` leaves the
-    /// cell advanced without the tombstone; caller-side retry / WAL replay.
+    /// `set_versioned`. The log is the sole durable write. Cancellation after
+    /// `publish_cell` but before the tombstone `history.set` leaves the cell
+    /// advanced without the tombstone; caller-side retry / WAL replay.
     ///
     /// Returns the monotonic version assigned to this delete (always
     /// allocated — see [`set_versioned`] for rationale).
     pub async fn delete_versioned(&self, key: Bytes) -> DbResult<u64> {
-        // FINAL-A: log is the sole durable write — main is no longer written.
-        // A tombstone (empty value) is appended to the log for the delete
-        // version. The prior version is already in the log from when it was
-        // written as current (C1).
+        // Single log append: a tombstone (empty value) is written for the
+        // delete version. The prior version is already in the log from when
+        // it was written as current.
         //
-        // Bump-first: assign version, update cell (version+hwm), then write
-        // the tombstone. CRIT-2: `publish_cell` uses entry_async
-        // modify-or-insert so the cached version advances monotonically.
+        // Bump-first: assign version, update cell, then write the tombstone.
+        // CRIT-2: `publish_cell` uses entry_async (modify-or-insert) so the
+        // cached version advances monotonically.
         let new_v = self.gate.assign_next_version();
         self.publish_cell(key.clone(), new_v).await;
         // Single log write: tombstone (empty value — MessagePack records are
@@ -678,15 +671,15 @@ impl MvccStore {
         Ok(new_v)
     }
 
-    /// cancel-safe: yes — read-only. Fast path is a single `history.get`;
-    /// slow path is a read-only history range scan. Cancellation drops
+    /// cancel-safe: yes — read-only. The direct path is a single `history.get`;
+    /// the fallback is a read-only history range scan. Cancellation drops
     /// the future with no state mutation.
     ///
     /// Snapshot read: return the value visible at `snapshot_version`.
     ///
-    /// Fast path: if version_cache says current version ≤ snapshot →
+    /// Direct path: if version_cache says current version ≤ snapshot →
     /// return `history.get(encode_version_key(key, cur_v))`.
-    /// Slow path: range scan history `[key::0, key::snapshot]`, take last.
+    /// Fallback: range scan history `[key::0, key::snapshot]`, take last.
     pub async fn get_at(&self, key: &[u8], snapshot_version: u64) -> DbResult<Option<Bytes>> {
         let cur_v = self.current_version(key);
         self.resolve_read(key, snapshot_version, cur_v).await
@@ -1026,9 +1019,9 @@ impl MvccStore {
     /// entries directly into the history log, bypassing
     /// [`apply_committed_ops`]. That keeps the log correct but leaves
     /// `version_cache` empty, so a later `get_at(key, snap)` for a
-    /// snapshot *below* `commit_version` would take the fast path
+    /// snapshot *below* `commit_version` would use the direct-read path
     /// (`current_version == 0 ≤ snap`) and return the recovered (latest)
-    /// value instead of scanning history.
+    /// value instead of range-scanning the log.
     ///
     /// In the bootstrap-recovery scenario this is harmless (no snapshot
     /// survives a restart and every fresh snapshot opens at
@@ -1043,10 +1036,10 @@ impl MvccStore {
         self.cells.upsert_async(key, RecordCell { version }).await;
     }
 
-    /// cancel-safe: NO — applies a batch of `KvOp` via multi-step
-    /// sequences (history transact, version_cache updates). FINAL-A: only
-    /// one durable write (history transact). Cancellation mid-batch leaves
-    /// some phases applied, others not. Recovery relies on WAL replay.
+    /// cancel-safe: NO — applies a batch of `KvOp` via multi-step sequences
+    /// (history transact, version_cache updates). One durable write (history
+    /// transact). Cancellation mid-batch leaves some phases applied, others
+    /// not. Recovery relies on WAL replay.
     pub async fn apply_committed_ops(&self, ops: Vec<KvOp>, commit_version: u64) -> DbResult<()> {
         // HIGH-3: batch the physical writes through `Store::transact`.
         // Per-op `set`/`remove` collapses to a single atomic write-tx
@@ -1066,8 +1059,8 @@ impl MvccStore {
             history_ops.push(h_key);
         }
 
-        // One batched write to history (current-into-log + tombstones).
-        // FINAL-A: log is the sole durable write — main is no longer written.
+        // One batched write to history (current version + tombstones).
+        // The log is the sole durable write target.
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
         }
@@ -1200,8 +1193,8 @@ impl MvccStore {
     ///    key is kept so the oldest live snapshot can still resolve a
     ///    read of a key last-written below `min_alive`.
     ///
-    /// Current versions now live in `history` too (C1 dual-write), so an
-    /// explicit `cur_v` guard prevents reclaiming them.
+    /// Current versions live in `history` (the single log), so an explicit
+    /// `cur_v` guard prevents reclaiming them.
     ///
     /// When a version is reclaimed, its `ts_key(version)` is removed in
     /// lockstep so timestamps never outlive their versions. Returns the
@@ -1295,29 +1288,28 @@ impl MvccStore {
     /// MVCC-visibility invariant (why `< min_alive` is safe):
     ///
     /// `get_at(key, snapshot)` reads `cur_v = current_version(key)` and,
-    /// if `cur_v <= snapshot`, reads `history` at the version-key (fast path);
-    /// otherwise it scans history for the newest version `<= snapshot`.
-    /// The cache entry only matters when it forces the *slow* path, i.e.
+    /// if `cur_v <= snapshot`, reads `history` at the version-key directly;
+    /// otherwise it range-scans the log for the newest version `<= snapshot`.
+    /// The cache entry only matters when it forces the range-scan, i.e.
     /// for snapshots `< cur_v`. Evicting an entry makes `current_version`
-    /// return `0`, so every snapshot takes the fast path and reads the log.
+    /// return `0`, so every snapshot uses the direct log-lookup path.
     ///
     /// An entry with `cv < min_alive` satisfies `cv < min_alive <= s` for
     /// *every* live snapshot `s` (no snapshot is older than `min_alive`).
     /// Thus `cv <= s` already held for all of them — they were *already*
-    /// on the fast path. After eviction `0 <= s` still routes them to the
-    /// fast path and the log still holds the key's current version entry,
+    /// on the direct path. After eviction `0 <= s` still routes them to the
+    /// direct path and the log still holds the key's current version entry,
     /// so the returned value is identical. The only thing forgotten
     /// is the version *number*, and it was needed solely to force a
-    /// history scan for snapshots below `cv` — none of which exist. Hence
+    /// log range-scan for snapshots below `cv` — none of which exist. Hence
     /// the prune is value-preserving for all live readers.
     ///
     /// Conversely, evicting entries with `cv >= min_alive` would be unsafe:
-    /// a live snapshot `s` with `min_alive <= s < cv` legitimately needs
-    /// the slow path (its visible value lives in history, archived when
-    /// the value advanced to `cv`); forgetting `cv` would route it to the
-    /// fast path and return the wrong (newer) current entry. That is why
-    /// the threshold is `min_alive` and not the (possibly larger)
-    /// `min_version` history-GC argument.
+    /// a live snapshot `s` with `min_alive <= s < cv` legitimately needs the
+    /// log range-scan (its visible value is an older log entry); forgetting
+    /// `cv` would route it to the direct-read path and return the wrong
+    /// (newer) current entry. That is why the threshold is `min_alive` and
+    /// not the (possibly larger) `min_version` history-GC argument.
     ///
     /// `retain_async` keeps entries for which the predicate returns `true`,
     /// so we keep `*v >= min_alive` and drop the rest. A key re-written
@@ -1338,8 +1330,8 @@ impl MvccStore {
         self.gc_below(min).await
     }
 
-    /// Slow path: range scan history for the latest version ≤ `snapshot`.
-    /// C2: if the latest value is a tombstone (empty), returns `None`.
+    /// Range-scan the log for the latest version ≤ `snapshot`.
+    /// Returns `None` for tombstones (empty value) and absent keys.
     async fn scan_history_for_version(&self, key: &[u8], snapshot: u64) -> DbResult<Option<Bytes>> {
         let lo = encode_version_key(key, 0);
         let hi = encode_version_key(key, snapshot);
@@ -1446,19 +1438,21 @@ impl MvccStore {
 
     /// T4-history: one key's full version timeline, ascending by version.
     ///
-    /// Merges two sources:
-    /// 1. `history` — every archived prior version, stored under
-    ///    `encode_version_key(key, version)` (`<key> || 0xFF || version_be`).
-    ///    The range scan `[encode_version_key(key, 0), +∞)` yields all
-    ///    versioned entries for this key. ts-keys (`[TS_TAG][version_be]`,
-    ///    9 bytes, `TS_TAG = 0x00`) are out of this key's range and are
-    ///    additionally rejected by `decode_version_key` (which returns
-    ///    `None` when the separator byte is not `VERSION_SEP`), so they
-    ///    can never be mistaken for a version entry.
-    /// 2. The current version already lives in the log (C1), so the Phase-1
-    ///    scan above already includes it — no separate read needed. A key
-    ///    that is currently DELETED contributes a tombstone; its prior
-    ///    versions still appear from the log.
+    /// Reads from a single source: the `history` version-log.
+    ///
+    /// Every version (current and prior) lives under
+    /// `encode_version_key(key, version)` (`<key> || 0xFF || version_be`).
+    /// The range scan `[encode_version_key(key, 0), +∞)` yields all versioned
+    /// entries for this key. ts-keys (`[TS_TAG][version_be]`, 9 bytes,
+    /// `TS_TAG = 0x00`) are out of this key's range and are additionally
+    /// rejected by `decode_version_key` (which returns `None` when the
+    /// separator byte is not `VERSION_SEP`), so they can never be mistaken
+    /// for a version entry.
+    ///
+    /// The current version is already in the log (written by
+    /// `set_versioned`/`apply_committed_ops`), so the single scan covers
+    /// the full timeline. A key that is currently DELETED contributes a
+    /// tombstone; its prior versions still appear from the log.
     ///
     /// Each entry's commit timestamp is resolved via [`Self::lookup_ts`]
     /// (T1c). Entries with no recorded ts carry `ts_millis = None`.
@@ -1499,11 +1493,9 @@ impl MvccStore {
             }
         }
 
-        // Phase 2 (C1+): the current version already lives in the log (written
-        // by set_versioned/apply_committed_ops), so the Phase-1 scan above
-        // already includes it — no separate `main` read is needed. This is the
-        // last residual `main` read on the read side; removing it completes the
-        // pre-refactor (history_of resolves purely from the log).
+        // Phase 2: no additional read needed. The current version is already
+        // in the log (written by set_versioned/apply_committed_ops), so the
+        // Phase-1 scan above already covers the full timeline.
 
         // Phase 3: ascending by version, resolve ts per version.
         entries.sort_by_key(|(v, _)| *v);
@@ -1630,8 +1622,8 @@ impl StreamingGroupByState {
 ///
 /// Returned by [`MvccStore::history_of`]. `version` is the monotonic
 /// commit version assigned by `RepoTxGate`; `value` is the bytes that
-/// were current at that version (archived in `history` for prior
-/// versions, read from `main` for the current version); `ts_millis` is
+/// were current at that version (all versions, including the current one,
+/// are read from the single `history` log); `ts_millis` is
 /// the per-version commit timestamp (T1c), or `None` when no ts was
 /// recorded for this version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1673,7 +1665,7 @@ mod tests {
             .await
             .unwrap();
 
-        // FINAL-A: the value is in the log (sole write).
+        // The value is in the log (single append).
         // Assert via the seam — the single authoritative source.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("v1")));
@@ -1711,13 +1703,13 @@ mod tests {
             .await
             .unwrap();
 
-        // FINAL-A: v2 is in the log (sole write), not main.
+        // v2 is the current entry in the log (single log append).
         // Assert via the seam.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("v2")));
 
-        // FINAL-A: history contains BOTH v1 (written when it was current)
-        // and v2 (the latest current — sole write into the log).
+        // The log contains BOTH v1 (written when it was current)
+        // and v2 (the latest current — single log append).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut found_v1 = false;
@@ -1756,7 +1748,7 @@ mod tests {
             .unwrap();
 
         let v = gate.assign_next_version();
-        // snapshot_version >> v → fast path returns from main
+        // snapshot_version >> v → direct-read path returns from log
         let result = mvcc.get_at(b"k1", v + 100).await.unwrap();
         assert_eq!(result, Some(Bytes::from("v1")));
     }
@@ -1780,7 +1772,7 @@ mod tests {
 
         // Query at snapshot between v1 and v2 — should find v1 in history.
         // After two set_versioned calls, version_cache[k1] = 2.
-        // get_at(snapshot=1) → cur_v(2) > 1 → slow path → scan history.
+        // get_at(snapshot=1) → cur_v(2) > 1 → log range-scan.
         let result = mvcc.get_at(b"k1", 1).await.unwrap();
         assert_eq!(result, Some(Bytes::from("v1")));
     }
@@ -1805,7 +1797,7 @@ mod tests {
             .unwrap();
         mvcc.delete_versioned(key.clone()).await.unwrap();
 
-        // FINAL-A: the seam returns None (tombstone) — main was never written.
+        // The seam returns None: the log contains a tombstone for this key.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert!(
             via_seam.is_none(),
@@ -1858,24 +1850,24 @@ mod tests {
         // delete at version 2
         mvcc.delete_versioned(key.clone()).await.unwrap();
 
-        // get_at between v1 and delete → slow path → v1 from history
+        // get_at between v1 and delete → log range-scan → v1
         let result = mvcc.get_at(b"k1", 1).await.unwrap();
         assert_eq!(result, Some(Bytes::from("v1")));
 
-        // get_at after delete → fast path (cur_v=2 <= 15) → history.get(tombstone) → None
+        // get_at after delete → direct read (cur_v=2 <= 15) → history.get(tombstone) → None
         let result = mvcc.get_at(b"k1", 15).await.unwrap();
         assert!(result.is_none());
     }
 
     // ========================================================================
-    // P1 / FINAL-A — "MVCC owns current state" read-seam (get_current / current_stream).
+    // "MVCC owns current state" read-seam (get_current / current_stream).
     // These tests pin the behaviour contract: both methods read the single
-    // version log (history), not main. Main is never written after FINAL-A.
+    // version log (`history`). There is no `main` store.
     // ========================================================================
 
     /// `get_current` reads the log: a written key returns `Some(v)`, an
-    /// absent key returns `Ok(None)` (NOT an error). FINAL-A: main is never
-    /// written, so assertions are against the log seam only.
+    /// absent key returns `Ok(None)` (NOT an error). Assertions are against
+    /// the single log (no `main` store exists).
     #[tokio::test]
     async fn get_current_matches_main_get() {
         let mvcc = make_mvcc();
@@ -1900,8 +1892,8 @@ mod tests {
     }
 
     /// After `delete_versioned`, the log has a tombstone and `get_current`
-    /// returns `Ok(None)`. FINAL-A: main is never written, so checking the
-    /// seam (log) is the only assertion needed.
+    /// returns `Ok(None)`. The log is the only source of truth (no `main`
+    /// store exists).
     #[tokio::test]
     async fn get_current_none_after_delete() {
         let mvcc = make_mvcc();
@@ -1924,8 +1916,8 @@ mod tests {
     }
 
     /// `current_stream(batch)` yields all current `(key, value)` pairs from
-    /// the log. FINAL-A: main is never written, so the only truth is the log.
-    /// Verifies the 3 written pairs appear and main is empty.
+    /// the log. The log is the single source of truth; verifies the 3 written
+    /// pairs appear.
     #[tokio::test]
     async fn current_stream_lists_all_current() {
         use std::collections::BTreeMap;
@@ -2043,7 +2035,7 @@ mod tests {
 
         assert_eq!(mvcc.version_of(&key), 42);
 
-        // FINAL-A: value is in the log.
+        // Value is in the log.
         let val = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(val, Some(Bytes::from("val")));
     }
@@ -2059,7 +2051,7 @@ mod tests {
         let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
         mvcc.apply_committed_ops(ops, 10).await.unwrap();
 
-        // FINAL-A: value is in the log. Assert via the seam.
+        // Value is in the log (single log append). Assert via the seam.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("new")));
 
@@ -2091,7 +2083,7 @@ mod tests {
         let ops = vec![KvOp::Remove(key.clone())];
         mvcc.apply_committed_ops(ops, 20).await.unwrap();
 
-        // FINAL-A: Remove writes a tombstone to the log; get_current reads it as None.
+        // Remove writes a tombstone to the log; get_current reads it as None.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert!(
             via_seam.is_none(),
@@ -2146,14 +2138,14 @@ mod tests {
             );
         }
 
-        // Query at version 0 (before any write) → slow path → scan [key::0, key::0] → empty → None
+        // Query at version 0 (before any write) → log range-scan → empty → None
         let result_before = mvcc.get_at(key.as_ref(), 0).await.unwrap();
         assert!(
             result_before.is_none(),
             "no value should exist before first write"
         );
 
-        // Query at a very high version → fast path → current (v5)
+        // Query at a very high version → direct-read path → current (v5)
         let result_latest = mvcc.get_at(key.as_ref(), u64::MAX - 1).await.unwrap();
         assert_eq!(result_latest, Some(Bytes::from("v5")));
     }
@@ -2244,7 +2236,7 @@ mod tests {
         let ops = vec![KvOp::Set(key.clone(), Bytes::from("new"))];
         mvcc.apply_committed_ops(ops, 5).await.unwrap();
 
-        // FINAL-A: value is in the log. Assert via the seam.
+        // Value is in the log (single log append). Assert via the seam.
         let via_seam = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(via_seam, Some(Bytes::from("new")));
 
@@ -2318,8 +2310,8 @@ mod tests {
             .await
             .unwrap();
 
-        // FINAL-A: the new value is written into the log at version 50
-        // (sole write — the log is the universal timeline).
+        // The new value is written into the log at version 50
+        // (single log append — the log is the universal timeline).
         let stream = mvcc.history.iter_stream(64);
         futures::pin_mut!(stream);
         let mut found = false;
@@ -2387,7 +2379,7 @@ mod tests {
     // ----------------------------------------------------------------
 
     /// Core eviction: keys whose cached version is `< min_alive` are dropped
-    /// (so `version_of` returns 0) while the current value in `main` — and
+    /// (so `version_of` returns 0) while the current entry in the log — and
     /// therefore `get_at` — stays correct. A key at/above `min_alive` is
     /// NOT evicted.
     #[tokio::test]
@@ -2460,8 +2452,8 @@ mod tests {
         );
         assert_eq!(mvcc.cells.len(), 1, "cache should have shrunk to 1");
 
-        // CURRENT values in main are still correct after eviction. With the
-        // entries gone, get_at takes the fast path and reads main.
+        // Current values remain readable from the log after eviction. With the
+        // cache entries gone, get_at uses the direct-read path (cur_v=0 ≤ snap).
         let snap = min_alive_target + 100;
         assert_eq!(
             mvcc.get_at(old_a.as_ref(), snap).await.unwrap(),
@@ -2576,7 +2568,7 @@ mod tests {
             "snapshot below the cached version must still read the archived v1"
         );
 
-        // And a snapshot at/after v2 sees v2 (fast path → main).
+        // And a snapshot at/after v2 sees v2 (direct-read path from log).
         assert_eq!(
             mvcc.get_at(key.as_ref(), v2).await.unwrap(),
             Some(Bytes::from("v2"))
@@ -2587,7 +2579,7 @@ mod tests {
     /// an OLD snapshot below the real version is still answered correctly,
     /// BECAUSE eviction only ever happens once no such live snapshot exists.
     /// This test exercises the "evict, then read at the boundary snapshot"
-    /// path to prove the fast-path fallback returns main's current value
+    /// path to prove the post-eviction read returns the correct log entry
     /// (the post-eviction contract) rather than a stale/incorrect one.
     #[tokio::test]
     async fn gc_evicted_key_read_at_boundary_snapshot_returns_main() {
@@ -2596,7 +2588,7 @@ mod tests {
         let guard = gate.open_snapshot().await;
 
         let key = Bytes::from("evict_then_read");
-        // Two versions: v1 archived, v2 in main.
+        // Two versions: v1 (prior entry) and v2 (current entry), both in the log.
         mvcc.set_versioned(key.clone(), Bytes::from("v1"))
             .await
             .unwrap();
@@ -2616,9 +2608,9 @@ mod tests {
         assert_eq!(mvcc.version_of(&key), 0, "redundant entry evicted");
 
         // A read at exactly min_alive (the lowest a fresh snapshot could be):
-        // cur_v = 0 (cell evicted) → slow path → scan history → finds v2
-        // (the anchor, still in the log). FINAL-A: the log is the source of
-        // truth; v2 survives as the anchor.
+        // cur_v = 0 (cell evicted) → log range-scan → finds v2
+        // (the anchor, still in the log). The log is the sole source of truth;
+        // v2 survives as the anchor.
         assert_eq!(
             mvcc.get_at(key.as_ref(), v2 + 1).await.unwrap(),
             Some(Bytes::from("v2")),
@@ -2630,7 +2622,7 @@ mod tests {
     // III.4 — `set_versioned_many` batched bulk write.
     // ----------------------------------------------------------------
 
-    /// FINAL-A: `set_versioned_many` always runs the log-only write path
+    /// `set_versioned_many` runs the single log-write path
     /// (publish_cell → log transact). For a batch of brand-new keys every
     /// key gets its own cell entry carrying its assigned version (one version
     /// per record); the log contains exactly n version-key entries.
@@ -2654,7 +2646,7 @@ mod tests {
             .collect();
         mvcc.set_versioned_many(items).await.unwrap();
 
-        // FINAL-A: every record is in the log (sole write). Assert via the seam.
+        // Every record is in the log (single log append). Assert via the seam.
         for i in 0..n {
             let k = Bytes::copy_from_slice(&i.to_be_bytes());
             let val = mvcc.get_current(k.clone()).await.unwrap();
@@ -2678,7 +2670,7 @@ mod tests {
             "FINAL-A: every key has exactly one version-key entry in the log (sole write)"
         );
 
-        // T1a: every key is published into the cells (one entry per key).
+        // Every key is published into the cells (one entry per key).
         assert_eq!(
             mvcc.cells.len(),
             n as usize,
@@ -2686,8 +2678,8 @@ mod tests {
         );
     }
 
-    /// Snapshot-active path: FINAL-A — the new values go directly to the log
-    /// (sole write), and every key gets a fresh monotonic version in the cache
+    /// Snapshot-active path: new values go directly to the log (sole write),
+    /// and every key gets a fresh monotonic version in the cache
     /// (one version per record, like the per-record `set_versioned` loop).
     #[tokio::test]
     async fn set_versioned_many_with_snapshot_archives_and_versions() {
@@ -2705,7 +2697,7 @@ mod tests {
         ];
         mvcc.set_versioned_many(items).await.unwrap();
 
-        // FINAL-A: all new values are in the log (sole write). Assert via seam.
+        // All new values are in the log (sole write). Assert via seam.
         assert_eq!(
             mvcc.get_current(k0.clone()).await.unwrap(),
             Some(Bytes::from("new0"))
@@ -2752,14 +2744,9 @@ mod tests {
         assert_eq!(mvcc.cells.len(), 0);
     }
 
-    /// Regression guard for the NotFound-vs-IO-error conflation bug.
-    /// Before the fix, `if let Ok(old) = self.main.get(key)` treated a
-    /// genuine I/O error identically to a missing key — skipping
-    /// archival but still overwriting main, breaking snapshot isolation.
-    ///
-    /// This test verifies the *correct* NotFound path: writing a brand-
-    /// new key under an active snapshot succeeds (nothing to archive)
-    /// and the key is readable.
+    /// Regression guard: writing a brand-new key under an active snapshot
+    /// succeeds (there is no prior version to supersede) and the key is
+    /// readable via the log immediately after the write.
     #[tokio::test]
     async fn set_versioned_new_key_under_snapshot_succeeds() {
         let gate = make_gate();
@@ -2775,7 +2762,7 @@ mod tests {
         let val = mvcc.get_current(key.clone()).await.unwrap();
         assert_eq!(val, Some(Bytes::from("v1")));
 
-        // C1: current version is in the log (dual-write), so 1 entry.
+        // The single log append produces exactly 1 entry for a brand-new key.
         let count = count_history_entries(&mvcc).await;
         assert_eq!(
             count, 1,
@@ -2874,7 +2861,7 @@ mod tests {
             async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
                 // Honour per-op fault flags so batched paths
                 // (set_versioned_many, apply_committed_ops) also hit the
-                // injection when they call `self.main.get(...)` pre-read.
+                // injection when they call `self.history.set(...)` (log write).
                 for op in ops {
                     match op {
                         KvOp::Set(k, v) => {
@@ -2898,19 +2885,19 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     /// Helper: build an MvccStore whose `history` is a FailingStore.
-    /// FINAL-A: history is the sole write target, so I/O error injection
-    /// must be applied here.
+    /// History is the sole write target, so I/O error injection must be
+    /// applied here.
     fn make_failing_history_mvcc(gate: Arc<RepoTxGate>) -> (MvccStore, Arc<FailingStore>) {
         let history = Arc::new(FailingStore::new());
         let mvcc = MvccStore::new(history.clone() as Arc<dyn Store>, gate);
         (mvcc, history)
     }
 
-    /// FINAL-A regression: `delete_versioned` propagates `history.set()` errors.
+    /// Regression: `delete_versioned` propagates `history.set()` errors.
     ///
-    /// The log is the sole durable write after FINAL-A. If `history.set()`
-    /// (the tombstone write) fails, the error propagates and the delete is
-    /// treated as if it never happened — no stale cell, caller sees `Err`.
+    /// The log is the sole durable write. If `history.set()` (the tombstone
+    /// write) fails, the error propagates and the delete is treated as if it
+    /// never happened — no stale cell, caller sees `Err`.
     #[tokio::test]
     async fn delete_versioned_propagates_remove_error() {
         let gate = make_gate();
@@ -2931,10 +2918,10 @@ mod tests {
         );
     }
 
-    /// FINAL-A regression: `set_versioned` propagates `history.set()` errors.
+    /// Regression: `set_versioned` propagates `history.set()` errors.
     ///
-    /// The log is the sole durable write after FINAL-A. If `history.set()`
-    /// fails, the error propagates and no version is committed.
+    /// The log is the sole durable write. If `history.set()` fails, the error
+    /// propagates and no version is committed.
     #[tokio::test]
     async fn set_versioned_propagates_archive_read_error() {
         let gate = make_gate();
@@ -2965,7 +2952,7 @@ mod tests {
         );
     }
 
-    /// FINAL-A regression: `delete_versioned` propagates `history.set()` (tombstone).
+    /// Regression: `delete_versioned` propagates `history.set()` (tombstone).
     ///
     /// Mirrors `set_versioned_propagates_archive_read_error` for the delete path.
     /// The caller sees `Err` when the log write fails — the error is not swallowed.
@@ -2990,41 +2977,26 @@ mod tests {
     }
 
     // ================================================================
-    // MVCC-2 VERIFICATION — set_versioned fast-path TOCTOU
+    // MVCC-2 VERIFICATION — set_versioned TOCTOU (historical; fixed)
     // ================================================================
     //
-    // CLAIM: Between `active_snapshots_empty()` (line 67) and `main.set()`
-    // (line 68), another task opens a snapshot. The non-tx write then lands
-    // in `main` WITHOUT being archived to `history` and WITHOUT updating
-    // `version_cache`. A snapshot that opens in this narrow window and then
-    // calls `get_at(key, snap)` will:
-    //   - Find `version_cache` returns 0 (key not cached).
-    //   - Take the fast path: `0 <= snap` → read `main`.
-    //   - See the FRESHLY WRITTEN value even though the snapshot predates it.
+    // The original MVCC-2 race: the old dual-write path checked
+    // `active_snapshots_empty()` and only wrote to `history` when snapshots
+    // were open. A snapshot opening between the check and the `main.set()`
+    // could read the freshly written value before it was archived to history.
     //
-    // ANALYSIS: Whether this is observable in practice depends on whether
-    // tokio's single-threaded executor can interleave async tasks between
-    // `active_snapshots_empty()` and `main.set()`. In practice:
+    // This race is ELIMINATED by the single-log design: every write is one
+    // log append (`publish_cell` then `history.set`); there is no conditional
+    // archive and no `main` store to bypass. `publish_cell` fires before the
+    // log write, so any snapshot opened mid-write sees the bumped cell version
+    // and correctly falls back to a log range-scan.
     //
-    //   a) `active_snapshots_empty()` is a synchronous atomic read.
-    //   b) `main.set()` on InMemoryStore is also synchronous.
-    //   c) There is NO `.await` between the two — they run in the same
-    //      poll() call, making interleaving IMPOSSIBLE in a single-threaded
-    //      tokio executor.
-    //
-    // Therefore the TOCTOU window is REAL in principle (code is non-atomic)
-    // but NOT EXPLOITABLE with InMemoryStore in a single-threaded runtime.
-    // A multi-threaded executor with blocking I/O between the check and the
-    // write could expose it.
-    //
-    // The tests below verify:
-    //   1. A deterministic sequential test confirms the gap is unobservable
-    //      with InMemoryStore (no preemption between the two lines).
-    //   2. A concurrent stress test runs 1000 iterations trying to create
-    //      the race; verifies it cannot be triggered with the current runtime.
-    //   3. A code-path analysis test documents what WOULD happen if a snapshot
-    //      opened between the check and the write (by manually simulating the
-    //      split: check → open snapshot → set → read).
+    // The tests below document the fixed behaviour:
+    //   1. Sequential test: snapshot opened AFTER the write sees the correct value.
+    //   2. Concurrent stress test: 1000 iterations confirm the race is not
+    //      triggerable with the current single-log write path.
+    //   3. Simulated-TOCTOU test: snapshot opened BEFORE the write does NOT see
+    //      the post-snapshot value (correct isolation).
 
     /// MVCC-2 deterministic: sequential check → set → open_snapshot → read.
     ///
@@ -3032,29 +3004,28 @@ mod tests {
     /// completes (the normal sequential case), `get_at` correctly returns
     /// the value visible at the snapshot version.
     ///
-    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
-    /// now asserts snapshot-correct visibility (flipped from the pre-fix
-    /// characterization). `version_of` is now populated on every write
-    /// (always-slow path), so a snapshot opened after the write at
-    /// `snap_v == v` routes correctly.
+    /// MVCC-2 cannot occur with the single-log design. This test asserts
+    /// snapshot-correct visibility: `version_of` is populated on every write
+    /// (single log append), so a snapshot opened after the write at
+    /// `snap_v == v` routes to the correct log entry.
     #[tokio::test]
     async fn mvcc2_fast_path_version_cache_not_updated() {
         let gate = make_gate();
         let mvcc = make_mvcc_with_gate(gate.clone());
         let key = Bytes::from("toctou_key");
 
-        // Write with no snapshot active — always-archive path now runs.
+        // Write with no snapshot active — single log append.
         let v = mvcc
             .set_versioned(key.clone(), Bytes::from("v1"))
             .await
             .unwrap();
         assert!(v > 0);
 
-        // T1a: always-archive populates the cell with the assigned version.
+        // Every write publishes the version into the cell.
         assert_eq!(
             mvcc.version_of(&key),
             v,
-            "T1a always-archive: every write publishes its version into the cell"
+            "every write publishes its version into the cell"
         );
 
         // Now publish and open a snapshot.
@@ -3063,43 +3034,35 @@ mod tests {
         let snap_v = snap.version();
         assert_eq!(snap_v, v, "snapshot must open at the published version");
 
-        // get_at: cur_v=v ≤ snap_v=v → fast path → reads history log → sees v1.
-        // This is correct: the snapshot was opened AFTER the write landed.
+        // get_at: cur_v=v ≤ snap_v=v → direct-read path → reads log at v → sees v1.
+        // Correct: the snapshot was opened AFTER the write landed.
         let result = mvcc.get_at(&key, snap_v).await.unwrap();
         assert_eq!(
             result,
             Some(Bytes::from("v1")),
-            "snapshot opened after the write sees v1 via fast path (correct)"
+            "snapshot opened after the write sees v1 via direct-read path (correct)"
         );
     }
 
-    /// MVCC-2 simulated TOCTOU — now asserts the fix.
+    /// MVCC-2 simulated TOCTOU — asserts snapshot-correct isolation.
     ///
-    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
-    /// now asserts snapshot-correct visibility (flipped from the pre-fix
-    /// characterization). Previously this test manually wrote to `main`
-    /// bypassing the slow path to demonstrate the phantom read. With the
-    /// fast path gone, the real `set_versioned` always archives, so we
-    /// drive the write through it and confirm a snapshot opened BEFORE
-    /// the write does NOT see the post-snapshot value — it sees the
-    /// pre-write value (OLD), which was archived.
+    /// MVCC-2 cannot occur: every write is a single log append regardless of
+    /// snapshot state. A snapshot opened BEFORE a write does NOT see the
+    /// post-snapshot value — it sees the pre-write value (OLD) from the log.
     ///
     /// Sequence:
-    ///   1. Seed OLD via `set_versioned` (no snapshot) — archived on the
-    ///      next overwrite.
+    ///   1. Seed OLD via `set_versioned` (no snapshot).
     ///   2. Open a snapshot at `v_old`.
-    ///   3. Overwrite with NEW via `set_versioned` — OLD is archived to
-    ///      `history`, cell advances to `v_new`.
-    ///   4. `get_at(key, v_old)`: `cur_v = v_new > v_old` → slow path →
-    ///      scans history → finds OLD. Correct.
+    ///   3. Overwrite with NEW via `set_versioned` — log advances to `v_new`.
+    ///   4. `get_at(key, v_old)`: `cur_v = v_new > v_old` → log range-scan →
+    ///      finds OLD. Correct.
     #[tokio::test]
     async fn mvcc2_simulated_toctou_snapshot_sees_phantom() {
         let gate = make_gate();
         let mvcc = make_mvcc_with_gate(gate.clone());
         let key = Bytes::from("toctou_key");
 
-        // Step 1: seed OLD with no snapshot active. Always-archive path runs
-        // but there is no prior value, so nothing is archived yet.
+        // Step 1: seed OLD with no snapshot active. A single log entry is written.
         let old_val = Bytes::from("OLD");
         let v_old = mvcc
             .set_versioned(key.clone(), old_val.clone())
@@ -3129,7 +3092,7 @@ mod tests {
         );
 
         // Step 4: get_at for the snapshot.
-        // cur_v = v_new > snap_v → SLOW path → scan history → finds OLD.
+        // cur_v = v_new > snap_v → log range-scan → finds OLD.
         // The snapshot does NOT see the phantom NEW; it sees the value that
         // was current at snap_v. MVCC-2 is closed by construction.
         let result = mvcc.get_at(&key, snap_v).await.unwrap();
@@ -3205,9 +3168,8 @@ mod tests {
             async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
                 if self.armed.swap(false, SeqCst) {
                     // Signal to the test that we have reached the pause point
-                    // (BEFORE the actual write — i.e., we are inside the
-                    // fast-path window between active_snapshots_empty() and
-                    // main.set()).
+                    // (BEFORE the actual log write — i.e., between
+                    // `publish_cell` and `history.set()`).
                     self.entered.notify_one();
                     // Block until the test calls release().
                     self.pause_gate.notified().await;
@@ -3268,11 +3230,10 @@ mod tests {
 
     /// MVCC-2 characterization via PausableStore — now asserts the fix.
     ///
-    /// FINAL-A: log is the sole durable write. `PausableStore` suspends
-    /// `history.set()` (the log append for NEW) — which is AFTER
-    /// `publish_cell` (cell advanced to `v_new`). A snapshot opened
-    /// inside this pause sees `cur_v = v_new > snap_v` → slow path →
-    /// scans history → finds OLD at v_seed. The phantom read cannot occur.
+    /// `PausableStore` suspends `history.set()` (the log append for NEW) —
+    /// which is AFTER `publish_cell` (cell advanced to `v_new`). A snapshot
+    /// opened inside this pause sees `cur_v = v_new > snap_v` → log
+    /// range-scan → finds OLD at v_seed. The phantom read cannot occur.
     ///
     /// Sequence:
     ///   [set_versioned(NEW)] publish_cell(v_new) → history.set(NEW)
@@ -3283,7 +3244,7 @@ mod tests {
     ///
     /// MVCC-2 guarantee: publish_cell advances BEFORE the log write, so
     /// any snapshot opened during the log write sees the bumped cell and
-    /// takes the slow path → finds OLD in the log. Safe by construction.
+    /// range-scans the log → finds OLD. Safe by construction.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mvcc2_real_interleaving_toctou_characterization() {
         use std::sync::Arc;
@@ -3293,7 +3254,7 @@ mod tests {
         let new_val = Bytes::from("NEW");
 
         // --- Setup ---
-        // FINAL-A: PausableStore is wired as `history` (the sole write target).
+        // PausableStore is wired as `history` (the single log / sole write target).
         let pausable = Arc::new(PausableStore::new());
         let gate = make_gate();
         let mvcc = Arc::new(MvccStore::new(
@@ -3325,7 +3286,7 @@ mod tests {
         );
 
         // --- Arm PausableStore ---
-        // FINAL-A: the next `set()` call on `history` will pause before writing.
+        // The next `set()` call on `history` will pause before writing.
         // The sequence for set_versioned(NEW) is:
         //   publish_cell(v_new) → history.set(NEW) ← PAUSE
         // When `entered` fires, the cell already carries v_new but NEW is
@@ -3357,7 +3318,7 @@ mod tests {
             "snapshot must open at v_after_seed (the gap version)"
         );
 
-        // FINAL-A: publish_cell has already advanced the cell to v_new.
+        // publish_cell has already advanced the cell to v_new.
         let v_new = mvcc.version_of(&key);
         assert!(
             v_new > snap_v,
@@ -3395,19 +3356,18 @@ mod tests {
     // A1+A2 — live_version (hwm) tests.
     // =================================================================
     //
-    // T1a (always-archive): the fast path is gone — every write runs the
-    // slow path, so `version` and `hwm` are always equal (both carry the
-    // assigned version). These tests now assert that equality directly
-    // (flipped from the pre-fix fast-path/hwm distinction).
+    // Every write is a single log append: `publish_cell` always runs, so
+    // `version` is always set to the assigned version. `live_version` and
+    // `version_of` therefore always agree.
 
-    /// T1a: always-archive — every write publishes its version into both
-    /// cell fields, so `live_version` and `version_of` agree.
+    /// Every write publishes its version into the cell, so `live_version`
+    /// and `version_of` agree.
     #[tokio::test]
     async fn live_version_tracks_fast_path_write() {
         let mvcc = make_mvcc();
         let key = Bytes::from("k_hwm_fast");
 
-        // T1a: always-slow path — no fast-path branch remains.
+        // Every write is a single log append; publish_cell always fires.
         let v = mvcc
             .set_versioned(key.clone(), Bytes::from("val"))
             .await
@@ -3419,13 +3379,13 @@ mod tests {
             Some(v),
             "live_version must equal the assigned version"
         );
-        // T1a: version_of (archive-routing) now equals v too (always-slow).
+        // version_of returns the latest committed version for the key.
         assert_eq!(
             mvcc.version_of(&key),
             v,
-            "T1a always-archive: version_of equals the assigned version (no fast-path split)"
+            "version_of equals the assigned version"
         );
-        // get_at at 0 (cur_v=v > 0 → slow path → history empty → None).
+        // get_at at 0 (cur_v=v > 0 → log range-scan → no entry below 0 → None).
         let result = mvcc.get_at(&key, 0).await.unwrap();
         assert_eq!(
             result, None,
@@ -3433,7 +3393,7 @@ mod tests {
         );
     }
 
-    /// Slow-path write sets both hwm and version.
+    /// A write with a live snapshot open still publishes the version into the cell.
     #[tokio::test]
     async fn live_version_tracks_slow_path_write() {
         let gate = make_gate();
@@ -3449,13 +3409,9 @@ mod tests {
         assert_eq!(
             mvcc.live_version(&key),
             Some(v),
-            "live_version must equal the assigned version on slow path"
+            "live_version must equal the assigned version"
         );
-        assert_eq!(
-            mvcc.version_of(&key),
-            v,
-            "version_of must also equal v on slow path"
-        );
+        assert_eq!(mvcc.version_of(&key), v, "version_of must also equal v");
     }
 
     /// live_version is None before any write touches a key.
@@ -3491,9 +3447,9 @@ mod tests {
         );
     }
 
-    /// T1a: always-archive — `set_versioned_many` assigns one version per
-    /// key (like the per-record `set_versioned` loop), so each key's
-    /// `live_version` and `version_of` carry that key's own version.
+    /// `set_versioned_many` assigns one version per key (like the per-record
+    /// `set_versioned` loop), so each key's `live_version` and `version_of`
+    /// carry that key's own version.
     ///
     /// T1b.1: uses `KeepHistory` so the eager vacuum does not prune the
     /// cells before the assertions (this test checks cell-population, not
@@ -3511,7 +3467,7 @@ mod tests {
         let max_v = mvcc.set_versioned_many(items.clone()).await.unwrap();
         assert!(max_v > 0);
 
-        // T1a: every key gets its own monotonic version (one per record);
+        // Every key gets its own monotonic version (one per record);
         // both live_version and version_of carry it.
         let mut prev = 0u64;
         for (key, _) in &items {
@@ -3529,14 +3485,10 @@ mod tests {
 
     /// MVCC-2 stress: concurrent set_versioned + open_snapshot, 500 iterations.
     ///
-    /// T1a: fast path removed (always-archive) — MVCC-2 cannot occur; this
-    /// now asserts snapshot-correct visibility (flipped from the pre-fix
-    /// characterization). With always-archive every write publishes its
-    /// version into the cell, so the old anomaly predicate
-    /// (`version_of == 0` after a write) can never hold — there is no
-    /// fast-path omission to exploit. The stress runs as a no-anomaly
-    /// guard: any anomaly would now indicate a regression of the
-    /// always-archive invariant.
+    /// MVCC-2 cannot occur: every write is a single log append that always
+    /// publishes its version into the cell. The old anomaly predicate
+    /// (`version_of == 0` after a write) can never hold. The stress runs as
+    /// a no-anomaly guard: any anomaly would indicate a regression.
     #[tokio::test]
     async fn mvcc2_stress_race_not_triggered_with_in_memory_store() {
         use std::sync::atomic::{AtomicUsize, Ordering as AO};
@@ -3573,12 +3525,12 @@ mod tests {
                 // Small yield to increase interleaving odds.
                 tokio::task::yield_now().await;
                 let result = mvcc_r.get_at(&key_r, snap_v).await.unwrap();
-                // T1a: every write publishes its version, so version_of is
-                // never 0 after a write lands. An anomaly here would mean a
-                // snapshot observed a value whose version is strictly greater
+                // Every write publishes its version, so version_of is never 0
+                // after a write lands. An anomaly here would mean a snapshot
+                // observed a value whose version is strictly greater
                 // than snap_v AND version_of disagrees — i.e. a regression
-                // of the always-archive invariant. With the fast path gone
-                // this predicate should never fire.
+                // (publish_cell not called before log write). With the single-log
+                // design this predicate should never fire.
                 let write_v = mvcc_r.version_of(&key_r);
                 if result.is_some() && snap_v == 0 && write_v == 0 {
                     anomaly.fetch_add(1, AO::Relaxed);
@@ -3595,9 +3547,9 @@ mod tests {
         }
 
         let anomalies = anomaly_count.load(AO::Relaxed);
-        // T1a: with always-archive the anomaly predicate (version_of == 0
+        // With the single-log design the anomaly predicate (version_of == 0
         // after a write) can never hold, so anomalies must be 0. A non-zero
-        // count would indicate the always-archive invariant regressed.
+        // count would indicate the publish_cell-before-log-write ordering regressed.
         assert_eq!(
             anomalies, 0,
             "T1a always-archive: no phantom-read anomaly (version_of is never 0 after a write)"
@@ -3995,7 +3947,7 @@ mod tests {
     // C1 — current-into-log / tombstone / vacuum-guard tests.
     // ================================================================
 
-    /// C1 guarantee: the current version is written into the log (dual-write).
+    /// The current version is written into the log on every write.
     #[tokio::test]
     async fn c1_current_version_is_in_the_log() {
         let mvcc = make_mvcc();
@@ -4314,7 +4266,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The snapshot at v1 still reads v1 via history (slow path).
+        // The snapshot at v1 still reads v1 via log range-scan.
         let result = mvcc.get_at(&key, snap_v).await.unwrap();
         assert_eq!(
             result,
@@ -4343,17 +4295,17 @@ mod tests {
     /// ordering + min_alive floor protect it. (§4.1-class race; loom sweep
     /// deferred to T1d.)
     ///
-    /// FINAL-A: PausableStore is wired as `history` (the sole write target).
-    /// The pause fires inside `history.set` — AFTER `publish_cell` advances
-    /// the cell to v_new. A snapshot opened inside this window sees
-    /// `cur_v = v_new > snap_v` → slow path → finds OLD in the log.
+    /// PausableStore is wired as `history` (the sole write target). The pause
+    /// fires inside `history.set` — AFTER `publish_cell` advances the cell to
+    /// v_new. A snapshot opened inside this window sees `cur_v = v_new > snap_v`
+    /// → log range-scan → finds OLD.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn eager_vacuum_race_open_snapshot() {
         let key = Bytes::from("race_key");
         let old_val = Bytes::from("OLD");
         let new_val = Bytes::from("NEW");
 
-        // FINAL-A: PausableStore wired as `history` (sole write target).
+        // PausableStore wired as `history` (sole write target).
         // CurrentOnly default — eager vacuum active.
         let pausable = Arc::new(PausableStore::new());
         let gate = make_gate();
@@ -4402,8 +4354,8 @@ mod tests {
 
         // The snapshot must NOT read None for a version it should see.
         // snap_v == v_seed (the published floor before the NEW write).
-        // The snapshot predates NEW; cur_v = v_new > snap_v → slow path →
-        // scans history → finds OLD at v_seed (pinned by min_alive).
+        // The snapshot predates NEW; cur_v = v_new > snap_v → log range-scan
+        // → finds OLD at v_seed (pinned by min_alive).
         let seen = mvcc.get_at(&key, snap_v).await.unwrap();
         assert!(
             seen.is_some(),
@@ -4448,7 +4400,7 @@ mod tests {
     //
     // All counts below assume NO live snapshot unless the test opens one.
     // With no snapshot: min_alive == last_committed == current, so the
-    // anchor is None (a fresh snapshot opens at `current` and reads `main`).
+    // anchor is None (a fresh snapshot opens at `current` and reads the log directly).
     // ================================================================
 
     /// 1. `max_count: Some(3)`, 6 writes (5 old), no snapshot → exactly 3 old
@@ -4495,7 +4447,7 @@ mod tests {
     }
 
     /// 2. Default `max_count: Some(0)` (CurrentOnly), 4 writes, no snapshot →
-    /// 0 old versions remain (only current in `main`).
+    /// 0 old versions remain (only the current entry in the log).
     #[tokio::test]
     async fn retention_current_only_is_max_count_zero() {
         let mvcc = make_mvcc(); // default = CurrentOnly
@@ -4561,7 +4513,7 @@ mod tests {
         let mvcc = make_mvcc_with_gate(gate.clone());
 
         let key = Bytes::from("pin_key");
-        // Write v1 — main=v1, last_committed=v1.
+        // Write v1 — log has v1 as the current entry, last_committed=v1.
         mvcc.set_versioned(key.clone(), Bytes::from("v1"))
             .await
             .unwrap();
@@ -4581,7 +4533,7 @@ mod tests {
             .await
             .unwrap();
 
-        // The snapshot at v1 still reads v1 via history (slow path).
+        // The snapshot at v1 still reads v1 via log range-scan.
         let result = mvcc.get_at(&key, snap_v).await.unwrap();
         assert_eq!(
             result,
@@ -4619,7 +4571,7 @@ mod tests {
         // CurrentOnly policy would reclaim on every write, leaving nothing to
         // exercise the anchor path).
         mvcc.set_retention(Retention::keep_history()).unwrap();
-        // Write 10 times → history has v1..v9 (9 entries), main=v10,
+        // Write 10 times → log has all 10 versions (v1..v10),
         // last_committed=10.
         for i in 1..=10u32 {
             mvcc.set_versioned(key.clone(), Bytes::from(format!("v{i}")))
@@ -4695,17 +4647,17 @@ mod tests {
     /// for a version it should see — the min_alive floor holds above the count
     /// knobs. (§4.1-class race; loom sweep deferred to T1d.)
     ///
-    /// FINAL-A: PausableStore is wired as `history` (the sole write target).
-    /// The pause fires inside `history.set` — AFTER `publish_cell` advances
-    /// the cell to v_new. A snapshot opened inside this window sees
-    /// `cur_v = v_new > snap_v` → slow path → finds OLD in the log.
+    /// PausableStore is wired as `history` (the sole write target). The pause
+    /// fires inside `history.set` — AFTER `publish_cell` advances the cell to
+    /// v_new. A snapshot opened inside this window sees `cur_v = v_new > snap_v`
+    /// → log range-scan → finds OLD.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn retention_race_open_snapshot_with_count() {
         let key = Bytes::from("race_key");
         let old_val = Bytes::from("OLD");
         let new_val = Bytes::from("NEW");
 
-        // FINAL-A: PausableStore wired as `history` (sole write target).
+        // PausableStore wired as `history` (sole write target).
         let pausable = Arc::new(PausableStore::new());
         let gate = make_gate();
         let mvcc = Arc::new(MvccStore::new(
@@ -5154,8 +5106,8 @@ mod tests {
     }
 
     /// A key written three times must yield three timeline entries
-    /// (v1, v2 from `history`, v3 from `main`), ascending by version,
-    /// each carrying its value and its recorded commit timestamp.
+    /// (v1, v2, v3 — all from the single `history` log), ascending by
+    /// version, each carrying its value and its recorded commit timestamp.
     #[tokio::test]
     async fn history_of_three_writes_full_timeline_with_ts() {
         let mvcc = make_mvcc();
@@ -5221,8 +5173,7 @@ mod tests {
         mvcc.delete_versioned(Bytes::from("k")).await.unwrap();
 
         let timeline = mvcc.history_of(b"k").await.unwrap();
-        // C1: v1 + v2 (both written into log when current) + v3 (tombstone).
-        // No current entry from main — main no longer has the key.
+        // v1 + v2 (prior log entries) + v3 (tombstone, also in the log).
         assert_eq!(timeline.len(), 3);
         let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
         assert_eq!(versions, vec![1, 2, 3]);
@@ -5257,10 +5208,10 @@ mod tests {
     // T4-purge — purge_below_ts
     // ========================================================================
 
-    /// Helper: count this key's archived (old) history versions — the entries
-    /// `history_of` returns minus the current (latest) entry. FINAL-A: the
-    /// current entry is in the log, so history_of includes it. Archived
-    /// versions = total − (1 if a current version is cached else 0).
+    /// Helper: count this key's prior (old) log versions — the entries
+    /// `history_of` returns minus the current (latest) entry. The current
+    /// entry is always in the log, so `history_of` includes it.
+    /// Prior versions = total − (1 if a current version is cached else 0).
     async fn archived_count(mvcc: &MvccStore, key: &[u8]) -> usize {
         let timeline = mvcc.history_of(key).await.unwrap();
         let cur_v = mvcc.current_version(key);
@@ -5271,10 +5222,9 @@ mod tests {
         }
     }
 
-    /// Core case: a key written three times (v1, v2 archived; v3
-    /// current). Purging with a cutoff that falls BETWEEN v1's and
-    /// v2's commit ts reclaims v1 only — v2 (newer than cutoff) and
-    /// v3 (current, in main) survive.
+    /// Core case: a key written three times (v1, v2 prior; v3 current).
+    /// Purging with a cutoff that falls BETWEEN v1's and v2's commit ts
+    /// reclaims v1 only — v2 (newer than cutoff) and v3 (current) survive.
     #[tokio::test]
     async fn purge_below_ts_reclaims_only_older_than_cutoff() {
         let mvcc = make_mvcc();
@@ -5304,7 +5254,7 @@ mod tests {
         // v2 survives; v1 is gone.
         let timeline = mvcc.history_of(b"k").await.unwrap();
         let versions: Vec<u64> = timeline.iter().map(|e| e.version).collect();
-        assert_eq!(versions, vec![2, 3], "v2 (archived) + v3 (current) remain");
+        assert_eq!(versions, vec![2, 3], "v2 (prior) + v3 (current) remain");
         assert!(!versions.contains(&1), "v1 must be purged");
 
         mvcc.set_test_now(0);
@@ -5390,7 +5340,7 @@ mod tests {
         mvcc.set_retention(Retention::keep_history()).unwrap();
 
         // v1 @ ts=1_000, v2 @ ts=2_000, v3 @ ts=3_000.
-        // After three writes: history = {v1, v2}, main = v3,
+        // After three writes: log = {v1, v2, v3 (current)},
         // min_alive = last_committed = 3 (no snapshot).
         mvcc.set_test_now(1_000);
         mvcc.set_versioned(Bytes::from("k"), Bytes::from("v1"))
