@@ -45,7 +45,14 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                     return Ok(());
                 }
             };
-            tbl.data_store().set(rid.to_bytes(), body.clone()).await?;
+            // Collapse-main: attached tables (with an MvccStore) are recovered
+            // into the version log by `seed_version_cache_for_entry` (writes
+            // `history.set(key‖v, body)`); the raw `data_store` is vestigial for
+            // them, so skip the redundant write. Only unattached tables (no
+            // MvccStore — system/test) still materialize into `data_store`.
+            if tbl.mvcc_store().is_none() {
+                tbl.data_store().set(rid.to_bytes(), body.clone()).await?;
+            }
             Ok(())
         }
         WalOpV2::Delete {
@@ -62,14 +69,22 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
                     return Ok(());
                 }
             };
+            // Collapse-main: attached tables record the delete tombstone into
+            // the version log via `seed_version_cache_for_entry`
+            // (`history.set(key‖v, EMPTY)`); the raw `data_store` is vestigial,
+            // so skip the redundant remove. Only unattached tables (no
+            // MvccStore) still mutate `data_store`.
+            //
             // Delete-replay is idempotent: a key already gone (the delete
             // landed before the crash, or the record never existed) is
             // benign and must not fail recovery. But a genuine storage
             // I/O error must propagate — swallowing it would report a
             // successful replay having NOT applied the delete.
-            match tbl.data_store().remove(rid.to_bytes()).await {
-                Ok(_) | Err(DbError::NotFound(_)) => {}
-                Err(e) => return Err(e),
+            if tbl.mvcc_store().is_none() {
+                match tbl.data_store().remove(rid.to_bytes()).await {
+                    Ok(_) | Err(DbError::NotFound(_)) => {}
+                    Err(e) => return Err(e),
+                }
             }
             Ok(())
         }
