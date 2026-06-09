@@ -425,6 +425,10 @@ impl SessionPermissions {
 
             // Stored procedure call — execute on a function, no table_ref.
             BatchOp::Call(_) => (Action::Read, Resource::Global),
+
+            // Sub-batch — no direct resource access at this level; the
+            // inner batch's ops are checked recursively at execution time.
+            BatchOp::Batch(_) => (Action::Read, Resource::Global),
         }
     }
 }

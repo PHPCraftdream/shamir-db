@@ -403,6 +403,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
     );
     let insert_req = b.build();
     let insert_entry = insert_req.queries.get("ins").unwrap().clone();
+    let empty_params = shamir_types::types::common::new_map();
     let mut runner = QueryRunner {
         resolver: &resolver,
         admin: None,
@@ -410,6 +411,8 @@ async fn test_query_runner_none_tx_insert_and_read() {
         tx: None,
         actor: Actor::System,
         db_name: "test",
+        depth: 0,
+        params: &empty_params,
     };
     let result = runner
         .run(
@@ -427,6 +430,7 @@ async fn test_query_runner_none_tx_insert_and_read() {
     b.query("q", Query::from("users"));
     let read_req = b.build();
     let read_entry = read_req.queries.get("q").unwrap().clone();
+    let empty_params2 = shamir_types::types::common::new_map();
     let mut runner = QueryRunner {
         resolver: &resolver,
         admin: None,
@@ -434,6 +438,8 @@ async fn test_query_runner_none_tx_insert_and_read() {
         tx: None,
         actor: Actor::System,
         db_name: "test",
+        depth: 0,
+        params: &empty_params2,
     };
     let result = runner
         .run("q", &read_entry, &shamir_types::types::common::new_map())

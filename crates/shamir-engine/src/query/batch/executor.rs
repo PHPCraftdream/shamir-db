@@ -21,6 +21,7 @@ use shamir_query_types::CallOp;
 use shamir_storage::error::DbResult;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, TMap};
+use shamir_types::types::value::InnerValue;
 
 /// Trait for resolving table references to TableManager instances.
 #[async_trait::async_trait]
@@ -80,86 +81,129 @@ pub async fn execute_batch(
     actor: Actor,
     db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
-    let start = Instant::now();
+    execute_batch_impl(
+        request,
+        resolver,
+        admin,
+        invoker,
+        actor,
+        db_name,
+        0,
+        &new_map(),
+    )
+    .await
+}
 
-    // 4.C: cross-repo guard for transactional batches.
-    if request.transactional {
-        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
-        if repos.len() > 1 {
-            let mut repos: Vec<String> = repos.into_iter().collect();
-            repos.sort();
-            return Err(BatchError::CrossRepoNotSupported { repos });
+/// Internal entry point that carries the sub-batch recursion state.
+///
+/// - `depth` — current nesting level (0 at the public entry).
+/// - `params` — injected `$param` bindings from the outer batch's
+///   `BatchOp::Batch.bind` map, resolved to concrete `InnerValue`s.
+///
+/// Called recursively by [`QueryRunner::run`] when it encounters a
+/// `BatchOp::Batch` entry; callers above the public entry always pass
+/// `depth = 0` and an empty `params` map.
+///
+/// Returns a boxed future because the function is mutually recursive
+/// (QueryRunner::run → execute_batch_impl → execute_plan_impl →
+/// execute_single_impl → QueryRunner::run) and Rust requires boxing
+/// to give the async state machine a statically known size.
+#[allow(clippy::too_many_arguments)]
+fn execute_batch_impl<'a>(
+    request: &'a BatchRequest,
+    resolver: &'a dyn TableResolver,
+    admin: Option<&'a dyn AdminExecutor>,
+    invoker: Option<&'a dyn FunctionInvoker>,
+    actor: Actor,
+    db_name: &'a str,
+    depth: usize,
+    params: &'a TMap<String, InnerValue>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<BatchResponse, BatchError>> + Send + 'a>,
+> {
+    Box::pin(async move {
+        let start = Instant::now();
+
+        // 4.C: cross-repo guard for transactional batches.
+        if request.transactional {
+            let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+            if repos.len() > 1 {
+                let mut repos: Vec<String> = repos.into_iter().collect();
+                repos.sort();
+                return Err(BatchError::CrossRepoNotSupported { repos });
+            }
         }
-    }
 
-    // 1. Plan
-    let plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
+        // 1. Plan
+        let plan =
+            shamir_query_types::batch::BatchPlanner::plan(&request.queries, &request.limits)?;
 
-    // 2. Validate: all referenced tables exist (skip admin ops)
-    validate_tables(&request.queries, resolver).await?;
+        // 2. Validate: all referenced tables exist (skip admin ops)
+        validate_tables(&request.queries, resolver).await?;
 
-    // 2b. Validate: filter nesting depth (DoS guard)
-    validate_filter_depth(&request.queries)?;
+        // 2b. Validate: filter nesting depth (DoS guard)
+        validate_filter_depth(&request.queries)?;
 
-    let mut plan = plan;
+        let mut plan = plan;
 
-    // 3. Execute — branch on transactional.
-    let (all_results, tx_info) = if request.transactional {
-        execute_transactional(
-            request, &mut plan, resolver, admin, invoker, &actor, db_name,
-        )
-        .await?
-    } else {
-        let r = execute_plan(
-            &mut plan,
-            &request.queries,
-            resolver,
-            admin,
-            invoker,
-            &actor,
-            db_name,
-        )
-        .await?;
-        (r, None)
-    };
+        // 3. Execute — branch on transactional.
+        let (all_results, tx_info) = if request.transactional {
+            execute_transactional_impl(
+                request, &mut plan, resolver, admin, invoker, &actor, db_name, depth, params,
+            )
+            .await?
+        } else {
+            let r = execute_plan_impl(
+                &mut plan,
+                &request.queries,
+                resolver,
+                admin,
+                invoker,
+                &actor,
+                db_name,
+                depth,
+                params,
+            )
+            .await?;
+            (r, None)
+        };
 
-    // 3.5. Durability: if `synced`, flush every distinct repo the batch
-    // touched before building the response so the write survives an
-    // immediate hard crash.
-    if request.durability.as_deref() == Some("synced") {
-        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
-        for repo_name in repos {
-            let repo =
-                resolver
-                    .resolve_repo(&repo_name)
-                    .await
-                    .map_err(|e| BatchError::QueryError {
+        // 3.5. Durability: if `synced`, flush every distinct repo the batch
+        // touched before building the response so the write survives an
+        // immediate hard crash.
+        if request.durability.as_deref() == Some("synced") {
+            let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+            for repo_name in repos {
+                let repo = resolver.resolve_repo(&repo_name).await.map_err(|e| {
+                    BatchError::QueryError {
                         alias: String::new(),
                         message: format!("resolve_repo({}): {}", repo_name, e),
                         code: None,
-                    })?;
-            repo.synced_flush()
-                .await
-                .map_err(|e| BatchError::QueryError {
-                    alias: String::new(),
-                    message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
-                    code: None,
+                    }
                 })?;
+                repo.synced_flush()
+                    .await
+                    .map_err(|e| BatchError::QueryError {
+                        alias: String::new(),
+                        message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
+                        code: None,
+                    })?;
+            }
         }
-    }
 
-    // 4. Filter results for response
-    let results = filter_results(all_results, request);
+        // 4. Filter results for response
+        let results = filter_results(all_results, request);
 
-    let elapsed = start.elapsed();
+        let elapsed = start.elapsed();
 
-    Ok(BatchResponse {
-        id: request.id.clone(),
-        results,
-        execution_plan: std::mem::take(&mut plan.stages),
-        execution_time_us: elapsed.as_micros() as u64,
-        transaction: tx_info,
-    })
+        Ok(BatchResponse {
+            id: request.id.clone(),
+            results,
+            execution_plan: std::mem::take(&mut plan.stages),
+            execution_time_us: elapsed.as_micros() as u64,
+            transaction: tx_info,
+        })
+    }) // end Box::pin
 }
 
 /// Execute a batch request with permission checks.
@@ -345,7 +389,8 @@ fn validate_filter_depth(queries: &TMap<String, QueryEntry>) -> Result<(), Batch
 /// needs `Arc<dyn TableResolver>` / `Arc<dyn AdminExecutor>` (or a
 /// scoped-spawn helper); kept out of scope for now and tracked as a
 /// future opt.
-async fn execute_plan(
+#[allow(clippy::too_many_arguments)]
+async fn execute_plan_impl(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
     resolver: &dyn TableResolver,
@@ -353,6 +398,8 @@ async fn execute_plan(
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
     db_name: &str,
+    depth: usize,
+    params: &TMap<String, InnerValue>,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map();
 
@@ -368,7 +415,7 @@ async fn execute_plan(
             let deps = plan.dependencies.get(alias);
             let resolved_refs = build_resolved_refs(&all_results, deps);
 
-            let result = execute_single(
+            let result = execute_single_impl(
                 alias,
                 entry,
                 resolver,
@@ -377,6 +424,8 @@ async fn execute_plan(
                 &resolved_refs,
                 actor,
                 db_name,
+                depth,
+                params,
             )
             .await?;
             all_results.insert(alias.clone(), result);
@@ -386,7 +435,7 @@ async fn execute_plan(
     Ok(all_results)
 }
 
-/// tx-aware variant of [`execute_plan`].
+/// tx-aware variant of [`execute_plan_impl`].
 ///
 /// Uses `QueryRunner` with `Some(&mut tx)` so each mutation routes
 /// through `execute_*_tx`. Reads route through `TableManager::read_tx`
@@ -403,6 +452,34 @@ async fn execute_plan_tx(
     actor: &Actor,
     db_name: &str,
     tx: &mut shamir_tx::TxContext,
+) -> Result<TMap<String, QueryResult>, BatchError> {
+    execute_plan_tx_impl(
+        plan,
+        queries,
+        resolver,
+        admin,
+        invoker,
+        actor,
+        db_name,
+        tx,
+        0,
+        &new_map(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_plan_tx_impl(
+    plan: &mut BatchPlan,
+    queries: &TMap<String, QueryEntry>,
+    resolver: &dyn TableResolver,
+    admin: Option<&dyn AdminExecutor>,
+    invoker: Option<&dyn FunctionInvoker>,
+    actor: &Actor,
+    db_name: &str,
+    tx: &mut shamir_tx::TxContext,
+    depth: usize,
+    params: &TMap<String, InnerValue>,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
     let mut all_results: TMap<String, QueryResult> = new_map();
 
@@ -424,6 +501,8 @@ async fn execute_plan_tx(
                 tx: Some(&mut *tx),
                 actor: actor.clone(),
                 db_name,
+                depth,
+                params,
             };
             let result = runner.run(alias, entry, &resolved_refs).await?;
             all_results.insert(alias.clone(), result);
@@ -437,7 +516,8 @@ async fn execute_plan_tx(
 ///
 /// Returns the per-query results AND the populated TransactionInfo
 /// (committed or aborted with reason).
-async fn execute_transactional(
+#[allow(clippy::too_many_arguments)]
+async fn execute_transactional_impl(
     request: &BatchRequest,
     plan: &mut BatchPlan,
     resolver: &dyn TableResolver,
@@ -445,6 +525,8 @@ async fn execute_transactional(
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
     db_name: &str,
+    depth: usize,
+    params: &TMap<String, InnerValue>,
 ) -> Result<
     (
         TMap<String, QueryResult>,
@@ -494,7 +576,7 @@ async fn execute_transactional(
     let tx_id = tx.tx_id.0;
 
     // Execute plan in tx mode.
-    let plan_result = execute_plan_tx(
+    let plan_result = execute_plan_tx_impl(
         plan,
         &request.queries,
         resolver,
@@ -503,6 +585,8 @@ async fn execute_transactional(
         actor,
         db_name,
         &mut tx,
+        depth,
+        params,
     )
     .await;
 
@@ -692,6 +776,11 @@ fn build_resolved_refs(
 /// function `execute_single`. In tx mode (`tx == Some(&mut TxContext)`)
 /// each mutation routes through tx-aware methods (`execute_*_tx`).
 ///
+/// `depth` and `params` support nested `BatchOp::Batch` execution (P3):
+/// - `depth` is the current nesting level (0 at the outermost batch).
+/// - `params` carries the injected `$param` bindings resolved from the
+///   outer batch's `BatchOp::Batch.bind` map for this execution scope.
+///
 /// Per design decision D9 in
 /// `docs/pre-transactional/05-executor-isolation.md`.
 pub struct QueryRunner<'a> {
@@ -701,6 +790,10 @@ pub struct QueryRunner<'a> {
     pub tx: Option<&'a mut shamir_tx::TxContext>,
     pub actor: Actor,
     pub db_name: &'a str,
+    /// Current nesting depth (0 at the public entry).
+    pub depth: usize,
+    /// Injected `$param` bindings for this execution scope.
+    pub params: &'a TMap<String, InnerValue>,
 }
 
 impl<'a> QueryRunner<'a> {
@@ -728,6 +821,106 @@ impl<'a> QueryRunner<'a> {
         entry: &QueryEntry,
         resolved_refs: &TMap<String, QueryResult>,
     ) -> Result<QueryResult, BatchError> {
+        // Sub-batch — handle before is_admin() so we can recurse rather
+        // than delegating to AdminExecutor (which has no recursion seam).
+        if let BatchOp::Batch(sub) = &entry.op {
+            // Guard: transactional sub-batch inside an already-open tx
+            // is not supported (two-phase commit across a shared TxContext
+            // is not safe; per design the outer should be non-transactional
+            // when it contains transactional sub-batches).
+            if sub.batch.transactional && self.tx.is_some() {
+                return Err(BatchError::query_coded(
+                    alias,
+                    "nested_tx_not_supported",
+                    "a transactional sub-batch cannot run inside an outer transaction",
+                ));
+            }
+
+            // Resolve the `bind` map against the CURRENT scope's resolved_refs
+            // and params. Each value is a FilterValue — resolve it to an
+            // InnerValue using the same machinery as filter evaluation.
+            // We use a dummy record (Null) because bind values may only
+            // reference $query aliases or literals, not record fields.
+            let dummy_record = InnerValue::Null;
+            // We need an Interner for FilterContext, but bind values must only
+            // be literals or $query refs (not FieldRefs). Use a scratch interner.
+            let scratch = shamir_types::core::interner::Interner::new();
+            let bind_ctx = FilterContext::new(&scratch, resolved_refs)
+                .with_actor(self.actor.clone())
+                .with_params(self.params);
+            let mut resolved_params: TMap<String, InnerValue> = new_map();
+            for (key, fv) in &sub.bind {
+                match fv {
+                    crate::query::filter::FilterValue::Param { name } => {
+                        // $param in a bind value means look up from the
+                        // current (outer) scope's params — propagation.
+                        let v = self.params.get(name.as_str()).ok_or_else(|| {
+                            BatchError::query_coded(
+                                alias,
+                                "unbound_param",
+                                format!("$param '{}' is not bound in the current scope", name),
+                            )
+                        })?;
+                        resolved_params.insert(key.clone(), v.clone());
+                    }
+                    other => {
+                        let v = crate::query::filter::eval::resolve_filter_value(
+                            other,
+                            &dummy_record,
+                            &bind_ctx,
+                        )
+                        .ok_or_else(|| BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!(
+                                "bind key '{}': cannot resolve filter value {:?}",
+                                key, fv
+                            ),
+                            code: None,
+                        })?;
+                        resolved_params.insert(key.clone(), v);
+                    }
+                }
+            }
+
+            // Recurse into the sub-batch.
+            let inner_response = execute_batch_impl(
+                &sub.batch,
+                self.resolver,
+                self.admin,
+                self.invoker,
+                self.actor.clone(),
+                self.db_name,
+                self.depth + 1,
+                &resolved_params,
+            )
+            .await
+            .map_err(|e| BatchError::QueryError {
+                alias: alias.to_string(),
+                message: format!("sub-batch '{}' failed: {}", alias, e),
+                code: e.code().map(str::to_owned),
+            })?;
+
+            // Wrap the inner BatchResponse into a QueryResult for the outer
+            // $query path resolution.
+            //
+            // `resolve_query_ref_value` in eval.rs checks `qr.value` first
+            // (Call-result path). We store the inner results map as a JSON
+            // object in `value` so outer ops can access sub-aliases:
+            //   $query @sub[0].records[0].id  — NOT supported (records empty)
+            //   $query @sub.alias_name[0].id  — walks value.alias_name[0].id
+            //
+            // The inner results are already JSON (QueryResult::records are
+            // Vec<serde_json::Value>), so we serialise the entire results map
+            // directly.
+            let value = serde_json::to_value(&inner_response.results).ok();
+            return Ok(QueryResult {
+                records: Vec::new(),
+                stats: None,
+                pagination: None,
+                value,
+            });
+        }
+
         // Admin ops — delegate to AdminExecutor (no tx).
         if entry.op.is_admin() {
             return match self.admin {
@@ -775,7 +968,9 @@ impl<'a> QueryRunner<'a> {
                 code: None,
             })?;
 
-        let ctx = FilterContext::new(interner, resolved_refs).with_actor(self.actor.clone());
+        let ctx = FilterContext::new(interner, resolved_refs)
+            .with_actor(self.actor.clone())
+            .with_params(self.params);
 
         match &entry.op {
             BatchOp::Read(query) => {
@@ -895,7 +1090,7 @@ impl<'a> QueryRunner<'a> {
 ///
 /// Thin wrapper around [`QueryRunner`] with `tx: None`.
 #[allow(clippy::too_many_arguments)]
-async fn execute_single(
+async fn execute_single_impl(
     alias: &str,
     entry: &QueryEntry,
     resolver: &dyn TableResolver,
@@ -904,6 +1099,8 @@ async fn execute_single(
     resolved_refs: &TMap<String, QueryResult>,
     actor: &Actor,
     db_name: &str,
+    depth: usize,
+    params: &TMap<String, InnerValue>,
 ) -> Result<QueryResult, BatchError> {
     let mut runner = QueryRunner {
         resolver,
@@ -912,6 +1109,8 @@ async fn execute_single(
         tx: None,
         actor: actor.clone(),
         db_name,
+        depth,
+        params,
     };
     runner.run(alias, entry, resolved_refs).await
 }

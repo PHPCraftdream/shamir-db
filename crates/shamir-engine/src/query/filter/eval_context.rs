@@ -4,6 +4,7 @@ use shamir_funclib::registry::ScalarRegistry;
 use shamir_types::access::Actor;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::TMap;
+use shamir_types::types::value::InnerValue;
 
 use crate::function::builtin_scalars;
 use crate::query::read::QueryResult;
@@ -14,6 +15,11 @@ use crate::query::read::QueryResult;
 /// a map of resolved query results for QueryRef support,
 /// the [`Actor`] that initiated the operation, and the scalar function
 /// registry used to evaluate `FilterValue::FnCall` nodes.
+///
+/// `params` is the injected sub-batch parameter scope — populated when
+/// this context belongs to a nested `BatchOp::Batch` execution. At the
+/// top level it is an empty shared map (zero allocation on the common
+/// path). Used to resolve `FilterValue::Param { name }` references.
 pub struct FilterContext<'a> {
     pub interner: &'a Interner,
     pub resolved_refs: &'a TMap<String, QueryResult>,
@@ -21,6 +27,17 @@ pub struct FilterContext<'a> {
     /// Scalar function registry for `FnCall` dispatch. Defaults to the
     /// process-global built-ins ([`builtin_scalars`]).
     pub scalars: &'a ScalarRegistry,
+    /// Injected sub-batch parameters (`$param` bindings). Empty at the
+    /// top level; populated by the recursive sub-batch executor (P3).
+    pub params: &'a TMap<String, InnerValue>,
+}
+
+/// A permanently empty params map, shared across all top-level contexts
+/// so `FilterContext::new` never allocates.
+fn empty_params() -> &'static TMap<String, InnerValue> {
+    use std::sync::OnceLock;
+    static EMPTY: OnceLock<TMap<String, InnerValue>> = OnceLock::new();
+    EMPTY.get_or_init(shamir_types::types::common::new_map)
 }
 
 impl<'a> FilterContext<'a> {
@@ -30,12 +47,19 @@ impl<'a> FilterContext<'a> {
             resolved_refs,
             actor: Actor::System,
             scalars: builtin_scalars(),
+            params: empty_params(),
         }
     }
 
     /// Builder: set the actor that initiated this operation.
     pub fn with_actor(mut self, actor: Actor) -> Self {
         self.actor = actor;
+        self
+    }
+
+    /// Builder: inject sub-batch params for `$param` resolution.
+    pub fn with_params(mut self, params: &'a TMap<String, InnerValue>) -> Self {
+        self.params = params;
         self
     }
 }
