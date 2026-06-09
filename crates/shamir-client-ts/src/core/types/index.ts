@@ -33,3 +33,14 @@ export type {
 } from './query.js';
 
 export type { ConnectOptions } from './connection.js';
+
+export type {
+  Json,
+  UpdateReturnMode,
+  UpdateSelect,
+  InsertOp,
+  UpdateOp,
+  SetOp,
+  DeleteOp,
+  WriteOp,
+} from './write.js';
