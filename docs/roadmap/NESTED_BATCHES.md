@@ -1,6 +1,21 @@
 # NESTED BATCHES — composable sub-batches as batch operations (#282)
 
-**Status:** design doc (revision 2026-06-09).
+**Status:** APPROVED design — implementing (revision 2026-06-09).
+
+**Key motivation:** "подождать транзакцию" — a sub-batch runs as its own
+transactional unit; outer ops that reference it via `$query` **wait** for
+its commit and see durable results. The outer batch is an **orchestrator**;
+transactional atomicity lives inside sub-batches.
+
+**Approved decisions:**
+- True nesting (recursive batch executor), NOT flatten.
+- Data into sub-batch: explicit `bind` params (variant P) + `$param` values.
+  Sub-batch is self-contained (no lexical scoping of parent aliases).
+- Data out: sub-batch alias is a normal `QueryResult`; `$query @sub[...]`.
+- TX-in-TX: forbidden on phase 1 (sub-batch inside already-transactional
+  parent → error `nested_tx_not_supported`). Savepoints — future.
+- Three atoms: `BatchOp::Batch(SubBatchOp)`, `FilterValue::Param`,
+  `SubBatchOp.bind` map.
 
 A batch can be included in another batch as a normal operation. Its
 named results are available to other operations in the **outer** batch
