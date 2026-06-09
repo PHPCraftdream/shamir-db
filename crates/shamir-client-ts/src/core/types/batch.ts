@@ -30,6 +30,20 @@ import type { InsertOp, UpdateOp, SetOp, DeleteOp } from './write.js';
 import type { DdlOp } from './ddl.js';
 import type { AdminOp } from './admin.js';
 import type { CallOp } from './call.js';
+import type { FilterValue } from './filter.js';
+
+// ── Sub-batch operation ─────────────────────────────────────────────
+
+/**
+ * A nested batch operation (`{ "batch": <BatchRequest>, "bind": { … } }`).
+ * Mirrors the server's `SubBatchOp` variant accepted inside a batch entry.
+ * `bind` maps parameter names to `FilterValue`s that the inner batch can
+ * reference via `{ "$param": "name" }`.  Omitted when empty.
+ */
+export interface SubBatchOp {
+  batch: BatchRequest;
+  bind?: Record<string, FilterValue>;
+}
 
 // ── Batch operation input ───────────────────────────────────────────
 
@@ -42,7 +56,8 @@ export type BatchOpInput =
   | DeleteOp
   | DdlOp
   | AdminOp
-  | CallOp;
+  | CallOp
+  | SubBatchOp;
 
 // ── QueryEntry ──────────────────────────────────────────────────────
 

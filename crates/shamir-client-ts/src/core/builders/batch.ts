@@ -19,6 +19,7 @@ import type {
   BatchRequest,
   BatchResponse,
 } from '../types/batch.js';
+import type { FilterValue } from '../types/filter.js';
 import type { ExecCtx } from '../exec-ctx.js';
 
 /** Something that has a `.build()` method returning a wire op. */
@@ -83,6 +84,53 @@ export class Batch {
         : (op as BatchOpInput);
 
     const entry: QueryEntry = { ...resolved };
+
+    if (opts?.returnResult === false) {
+      entry.return_result = false;
+    }
+
+    if (opts?.after && opts.after.length > 0) {
+      entry.after = opts.after;
+    }
+
+    this.queriesMap[alias] = entry;
+    return this;
+  }
+
+  /**
+   * Add a nested sub-batch operation under `alias`.
+   *
+   * `inner` may be a `Batch` instance (`.build()` is called automatically)
+   * or a raw `BatchRequest` object.
+   *
+   * `opts.bind` maps parameter names to `FilterValue`s that the inner batch
+   * can reference via `{ "$param": "name" }`. The `bind` field is omitted
+   * when empty or not provided (matches the server's skip-if-empty rule).
+   *
+   * `opts.returnResult` and `opts.after` behave identically to `.add()`.
+   */
+  subBatch(
+    alias: string,
+    inner: Batch | BatchRequest,
+    opts?: {
+      bind?: Record<string, FilterValue>;
+      returnResult?: boolean;
+      after?: string[];
+    },
+  ): this {
+    const resolved: BatchRequest =
+      typeof (inner as Partial<Batch>).build === 'function'
+        ? (inner as Batch).build()
+        : (inner as BatchRequest);
+
+    const op: BatchOpInput = { batch: resolved };
+
+    if (opts?.bind && Object.keys(opts.bind).length > 0) {
+      (op as { batch: BatchRequest; bind?: Record<string, FilterValue> }).bind =
+        opts.bind;
+    }
+
+    const entry: QueryEntry = { ...op };
 
     if (opts?.returnResult === false) {
       entry.return_result = false;

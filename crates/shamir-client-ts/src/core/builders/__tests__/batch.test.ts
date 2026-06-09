@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { Batch } from '../batch.js';
 import { Query } from '../query.js';
 import { write } from '../write.js';
+import { filter } from '../filter.js';
 import type {
   BatchResponse,
   BatchRequest,
@@ -192,6 +193,85 @@ describe('Batch — insert helper interop', () => {
       insert_into: 'users',
       values: [{ name: 'Alice' }],
     });
+  });
+});
+
+// ── subBatch ─────────────────────────────────────────────────────────
+
+describe('Batch — subBatch', () => {
+  it('produces { batch, bind } wire shape', () => {
+    const inner = Batch.create('inner')
+      .add('item', Query.from('items'))
+      .build();
+
+    const req = Batch.create('f')
+      .add('user', Query.from('users').where(filter.eq('id', 'u1')))
+      .subBatch('proc', inner, {
+        bind: { uid: filter.queryRef('@user', '[0].id') },
+      })
+      .build();
+
+    expect(req.queries.proc).toEqual({
+      batch: inner,
+      bind: { uid: { $query: '@user', path: '[0].id' } },
+    });
+  });
+
+  it('subBatch omits empty bind', () => {
+    const inner = Batch.create('inner')
+      .add('item', Query.from('items'))
+      .build();
+
+    const req = Batch.create('f')
+      .subBatch('proc', inner, { bind: {} })
+      .build();
+
+    const entry = req.queries.proc as { batch: BatchRequest; bind?: unknown };
+    expect(entry.batch).toEqual(inner);
+    expect(entry.bind).toBeUndefined();
+  });
+
+  it('subBatch accepts a raw BatchRequest (not a Batch instance)', () => {
+    const rawBatch: BatchRequest = {
+      id: 'raw',
+      queries: {
+        q: { from: 'items' },
+      },
+    };
+
+    const req = Batch.create('outer')
+      .subBatch('nested', rawBatch, {
+        bind: { x: filter.param('uid') },
+      })
+      .build();
+
+    expect(req.queries.nested).toEqual({
+      batch: rawBatch,
+      bind: { x: { $param: 'uid' } },
+    });
+  });
+
+  it('subBatch accepts a Batch instance and calls .build()', () => {
+    const innerBuilder = Batch.create('b')
+      .add('q', Query.from('orders'));
+
+    const req = Batch.create('outer')
+      .subBatch('child', innerBuilder)
+      .build();
+
+    const entry = req.queries.child as { batch: BatchRequest };
+    expect(entry.batch).toEqual(innerBuilder.build());
+  });
+
+  it('subBatch respects returnResult and after opts', () => {
+    const inner = Batch.create('i').add('q', Query.from('t')).build();
+
+    const req = Batch.create('o')
+      .subBatch('x', inner, { returnResult: false, after: ['a'] })
+      .build();
+
+    expect(req.queries.x.return_result).toBe(false);
+    expect(req.queries.x.after).toEqual(['a']);
   });
 });
 
