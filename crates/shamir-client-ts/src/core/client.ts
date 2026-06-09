@@ -9,10 +9,28 @@
 
 import type { Platform } from './platform.js';
 import type { ConnectOptions } from './types/index.js';
-import type { BatchResponse } from './types/batch.js';
+import type { BatchResponse, TransactionInfo } from './types/batch.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
 import { signCanonical } from './hmac.js';
+
+/** Result of {@link ShamirClient.txBegin} (`DbResponse::TxOpened`). */
+export interface TxOpened {
+  /** Opaque handle for subsequent txExecute/txCommit/txRollback. */
+  tx_handle: number;
+  /** MVCC version the transaction's snapshot reads at. */
+  snapshot_version: number;
+  /** Effective isolation (`"snapshot"` | `"serializable"`). */
+  isolation: string;
+}
+
+/** Result of {@link ShamirClient.createScramUser} (`DbResponse::UserCreated`). */
+export interface ScramUserCreated {
+  /** Echoed user name (post-normalisation). */
+  name: string;
+  /** Stable 16-byte user id assigned by the directory. */
+  user_id: Uint8Array;
+}
 
 export class ShamirClient {
   private readonly platform: Platform;
@@ -98,17 +116,17 @@ export class ShamirClient {
   }
 
   /**
-   * Health-check ping — zero DB cost. Returns the decoded `DbResponse`.
-   * Uses `DbRequest::Ping` (internally-tagged enum with `op: "ping"`).
+   * Round-trip one `DbRequest` and return the decoded `DbResponse` object.
+   * Wraps the request in a session envelope (`{sid, rid, req}`), awaits the
+   * matching `{rid, res}` reply, and throws on a transport-level `error`, a
+   * request-id mismatch, a missing `res`, or a DB-layer `kind:"error"`.
+   * The caller dispatches on the returned `kind`.
    */
-  async ping(): Promise<object> {
+  private async sendDbRequest(req: object): Promise<Record<string, unknown>> {
     const rid = this.nextRequestId++;
-    const reqBody = encode({ op: 'ping' });
-    const envelope = encode({
-      sid: this._sessionId,
-      rid,
-      req: reqBody,
-    });
+    // Outer request envelope. `req` is opaque msgpack bytes (serde_bytes)
+    // carrying the internally-tagged DbRequest (tag = "op").
+    const envelope = encode({ sid: this._sessionId, rid, req: encode(req) });
     this.framer.send(envelope);
 
     const respBytes = await this.framer.recv();
@@ -120,10 +138,29 @@ export class ShamirClient {
     if (typeof resp.error === 'string') {
       throw new Error(`protocol error: ${resp.error}`);
     }
+    if (resp.rid !== undefined && resp.rid !== rid) {
+      throw new Error(`request id mismatch: sent ${rid}, got ${resp.rid}`);
+    }
     if (!(resp.res instanceof Uint8Array)) {
       throw new Error('response envelope missing `res` bytes');
     }
-    return decode(resp.res) as object;
+    const dbResponse = decode(resp.res) as Record<string, unknown>;
+    if (dbResponse.kind === 'error') {
+      throw new Error(
+        `db error [${(dbResponse.code as string) ?? 'unknown'}]: ${
+          (dbResponse.message as string) ?? ''
+        }`,
+      );
+    }
+    return dbResponse;
+  }
+
+  /**
+   * Health-check ping — zero DB cost. Returns the decoded `DbResponse`
+   * (`{ kind: "pong" }`). Uses `DbRequest::Ping`.
+   */
+  async ping(): Promise<object> {
+    return this.sendDbRequest({ op: 'ping' });
   }
 
   /**
@@ -134,56 +171,126 @@ export class ShamirClient {
    * or DB-layer (`kind:"error"`) failures.
    */
   async execute(db: string, batch: object): Promise<BatchResponse> {
-    const rid = this.nextRequestId++;
-    // Inner DB request — internally-tagged enum (tag = "op").
-    const reqBody = encode({
+    const r = await this.sendDbRequest({
       op: 'execute',
       query_version: 1,
       db,
       batch,
     });
-    // Outer request envelope. `req` is opaque msgpack bytes (serde_bytes).
-    const envelope = encode({
-      sid: this._sessionId,
-      rid,
-      req: reqBody,
-    });
-    this.framer.send(envelope);
-
-    const respBytes = await this.framer.recv();
-    const resp = decode(respBytes) as {
-      rid?: number;
-      res?: Uint8Array;
-      error?: string;
-    };
-
-    if (typeof resp.error === 'string') {
-      throw new Error(`protocol error: ${resp.error}`);
-    }
-    if (resp.rid !== undefined && resp.rid !== rid) {
-      throw new Error(`request id mismatch: sent ${rid}, got ${resp.rid}`);
-    }
-    if (!(resp.res instanceof Uint8Array)) {
-      throw new Error('response envelope missing `res` bytes');
-    }
-    const dbResponse = decode(resp.res) as {
-      kind?: string;
-      code?: string;
-      message?: string;
-      response?: BatchResponse;
-    };
-    if (dbResponse.kind === 'error') {
-      throw new Error(
-        `db error [${dbResponse.code ?? 'unknown'}]: ${dbResponse.message ?? ''}`,
-      );
-    }
     // DbResponse::Batch is `{ kind: "batch", response: BatchResponse }` —
     // unwrap the envelope so callers get the BatchResponse directly.
-    if (dbResponse.kind === 'batch' && dbResponse.response !== undefined) {
-      return dbResponse.response;
+    if (r.kind === 'batch' && r.response !== undefined) {
+      return r.response as BatchResponse;
     }
     throw new Error(
-      `unexpected DbResponse kind for execute: ${dbResponse.kind ?? 'missing'}`,
+      `unexpected DbResponse kind for execute: ${(r.kind as string) ?? 'missing'}`,
+    );
+  }
+
+  // ── Interactive (multi-call) transactions ─────────────────────────
+
+  /**
+   * Open an interactive transaction scoped to a single `repo`. Returns the
+   * minted handle + the snapshot version it reads at. `isolation` is
+   * `"snapshot"` (default) | `"serializable"`.
+   */
+  async txBegin(
+    db: string,
+    repo: string,
+    isolation?: 'snapshot' | 'serializable',
+  ): Promise<TxOpened> {
+    const r = await this.sendDbRequest({
+      op: 'tx_begin',
+      query_version: 1,
+      db,
+      repo,
+      ...(isolation !== undefined ? { isolation } : {}),
+    });
+    if (r.kind !== 'tx_opened') {
+      throw new Error(`unexpected DbResponse kind for tx_begin: ${r.kind}`);
+    }
+    return {
+      tx_handle: r.tx_handle as number,
+      snapshot_version: r.snapshot_version as number,
+      isolation: r.isolation as string,
+    };
+  }
+
+  /**
+   * Run a batch inside an open interactive transaction. State accumulates in
+   * the parked transaction (no commit). Returns the {@link BatchResponse}
+   * (its `.transaction` stays null — there is no per-call commit outcome yet).
+   */
+  async txExecute(
+    db: string,
+    txHandle: number,
+    batch: object,
+  ): Promise<BatchResponse> {
+    const r = await this.sendDbRequest({
+      op: 'tx_execute',
+      query_version: 1,
+      db,
+      tx_handle: txHandle,
+      batch,
+    });
+    if (r.kind === 'tx_batch' && r.response !== undefined) {
+      return r.response as BatchResponse;
+    }
+    throw new Error(`unexpected DbResponse kind for tx_execute: ${r.kind}`);
+  }
+
+  /**
+   * Commit an open interactive transaction (runs the full commit pipeline).
+   * Returns the {@link TransactionInfo} (committed or aborted).
+   */
+  async txCommit(db: string, txHandle: number): Promise<TransactionInfo> {
+    const r = await this.sendDbRequest({
+      op: 'tx_commit',
+      db,
+      tx_handle: txHandle,
+    });
+    if (r.kind === 'tx_committed' && r.transaction !== undefined) {
+      return r.transaction as TransactionInfo;
+    }
+    throw new Error(`unexpected DbResponse kind for tx_commit: ${r.kind}`);
+  }
+
+  /** Roll back (abort) an open interactive transaction. */
+  async txRollback(db: string, txHandle: number): Promise<void> {
+    const r = await this.sendDbRequest({
+      op: 'tx_rollback',
+      db,
+      tx_handle: txHandle,
+    });
+    if (r.kind !== 'tx_rolled_back') {
+      throw new Error(`unexpected DbResponse kind for tx_rollback: ${r.kind}`);
+    }
+  }
+
+  // ── SCRAM user provisioning ───────────────────────────────────────
+
+  /**
+   * Create a SCRAM-authenticatable user (one that can log in over the wire).
+   * Requires a superuser session. The server runs Argon2id with its KDF
+   * defaults and writes the durable user record. `roles: ["superuser"]`
+   * grants admin powers; other strings are app-defined.
+   */
+  async createScramUser(
+    name: string,
+    password: string,
+    roles: string[] = [],
+  ): Promise<ScramUserCreated> {
+    const r = await this.sendDbRequest({
+      op: 'create_scram_user',
+      name,
+      password,
+      roles,
+    });
+    if (r.kind === 'user_created') {
+      return { name: r.name as string, user_id: r.user_id as Uint8Array };
+    }
+    throw new Error(
+      `unexpected DbResponse kind for create_scram_user: ${r.kind}`,
     );
   }
 
