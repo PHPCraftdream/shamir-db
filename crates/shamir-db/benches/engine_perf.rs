@@ -19,13 +19,20 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use serde_json::{json, Map as JsonMap, Value as JsonValue};
+use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Runtime;
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
+
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+use shamir_query_builder::filter::{self as f};
+use shamir_query_builder::query::Query;
+use shamir_query_builder::select;
+use shamir_query_builder::write;
 
 // --------------------------------------------------------------------------
 // Test-data generator — realistic-ish user records
@@ -269,14 +276,11 @@ async fn fresh_db_membuffer_nebari(path: &std::path::Path) -> Arc<ShamirDb> {
 /// Seed `n` records via a single `insert_into` op (does NOT scan).
 async fn seed_users(shamir: &ShamirDb, n: usize) {
     let values: Vec<JsonValue> = (0..n).map(gen_user).collect();
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "seed",
-        "queries": {
-            "ins": { "insert_into": "users", "values": values }
-        },
-        "return_all": false
-    }))
-    .expect("parse seed batch");
+    let mut b = Batch::new();
+    b.id("seed")
+        .return_flagged()
+        .insert("ins", write::insert("users").rows(values));
+    let req = b.build();
     shamir.execute("bench", &req).await.expect("seed");
 }
 
@@ -299,20 +303,14 @@ async fn create_covering_sorted_index(
     field: &str,
     include_field: &str,
 ) {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "idx",
-        "queries": {
-            "i": {
-                "create_index": index_name,
-                "table": table,
-                "fields": [[field]],
-                "unique": false,
-                "sorted": true,
-                "include": [[include_field]]
-            }
-        }
-    }))
-    .expect("parse covering idx batch");
+    let idx = ddl::create_index(index_name, table)
+        .field(field)
+        .sorted()
+        .include([vec![include_field.to_string()]])
+        .build();
+    let mut b = Batch::new();
+    b.id("idx").create_index("i", idx);
+    let req = b.build();
     shamir
         .execute("bench", &req)
         .await
@@ -327,19 +325,16 @@ async fn create_index_inner(
     unique: bool,
     sorted: bool,
 ) {
-    let req: BatchRequest = serde_json::from_value(json!({
-        "id": "idx",
-        "queries": {
-            "i": {
-                "create_index": index_name,
-                "table": table,
-                "fields": [[field]],
-                "unique": unique,
-                "sorted": sorted
-            }
-        }
-    }))
-    .expect("parse idx batch");
+    let mut idx = ddl::create_index(index_name, table).field(field);
+    if unique {
+        idx = idx.unique();
+    }
+    if sorted {
+        idx = idx.sorted();
+    }
+    let mut b = Batch::new();
+    b.id("idx").create_index("i", idx.build());
+    let req = b.build();
     shamir.execute("bench", &req).await.expect("create index");
 }
 
@@ -362,237 +357,149 @@ async fn seeded(n: usize, with_id_index: bool) -> Arc<ShamirDb> {
 // --------------------------------------------------------------------------
 
 fn req_set_one(target_id: &str, score: i64) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "s",
-        "queries": {
-            "s": {
-                "set": "users",
-                "key": { "id": target_id },
-                "value": { "id": target_id, "score": score, "name": "Updated", "active": true }
-            }
-        },
-        "return_all": false
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("s").return_flagged().upsert(
+        "s",
+        write::upsert("users")
+            .key(json!({ "id": target_id }))
+            .value(json!({ "id": target_id, "score": score, "name": "Updated", "active": true })),
+    );
+    b.build()
 }
 
 fn req_read_by_id(target_id: &str) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": { "from": "users", "where": { "op": "eq", "field": ["id"], "value": target_id } }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").where_eq("id", target_id));
+    b.build()
 }
 
 fn req_read_by_city(city: &str) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": { "from": "users", "where": { "op": "eq", "field": ["city"], "value": city } }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").where_eq("city", city));
+    b.build()
 }
 
 fn req_update_by_id(target_id: &str) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "u",
-        "queries": {
-            "u": {
-                "update": "users",
-                "where": { "op": "eq", "field": ["id"], "value": target_id },
-                "set": { "score": 1234 }
-            }
-        },
-        "return_all": false
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("u").return_flagged().update(
+        "u",
+        write::update("users")
+            .where_(f::eq("id", target_id))
+            .set(json!({ "score": 1234 })),
+    );
+    b.build()
 }
 
 fn req_delete_by_id(target_id: &str) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "d",
-        "queries": {
-            "d": {
-                "delete_from": "users",
-                "where": { "op": "eq", "field": ["id"], "value": target_id }
-            }
-        },
-        "return_all": false
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("d")
+        .return_flagged()
+        .delete("d", write::delete("users").where_(f::eq("id", target_id)));
+    b.build()
 }
 
 fn req_read_complex_filter() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "where": {
-                    "op": "and",
-                    "filters": [
-                        { "op": "gte", "field": ["age"], "value": 30 },
-                        { "op": "lte", "field": ["age"], "value": 50 },
-                        {
-                            "op": "or",
-                            "filters": [
-                                { "op": "eq", "field": ["city"], "value": "NYC" },
-                                { "op": "eq", "field": ["city"], "value": "LA" }
-                            ]
-                        }
-                    ]
-                }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r").query(
+        "r",
+        Query::from("users")
+            .where_gte("age", 30)
+            .where_lte("age", 50)
+            .where_group_or(|conds| conds.where_eq("city", "NYC").where_eq("city", "LA")),
+    );
+    b.build()
 }
 
 fn req_read_with_order_limit() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "order_by": { "items": [{ "field": ["score"], "direction": "desc" }] },
-                "pagination": { "mode": "LimitOffset", "limit": 10, "offset": 0 }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").order_by_desc("score").limit(10));
+    b.build()
 }
 
 fn req_read_with_order_limit_asc() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "order_by": { "items": [{ "field": ["score"], "direction": "asc" }] },
-                "pagination": { "mode": "LimitOffset", "limit": 10, "offset": 0 }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").order_by_asc("score").limit(10));
+    b.build()
 }
 
 fn req_count_all() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "c",
-        "queries": {
-            "c": {
-                "from": "users",
-                "select": { "items": [{ "type": "count_all", "alias": "n" }] }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("c")
+        .query("c", Query::from("users").select([select::count_all("n")]));
+    b.build()
 }
 
 fn req_count_with_filter(city: &str) -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "c",
-        "queries": {
-            "c": {
-                "from": "users",
-                "where": { "op": "eq", "field": ["city"], "value": city },
-                "select": { "items": [{ "type": "count_all", "alias": "n" }] }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("c").query(
+        "c",
+        Query::from("users")
+            .where_eq("city", city)
+            .select([select::count_all("n")]),
+    );
+    b.build()
 }
 
 fn req_min_max_score() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "mm",
-        "queries": {
-            "mm": {
-                "from": "users",
-                "select": {
-                    "items": [
-                        { "type": "aggregate", "func": "min", "field": ["score"], "alias": "lo" },
-                        { "type": "aggregate", "func": "max", "field": ["score"], "alias": "hi" }
-                    ]
-                }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("mm").query(
+        "mm",
+        Query::from("users").select([select::min("score", "lo"), select::max("score", "hi")]),
+    );
+    b.build()
 }
 
 /// MIN(score) ONLY — eligible for Q1 sorted-index fast-path
 /// (single aggregate, no other select items, no filter/order/etc).
 fn req_min_score() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "m",
-        "queries": {
-            "m": {
-                "from": "users",
-                "select": {
-                    "items": [
-                        { "type": "aggregate", "func": "min", "field": ["score"], "alias": "lo" }
-                    ]
-                }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("m").query(
+        "m",
+        Query::from("users").select([select::min("score", "lo")]),
+    );
+    b.build()
 }
 
 fn req_range_age() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "where": { "op": "between", "field": ["age"], "from": 30, "to": 35 }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").where_between("age", 30, 35));
+    b.build()
 }
 
 /// Narrow range — ~1.6 % selectivity (one age value out of 60). Shows
 /// where sorted-index wins really matter: when most records are
 /// filtered out, avoiding the per-record load dominates.
 fn req_range_age_narrow() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "where": { "op": "between", "field": ["age"], "from": 30, "to": 30 }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").where_between("age", 30, 30));
+    b.build()
 }
 
 fn req_bulk_insert(start: usize, count: usize) -> BatchRequest {
     let values: Vec<JsonValue> = (start..start + count).map(gen_user).collect();
-    serde_json::from_value(json!({
-        "id": "b",
-        "queries": {
-            "ins": { "insert_into": "users", "values": values }
-        },
-        "return_all": false
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("b")
+        .return_flagged()
+        .insert("ins", write::insert("users").rows(values));
+    b.build()
 }
 
 fn req_batch_independent_reads() -> BatchRequest {
-    let mut queries = JsonMap::new();
+    let mut b = Batch::new();
+    b.id("multi");
     for (i, city) in CITIES.iter().enumerate() {
-        queries.insert(
+        b.query(
             format!("q{}", i),
-            json!({ "from": "users", "where": { "op": "eq", "field": ["city"], "value": city } }),
+            Query::from("users").where_eq("city", *city),
         );
     }
-    serde_json::from_value(json!({ "id": "multi", "queries": queries })).unwrap()
+    b.build()
 }
 
 // --------------------------------------------------------------------------
@@ -1549,36 +1456,23 @@ fn bench_range_query_narrow_with_index_sled(c: &mut Criterion) {
 /// Only ~1.6% of records match. The narrow select is the ideal covering-index
 /// target; without covering index the engine decodes all fields regardless.
 fn req_range_age_narrow_wide() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "where": { "op": "between", "field": ["age"], "from": 30, "to": 30 },
-                "select": {
-                    "items": [
-                        { "type": "field", "path": ["age"] }
-                    ]
-                }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r").query(
+        "r",
+        Query::from("users")
+            .where_between("age", 30, 30)
+            .select([select::field("age")]),
+    );
+    b.build()
 }
 
 /// Full projection on wide records (no select clause): WHERE age BETWEEN 30 AND 30.
 /// Used as the baseline that covering index would improve upon.
 fn req_range_age_narrow_wide_full() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "where": { "op": "between", "field": ["age"], "from": 30, "to": 30 }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r")
+        .query("r", Query::from("users").where_between("age", 30, 30));
+    b.build()
 }
 
 /// Wide-record range query WITHOUT index. Full table scan decoding all
@@ -1689,26 +1583,19 @@ fn bench_range_query_wide_narrow_with_covering_index_sled(c: &mut Criterion) {
 /// large, every matched record is wide, but only `age` is projected — so
 /// avoiding the fetch+decode of the full record for every row is a big win.
 fn req_range_age_highk_wide() -> BatchRequest {
-    serde_json::from_value(json!({
-        "id": "r",
-        "queries": {
-            "r": {
-                "from": "users",
-                "where": { "op": "between", "field": ["age"], "from": 18, "to": 77 },
-                "select": {
-                    "items": [
-                        { "type": "field", "path": ["age"] }
-                    ]
-                }
-            }
-        }
-    }))
-    .unwrap()
+    let mut b = Batch::new();
+    b.id("r").query(
+        "r",
+        Query::from("users")
+            .where_between("age", 18, 77)
+            .select([select::field("age")]),
+    );
+    b.build()
 }
 
 /// High-K, NON-covering sorted index on age + narrow SELECT ["age"]. The
 /// range matches ~all rows, so the engine fetches and fully decodes every
-/// wide record just to project `age`. Baseline for the covering comparison.
+/// wide record just to project `age". Baseline for the covering comparison.
 fn bench_range_query_wide_highk_with_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("range_query_wide_highk_with_index_sled");
@@ -2194,16 +2081,14 @@ fn bench_concurrent_inserts(c: &mut Criterion) {
                             let s = Arc::clone(&shamir);
                             let id = c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             handles.push(tokio::spawn(async move {
-                                let req: BatchRequest = serde_json::from_value(json!({
-                                    "id": id,
-                                    "queries": {
-                                        "ups": {
-                                            "set": "users",
-                                            "key": {"id": id},
-                                            "value": {"id": id, "name": format!("w{id}"), "score": id}
-                                        }
-                                    }
-                                })).unwrap();
+                                let mut b = Batch::new();
+                                b.id(id).upsert(
+                                    "ups",
+                                    write::upsert("users").key(json!({ "id": id })).value(
+                                        json!({ "id": id, "name": format!("w{id}"), "score": id }),
+                                    ),
+                                );
+                                let req = b.build();
                                 s.execute("bench", &req).await.unwrap();
                             }));
                         }
@@ -2246,17 +2131,12 @@ fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
                         });
                         let start = Instant::now();
                         rt.block_on(async {
-                            let req: BatchRequest = serde_json::from_value(json!({
-                                "id": 1,
-                                "queries": {
-                                    "idx": {
-                                        "create_index": "by_score",
-                                        "table": "items",
-                                        "fields": [["score"]]
-                                    }
-                                }
-                            }))
-                            .unwrap();
+                            let idx = ddl::create_index("by_score", "items")
+                                .field("score")
+                                .build();
+                            let mut b = Batch::new();
+                            b.id(1).create_index("idx", idx);
+                            let req = b.build();
                             shamir.execute("bench", &req).await.unwrap();
                         });
                         total += start.elapsed();
@@ -2277,38 +2157,27 @@ fn bench_group_by_sum_e2e(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let shamir = rt.block_on(seeded(1000, false));
 
-    let req_group_sum: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": {
-            "g": {
-                "from": "users",
-                "select": {
-                    "items": [
-                        {"type": "field", "path": ["city"]},
-                        {"type": "aggregate", "func": "sum", "field": ["score"], "alias": "total_score"},
-                        {"type": "count_all", "alias": "n"}
-                    ]
-                },
-                "group_by": {"fields": [["city"]]}
-            }
-        }
-    })).unwrap();
+    let mut b_sum = Batch::new();
+    b_sum.id(1).query(
+        "g",
+        Query::from("users")
+            .select([
+                select::field("city"),
+                select::sum("score", "total_score"),
+                select::count_all("n"),
+            ])
+            .group_by_many(["city"]),
+    );
+    let req_group_sum = b_sum.build();
 
-    let req_group_avg: BatchRequest = serde_json::from_value(json!({
-        "id": 2,
-        "queries": {
-            "g": {
-                "from": "users",
-                "select": {
-                    "items": [
-                        {"type": "field", "path": ["city"]},
-                        {"type": "aggregate", "func": "avg", "field": ["score"], "alias": "avg_score"}
-                    ]
-                },
-                "group_by": {"fields": [["city"]]}
-            }
-        }
-    })).unwrap();
+    let mut b_avg = Batch::new();
+    b_avg.id(2).query(
+        "g",
+        Query::from("users")
+            .select([select::field("city"), select::avg("score", "avg_score")])
+            .group_by_many(["city"]),
+    );
+    let req_group_avg = b_avg.build();
 
     let mut group = c.benchmark_group("group_by_e2e");
     group.throughput(Throughput::Elements(1000));
@@ -2349,17 +2218,12 @@ fn bench_changefeed_overhead(c: &mut Criterion) {
     // Shared request: insert record with id "b1" into the bench table.
     // Using a fixed id means repeated calls overwrite the same row
     // (upsert), keeping the table size stable across iterations.
-    let req_insert: BatchRequest = serde_json::from_value(json!({
-        "id": "b1",
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [gen_user(999)]
-            }
-        },
-        "return_all": false
-    }))
-    .unwrap();
+    let mut b_ins = Batch::new();
+    b_ins
+        .id("b1")
+        .return_flagged()
+        .insert("ins", write::insert("users").row(gen_user(999)));
+    let req_insert = b_ins.build();
 
     // (a) no_subscribers — changefeed channel has no active receivers.
     //     emit_nontx_changefeed does try_send; with 0 receivers it still
@@ -2423,17 +2287,12 @@ fn bench_validator_overhead(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("validator_overhead");
 
-    let req_insert: BatchRequest = serde_json::from_value(json!({
-        "id": "b1",
-        "queries": {
-            "ins": {
-                "insert_into": "users",
-                "values": [gen_user(999)]
-            }
-        },
-        "return_all": false
-    }))
-    .unwrap();
+    let mut b_ins = Batch::new();
+    b_ins
+        .id("b1")
+        .return_flagged()
+        .insert("ins", write::insert("users").row(gen_user(999)));
+    let req_insert = b_ins.build();
 
     // (a) no_validators — default state, run_validators checks an
     //     empty binding list and returns immediately.
@@ -2518,17 +2377,10 @@ async fn seed_users_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
         let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user).collect();
-        let req: BatchRequest = serde_json::from_value(json!({
-            "id": chunk_start,
-            "queries": {
-                "s": {
-                    "insert_into": table,
-                    "values": values,
-                    "return_result": false
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(chunk_start)
+            .insert("s", write::insert(table).rows(values));
+        let req = b.build();
         shamir.execute("bench", &req).await.unwrap();
     }
 }
@@ -2542,17 +2394,10 @@ async fn seed_users_wide_inner(shamir: &ShamirDb, n: usize, table: &str) {
     for chunk_start in (0..n).step_by(50) {
         let chunk_end = (chunk_start + 50).min(n);
         let values: Vec<JsonValue> = (chunk_start..chunk_end).map(gen_user_wide).collect();
-        let req: BatchRequest = serde_json::from_value(json!({
-            "id": chunk_start,
-            "queries": {
-                "s": {
-                    "insert_into": table,
-                    "values": values,
-                    "return_result": false
-                }
-            }
-        }))
-        .unwrap();
+        let mut b = Batch::new();
+        b.id(chunk_start)
+            .insert("s", write::insert(table).rows(values));
+        let req = b.build();
         shamir.execute("bench", &req).await.unwrap();
     }
 }
