@@ -130,6 +130,31 @@ serialisation for unique-index validation).
 
 ---
 
+## 🏗️ Query construction — builder only
+
+Database queries are **always** built through a query builder — the Rust
+`shamir-query-builder` in engine/server code, the typed client builder in
+`shamir-client-ts`. **Never** hand-assemble a query, batch, filter, or any
+wire op from raw `serde_json::json!` / `serde_json::Value` /
+`serde_json::from_value` — in code, in docs, or in examples.
+
+Where the builder genuinely does not apply, do **not** silently leave raw
+JSON: add a one-line comment stating *why*. The documented exceptions:
+
+* **napi / FFI boundary** — deserialising a request that arrived as JSON
+  from a client; no query is being *constructed*.
+* **serde round-trip tests** — the test's subject *is* the wire format, so
+  a builder would bypass what's under test.
+* **WASM-bridge conversion** — mapping an intermediate (e.g. WASM
+  `QueryValue`) into a typed `Filter`/op.
+* **`docs/client-server-protocol-spec/`** — reference documentation of the
+  wire format itself (the builder is what *produces* these shapes).
+
+Everywhere else (user-facing guides, architecture/roadmap docs, engine and
+server code, benches) → builder.
+
+---
+
 ## 📁 Test organisation
 
 Modules with tests follow a strict layout:
