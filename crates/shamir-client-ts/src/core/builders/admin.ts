@@ -1,0 +1,207 @@
+/**
+ * Access-control (ACL) + RBAC admin operation builders — the CODE that
+ * constructs the wire shapes declared in `../types/admin.ts`. Mirrors
+ * `crates/shamir-query-types/src/admin/access.rs` and
+ * `crates/shamir-query-types/src/auth/types.rs`.
+ *
+ * Non-HMAC ops are plain functions returning the wire object.
+ * HMAC-gated ops (`drop_user`, `drop_role`) take a `signer: HmacSigner`,
+ * build the canonical input via `../hmac.ts`, and attach the HMAC tag.
+ *
+ * PLATFORM-AGNOSTIC.
+ */
+
+import type {
+  HmacSigner,
+  ResourceRef,
+  GroupRef,
+  Resource,
+  Action,
+  Effect,
+  Permission,
+  ChmodOp,
+  ChownOp,
+  ChgrpOp,
+  CreateGroupOp,
+  DropGroupOp,
+  AddGroupMemberOp,
+  RemoveGroupMemberOp,
+  AccessTreeOp,
+  CreateUserOp,
+  DropUserOp,
+  CreateRoleOp,
+  DropRoleOp,
+  GrantRoleOp,
+  RevokeRoleOp,
+} from '../types/admin.js';
+
+import type { Filter } from '../types/filter.js';
+import type { Json } from '../types/write.js';
+
+import {
+  canonicalDropUser,
+  canonicalDropRole,
+} from '../hmac.js';
+
+// ── ResourceRef constructors (access.rs, untagged, single-key) ──────
+
+export function refDatabase(db: string): ResourceRef {
+  return { database: db };
+}
+
+export function refStore(db: string, store: string): ResourceRef {
+  return { store: [db, store] };
+}
+
+export function refTable(db: string, store: string, table: string): ResourceRef {
+  return { table: [db, store, table] };
+}
+
+export function refFunction(name: string): ResourceRef {
+  return { function: name };
+}
+
+export function refFunctionFolder(segs: string[]): ResourceRef {
+  return { function_folder: segs };
+}
+
+export function refFunctionNamespace(): ResourceRef {
+  return { function_namespace: true };
+}
+
+// ── Resource (permission scope) constructors (auth/types.rs, tag="scope") ─
+
+export function scopeGlobal(): Resource {
+  return { scope: 'global' };
+}
+
+export function scopeDatabase(db: string): Resource {
+  return { scope: 'database', database: db };
+}
+
+export function scopeRepo(db: string, repo: string): Resource {
+  return { scope: 'repo', database: db, repo };
+}
+
+export function scopeTable(db: string, repo: string, table: string): Resource {
+  return { scope: 'table', database: db, repo, table };
+}
+
+// ── GroupRef constructors ───────────────────────────────────────────
+
+export function groupName(name: string): GroupRef {
+  return { name };
+}
+
+export function groupId(id: number): GroupRef {
+  return { id };
+}
+
+// ── ACL ops (all NON-HMAC) ──────────────────────────────────────────
+
+export function chmod(resource: ResourceRef, mode: number): ChmodOp {
+  return { chmod: resource, mode };
+}
+
+export function chown(resource: ResourceRef, owner: number): ChownOp {
+  return { chown: resource, owner };
+}
+
+export function chgrp(resource: ResourceRef, group: number | null): ChgrpOp {
+  return { chgrp: resource, group };
+}
+
+export function createGroup(name: string): CreateGroupOp {
+  return { create_group: name };
+}
+
+export function dropGroup(ref: GroupRef): DropGroupOp {
+  return { drop_group: ref };
+}
+
+export function addGroupMember(ref: GroupRef, user: number): AddGroupMemberOp {
+  return { add_group_member: ref, user };
+}
+
+export function removeGroupMember(ref: GroupRef, user: number): RemoveGroupMemberOp {
+  return { remove_group_member: ref, user };
+}
+
+export function accessTree(opts?: { depth?: number; db?: string }): AccessTreeOp {
+  const op: AccessTreeOp = { access_tree: true };
+  if (opts?.depth !== undefined) op.depth = opts.depth;
+  if (opts?.db !== undefined) op.db = opts.db;
+  return op;
+}
+
+// ── RBAC ops ────────────────────────────────────────────────────────
+
+export function permission(
+  effect: Effect,
+  actions: Action[],
+  resource: Resource,
+  opts?: { where?: Filter },
+): Permission {
+  const p: Permission = { effect, actions, resource };
+  if (opts?.where !== undefined) p.where = opts.where;
+  return p;
+}
+
+/**
+ * Create a user. `roles` is `#[serde(default)]` WITHOUT skip → always
+ * present on the wire. Emits `roles: []` when none provided.
+ * `password` is a SecretString on the Rust side → plain string on wire.
+ */
+export function createUser(
+  name: string,
+  password: string,
+  opts?: { roles?: string[]; profile?: Json; database?: string },
+): CreateUserOp {
+  const op: CreateUserOp = {
+    create_user: name,
+    password,
+    roles: opts?.roles ?? [],
+  };
+  if (opts?.profile !== undefined) op.profile = opts.profile;
+  if (opts?.database !== undefined) op.database = opts.database;
+  return op;
+}
+
+/** Drop a user (HMAC-gated). canonical = `canonicalDropUser(username)`. */
+export function dropUser(
+  signer: HmacSigner,
+  username: string,
+): DropUserOp {
+  const canonical = canonicalDropUser(username);
+  return {
+    drop_user: username,
+    hmac: signer.hmacTagHex(canonical),
+  };
+}
+
+export function createRole(
+  name: string,
+  permissions: Permission[],
+): CreateRoleOp {
+  return { create_role: name, permissions };
+}
+
+/** Drop a role (HMAC-gated). canonical = `canonicalDropRole(role)`. */
+export function dropRole(
+  signer: HmacSigner,
+  role: string,
+): DropRoleOp {
+  const canonical = canonicalDropRole(role);
+  return {
+    drop_role: role,
+    hmac: signer.hmacTagHex(canonical),
+  };
+}
+
+export function grantRole(role: string, user: string): GrantRoleOp {
+  return { grant_role: role, user };
+}
+
+export function revokeRole(role: string, user: string): RevokeRoleOp {
+  return { revoke_role: role, user };
+}
