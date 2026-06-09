@@ -283,3 +283,107 @@ describe('special filter values', () => {
     });
   });
 });
+
+describe('fn — system function call ($fn)', () => {
+  it('filter.fn("NOW") produces Simple form (bare string)', () => {
+    expect(filter.fn('NOW')).toEqual({ $fn: 'NOW' });
+  });
+
+  it('filter.fn("COALESCE", [null, "x"]) produces Complex form', () => {
+    expect(filter.fn('COALESCE', [null, 'x'])).toEqual({
+      $fn: { name: 'COALESCE', args: [null, 'x'] },
+    });
+  });
+
+  it('filter.fn("UUID", []) collapses to Simple form (empty args)', () => {
+    expect(filter.fn('UUID', [])).toEqual({ $fn: 'UUID' });
+  });
+
+  it('filter.fn inside eq — usage in a filter', () => {
+    expect(filter.eq('created', filter.fn('NOW'))).toEqual({
+      op: 'eq',
+      field: ['created'],
+      value: { $fn: 'NOW' },
+    });
+  });
+});
+
+describe('expr — expression ($expr)', () => {
+  it('filter.expr("add", [10, 20])', () => {
+    expect(filter.expr('add', [10, 20])).toEqual({
+      $expr: { op: 'add', args: [10, 20] },
+    });
+  });
+
+  it('filter.expr("concat", [...]) with nested $ref values', () => {
+    expect(
+      filter.expr('concat', [filter.ref('first'), ' ', filter.ref('last')]),
+    ).toEqual({
+      $expr: {
+        op: 'concat',
+        args: [{ $ref: ['first'] }, ' ', { $ref: ['last'] }],
+      },
+    });
+  });
+
+  it('filter.expr inside eq', () => {
+    expect(filter.eq('total', filter.expr('add', [filter.ref('price'), 10]))).toEqual({
+      op: 'eq',
+      field: ['total'],
+      value: { $expr: { op: 'add', args: [{ $ref: ['price'] }, 10] } },
+    });
+  });
+});
+
+describe('cond — conditional ($cond)', () => {
+  it('filter.cond(eq, then, else) basic', () => {
+    expect(filter.cond(filter.eq('active', true), 'yes', 'no')).toEqual({
+      $cond: {
+        if: { op: 'eq', field: ['active'], value: true },
+        then: 'yes',
+        else: 'no',
+      },
+    });
+  });
+
+  it('nested cond — else branch is another cond', () => {
+    expect(
+      filter.cond(
+        filter.gte('score', 100),
+        'vip',
+        filter.cond(filter.gte('score', 50), 'regular', 'newbie'),
+      ),
+    ).toEqual({
+      $cond: {
+        if: { op: 'gte', field: ['score'], value: 100 },
+        then: 'vip',
+        else: {
+          $cond: {
+            if: { op: 'gte', field: ['score'], value: 50 },
+            then: 'regular',
+            else: 'newbie',
+          },
+        },
+      },
+    });
+  });
+
+  it('cond inside eq', () => {
+    expect(
+      filter.eq(
+        'label',
+        filter.cond(filter.eq('active', true), 'on', 'off'),
+      ),
+    ).toEqual({
+      op: 'eq',
+      field: ['label'],
+      value: {
+        $cond: {
+          if: { op: 'eq', field: ['active'], value: true },
+          then: 'on',
+          else: 'off',
+        },
+      },
+    });
+  });
+});

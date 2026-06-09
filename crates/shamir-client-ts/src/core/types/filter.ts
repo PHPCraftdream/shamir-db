@@ -23,6 +23,26 @@ export type FieldPath = string[];
 /** System function call (`$fn`) — `FnCall` in `fn_call.rs` (untagged). */
 export type FnCall = string | { name: string; args?: FilterValue[] };
 
+/** Expression operator for `$expr`. Mirrors `FilterExprOp` (serde `rename_all = "lowercase"`). */
+export type ExprOp =
+  | 'add' | 'sub' | 'mul' | 'div' | 'mod' | 'neg'
+  | 'concat' | 'lower' | 'upper' | 'trim' | 'length'
+  | 'and' | 'or' | 'not'
+  | 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte';
+
+/** Expression value (`$expr`) — mirrors `FilterExpr` in `filter_expr.rs`. */
+export interface FilterExprValue {
+  op: ExprOp;
+  args: FilterValue[];
+}
+
+/** Conditional value (`$cond`) — mirrors `Cond` in `cond.rs`. */
+export interface CondValue {
+  if: Filter;
+  then: FilterValue;
+  else: FilterValue;
+}
+
 /**
  * Scalar / composite value accepted in filter positions.
  * Mirrors `FilterValue` in `filter_value.rs` (`#[serde(untagged)]`):
@@ -39,8 +59,8 @@ export type FilterValue =
   | { $ref: FieldPath }
   | { $query: string; path?: string }
   | { $fn: FnCall }
-  | { $expr: unknown }
-  | { $cond: unknown };
+  | { $expr: FilterExprValue }
+  | { $cond: CondValue };
 
 // ── Filter ───────────────────────────────────────────────────────────
 

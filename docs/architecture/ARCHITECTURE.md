@@ -474,17 +474,16 @@ SDBQL поддерживает специальные ссылки в значе
 |--------|----------|---------|
 | `$query` | Ссылка на результат другого запроса | `filter.queryRef('@alias', '[0].id')` |
 | `$ref` | Ссылка на другое поле записи | `filter.ref(['address', 'city'])` |
-| `$fn` | Системная функция | wire form — no builder surface yet |
-| `$expr` | Выражение (арифметика, строки) | wire form — no builder surface yet |
-| `$cond` | Условный оператор | wire form — no builder surface yet |
+| `$fn` | Системная функция | `filter.fn('NOW')` / `filter.fn('COALESCE', [null, 'x'])` |
+| `$expr` | Выражение (арифметика, строки) | `filter.expr('add', [10, 20])` |
+| `$cond` | Условный оператор | `filter.cond(filter.eq('active', true), 'yes', 'no')` |
 
-Wire shapes for `$fn`, `$expr`, `$cond` (wire form; clients build this via the query builder where available):
-
-```json
-{ "$fn": "NOW" }
-{ "$fn": { "name": "COALESCE", "args": [null, "default"] } }
-{ "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
-{ "$cond": { "if": { "op": "gte", "field": "score", "value": 100 }, "then": "vip", "else": "regular" } }
+```ts
+filter.fn('NOW')                        // { "$fn": "NOW" }
+filter.fn('COALESCE', [null, 'default']) // { "$fn": { "name": "COALESCE", "args": [null, "default"] } }
+filter.expr('mul', [filter.ref('price'), 1.1])  // { "$expr": { "op": "mul", "args": [{ "$ref": ["price"] }, 1.1] } }
+filter.cond(filter.gte('score', 100), 'vip', 'regular')
+// { "$cond": { "if": { "op": "gte", "field": ["score"], "value": 100 }, "then": "vip", "else": "regular" } }
 ```
 
 ### Системные функции ($fn)
@@ -497,7 +496,7 @@ Wire shapes for `$fn`, `$expr`, `$cond` (wire form; clients build this via the q
 - Хеширование: `MD5`, `SHA256`
 - Математика: `ABS`, `ROUND`, `FLOOR`, `CEIL`
 
-### Выражения ($expr) (wire form; clients build this via the query builder)
+### Выражения ($expr)
 
 Арифметические и строковые операции.
 
@@ -507,26 +506,20 @@ Wire shapes for `$fn`, `$expr`, `$cond` (wire form; clients build this via the q
 - Логика: `and`, `or`, `not`
 - Сравнение: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`
 
-**Синтаксис (wire form):**
-```json
-{ "$expr": { "op": "add", "args": [10, 20] } }
-{ "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
-{ "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
+**Builder:**
+```ts
+filter.expr('add', [10, 20])
+filter.expr('mul', [filter.ref('price'), 1.1])
+filter.expr('concat', [filter.ref('first'), ' ', filter.ref('last')])
 ```
 
-### Условия ($cond) (wire form; clients build this via the query builder)
+### Условия ($cond)
 
 Условный оператор (тернарный).
 
-**Синтаксис (wire form):**
-```json
-{
-  "$cond": {
-    "if": { "op": "eq", "field": "active", "value": true },
-    "then": "yes",
-    "else": "no"
-  }
-}
+**Builder:**
+```ts
+filter.cond(filter.eq('active', true), 'yes', 'no')
 ```
 
 ## arch-013-query-planner

@@ -11,6 +11,9 @@ export type {
   FieldPath,
   FilterValue,
   FnCall,
+  ExprOp,
+  FilterExprValue,
+  CondValue,
   Filter,
   ComputedFilter,
 } from './filter.js';

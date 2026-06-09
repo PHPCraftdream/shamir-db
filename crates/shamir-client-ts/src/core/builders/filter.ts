@@ -15,6 +15,7 @@ import type {
   FilterValue,
   Filter,
   ComputedFilter,
+  ExprOp,
 } from '../types/filter.js';
 
 /** Normalise a field spec (bare string or path array) to the wire form. */
@@ -221,6 +222,40 @@ export function ref(field: string | string[]): FilterValue {
   return { $ref: fp(field) };
 }
 
+// ── Function / Expression / Conditional value constructors ────────────
+
+/**
+ * System function call (`$fn`).
+ *
+ * When `args` is omitted or empty the wire form is the bare-string Simple
+ * variant (`{ "$fn": "NOW" }`), matching `FnCall::Simple` in Rust. Otherwise
+ * the Complex variant is emitted (`{ "$fn": { "name": ..., "args": [...] } }`).
+ */
+export function fn(name: string, args?: FilterValue[]): FilterValue {
+  if (!args || args.length === 0) {
+    return { $fn: name };
+  }
+  return { $fn: { name, args } };
+}
+
+/**
+ * Expression (`$expr`) — arithmetic, string, logic, comparison.
+ *
+ * Mirrors `FilterExpr { op, args }` in `filter_expr.rs`.
+ */
+export function expr(op: ExprOp, args: FilterValue[]): FilterValue {
+  return { $expr: { op, args } };
+}
+
+/**
+ * Conditional (`$cond`) — ternary operator.
+ *
+ * Mirrors `Cond { if, then, else }` in `cond.rs`.
+ */
+export function cond(ifFilter: Filter, then: FilterValue, orElse: FilterValue): FilterValue {
+  return { $cond: { if: ifFilter, then, else: orElse } };
+}
+
 // ── Logical combinators ──────────────────────────────────────────────
 
 /**
@@ -293,4 +328,7 @@ export const filter = {
   not,
   queryRef,
   ref,
+  fn,
+  expr,
+  cond,
 };
