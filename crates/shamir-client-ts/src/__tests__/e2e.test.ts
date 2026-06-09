@@ -713,68 +713,49 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(plan[0].length).toBe(3);
     });
 
-    it('batch: parent -> child via $query reference', async () => {
-      const resp = br(await client!.execute(multiDb, {
-        id: 'parent-child',
-        queries: {
-          user: {
-            from: 'users',
-            where: { op: 'eq', field: ['name'], value: 'Alice' },
-          },
-          orders: {
-            from: 'orders',
-            where: {
-              op: 'eq',
-              field: ['user_id'],
-              value: { $query: '@user', path: '[0].id' },
-            },
-          },
-        },
-      }));
+    it('batch: parent -> child via $query reference (typed queryRef)', async () => {
+      const db = client!.db(multiDb);
+      const resp = await db
+        .batch('parent-child-ref')
+        .add('user', db.query('users').where(filter.eq('id', 'u1')))
+        .add('orders', db.query('orders').where(filter.eq('user_id', filter.queryRef('@user', '[0].id'))))
+        .run();
       const orders = resp.results.orders.records;
       expect(orders.length).toBe(3);
       for (const o of orders) {
         expect(o.user_id).toBe('u1');
       }
+      // 2-stage execution_plan: user in stage 0, orders in stage 1
+      expect(resp.execution_plan.length).toBe(2);
+      expect(resp.execution_plan[0]).toContain('user');
+      expect(resp.execution_plan[1]).toContain('orders');
     });
 
     it('batch: execution_plan reflects dep (two stages)', async () => {
-      const resp = br(await client!.execute(multiDb, {
-        id: 'plan-shape',
-        queries: {
-          user: { from: 'users', where: { op: 'eq', field: ['id'], value: 'u1' } },
-          orders: {
-            from: 'orders',
-            where: {
-              op: 'eq',
-              field: ['user_id'],
-              value: { $query: '@user', path: '[0].id' },
-            },
-          },
-        },
-      }));
+      const db = client!.db(multiDb);
+      const resp = await db
+        .batch('plan-shape-ref')
+        .add('user', db.query('users').where(filter.eq('id', 'u1')))
+        .add('orders', db.query('orders').where(filter.eq('user_id', filter.queryRef('@user', '[0].id'))))
+        .run();
       const plan = resp.execution_plan;
       expect(plan.length).toBe(2);
       expect(plan[0][0]).toBe('user');
       expect(plan[1][0]).toBe('orders');
     });
 
-    it('batch: column ref via @alias[].field — IN expansion', async () => {
-      const resp = br(await client!.execute(multiDb, {
-        id: 'array-ref',
-        queries: {
-          all_users: { from: 'users' },
-          their_orders: {
-            from: 'orders',
-            where: {
-              op: 'in',
-              field: ['user_id'],
-              values: [{ $query: '@all_users', path: '[].id' }],
-            },
-          },
-        },
-      }));
+    it('batch: column ref via queryRef IN-expansion (typed)', async () => {
+      const db = client!.db(multiDb);
+      const resp = await db
+        .batch('array-ref-typed')
+        .add('all_users', db.query('users'))
+        .add('their_orders', db.query('orders').where(filter.in_('user_id', [filter.queryRef('@all_users', '[].id')])))
+        .run();
       expect(resp.results.their_orders.records.length).toBe(4);
+      // 2-stage: all_users in stage 0, their_orders in stage 1
+      expect(resp.execution_plan.length).toBe(2);
+      expect(resp.execution_plan[0]).toContain('all_users');
+      expect(resp.execution_plan[1]).toContain('their_orders');
     });
 
     // ── 8. Admin DDL + HMAC (port 08/12) ────────────────────────────────

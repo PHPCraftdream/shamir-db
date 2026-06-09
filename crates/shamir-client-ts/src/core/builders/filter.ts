@@ -199,6 +199,28 @@ export function computed(
   return f;
 }
 
+// ── Value references ────────────────────────────────────────────────
+
+/**
+ * Reference to another query's result in the same batch.
+ * `alias` is the `@alias` string, e.g. `'@users'`.
+ * `path` is optional — when provided it extracts a scalar (`'[0].id'`)
+ * or a column (`'[].id'`) from the upstream result.
+ */
+export function queryRef(alias: string, path?: string): FilterValue {
+  const v: FilterValue = { $query: alias };
+  if (path !== undefined) (v as { $query: string; path?: string }).path = path;
+  return v;
+}
+
+/**
+ * Reference to another field in the same document.
+ * A bare string is normalised to a 1-element path array.
+ */
+export function ref(field: string | string[]): FilterValue {
+  return { $ref: fp(field) };
+}
+
 // ── Logical combinators ──────────────────────────────────────────────
 
 /**
@@ -269,4 +291,6 @@ export const filter = {
   and,
   or,
   not,
+  queryRef,
+  ref,
 };
