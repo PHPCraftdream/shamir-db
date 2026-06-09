@@ -63,6 +63,7 @@ tempfile    = "3.10.1"
 serial_test = "3.3.1"
 criterion   = { version = "0.5", features = ["async_tokio", "html_reports"] }
 wat         = "1.226"
+shamir-collections   = { path = "../shamir-collections" }
 shamir-query-builder = { path = "../shamir-query-builder" }
 shamir-query-types   = { path = "../shamir-query-types" }
 # CAS sequenced-write e2e: canonical record hash shared by the validator and
