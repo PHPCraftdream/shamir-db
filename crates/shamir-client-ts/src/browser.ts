@@ -19,6 +19,7 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
 
 export { ShamirClient };
 export type { TxOpened, ScramUserCreated } from './core/client.js';
+export type { Db } from './core/db.js';
 
 // All builders (filter/select/write/ddl/admin/query/batch/call) as FLAT named
 // exports — `import { eq, insert, createTable, call, Query, Batch } from '@shamir/client/browser'`.

@@ -1013,6 +1013,76 @@ describe.skipIf(!SERVER_AVAILABLE)(
         await user2.close();
       }
     });
+
+    // ── 12. Bound Db handle (TS-T14) ────────────────────────────────────
+
+    let handleDb: string;
+
+    it('handle: setup via db.run(ddl.createTable)', async () => {
+      const db = uniqueDbName('handle');
+      // Create database via Layer-1
+      await client!.execute('default', {
+        id: `setup-${db}-db`,
+        queries: { mk: ddl.createDb(db) },
+      });
+      // Switch to handle
+      const app = client!.db(db);
+      await app.run(ddl.createRepo('main'));
+      await app.run(ddl.createTable('items', { repo: 'main' }));
+      handleDb = db;
+    });
+
+    it('handle: db.run(write.insert) + db.query().rows()', async () => {
+      const app = client!.db(handleDb);
+      await app.run(write.insert('items', [{ id: 'H1', qty: 10 }]));
+
+      const rows = await app.query('items').where(filter.eq('id', 'H1')).rows();
+      expect(rows.length).toBe(1);
+      expect(rows[0].id).toBe('H1');
+      expect(rows[0].qty).toBe(10);
+    });
+
+    it('handle: db.query().ex() returns QueryResult', async () => {
+      const app = client!.db(handleDb);
+      const qr = await app.query('items').where(filter.eq('id', 'H1')).ex();
+      expect(qr.records.length).toBe(1);
+      expect(qr.records[0].qty).toBe(10);
+    });
+
+    it('handle: db.run(write.update) + verify', async () => {
+      const app = client!.db(handleDb);
+      await app.run(write.update('items').where(filter.eq('id', 'H1')).set({ qty: 99 }));
+      const rows = await app.query('items').where(filter.eq('id', 'H1')).rows();
+      expect(rows[0].qty).toBe(99);
+    });
+
+    it('handle: db.batch().add(...).transactional().run()', async () => {
+      const app = client!.db(handleDb);
+      const resp = await app
+        .batch('tx-handle')
+        .add('ins', write.insert('items', [{ id: 'H2', qty: 5 }]))
+        .transactional()
+        .run();
+      expect(resp.transaction).toBeDefined();
+      expect(resp.transaction!.status).toBe('committed');
+    });
+
+    it('handle: db.batch().add(query).run() with bound query', async () => {
+      const app = client!.db(handleDb);
+      const resp = await app
+        .batch()
+        .add('all', app.query('items'))
+        .run();
+      expect(resp.results.all.records.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('handle: db.dropTable(main, items) drops via HMAC', async () => {
+      const app = client!.db(handleDb);
+      const qr = await app.dropTable('main', 'items');
+      const row = qr.records[0] as Record<string, unknown>;
+      expect(row.dropped_table).toBe('items');
+      expect(row.existed).toBe(true);
+    });
   },
 );
 

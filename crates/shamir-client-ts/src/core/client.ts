@@ -13,6 +13,7 @@ import type { BatchResponse, TransactionInfo } from './types/batch.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
 import { signCanonical } from './hmac.js';
+import { Db } from './db.js';
 
 /** Result of {@link ShamirClient.txBegin} (`DbResponse::TxOpened`). */
 export interface TxOpened {
@@ -292,6 +293,15 @@ export class ShamirClient {
     throw new Error(
       `unexpected DbResponse kind for create_scram_user: ${r.kind}`,
     );
+  }
+
+  /**
+   * Return a bound {@link Db} handle for `name`. Subsequent calls via
+   * the handle (`db.run(...)`, `db.query(...)`, `db.batch(...)`, etc.)
+   * automatically thread the client and database name — no re-threading.
+   */
+  db(name: string): Db {
+    return new Db(this, name);
   }
 
   /** Close the WS (normal closure). Idempotent. */

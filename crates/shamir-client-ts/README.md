@@ -66,6 +66,39 @@ await client.close();
 
 ---
 
+## Bound handle (no connection threading)
+
+After `const db = client.db('my_app')`, no call re-threads the connection:
+
+```ts
+const db = client.db('my_app');
+
+// Read: one-shot rows or full QueryResult
+const rows = await db.query('items').where(filter.eq('id', 'A1')).rows();   // → records[]
+const qr   = await db.query('items').where(filter.eq('id', 'A1')).ex();     // → QueryResult
+
+// Write: any op/builder → QueryResult
+await db.run(write.insert('items', [{ id: 'B2', qty: 3 }]));
+await db.run(write.update('items').where(filter.eq('id', 'B2')).set({ qty: 9 }));
+
+// HMAC-gated DDL — signer injected internally
+await db.dropTable('main', 'old_table');
+await db.dropIndex('main', 'items', 'by_email', { unique: true });
+await db.dropRepo('archive', { cascade: true });
+await db.dropDb({ cascade: true });
+
+// Batch with bound queries
+const resp = await db.batch()
+  .add('users',  db.query('users'))
+  .add('orders', db.query('orders').where(filter.eq('user_id', { $query: '@users', path: '[0].id' })))
+  .transactional()
+  .run();                                                                   // → BatchResponse
+```
+
+`client.db(name)` returns a `Db` instance that holds the connection and database name. All Layer-1 APIs (`filter.*`, `select.*`, `write.*`, `ddl.*`, `Query`, `Batch`) continue to work unchanged — the handle is purely additive.
+
+---
+
 ## Browser
 
 ```ts
