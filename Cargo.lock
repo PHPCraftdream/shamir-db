@@ -3767,6 +3767,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "shamir-collections",
  "shamir-engine",
  "shamir-funclib",
  "shamir-query-builder",
