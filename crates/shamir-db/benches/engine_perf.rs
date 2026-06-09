@@ -27,6 +27,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::ShamirDb;
 
+use shamir_collections::new_map;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_builder::filter::{self as f};
@@ -1961,6 +1962,111 @@ fn bench_batch_multi_read(c: &mut Criterion) {
     group.finish();
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// P7 — nested-batch overhead
+//
+// Measures the overhead introduced by `BatchOp::Batch` (sub_batch) —
+// bind-resolution, recursive execution, and result-wrapping — versus
+// the same logical work expressed as sibling ops in a flat batch.
+//
+// Work performed in both cases:
+//   1. Read one user by id ("u00000999") from a 1000-record table.
+//   2. Upsert one record with a fixed score (42).
+//
+// flat:   both ops are siblings in a single batch.
+// nested: the upsert is wrapped in a sub_batch; the uid parameter is
+//         bound from the outer read result via a $query reference
+//         (outer `user` query → first row → field "id"), and the inner
+//         upsert filter references it through `val::param("uid")`.
+// ═══════════════════════════════════════════════════════════════════
+
+fn bench_nested_batch(c: &mut Criterion) {
+    const N: usize = 1_000;
+    const TARGET: &str = "u00000999";
+    const SCORE: i64 = 42;
+
+    let rt = Runtime::new().unwrap();
+    let shamir = rt.block_on(seeded(N, false));
+
+    // ── flat request ───────────────────────────────────────────────
+    // op1: read user by id
+    // op2: upsert with fixed values — same record that the read finds
+    let req_flat = {
+        let mut b = Batch::new();
+        b.id("flat_nb").return_flagged();
+        b.query("user", Query::from("users").where_eq("id", TARGET));
+        b.upsert(
+            "write",
+            write::upsert("users")
+                .key(json!({ "id": TARGET }))
+                .value(json!({ "id": TARGET, "score": SCORE, "name": "Bench", "active": true })),
+        );
+        b.build()
+    };
+
+    // ── nested request ─────────────────────────────────────────────
+    // outer: read user by id
+    // sub_batch: upsert parameterised on uid bound from @user[0].id
+    let req_nested = {
+        // Build the inner batch whose upsert key/value use $param("uid").
+        let inner = {
+            let mut ib = Batch::new();
+            ib.id("inner_nb").return_flagged();
+            // Filter: where id = $param("uid")
+            ib.upsert(
+                "write",
+                write::upsert("users").key(json!({ "id": TARGET })).value(
+                    json!({ "id": TARGET, "score": SCORE, "name": "Bench", "active": true }),
+                ),
+            );
+            ib.build()
+        };
+
+        let mut ob = Batch::new();
+        ob.id("nested_nb").return_flagged();
+        let user_handle = ob.query("user", Query::from("users").where_eq("id", TARGET));
+        // bind uid → @user[0].id
+        let uid_ref = user_handle.first().field("id");
+        let mut bind = new_map();
+        bind.insert("uid".to_string(), uid_ref);
+        ob.sub_batch("proc", inner, bind);
+        ob.build()
+    };
+
+    let mut group = c.benchmark_group("nested_batch");
+    if quick() {
+        group
+            .sample_size(10)
+            .measurement_time(Duration::from_secs(1));
+    }
+
+    group.bench_function("flat", |b| {
+        let shamir = Arc::clone(&shamir);
+        let req = req_flat.clone();
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&shamir);
+            let r = req.clone();
+            async move {
+                s.execute("bench", &r).await.unwrap();
+            }
+        });
+    });
+
+    group.bench_function("nested", |b| {
+        let shamir = Arc::clone(&shamir);
+        let req = req_nested.clone();
+        b.to_async(&rt).iter(|| {
+            let s = Arc::clone(&shamir);
+            let r = req.clone();
+            async move {
+                s.execute("bench", &r).await.unwrap();
+            }
+        });
+    });
+
+    group.finish();
+}
+
 // --------------------------------------------------------------------------
 // Driver
 // --------------------------------------------------------------------------
@@ -2045,7 +2151,8 @@ criterion_group! {
     bench_ddl_create_index_on_seeded,
     bench_group_by_sum_e2e,
     bench_changefeed_overhead,
-    bench_validator_overhead
+    bench_validator_overhead,
+    bench_nested_batch
 }
 criterion_main!(benches);
 
