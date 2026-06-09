@@ -24,13 +24,19 @@ interface Buildable {
 
 /** Execute a single op through an `ExecCtx`, returning the unwrapped `QueryResult`. */
 async function runOne(ctx: ExecCtx, op: object): Promise<QueryResult> {
+  // A builder is detected by a callable `.build()` — not merely the presence
+  // of a `build` key (a raw wire op could legitimately carry one).
   const resolved: object =
-    typeof op === 'object' && op !== null && 'build' in op
+    typeof (op as Partial<Buildable>).build === 'function'
       ? (op as Buildable).build()
       : op;
   const batch = { id: 1, queries: { _: resolved } };
   const resp: BatchResponse = await ctx.exec(batch);
-  return resp.results['_']!;
+  const result = resp.results['_'];
+  if (result === undefined) {
+    throw new Error("server returned no result for the operation (alias '_')");
+  }
+  return result;
 }
 
 export class Db {

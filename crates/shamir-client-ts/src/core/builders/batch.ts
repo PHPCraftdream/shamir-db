@@ -78,7 +78,7 @@ export class Batch {
     opts?: { returnResult?: boolean; after?: string[] },
   ): this {
     const resolved: BatchOpInput =
-      typeof op === 'object' && op !== null && 'build' in op
+      typeof (op as Partial<Buildable>).build === 'function'
         ? (op as Buildable).build()
         : (op as BatchOpInput);
 

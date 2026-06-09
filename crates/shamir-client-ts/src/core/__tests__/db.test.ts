@@ -526,3 +526,37 @@ describe('Db.tx() (unit)', () => {
     expect(dbBatch).toEqual(txBatch);
   });
 });
+
+// ─── runOne edge cases (TS-T17 review fixes) ─────────────────────────────────
+
+describe('Db.run edge cases', () => {
+  /** Fake client whose execute returns a BatchResponse with NO `_` result. */
+  function emptyResultClient() {
+    return {
+      execute: async (): Promise<BatchResponse> => ({
+        id: 1 as Json,
+        results: {},
+        execution_plan: [],
+        execution_time_us: 0,
+      }),
+    } as unknown as import('../client.js').ShamirClient;
+  }
+
+  it('throws when the server returns no result for the op (no silent undefined)', async () => {
+    const db = new Db(emptyResultClient(), 'test_db');
+    await expect(db.run(write.insert('x', [{ a: 1 }]))).rejects.toThrow(
+      /no result for the operation/,
+    );
+  });
+
+  it('treats a raw op carrying a non-function `build` key as a raw op (not a builder)', async () => {
+    const captured: Captured[] = [];
+    const db = new Db(asClient(fakeClient(captured)), 'test_db');
+    // A plain wire op that happens to have a `build` string field must NOT be
+    // mistaken for a builder (no `.build()` call attempted).
+    const rawOp = { insert_into: 'x', values: [{ a: 1 }], build: 'not-a-fn' };
+    await db.run(rawOp as unknown as object);
+    const sent = (captured[0].batch as { queries: { _: object } }).queries._;
+    expect(sent).toEqual(rawOp);
+  });
+});
