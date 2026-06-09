@@ -17,10 +17,10 @@
 use std::net::SocketAddr;
 
 use anyhow::{anyhow, Context};
-use serde_json::{json, Value};
+use serde_json::Value;
 use zeroize::Zeroizing;
 
-use shamir_client::{BatchRequest, Client, ConnectOptions};
+use shamir_client::{Client, ConnectOptions};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 
@@ -135,21 +135,16 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Value
     .await
     .map_err(|e| anyhow!("connect/authenticate: {e}"))?;
 
-    // Build the single-op batch via JSON so we don't have to hand-construct
-    // the internal `TMap`/`QueryEntry` types.
-    let mut inner = serde_json::Map::new();
-    inner.insert("access_tree".to_string(), json!(true));
+    let mut ddl = shamir_query_builder::ddl::access_tree();
     if let Some(d) = args.depth {
-        inner.insert("depth".to_string(), json!(d));
+        ddl = ddl.depth(d);
     }
     if let Some(db) = &args.db {
-        inner.insert("db".to_string(), json!(db));
+        ddl = ddl.db(db);
     }
-    let batch: BatchRequest = serde_json::from_value(json!({
-        "id": 1,
-        "queries": { "tree": Value::Object(inner) },
-    }))
-    .context("build access_tree batch")?;
+    let mut batch = shamir_query_builder::batch::Batch::new();
+    batch.id(1).access_tree("tree", ddl);
+    let batch = batch.build();
 
     let resp = client
         .execute("default", batch)
@@ -354,6 +349,8 @@ fn push_aligned(out: &mut String, rows: &[(String, String, String)]) {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
