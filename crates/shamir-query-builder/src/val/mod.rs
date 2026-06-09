@@ -108,6 +108,23 @@ pub fn func(name: impl Into<String>, args: impl IntoIterator<Item = FilterValue>
     }
 }
 
+// ── parameter reference ──────────────────────────────────────────────
+
+/// Create a [`FilterValue::Param`] referencing a named binding from the
+/// enclosing sub-batch's `bind` map.
+///
+/// Use inside a nested `BatchRequest` that is passed to
+/// [`crate::batch::Batch::sub_batch`]. The engine resolves the name at
+/// execution time from the outer batch's bind map.
+///
+/// ```ignore
+/// param("uid")  // → FilterValue::Param { name: "uid" }
+///               // serialises as {"$param":"uid"}
+/// ```
+pub fn param(name: impl Into<String>) -> FilterValue {
+    FilterValue::Param { name: name.into() }
+}
+
 // ── query reference ──────────────────────────────────────────────────
 
 /// Normalize an alias so it always starts with `@`.

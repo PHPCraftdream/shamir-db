@@ -8,6 +8,7 @@
 
 use serde_json::Value;
 use shamir_collections::{new_map, TMap};
+use shamir_query_types::batch::types::SubBatchOp;
 use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
@@ -212,6 +213,12 @@ impl IntoBatchOp for crate::write::Delete {
 impl IntoBatchOp for CallOp {
     fn into_batch_op(self) -> BatchOp {
         BatchOp::Call(self)
+    }
+}
+
+impl IntoBatchOp for SubBatchOp {
+    fn into_batch_op(self) -> BatchOp {
+        BatchOp::Batch(self)
     }
 }
 
@@ -744,6 +751,46 @@ impl Batch {
             repo: repo.into(),
         };
         self.add_entry(alias, BatchOp::Call(op), true)
+    }
+
+    // ── nested sub-batch ──────────────────────────────────────────────
+
+    /// Embed a nested [`BatchRequest`] with explicit parameter bindings.
+    ///
+    /// Registers a `BatchOp::Batch(SubBatchOp { batch, bind })` entry under
+    /// `alias` and returns a [`Handle`] so outer queries can reference the
+    /// sub-batch result via `$query` paths (e.g. `handle.first().field("id")`).
+    ///
+    /// `bind` maps parameter names to [`FilterValue`]s (typically `$query`
+    /// references into the outer batch, or plain literals).  Inner queries
+    /// reference these values via [`crate::val::param`].
+    ///
+    /// Use [`sub_batch_no_bind`][Self::sub_batch_no_bind] when no bindings
+    /// are needed.
+    pub fn sub_batch(
+        &mut self,
+        alias: impl Into<String>,
+        inner: impl Into<BatchRequest>,
+        bind: TMap<String, FilterValue>,
+    ) -> Handle {
+        let op = SubBatchOp {
+            batch: inner.into(),
+            bind,
+        };
+        self.add_entry(alias, BatchOp::Batch(op), true)
+    }
+
+    /// Embed a nested [`BatchRequest`] with no parameter bindings.
+    ///
+    /// Convenience wrapper over [`sub_batch`][Self::sub_batch] for the common
+    /// case where the inner batch is self-contained and requires no
+    /// outer-scope values.
+    pub fn sub_batch_no_bind(
+        &mut self,
+        alias: impl Into<String>,
+        inner: impl Into<BatchRequest>,
+    ) -> Handle {
+        self.sub_batch(alias, inner, new_map())
     }
 
     // ── escape hatches ────────────────────────────────────────────
