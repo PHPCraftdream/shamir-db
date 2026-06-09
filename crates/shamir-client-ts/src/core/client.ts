@@ -11,8 +11,10 @@ import type { Platform } from './platform.js';
 import type { ConnectOptions } from './types/index.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
+import { signCanonical } from './hmac.js';
 
 export class ShamirClient {
+  private readonly platform: Platform;
   private readonly framer: WsFramer;
   private readonly _sessionId: Uint8Array;
   private readonly _serverPubKey: Uint8Array;
@@ -20,11 +22,13 @@ export class ShamirClient {
   private nextRequestId = 1;
 
   private constructor(
+    platform: Platform,
     framer: WsFramer,
     sessionId: Uint8Array,
     serverPubKey: Uint8Array,
     expiresAtNs: bigint,
   ) {
+    this.platform = platform;
     this.framer = framer;
     this._sessionId = sessionId;
     this._serverPubKey = serverPubKey;
@@ -54,7 +58,13 @@ export class ShamirClient {
         opts.username,
         opts.password,
       );
-      return new ShamirClient(framer, sessionId, serverPubKey, expiresAtNs);
+      return new ShamirClient(
+        platform,
+        framer,
+        sessionId,
+        serverPubKey,
+        expiresAtNs,
+      );
     } catch (e) {
       await framer.close();
       throw e;
@@ -74,6 +84,16 @@ export class ShamirClient {
   /** Absolute session expiry (unix nanoseconds). */
   expiresAtNs(): bigint {
     return this._expiresAtNs;
+  }
+
+  /**
+   * Hex HMAC-SHA256 tag over `canonical`, keyed by this session's derived
+   * HMAC key (`SHA256("shamir-db hmac key v1\0" || session_id)`). The
+   * "did-you-mean-it" intent tag the server requires on destructive
+   * `drop_*` / migration ops. Pair with the `hmac.canonical*` builders.
+   */
+  hmacTagHex(canonical: Uint8Array): string {
+    return signCanonical(this.platform, this._sessionId, canonical);
   }
 
   /**
