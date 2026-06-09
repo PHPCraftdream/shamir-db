@@ -18,9 +18,10 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
 }
 
 export { ShamirClient };
+export type { TxOpened, ScramUserCreated } from './core/client.js';
 
-// All builders (filter/select/write/ddl/admin/query/batch) as FLAT named
-// exports — `import { eq, insert, createTable, Query, Batch } from '@shamir/client/browser'`.
+// All builders (filter/select/write/ddl/admin/query/batch/call) as FLAT named
+// exports — `import { eq, insert, createTable, call, Query, Batch } from '@shamir/client/browser'`.
 export * from './core/builders/index.js';
 // The wire type model (platform-agnostic core).
 export type * from './core/types/index.js';

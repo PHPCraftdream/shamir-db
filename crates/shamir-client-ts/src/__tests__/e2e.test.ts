@@ -927,6 +927,97 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(!resp.transaction || resp.transaction === undefined).toBe(true);
       expect(resp.results.ins.records.length).toBeGreaterThanOrEqual(1);
     });
+
+    // ── 10. Interactive (multi-call) transactions (TS-T9) ───────────────
+
+    let itxDb: string;
+
+    it('itx: setup table', async () => {
+      itxDb = await setupDb(client!, 'itx', ['acct']);
+    });
+
+    it('itx: begin → execute(write) → commit, row visible after commit', async () => {
+      const opened = await client!.txBegin(itxDb, 'main');
+      expect(typeof opened.tx_handle).toBe('number');
+      expect(opened.snapshot_version).toBeGreaterThanOrEqual(0);
+      expect(opened.isolation).toBe('snapshot');
+
+      let committed = false;
+      try {
+        // Write inside the open tx — accumulates in the parked transaction.
+        const insResp = await client!.txExecute(
+          itxDb,
+          opened.tx_handle,
+          Batch.create('itx-ins').add('i', insert('acct', [{ id: 'a', bal: 100 }])).build(),
+        );
+        // Per-call response carries no commit outcome yet (tx still open).
+        expect(insResp.transaction === undefined || insResp.transaction === null).toBe(true);
+
+        const info = await client!.txCommit(itxDb, opened.tx_handle);
+        committed = true;
+        expect(info.status).toBe('committed');
+        expect(info.commit_version).toBeGreaterThan(0);
+      } finally {
+        if (!committed) {
+          await client!.txRollback(itxDb, opened.tx_handle).catch(() => {});
+        }
+      }
+
+      // After commit the row is visible to a fresh non-tx read.
+      const after = br(await Batch.create('itx-after')
+        .add('r', Query.from('acct'))
+        .execute(client!, itxDb));
+      expect(after.results.r.records.map(x => x.id)).toContain('a');
+    });
+
+    it('itx: rollback discards the writes', async () => {
+      const opened = await client!.txBegin(itxDb, 'main');
+      let done = false;
+      try {
+        await client!.txExecute(
+          itxDb,
+          opened.tx_handle,
+          Batch.create('itx-roll-ins').add('i', insert('acct', [{ id: 'ghost', bal: 1 }])).build(),
+        );
+        await client!.txRollback(itxDb, opened.tx_handle);
+        done = true;
+      } finally {
+        if (!done) {
+          await client!.txRollback(itxDb, opened.tx_handle).catch(() => {});
+        }
+      }
+
+      const after = br(await Batch.create('itx-roll-check')
+        .add('r', Query.from('acct'))
+        .execute(client!, itxDb));
+      expect(after.results.r.records.map(x => x.id)).not.toContain('ghost');
+    });
+
+    // ── 11. CreateScramUser (TS-T10) ────────────────────────────────────
+
+    it('scram: create a login-capable user, then authenticate as them', async () => {
+      const uname = `e2e_user_${process.pid}_${dbCounter}`;
+      const upass = 'another correct horse battery staple';
+
+      const created = await client!.createScramUser(uname, upass, []);
+      expect(created.name).toBe(uname);
+      expect(created.user_id.length).toBe(16);
+
+      // The freshly-created user can complete a full SCRAM handshake.
+      const user2 = await connect({
+        host: HOST,
+        port: PORT,
+        username: uname,
+        password: upass,
+        tls: { rejectUnauthorized: false },
+        origin: ORIGIN,
+      });
+      try {
+        expect(user2.sessionId().length).toBe(32);
+      } finally {
+        await user2.close();
+      }
+    });
   },
 );
 
