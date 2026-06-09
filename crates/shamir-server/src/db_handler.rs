@@ -958,6 +958,7 @@ fn error_code(e: &BatchError) -> &str {
             }
         }
         BatchError::CrossRepoNotSupported { .. } => "tx_cross_repo_not_supported",
+        BatchError::NestingTooDeep { .. } => "nesting_too_deep",
     }
 }
 

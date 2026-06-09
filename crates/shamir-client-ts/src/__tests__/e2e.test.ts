@@ -1112,6 +1112,104 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const rows = await app.query('acct').rows();
       expect(rows.map((r) => r.id)).not.toContain('ghost');
     });
+
+    // ── 14. Nested batches (P6 live-server e2e) ─────────────────────────
+
+    let nestedDb: string;
+
+    it('nested: setup users + orders + inventory + log tables', async () => {
+      nestedDb = await setupDb(client!, 'nested', ['users', 'orders', 'inventory', 'log']);
+      // seed one user and two orders we'll reference
+      await seed(client!, nestedDb, 'users', [{ id: 'u-alice', name: 'Alice' }]);
+      await seed(client!, nestedDb, 'orders', [
+        { id: 'o1', user_id: 'u-alice', item: 'widget', qty: 1 },
+        { id: 'o2', user_id: 'u-alice', item: 'gear', qty: 2 },
+        { id: 'o3', user_id: 'u-bob', item: 'bolt', qty: 10 },
+      ]);
+    });
+
+    it('nested: happy path — bind + $param + outer reads sub result', async () => {
+      const db = client!.db(nestedDb);
+
+      // inner batch: read orders using $param for user_id (param resolution in WHERE is supported)
+      const innerBatch = Batch.create('inner-read')
+        .add('found', db.query('orders').where(filter.eq('user_id', filter.param('uid'))));
+
+      const resp = await db
+        .batch('nested-happy')
+        .add('user', db.query('users').where(filter.eq('id', 'u-alice')))
+        .subBatch('proc', innerBatch, {
+          bind: { uid: filter.queryRef('@user', '[0].id') },
+        })
+        .add('conf', db.query('orders').where(
+          filter.eq('user_id', filter.queryRef('@proc', '.found.records[0].user_id'))
+        ))
+        .run();
+
+      // proc sub-batch must have succeeded and found alice's orders
+      const procResult = resp.results.proc as unknown as Record<string, unknown>;
+      expect(procResult).toBeDefined();
+
+      // conf should find alice's orders too (same user_id resolved via @proc)
+      const confRecords = resp.results.conf.records;
+      expect(confRecords.length).toBeGreaterThanOrEqual(1);
+      expect(confRecords[0].user_id).toBe('u-alice');
+
+      // execution_plan: user in stage 0, proc in stage 1 (after user), conf in stage 2+ (after proc)
+      const plan = resp.execution_plan;
+      expect(Array.isArray(plan)).toBe(true);
+      const userStage = plan.findIndex((stage: string[]) => stage.includes('user'));
+      const procStage = plan.findIndex((stage: string[]) => stage.includes('proc'));
+      const confStage = plan.findIndex((stage: string[]) => stage.includes('conf'));
+      expect(userStage).toBeGreaterThanOrEqual(0);
+      expect(procStage).toBeGreaterThan(userStage);
+      expect(confStage).toBeGreaterThan(procStage);
+    });
+
+    it('nested: atomicity — failed inner op rolls back first inner write', async () => {
+      const db = client!.db(nestedDb);
+
+      // inner batch: first write to inventory succeeds, second write to
+      // a non-existent table triggers an error — the whole sub-batch must roll back
+      const innerAtomic = Batch.create('inner-atomic')
+        .add('good', write.insert('inventory', [{ id: 'inv-ghost', sku: 'X1', qty: 5 }]))
+        .add('bad', write.insert('no_such_table', [{ id: 'x' }]), { after: ['good'] })
+        .transactional();
+
+      // The outer batch itself is non-transactional; we just expect an error
+      // propagation from the sub-batch
+      await expect(
+        db.batch('nested-atomic')
+          .subBatch('proc', innerAtomic, {})
+          .run(),
+      ).rejects.toThrow();
+
+      // The good write must not have persisted (sub-batch rolled back)
+      const rows = await db.query('inventory').where(filter.eq('id', 'inv-ghost')).rows();
+      expect(rows.length).toBe(0);
+    });
+
+    it('nested: tx-in-tx rejected — outer transactional + transactional subBatch', async () => {
+      const db = client!.db(nestedDb);
+
+      const innerTx = Batch.create('inner-tx')
+        .add('ins', write.insert('log', [{ event: 'test' }]))
+        .transactional();
+
+      // The outer transactional batch aborts because the sub-batch is also transactional.
+      // The server returns a BatchResponse with transaction.status = "aborted" and
+      // a reason containing "nested_tx_not_supported". The client resolves (not rejects).
+      const resp = await db
+        .batch('nested-tx-in-tx')
+        .add('pre', write.insert('log', [{ event: 'outer' }]))
+        .subBatch('sub', innerTx, {})
+        .transactional()
+        .run();
+
+      expect(resp.transaction).toBeDefined();
+      expect(resp.transaction!.status).toBe('aborted');
+      expect(resp.transaction!.reason).toMatch(/nested_tx_not_supported/i);
+    });
   },
 );
 
