@@ -29,6 +29,7 @@ import type { ReadQuery } from './query.js';
 import type { InsertOp, UpdateOp, SetOp, DeleteOp } from './write.js';
 import type { DdlOp } from './ddl.js';
 import type { AdminOp } from './admin.js';
+import type { CallOp } from './call.js';
 
 // ── Batch operation input ───────────────────────────────────────────
 
@@ -40,7 +41,8 @@ export type BatchOpInput =
   | SetOp
   | DeleteOp
   | DdlOp
-  | AdminOp;
+  | AdminOp
+  | CallOp;
 
 // ── QueryEntry ──────────────────────────────────────────────────────
 

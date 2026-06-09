@@ -17,4 +17,5 @@ export * from './write.js';
 export * from './ddl.js';
 export * from './admin.js';
 export * from './query.js';
+export * from './call.js';
 export * from './batch.js';
