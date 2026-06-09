@@ -109,6 +109,10 @@ export type {
 } from './admin.js';
 
 export type {
+  CallOp,
+} from './call.js';
+
+export type {
   BatchOpInput,
   QueryEntry,
   IsolationLevel,
