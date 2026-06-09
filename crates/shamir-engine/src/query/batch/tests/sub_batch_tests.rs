@@ -8,6 +8,7 @@ use shamir_query_builder::write::{self, doc};
 use shamir_query_types::batch::types::SubBatchOp;
 use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
 use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_query_types::write::InsertOp;
 use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 
@@ -663,6 +664,337 @@ async fn unbound_param_in_bind_errors() {
         err.code(),
         Some("unbound_param"),
         "expected unbound_param code, got {:?}",
+        err
+    );
+}
+
+// ============================================================================
+// Test 6: param_in_insert_values
+//
+// P3b — canonical case: sub-batch inserts a row where a column value comes
+// from a $param bound to the result of an outer query.
+//
+// Outer:
+//   user → read user by name (returns id = 42)
+//   sub  → BatchOp::Batch with bind: { uid: $query @user[0].id }
+//            inner: insert into orders { user_id: {"$param":"uid"}, note: "order1" }
+//   read_back → read orders where user_id == 42
+//
+// After execution, `read_back` must return exactly one record with user_id=42.
+// ============================================================================
+
+#[tokio::test]
+async fn param_in_insert_values() {
+    let resolver = setup().await;
+
+    // Seed a user with id field set explicitly.
+    let mut seed = Batch::new();
+    seed.id(0);
+    seed.op_silent(
+        "seed_user",
+        write::insert("users").row(doc().set("name", "p3b_alice").set("user_id", 42i64)),
+    );
+    execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // Inner batch: insert one order using $param uid as column value.
+    let inner_insert_value = serde_json::json!({
+        "user_id": { "$param": "uid" },
+        "note": "order1"
+    });
+    let mut inner_queries = new_map();
+    inner_queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("orders"),
+                values: vec![inner_insert_value],
+            }),
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    let inner_req = BatchRequest {
+        id: serde_json::json!(60),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: inner_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    // Outer batch:
+    //   user → read user with name p3b_alice (has user_id=42)
+    //   sub  → inner batch with bind: { uid: $query @user[0].user_id }
+    //   read_back → read orders where user_id == 42
+    let outer_read_q =
+        shamir_query_builder::query::Query::from("users").where_eq("name", "p3b_alice");
+    let user_entry = QueryEntry {
+        op: BatchOp::Read(crate::query::read::ReadQuery::from(outer_read_q)),
+        return_result: true,
+        after: Vec::new(),
+    };
+
+    let mut bind = new_map();
+    bind.insert(
+        "uid".to_string(),
+        FilterValue::QueryRef {
+            alias: "@user".to_string(),
+            path: Some("[0].user_id".to_string()),
+        },
+    );
+    let sub_entry = QueryEntry {
+        op: BatchOp::Batch(SubBatchOp {
+            batch: inner_req,
+            bind,
+        }),
+        return_result: true,
+        after: vec!["user".to_string()],
+    };
+
+    let read_back_q = shamir_query_builder::query::Query::from("orders").where_eq("user_id", 42i64);
+    let read_back_entry = QueryEntry {
+        op: BatchOp::Read(crate::query::read::ReadQuery::from(read_back_q)),
+        return_result: true,
+        after: vec!["sub".to_string()],
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert("user".to_string(), user_entry);
+    outer_queries.insert("sub".to_string(), sub_entry);
+    outer_queries.insert("read_back".to_string(), read_back_entry);
+
+    let outer_req = BatchRequest {
+        id: serde_json::json!(6),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let records = &resp.results["read_back"].records;
+    assert_eq!(
+        records.len(),
+        1,
+        "read_back must find exactly 1 order with user_id=42; got {:?}",
+        records
+    );
+    assert_eq!(
+        records[0]["user_id"],
+        serde_json::json!(42),
+        "inserted order must have user_id == 42 (from $param uid)"
+    );
+    assert_eq!(
+        records[0]["note"],
+        serde_json::json!("order1"),
+        "note field must be preserved verbatim"
+    );
+}
+
+// ============================================================================
+// Test 7: param_in_insert_nested
+//
+// P3b — $param resolves at depth inside an object nested in an insert value.
+// ============================================================================
+
+#[tokio::test]
+async fn param_in_insert_nested() {
+    let resolver = setup().await;
+
+    // Inner batch: insert a row with a nested object containing $param.
+    let inner_value = serde_json::json!({
+        "meta": {
+            "created_by": { "$param": "actor_id" }
+        },
+        "label": "nested_test"
+    });
+    let mut inner_queries = new_map();
+    inner_queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("orders"),
+                values: vec![inner_value],
+            }),
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    let inner_req = BatchRequest {
+        id: serde_json::json!(70),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: inner_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    // Bind actor_id = 99.
+    let mut bind = new_map();
+    bind.insert(
+        "actor_id".to_string(),
+        // Literal 99 expressed as a FilterValue so the bind resolution
+        // path exercises the full pipeline from FilterValue → InnerValue.
+        FilterValue::Int(99),
+    );
+    let sub_entry = QueryEntry {
+        op: BatchOp::Batch(SubBatchOp {
+            batch: inner_req,
+            bind,
+        }),
+        return_result: true,
+        after: Vec::new(),
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert("sub".to_string(), sub_entry);
+
+    let outer_req = BatchRequest {
+        id: serde_json::json!(7),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    let resp = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    // The inserted record's nested field must carry the resolved value.
+    let sub_val = resp.results["sub"].value.as_ref().unwrap();
+    let inserted = &sub_val["ins"]["records"];
+    let rows = inserted.as_array().expect("ins.records must be array");
+    assert_eq!(rows.len(), 1, "must have inserted 1 row");
+    // The stored record is a flat record; nested objects may be serialised as
+    // nested JSON. We verify via a direct read.
+    drop(resp);
+
+    let mut read_queries = new_map();
+    read_queries.insert(
+        "r".to_string(),
+        QueryEntry {
+            op: BatchOp::Read(crate::query::read::ReadQuery::from(
+                shamir_query_builder::query::Query::from("orders").where_eq("label", "nested_test"),
+            )),
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    let read_req = BatchRequest {
+        id: serde_json::json!(71),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: read_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+    let read_resp = execute_batch(&read_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    let rows = &read_resp.results["r"].records;
+    assert_eq!(rows.len(), 1, "must find the inserted row by label");
+    assert_eq!(
+        rows[0]["meta"]["created_by"],
+        serde_json::json!(99),
+        "nested $param must have been substituted to 99"
+    );
+}
+
+// ============================================================================
+// Test 8: param_in_insert_missing_param_errors
+//
+// P3b — an insert value references a $param that was NOT bound →
+// unbound_param error (not a silent miss like in filters).
+// ============================================================================
+
+#[tokio::test]
+async fn param_in_insert_missing_param_errors() {
+    let resolver = setup().await;
+
+    // Inner insert references $param that is NOT in bind.
+    let inner_value = serde_json::json!({
+        "user_id": { "$param": "ghost_param" }
+    });
+    let mut inner_queries = new_map();
+    inner_queries.insert(
+        "ins".to_string(),
+        QueryEntry {
+            op: BatchOp::Insert(InsertOp {
+                insert_into: TableRef::new("orders"),
+                values: vec![inner_value],
+            }),
+            return_result: true,
+            after: Vec::new(),
+        },
+    );
+    let inner_req = BatchRequest {
+        id: serde_json::json!(80),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: inner_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    // Bind is EMPTY — ghost_param not supplied.
+    let sub_entry = QueryEntry {
+        op: BatchOp::Batch(SubBatchOp {
+            batch: inner_req,
+            bind: new_map(),
+        }),
+        return_result: true,
+        after: Vec::new(),
+    };
+
+    let mut outer_queries = new_map();
+    outer_queries.insert("sub".to_string(), sub_entry);
+
+    let outer_req = BatchRequest {
+        id: serde_json::json!(8),
+        name: None,
+        transactional: false,
+        isolation: None,
+        durability: None,
+        queries: outer_queries,
+        return_all: true,
+        return_only: None,
+        limits: BatchLimits::default(),
+    };
+
+    let err = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
+        .await
+        .expect_err("missing $param in insert value must error");
+
+    assert_eq!(
+        err.code(),
+        Some("unbound_param"),
+        "expected unbound_param, got {:?}",
         err
     );
 }

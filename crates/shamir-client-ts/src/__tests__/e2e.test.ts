@@ -1166,6 +1166,41 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(confStage).toBeGreaterThan(procStage);
     });
 
+    it('nested: P3b — $param in INSERT column value (canonical sub-batch write)', async () => {
+      const db = client!.db(nestedDb);
+
+      // Inner batch: INSERT a log entry whose ref_user column comes from $param uid.
+      // The row value uses the raw { $param: 'uid' } wire shape — P3b feature.
+      // We cast to unknown→Record to work around the strict Json type (the server
+      // accepts $param objects in insert values starting from this commit).
+      const innerInsert = Batch.create('inner-insert').add(
+        'ins',
+        write.insert('log', [
+          { event: 'order_created', ref_user: { $param: 'uid' } as unknown as string },
+        ]),
+      );
+
+      const resp = await db
+        .batch('nested-p3b')
+        .add('user', db.query('users').where(filter.eq('id', 'u-alice')))
+        .subBatch('proc', innerInsert, {
+          bind: { uid: filter.queryRef('@user', '[0].id') },
+        })
+        .run();
+
+      // The sub-batch must have executed without error.
+      expect(resp.results.proc).toBeDefined();
+
+      // Read back the log entry and confirm ref_user == 'u-alice'.
+      const rows = await db
+        .query('log')
+        .where(filter.eq('event', 'order_created'))
+        .rows();
+      const inserted = rows.find((r: Record<string, unknown>) => r.ref_user === 'u-alice');
+      expect(inserted).toBeDefined();
+      expect(inserted!.ref_user).toBe('u-alice');
+    });
+
     it('nested: atomicity — failed inner op rolls back first inner write', async () => {
       const db = client!.db(nestedDb);
 

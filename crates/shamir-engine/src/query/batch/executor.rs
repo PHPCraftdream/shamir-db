@@ -1008,9 +1008,36 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
+                // Substitute $param references inside each inserted value row.
+                // substitute_params has a fast path (clone) for rows with no $param nodes.
+                let subst_values: Result<Vec<_>, _> = op
+                    .values
+                    .iter()
+                    .map(|v| {
+                        substitute_params(v, self.params).map_err(|name| {
+                            BatchError::query_coded(
+                                alias,
+                                "unbound_param",
+                                format!("$param '{}' is not bound in this sub-batch", name),
+                            )
+                        })
+                    })
+                    .collect();
+                let subst_op;
+                let op_ref: &shamir_query_types::write::InsertOp = match subst_values {
+                    Ok(values) if values == op.values => op,
+                    Ok(values) => {
+                        subst_op = shamir_query_types::write::InsertOp {
+                            insert_into: op.insert_into.clone(),
+                            values,
+                        };
+                        &subst_op
+                    }
+                    Err(e) => return Err(e),
+                };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_insert_tx(op, tx).await,
-                    None => table.execute_insert(op).await,
+                    Some(tx) => table.execute_insert_tx(op_ref, tx).await,
+                    None => table.execute_insert(op_ref).await,
                 }
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
@@ -1028,9 +1055,30 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
+                // Substitute $param references inside the `set` document.
+                // substitute_params has a fast path (clone) when no $param nodes exist.
+                let subst_set = substitute_params(&op.set, self.params).map_err(|name| {
+                    BatchError::query_coded(
+                        alias,
+                        "unbound_param",
+                        format!("$param '{}' is not bound in this sub-batch", name),
+                    )
+                })?;
+                let subst_op;
+                let op_ref: &shamir_query_types::write::UpdateOp = if subst_set == op.set {
+                    op
+                } else {
+                    subst_op = shamir_query_types::write::UpdateOp {
+                        update: op.update.clone(),
+                        where_clause: op.where_clause.clone(),
+                        set: subst_set,
+                        select: op.select.clone(),
+                    };
+                    &subst_op
+                };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_update_tx(op, &ctx, tx).await,
-                    None => table.execute_update(op, &ctx).await,
+                    Some(tx) => table.execute_update_tx(op_ref, &ctx, tx).await,
+                    None => table.execute_update(op_ref, &ctx).await,
                 }
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
@@ -1068,9 +1116,37 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
+                // Substitute $param references inside the upsert `key` and `value`.
+                // substitute_params has a fast path (clone) when no $param nodes exist.
+                let subst_key = substitute_params(&op.key, self.params).map_err(|name| {
+                    BatchError::query_coded(
+                        alias,
+                        "unbound_param",
+                        format!("$param '{}' is not bound in this sub-batch", name),
+                    )
+                })?;
+                let subst_value = substitute_params(&op.value, self.params).map_err(|name| {
+                    BatchError::query_coded(
+                        alias,
+                        "unbound_param",
+                        format!("$param '{}' is not bound in this sub-batch", name),
+                    )
+                })?;
+                let subst_op;
+                let op_ref: &shamir_query_types::write::SetOp =
+                    if subst_key == op.key && subst_value == op.value {
+                        op
+                    } else {
+                        subst_op = shamir_query_types::write::SetOp {
+                            set: op.set.clone(),
+                            key: subst_key,
+                            value: subst_value,
+                        };
+                        &subst_op
+                    };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_set_tx(op, tx).await,
-                    None => table.execute_set(op).await,
+                    Some(tx) => table.execute_set_tx(op_ref, tx).await,
+                    None => table.execute_set(op_ref).await,
                 }
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),
@@ -1127,6 +1203,106 @@ fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
         }),
         pagination: None,
         value: None,
+    }
+}
+
+/// Convert a scalar `InnerValue` to `serde_json::Value`.
+///
+/// Only the variants that can arrive in a `$param` binding are handled —
+/// params are resolved from `FilterValue` via `resolve_filter_value`, which
+/// produces only Null/Bool/Int/F64/Str. Map/List/Set/Bin etc. never appear
+/// here; we return `serde_json::Value::Null` for unrepresentable variants
+/// (safe: no data loss since those variants cannot be bound as params).
+fn scalar_inner_to_json(v: &shamir_types::types::value::InnerValue) -> serde_json::Value {
+    use shamir_types::types::value::InnerValue;
+    match v {
+        InnerValue::Null => serde_json::Value::Null,
+        InnerValue::Bool(b) => serde_json::Value::Bool(*b),
+        InnerValue::Int(i) => serde_json::Value::Number((*i).into()),
+        InnerValue::F64(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        InnerValue::Str(s) => serde_json::Value::String(s.clone()),
+        // Binary / List / Set / Map cannot appear in param bindings (see above).
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Return `true` if `value` contains any `{ "$param": "..." }` node at any depth.
+fn contains_param_ref(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(serde_json::Value::String(_)) = map.get("$param") {
+                    return true;
+                }
+            }
+            map.values().any(contains_param_ref)
+        }
+        serde_json::Value::Array(arr) => arr.iter().any(contains_param_ref),
+        _ => false,
+    }
+}
+
+/// Recursively substitute `{ "$param": "<name>" }` objects inside a
+/// `serde_json::Value` with the corresponding resolved `InnerValue`.
+///
+/// An object is a `$param` reference if and only if it has exactly one key
+/// named `"$param"` whose value is a JSON string.
+///
+/// Returns `Ok(owned value)` with substitutions applied.
+///
+/// Errors with the unresolvable param name (a `String`) if a referenced
+/// param is absent from `params`; the caller maps this to
+/// `BatchError::query_coded(alias, "unbound_param", ...)`.
+///
+/// **Fast path**: pre-scan the tree for any `$param` node. If none exist,
+/// return a clone immediately — no per-node allocation for the common case
+/// where write values are plain JSON with no param references.
+/// If a `$param` is found but `params` is empty (top-level or empty bind),
+/// the substitution will error with `unbound_param`.
+fn substitute_params(
+    value: &serde_json::Value,
+    params: &TMap<String, shamir_types::types::value::InnerValue>,
+) -> Result<serde_json::Value, String> {
+    // Fast path: if the tree has no $param nodes, return unchanged.
+    if !contains_param_ref(value) {
+        return Ok(value.clone());
+    }
+    substitute_params_inner(value, params)
+}
+
+fn substitute_params_inner(
+    value: &serde_json::Value,
+    params: &TMap<String, shamir_types::types::value::InnerValue>,
+) -> Result<serde_json::Value, String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Check if this object is exactly `{ "$param": "<name>" }`.
+            if map.len() == 1 {
+                if let Some(serde_json::Value::String(name)) = map.get("$param") {
+                    return match params.get(name.as_str()) {
+                        Some(inner) => Ok(scalar_inner_to_json(inner)),
+                        None => Err(name.clone()),
+                    };
+                }
+            }
+            // Recurse into all fields.
+            let mut new_map = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                new_map.insert(k.clone(), substitute_params_inner(v, params)?);
+            }
+            Ok(serde_json::Value::Object(new_map))
+        }
+        serde_json::Value::Array(arr) => {
+            let mut new_arr = Vec::with_capacity(arr.len());
+            for v in arr {
+                new_arr.push(substitute_params_inner(v, params)?);
+            }
+            Ok(serde_json::Value::Array(new_arr))
+        }
+        // Scalars: nothing to substitute.
+        other => Ok(other.clone()),
     }
 }
 
