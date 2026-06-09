@@ -387,3 +387,17 @@ describe('cond — conditional ($cond)', () => {
     });
   });
 });
+
+describe('param — batch parameter reference ($param)', () => {
+  it('filter.param returns { $param: name }', () => {
+    expect(filter.param('uid')).toEqual({ $param: 'uid' });
+  });
+
+  it('param in a value position (eq)', () => {
+    expect(filter.eq('user_id', filter.param('uid'))).toEqual({
+      op: 'eq',
+      field: ['user_id'],
+      value: { $param: 'uid' },
+    });
+  });
+});

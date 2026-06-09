@@ -60,7 +60,8 @@ export type FilterValue =
   | { $query: string; path?: string }
   | { $fn: FnCall }
   | { $expr: FilterExprValue }
-  | { $cond: CondValue };
+  | { $cond: CondValue }
+  | { $param: string };
 
 // ── Filter ───────────────────────────────────────────────────────────
 

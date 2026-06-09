@@ -200,6 +200,17 @@ export function computed(
   return f;
 }
 
+// ── Batch parameter reference ────────────────────────────────────────
+
+/**
+ * Reference to a named parameter bound at the outer batch level.
+ * Produces `{ "$param": name }` on the wire — matches the server's
+ * `FilterValue::Param` variant.
+ */
+export function param(name: string): FilterValue {
+  return { $param: name };
+}
+
 // ── Value references ────────────────────────────────────────────────
 
 /**
@@ -328,6 +339,7 @@ export const filter = {
   not,
   queryRef,
   ref,
+  param,
   fn,
   expr,
   cond,

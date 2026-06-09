@@ -116,6 +116,7 @@ export type {
 } from './call.js';
 
 export type {
+  SubBatchOp,
   BatchOpInput,
   QueryEntry,
   IsolationLevel,
