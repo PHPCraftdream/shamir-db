@@ -17,6 +17,7 @@ use crate::admin::{
 };
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
+use crate::filter::FilterValue;
 use crate::read::{QueryResult, ReadQuery};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_collections::{TMap, TSet};
@@ -118,6 +119,17 @@ pub enum BatchOp {
 
     /// Stored procedure / callable function invocation.
     Call(CallOp),
+
+    /// Nested sub-batch — recursive execution with its own tx scope.
+    Batch(SubBatchOp),
+}
+
+/// A sub-batch — a nested BatchRequest with explicit parameter bindings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubBatchOp {
+    pub batch: BatchRequest,
+    #[serde(default, skip_serializing_if = "TMap::is_empty")]
+    pub bind: TMap<String, FilterValue>,
 }
 
 impl Serialize for BatchOp {
@@ -172,6 +184,7 @@ impl Serialize for BatchOp {
             BatchOp::SetRetention(op) => op.serialize(serializer),
             BatchOp::ChangesSince(op) => op.serialize(serializer),
             BatchOp::Call(op) => op.serialize(serializer),
+            BatchOp::Batch(op) => op.serialize(serializer),
         }
     }
 }
@@ -376,6 +389,10 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::Call)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("batch") {
+            serde_json::from_value(value)
+                .map(BatchOp::Batch)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value)
@@ -396,6 +413,7 @@ impl BatchOp {
             BatchOp::Update(u) => Some(&u.update),
             BatchOp::Set(s) => Some(&s.set),
             BatchOp::Delete(d) => Some(&d.delete_from),
+            BatchOp::Batch(_) => None,
             _ => None,
         }
     }
@@ -447,6 +465,7 @@ impl BatchOp {
                 | BatchOp::PurgeHistory(_)
                 | BatchOp::SetRetention(_)
                 | BatchOp::ChangesSince(_)
+                | BatchOp::Batch(_)
         )
     }
 }
@@ -801,6 +820,9 @@ pub struct BatchLimits {
 
     /// Maximum result size (bytes).
     pub max_result_size: usize,
+
+    /// Maximum sub-batch nesting depth. 0 = no nesting allowed.
+    pub max_nesting_depth: usize,
 }
 
 impl Default for BatchLimits {
@@ -810,6 +832,7 @@ impl Default for BatchLimits {
             max_dependency_depth: 10,
             max_execution_time_secs: 30,
             max_result_size: 10 * 1024 * 1024, // 10MB
+            max_nesting_depth: 4,
         }
     }
 }
@@ -1451,6 +1474,119 @@ mod tests {
             }
             _ => panic!("expected AccessTree"),
         }
+    }
+
+    // ========================================================================
+    // Nested batch types + wire serde (P1)
+    // ========================================================================
+
+    #[test]
+    fn nested_batch_serde_roundtrip() {
+        use shamir_collections::TMap;
+
+        let inner = BatchRequest {
+            id: serde_json::json!(99),
+            name: None,
+            transactional: false,
+            isolation: None,
+            durability: None,
+            queries: TMap::default(),
+            return_all: true,
+            return_only: None,
+            limits: BatchLimits::default(),
+        };
+        let mut bind = TMap::default();
+        bind.insert(
+            "uid".to_string(),
+            crate::filter::FilterValue::String("u1".into()),
+        );
+        let sub = SubBatchOp { batch: inner, bind };
+        let op = BatchOp::Batch(sub);
+
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(
+            json.contains("\"batch\""),
+            "serialized JSON must have 'batch' key"
+        );
+        assert!(
+            json.contains("\"bind\""),
+            "serialized JSON must have 'bind' key"
+        );
+
+        let back: BatchOp = serde_json::from_str(&json).unwrap();
+        assert_eq!(op, back);
+    }
+
+    #[test]
+    fn nested_batch_empty_bind_omitted() {
+        use shamir_collections::TMap;
+
+        let inner = BatchRequest {
+            id: serde_json::json!(1),
+            name: None,
+            transactional: false,
+            isolation: None,
+            durability: None,
+            queries: TMap::default(),
+            return_all: true,
+            return_only: None,
+            limits: BatchLimits::default(),
+        };
+        let op = BatchOp::Batch(SubBatchOp {
+            batch: inner,
+            bind: TMap::default(),
+        });
+
+        let json = serde_json::to_string(&op).unwrap();
+        assert!(
+            !json.contains("\"bind\""),
+            "empty bind must NOT appear in serialized JSON"
+        );
+    }
+
+    #[test]
+    fn nested_batch_dispatch_by_batch_key() {
+        let json = r#"{"batch": {"id": 1, "queries": {}}}"#;
+        let op: BatchOp = serde_json::from_str(json).unwrap();
+        assert!(matches!(op, BatchOp::Batch(_)));
+    }
+
+    #[test]
+    fn nested_batch_is_admin() {
+        use shamir_collections::TMap;
+
+        let inner = BatchRequest {
+            id: serde_json::json!(1),
+            name: None,
+            transactional: false,
+            isolation: None,
+            durability: None,
+            queries: TMap::default(),
+            return_all: true,
+            return_only: None,
+            limits: BatchLimits::default(),
+        };
+        let op = BatchOp::Batch(SubBatchOp {
+            batch: inner,
+            bind: TMap::default(),
+        });
+        assert!(op.is_admin());
+        assert!(op.table_ref().is_none());
+    }
+
+    #[test]
+    fn filter_value_param_serde() {
+        let v = crate::filter::FilterValue::Param { name: "uid".into() };
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, r#"{"$param":"uid"}"#);
+
+        let back: crate::filter::FilterValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn batch_limits_default_nesting_depth() {
+        assert_eq!(BatchLimits::default().max_nesting_depth, 4);
     }
 
     #[test]
