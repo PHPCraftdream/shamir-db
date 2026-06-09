@@ -40,6 +40,8 @@ export class ShamirClient {
   private readonly _serverPubKey: Uint8Array;
   private readonly _expiresAtNs: bigint;
   private nextRequestId = 1;
+  /** Serialises wire round-trips (see {@link sendDbRequest}). */
+  private sendQueue: Promise<unknown> = Promise.resolve();
 
   private constructor(
     platform: Platform,
@@ -118,12 +120,27 @@ export class ShamirClient {
 
   /**
    * Round-trip one `DbRequest` and return the decoded `DbResponse` object.
-   * Wraps the request in a session envelope (`{sid, rid, req}`), awaits the
-   * matching `{rid, res}` reply, and throws on a transport-level `error`, a
-   * request-id mismatch, a missing `res`, or a DB-layer `kind:"error"`.
-   * The caller dispatches on the returned `kind`.
+   *
+   * Calls are SERIALISED: `WsFramer` delivers responses FIFO (it does not
+   * match by `rid`), so two overlapping round-trips would cross-resolve.
+   * Each call is chained after the previous one's completion — concurrent
+   * callers (e.g. `Promise.all([db.run(a), db.run(b)])`) simply queue and run
+   * one at a time over the wire. The chain advances on both success and
+   * failure so one rejected request never wedges the queue.
    */
-  private async sendDbRequest(req: object): Promise<Record<string, unknown>> {
+  private sendDbRequest(req: object): Promise<Record<string, unknown>> {
+    const run = this.sendQueue.then(() => this.doSendDbRequest(req));
+    this.sendQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** The actual single round-trip; serialised by {@link sendDbRequest}. */
+  private async doSendDbRequest(
+    req: object,
+  ): Promise<Record<string, unknown>> {
     const rid = this.nextRequestId++;
     // Outer request envelope. `req` is opaque msgpack bytes (serde_bytes)
     // carrying the internally-tagged DbRequest (tag = "op").

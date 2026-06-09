@@ -1057,6 +1057,23 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(resp.results.all.records.length).toBeGreaterThanOrEqual(2);
     });
 
+    it('handle: concurrent Promise.all reads do not cross-resolve (rid serialisation)', async () => {
+      const app = client!.db(handleDb);
+      // Fire overlapping round-trips. WsFramer delivers FIFO; without the
+      // sendDbRequest serialisation these would cross-resolve and throw
+      // "request id mismatch". Each must return its OWN row.
+      const [h1, h2, missing] = await Promise.all([
+        app.query('items').where(filter.eq('id', 'H1')).rows(),
+        app.query('items').where(filter.eq('id', 'H2')).rows(),
+        app.query('items').where(filter.eq('id', 'NOPE')).rows(),
+      ]);
+      expect(h1.length).toBe(1);
+      expect(h1[0].id).toBe('H1');
+      expect(h2.length).toBe(1);
+      expect(h2[0].id).toBe('H2');
+      expect(missing.length).toBe(0);
+    });
+
     it('handle: db.dropTable(main, items) drops via HMAC', async () => {
       const app = client!.db(handleDb);
       const qr = await app.dropTable('main', 'items');
