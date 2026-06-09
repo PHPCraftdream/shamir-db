@@ -1064,6 +1064,37 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(row.dropped_table).toBe('items');
       expect(row.existed).toBe(true);
     });
+
+    // ── 13. db.tx() auto-managed transactions (TS-T16) ──────────────────
+
+    let txWrapDb: string;
+
+    it('db.tx: setup acct table', async () => {
+      txWrapDb = await setupDb(client!, 'tx_wrap', ['acct']);
+    });
+
+    it('db.tx: insert committed; row visible after commit', async () => {
+      const app = client!.db(txWrapDb);
+      await app.tx(async (t) => {
+        await t.run(write.insert('acct', [{ id: 'a', bal: 100 }]));
+      });
+
+      const rows = await app.query('acct').rows();
+      expect(rows.map((r) => r.id)).toContain('a');
+    });
+
+    it('db.tx: rollback on throw; row not visible', async () => {
+      const app = client!.db(txWrapDb);
+      await expect(
+        app.tx(async (t) => {
+          await t.run(write.insert('acct', [{ id: 'ghost' }]));
+          throw new Error('x');
+        }),
+      ).rejects.toThrow('x');
+
+      const rows = await app.query('acct').rows();
+      expect(rows.map((r) => r.id)).not.toContain('ghost');
+    });
   },
 );
 
