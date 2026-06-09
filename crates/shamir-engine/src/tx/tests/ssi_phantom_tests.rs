@@ -636,6 +636,7 @@ async fn ssi_phantom_filter_stream_tx_records_coarse_when_filter_has_no_sorted_i
         resolved_refs: &refs,
         actor: Actor::System,
         scalars: crate::function::builtin_scalars(),
+        params: &shamir_types::types::common::new_map(),
     };
 
     let stream = tbl
@@ -716,6 +717,7 @@ async fn ssi_phantom_indexed_range_aborts_second_commit() {
         resolved_refs: &refs,
         actor: Actor::System,
         scalars: crate::function::builtin_scalars(),
+        params: &shamir_types::types::common::new_map(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
@@ -797,6 +799,7 @@ async fn ssi_phantom_between_range_aborts() {
         resolved_refs: &refs,
         actor: Actor::System,
         scalars: crate::function::builtin_scalars(),
+        params: &shamir_types::types::common::new_map(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
@@ -863,6 +866,7 @@ async fn ssi_phantom_disjoint_indexed_ranges_both_commit() {
         resolved_refs: &refs,
         actor: Actor::System,
         scalars: crate::function::builtin_scalars(),
+        params: &shamir_types::types::common::new_map(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 
@@ -920,6 +924,7 @@ async fn ssi_phantom_no_index_records_table_scan_and_aborts() {
         resolved_refs: &refs,
         actor: Actor::System,
         scalars: crate::function::builtin_scalars(),
+        params: &shamir_types::types::common::new_map(),
     };
     let _ = tbl.read_tx(&query, &ctx, Some(&tx2)).await.unwrap();
 

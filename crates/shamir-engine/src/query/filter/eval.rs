@@ -143,6 +143,11 @@ pub fn resolve_filter_value(
             }
             ctx.scalars.call(call.name(), &args).ok()
         }
+        FilterValue::Param { name } => {
+            // Injected sub-batch parameter. Populated by the recursive
+            // sub-batch executor (P3); empty at the top level.
+            ctx.params.get(name.as_str()).cloned()
+        }
         _ => None,
     }
 }
