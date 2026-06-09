@@ -90,7 +90,7 @@ await db.dropDb({ cascade: true });
 // Batch with bound queries
 const resp = await db.batch()
   .add('users',  db.query('users'))
-  .add('orders', db.query('orders').where(filter.eq('user_id', { $query: '@users', path: '[0].id' })))
+  .add('orders', db.query('orders').where(filter.eq('user_id', filter.queryRef('@users', '[0].id'))))
   .transactional()
   .run();                                                                   // → BatchResponse
 ```
@@ -339,29 +339,44 @@ Batch.create(1)
 
 ### Query dependencies ($query)
 
-Operations can reference results of earlier aliases via `$query`:
+Operations can reference results of earlier aliases via `filter.queryRef()`. Two forms:
+
+**Single value** — extract a scalar from another query's result:
 
 ```ts
-await client.execute(db, {
-  id: 'deps',
-  queries: {
-    user: {
-      from: 'users',
-      where: { op: 'eq', field: ['name'], value: 'Alice' },
-    },
-    orders: {
-      from: 'orders',
-      where: {
-        op: 'eq',
-        field: ['user_id'],
-        value: { $query: '@user', path: '[0].id' },
-      },
-    },
-  },
-});
+const db = client.db('my_app');
+
+const resp = await db.batch()
+  .add('user', db.query('users').where(filter.eq('name', 'Alice')))
+  .add('orders', db.query('orders').where(
+    filter.eq('user_id', filter.queryRef('@user', '[0].id')),
+  ))
+  .run();
+
+resp.results.orders.records;     // Alice's orders
+resp.execution_plan.length;       // 2 (user → orders)
 ```
 
-The `execution_plan` reflects the dependency graph — independent ops are grouped into one stage, dependent ops form subsequent stages.
+**Column / IN-expansion** — pluck a whole column into an `in` filter:
+
+```ts
+const resp = await db.batch()
+  .add('all', db.query('users'))
+  .add('their_orders', db.query('orders').where(
+    filter.in_('user_id', [filter.queryRef('@all', '[].id')]),
+  ))
+  .run();
+
+resp.results.their_orders.records;  // every order whose user_id is in the users table
+```
+
+`filter.queryRef(alias, path?)` builds `{ $query, path? }`. Omit `path` to pass the full upstream result. The `execution_plan` reflects the dependency graph — independent ops are grouped into one stage, dependent ops form subsequent stages.
+
+### Same-document field references ($ref)
+
+```ts
+filter.eq('city', filter.ref(['address', 'city']))  // { $ref: ['address', 'city'] }
+```
 
 ---
 

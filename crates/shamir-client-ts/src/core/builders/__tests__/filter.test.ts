@@ -219,6 +219,53 @@ describe('logical combinators', () => {
   });
 });
 
+describe('value-ref constructors', () => {
+  it('queryRef(alias, path) includes both keys', () => {
+    expect(filter.queryRef('@user', '[0].id')).toEqual({
+      $query: '@user',
+      path: '[0].id',
+    });
+  });
+
+  it('queryRef(alias) omits path key', () => {
+    const v = filter.queryRef('@user');
+    expect(v).toEqual({ $query: '@user' });
+    expect('path' in (v as object)).toBe(false);
+  });
+
+  it('queryRef inside eq (single-value dependency)', () => {
+    expect(filter.eq('user_id', filter.queryRef('@user', '[0].id'))).toEqual({
+      op: 'eq',
+      field: ['user_id'],
+      value: { $query: '@user', path: '[0].id' },
+    });
+  });
+
+  it('queryRef inside in_ (column / IN-expansion)', () => {
+    expect(filter.in_('user_id', [filter.queryRef('@all_users', '[].id')])).toEqual({
+      op: 'in',
+      field: ['user_id'],
+      values: [{ $query: '@all_users', path: '[].id' }],
+    });
+  });
+
+  it('ref(string) normalises to a 1-element path', () => {
+    expect(filter.ref('id')).toEqual({ $ref: ['id'] });
+  });
+
+  it('ref(string[]) keeps the path as-is', () => {
+    expect(filter.ref(['addr', 'city'])).toEqual({ $ref: ['addr', 'city'] });
+  });
+
+  it('ref inside eq', () => {
+    expect(filter.eq('a', filter.ref(['b', 'c']))).toEqual({
+      op: 'eq',
+      field: ['a'],
+      value: { $ref: ['b', 'c'] },
+    });
+  });
+});
+
 describe('special filter values', () => {
   it('carries a $ref field reference', () => {
     expect(filter.eq('a', { $ref: ['b'] })).toEqual({
