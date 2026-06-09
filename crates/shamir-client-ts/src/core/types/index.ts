@@ -83,3 +83,28 @@ export type {
   ListOp,
   DdlOp,
 } from './ddl.js';
+
+export type {
+  ResourceRef,
+  GroupRef,
+  Resource,
+  Action,
+  Effect,
+  Permission,
+  ChmodOp,
+  ChownOp,
+  ChgrpOp,
+  CreateGroupOp,
+  DropGroupOp,
+  AddGroupMemberOp,
+  RemoveGroupMemberOp,
+  AccessTreeOp,
+  CreateUserOp,
+  DropUserOp,
+  CreateRoleOp,
+  DropRoleOp,
+  GrantRoleOp,
+  RevokeRoleOp,
+  AdminOp,
+} from './admin.js';
+
