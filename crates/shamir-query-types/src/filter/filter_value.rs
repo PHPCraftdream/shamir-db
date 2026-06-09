@@ -43,6 +43,12 @@ pub enum FilterValue {
         #[serde(rename = "$cond")]
         cond: Box<Cond>,
     },
+    /// Parameter reference — reads a named binding from the sub-batch's
+    /// injected `bind` map.
+    Param {
+        #[serde(rename = "$param")]
+        name: String,
+    },
 }
 
 impl FilterValue {
