@@ -20,7 +20,8 @@
     "./dist/index.js": "./dist/browser.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {

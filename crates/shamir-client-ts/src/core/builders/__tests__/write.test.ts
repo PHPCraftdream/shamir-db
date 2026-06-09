@@ -3,18 +3,18 @@
  *
  * The authority for every shape is `crates/shamir-query-types/src/write/types.rs`
  * (serde: skip_serializing_if, rename = "where", rename_all = "lowercase",
- * default values) cross-checked with `table_ref.rs` for TableRef serialisation.
+ * default values) cross-checked with `table_refilter.rs` for TableRef serialisation.
  */
 
 import { describe, it, expect } from 'vitest';
-import { insert, update, upsert, del } from '../write.js';
-import * as f from '../filter.js';
+import { write } from '../write.js';
+import { filter } from '../filter.js';
 
 // ── insert ───────────────────────────────────────────────────────────
 
 describe('insert', () => {
   it('single record → array of one, default repo → bare string', () => {
-    const op = insert('users', { name: 'Alice', age: 30 });
+    const op = write.insert('users', { name: 'Alice', age: 30 });
     expect(op).toEqual({
       insert_into: 'users',
       values: [{ name: 'Alice', age: 30 }],
@@ -22,7 +22,7 @@ describe('insert', () => {
   });
 
   it('array of records, default repo → bare string', () => {
-    const op = insert('users', [
+    const op = write.insert('users', [
       { name: 'Alice' },
       { name: 'Bob' },
     ]);
@@ -33,7 +33,7 @@ describe('insert', () => {
   });
 
   it('explicit repo → [repo, table] tuple', () => {
-    const op = insert('sessions', { id: 1 }, { repo: 'hot' });
+    const op = write.insert('sessions', { id: 1 }, { repo: 'hot' });
     expect(op).toEqual({
       insert_into: ['hot', 'sessions'],
       values: [{ id: 1 }],
@@ -41,7 +41,7 @@ describe('insert', () => {
   });
 
   it('repo "main" collapses to bare string', () => {
-    const op = insert('users', { id: 1 }, { repo: 'main' });
+    const op = write.insert('users', { id: 1 }, { repo: 'main' });
     expect(op.insert_into).toBe('users');
   });
 });
@@ -50,8 +50,8 @@ describe('insert', () => {
 
 describe('update', () => {
   it('.where().set() emits {update, where, set}; no select', () => {
-    const op = update('users')
-      .where(f.eq('age', 30))
+    const op = write.update('users')
+      .where(filter.eq('age', 30))
       .set({ age: 31 })
       .build();
     expect(op).toEqual({
@@ -63,7 +63,7 @@ describe('update', () => {
   });
 
   it('without .where() omits where key', () => {
-    const op = update('users').set({ active: true }).build();
+    const op = write.update('users').set({ active: true }).build();
     expect(op).toEqual({
       update: 'users',
       set: { active: true },
@@ -72,7 +72,7 @@ describe('update', () => {
   });
 
   it('.returning("all", ["a"]) emits select with return_mode + fields', () => {
-    const op = update('users')
+    const op = write.update('users')
       .set({ x: 1 })
       .returning('all', ['a'])
       .build();
@@ -83,23 +83,23 @@ describe('update', () => {
   });
 
   it('.returning() with no args → select:{return_mode:"changed"} (always present)', () => {
-    const op = update('users').set({ x: 1 }).returning().build();
+    const op = write.update('users').set({ x: 1 }).returning().build();
     expect(op.select).toEqual({ return_mode: 'changed' });
     expect(op.select).not.toHaveProperty('fields');
   });
 
   it('.returning("unchanged") → return_mode:"unchanged"', () => {
-    const op = update('users').set({ x: 1 }).returning('unchanged').build();
+    const op = write.update('users').set({ x: 1 }).returning('unchanged').build();
     expect(op.select).toEqual({ return_mode: 'unchanged' });
   });
 
   it('explicit repo → [repo, table] tuple', () => {
-    const op = update('sessions', { repo: 'hot' }).set({ v: 2 }).build();
+    const op = write.update('sessions', { repo: 'hot' }).set({ v: 2 }).build();
     expect(op.update).toEqual(['hot', 'sessions']);
   });
 
   it('throws on build without .set()', () => {
-    expect(() => update('users').build()).toThrow(
+    expect(() => write.update('users').build()).toThrow(
       'update builder requires .set() before .build()',
     );
   });
@@ -109,7 +109,7 @@ describe('update', () => {
 
 describe('upsert', () => {
   it('emits {set, key, value}', () => {
-    const op = upsert('users', { id: 1 }, { name: 'Alice' });
+    const op = write.upsert('users', { id: 1 }, { name: 'Alice' });
     expect(op).toEqual({
       set: 'users',
       key: { id: 1 },
@@ -118,7 +118,7 @@ describe('upsert', () => {
   });
 
   it('explicit repo → tuple', () => {
-    const op = upsert('kv', 'my-key', 'my-value', { repo: 'cache' });
+    const op = write.upsert('kv', 'my-key', 'my-value', { repo: 'cache' });
     expect(op).toEqual({
       set: ['cache', 'kv'],
       key: 'my-key',
@@ -131,7 +131,7 @@ describe('upsert', () => {
 
 describe('del', () => {
   it('emits {delete_from, where}; where is always present', () => {
-    const op = del('users', f.eq('id', 42));
+    const op = write.del('users', filter.eq('id', 42));
     expect(op).toEqual({
       delete_from: 'users',
       where: { op: 'eq', field: ['id'], value: 42 },
@@ -139,12 +139,12 @@ describe('del', () => {
   });
 
   it('explicit repo → tuple', () => {
-    const op = del('sessions', f.eq('token', 'abc'), { repo: 'hot' });
+    const op = write.del('sessions', filter.eq('token', 'abc'), { repo: 'hot' });
     expect(op.delete_from).toEqual(['hot', 'sessions']);
   });
 
   it('accepts complex filter (and / or)', () => {
-    const op = del('users', f.and(f.eq('age', 30), f.eq('status', 'inactive')));
+    const op = write.del('users', filter.and(filter.eq('age', 30), filter.eq('status', 'inactive')));
     expect(op.where).toEqual({
       op: 'and',
       filters: [
@@ -159,7 +159,7 @@ describe('del', () => {
 
 describe('UpdateReturnMode values', () => {
   it('all three modes are lowercase strings', () => {
-    const modes: Array<import('../../../types/write.js').UpdateReturnMode> = [
+    const modes: Array<import('../../types/write.js').UpdateReturnMode> = [
       'all',
       'changed',
       'unchanged',

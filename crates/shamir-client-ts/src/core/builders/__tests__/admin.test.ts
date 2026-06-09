@@ -9,7 +9,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import * as admin from '../admin.js';
+import { admin } from '../admin.js';
+import type { Action } from '../../types/admin.js';
 import {
   canonicalDropUser,
   canonicalDropRole,
@@ -268,7 +269,7 @@ describe('permission', () => {
   });
 
   it('all Action values are snake_case strings', () => {
-    const actions: admin.Action[] = [
+    const actions: Action[] = [
       'read', 'insert', 'update', 'delete', 'create',
       'drop', 'alter', 'manage_users', 'manage_roles', 'all',
     ];

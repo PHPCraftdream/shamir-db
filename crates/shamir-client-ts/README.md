@@ -21,9 +21,8 @@ import {
   connect,
   Query,
   Batch,
-  insert,
-  createDb,
-  createTable,
+  write,
+  ddl,
 } from '@shamir/client';
 
 // Connect over WSS with SCRAM-Argon2id auth
@@ -40,20 +39,20 @@ const client = await connect({
 await client.execute('default', {
   id: 'setup',
   queries: {
-    db: createDb('my_app'),
+    db: ddl.createDb('my_app'),
   },
 });
 await client.execute('my_app', {
   id: 'tables',
   queries: {
     repo: { create_repo: 'main' },
-    tbl: createTable('items'),
+    tbl: ddl.createTable('items'),
   },
 });
 
 // Insert a record
 const ins = await Batch.create('ins')
-  .add('i', insert('items', [{ id: 'A1', name: 'widget', qty: 10 }]))
+  .add('i', write.insert('items', [{ id: 'A1', name: 'widget', qty: 10 }]))
   .execute(client, 'my_app');
 
 // Read it back
@@ -88,52 +87,41 @@ const client = await connect({
 
 ---
 
-## Flat named imports
+## Namespace imports
 
-All builders are flat named exports — no namespaces, no `import * as`:
+Each builder domain exports a single named namespace object. Import one object per domain and call methods off it:
 
 ```ts
 import {
   // client
   connect, ShamirClient,
   // query
-  Query,
+  Query, Batch,
   // filter
-  eq, ne, gt, gte, lt, lte, in_, notIn, like, ilike, regex,
-  isNull, isNotNull, exists, notExists,
-  contains, containsAny, containsAll,
-  between, fts, vectorSimilarity, computed, fieldEq,
-  and, or, not,
+  filter,
   // select
-  field, all, countAll, count, sum, avg, min, max,
-  aggregate, aggregateFn, func,
+  select,
   // write
-  insert, update, upsert, del,
+  write,
   // ddl
-  createDb, createRepo, createTable, createIndex,
-  dropDb, dropRepo, dropTable, dropIndex,
-  listDatabases, listRepos, listTables, listIndexes,
-  listUsers, listRoles, listFunctions, listFunctionFolders,
+  ddl,
   // admin
-  chmod, chown, chgrp, createGroup, dropGroup,
-  addGroupMember, removeGroupMember, accessTree,
-  refDatabase, refStore, refTable, refFunction, refFunctionFolder, refFunctionNamespace,
-  scopeGlobal, scopeDatabase, scopeRepo, scopeTable,
-  groupName, groupId,
-  permission, createUser, dropUser, createRole, dropRole, grantRole, revokeRole,
-  // batch
-  Batch,
+  admin,
   // call
   call,
 } from '@shamir/client';
+
+// Usage: filter.eq(...), select.field(...), write.insert(...), ddl.createDb(...), admin.chmod(...)
 ```
+
+Individual function exports are still available for internal / advanced use (they power the namespace objects internally), but the recommended public API is the namespace style shown above.
 
 ---
 
 ## Query builder (OQL)
 
 ```ts
-import { Query, eq, gt, and, field, countAll, sum } from '@shamir/client';
+import { Query, filter, select } from '@shamir/client';
 ```
 
 ### from / withRepo
@@ -147,40 +135,40 @@ Query.withRepo('archive', 'orders')    // explicit repo
 
 ```ts
 // Column projection
-Query.from('orders').select([field('user'), field('amount')])
+Query.from('orders').select([select.field('user'), select.field('amount')])
 
 // Aggregations
 Query.from('orders').select([
-  countAll('n'),
-  sum('amount', { alias: 'total' }),
-  avg('amount', { alias: 'mean' }),
-  min('amount', { alias: 'lo' }),
-  max('amount', { alias: 'hi' }),
+  select.countAll('n'),
+  select.sum('amount', { alias: 'total' }),
+  select.avg('amount', { alias: 'mean' }),
+  select.min('amount', { alias: 'lo' }),
+  select.max('amount', { alias: 'hi' }),
 ])
 
 // Library aggregate (e.g. median, stddev)
-import { aggregateFn } from '@shamir/client';
+import { select } from '@shamir/client';
 Query.from('orders').select([
-  aggregateFn('median', 'amount', { alias: 'med' }),
+  select.aggregateFn('median', 'amount', { alias: 'med' }),
 ])
 ```
 
 ### where / andWhere with filter constructors
 
 ```ts
-Query.from('items').where(eq('tag', 'red'))
+Query.from('items').where(filter.eq('tag', 'red'))
 
 // AND multiple conditions
 Query.from('items')
-  .where(gt('qty', 5))
-  .andWhere(eq('tag', 'blue'))
+  .where(filter.gt('qty', 5))
+  .andWhere(filter.eq('tag', 'blue'))
 
 // Nested field paths
-Query.from('items').where(eq(['addr', 'city'], 'NYC'))
+Query.from('items').where(filter.eq(['addr', 'city'], 'NYC'))
 
 // Combined
 Query.from('items').where(
-  and([eq('tag', 'blue'), gt('qty', 10)])
+  filter.and([filter.eq('tag', 'blue'), filter.gt('qty', 10)])
 )
 ```
 
@@ -189,8 +177,8 @@ Query.from('items').where(
 ```ts
 Query.from('orders')
   .groupBy('user')
-  .having(gt('amount', 100))
-  .select([field('user'), sum('amount', { alias: 'total' })])
+  .having(filter.gt('amount', 100))
+  .select([select.field('user'), select.sum('amount', { alias: 'total' })])
 ```
 
 ### orderByAsc / orderByDesc / orderBy
@@ -236,21 +224,21 @@ Query.from('items').withVersion()
 ## Writes
 
 ```ts
-import { insert, update, upsert, del, eq } from '@shamir/client';
+import { write, filter } from '@shamir/client';
 ```
 
 ### insert
 
 ```ts
-insert('items', { id: 'A1', name: 'widget', qty: 10 })
-insert('items', [{ id: 'A1', name: 'widget' }, { id: 'A2', name: 'gear' }])
+write.insert('items', { id: 'A1', name: 'widget', qty: 10 })
+write.insert('items', [{ id: 'A1', name: 'widget' }, { id: 'A2', name: 'gear' }])
 ```
 
 ### update (fluent builder)
 
 ```ts
-update('items')
-  .where(eq('id', 'B2'))
+write.update('items')
+  .where(filter.eq('id', 'B2'))
   .set({ qty: 7 })
   .returning('changed')
   .build()
@@ -259,13 +247,13 @@ update('items')
 ### upsert
 
 ```ts
-upsert('items', { id: 'A1' }, { id: 'A1', name: 'widget-v2', qty: 99 })
+write.upsert('items', { id: 'A1' }, { id: 'A1', name: 'widget-v2', qty: 99 })
 ```
 
 ### del
 
 ```ts
-del('items', eq('id', 'A1'))
+write.del('items', filter.eq('id', 'A1'))
 ```
 
 ---
@@ -273,7 +261,7 @@ del('items', eq('id', 'A1'))
 ## Batch
 
 ```ts
-import { Batch, Query, insert, update, eq } from '@shamir/client';
+import { Batch, Query, write, filter } from '@shamir/client';
 ```
 
 ### Basics
@@ -293,8 +281,8 @@ resp.execution_plan;              // string[][] — stages
 
 ```ts
 const resp = await Batch.create('tx')
-  .add('ins_items', insert('items', [{ name: 'cross-item' }]))
-  .add('ins_logs', insert('logs', [{ event: 'item_created' }]))
+  .add('ins_items', write.insert('items', [{ name: 'cross-item' }]))
+  .add('ins_logs', write.insert('logs', [{ event: 'item_created' }]))
   .transactional()              // or .transactional('serializable')
   .execute(client, 'my_app');
 
@@ -307,7 +295,7 @@ resp.transaction.tx_id;    // number
 ```ts
 Batch.create(1)
   .add('q1', Query.from('t'))
-  .add('q2', insert('t', { id: 1 }), { returnResult: false })
+  .add('q2', write.insert('t', { id: 1 }), { returnResult: false })
   .add('q3', Query.from('t'), { after: ['q1', 'q2'] })
   .name('debug-label')
   .durability('synced')
@@ -349,26 +337,26 @@ The `execution_plan` reflects the dependency graph — independent ops are group
 Non-destructive DDL ops are plain function calls:
 
 ```ts
-import { createDb, createTable, createIndex, listIndexes } from '@shamir/client';
+import { ddl } from '@shamir/client';
 
-createDb('my_app')
-createTable('items', { repo: 'main' })
-createIndex('by_email', 'users', [['email']], { unique: true })
+ddl.createDb('my_app')
+ddl.createTable('items', { repo: 'main' })
+ddl.createIndex('by_email', 'users', [['email']], { unique: true })
 ```
 
 **Destructive ops** (`dropTable`, `dropDb`, `dropRepo`, `dropIndex`, `startMigration`, `commitMigration`, `rollbackMigration`) require an HMAC tag derived from the session. Pass the connected `client` as the first `signer` argument — the builder calls `client.hmacTagHex()` internally:
 
 ```ts
-import { dropTable, dropDb } from '@shamir/client';
+import { ddl } from '@shamir/client';
 
-// dropTable(signer, dbInUse, repo, table)
+// ddl.dropTable(signer, dbInUse, repo, table)
 await Batch.create('drop')
-  .add('d', dropTable(client, 'my_app', 'main', 'old_table'))
+  .add('d', ddl.dropTable(client, 'my_app', 'main', 'old_table'))
   .execute(client, 'my_app');
 
-// dropDb(signer, db, { cascade? })
+// ddl.dropDb(signer, db, { cascade? })
 await Batch.create('drop-db')
-  .add('d', dropDb(client, 'my_app', { cascade: true }))
+  .add('d', ddl.dropDb(client, 'my_app', { cascade: true }))
   .execute(client, 'default');
 ```
 
@@ -379,43 +367,35 @@ The HMAC is a "did-you-mean-it" guard, not an additional authentication layer. T
 ## Access control + RBAC
 
 ```ts
-import {
-  chmod, chown, chgrp,
-  refTable, refDatabase,
-  scopeTable, scopeDatabase,
-  permission,
-  createUser, dropUser,
-  createRole, dropRole,
-  grantRole, revokeRole,
-} from '@shamir/client';
+import { admin } from '@shamir/client';
 ```
 
 ### ACL (POSIX-style)
 
 ```ts
-chmod(refTable('my_app', 'main', 'items'), 0o644)
-chown(refDatabase('my_app'), 1)
-chgrp(refTable('my_app', 'main', 'items'), 2)
+admin.chmod(admin.refTable('my_app', 'main', 'items'), 0o644)
+admin.chown(admin.refDatabase('my_app'), 1)
+admin.chgrp(admin.refTable('my_app', 'main', 'items'), 2)
 ```
 
 ### Users + roles
 
 ```ts
-// createRole(name, permissions)
-createRole('reader', [
-  permission('allow', ['read'], scopeTable('my_app', 'main', 'items')),
+// admin.createRole(name, permissions)
+admin.createRole('reader', [
+  admin.permission('allow', ['read'], admin.scopeTable('my_app', 'main', 'items')),
 ])
 
-// createUser(name, password, { roles?, profile? })
-createUser('alice', 'password123', { roles: ['reader'] })
+// admin.createUser(name, password, { roles?, profile? })
+admin.createUser('alice', 'password123', { roles: ['reader'] })
 
 // HMAC-gated drops
-dropUser(client, 'alice')
-dropRole(client, 'reader')
+admin.dropUser(client, 'alice')
+admin.dropRole(client, 'reader')
 
 // Grant / revoke
-grantRole('reader', 'alice')
-revokeRole('reader', 'alice')
+admin.grantRole('reader', 'alice')
+admin.revokeRole('reader', 'alice')
 ```
 
 ---
@@ -431,7 +411,7 @@ const opened = await client.txBegin('my_app', 'main');
 
 // Execute a batch inside the open transaction
 await client.txExecute('my_app', opened.tx_handle,
-  Batch.create('ins').add('i', insert('items', [{ id: 'a', bal: 100 }])).build(),
+  Batch.create('ins').add('i', write.insert('items', [{ id: 'a', bal: 100 }])).build(),
 );
 
 // Commit

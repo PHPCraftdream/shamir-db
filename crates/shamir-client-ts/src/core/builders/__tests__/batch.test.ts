@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { Batch } from '../batch.js';
 import { Query } from '../query.js';
-import { insert } from '../write.js';
+import { write } from '../write.js';
 import type {
   BatchResponse,
   BatchRequest,
@@ -186,7 +186,7 @@ describe('Batch — returnAll', () => {
 describe('Batch — insert helper interop', () => {
   it('accepts an InsertOp from the write helper', () => {
     const req = Batch.create()
-      .add('ins', insert('users', [{ name: 'Alice' }]))
+      .add('ins', write.insert('users', [{ name: 'Alice' }]))
       .build();
     expect(req.queries.ins).toEqual({
       insert_into: 'users',

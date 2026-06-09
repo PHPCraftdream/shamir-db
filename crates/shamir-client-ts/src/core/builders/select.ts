@@ -138,3 +138,18 @@ export function func(
   if (alias !== undefined) item.alias = alias;
   return item;
 }
+
+/** Aggregate namespace — every select constructor in one object. */
+export const select = {
+  all,
+  field,
+  countAll,
+  aggregate,
+  count,
+  sum,
+  avg,
+  min,
+  max,
+  aggregateFn,
+  func,
+};
