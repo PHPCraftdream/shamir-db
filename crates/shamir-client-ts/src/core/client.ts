@@ -9,6 +9,7 @@
 
 import type { Platform } from './platform.js';
 import type { ConnectOptions } from './types/index.js';
+import type { BatchResponse } from './types/batch.js';
 import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
 import { signCanonical } from './hmac.js';
@@ -126,10 +127,13 @@ export class ShamirClient {
   }
 
   /**
-   * Execute a BatchRequest against `db`. Returns the decoded `DbResponse`.
-   * Throws on transport, protocol, or DB-layer errors.
+   * Execute a BatchRequest against `db`. Returns the unwrapped
+   * {@link BatchResponse} (the server's `DbResponse::Batch.response`), so
+   * callers read `.results` / `.execution_plan` / `.transaction` directly —
+   * matching the napi binding's ergonomics. Throws on transport, protocol,
+   * or DB-layer (`kind:"error"`) failures.
    */
-  async execute(db: string, batch: object): Promise<object> {
+  async execute(db: string, batch: object): Promise<BatchResponse> {
     const rid = this.nextRequestId++;
     // Inner DB request — internally-tagged enum (tag = "op").
     const reqBody = encode({
@@ -166,13 +170,21 @@ export class ShamirClient {
       kind?: string;
       code?: string;
       message?: string;
+      response?: BatchResponse;
     };
     if (dbResponse.kind === 'error') {
       throw new Error(
         `db error [${dbResponse.code ?? 'unknown'}]: ${dbResponse.message ?? ''}`,
       );
     }
-    return dbResponse;
+    // DbResponse::Batch is `{ kind: "batch", response: BatchResponse }` —
+    // unwrap the envelope so callers get the BatchResponse directly.
+    if (dbResponse.kind === 'batch' && dbResponse.response !== undefined) {
+      return dbResponse.response;
+    }
+    throw new Error(
+      `unexpected DbResponse kind for execute: ${dbResponse.kind ?? 'missing'}`,
+    );
   }
 
   /** Close the WS (normal closure). Idempotent. */
