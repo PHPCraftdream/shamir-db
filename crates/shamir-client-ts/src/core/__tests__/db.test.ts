@@ -27,10 +27,17 @@ interface Captured {
 /**
  * Build a fake client that records every `execute(db, batch)` call.
  * `hmacTagHex` returns a deterministic stub so HMAC wrappers are verifiable.
+ * Includes no-op tx stubs so the cast to ShamirClient satisfies the type.
  */
 function fakeClient(captured: Captured[]) {
   const okResult: QueryResult = {
     records: [{ id: 'fake', ok: true }],
+  };
+  const okBatch: BatchResponse = {
+    id: 1 as Json,
+    results: { _: okResult },
+    execution_plan: [],
+    execution_time_us: 0,
   };
   return {
     execute: async (db: string, batch: object): Promise<BatchResponse> => {
@@ -42,6 +49,18 @@ function fakeClient(captured: Captured[]) {
         execution_time_us: 0,
       };
     },
+    txBegin: async (): Promise<import('../client.js').TxOpened> => ({
+      tx_handle: 0,
+      snapshot_version: 0,
+      isolation: 'snapshot',
+    }),
+    txExecute: async (): Promise<BatchResponse> => okBatch,
+    txCommit: async (): Promise<import('../types/batch.js').TransactionInfo> => ({
+      tx_id: 0,
+      status: 'committed',
+      materialized: true,
+    }),
+    txRollback: async (): Promise<void> => {},
     hmacTagHex: (_canonical: Uint8Array): string => {
       return 'aa'.repeat(32);
     },
@@ -304,5 +323,206 @@ describe('Db handle (unit)', () => {
       queries: Record<string, object>;
     };
     expect(batch.queries['_']).toEqual({ from: ['archive', 'orders'] });
+  });
+});
+
+// ─── Tx (interactive transaction) unit tests ─────────────────────────────────
+
+describe('Db.tx() (unit)', () => {
+  /** Call log entry recorded by the fake tx-aware client. */
+  interface TxCall {
+    method: string;
+    args: unknown[];
+  }
+
+  const okResult: QueryResult = { records: [{ ok: true }] };
+  const okBatchResponse: BatchResponse = {
+    id: 1 as Json,
+    results: { _: okResult },
+    execution_plan: [],
+    execution_time_us: 0,
+  };
+
+  /**
+   * Build a fake client that records txBegin/txExecute/txCommit/txRollback
+   * and execute calls. Defaults to happy-path responses.
+   */
+  function fakeTxClient(
+    calls: TxCall[],
+    overrides?: {
+      commitResponse?: import('../types/batch.js').TransactionInfo;
+    },
+  ) {
+    const commitResp = overrides?.commitResponse ?? {
+      tx_id: 1,
+      status: 'committed' as const,
+      materialized: true,
+      commit_version: 42,
+    };
+    return {
+      execute: async (db: string, batch: object): Promise<BatchResponse> => {
+        calls.push({ method: 'execute', args: [db, batch] });
+        return okBatchResponse;
+      },
+      txBegin: async (
+        db: string,
+        repo: string,
+        isolation?: string,
+      ): Promise<import('../client.js').TxOpened> => {
+        calls.push({ method: 'txBegin', args: [db, repo, isolation] });
+        return { tx_handle: 99, snapshot_version: 10, isolation: isolation ?? 'snapshot' };
+      },
+      txExecute: async (
+        db: string,
+        handle: number,
+        batch: object,
+      ): Promise<BatchResponse> => {
+        calls.push({ method: 'txExecute', args: [db, handle, batch] });
+        return okBatchResponse;
+      },
+      txCommit: async (
+        db: string,
+        handle: number,
+      ): Promise<import('../types/batch.js').TransactionInfo> => {
+        calls.push({ method: 'txCommit', args: [db, handle] });
+        return commitResp;
+      },
+      txRollback: async (db: string, handle: number): Promise<void> => {
+        calls.push({ method: 'txRollback', args: [db, handle] });
+      },
+      hmacTagHex: (_canonical: Uint8Array): string => 'aa'.repeat(32),
+    };
+  }
+
+  function asClient(fc: ReturnType<typeof fakeTxClient>) {
+    return fc as unknown as import('../client.js').ShamirClient;
+  }
+
+  it('happy path: begin → execute → commit', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls);
+    const db = new Db(asClient(fc), 'test_db');
+
+    await db.tx(async (t) => {
+      await t.run(write.insert('x', [{ a: 1 }]));
+    });
+
+    expect(calls.length).toBe(3);
+    expect(calls[0]).toEqual({ method: 'txBegin', args: ['test_db', 'main', undefined] });
+    expect(calls[1].method).toBe('txExecute');
+    expect(calls[1].args).toEqual([
+      'test_db',
+      99,
+      { id: 1, queries: { _: { insert_into: 'x', values: [{ a: 1 }] } } },
+    ]);
+    expect(calls[2]).toEqual({ method: 'txCommit', args: ['test_db', 99] });
+  });
+
+  it('happy path: no txRollback on success', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls);
+    const db = new Db(asClient(fc), 'test_db');
+
+    await db.tx(async () => {});
+
+    const methods = calls.map((c) => c.method);
+    expect(methods).not.toContain('txRollback');
+  });
+
+  it('throw path: begin → rollback, no commit; error rethrown', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls);
+    const db = new Db(asClient(fc), 'test_db');
+
+    await expect(
+      db.tx(async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+
+    const methods = calls.map((c) => c.method);
+    expect(methods).toEqual(['txBegin', 'txRollback']);
+    expect(methods).not.toContain('txCommit');
+  });
+
+  it('opts.isolation is forwarded to txBegin', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls);
+    const db = new Db(asClient(fc), 'test_db');
+
+    await db.tx(async () => {}, { isolation: 'serializable' });
+
+    expect(calls[0]).toEqual({
+      method: 'txBegin',
+      args: ['test_db', 'main', 'serializable'],
+    });
+  });
+
+  it('opts.repo is forwarded to txBegin', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls);
+    const db = new Db(asClient(fc), 'test_db');
+
+    await db.tx(async () => {}, { repo: 'archive' });
+
+    expect(calls[0]).toEqual({
+      method: 'txBegin',
+      args: ['test_db', 'archive', undefined],
+    });
+  });
+
+  it('aborted commit rejects with reason', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls, {
+      commitResponse: {
+        tx_id: 1,
+        status: 'aborted',
+        reason: 'tx_conflict',
+        materialized: false,
+      },
+    });
+    const db = new Db(asClient(fc), 'test_db');
+
+    await expect(
+      db.tx(async () => {}),
+    ).rejects.toThrow('transaction aborted: tx_conflict');
+
+    // The aborted commit already finalised the tx server-side — NO redundant
+    // rollback is issued; only begin + commit were attempted.
+    const methods = calls.map((c) => c.method);
+    expect(methods).toEqual(['txBegin', 'txCommit']);
+    expect(methods).not.toContain('txRollback');
+  });
+
+  it('t.query().rows() routes through txExecute, not execute', async () => {
+    const calls: TxCall[] = [];
+    const fc = fakeTxClient(calls);
+    const db = new Db(asClient(fc), 'test_db');
+
+    await db.tx(async (t) => {
+      await t.query('x').rows();
+    });
+
+    const methods = calls.map((c) => c.method);
+    expect(methods).toContain('txExecute');
+    expect(methods).not.toContain('execute');
+  });
+
+  it('t.run() and db.run() produce identical batch shapes', async () => {
+    const dbCaptured: Captured[] = [];
+    const fc1 = fakeClient(dbCaptured);
+    const db = new Db(asClient(fc1), 'test_db');
+    await db.run(write.insert('x', [{ a: 1 }]));
+    const dbBatch = dbCaptured[0].batch;
+
+    const txCalls: TxCall[] = [];
+    const fc2 = fakeTxClient(txCalls);
+    const db2 = new Db(asClient(fc2), 'test_db');
+    await db2.tx(async (t) => {
+      await t.run(write.insert('x', [{ a: 1 }]));
+    });
+    const txBatch = txCalls[1].args[2]; // [db, handle, batch]
+
+    expect(dbBatch).toEqual(txBatch);
   });
 });

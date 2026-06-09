@@ -97,6 +97,25 @@ const resp = await db.batch()
 
 `client.db(name)` returns a `Db` instance that holds the connection and database name. All Layer-1 APIs (`filter.*`, `select.*`, `write.*`, `ddl.*`, `Query`, `Batch`) continue to work unchanged — the handle is purely additive.
 
+### Transactions (auto-managed)
+
+```ts
+const db = client.db('my_app');
+
+// Auto-commit on resolve, auto-rollback on throw
+await db.tx(async (t) => {
+  await t.run(write.insert('acct', [{ id: 'a', bal: 100 }]));
+  await t.run(write.update('acct').where(filter.eq('id', 'a')).set({ bal: 90 }));
+  const rows = await t.query('acct').rows();   // reads inside the tx
+});
+// committed automatically; on any throw → rolled back + error rethrown
+
+// With options
+await db.tx(async (t) => { /* ... */ }, { isolation: 'serializable', repo: 'main' });
+```
+
+The callback receives a `Tx` handle whose operations route through `txExecute`. If the server reports `status === 'aborted'` at commit time, the wrapper throws an error carrying the reason.
+
 ---
 
 ## Browser
