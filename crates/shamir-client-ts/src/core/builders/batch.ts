@@ -19,6 +19,7 @@ import type {
   BatchRequest,
   BatchResponse,
 } from '../types/batch.js';
+import type { ExecCtx } from '../exec-ctx.js';
 
 /** Something that has a `.build()` method returning a wire op. */
 interface Buildable {
@@ -49,6 +50,7 @@ export class Batch {
   private returnAllExplicit: boolean | undefined;
   private returnOnlyValue: string[] | undefined;
   private limitsValue: BatchLimits | undefined;
+  private ctxValue: ExecCtx | null = null;
 
   private constructor(id: Json) {
     this.idValue = id;
@@ -176,5 +178,24 @@ export class Batch {
    */
   execute(client: BatchClient, db: string): Promise<BatchResponse> {
     return client.execute(db, this.build());
+  }
+
+  /** @internal Bind an execution context (set by `Db.batch()`). */
+  bindCtx(ctx: ExecCtx): this {
+    this.ctxValue = ctx;
+    return this;
+  }
+
+  /**
+   * Build and send via the bound context. Throws if not bound.
+   * Layer-2 counterpart to `execute(client, db)`.
+   */
+  async run(): Promise<BatchResponse> {
+    if (!this.ctxValue) {
+      throw new Error(
+        'Batch is not bound to a Db; use db.batch() or batch.execute(client, db)',
+      );
+    }
+    return this.ctxValue.exec(this.build());
   }
 }

@@ -26,6 +26,9 @@ import type {
   Temporal,
   ReadQuery,
 } from '../types/query.js';
+import type { QueryResult } from '../types/batch.js';
+import type { Json } from '../types/write.js';
+import type { ExecCtx } from '../exec-ctx.js';
 import { and } from './filter.js';
 import { field as selectField } from './select.js';
 
@@ -66,6 +69,7 @@ export class Query {
   private countTotalFlag = false;
   private temporalValue: Temporal | null = null;
   private withVersionFlag = false;
+  private ctxValue: ExecCtx | null = null;
 
   private constructor(from: TableRefWire) {
     this.from = from;
@@ -280,6 +284,32 @@ export class Query {
     if (this.withVersionFlag) q.with_version = true;
 
     return q;
+  }
+
+  /** @internal Bind an execution context (set by `Db.query()` / `Db.withRepo()`). */
+  bindCtx(ctx: ExecCtx): this {
+    this.ctxValue = ctx;
+    return this;
+  }
+
+  /**
+   * Build + execute as a single-op batch, returning the `QueryResult`.
+   * Throws if the query is not bound to a `Db`.
+   */
+  async ex(): Promise<QueryResult> {
+    if (!this.ctxValue) {
+      throw new Error(
+        'Query is not bound to a Db; use db.query(...) or db.run(query)',
+      );
+    }
+    const batch = { id: 1, queries: { _: this.build() } };
+    const resp = await this.ctxValue.exec(batch);
+    return resp.results['_']!;
+  }
+
+  /** Shortcut: `.ex()` then return `.records`. */
+  async rows(): Promise<Array<Record<string, Json>>> {
+    return (await this.ex()).records;
   }
 
   private buildPagination(): Pagination | null {
