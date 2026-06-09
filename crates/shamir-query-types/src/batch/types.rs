@@ -919,6 +919,12 @@ pub enum BatchError {
     /// 2PC across repos is intentionally out of scope. Clients must
     /// split such batches into separate single-repo transactions.
     CrossRepoNotSupported { repos: Vec<String> },
+
+    /// Static sub-batch nesting depth exceeded.
+    ///
+    /// The op tree contains `BatchOp::Batch` nodes nested deeper than
+    /// `BatchLimits::max_nesting_depth`.
+    NestingTooDeep { depth: usize, max: usize },
 }
 
 impl std::fmt::Display for BatchError {
@@ -965,6 +971,9 @@ impl std::fmt::Display for BatchError {
                 "transactional batch targets multiple repositories ({}); single-repo only",
                 repos.join(", ")
             ),
+            BatchError::NestingTooDeep { depth, max } => {
+                write!(f, "Sub-batch nesting too deep: {} (max: {})", depth, max)
+            }
         }
     }
 }
