@@ -117,9 +117,12 @@ export interface PaginationInfo {
 /**
  * Query result — every batch entry (read / write / DDL / admin) comes
  * back as a `QueryResult`.
+ *
+ * `records` are JSON objects (field → value); each field value is `Json`.
+ * A scalar/array answer from a stored function lands in `value`, not here.
  */
 export interface QueryResult {
-  records: Json[];
+  records: Array<Record<string, Json>>;
   stats?: QueryStats;
   pagination?: PaginationInfo;
   value?: Json;

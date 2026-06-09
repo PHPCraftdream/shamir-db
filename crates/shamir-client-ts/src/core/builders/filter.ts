@@ -240,3 +240,33 @@ export function or(aOrFilters: Filter | Filter[], b?: Filter): Filter {
 export function not(filter: Filter): Filter {
   return { op: 'not', filter };
 }
+
+/** Aggregate namespace — every filter constructor in one object. */
+export const filter = {
+  eq,
+  ne,
+  gt,
+  gte,
+  lt,
+  lte,
+  fieldEq,
+  in_,
+  notIn,
+  like,
+  ilike,
+  regex,
+  isNull,
+  isNotNull,
+  exists,
+  notExists,
+  contains,
+  containsAny,
+  containsAll,
+  between,
+  fts,
+  vectorSimilarity,
+  computed,
+  and,
+  or,
+  not,
+};

@@ -141,3 +141,6 @@ export function del(
 ): DeleteOp {
   return { delete_from: tableRef(opts?.repo, table), where };
 }
+
+/** Aggregate namespace — every write constructor in one object. */
+export const write = { insert, update, upsert, del };

@@ -8,8 +8,8 @@
 
 import { describe, it, expect } from 'vitest';
 import { Query, atTimestamp } from '../query.js';
-import * as f from '../filter.js';
-import * as select from '../select.js';
+import { filter } from '../filter.js';
+import { select } from '../select.js';
 
 describe('from / select defaults', () => {
   it('plain SELECT * omits select (server defaults to all)', () => {
@@ -49,7 +49,7 @@ describe('from / select defaults', () => {
 
 describe('where', () => {
   it('where sets the filter', () => {
-    expect(Query.from('users').where(f.eq('status', 'active')).build()).toEqual({
+    expect(Query.from('users').where(filter.eq('status', 'active')).build()).toEqual({
       from: 'users',
       where: { op: 'eq', field: ['status'], value: 'active' },
     });
@@ -57,8 +57,8 @@ describe('where', () => {
 
   it('andWhere combines with smart flattening', () => {
     const q = Query.from('users')
-      .andWhere(f.eq('status', 'active'))
-      .andWhere(f.gt('age', 18))
+      .andWhere(filter.eq('status', 'active'))
+      .andWhere(filter.gt('age', 18))
       .build();
     expect(q.where).toEqual({
       op: 'and',
@@ -75,7 +75,7 @@ describe('group by / having', () => {
     const q = Query.from('orders')
       .select([select.field('status'), select.count('id', { alias: 'n' })])
       .groupBy('status')
-      .having(f.gt('n', 5))
+      .having(filter.gt('n', 5))
       .build();
     expect(q.group_by).toEqual({
       fields: [['status']],
@@ -84,7 +84,7 @@ describe('group by / having', () => {
   });
 
   it('having without groupBy throws on build', () => {
-    expect(() => Query.from('orders').having(f.gt('n', 5)).build()).toThrow(
+    expect(() => Query.from('orders').having(filter.gt('n', 5)).build()).toThrow(
       /having\(\) requires groupBy\(\)/,
     );
   });
@@ -245,8 +245,8 @@ describe('composed query', () => {
   it('assembles a full read query in wire order', () => {
     const q = Query.from('users')
       .select(['id', 'name'])
-      .where(f.eq('status', 'active'))
-      .andWhere(f.gt('age', 18))
+      .where(filter.eq('status', 'active'))
+      .andWhere(filter.gt('age', 18))
       .orderByDesc('age')
       .limit(20)
       .build();

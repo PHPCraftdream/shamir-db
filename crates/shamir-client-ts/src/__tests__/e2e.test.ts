@@ -13,19 +13,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { connect } from '../index.js';
-import type { ShamirClient, BatchResponse } from '../index.js';
+import type { ShamirClient, BatchResponse, Json } from '../index.js';
 import {
   Query,
   Batch,
-  // filter
-  eq, ne, gt, gte, lt, lte, in_, notIn, and, or, between,
-  // select
-  field, countAll, sum, avg, min, max,
-  // write
-  insert, update, upsert, del,
-  // ddl
-  createDb, createRepo, createTable, createIndex,
-  dropDb, dropTable, dropIndex, listDatabases, listIndexes,
+  filter,
+  select,
+  write,
+  ddl,
 } from '../index.js';
 
 // ─── server binary path ───────────────────────────────────────────────────────
@@ -227,12 +222,12 @@ async function setupDb(
 
   await client.execute('default', {
     id: `setup-${db}-db`,
-    queries: { mk: createDb(db) },
+    queries: { mk: ddl.createDb(db) },
   });
 
-  const queries: Record<string, object> = { mr: createRepo('main') };
+  const queries: Record<string, object> = { mr: ddl.createRepo('main') };
   for (let i = 0; i < tableNames.length; i += 1) {
-    queries[`tb${i}`] = createTable(tableNames[i], { repo: 'main' });
+    queries[`tb${i}`] = ddl.createTable(tableNames[i], { repo: 'main' });
   }
   await client.execute(db, {
     id: `setup-${db}-tables`,
@@ -246,14 +241,14 @@ async function seed(
   client: ShamirClient,
   db: string,
   table: string,
-  records: object[],
+  records: Array<Record<string, Json>>,
   keyFields: string[] = ['id'],
 ): Promise<BatchResponse> {
   const queries: Record<string, object> = {};
   records.forEach((r, i) => {
-    const key: Record<string, unknown> = {};
-    for (const k of keyFields) key[k] = (r as Record<string, unknown>)[k];
-    queries[`s${i}`] = upsert(table, key, r);
+    const key: Record<string, Json> = {};
+    for (const k of keyFields) key[k] = r[k];
+    queries[`s${i}`] = write.upsert(table, key, r);
   });
   return br(await client.execute(db, { id: `seed-${db}-${table}`, queries }));
 }
@@ -315,7 +310,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('CRUD: insert single record', async () => {
       const resp = br(await Batch.create('ins-one')
-        .add('ins', insert('items', [{ id: 'A1', name: 'widget', qty: 10 }]))
+        .add('ins', write.insert('items', [{ id: 'A1', name: 'widget', qty: 10 }]))
         .execute(client!, crudDb));
       expect(resp.results.ins.records.length).toBe(1);
     });
@@ -332,7 +327,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('CRUD: upsert a new key', async () => {
       await br(await Batch.create('set-new')
-        .add('s', upsert('items', { id: 'B2' }, { id: 'B2', name: 'gear', qty: 3 }))
+        .add('s', write.upsert('items', { id: 'B2' }, { id: 'B2', name: 'gear', qty: 3 }))
         .execute(client!, crudDb));
       const resp = br(await Batch.create('count-after-set')
         .add('all', Query.from('items'))
@@ -342,10 +337,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('CRUD: upsert overwrites an existing key', async () => {
       await br(await Batch.create('set-existing')
-        .add('s', upsert('items', { id: 'A1' }, { id: 'A1', name: 'widget-v2', qty: 99 }))
+        .add('s', write.upsert('items', { id: 'A1' }, { id: 'A1', name: 'widget-v2', qty: 99 }))
         .execute(client!, crudDb));
       const resp = br(await Batch.create('read-A1')
-        .add('a', Query.from('items').where(eq('id', 'A1')))
+        .add('a', Query.from('items').where(filter.eq('id', 'A1')))
         .execute(client!, crudDb));
       expect(resp.results.a.records.length).toBe(1);
       expect(resp.results.a.records[0].name).toBe('widget-v2');
@@ -354,17 +349,17 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('CRUD: update by filter', async () => {
       await br(await Batch.create('upd')
-        .add('u', update('items').where(eq('id', 'B2')).set({ qty: 7 }).build())
+        .add('u', write.update('items').where(filter.eq('id', 'B2')).set({ qty: 7 }).build())
         .execute(client!, crudDb));
       const resp = br(await Batch.create('read-B2')
-        .add('b', Query.from('items').where(eq('id', 'B2')))
+        .add('b', Query.from('items').where(filter.eq('id', 'B2')))
         .execute(client!, crudDb));
       expect(resp.results.b.records[0].qty).toBe(7);
     });
 
     it('CRUD: delete by filter', async () => {
       await br(await Batch.create('del')
-        .add('d', del('items', eq('id', 'A1')))
+        .add('d', write.del('items', filter.eq('id', 'A1')))
         .execute(client!, crudDb));
       const resp = br(await Batch.create('read-after-del')
         .add('all', Query.from('items'))
@@ -389,7 +384,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       await seed(client!, filterDb, 't', filterSeed);
     });
 
-    async function filteredRead(where: ReturnType<typeof eq>): Promise<object[]> {
+    async function filteredRead(where: ReturnType<typeof filter.eq>): Promise<Array<Record<string, Json>>> {
       const resp = br(await Batch.create('r')
         .add('r', Query.from('t').where(where))
         .execute(client!, filterDb));
@@ -397,55 +392,55 @@ describe.skipIf(!SERVER_AVAILABLE)(
     }
 
     it('filters: eq', async () => {
-      const r = await filteredRead(eq('tag', 'red'));
+      const r = await filteredRead(filter.eq('tag', 'red'));
       expect(r.length).toBe(2);
     });
 
     it('filters: ne', async () => {
-      const r = await filteredRead(ne('tag', 'red'));
+      const r = await filteredRead(filter.ne('tag', 'red'));
       expect(r.length).toBe(3);
     });
 
     it('filters: gt', async () => {
-      const r = await filteredRead(gt('qty', 10));
+      const r = await filteredRead(filter.gt('qty', 10));
       expect(r.length).toBe(2);
     });
 
     it('filters: gte', async () => {
-      const r = await filteredRead(gte('qty', 10));
+      const r = await filteredRead(filter.gte('qty', 10));
       expect(r.length).toBe(3);
     });
 
     it('filters: lt', async () => {
-      const r = await filteredRead(lt('qty', 10));
+      const r = await filteredRead(filter.lt('qty', 10));
       expect(r.length).toBe(2);
     });
 
     it('filters: lte', async () => {
-      const r = await filteredRead(lte('qty', 10));
+      const r = await filteredRead(filter.lte('qty', 10));
       expect(r.length).toBe(3);
     });
 
     it('filters: in', async () => {
-      const r = await filteredRead(in_('tag', ['red', 'green']));
+      const r = await filteredRead(filter.in_('tag', ['red', 'green']));
       expect(r.length).toBe(3);
     });
 
     it('filters: not_in', async () => {
-      const r = await filteredRead(notIn('tag', ['red', 'green']));
+      const r = await filteredRead(filter.notIn('tag', ['red', 'green']));
       expect(r.length).toBe(2);
     });
 
     it('filters: between', async () => {
-      const r = await filteredRead(between('qty', 5, 25));
+      const r = await filteredRead(filter.between('qty', 5, 25));
       expect(r.length).toBe(3);
     });
 
     it('filters: and', async () => {
       const r = await filteredRead(
-        and([
-          eq('tag', 'blue'),
-          gt('qty', 10),
+        filter.and([
+          filter.eq('tag', 'blue'),
+          filter.gt('qty', 10),
         ]),
       );
       expect(r.length).toBe(1);
@@ -454,9 +449,9 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('filters: or', async () => {
       const r = await filteredRead(
-        or([
-          eq('tag', 'green'),
-          gt('qty', 20),
+        filter.or([
+          filter.eq('tag', 'green'),
+          filter.gt('qty', 20),
         ]),
       );
       expect(r.length).toBe(2);
@@ -464,19 +459,19 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('filters: nested AND/OR', async () => {
       const r = await filteredRead(
-        and([
-          or([
-            eq('tag', 'red'),
-            eq('tag', 'blue'),
+        filter.and([
+          filter.or([
+            filter.eq('tag', 'red'),
+            filter.eq('tag', 'blue'),
           ]),
-          gte('qty', 5),
+          filter.gte('qty', 5),
         ]),
       );
       expect(r.length).toBe(3);
     });
 
     it('filters: nested field path', async () => {
-      const r = await filteredRead(eq(['addr', 'city'], 'NYC'));
+      const r = await filteredRead(filter.eq(['addr', 'city'], 'NYC'));
       expect(r.length).toBe(2);
       const ids = r.map((x: Record<string, unknown>) => x.id).sort();
       expect(ids).toContain('a');
@@ -500,7 +495,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('agg: select specific fields (column projection)', async () => {
       const resp = br(await Batch.create('proj')
-        .add('r', Query.from('orders').select([field('user'), field('amount')]))
+        .add('r', Query.from('orders').select([select.field('user'), select.field('amount')]))
         .execute(client!, aggDb));
       const recs = resp.results.r.records;
       expect(recs.length).toBe(5);
@@ -514,7 +509,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('agg: count_all aggregate', async () => {
       const resp = br(await Batch.create('cnt')
-        .add('c', Query.from('orders').select([countAll('n')]))
+        .add('c', Query.from('orders').select([select.countAll('n')]))
         .execute(client!, aggDb));
       const r = resp.results.c.records;
       expect(r.length).toBe(1);
@@ -524,10 +519,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('agg: sum + avg + min + max', async () => {
       const resp = br(await Batch.create('sums')
         .add('s', Query.from('orders').select([
-          sum('amount', { alias: 'total' }),
-          avg('amount', { alias: 'mean' }),
-          min('amount', { alias: 'lo' }),
-          max('amount', { alias: 'hi' }),
+          select.sum('amount', { alias: 'total' }),
+          select.avg('amount', { alias: 'mean' }),
+          select.min('amount', { alias: 'lo' }),
+          select.max('amount', { alias: 'hi' }),
         ]))
         .execute(client!, aggDb));
       const r = resp.results.s.records[0];
@@ -542,9 +537,9 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .add('g', Query.from('orders')
           .groupBy('user')
           .select([
-            field('user'),
-            countAll('n_orders'),
-            sum('amount', { alias: 'total' }),
+            select.field('user'),
+            select.countAll('n_orders'),
+            select.sum('amount', { alias: 'total' }),
           ])
           .orderByAsc('user'))
         .execute(client!, aggDb));
@@ -574,7 +569,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
           bucket: i % 3,
         });
       }
-      await seed(client!, pageDb, 'items', records);
+      await seed(client!, pageDb, 'items', records as Array<Record<string, Json>>);
     });
 
     it('sort/page: order_by score asc', async () => {
@@ -584,7 +579,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const recs = resp.results.r.records;
       expect(recs.length).toBe(PN);
       for (let i = 1; i < recs.length; i += 1) {
-        expect(recs[i - 1].score <= recs[i].score).toBe(true);
+        expect((recs[i - 1].score as number) <= (recs[i].score as number)).toBe(true);
       }
     });
 
@@ -594,7 +589,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .execute(client!, pageDb));
       const recs = resp.results.r.records;
       for (let i = 1; i < recs.length; i += 1) {
-        expect(recs[i - 1].score >= recs[i].score).toBe(true);
+        expect((recs[i - 1].score as number) >= (recs[i].score as number)).toBe(true);
       }
     });
 
@@ -611,9 +606,9 @@ describe.skipIf(!SERVER_AVAILABLE)(
         const prev = recs[i - 1];
         const cur = recs[i];
         if (prev.bucket === cur.bucket) {
-          expect(prev.score >= cur.score).toBe(true);
+          expect((prev.score as number) >= (cur.score as number)).toBe(true);
         } else {
-          expect(prev.bucket < cur.bucket).toBe(true);
+          expect((prev.bucket as number) < (cur.bucket as number)).toBe(true);
         }
       }
     });
@@ -657,7 +652,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('sort/page: count_total returns full size with paginated records', async () => {
       const resp = br(await Batch.create('ct')
         .add('r', Query.from('items')
-          .where(gte('score', 50))
+          .where(filter.gte('score', 50))
           .limit(3)
           .offset(0)
           .countTotal())
@@ -719,7 +714,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     it('batch: parent -> child via $query reference', async () => {
-      const resp = br(await client.execute(multiDb, {
+      const resp = br(await client!.execute(multiDb, {
         id: 'parent-child',
         queries: {
           user: {
@@ -744,7 +739,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     it('batch: execution_plan reflects dep (two stages)', async () => {
-      const resp = br(await client.execute(multiDb, {
+      const resp = br(await client!.execute(multiDb, {
         id: 'plan-shape',
         queries: {
           user: { from: 'users', where: { op: 'eq', field: ['id'], value: 'u1' } },
@@ -765,7 +760,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     });
 
     it('batch: column ref via @alias[].field — IN expansion', async () => {
-      const resp = br(await client.execute(multiDb, {
+      const resp = br(await client!.execute(multiDb, {
         id: 'array-ref',
         queries: {
           all_users: { from: 'users' },
@@ -786,7 +781,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('DDL: list databases includes default', async () => {
       const resp = br(await Batch.create('lsdb')
-        .add('l', listDatabases())
+        .add('l', ddl.listDatabases())
         .execute(client!, 'default'));
       const names = resp.results.l.records[0].databases as string[];
       expect(Array.isArray(names)).toBe(true);
@@ -797,22 +792,22 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const idxDb = await setupDb(client!, 'ddl_idx', ['t']);
 
       await br(await Batch.create('mk-idx')
-        .add('i', createIndex('by_email', 't', [['email']]))
+        .add('i', ddl.createIndex('by_email', 't', [['email']]))
         .execute(client!, idxDb));
 
       const lsResp = br(await Batch.create('ls-idx')
-        .add('l', listIndexes('t'))
+        .add('l', ddl.listIndexes('t'))
         .execute(client!, idxDb));
       const indexNames = (lsResp.results.l.records[0].indexes as Array<{ name: string }>).map(i => i.name);
       expect(indexNames).toContain('by_email');
 
       // Drop with HMAC — client IS the HmacSigner
       await br(await Batch.create('rm-idx')
-        .add('d', dropIndex(client!, idxDb, 'main', 't', 'by_email'))
+        .add('d', ddl.dropIndex(client!, idxDb, 'main', 't', 'by_email'))
         .execute(client!, idxDb));
 
       const ls2 = br(await Batch.create('ls-idx2')
-        .add('l', listIndexes('t'))
+        .add('l', ddl.listIndexes('t'))
         .execute(client!, idxDb));
       const afterNames = (ls2.results.l.records[0].indexes as Array<{ name: string }>).map(i => i.name);
       expect(afterNames).not.toContain('by_email');
@@ -847,7 +842,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('HMAC: drop_table with correct hmac succeeds', async () => {
       const hmacDb = await setupDb(client!, 'hmac_ok', ['t']);
       const resp = br(await Batch.create('drop-ok')
-        .add('d', dropTable(client!, hmacDb, 'main', 't'))
+        .add('d', ddl.dropTable(client!, hmacDb, 'main', 't'))
         .execute(client!, hmacDb));
       const row = resp.results.d.records[0] as Record<string, unknown>;
       expect(row.dropped_table).toBe('t');
@@ -867,7 +862,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('HMAC: drop_db with correct hmac + cascade succeeds', async () => {
       const victim = await setupDb(client!, 'hmac_ok_db', []);
       const resp = br(await Batch.create('drop-db-ok')
-        .add('d', dropDb(client!, victim, { cascade: true }))
+        .add('d', ddl.dropDb(client!, victim, { cascade: true }))
         .execute(client!, 'default'));
       const row = resp.results.d.records[0] as Record<string, unknown>;
       expect(row.dropped).toBe(victim);
@@ -883,7 +878,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('tx: transactional insert + read returns committed data', async () => {
       const ins = br(await Batch.create('tx-si-1-ins')
-        .add('ins', insert('items', [{ name: 'widget', qty: 10 }]))
+        .add('ins', write.insert('items', [{ name: 'widget', qty: 10 }]))
         .transactional()
         .execute(client!, txDb));
       expect(ins.transaction).toBeDefined();
@@ -903,8 +898,8 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('tx: cross-table insert is atomic', async () => {
       const resp = br(await Batch.create('tx-cross-table')
-        .add('ins_items', insert('items', [{ name: 'cross-item' }]))
-        .add('ins_logs', insert('logs', [{ event: 'item_created' }]))
+        .add('ins_items', write.insert('items', [{ name: 'cross-item' }]))
+        .add('ins_logs', write.insert('logs', [{ event: 'item_created' }]))
         .transactional()
         .execute(client!, txDb));
       expect(resp.transaction!.status).toBe('committed');
@@ -914,7 +909,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('tx: isolation serializable accepted', async () => {
       const resp = br(await Batch.create('tx-ssi')
-        .add('ins', insert('items', [{ name: 'ssi-item' }]))
+        .add('ins', write.insert('items', [{ name: 'ssi-item' }]))
         .transactional('serializable')
         .execute(client!, txDb));
       expect(resp.transaction!.status).toBe('committed');
@@ -922,7 +917,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     it('tx: non-tx insert works alongside tx infra', async () => {
       const resp = br(await Batch.create('non-tx')
-        .add('ins', insert('items', [{ name: 'plain-item' }]))
+        .add('ins', write.insert('items', [{ name: 'plain-item' }]))
         .execute(client!, txDb));
       expect(!resp.transaction || resp.transaction === undefined).toBe(true);
       expect(resp.results.ins.records.length).toBeGreaterThanOrEqual(1);
@@ -948,7 +943,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         const insResp = await client!.txExecute(
           itxDb,
           opened.tx_handle,
-          Batch.create('itx-ins').add('i', insert('acct', [{ id: 'a', bal: 100 }])).build(),
+          Batch.create('itx-ins').add('i', write.insert('acct', [{ id: 'a', bal: 100 }])).build(),
         );
         // Per-call response carries no commit outcome yet (tx still open).
         expect(insResp.transaction === undefined || insResp.transaction === null).toBe(true);
@@ -977,7 +972,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         await client!.txExecute(
           itxDb,
           opened.tx_handle,
-          Batch.create('itx-roll-ins').add('i', insert('acct', [{ id: 'ghost', bal: 1 }])).build(),
+          Batch.create('itx-roll-ins').add('i', write.insert('acct', [{ id: 'ghost', bal: 1 }])).build(),
         );
         await client!.txRollback(itxDb, opened.tx_handle);
         done = true;

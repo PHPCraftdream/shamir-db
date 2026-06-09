@@ -205,3 +205,34 @@ export function grantRole(role: string, user: string): GrantRoleOp {
 export function revokeRole(role: string, user: string): RevokeRoleOp {
   return { revoke_role: role, user };
 }
+
+/** Aggregate namespace — every admin constructor in one object. */
+export const admin = {
+  refDatabase,
+  refStore,
+  refTable,
+  refFunction,
+  refFunctionFolder,
+  refFunctionNamespace,
+  scopeGlobal,
+  scopeDatabase,
+  scopeRepo,
+  scopeTable,
+  groupName,
+  groupId,
+  chmod,
+  chown,
+  chgrp,
+  createGroup,
+  dropGroup,
+  addGroupMember,
+  removeGroupMember,
+  accessTree,
+  permission,
+  createUser,
+  dropUser,
+  createRole,
+  dropRole,
+  grantRole,
+  revokeRole,
+};

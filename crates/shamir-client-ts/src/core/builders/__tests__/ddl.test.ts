@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import * as ddl from '../ddl.js';
+import { ddl } from '../ddl.js';
 import {
   canonicalDropDb,
   canonicalDropRepo,
@@ -165,7 +165,7 @@ describe('createIndex', () => {
 // ── buffer config ops ───────────────────────────────────────────────
 
 describe('buffer config', () => {
-  const cfg: import('../../../types/ddl.js').BufferConfigDto = {
+  const cfg: import('../../types/ddl.js').BufferConfigDto = {
     max_bytes: 1024,
     max_entries: 100,
     flush_interval_ms: 5000,
