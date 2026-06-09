@@ -15,20 +15,17 @@
 
 ## 1. Durability: `buffered` (дефолт) и `synced`
 
-Поле `durability` на уровне батча:
+`durability` задаётся на уровне батча через `.durability('synced')`:
 
-```json
-{
-  "id": "safe-write",
-  "durability": "synced",
-  "queries": {
-    "p": {
-      "set": "orders",
-      "key": { "id": "ORD-1" },
-      "value": { "id": "ORD-1", "amount": 9990, "status": "new" }
-    }
-  }
-}
+```ts
+import { write } from '@shamir/client';
+
+const db = client.db('default');
+
+await db.batch()
+  .add('p', write.upsert('orders', { id: 'ORD-1' }, { id: 'ORD-1', amount: 9990, status: 'new' }))
+  .durability('synced')
+  .run();
 ```
 
 || Уровень | Что происходит | Переживает |
@@ -49,42 +46,24 @@
 
 ## 2. Транзакционные батчи
 
-Флаг `transactional: true` оборачивает весь батч в MVCC-транзакцию.
+`.transactional()` оборачивает весь батч в MVCC-транзакцию.
 Все операции видят консистентный срез (snapshot) данных, коммит — атомарный.
 
 ### Snapshot Isolation (SI)
 
-```json
-{
-  "id": "tx-si",
-  "transactional": true,
-  "queries": {
-    "ins": {
-      "insert_into": "items",
-      "values": [{ "name": "widget", "qty": 10 }]
-    }
-  }
-}
-```
+```ts
+import { write } from '@shamir/client';
 
-Ответ содержит блок `transaction`:
+const db = client.db('default');
 
-```json
-{
-  "id": "tx-si",
-  "results": {
-    "ins": { "records": [{ "name": "widget", "qty": 10 }] }
-  },
-  "execution_plan": [["ins"]],
-  "execution_time_us": 340,
-  "transaction": {
-    "tx_id": 1,
-    "status": "committed",
-    "snapshot_version": 100,
-    "commit_version": 101,
-    "materialized": true
-  }
-}
+const resp = await db.batch()
+  .add('ins', write.insert('items', [{ name: 'widget', qty: 10 }]))
+  .transactional()
+  .run();
+
+resp.transaction?.status;          // 'committed'
+resp.transaction?.tx_id;           // number
+resp.transaction?.commit_version;  // number
 ```
 
 `materialized: true` — проекции (data-store, индексы) успели
@@ -93,21 +72,14 @@
 
 ### Кросс-таблицная атомарность
 
-```json
-{
-  "id": "tx-cross",
-  "transactional": true,
-  "queries": {
-    "ins_items": {
-      "insert_into": "items",
-      "values": [{ "name": "cross-item" }]
-    },
-    "ins_logs": {
-      "insert_into": "logs",
-      "values": [{ "event": "item_created" }]
-    }
-  }
-}
+```ts
+const resp = await db.batch()
+  .add('ins_items', write.insert('items', [{ name: 'cross-item' }]))
+  .add('ins_logs',  write.insert('logs',  [{ event: 'item_created' }]))
+  .transactional()
+  .run();
+
+resp.transaction?.status; // 'committed'
 ```
 
 Обе таблицы — один репозиторий → одна транзакция. Либо обе вставки
@@ -115,45 +87,36 @@
 
 ### Serializable Snapshot Isolation (SSI)
 
-```json
-{
-  "id": "tx-ssi",
-  "transactional": true,
-  "isolation": "serializable",
-  "queries": {
-    "ins": {
-      "insert_into": "items",
-      "values": [{ "name": "ssi-item" }]
-    }
-  }
-}
+```ts
+const resp = await db.batch()
+  .add('ins', write.insert('items', [{ name: 'ssi-item' }]))
+  .transactional('serializable')
+  .run();
+
+resp.transaction?.status; // 'committed'
 ```
 
-`"isolation": "snapshot"` — дефолт (SI). `"serializable"` добавляет
+`transactional()` — дефолт (SI). `transactional('serializable')` добавляет
 валидацию read-set'а на коммите: если конкурентная транзакция успела
 изменить данные, которые ты читал, — твой коммит abort с причиной
 `"tx_conflict"`.
 
 ## 3. Нетранзакционные батчи — по-прежнему работают
 
-Без `transactional` (или `transactional: false`) — автокоммит каждой
-операции. Блок `transaction` в ответе отсутствует:
+Без `.transactional()` — автокоммит каждой операции. Поле `transaction`
+в ответе отсутствует:
 
-```json
-{
-  "id": "non-tx",
-  "queries": {
-    "ins": {
-      "insert_into": "items",
-      "values": [{ "name": "plain-item" }]
-    }
-  }
-}
+```ts
+const resp = await db.batch()
+  .add('ins', write.insert('items', [{ name: 'plain-item' }]))
+  .run();
+
+resp.transaction; // undefined
 ```
 
 ## 4. Деструктивные операции и HMAC-gate
 
-`drop_table`, `drop_db`, `drop_index`, `drop_user`, `drop_role` —
+`dropTable`, `dropDb`, `dropIndex`, `dropUser`, `dropRole` —
 деструктивные операции. Они требуют **HMAC-тег** — не для аутентификации
 (транспорт уже TLS 1.3 + SCRAM), а как подтверждение намерения:
 «ты точно уверен?».
@@ -165,25 +128,28 @@
    `drop_table\0<db>\0<repo>\0<table>`.
 3. HMAC-SHA256 → hex-тег → поле `"hmac"` в операции.
 
-Клиентская библиотека скрывает механику — вызови helpers:
+TS-клиент скрывает механику — передай подключённый `client` как `signer`:
 
-```javascript
-// JS (napi helper)
-const hmac = require('./helpers/hmac');
+```ts
+import { ddl, Batch } from '@shamir/client';
 
-await client.execute(db, {
-  id: 1,
-  queries: { d: hmac.drop_table_op(client, db, 'main', 'items') },
-});
+// ddl.dropTable(signer, dbInUse, repo, table)
+const resp = await Batch.create('drop')
+  .add('d', ddl.dropTable(client, 'default', 'main', 'old_table'))
+  .execute(client, 'default');
+
+// Или через bound-handle:
+const qr = await db.dropTable('main', 'old_table');
+qr.records[0]; // { dropped_table: 'old_table', existed: true }
 ```
 
 ### Три состояния
 
-|| Запрос | Результат |
-|---|---|---|
-| HMAC отсутствует | `{ "drop_table": "items", "repo": "main" }` | ошибка `hmac_required` |
-| HMAC неверный | `{ "drop_table": "items", "repo": "main", "hmac": "aa…aa" }` | ошибка `hmac_mismatch` |
-| HMAC верный | сгенерирован helper'ом | успех, `records: [{ dropped_table: "items", existed: true }]` |
+| Запрос | Результат |
+|---|---|
+| Без HMAC | ошибка `hmac_required` |
+| HMAC неверный | ошибка `hmac_mismatch` |
+| HMAC верный (через `ddl.*` / `db.dropTable(...)`) | успех, `records: [{ dropped_table: "...", existed: true }]` |
 
 **Без hmac-тега** работают: все read-операции, `create_table`, `create_db`,
 `create_index`. HMAC — только для `drop_*`.

@@ -23,21 +23,26 @@ shamir-server --config db.ktav --bootstrap-password "change-me-admin"
 
 ## 2. Подключись клиентом
 
-Высокоуровневый клиент сам проводит TLS 1.3 + SCRAM-Argon2id:
+Установи пакет и подключись — клиент сам проводит TLS 1.3 + SCRAM-Argon2id:
 
-```rust
-use shamir_client::{BatchRequest, Client, ConnectOptions};
-use zeroize::Zeroizing;
+```bash
+npm i @shamir/client
+```
 
-let client = Client::connect(ConnectOptions {
-    addr: "127.0.0.1:7000".parse()?,
-    server_name: "localhost".into(),       // совпадает с self-signed сертом
-    username: "admin".into(),
-    password: Zeroizing::new(b"change-me-admin".to_vec()),
-    accept_new_host: true,                  // trust-on-first-use; пин сохрани для следующих коннектов
-    trusted_pin: None,
-})
-.await?;
+```ts
+import { connect, filter, write, ddl } from '@shamir/client';
+
+const client = await connect({
+  host: '127.0.0.1',
+  port: 13760,
+  username: 'admin',
+  password: 'change-me-admin',
+  tls: { rejectUnauthorized: false }, // self-signed cert
+  origin: 'https://127.0.0.1',
+});
+
+// Получаем bound-handle на нужную базу — дальше используем его
+const db = client.db('default');
 ```
 
 ## 3. Создай таблицу в хранилище по умолчанию
@@ -45,48 +50,23 @@ let client = Client::connect(ConnectOptions {
 Хранилище `default` и репозиторий `main` **уже существуют** (durable, созданы
 на старте) — отдельно их заводить не нужно. Создаём только таблицу:
 
-```rust
-let mk: BatchRequest = serde_json::from_value(json!({
-    "id": "mk",
-    "queries": {
-        "t": { "create_table": "kv", "repo": "main" }
-    }
-}))?;
-client.execute("default", mk).await?;
+```ts
+await db.run(ddl.createTable('kv', { repo: 'main' }));
 ```
 
 ## 4. PUT / GET по ключу
 
-Запросы шлются **батчами** (можно несколько за один round-trip). `set` —
-upsert по ключу (PUT); `from` — чтение (GET).
+`write.upsert` — upsert по ключу (PUT); `db.query` — чтение (GET).
 
-```rust
+```ts
 // PUT
-let put: BatchRequest = serde_json::from_value(json!({
-    "id": "put",
-    "queries": {
-        "p": {
-            "set": "kv",
-            "key":   { "id": "user:42" },
-            "value": { "id": "user:42", "name": "Алиса", "score": 7 }
-        }
-    }
-}))?;
-client.execute("default", put).await?;
+await db.run(write.upsert('kv', { id: 'user:42' }, { id: 'user:42', name: 'Алиса', score: 7 }));
 
 // GET (по фильтру на ключ)
-let get: BatchRequest = serde_json::from_value(json!({
-    "id": "get",
-    "queries": {
-        "g": {
-            "from": "kv",
-            "where": { "op": "eq", "field": "id", "value": "user:42" }
-        }
-    }
-}))?;
-let resp = client.execute("default", get).await?;
-let rows = &resp.results["g"].records;
-assert_eq!(rows[0]["name"], "Алиса");
+const rows = await db.query('kv').where(filter.eq('id', 'user:42')).rows();
+console.log(rows[0].name); // 'Алиса'
+
+await client.close();
 ```
 
 Всё. Это рабочее, durable (переживает рестарт) KV-хранилище.
@@ -96,8 +76,8 @@ assert_eq!(rows[0]["name"], "Алиса");
 * **Записи — это документы** (вложенный JSON/MessagePack), не только плоские
   пары. Ключ — это поле(я), по которым ты адресуешь запись.
 * **`field` — это путь к полю.** Верхнее поле можно писать строкой —
-  `"field": "id"` — это эквивалент пути из одного сегмента `["id"]`. Для
-  вложенного документа указываешь путь массивом: `["address", "city"]` →
+  `filter.eq('id', …)` — это эквивалент пути из одного сегмента `['id']`. Для
+  вложенного документа указываешь путь массивом: `['address', 'city']` →
   `record.address.city`. Строка и одноэлементный массив — одно и то же.
 * **Durability по умолчанию — `buffered`**: подтверждение приходит быстро,
   данные доливаются на диск фоном за миллисекунды и гарантированно — на

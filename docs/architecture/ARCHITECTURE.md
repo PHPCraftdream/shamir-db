@@ -392,10 +392,10 @@ return Ok(None);  // Хеш совпал, но данные разные (кол
 
 ## arch-012-query-language
 
-Query Language (SDBQL - S.H.A.M.I.R. Database Query Language)
+Query Language (OQL — Object Query Language)
 
 **Design Philosophy:**
-- JSON-native: Queries are JSON objects
+- JSON-native: Queries are JSON objects (the wire shape)
 - Familiar: MongoDB-style find/update syntax
 - Index-aware: Query planner uses indexes automatically
 - Pipeline-based: Composable operations
@@ -428,19 +428,64 @@ the wire, and guest procedures all speak the identical DTOs (one language,
 one builder, three callers); a text "v2" would only parse back into these
 DTOs and would fracture that symmetry.
 
-**Query Types:**
+**Client-side query construction — use the TS builder:**
+
+Reads:
+
+```ts
+import { Query, filter, select } from '@shamir/client';
+
+// eq filter
+const db = client.db('my_app');
+const rows = await db.query('users').where(filter.eq('status', 'active')).rows();
+
+// Nested field path
+const rows2 = await db.query('users').where(filter.eq(['address', 'city'], 'NYC')).rows();
+
+// Aggregation
+const qr = await db.query('orders')
+  .select([select.countAll('n'), select.sum('amount', { alias: 'total' })])
+  .ex();
+```
+
+Writes:
+
+```ts
+import { write } from '@shamir/client';
+
+// insert
+await db.run(write.insert('users', [{ id: 'A1', name: 'Alice' }]));
+
+// update
+await db.run(write.update('users').where(filter.eq('id', 'A1')).set({ name: 'Alice V2' }));
+
+// upsert
+await db.run(write.upsert('users', { id: 'A1' }, { id: 'A1', name: 'Alice V3' }));
+
+// delete
+await db.run(write.del('users', filter.eq('id', 'A1')));
+```
 
 ### Special Value References
 
 SDBQL поддерживает специальные ссылки в значениях:
 
-| Ссылка | Описание | Пример |
-|--------|----------|--------|
-| `$query` | Ссылка на результат другого запроса | `{ "$query": "users[0].id" }` |
-| `$ref` | Ссылка на другое поле записи | `{ "$ref": "other_field" }` |
-| `$fn` | Системная функция | `{ "$fn": "NOW" }` |
-| `$expr` | Выражение (арифметика, строки) | `{ "$expr": { "op": "add", "args": [1, 2] } }` |
-| `$cond` | Условный оператор | `{ "$cond": { "if": {...}, "then": "a", "else": "b" } }` |
+| Ссылка | Описание | Builder |
+|--------|----------|---------|
+| `$query` | Ссылка на результат другого запроса | `filter.queryRef('@alias', '[0].id')` |
+| `$ref` | Ссылка на другое поле записи | `filter.ref(['address', 'city'])` |
+| `$fn` | Системная функция | wire form — no builder surface yet |
+| `$expr` | Выражение (арифметика, строки) | wire form — no builder surface yet |
+| `$cond` | Условный оператор | wire form — no builder surface yet |
+
+Wire shapes for `$fn`, `$expr`, `$cond` (wire form; clients build this via the query builder where available):
+
+```json
+{ "$fn": "NOW" }
+{ "$fn": { "name": "COALESCE", "args": [null, "default"] } }
+{ "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
+{ "$cond": { "if": { "op": "gte", "field": "score", "value": 100 }, "then": "vip", "else": "regular" } }
+```
 
 ### Системные функции ($fn)
 
@@ -452,26 +497,7 @@ SDBQL поддерживает специальные ссылки в значе
 - Хеширование: `MD5`, `SHA256`
 - Математика: `ABS`, `ROUND`, `FLOOR`, `CEIL`
 
-**Синтаксис:**
-```json
-// Без аргументов
-{ "$fn": "NOW" }
-{ "$fn": "UUID" }
-
-// С аргументами
-{ "$fn": { "name": "COALESCE", "args": [null, "default"] } }
-```
-
-**Использование:**
-```json
-// В WHERE
-{ "where": { "op": "lt", "field": "expires_at", "value": { "$fn": "NOW" } } }
-
-// В SET
-{ "set": { "created_at": { "$fn": "NOW" }, "token": { "$fn": "UUID" } } }
-```
-
-### Выражения ($expr)
+### Выражения ($expr) (wire form; clients build this via the query builder)
 
 Арифметические и строковые операции.
 
@@ -481,30 +507,18 @@ SDBQL поддерживает специальные ссылки в значе
 - Логика: `and`, `or`, `not`
 - Сравнение: `eq`, `ne`, `gt`, `gte`, `lt`, `lte`
 
-**Синтаксис:**
+**Синтаксис (wire form):**
 ```json
 { "$expr": { "op": "add", "args": [10, 20] } }
 { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } }
 { "$expr": { "op": "concat", "args": [{ "$ref": "first" }, " ", { "$ref": "last" }] } }
 ```
 
-**Использование:**
-```json
-// В SET
-{ "set": { "price": { "$expr": { "op": "mul", "args": [{ "$ref": "price" }, 1.1] } } } }
-
-// Вложенные выражения
-{ "set": { "total": { "$expr": { "op": "mul", "args": [
-  { "$expr": { "op": "add", "args": [{ "$ref": "a" }, { "$ref": "b" }] } },
-  2
-] } } } }
-```
-
-### Условия ($cond)
+### Условия ($cond) (wire form; clients build this via the query builder)
 
 Условный оператор (тернарный).
 
-**Синтаксис:**
+**Синтаксис (wire form):**
 ```json
 {
   "$cond": {
@@ -512,158 +526,6 @@ SDBQL поддерживает специальные ссылки в значе
     "then": "yes",
     "else": "no"
   }
-}
-```
-
-**Условие `if` использует существующий синтаксис Filter.**
-
-**Использование:**
-```json
-// Простой выбор
-{ "set": { "label": { "$cond": {
-  "if": { "op": "gte", "field": "score", "value": 100 },
-  "then": "vip",
-  "else": "regular"
-} } } }
-
-// С $expr в then/else
-{ "set": { "price": { "$cond": {
-  "if": { "op": "eq", "field": "is_vip", "value": true },
-  "then": { "$expr": { "op": "mul", "args": [{ "$ref": "base" }, 0.9] } },
-  "else": { "$ref": "base" }
-} } } }
-
-// Вложенные $cond
-{ "set": { "tier": { "$cond": {
-  "if": { "op": "gte", "field": "score", "value": 1000 },
-  "then": "platinum",
-  "else": { "$cond": {
-    "if": { "op": "gte", "field": "score", "value": 500 },
-    "then": "gold",
-    "else": "silver"
-  } }
-} } } }
-```
-
-### Data Query Commands
-
-```json
-// FIND - Query records with filter
-{
-  "find": {
-    "from": "users",
-    "where": { "name": "Alice" },
-    "select": ["name", "email"],
-    "limit": 10,
-    "offset": 0,
-    "sort": { "name": 1 }
-  }
-}
-
-// FIND ONE - Single record
-{
-  "findOne": {
-    "from": "users",
-    "where": { "_id": "record_id" }
-  }
-}
-
-// INSERT - Create new record
-{
-  "insert": {
-    "into": "users",
-    "data": { "name": "Alice", "email": "alice@example.com" }
-  }
-}
-
-// INSERT MANY - Bulk insert
-{
-  "insertMany": {
-    "into": "users",
-    "data": [
-      { "name": "Alice" },
-      { "name": "Bob" }
-    ]
-  }
-}
-
-// UPDATE - Modify records
-{
-  "update": {
-    "in": "users",
-    "where": { "status": "active" },
-    "set": { "last_login": "2024-01-15" },
-    "inc": { "login_count": 1 }
-  }
-}
-
-// DELETE - Remove records
-{
-  "delete": {
-    "from": "users",
-    "where": { "status": "inactive" }
-  }
-}
-
-// COUNT - Count records
-{
-  "count": {
-    "from": "users",
-    "where": { "status": "active" }
-  }
-}
-```
-
-### Filter Operators
-
-```json
-{
-  "where": {
-    "age": { "$gt": 18 },
-    "name": { "$like": "A%" },
-    "status": { "$in": ["active", "pending"] },
-    "email": { "$ne": null },
-    "tags": { "$contains": "admin" },
-    "$and": [
-      { "age": { "$gte": 18 } },
-      { "age": { "$lte": 65 } }
-    ],
-    "$or": [
-      { "role": "admin" },
-      { "role": "moderator" }
-    ]
-  }
-}
-```
-
-**Supported Operators:**
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `$eq` | Equal | `{ "status": { "$eq": "active" } }` |
-| `$ne` | Not equal | `{ "status": { "$ne": "deleted" } }` |
-| `$gt` | Greater than | `{ "age": { "$gt": 18 } }` |
-| `$gte` | Greater or equal | `{ "age": { "$gte": 18 } }` |
-| `$lt` | Less than | `{ "age": { "$lt": 65 } }` |
-| `$lte` | Less or equal | `{ "age": { "$lte": 65 } }` |
-| `$in` | In array | `{ "status": { "$in": ["a", "b"] } }` |
-| `$nin` | Not in array | `{ "status": { "$nin": ["a", "b"] } }` |
-| `$like` | Pattern match | `{ "name": { "$like": "A%" } }` |
-| `$contains` | Array contains | `{ "tags": { "$contains": "admin" } }` |
-| `$exists` | Field exists | `{ "email": { "$exists": true } }` |
-| `$and` | Logical AND | `{ "$and": [...] }` |
-| `$or` | Logical OR | `{ "$or": [...] }` |
-| `$not` | Logical NOT | `{ "$not": { "status": "deleted" } }` |
-
-### Update Operators
-
-```json
-{
-  "set": { "name": "New Name" },       // Set field
-  "unset": ["temp_field"],              // Remove field
-  "inc": { "count": 1 },                // Increment number
-  "push": { "tags": "new_tag" },        // Add to array
-  "pull": { "tags": "old_tag" },        // Remove from array
-  "rename": { "old_name": "new_name" }  // Rename field
 }
 ```
 
@@ -680,10 +542,10 @@ Query Planner - Index-Aware Query Execution
 4. Select optimal index (or full scan)
 5. Generate execution plan
 
-**Index Selection Strategy:**
+**Index Selection Strategy (wire form; clients build this via the query builder):**
 
 ```
-Query: { "where": { "email": "alice@example.com" } }
+Query: filter.eq('email', 'alice@example.com')
 Available Indexes: ["by_email" (unique), "by_name" (regular)]
 
 Plan:
@@ -695,7 +557,7 @@ Plan:
 **Composite Index Usage:**
 
 ```
-Query: { "where": { "status": "active", "department": "engineering" } }
+Query: filter.and([filter.eq('status', 'active'), filter.eq('department', 'engineering')])
 Available Indexes: ["by_status_dept" (composite: status, department)]
 
 Plan:
@@ -707,7 +569,7 @@ Plan:
 **Full Scan Fallback:**
 
 ```
-Query: { "where": { "temp_field": "value" } }
+Query: filter.eq('temp_field', 'value')
 No index on "temp_field"
 
 Plan:
@@ -745,50 +607,40 @@ Authentication System
 
 **Authentication Methods:**
 
-### 1. Password Authentication
-```json
-{
-  "auth": {
-    "method": "password",
-    "username": "admin",
-    "password": "secure_hash"
-  }
-}
+### 1. SCRAM-Argon2id (primary — used by TS/Rust clients)
+
+The `connect()` call performs the full SCRAM-Argon2id handshake:
+
+```ts
+import { connect } from '@shamir/client';
+
+const client = await connect({
+  host: '127.0.0.1',
+  port: 13760,
+  username: 'admin',
+  password: 'correct horse battery staple',
+  tls: { rejectUnauthorized: false },
+  origin: 'https://127.0.0.1',
+});
 ```
 
-### 2. Token Authentication
+The raw wire shapes below document the handshake protocol (wire form; clients build this via `connect()`):
+
 ```json
-{
-  "auth": {
-    "method": "token",
-    "token": "eyJhbGciOiJIUzI1NiIs..."
-  }
-}
+{ "op": "auth_init", "username": "admin", "client_nonce": "<bytes>" }
 ```
 
-### 3. API Key Authentication
 ```json
-{
-  "auth": {
-    "method": "api_key",
-    "key": "sk_live_xxx"
-  }
-}
+{ "op": "auth_finish", "client_proof": "<bytes>" }
 ```
 
-**Session Management:**
+### 2. User provisioning
 
-```json
-// Login
-{ "login": { "username": "admin", "password": "***" } }
-// Response
-{ "token": "xxx", "expires_at": "2024-01-16T00:00:00Z" }
-
-// Logout
-{ "logout": {} }
-
-// Refresh token
-{ "refreshToken": {} }
+```ts
+// Create a new login-capable user
+const created = await client.createScramUser('bob', 'password', ['reader']);
+created.name;    // 'bob'
+created.user_id; // Uint8Array(16)
 ```
 
 **Password Storage:**
@@ -799,13 +651,12 @@ Authentication System
 **System Users:**
 | Username | Role | Description |
 |----------|------|-------------|
-| `root` | superuser | Created on first init |
+| `admin` | superuser | Created on bootstrap |
 | `system` | system | Internal operations |
-| `public` | anonymous | Unauthenticated access |
 
 ## arch-015-authorization
 
-Authorization (RBAC - Role-Based Access Control)
+Authorization (POSIX-style DAC + RBAC)
 
 **Permission Model:**
 
@@ -814,72 +665,60 @@ User -> Role -> Permission -> Resource
 ```
 
 **Resource Types:**
-- `server` - Server-level operations
 - `database` - Database-level operations
-- `store` - Store-level operations
+- `store` (repo) - Repo-level operations
 - `table` - Table-level operations
-- `index` - Index-level operations
+- `function` - Function-level operations
 
 **Permission Actions:**
 | Action | Description |
 |--------|-------------|
-| `create` | Create new resource |
 | `read` | Read/query data |
+| `insert` | Insert data |
 | `update` | Modify data |
 | `delete` | Delete data |
-| `manage` | Full control (includes all above) |
-| `grant` | Grant permissions to others |
-| `revoke` | Revoke permissions |
+| `create` | Create new resource |
+| `drop` | Drop resource |
+| `alter` | Alter resource |
+| `manage_users` | Manage users |
+| `manage_roles` | Manage roles |
+| `all` | All of the above |
 
-**Predefined Roles:**
+**RBAC via the builder:**
 
-| Role | Permissions |
-|------|-------------|
-| `superuser` | Full access to everything |
-| `admin` | Manage databases, users, roles |
-| `db_owner` | Full access to specific database |
-| `read_write` | Read and write data |
-| `read_only` | Read data only |
-| `public` | Minimal access |
+```ts
+import { admin, Batch } from '@shamir/client';
 
-**Permission Commands:**
-
-```json
 // Create role
-{
-  "createRole": {
-    "name": "analyst",
-    "permissions": [
-      { "resource": "database:analytics", "action": "read" },
-      { "resource": "table:analytics.*", "action": "read" }
-    ]
-  }
-}
+await Batch.create('mk-role')
+  .add('r', admin.createRole('analyst', [
+    admin.permission('allow', ['read'], admin.scopeDatabase('analytics')),
+  ]))
+  .execute(client, 'default');
 
 // Grant role to user
-{
-  "grantRole": {
-    "user": "john",
-    "role": "analyst"
-  }
-}
+await Batch.create('grant')
+  .add('g', admin.grantRole('analyst', 'alice'))
+  .execute(client, 'default');
 
 // Revoke role from user
-{
-  "revokeRole": {
-    "user": "john",
-    "role": "analyst"
-  }
-}
+await Batch.create('revoke')
+  .add('r', admin.revokeRole('analyst', 'alice'))
+  .execute(client, 'default');
+```
 
-// Check permission
-{
-  "checkPermission": {
-    "user": "john",
-    "resource": "table:analytics.users",
-    "action": "read"
-  }
-}
+**ACL (chmod/chown/chgrp) via the builder:**
+
+```ts
+// chmod
+await Batch.create('chmod')
+  .add('cm', admin.chmod(admin.refTable('mydb', 'main', 'secret'), 0o700))
+  .execute(client, 'mydb');
+
+// chown
+await Batch.create('chown')
+  .add('co', admin.chown(admin.refDatabase('mydb'), userId))
+  .execute(client, 'default');
 ```
 
 **Permission Resolution:**
@@ -892,216 +731,103 @@ User -> Role -> Permission -> Resource
 
 Administration Commands
 
-### Server Management
-
-```json
-// Server status
-{ "serverStatus": {} }
-
-// Server configuration
-{ "serverConfig": { "get": "max_connections" } }
-{ "serverConfig": { "set": { "max_connections": 100 } } }
-
-// Shutdown server
-{ "shutdown": { "delay": 5000 } }
-```
-
 ### Database Management
 
-```json
+```ts
+import { ddl, Batch } from '@shamir/client';
+
 // Create database
-{
-  "createDatabase": {
-    "name": "mydb",
-    "options": {
-      "backend": "sled",
-      "path": "./data/mydb"
-    }
-  }
-}
+await Batch.create('create-db')
+  .add('mk', ddl.createDb('mydb'))
+  .execute(client, 'default');
 
-// Drop database
-{
-  "dropDatabase": {
-    "name": "mydb",
-    "confirm": true
-  }
-}
-
-// Rename database
-{
-  "renameDatabase": {
-    "from": "old_name",
-    "to": "new_name"
-  }
-}
+// Drop database (HMAC-gated)
+await Batch.create('drop-db')
+  .add('d', ddl.dropDb(client, 'mydb', { cascade: true }))
+  .execute(client, 'default');
 
 // List databases
-{ "listDatabases": {} }
-
-// Use database (switch context)
-{ "use": "mydb" }
+const resp = await Batch.create('list-dbs')
+  .add('l', ddl.listDatabases())
+  .execute(client, 'default');
+resp.results.l.records[0].databases; // string[]
 ```
 
-### Store Management
+### Repo Management
 
-```json
-// Create store
-{
-  "createStore": {
-    "name": "users",
-    "database": "mydb"
-  }
-}
+```ts
+const db = client.db('mydb');
 
-// Drop store
-{
-  "dropStore": {
-    "name": "users",
-    "database": "mydb"
-  }
-}
+// Create repo
+await db.run(ddl.createRepo('cold'));
 
-// Rename store
-{
-  "renameStore": {
-    "database": "mydb",
-    "from": "old_name",
-    "to": "new_name"
-  }
-}
+// Drop repo (HMAC-gated, via handle)
+await db.dropRepo('cold', { cascade: true });
 
-// List stores
-{ "listStores": { "database": "mydb" } }
+// List repos
+const resp = await Batch.create('list-repos')
+  .add('l', ddl.listRepos())
+  .execute(client, 'mydb');
+resp.results.l.records[0].repos; // string[]
 ```
 
 ### Table Management
 
-```json
+```ts
 // Create table
-{
-  "createTable": {
-    "name": "users",
-    "store": "default",
-    "schema": {
-      "name": { "type": "string", "required": true },
-      "email": { "type": "string", "unique": true },
-      "age": { "type": "integer", "min": 0 }
-    }
-  }
-}
+await db.run(ddl.createTable('users', { repo: 'main' }));
 
-// Drop table
-{
-  "dropTable": {
-    "name": "users",
-    "confirm": true
-  }
-}
-
-// Rename table
-{
-  "renameTable": {
-    "from": "old_name",
-    "to": "new_name"
-  }
-}
-
-// Truncate table (delete all records)
-{
-  "truncateTable": {
-    "name": "users"
-  }
-}
+// Drop table (HMAC-gated, via handle)
+const qr = await db.dropTable('main', 'users');
+qr.records[0]; // { dropped_table: 'users', existed: true }
 
 // List tables
-{ "listTables": {} }
-
-// Table info
-{ "tableInfo": { "name": "users" } }
+const resp = await Batch.create('list-tables')
+  .add('l', ddl.listTables({ repo: 'main' }))
+  .execute(client, 'mydb');
+resp.results.l.records[0].tables; // string[]
 ```
 
 ### Index Management
 
-```json
+```ts
 // Create index
-{
-  "createIndex": {
-    "table": "users",
-    "name": "by_email",
-    "fields": ["email"],
-    "unique": true
-  }
-}
-
-// Create composite index
-{
-  "createIndex": {
-    "table": "orders",
-    "name": "by_user_date",
-    "fields": ["user_id", "created_at"],
-    "unique": false
-  }
-}
-
-// Drop index
-{
-  "dropIndex": {
-    "table": "users",
-    "name": "by_email"
-  }
-}
-
-// Rebuild index
-{
-  "rebuildIndex": {
-    "table": "users",
-    "name": "by_email"
-  }
-}
+await Batch.create('mk-idx')
+  .add('i', ddl.createIndex('by_email', 'users', [['email']], { unique: true }))
+  .execute(client, 'mydb');
 
 // List indexes
-{ "listIndexes": { "table": "users" } }
+const resp = await Batch.create('list-idx')
+  .add('l', ddl.listIndexes('users', { repo: 'main' }))
+  .execute(client, 'mydb');
+resp.results.l.records[0].indexes; // Array<{ name: string }>
+
+// Drop index (HMAC-gated)
+await Batch.create('drop-idx')
+  .add('d', ddl.dropIndex(client, 'mydb', 'main', 'users', 'by_email'))
+  .execute(client, 'mydb');
 ```
 
 ### User Management
 
-```json
+```ts
 // Create user
-{
-  "createUser": {
-    "username": "john",
-    "password": "***",
-    "roles": ["read_write"]
-  }
-}
+const user = await client.createScramUser('john', 'password', ['read_write']);
 
-// Drop user
-{
-  "dropUser": {
-    "username": "john"
-  }
-}
-
-// Update user password
-{
-  "updatePassword": {
-    "username": "john",
-    "oldPassword": "***",
-    "newPassword": "***"
-  }
-}
+// Drop user (HMAC-gated)
+await Batch.create('drop-user')
+  .add('d', admin.dropUser(client, 'john'))
+  .execute(client, 'default');
 
 // List users
-{ "listUsers": {} }
-
-// User info
-{ "userInfo": { "username": "john" } }
+const resp = await Batch.create('list-users')
+  .add('u', ddl.listUsers())
+  .execute(client, 'default');
 ```
 
 ## arch-017-transaction-manager
 
-Transaction Manager (Future)
+Transaction Manager
 
 **Purpose:** Atomic multi-operation transactions.
 
@@ -1111,68 +837,122 @@ Transaction Manager (Future)
 - Isolation: Concurrent transactions don't interfere
 - Durability: Committed transactions survive crashes
 
-**Transaction Commands:**
+**Single-batch transactions via the builder:**
+
+```ts
+import { write, Batch } from '@shamir/client';
+
+const db = client.db('my_app');
+
+// Auto-commit batch transaction (Snapshot Isolation)
+const resp = await db.batch()
+  .add('ins', write.insert('items', [{ name: 'widget' }]))
+  .transactional()
+  .run();
+
+resp.transaction?.status;         // 'committed'
+resp.transaction?.tx_id;          // number
+resp.transaction?.commit_version; // number
+
+// Serializable
+const resp2 = await db.batch()
+  .add('ins', write.insert('items', [{ name: 'ssi-item' }]))
+  .transactional('serializable')
+  .run();
+```
+
+**Auto-managed multi-op transactions:**
+
+```ts
+await db.tx(async (t) => {
+  await t.run(write.insert('acct', [{ id: 'a', bal: 100 }]));
+  await t.run(write.update('acct').where(filter.eq('id', 'a')).set({ bal: 90 }));
+  const rows = await t.query('acct').rows();   // reads inside the tx
+});
+// committed automatically; on any throw → rolled back + error rethrown
+```
+
+**Interactive (multi-call) transactions:**
+
+```ts
+// Begin transaction
+const opened = await client.txBegin('my_app', 'main');
+// opened.tx_handle, opened.snapshot_version, opened.isolation
+
+// Execute a batch inside the open transaction
+await client.txExecute(
+  'my_app',
+  opened.tx_handle,
+  Batch.create('ins').add('i', write.insert('items', [{ id: 'a', bal: 100 }])).build(),
+);
+
+// Commit
+const info = await client.txCommit('my_app', opened.tx_handle);
+// info.status === 'committed', info.commit_version
+
+// — or abort:
+// await client.txRollback('my_app', opened.tx_handle);
+```
+
+Wire form for raw transaction protocol (wire form; clients build this via the builder):
 
 ```json
-// Begin transaction
-{ "begin": {} }
-// Response: { "transaction_id": "tx_123" }
-
-// Execute in transaction
-{ "execute": { "tx": "tx_123", "query": { ... } } }
-
-// Commit transaction
-{ "commit": { "tx": "tx_123" } }
-
-// Rollback transaction
-{ "rollback": { "tx": "tx_123" } }
+{ "op": "tx_begin",   "db": "my_app", "repo": "main" }
+{ "op": "tx_execute", "tx_handle": 1, "batch": { "…": "…" } }
+{ "op": "tx_commit",  "tx_handle": 1 }
+{ "op": "tx_rollback","tx_handle": 1 }
 ```
 
 **Isolation Levels:**
 | Level | Description |
 |-------|-------------|
-| `read_uncommitted` | Can read uncommitted changes |
-| `read_committed` | Only committed data visible |
-| `repeatable_read` | Consistent reads within transaction |
-| `serializable` | Full isolation |
-
-**Implementation Status:** NOT IMPLEMENTED
-- Storage backends have their own transaction support
-- S.H.A.M.I.R. layer will provide unified API
-- Priority: After Query Planner
+| `snapshot` | Consistent reads within transaction (default) |
+| `serializable` | Full isolation — aborts on read-write conflict |
 
 ## arch-018-network-layer
 
-Network Layer (Future)
+Network Layer
 
 **Supported Protocols:**
 
 ### 1. TCP (Binary Protocol)
 - MessagePack-framed messages
-- Connection pooling
-- TLS support
+- TLS 1.3 (SCRAM-Argon2id auth)
 
-### 2. HTTP/REST
-- JSON API
-- WebSocket for real-time
-- OpenAPI documentation
+### 2. WebSocket
+- MessagePack frames over WSS
+- Browser-compatible (native WebSocket)
+- TLS 1.3 (SCRAM-Argon2id auth)
 
-### 3. gRPC (Optional)
-- Protocol Buffers
-- Streaming support
+**Connection via TS client:**
 
-**Connection Command:**
+```ts
+import { connect } from '@shamir/client';
+
+// Node.js (TCP or WS)
+const client = await connect({
+  host: '127.0.0.1',
+  port: 13760,
+  username: 'admin',
+  password: 'correct horse battery staple',
+  tls: { rejectUnauthorized: false },
+  origin: 'https://127.0.0.1',
+});
+
+// Browser
+import { connect } from '@shamir/client/browser';
+const client = await connect({
+  host: 'db.example.com',
+  port: 443,
+  username: 'reader',
+  password: 's3cret',
+});
+```
+
+Wire envelope shapes (wire form; clients build this via `connect()` + builder):
 
 ```
-# TCP
-shamir-cli connect --host localhost --port 7331
-
-# HTTP
-curl http://localhost:7331/api/v1/query \
-  -H "Authorization: Bearer xxx" \
-  -d '{"find": {"from": "users"}}'
+Request:  { "sid": bytes(32), "rid": Optional<u32>, "req": <opaque> }
+Response: { "rid": Optional<u32>, "res": <opaque> }
+Error:    { "rid": Optional<u32>, "error": String }
 ```
-
-**Implementation Status:** NOT IMPLEMENTED
-- Priority: After Query Language
-- Required for production use

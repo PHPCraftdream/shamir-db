@@ -5,230 +5,210 @@
 KV-хранилище с этажа 0 — уже работает. Но данные растут: нужны выборки
 по полям, диапазоны, сортировка, индексы. Этот этаж — именно об этом.
 
-Примеры ниже — JSON, который ты отправляешь в `queries` батча (так же,
-как на этаже 0). Мы продолжаем пользоваться `client.execute("default", batch)`.
+Примеры ниже используют TS-клиент `@shamir/client`. Подключение — как
+на этаже 0: `const db = client.db('default')`.
 
 ## 1. Фильтры: `where`
 
-Каждый `from`-запрос принимает необязательный `where` — фильтр в виде
-JSON-объекта с полем `op`. Вот основные операции.
+Каждый `db.query(table)` принимает необязательный `.where(filter.*)` —
+фильтр, построенный через билдер. Вот основные операции.
 
 ### Сравнения
 
-```json
-{ "from": "users",
-  "where": { "op": "eq", "field": "status", "value": "active" } }
+```ts
+import { filter } from '@shamir/client';
+
+// равно
+const rows = await db.query('users').where(filter.eq('status', 'active')).rows();
 ```
 
-| `op` | Смысл | Пример значения |
+| Метод | Смысл | Пример |
 |---|---|---|
-| `eq` | равно | `"active"`, `42`, `true`, `null` |
-| `ne` | не равно | `"inactive"` |
-| `gt` | больше | `18` |
-| `gte` | больше или равно | `50000` |
-| `lt` | меньше | `65` |
-| `lte` | меньше или равно | `100` |
+| `filter.eq(f, v)` | равно | `filter.eq('status', 'active')` |
+| `filter.ne(f, v)` | не равно | `filter.ne('status', 'inactive')` |
+| `filter.gt(f, v)` | больше | `filter.gt('age', 18)` |
+| `filter.gte(f, v)` | больше или равно | `filter.gte('salary', 50000)` |
+| `filter.lt(f, v)` | меньше | `filter.lt('age', 65)` |
+| `filter.lte(f, v)` | меньше или равно | `filter.lte('score', 100)` |
 
-Значение (`value`) — строка, число, булев или `null` — Shamir сам
-приведёт тип.
+Значение — строка, число, булев или `null` — Shamir сам приведёт тип.
 
 ### Проверка на null / существование поля
 
-```json
-{ "op": "is_null",     "field": "deleted_at" }
-{ "op": "is_not_null", "field": "email" }
+```ts
+// поле отсутствует или равно null
+db.query('users').where(filter.isNull('deleted_at'))
+
+// поле присутствует и не null
+db.query('users').where(filter.isNotNull('email'))
 ```
 
-`is_null` — поле отсутствует или равно `null`. `is_not_null` — поле
+`filter.isNull` — поле отсутствует или равно `null`. `filter.isNotNull` — поле
 присутствует и не null.
 
-### `in` / `not_in` — список значений
+### `in_` / `notIn` — список значений
 
-```json
-{ "op": "in",     "field": "status", "values": ["active", "pending"] }
-{ "op": "not_in", "field": "status", "values": ["banned"] }
+```ts
+// поле входит в список
+db.query('users').where(filter.in_('status', ['active', 'pending']))
+
+// поле не входит в список
+db.query('users').where(filter.notIn('status', ['banned']))
 ```
-
-Обрати внимание: ключ — `values` (массив), а не `value`.
 
 ### `between` — диапазон включительно с обоих концов
 
-```json
-{ "op": "between", "field": "age", "from": 25, "to": 35 }
+```ts
+db.query('users').where(filter.between('age', 25, 35))
 ```
 
 Эквивалентно `age >= 25 AND age <= 35`. Обе границы включительны.
 
-### `like` — шаблон строки
+### `like` / `ilike` — шаблон строки
 
-```json
-{ "op": "like",  "field": "email", "pattern": "%@example.com" }
-{ "op": "ilike", "field": "email", "pattern": "%@EXAMPLE.COM" }
+```ts
+// LIKE
+db.query('users').where(filter.like('email', '%@example.com'))
+
+// Case-insensitive LIKE
+db.query('users').where(filter.ilike('email', '%@EXAMPLE.COM'))
 ```
 
 `%` — любая последовательность, `_` — один символ. `ilike` —
 регистронезависимый вариант.
 
-### `exists` / `not_exists` — наличие поля у записи
+### `exists` / `notExists` — наличие поля у записи
 
-```json
-{ "op": "exists",     "field": "email" }
-{ "op": "not_exists", "field": "temp" }
+```ts
+db.query('users').where(filter.exists('email'))
+db.query('users').where(filter.notExists('temp'))
 ```
 
 ### Комбинирование: `and`, `or`, `not`
 
-```json
-{
-  "op": "and",
-  "filters": [
-    { "op": "gte", "field": "age", "value": 30 },
-    { "op": "lte", "field": "age", "value": 50 },
-    { "op": "or", "filters": [
-        { "op": "eq", "field": "city", "value": "NYC" },
-        { "op": "eq", "field": "city", "value": "LA" }
-    ]}
-  ]
-}
+```ts
+// AND через andWhere
+db.query('users')
+  .where(filter.gte('age', 30))
+  .andWhere(filter.lte('age', 50))
+
+// AND + OR — вложенные комбинаторы
+db.query('users').where(
+  filter.and([
+    filter.gte('age', 30),
+    filter.lte('age', 50),
+    filter.or([
+      filter.eq('city', 'NYC'),
+      filter.eq('city', 'LA'),
+    ]),
+  ])
+)
+
+// NOT
+db.query('users').where(filter.not(filter.eq('status', 'deleted')))
 ```
 
-```json
-{ "op": "not", "filter": { "op": "eq", "field": "status", "value": "deleted" } }
-```
-
-Вложенность любая. `and`/`or` принимают `filters` (массив), `not` —
-один `filter`.
+Вложенность любая. `filter.and([...])` / `filter.or([...])` принимают массив,
+`filter.not(f)` — один фильтр.
 
 ### Путь к полю: строка или массив
 
 `field` принимает **два формата**:
 
-* **Строка** — верхнее поле: `"field": "id"` (частый случай).
-* **Массив** — вложенный путь: `"field": ["address", "city"]` →
+* **Строка** — верхнее поле: `filter.eq('id', ...)` (частый случай).
+* **Массив** — вложенный путь: `filter.eq(['address', 'city'], 'NY')` →
   `record.address.city`.
 
 Для одноэлементного пути строка и массив — эквивалентны:
-`"id"` === `["id"]`. Serializer всегда выдаёт канонический массив, но
-в запросе можно писать строку — это чище.
+`'id'` === `['id']`.
 
-```json
-{ "op": "eq", "field": ["address", "city"], "value": "NY" }
+```ts
+db.query('users').where(filter.eq(['address', 'city'], 'NY'))
 ```
 
 ## 2. Мульти-запросные батчи
 
-Несколько операций — один round-trip. Ключи в `queries` — **алиасы**;
+Несколько операций — один round-trip. Алиасы — ключи в `.add(alias, ...)`;
 результаты вернутся в `resp.results[alias]`.
 
 ### Независимые операции
 
-```json
-{
-  "id": "multi",
-  "queries": {
-    "users":  { "from": "users" },
-    "orders": { "from": "orders" },
-    "seed":   {
-      "insert_into": "users",
-      "values": [{ "name": "Alice", "score": 100 }]
-    }
-  }
-}
+```ts
+import { Query, write } from '@shamir/client';
+
+const resp = await db.batch()
+  .add('users',  db.query('users'))
+  .add('orders', db.query('orders'))
+  .add('seed',   write.insert('users', [{ name: 'Alice', score: 100 }]))
+  .run();
+
+resp.results.users.records;
+resp.results.orders.records;
 ```
 
-Чтения и записи вперемешку. Порядок ключей в JSON не гарантируется,
-но движок корректно упорядочит выполнение.
+Чтения и записи вперемешку. Движок корректно упорядочит выполнение.
 
 ### Скрытие промежуточных результатов
 
-`"return_result": false` — операция выполнится, но результат не вернётся.
-Удобно для промежуточных записей:
+`.add(alias, op, { returnResult: false })` — операция выполнится, но результат
+не вернётся. Удобно для промежуточных записей:
 
-```json
-{
-  "id": "setup-and-read",
-  "queries": {
-    "setup": {
-      "insert_into": "users",
-      "values": [{ "name": "Alice" }],
-      "return_result": false
-    },
-    "read": { "from": "users" }
-  }
-}
+```ts
+const resp = await db.batch()
+  .add('setup', write.insert('users', [{ name: 'Alice' }]), { returnResult: false })
+  .add('read',  db.query('users'))
+  .run();
+
+resp.results.read.records; // ['Alice']
+// resp.results.setup — отсутствует
 ```
 
-### Зависимые запросы: `$query`-ссылки
+### Зависимые запросы: `filter.queryRef`
 
-Один запрос может ссылаться на результат другого через `{"$query": "<alias>", "path": "<path>"}`.
+Один запрос может ссылаться на результат другого через `filter.queryRef('@alias', path)`.
 
-```json
-{
-  "id": "chained",
-  "queries": {
-    "user": {
-      "from": "users",
-      "where": { "op": "eq", "field": "name", "value": "alice" }
-    },
-    "user_orders": {
-      "from": "orders",
-      "where": {
-        "op": "eq",
-        "field": "user_id",
-        "value": { "$query": "user", "path": "[0].id" }
-      }
-    }
-  }
-}
+```ts
+const resp = await db.batch()
+  .add('user', db.query('users').where(filter.eq('name', 'alice')))
+  .add('user_orders', db.query('orders').where(
+    filter.eq('user_id', filter.queryRef('@user', '[0].id'))
+  ))
+  .run();
+
+resp.results.user_orders.records; // заказы alice
+resp.execution_plan;               // [['user'], ['user_orders']] — два этапа
 ```
 
-`"path": "[0].id"` — взять поле `id` из первой записи результата
-`user`. Планировщик автоматически выстроит этапы: `user` → `user_orders`.
+`'[0].id'` — взять поле `id` из первой записи результата `user`. Планировщик
+автоматически выстроит этапы: `user` → `user_orders`.
 
-Краткая запись `"path"` поддерживает навигацию по результату:
+Краткая запись `path` поддерживает навигацию по результату:
 `[0].field`, `[].field` (все элементы), `.count` / `.length`.
 
 ## 3. Вторичные индексы
 
 Без индекса каждый `where` сканирует таблицу целиком (O(n)). Индекс
-ускоряет конкретные паттерны доступа. Создаётся — как и всё — батчем:
+ускоряет конкретные паттерны доступа. Создаётся через `ddl.createIndex`:
 
 ### Обычный (hash) индекс
 
-Ускоряет `eq`-поиск по полю:
+Ускоряет `filter.eq`-поиск по полю:
 
-```json
-{
-  "id": 1,
-  "queries": {
-    "idx": {
-      "create_index": "name_idx",
-      "table": "users",
-      "fields": [["name"]]
-    }
-  }
-}
+```ts
+import { ddl } from '@shamir/client';
+
+await db.run(ddl.createIndex('name_idx', 'users', [['name']]));
 ```
 
-После этого `{ "op": "eq", "field": "name", "value": "Bob" }` пойдёт
-через индекс — O(log n) вместо полного скана.
+После этого `filter.eq('name', 'Bob')` пойдёт через индекс — O(log n)
+вместо полного скана.
 
 ### Уникальный индекс
 
 То же, что обычный, плюс constraint: дубль по полю → ошибка.
 
-```json
-{
-  "id": 2,
-  "queries": {
-    "idx": {
-      "create_index": "email_idx",
-      "table": "users",
-      "fields": [["email"]],
-      "unique": true
-    }
-  }
-}
+```ts
+await db.run(ddl.createIndex('email_idx', 'users', [['email']], { unique: true }));
 ```
 
 ### Sorted-индекс (для диапазонов, сортировки, MIN/MAX)
@@ -237,21 +217,11 @@ JSON-объекта с полем `op`. Вот основные операции
 для:
 
 * диапазонов: `between`, `gt`/`gte`, `lt`/`lte` по одному полю;
-* `order by` + `LIMIT K` — первые/последние K без полной сортировки;
-* `MIN(field)`, `MAX(field)` — O(1) из начала/конца индекса.
+* `orderByAsc` / `orderByDesc` + `limit` — первые/последние K без полной сортировки;
+* `select.min` / `select.max` — O(1) из начала/конца индекса.
 
-```json
-{
-  "id": 1,
-  "queries": {
-    "idx": {
-      "create_index": "score_idx",
-      "table": "users",
-      "fields": [["score"]],
-      "sorted": true
-    }
-  }
-}
+```ts
+await db.run(ddl.createIndex('score_idx', 'users', [['score']], { sorted: true }));
 ```
 
 > `unique: true` + `sorted: true` одновременно — **запрещено**.
@@ -261,20 +231,19 @@ JSON-объекта с полем `op`. Вот основные операции
 
 | Паттерн запроса | Нужный индекс |
 |---|---|
-| `{ "op": "eq", "field": "email", … }` | обычный или `unique` по `email` |
-| `{ "op": "between", "field": "age", … }` | `sorted` по `age` |
-| `order by score desc` + `LIMIT 10` | `sorted` по `score` |
-| `MIN(score)`, `MAX(score)` | `sorted` по `score` |
+| `filter.eq('email', …)` | обычный или `unique` по `email` |
+| `filter.between('age', …)` | `sorted` по `age` |
+| `orderByDesc('score')` + `limit(10)` | `sorted` по `score` |
+| `select.min('score')`, `select.max('score')` | `sorted` по `score` |
 
 ## 4. Диапазоны, сортировка, лимиты
 
 ### BETWEEN + sorted-индекс
 
-```json
-{
-  "from": "users",
-  "where": { "op": "between", "field": ["age"], "from": 30, "to": 35 }
-}
+```ts
+const rows = await db.query('users')
+  .where(filter.between('age', 30, 35))
+  .rows();
 ```
 
 При наличии sorted-индекса по `age` — сканирование от 30 до 35,
@@ -282,35 +251,31 @@ O(log n + K), где K — число попавших записей.
 
 ### ORDER BY + LIMIT
 
-```json
-{
-  "from": "users",
-  "order_by": {
-    "items": [
-      { "field": ["score"], "direction": "desc" }
-    ]
-  },
-  "pagination": { "mode": "LimitOffset", "limit": 10, "offset": 0 }
-}
+```ts
+const rows = await db.query('users')
+  .orderByDesc('score')
+  .limit(10)
+  .offset(0)
+  .rows();
 ```
 
-* `direction`: `"asc"` (по умолчанию) или `"desc"`.
-* `pagination.mode: "LimitOffset"` — классический limit/offset.
+* `orderByAsc(field)` / `orderByDesc(field)` — сортировка по одному полю.
 * При sorted-индексе по `score` движок возьмёт 10 записей прямо
   из индекса — без сортировки всей таблицы.
 
 ### MIN / MAX
 
-```json
-{
-  "from": "users",
-  "select": {
-    "items": [
-      { "type": "aggregate", "func": "min", "field": ["score"], "alias": "lo" },
-      { "type": "aggregate", "func": "max", "field": ["score"], "alias": "hi" }
-    ]
-  }
-}
+```ts
+import { select } from '@shamir/client';
+
+const qr = await db.query('users')
+  .select([
+    select.min('score', { alias: 'lo' }),
+    select.max('score', { alias: 'hi' }),
+  ])
+  .ex();
+
+const { lo, hi } = qr.records[0];
 ```
 
 С sorted-индексом — O(1): берётся первая (min) и/или последняя (max)
@@ -318,32 +283,43 @@ O(log n + K), где K — число попавших записей.
 
 ### Постраничная навигация
 
-Альтернатива LimitOffset — постраничный режим:
+```ts
+// LimitOffset
+const rows = await db.query('users')
+  .limit(25)
+  .offset(25) // вторая страница
+  .rows();
 
-```json
-{
-  "from": "users",
-  "pagination": { "mode": "Page", "page": 2, "page_size": 25 },
-  "count_total": true
-}
+// 1-based page helper
+const rows2 = await db.query('users').page(2, 25).rows();
+
+// С подсчётом общего числа записей
+const qr = await db.query('users')
+  .where(filter.gte('score', 50))
+  .limit(25)
+  .offset(0)
+  .countTotal()
+  .ex();
+
+const total = qr.pagination?.total_count; // нужно для пагинации UI
 ```
 
-`count_total: true` — вернуть общее число записей в ответе (нужно для
-пагинации UI).
+`countTotal()` — вернуть общее число записей в ответе (нужно для
+пагинации UI). Результат — в `qr.pagination.total_count`.
 
 ## Что важно знать уже сейчас (дозированно)
 
 * **Индекс — overlay.** Данные живут в MVCC-сторе; индекс лишь
   ускоряет доступ. При crash он восстанавливается из WAL.
-* **`from` — это не только строка.** `"from": "users"` → таблица
+* **`Query.from` и `Query.withRepo`.** `db.query('users')` → таблица
   `users` в репозитории `main` (по умолчанию). Если нужна таблица
-  из другого репозитория: `"from": ["hot", "sessions"]` → репо `hot`,
-  таблица `sessions`. Подробности — [этаж 3](./03-storage.md).
+  из другого репозитория: `Query.withRepo('hot', 'sessions')`.
+  Подробности — [этаж 3](./03-storage.md).
 * **`select` по умолчанию — `SELECT *`.** Опускай его, пока не нужны
   агрегаты или проекции.
 * **FTS, vector, functional-индексы** — отдельный зоопарк, им посвящён
-  [этаж 6](./06-search.md). Здесь мы не касаемся `op: "fts"`,
-  `op: "vector_similarity"` и `op: "computed"`.
+  [этаж 6](./06-search.md). Здесь мы не касаемся `filter.fts`,
+  `filter.vectorSimilarity` и `filter.computed`.
 
 ## Куда дальше
 
