@@ -15,3 +15,4 @@ export * as write from './write.js';
 export * as ddl from './ddl.js';
 export * as admin from './admin.js';
 export { Query, atVersion, atTimestamp } from './query.js';
+export { Batch } from './batch.js';

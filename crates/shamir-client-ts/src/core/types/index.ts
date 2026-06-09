@@ -108,3 +108,17 @@ export type {
   AdminOp,
 } from './admin.js';
 
+export type {
+  BatchOpInput,
+  QueryEntry,
+  IsolationLevel,
+  DurabilityLevel,
+  BatchLimits,
+  BatchRequest,
+  QueryStats,
+  PaginationInfo,
+  QueryResult,
+  TransactionInfo,
+  BatchResponse,
+} from './batch.js';
+
