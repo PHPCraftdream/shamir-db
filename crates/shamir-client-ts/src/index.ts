@@ -19,6 +19,8 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
 
 export { ShamirClient };
 
-// Query builders + the wire type model (platform-agnostic core).
-export { Query, atVersion, atTimestamp, filter, select, write, ddl, admin, Batch } from './core/builders/index.js';
+// All builders (filter/select/write/ddl/admin/query/batch) as FLAT named
+// exports — `import { eq, insert, createTable, Query, Batch } from '@shamir/client'`.
+export * from './core/builders/index.js';
+// The wire type model (platform-agnostic core).
 export type * from './core/types/index.js';

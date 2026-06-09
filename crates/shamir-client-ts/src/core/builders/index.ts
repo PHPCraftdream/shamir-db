@@ -1,18 +1,20 @@
 /**
- * Builders barrel — the CODE surface (constructors + fluent builders) that
- * assembles the wire types declared under `../types/`. Re-exports only.
+ * Builders barrel — FLAT named re-exports of every constructor / fluent
+ * builder. Consumers import names directly, with no namespace objects and no
+ * `import * as`:
  *
- * Filter and select constructors are exposed under namespaces (`filter`,
- * `select`) because they share short names (`field`, `count`, …); the
- * `Query` builder and temporal helpers are exposed directly.
+ *   import { eq, gt, insert, createTable, chmod, Query, Batch } from '@shamir/client';
+ *
+ * Every exported name is unique across the filter / select / write / ddl /
+ * admin / query / batch modules, so the flat surface has no collisions.
  *
  * PLATFORM-AGNOSTIC.
  */
 
-export * as filter from './filter.js';
-export * as select from './select.js';
-export * as write from './write.js';
-export * as ddl from './ddl.js';
-export * as admin from './admin.js';
-export { Query, atVersion, atTimestamp } from './query.js';
-export { Batch } from './batch.js';
+export * from './filter.js';
+export * from './select.js';
+export * from './write.js';
+export * from './ddl.js';
+export * from './admin.js';
+export * from './query.js';
+export * from './batch.js';
