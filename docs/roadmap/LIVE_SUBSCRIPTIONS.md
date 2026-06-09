@@ -102,6 +102,8 @@ a one-shot admin batch op:
 { "changes_since": 0, "repo": "main", "limit": 1000 }
 ```
 
+(wire form; clients build this via the query builder)
+
 Execution (`crates/shamir-db/src/shamir_db/execute.rs:1993`) reads the
 durable journal with `commit_version > cursor` (strictly after) and
 returns:
@@ -116,6 +118,18 @@ returns:
 
 The TS client exposes `ddl.changesSince(cursor, {repo, limit})`
 (`crates/shamir-client-ts/src/core/builders/ddl.ts:373`).
+
+Usage example:
+
+```ts
+import { ddl, Batch } from '@shamir/client';
+
+const resp = await Batch.create('poll')
+  .add('c', ddl.changesSince(0, { repo: 'main', limit: 1000 }))
+  .execute(client, 'my_app');
+
+const { events, gap_at } = resp.results.c.records[0];
+```
 
 ### 1.5 Engine API for live subscription
 
@@ -586,20 +600,25 @@ client's framing layer.
 
 ## §8 — Wire layout summary
 
-### New DbRequest variants
+All shapes below are the **wire protocol design** for Phase 1–2. They are
+not yet exposed through the TS client; once implemented, P2 will add
+`client.subscribeChangelog(db, repo, fromVersion?)` returning an
+`AsyncIterableIterator<ChangelogEvent>`.
+
+### New DbRequest variants (wire form; clients build this via the query builder)
 
 ```json
 { "op": "subscribe_changelog", "db": "mydb", "repo": "main", "from_version": 0, "limit_backfill": 1000 }
 { "op": "unsubscribe_changelog", "db": "mydb", "repo": "main" }
 ```
 
-### New DbResponse variant
+### New DbResponse variant (wire form; clients build this via the query builder)
 
 ```json
 { "kind": "subscription_opened", "db": "mydb", "repo": "main", "backfill_count": 42 }
 ```
 
-### Push frame (unsolicited, server → client)
+### Push frame (unsolicited, server → client) (wire form; clients build this via the query builder)
 
 ```json
 { "push": "changelog_event", "sub": 1, "seq": 7, "data": <msgpack ChangelogEvent> }
@@ -607,7 +626,7 @@ client's framing layer.
 { "push": "slow_consumer" }
 ```
 
-### Unsubscribe ack (regular response)
+### Unsubscribe ack (regular response) (wire form; clients build this via the query builder)
 
 ```json
 { "kind": "subscription_closed", "db": "mydb", "repo": "main" }

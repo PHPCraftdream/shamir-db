@@ -16,24 +16,13 @@
 
 ### Создание
 
-Пользователь создаётся через отдельный wire-запрос (не батч):
+Пользователь создаётся через `client.createScramUser`:
 
-```javascript
-await client.createScramUser('alice', 'alice-password', []);
+```ts
+const created = await client.createScramUser('alice', 'alice-password', []);
+created.name;    // 'alice'
+created.user_id; // Uint8Array(16)
 ```
-
-Под капотом — `DbRequest::CreateScramUser`:
-
-```json
-{
-  "op": "create_scram_user",
-  "name": "alice",
-  "password": "alice-password",
-  "roles": []
-}
-```
-
-Ответ: `DbResponse::UserCreated { name: "alice", user_id: <16 байт> }`.
 
 Пользователь получает стабильный числовой ID (hash от имени). Этот ID
 используется в `chown`, `chgrp`, группах.
@@ -43,14 +32,16 @@ await client.createScramUser('alice', 'alice-password', []);
 Каждый пользователь подключается отдельно — SCRAM-аутентификация,
 TLS 1.3. Сессия привязана к principal:
 
-```javascript
-const alice = await Client.connect({
-  addr: '127.0.0.1:7000',
-  server_name: 'localhost',
+```ts
+import { connect } from '@shamir/client';
+
+const alice = await connect({
+  host: '127.0.0.1',
+  port: 13760,
   username: 'alice',
-  password: Zeroizing::new(b'alice-password'.to_vec()),
-  accept_new_host: true,
-  trusted_pin: None,
+  password: 'alice-password',
+  tls: { rejectUnauthorized: false },
+  origin: 'https://127.0.0.1',
 });
 ```
 
@@ -58,22 +49,14 @@ const alice = await Client.connect({
 
 Роль — именованный набор разрешений:
 
-```json
-{
-  "id": "mk-role",
-  "queries": {
-    "r": {
-      "create_role": "analyst",
-      "permissions": [
-        {
-          "effect": "allow",
-          "actions": ["read"],
-          "resource": { "scope": "database", "database": "analytics" }
-        }
-      ]
-    }
-  }
-}
+```ts
+import { admin, Batch } from '@shamir/client';
+
+await Batch.create('mk-role')
+  .add('r', admin.createRole('analyst', [
+    admin.permission('allow', ['read'], admin.scopeDatabase('analytics')),
+  ]))
+  .execute(client, 'default');
 ```
 
 Каждое разрешение:
@@ -82,54 +65,44 @@ const alice = await Client.connect({
 |---|---|---|
 | `effect` | `"allow"` или `"deny"` |
 | `actions` | массив: `"read"`, `"insert"`, `"update"`, `"delete"`, `"create"`, `"drop"`, `"alter"`, `"manage_users"`, `"manage_roles"`, `"all"` |
-| `resource` | область действия: `{ "scope": "global" }` / `{ "scope": "database", "database": "…" }` / `{ "scope": "repo", "database": "…", "repo": "…" }` / `{ "scope": "table", "database": "…", "repo": "…", "table": "…" }` |
+| `resource` | область действия: `admin.scopeGlobal()` / `admin.scopeDatabase(db)` / `admin.scopeRepo(db, repo)` / `admin.scopeTable(db, repo, table)` |
 
 Чем выше `specificity` (table > repo > database > global), тем приоритетнее.
 Разрешение на `database` покрывает все repo и table внутри.
 
 Назначение роли пользователю:
 
-```json
-{
-  "id": "grant",
-  "queries": {
-    "g": { "grant_role": "analyst", "user": "alice" }
-  }
-}
+```ts
+await Batch.create('grant')
+  .add('g', admin.grantRole('analyst', 'alice'))
+  .execute(client, 'default');
 ```
 
 Отзыв:
 
-```json
-{
-  "id": "revoke",
-  "queries": {
-    "r": { "revoke_role": "analyst", "user": "alice" }
-  }
-}
+```ts
+await Batch.create('revoke')
+  .add('r', admin.revokeRole('analyst', 'alice'))
+  .execute(client, 'default');
 ```
 
 Удаление роли (HMAC-gated):
 
-```json
-{
-  "id": "drop-role",
-  "queries": {
-    "d": { "drop_role": "analyst", "hmac": "<tag>" }
-  }
-}
+```ts
+await Batch.create('drop-role')
+  .add('d', admin.dropRole(client, 'analyst'))
+  .execute(client, 'default');
 ```
 
 ### Интроспекция
 
-```json
-{
-  "id": "ls",
-  "queries": {
-    "u": { "list": "users" },
-    "r": { "list": "roles" }
-  }
-}
+```ts
+import { ddl } from '@shamir/client';
+
+const resp = await Batch.create('ls')
+  .add('u', ddl.listUsers())
+  .add('r', ddl.listRoles())
+  .execute(client, 'default');
 ```
 
 ## 2. POSIX-режимы: `chmod`, `chown`, `chgrp`
@@ -140,32 +113,28 @@ const alice = await Client.connect({
 
 ### Ресурсы и адресация
 
-Ресурс указывается объектом (`ResourceRef`):
+Ресурс строится через `admin.ref*`:
 
-|| Ресурс | Объект в JSON |
+|| Ресурс | Вызов |
 |---|---|---|
-| База данных | `{ "database": "mydb" }` |
-| Репозиторий | `{ "store": ["mydb", "main"] }` |
-| Таблица | `{ "table": ["mydb", "main", "users"] }` |
-| Функция | `{ "function": "my_fn" }` |
-| Папка функций | `{ "function_folder": ["reports", "daily"] }` |
-| Пространство имён функций | `{ "function_namespace": true }` |
+| База данных | `admin.refDatabase('mydb')` |
+| Репозиторий | `admin.refStore('mydb', 'main')` |
+| Таблица | `admin.refTable('mydb', 'main', 'users')` |
+| Функция | `admin.refFunction('my_fn')` |
+| Папка функций | `admin.refFunctionFolder(['reports', 'daily'])` |
+| Пространство имён функций | `admin.refFunctionNamespace()` |
 
 ### chmod — сменить режим
 
-```json
-{
-  "id": "chmod-tbl",
-  "queries": {
-    "cm": {
-      "chmod": { "table": ["ptest", "main", "secret"] },
-      "mode": 448
-    }
-  }
-}
+```ts
+import { admin, Batch } from '@shamir/client';
+
+await Batch.create('chmod-tbl')
+  .add('cm', admin.chmod(admin.refTable('ptest', 'main', 'secret'), 0o700))
+  .execute(client, 'ptest');
 ```
 
-`448` = `0o700` = `rwx------` (только владелец).
+`0o700` = `448` = `rwx------` (только владелец).
 
 || Примеры mode | Октал | Смысл |
 |---|---|---|---|
@@ -176,98 +145,66 @@ const alice = await Client.connect({
 
 ### chown — сменить владельца
 
-```json
-{
-  "id": "chown-db",
-  "queries": {
-    "co": {
-      "chown": { "database": "analytics" },
-      "owner": 7
-    }
-  }
-}
+```ts
+await Batch.create('chown-db')
+  .add('co', admin.chown(admin.refDatabase('analytics'), 7))
+  .execute(client, 'default');
 ```
 
 `owner` — числовой ID пользователя.
 
 ### chgrp — назначить группу
 
-```json
-{
-  "id": "chgrp-tbl",
-  "queries": {
-    "cg": {
-      "chgrp": { "table": ["gtest", "main", "shared"] },
-      "group": 3
-    }
-  }
-}
+```ts
+await Batch.create('chgrp-tbl')
+  .add('cg', admin.chgrp(admin.refTable('gtest', 'main', 'shared'), 3))
+  .execute(client, 'gtest');
+
+// null — снять группу:
+await Batch.create('chgrp-remove')
+  .add('cg', admin.chgrp(admin.refDatabase('mydb'), null))
+  .execute(client, 'default');
 ```
 
-`group` — числовой ID группы. `null` — снять группу:
-
-```json
-{
-  "chgrp": { "database": "mydb" },
-  "group": null
-}
-```
+`group` — числовой ID группы. `null` — снять группу.
 
 ## 3. Группы
 
 Группа — множество пользователей. Создаётся администратором:
 
-```json
-{
-  "id": "mkgrp",
-  "queries": {
-    "mk": { "create_group": "devs" }
-  }
-}
-```
+```ts
+const resp = await Batch.create('mkgrp')
+  .add('mk', admin.createGroup('devs'))
+  .execute(client, 'gtest');
 
-Ответ содержит `group_id`:
-
-```json
-{ "results": { "mk": { "records": [{ "create_group": "devs", "group_id": 1 }] } } }
+const groupId = resp.results.mk.records[0].group_id;
 ```
 
 ### Добавление и удаление участников
 
-```json
-{
-  "id": "add-bob",
-  "queries": {
-    "am": { "add_group_member": { "name": "devs" }, "user": 42 }
-  }
-}
-```
+```ts
+await Batch.create('add-bob')
+  .add('am', admin.addGroupMember(admin.groupName('devs'), bobPrincipalId))
+  .execute(client, 'gtest');
 
-```json
-{
-  "id": "rm-bob",
-  "queries": {
-    "rm": { "remove_group_member": { "id": 1 }, "user": 42 }
-  }
-}
+await Batch.create('rm-bob')
+  .add('rm', admin.removeGroupMember(admin.groupId(1), bobPrincipalId))
+  .execute(client, 'gtest');
 ```
 
 Группа адресуется по имени или ID:
 
-|| Форма | JSON |
+|| Форма | Вызов |
 |---|---|
-| по имени | `{ "name": "devs" }` |
-| по ID | `{ "id": 1 }` |
+| по имени | `admin.groupName('devs')` |
+| по ID | `admin.groupId(1)` |
 
 ### Удаление группы
 
-```json
-{
-  "id": "dropgrp",
-  "queries": {
-    "dg": { "drop_group": { "name": "devs" } }
-  }
-}
+```ts
+await Batch.create('dropgrp')
+  .add('dg', admin.dropGroup(admin.groupName('devs')))
+  .execute(client, 'gtest');
 ```
 
 ## 4. Как это работает вместе: типичный сценарий
@@ -275,41 +212,38 @@ const alice = await Client.connect({
 **Задача:** дать разработчикам (bob) доступ к таблице `shared`,
 запретить остальным (carol).
 
-```javascript
+```ts
+import { ddl, admin, Batch, connect } from '@shamir/client';
+
 // 1. Создать базу и таблицу (от имени admin)
-await client.execute('default', { id: 1, queries: { mk: { create_db: 'gtest' } } });
-await client.execute('gtest', {
-  id: 2,
-  queries: {
-    mr: { create_repo: 'main' },
-    tb: { create_table: 'shared' },
-  },
-});
+await Batch.create('setup-db')
+  .add('mk', ddl.createDb('gtest'))
+  .execute(client, 'default');
+
+const gtest = client.db('gtest');
+await gtest.run(ddl.createRepo('main'));
+await gtest.run(ddl.createTable('shared', { repo: 'main' }));
 
 // 2. Создать группу
-const grpResp = await client.execute('gtest', {
-  id: 3,
-  queries: { mk: { create_group: 'devs' } },
-});
-const groupId = grpResp.results.mk.records[0].group_id;
+const grpResp = await Batch.create('mkgrp')
+  .add('mk', admin.createGroup('devs'))
+  .execute(client, 'gtest');
+const groupId = grpResp.results.mk.records[0].group_id as number;
 
 // 3. Добавить bob в группу (bob's principal_id = hash(username))
-await client.execute('gtest', {
-  id: 4,
-  queries: { am: { add_group_member: { name: 'devs' }, user: bobPrincipalId } },
-});
+await Batch.create('add-bob')
+  .add('am', admin.addGroupMember(admin.groupName('devs'), bobPrincipalId))
+  .execute(client, 'gtest');
 
 // 4. Назначить группе таблицу
-await client.execute('gtest', {
-  id: 5,
-  queries: { cg: { chgrp: { table: ['gtest', 'main', 'shared'] }, group: groupId } },
-});
+await Batch.create('chgrp')
+  .add('cg', admin.chgrp(admin.refTable('gtest', 'main', 'shared'), groupId))
+  .execute(client, 'gtest');
 
 // 5. Установить режим 0o750: owner rwx + group r-x + other ---
-await client.execute('gtest', {
-  id: 6,
-  queries: { cm: { chmod: { table: ['gtest', 'main', 'shared'] }, mode: 488 } },
-});
+await Batch.create('chmod')
+  .add('cm', admin.chmod(admin.refTable('gtest', 'main', 'shared'), 0o750))
+  .execute(client, 'gtest');
 ```
 
 Результат:
@@ -348,7 +282,7 @@ await client.execute('gtest', {
 Для доступа к глубокому ресурсу нужна `x` (execute/traverse) на каждом
 предке — как `x` на каталогах в POSIX.
 
-`access_tree` (этаж 3) показывает актуальное дерево с владельцами
+`admin.accessTree()` (этаж 3) показывает актуальное дерево с владельцами
 и режимами.
 
 ## 6. Бизнес-доступ через процедуры
@@ -372,9 +306,9 @@ await client.execute('gtest', {
   (`read`, `insert`…), группа — *с кем* делится доступ к ресурсу.
 * **Admin обходит все проверки.** Bootstrap-админ (и любой
   `Actor::System`) минует gate Shomer.
-* **`access_tree` — read-only.** Не меняет права, только показывает.
-* **Удаление пользователя (`drop_user`) — HMAC-gated**, как и все
-  деструктивные операции (этаж 2).
+* **`admin.accessTree()` — read-only.** Не меняет права, только показывает.
+* **Удаление пользователя (`admin.dropUser(client, username)`) — HMAC-gated**,
+  как и все деструктивные операции (этаж 2).
 
 ## Куда дальше
 

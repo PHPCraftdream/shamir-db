@@ -139,7 +139,7 @@ pub enum VectorMetric {
 }
 ```
 
-Wire shape (JSON):
+Wire shape (JSON — wire form; clients build this via the query builder):
 
 ```json
 { "create_vector_index": "by_embedding",
@@ -149,6 +149,26 @@ Wire shape (JSON):
 { "from": "docs",
   "where": { "op": "vector_search", "field": ["embedding"],
              "vector": [0.12, -0.04, ...], "k": 10 } }
+```
+
+When this ships, the TS client will expose:
+
+```ts
+import { ddl, filter, Batch } from '@shamir/client';
+
+// DDL — ddl.createIndex already accepts index_type/vector_dim/vector_metric
+await Batch.create('mk-vec')
+  .add('idx', ddl.createIndex('by_embedding', 'docs', [['embedding']], {
+    index_type:    'vector',
+    vector_dim:    768,
+    vector_metric: 'cosine',
+  }))
+  .execute(client, 'my_app');
+
+// Query — filter.vectorSimilarity already exists in the current builder
+const rows = await db.query('docs')
+  .where(filter.vectorSimilarity('embedding', [0.12, -0.04, /* ... */], 10))
+  .rows();
 ```
 
 Server-side: a new `IndexKind::Vector` alongside `Regular` / `Unique`
@@ -244,7 +264,7 @@ Each embedder gets:
 
 ### Auto-embed-on-change
 
-When an index is configured with `auto_embed`:
+When an index is configured with `auto_embed` (wire form; clients build this via the query builder):
 
 ```json
 {

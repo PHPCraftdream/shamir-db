@@ -223,7 +223,7 @@ Filter::FtsMatch {
 }
 ```
 
-Wire shape (JSON):
+Wire shape (JSON — wire form; clients build this via the query builder):
 
 ```json
 { "create_fts_index": "by_body",
@@ -241,6 +241,25 @@ Wire shape (JSON):
              "field": ["body"],
              "query": "rust embedded",
              "mode": "all_terms" } }
+```
+
+When this ships, the TS client will expose:
+
+```ts
+import { ddl, filter, Batch } from '@shamir/client';
+
+// DDL
+await Batch.create('mk-fts')
+  .add('idx', ddl.createIndex('by_body', 'docs', [['title'], ['body']], {
+    index_type: 'fts',
+    fts_tokenizer: 'unicode',
+  }))
+  .execute(client, 'my_app');
+
+// Query — filter.fts already exists in the current builder
+const rows = await db.query('docs')
+  .where(filter.fts('body', 'rust embedded', 'and'))
+  .rows();
 ```
 
 ### Storage layout
@@ -438,7 +457,8 @@ Observability metrics:
 ### `_score` virtual column
 
 When an `FtsMatch` filter is present, each result record gets a
-synthetic `_score` field. `ORDER BY` and `SELECT` can reference it:
+synthetic `_score` field. `ORDER BY` and `SELECT` can reference it
+(wire form; clients build this via the query builder):
 
 ```json
 { "from": "docs",

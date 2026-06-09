@@ -16,52 +16,36 @@
 
 ### Создание
 
-```json
-{
-  "id": "mk-analytics",
-  "queries": {
-    "mk": { "create_db": "analytics" }
-  }
-}
+```ts
+import { ddl, Batch } from '@shamir/client';
+
+await Batch.create('mk-analytics')
+  .add('mk', ddl.createDb('analytics'))
+  .execute(client, 'default');
 ```
 
 Ответ: `results.mk.records[0].created_db === "analytics"`.
 
 Создаём против `"default"` (базы живут на уровне сервера):
 
-```javascript
-await client.execute('default', {
-  id: 'mk',
-  queries: { mk: { create_db: 'analytics' } },
-});
+### Интроспекция: `listDatabases`
+
+```ts
+const resp = await Batch.create('ls')
+  .add('l', ddl.listDatabases())
+  .execute(client, 'default');
+
+resp.results.l.records[0].databases; // ['default', 'analytics']
 ```
 
-### Интроспекция: `list`
-
-```json
-{
-  "id": "ls",
-  "queries": { l: { "list": "databases" } }
-}
-```
-
-Ответ:
-
-```json
-{
-  "results": {
-    "l": { "records": [{ "databases": ["default", "analytics"] }] }
-  }
-}
-```
+(wire form; clients build this via the query builder)
 
 ### Удаление (требует HMAC)
 
-```javascript
-await client.execute('default', {
-  id: 1,
-  queries: { d: hmac.drop_db_op(client, 'analytics') },
-});
+```ts
+await Batch.create('drop-db')
+  .add('d', ddl.dropDb(client, 'analytics', { cascade: true }))
+  .execute(client, 'default');
 ```
 
 Ответ: `results.d.records[0].dropped === "analytics"`.
@@ -74,22 +58,10 @@ await client.execute('default', {
 
 ### Создание репозитория
 
-```json
-{
-  "id": "mk-cold",
-  "queries": {
-    "r": { "create_repo": "cold" }
-  }
-}
-```
+```ts
+const db = client.db('analytics');
 
-Запускаем против целевой базы:
-
-```javascript
-await client.execute('analytics', {
-  id: 'mk-cold',
-  queries: { r: { create_repo: 'cold' } },
-});
+await db.run(ddl.createRepo('cold'));
 ```
 
 Ответ: `results.r.records[0].created_repo === "cold"`.
@@ -98,8 +70,9 @@ await client.execute('analytics', {
 wire-созданные репозитории — durable (redb). Если сервер in-memory
 (тесты) — репозиторий тоже in-memory. Явный opt-out:
 
-```json
-{ "create_repo": "scratch", "engine": "in_memory" }
+```ts
+// wire form: { "create_repo": "scratch", "engine": "in_memory" }
+await db.run(ddl.createRepo('scratch', { engine: 'in_memory' }));
 ```
 
 `in_memory`-репозиторий — эфемерный scratch-пространство: данные не
@@ -109,68 +82,52 @@ wire-созданные репозитории — durable (redb). Если се
 
 ### Интроспекция
 
-```json
-{
-  "id": "ls-repos",
-  "queries": { l: { "list": "repos" } }
-}
-```
+```ts
+const resp = await Batch.create('ls-repos')
+  .add('l', ddl.listRepos())
+  .execute(client, 'analytics');
 
-Ответ:
-
-```json
-{
-  "results": {
-    "l": { "records": [{ "repos": ["main", "cold"] }] }
-  }
-}
+resp.results.l.records[0].repos; // ['main', 'cold']
 ```
 
 ### Удаление (требует HMAC)
 
-```javascript
-await client.execute(dbName, {
-  id: 1,
-  queries: { d: hmac.drop_repo_op(client, dbName, 'cold') },
-});
+```ts
+await db.dropRepo('cold');
 ```
 
 ## 3. Таблицы в разных репозиториях
 
 Таблица принадлежит репозиторию. По умолчанию — `main`. Адресация
-через поле `repo`:
+через опцию `repo`:
 
-```json
-{
-  "id": "mk-tables",
-  "queries": {
-    "t1": { "create_table": "users", "repo": "main" },
-    "t2": { "create_table": "archive", "repo": "cold" }
-  }
-}
+```ts
+await Batch.create('mk-tables')
+  .add('t1', ddl.createTable('users',   { repo: 'main' }))
+  .add('t2', ddl.createTable('archive', { repo: 'cold' }))
+  .execute(client, 'analytics');
 ```
 
 Интроспекция таблиц — repo-scoped:
 
-```json
-{
-  "id": "ls-main",
-  "queries": { l: { "list": "tables", "repo": "main" } }
-}
+```ts
+const resp = await Batch.create('ls-main')
+  .add('l', ddl.listTables({ repo: 'main' }))
+  .execute(client, 'analytics');
+
+resp.results.l.records[0].tables; // ['users']
+resp.results.l.records[0].repo;   // 'main'
 ```
 
-Ответ:
+Чтение из таблицы другого репо — через `Query.withRepo`:
 
-```json
-{
-  "results": {
-    "l": { "records": [{ "tables": ["users"], "repo": "main" }] }
-  }
-}
+```ts
+import { Query } from '@shamir/client';
+
+const rows = await Batch.create('read-cold')
+  .add('r', Query.withRepo('cold', 'archive'))
+  .execute(client, 'analytics');
 ```
-
-Чтение из таблицы другого репо — через `"from": ["repo", "table"]`
-(подробнее на этаже 1).
 
 ## 4. Конфигурация буферов (per-table)
 
@@ -179,53 +136,39 @@ await client.execute(dbName, {
 
 ### Просмотр
 
-```json
-{
-  "id": "get-buf",
-  "queries": {
-    "g": { "get_buffer_config": "items", "repo": "main" }
-  }
-}
-```
+```ts
+const resp = await Batch.create('get-buf')
+  .add('g', ddl.getBufferConfig('items', { repo: 'main' }))
+  .execute(client, 'analytics');
 
-Ответ (если не настроен): `records: [{ table: "items", repo: "main", config: null }]`.
+resp.results.g.records[0]; // { table: 'items', repo: 'main', config: null }
+```
 
 ### Установка
 
-```json
-{
-  "id": "set-buf",
-  "queries": {
-    "s": {
-      "set_buffer_config": "items",
-      "repo": "main",
-      "config": {
-        "max_bytes": 1048576,
-        "max_entries": 500,
-        "ttl_ms": 7000,
-        "flush_interval_ms": 333,
-        "flush_batch_size": 48
-      }
-    }
-  }
-}
+```ts
+await Batch.create('set-buf')
+  .add('s', ddl.setBufferConfig('items', {
+    max_bytes:        1048576,
+    max_entries:      500,
+    ttl_ms:           7000,
+    flush_interval_ms: 333,
+    flush_batch_size:  48,
+  }, { repo: 'main' }))
+  .execute(client, 'analytics');
 ```
 
 Ответ: `records: [{ set_buffer_config: "items", repo: "main", config: {…} }]`.
 
 ### Частичное обновление
 
-```json
-{
-  "id": "alter-buf",
-  "queries": {
-    "a": {
-      "alter_buffer_config": "items",
-      "repo": "main",
-      "patch": { "flush_interval_ms": 1000, "max_entries": 9999 }
-    }
-  }
-}
+```ts
+await Batch.create('alter-buf')
+  .add('a', ddl.alterBufferConfig('items', {
+    flush_interval_ms: 1000,
+    max_entries:       9999,
+  }, { repo: 'main' }))
+  .execute(client, 'analytics');
 ```
 
 Патч меняет только указанные поля. Остальные — без изменений.
@@ -241,76 +184,57 @@ await client.execute(dbName, {
 
 Подробно — на этаже 1. Здесь — полная картина DDL:
 
-```json
-{
-  "id": "idx-ddl",
-  "queries": {
-    "mk": {
-      "create_index": "by_email",
-      "table": "users",
-      "fields": [["email"]]
-    }
-  }
-}
+```ts
+await Batch.create('idx-ddl')
+  .add('mk', ddl.createIndex('by_email', 'users', [['email']]))
+  .execute(client, 'analytics');
 ```
 
 Интроспекция:
 
-```json
-{
-  "id": "ls-idx",
-  "queries": { l: { "list": "indexes", "repo": "main", "table": "users" } }
-}
-```
+```ts
+const resp = await Batch.create('ls-idx')
+  .add('l', ddl.listIndexes('users', { repo: 'main' }))
+  .execute(client, 'analytics');
 
-Ответ содержит rich-entries (не только имена):
-
-```json
-{
-  "results": {
-    "l": { "records": [{ "indexes": [{ "name": "by_email" }], "repo": "main", "table": "users" }] }
-  }
-}
+resp.results.l.records[0].indexes; // [{ name: 'by_email' }]
 ```
 
 Удаление индекса — HMAC-gated:
 
-```javascript
-await client.execute(dbName, {
-  id: 1,
-  queries: { d: hmac.drop_index_op(client, dbName, 'main', 'users', 'by_email') },
-});
+```ts
+await Batch.create('rm-idx')
+  .add('d', ddl.dropIndex(client, 'analytics', 'main', 'users', 'by_email'))
+  .execute(client, 'analytics');
 ```
 
 Для уникальных индексов — свой flavour тега:
 
-```javascript
-hmac.drop_index_op(client, dbName, 'main', 'users', 'by_email', { unique: true });
+```ts
+await Batch.create('rm-unique-idx')
+  .add('d', ddl.dropIndex(client, 'analytics', 'main', 'users', 'by_email', { unique: true }))
+  .execute(client, 'analytics');
 ```
 
 ## 6. Access-tree: интроспекция прав
 
-`access_tree` — read-only операция, которая возвращает дерево ресурсов
+`accessTree` — read-only операция, которая возвращает дерево ресурсов
 с владельцами, группами и режимами. Полная картина — кто и что может.
 
-```json
-{
-  "id": "tree",
-  "queries": {
-    "t": { "access_tree": true }
-  }
-}
+```ts
+import { admin } from '@shamir/client';
+
+const resp = await Batch.create('tree')
+  .add('t', admin.accessTree())
+  .execute(client, 'default');
 ```
 
 С фильтром по базе и ограничением глубины:
 
-```json
-{
-  "id": "tree-db",
-  "queries": {
-    "t": { "access_tree": true, "db": "analytics", "depth": 2 }
-  }
-}
+```ts
+const resp = await Batch.create('tree-db')
+  .add('t', admin.accessTree({ db: 'analytics', depth: 2 }))
+  .execute(client, 'default');
 ```
 
 Ответ содержит секции `resources`, `principals` и `functions`:
@@ -324,11 +248,11 @@ hmac.drop_index_op(client, dbName, 'main', 'users', 'by_email', { unique: true }
           "resources": {
             "kind": "root",
             "children": [
-              { "name": "default", "kind": "database", "children": […] }
+              { "name": "default", "kind": "database", "children": ["…"] }
             ]
           },
-          "principals": { "users": […], "groups": […] },
-          "functions": [{ "name": "argon2id" }, …]
+          "principals": { "users": ["…"], "groups": ["…"] },
+          "functions": [{ "name": "argon2id" }, "…"]
         }
       }]
     }
@@ -340,13 +264,13 @@ hmac.drop_index_op(client, dbName, 'main', 'users', 'by_email', { unique: true }
 
 ## Что важно знать уже сейчас (дозированно)
 
-* **`create_db` / `create_repo` / `create_table` — не требуют HMAC.**
+* **`ddl.createDb` / `ddl.createRepo` / `ddl.createTable` — не требуют HMAC.**
   Это созидательные операции. Удаление (`drop_*`) — требует.
 * **Durability репозитория = durability дома.** Если сервер запущен с
   `data_dir`, wire-созданные репозитории — durable. Если in-memory
   (тесты) — in-memory. Когерентно, без отдельного флага.
-* **База — единица изоляции.** `client.execute("db-a", …)` и
-  `client.execute("db-b", …)` видят только свои данные. Удаление базы A
+* **База — единица изоляции.** `client.db('db-a')` и
+  `client.db('db-b')` видят только свои данные. Удаление базы A
   не влияет на базу B.
 * **Транзакция = один репозиторий.** Нельзя в одной транзакции записать в
   `main` и `cold` — см. [этаж 2](./02-durability.md).
