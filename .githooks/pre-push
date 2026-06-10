@@ -34,3 +34,5 @@ echo "pre-push [3/3]: cargo test --workspace --lib"
 cargo test --workspace --lib
 
 echo "pre-push: all checks passed — pushing."
+
+cargo sweep --time 7 2>/dev/null || true
