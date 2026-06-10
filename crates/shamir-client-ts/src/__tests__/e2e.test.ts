@@ -1057,11 +1057,11 @@ describe.skipIf(!SERVER_AVAILABLE)(
       expect(resp.results.all.records.length).toBeGreaterThanOrEqual(2);
     });
 
-    it('handle: concurrent Promise.all reads do not cross-resolve (rid serialisation)', async () => {
+    it('handle: concurrent Promise.all reads resolve correctly (rid-demux)', async () => {
       const app = client!.db(handleDb);
-      // Fire overlapping round-trips. WsFramer delivers FIFO; without the
-      // sendDbRequest serialisation these would cross-resolve and throw
-      // "request id mismatch". Each must return its OWN row.
+      // Fire overlapping round-trips. The server multiplexes responses by rid;
+      // the client readLoop demultiplexes so each promise resolves with its own
+      // response regardless of completion order. Each must return its OWN row.
       const [h1, h2, missing] = await Promise.all([
         app.query('items').where(filter.eq('id', 'H1')).rows(),
         app.query('items').where(filter.eq('id', 'H2')).rows(),
