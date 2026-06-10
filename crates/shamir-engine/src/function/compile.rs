@@ -79,7 +79,10 @@ strip = true
     fs::write(tmpdir.path().join("src").join("lib.rs"), lib_rs)
         .map_err(|e| FunctionError::Compute(format!("write lib.rs: {e}")))?;
 
-    // Build.
+    // Build. Explicit --target-dir ensures the WASM artifact lands inside
+    // the temp directory even when a workspace-level CARGO_TARGET_DIR or
+    // [build] target-dir is configured.
+    let target_dir = tmpdir.path().join("target");
     let output = Command::new("cargo")
         .args([
             "build",
@@ -88,7 +91,10 @@ strip = true
             "--release",
             "--manifest-path",
             tmpdir.path().join("Cargo.toml").to_str().unwrap_or(""),
+            "--target-dir",
+            target_dir.to_str().unwrap_or(""),
         ])
+        .env_remove("CARGO_TARGET_DIR")
         .output()
         .map_err(|e| FunctionError::Compute(format!("cargo invocation: {e}")))?;
 
