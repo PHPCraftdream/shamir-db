@@ -18,6 +18,7 @@ use crate::instance_defaults;
 pub struct RuntimeTunables {
     io_frame_buffer_cap: AtomicUsize,
     server_poll_interval_ms: AtomicU64,
+    conn_max_in_flight: AtomicUsize,
 }
 
 impl Default for RuntimeTunables {
@@ -27,6 +28,7 @@ impl Default for RuntimeTunables {
             server_poll_interval_ms: AtomicU64::new(
                 instance_defaults::SERVER_POLL_INTERVAL.as_millis() as u64,
             ),
+            conn_max_in_flight: AtomicUsize::new(instance_defaults::CONN_MAX_IN_FLIGHT),
         }
     }
 }
@@ -60,6 +62,17 @@ impl RuntimeTunables {
         self.server_poll_interval_ms
             .store(v.as_millis() as u64, Ordering::Relaxed);
     }
+
+    /// Zero-overhead read: single relaxed atomic load.
+    #[inline]
+    pub fn conn_max_in_flight(&self) -> usize {
+        self.conn_max_in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Override (rare): store a new value (takes effect on the next read).
+    pub fn set_conn_max_in_flight(&self, v: usize) {
+        self.conn_max_in_flight.store(v, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +93,11 @@ mod tests {
             instance_defaults::SERVER_POLL_INTERVAL,
             "server_poll_interval default must match instance_defaults const"
         );
+        assert_eq!(
+            rt.conn_max_in_flight(),
+            instance_defaults::CONN_MAX_IN_FLIGHT,
+            "conn_max_in_flight default must match instance_defaults const"
+        );
     }
 
     #[test]
@@ -95,6 +113,13 @@ mod tests {
         let new_interval = Duration::from_millis(100);
         rt.set_server_poll_interval(new_interval);
         assert_eq!(rt.server_poll_interval(), new_interval);
+    }
+
+    #[test]
+    fn set_conn_max_in_flight_then_read() {
+        let rt = RuntimeTunables::new();
+        rt.set_conn_max_in_flight(8);
+        assert_eq!(rt.conn_max_in_flight(), 8);
     }
 
     /// Reads take `&self` — the struct is shareable via `Arc<RuntimeTunables>`.

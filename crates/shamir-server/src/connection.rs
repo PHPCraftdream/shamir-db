@@ -12,6 +12,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
+
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
@@ -143,6 +148,11 @@ pub struct ConnectionContext {
     /// task + buffers indefinitely otherwise. Real clients send `auth_init`
     /// within ~50 ms; the default of 5 s is comfortably above network jitter.
     pub auth_init_timeout: Duration,
+    /// Maximum number of requests in-flight concurrently on a single
+    /// connection. Controls the per-connection semaphore + writer-channel
+    /// capacity in [`request_loop`]. `1` gives lock-step semantics;
+    /// default is [`shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT`].
+    pub max_in_flight: usize,
 }
 
 /// Top-level entry — drive a single accepted connection through the
@@ -263,26 +273,14 @@ pub async fn handle_connection<F>(
         tokio::time::sleep(pad).await;
     }
 
-    // Split the framer into directional halves so the future duplex
-    // request loop (M1) can hand each half to its own task.  The lock-step
-    // loop below owns both halves sequentially — semantics are unchanged.
-    let (mut reader, mut writer) = framer.split();
+    // Split the framer into directional halves — the duplex request loop
+    // (M1) drives reading and writing from independent tasks.
+    let (reader, writer) = framer.split();
 
-    request_loop(
-        &ctx,
-        &mut reader,
-        &mut writer,
-        &mut frame_buf,
-        &mut write_scratch,
-        session_id,
-    )
-    .await;
+    request_loop(ctx, reader, writer, session_id).await;
 
-    // Terminal: 5s grace is a transport-layer concept (the session sticks
-    // around in SessionStore after disconnect; resume can re-bind within
-    // grace). Here we simply close the write half; the session remains in
-    // the store until session GC evicts it by idle TTL.
-    writer.shutdown().await;
+    // The writer task handles its own shutdown() call before exiting;
+    // nothing left to do on this path.
 }
 
 #[derive(Debug)]
@@ -662,144 +660,320 @@ async fn run_handshake<F: Framer>(
     Ok(auth_ok.session_id)
 }
 
-/// Outcome of one dispatch — serialised bytes plus a "break after
-/// writing" flag for the §7.5 session_invalidated / session_expired paths.
-enum DispatchOutput {
-    /// Reply bytes to write to the wire; keep looping afterwards.
+// ---------------------------------------------------------------------------
+// Duplex request loop — M1
+//
+// Architecture overview:
+//
+//   ┌──────────────┐       mpsc (cap=max_in_flight)       ┌─────────────┐
+//   │  Reader task │──── WriterMsg::{Reply,AndClose} ────►│ Writer task │
+//   │  (this task) │                                       │  (spawned)  │
+//   └──────────────┘                                       └─────────────┘
+//         │                                                       │
+//         │  Semaphore (max_in_flight permits)                    │
+//         │  JoinSet<()>  (one entry per in-flight request)       │
+//         └────────────────────────────────────────────────────────┘
+//
+// Back-pressure chain:
+//   1. Semaphore exhausted → reader blocks on `acquire_owned()` → no new
+//      frames read.
+//   2. Writer channel full → dispatch tasks block on `tx.send()` → permits
+//      held → semaphore exhausted → reader stalls.
+//
+// Reply ordering:
+//   Replies arrive in dispatch-completion order (not wire order). Clients
+//   must correlate by `request_id` (rid). `max_in_flight = 1` gives
+//   lock-step ordering identical to the old sequential loop.
+//
+// Teardown on any exit path:
+//   - `join_set.abort_all()` cancels in-flight dispatch tasks.
+//   - `tx` (Sender) is dropped, closing the channel.
+//   - Writer task sees channel closed → calls `writer.shutdown().await` and
+//     exits. `writer_handle.await` waits for that to complete.
+// ---------------------------------------------------------------------------
+
+/// Message sent from dispatch tasks to the writer task.
+enum WriterMsg {
+    /// Write these bytes and keep running.
     Reply(Vec<u8>),
-    /// Reply bytes to write to the wire; then break the request loop.
-    /// Used for `session_invalidated` (already removed from store) and
-    /// `session_expired` so an attacker that resends keeps wasting a
-    /// fresh connection rather than reusing this one.
-    ReplyAndBreak(Vec<u8>),
-    /// Nothing usable to write (encode failure on the error envelope) —
-    /// just continue the loop.
-    Skip,
+    /// Write these bytes, then shut down the connection.
+    ReplyAndClose(Vec<u8>),
 }
 
-async fn request_loop<R: FrameReader, W: FrameWriter>(
-    ctx: &ConnectionContext,
-    reader: &mut R,
-    writer: &mut W,
-    frame_buf: &mut Vec<u8>,
-    write_scratch: &mut Vec<u8>,
+/// Guard that decrements the `requests_in_flight` gauge on drop.
+/// Ensures decrement happens even if the dispatch task panics (§B21/rust-intel).
+struct InFlightGuard;
+
+impl InFlightGuard {
+    fn new() -> Self {
+        metrics::gauge!("requests_in_flight").increment(1.0);
+        InFlightGuard
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        metrics::gauge!("requests_in_flight").decrement(1.0);
+    }
+}
+
+/// Duplex post-handshake request loop for a single connection.
+///
+/// # Duplex model
+///
+/// After a successful SCRAM handshake the connection enters this loop which
+/// drives reading and writing from two independent tasks:
+///
+/// * **Reader loop** (this task): reads frames from the client, acquires a
+///   semaphore permit, and spawns a per-request dispatch task into a
+///   `JoinSet`. Back-pressure: when `max_in_flight` permits are exhausted
+///   the reader blocks and no new frames are accepted.
+///
+/// * **Writer task** (spawned): owns the write half of the framer. Receives
+///   `WriterMsg::{Reply, ReplyAndClose}` over a bounded `mpsc` channel
+///   (capacity = `max_in_flight`). Writes frames in receipt order; on
+///   `ReplyAndClose` writes the final frame and shuts down.
+///
+/// * **Dispatch tasks** (one per request, in `JoinSet`): each owns the
+///   frame bytes (fresh `Vec` — no per-connection buffer reuse on this
+///   path), an `Arc<ConnectionContext>`, an `OwnedSemaphorePermit` (released
+///   on task completion), and a clone of the `mpsc::Sender`. Each task
+///   deserialises the envelope, runs `dispatch_request_view`, serialises
+///   the response, and sends it to the writer.
+///
+/// # Reply ordering
+///
+/// Replies are written in dispatch-completion order, which is *not*
+/// necessarily wire-arrival order. Clients must match responses to requests
+/// by `request_id` (rid). Setting `max_in_flight = 1` reproduces the old
+/// lock-step behaviour with strict ordering.
+///
+/// # Teardown
+///
+/// Any exit cause (client EOF, writer death, panic in dispatch) triggers:
+/// 1. `join_set.abort_all()` — cancel in-flight tasks.
+/// 2. Drop `tx` — signal writer task that no more messages are coming.
+/// 3. `writer_handle.await` — wait for the writer to flush and shut down.
+pub async fn request_loop<R, W>(
+    ctx: Arc<ConnectionContext>,
+    mut reader: R,
+    writer: W,
     sid: [u8; 32],
-) {
-    loop {
-        match reader
-            .read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
-            .await
-        {
-            Ok(()) => {}
-            Err(_) => break, // client closed
-        }
+) where
+    R: FrameReader + 'static,
+    W: FrameWriter + 'static,
+{
+    let cap = ctx.max_in_flight.max(1);
+    let semaphore = Arc::new(Semaphore::new(cap));
+    let (tx, mut rx) = mpsc::channel::<WriterMsg>(cap);
 
-        // Parse the envelope, run §7.5 session validity, and invoke the
-        // async handler — all directly on the current async task. No
-        // blocking-pool bridge (spawn_blocking) is needed because
-        // RequestHandler::handle is now an async fn. The request loop
-        // remains lock-step (one in-flight request per connection); the
-        // worker is free to yield at every .await inside the handler.
-        let view = match RequestEnvelopeView::from_msgpack(frame_buf) {
-            Ok(v) => v,
-            Err(_) => {
-                // Malformed envelope — emit generic error envelope back.
-                let err = ErrorEnvelope::new(None, "invalid_envelope");
-                let dispatch = match err.to_msgpack() {
-                    Ok(b) => DispatchOutput::Reply(b),
-                    Err(_) => DispatchOutput::Skip,
-                };
-                match dispatch {
-                    DispatchOutput::Skip => continue,
-                    DispatchOutput::Reply(bytes) => {
-                        if writer
-                            .write_frame_into(&bytes, write_scratch)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        continue;
-                    }
-                    DispatchOutput::ReplyAndBreak(_) => unreachable!(),
+    // Shared flag: set to true by a dispatch task that sends ReplyAndClose.
+    // The reader loop checks this flag and stops accepting new frames.
+    let close_requested = Arc::new(AtomicBool::new(false));
+
+    // --- Writer task ---------------------------------------------------------
+    // Owns the write half; receives replies over mpsc; shuts down on
+    // channel-close or ReplyAndClose. §B21: JoinHandle is always awaited.
+    let mut writer_handle = tokio::spawn(async move {
+        let mut writer = writer;
+        let mut scratch =
+            Vec::with_capacity(shamir_tunables::instance_defaults::IO_FRAME_BUFFER_CAP);
+        loop {
+            match rx.recv().await {
+                None => {
+                    // Channel closed (all senders dropped) — clean exit.
+                    break;
                 }
-            }
-        };
-
-        let lookup_tib = |uid: &[u8; 16]| -> u64 {
-            // Spec §7.5 NORMATIVE: each request runs through this fast
-            // read so changes to the user record (role updates,
-            // kickSession, password change) invalidate live sessions on
-            // the next request. Reverse-lookup from `user_id` → username
-            // → UserRecord uses the secondary index maintained inside
-            // `RedbUserDirectory::insert`.
-            ctx.user_dir.tickets_invalid_before_ns_by_user_id(uid)
-        };
-
-        // `dyn RequestHandler` implements the trait directly — no DynRef
-        // wrapper needed now that handle() returns a boxed future.
-        let dispatch = match dispatch_request_view(
-            &view,
-            &ctx.session_store,
-            lookup_tib,
-            ctx.handler.as_ref(),
-        )
-        .await
-        {
-            Ok(outcome) => match outcome {
-                DispatchOutcome::Response(resp) => match resp.to_msgpack() {
-                    Ok(b) => DispatchOutput::Reply(b),
-                    Err(_) => DispatchOutput::Skip,
-                },
-                DispatchOutcome::Error(err) => {
-                    let invalidated =
-                        err.error == "session_invalidated" || err.error == "session_expired";
-                    match err.to_msgpack() {
-                        Ok(b) => {
-                            if invalidated {
-                                DispatchOutput::ReplyAndBreak(b)
-                            } else {
-                                DispatchOutput::Reply(b)
-                            }
-                        }
-                        Err(_) => DispatchOutput::Skip,
+                Some(WriterMsg::Reply(bytes)) => {
+                    // DEFECT C fix: on write error (broken pipe / dead client)
+                    // break immediately so the JoinHandle resolves and the
+                    // reader's select! branch wakes up (Defect B fix).
+                    if writer.write_frame_into(&bytes, &mut scratch).await.is_err() {
+                        break;
                     }
                 }
-            },
-            Err(_) => {
-                // Internal error — best-effort error envelope.
-                let err = ErrorEnvelope::new(view.request_id, "internal_error");
-                match err.to_msgpack() {
-                    Ok(b) => DispatchOutput::Reply(b),
-                    Err(_) => DispatchOutput::Skip,
-                }
-            }
-        };
-
-        // Apply the dispatch outcome.
-        // The view borrow of frame_buf ends here (last use above); NLL
-        // releases it so frame_buf is reused on the next iteration
-        // as-is (Optim #1 / #7 — capacity is preserved).
-        match dispatch {
-            DispatchOutput::Skip => continue,
-            DispatchOutput::Reply(bytes) => {
-                if writer
-                    .write_frame_into(&bytes, write_scratch)
-                    .await
-                    .is_err()
-                {
+                Some(WriterMsg::ReplyAndClose(bytes)) => {
+                    // Write error here is ignored — we're closing anyway.
+                    let _ = writer.write_frame_into(&bytes, &mut scratch).await;
                     break;
                 }
             }
-            DispatchOutput::ReplyAndBreak(bytes) => {
-                let _ = writer.write_frame_into(&bytes, write_scratch).await;
-                // §7.5 has already removed the session; close the loop.
+        }
+        writer.shutdown().await;
+    });
+
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    // Tracks whether the writer task has already been consumed by the select!
+    // branch below so teardown does not double-await it.
+    let mut writer_done = false;
+
+    // --- Reader loop ---------------------------------------------------------
+    // Acquire permit → read frame → spawn dispatch.
+    //
+    // `read_frame_into` is placed inside `tokio::select!` with a branch that
+    // watches the writer task handle. Cancel-safety of the read branch is
+    // intentionally NOT required here: when the writer branch fires we are
+    // tearing down the connection entirely, so any partially-read frame is
+    // discarded along with everything else. We never resume the read after
+    // the writer exits.
+    'conn: loop {
+        // Non-blocking drain of completed dispatch tasks: releases permits
+        // and surfaces panics before we block on the next acquire.
+        while let Some(result) = join_set.try_join_next() {
+            if let Err(e) = result {
+                if e.is_panic() {
+                    tracing::error!("dispatch task panicked: {:?}", e);
+                    // DEFECT A fix: a dispatch panic is fatal for this
+                    // connection. Use the labeled break to exit the outer
+                    // 'conn loop, not just this inner while.
+                    break 'conn;
+                }
+            }
+        }
+
+        // Check the ReplyAndClose flag set by a dispatch task.
+        if close_requested.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Acquire a semaphore permit (back-pressure gate).
+        // When all max_in_flight slots are taken this awaits the release of
+        // an existing permit by a completing dispatch task.
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => break, // semaphore closed — should never happen
+        };
+
+        // Double-check the close flag: a ReplyAndClose dispatch task may have
+        // completed while we were waiting for the permit.
+        if close_requested.load(Ordering::Relaxed) {
+            drop(permit);
+            break;
+        }
+
+        // Read the next frame. DEFECT B fix: run inside select! so that if
+        // the writer task exits (e.g. after ReplyAndClose or a write error)
+        // the reader does not block forever waiting for data from a client
+        // that is intentionally holding the TCP connection open.
+        // Cancel-safety of the read branch is not required — when the writer
+        // branch fires we discard the partial read and tear down immediately.
+        let mut frame_buf = Vec::new();
+        tokio::select! {
+            read_res = reader.read_frame_into(MAX_FRAME_SIZE_DEFAULT, &mut frame_buf) => {
+                match read_res {
+                    Ok(()) => {}
+                    Err(_) => {
+                        // Client closed or transport error.
+                        drop(permit);
+                        break;
+                    }
+                }
+            }
+            _ = &mut writer_handle => {
+                // Writer task exited (ReplyAndClose sent, or write error).
+                // Tear down immediately; do not block on a lingering client.
+                drop(permit);
+                writer_done = true;
                 break;
             }
         }
+
+        // Spawn a per-request dispatch task. Each task owns:
+        //   - `frame_buf`: raw msgpack bytes (fresh Vec — no reuse on
+        //     concurrent path)
+        //   - `ctx_clone`: Arc — cheap clone, shared read-only state
+        //   - `permit`: OwnedSemaphorePermit — released when task ends
+        //   - `tx_clone`: mpsc Sender — pushes reply to writer task
+        //   - `close_flag`: signals ReplyAndClose to the reader loop
+        let ctx_clone = Arc::clone(&ctx);
+        let tx_clone = tx.clone();
+        let close_flag = Arc::clone(&close_requested);
+        let sid_copy = sid;
+
+        join_set.spawn(async move {
+            let _guard = InFlightGuard::new();
+            let _permit = permit;
+
+            let msg = match RequestEnvelopeView::from_msgpack(&frame_buf) {
+                Ok(v) => {
+                    let lookup_tib = |uid: &[u8; 16]| -> u64 {
+                        ctx_clone.user_dir.tickets_invalid_before_ns_by_user_id(uid)
+                    };
+                    match dispatch_request_view(
+                        &v,
+                        &ctx_clone.session_store,
+                        lookup_tib,
+                        ctx_clone.handler.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(DispatchOutcome::Response(resp)) => {
+                            let rid = v.request_id;
+                            match resp.to_msgpack() {
+                                Ok(b) => Some(WriterMsg::Reply(b)),
+                                Err(_) => {
+                                    // Serialisation failure — best-effort error.
+                                    let err = ErrorEnvelope::new(rid, "internal_error");
+                                    err.to_msgpack().ok().map(WriterMsg::Reply)
+                                }
+                            }
+                        }
+                        Ok(DispatchOutcome::Error(err)) => {
+                            let close = err.error == "session_invalidated"
+                                || err.error == "session_expired";
+                            match err.to_msgpack() {
+                                Ok(b) => {
+                                    if close {
+                                        // Signal the reader loop to stop.
+                                        close_flag.store(true, Ordering::Relaxed);
+                                        Some(WriterMsg::ReplyAndClose(b))
+                                    } else {
+                                        Some(WriterMsg::Reply(b))
+                                    }
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                        Err(_) => {
+                            // Internal dispatch error.
+                            let err = ErrorEnvelope::new(v.request_id, "internal_error");
+                            err.to_msgpack().ok().map(WriterMsg::Reply)
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Malformed envelope.
+                    let err = ErrorEnvelope::new(None, "invalid_envelope");
+                    err.to_msgpack().ok().map(WriterMsg::Reply)
+                }
+            };
+
+            if let Some(msg) = msg {
+                // `send` provides back-pressure: blocks when the channel
+                // is at capacity. A slow writer stalls dispatch tasks →
+                // permits held → semaphore exhausted → reader stalls. §B14.
+                let _ = tx_clone.send(msg).await;
+            }
+
+            let _ = sid_copy;
+        });
     }
+
+    // --- Teardown ------------------------------------------------------------
+    // Cancel all in-flight dispatch tasks (they hold permits and tx_clones).
+    join_set.abort_all();
+    // Dropping tx closes the mpsc channel; the writer task sees None on its
+    // next recv() and exits gracefully after flushing what it has.
+    drop(tx);
+    // Wait for the writer task to finish. §B21: no detached tasks.
+    // If writer_done is true the select! branch already consumed the handle.
+    if !writer_done {
+        let _ = writer_handle.await;
+    }
+
     let _ = sid;
-    let _ = ConnectError::AuthFailed; // suppress unused import on some paths
+    let _ = ConnectError::AuthFailed;
 }
 
 fn prefix_8(sid: &[u8; 32]) -> [u8; 8] {
@@ -877,6 +1051,7 @@ impl ConnectionContext {
         transport_kind: TransportKind,
         kdf_override: Option<KdfParams>,
         auth_init_timeout: Duration,
+        max_in_flight: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             identity,
@@ -895,6 +1070,7 @@ impl ConnectionContext {
             transport_kind,
             kdf_override,
             auth_init_timeout,
+            max_in_flight,
         })
     }
 }
