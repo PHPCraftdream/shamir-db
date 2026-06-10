@@ -8,6 +8,16 @@ pub mod record_counter;
 pub mod table;
 pub mod table_config;
 pub mod table_manager;
+mod table_manager_buffer;
+mod table_manager_changefeed;
+mod table_manager_crud;
+mod table_manager_index_mgmt;
+mod table_manager_locks;
+mod table_manager_replication;
+mod table_manager_sorted_index;
+mod table_manager_streaming;
+mod table_manager_tx_ops;
+mod table_manager_validators;
 mod write_exec;
 
 #[cfg(test)]

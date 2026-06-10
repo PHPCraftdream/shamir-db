@@ -1,0 +1,510 @@
+use std::sync::Arc;
+
+use futures::StreamExt;
+use shamir_storage::error::DbResult;
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+
+use super::table::Table;
+use super::table_manager::TableManager;
+use crate::query::filter::eval::{compile_filter, FilterCallback};
+use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::Filter;
+
+impl TableManager {
+    /// Stream records in batches, returning InnerValues
+    ///
+    /// This is memory-efficient for large tables as it doesn't load all records at once.
+    /// Returns a stream that yields batches of records.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch
+    ///
+    /// # Returns
+    /// A stream that yields batches of (RecordId, InnerValue) tuples
+    pub fn list_stream(
+        &self,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Send + 'a>,
+        >;
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch(batch_bytes) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let s: DynStream<'_> = Box::pin(self.table.list_stream(batch_size));
+            s
+        }
+    }
+
+    /// Stream records filtered by a compiled filter callback.
+    ///
+    /// Compiles the Filter AST into a callback network, then yields
+    /// batches of matching records. The filter is compiled once; only
+    /// matching records are yielded — non-matching records are dropped
+    /// immediately without accumulation.
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of records per batch from storage
+    /// * `filter` - Filter AST to compile and apply
+    /// * `ctx` - Filter context with interner and resolved query refs
+    pub async fn filter_stream<'a>(
+        &'a self,
+        batch_size: usize,
+        filter: &Filter,
+        ctx: &'a FilterContext<'a>,
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
+        let interner = self.interner.get().await?;
+        let callback = compile_filter(filter, interner);
+        let table_stream = self.list_stream(batch_size);
+
+        Ok(async_stream::stream! {
+            futures::pin_mut!(table_stream);
+            while let Some(batch_result) = table_stream.next().await {
+                match batch_result {
+                    Err(e) => { yield Err(e); return; }
+                    Ok(batch) => {
+                        let filtered: Vec<_> = batch
+                            .into_iter()
+                            .filter(|(_, record)| callback.matches(record, ctx))
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Stream records filtered by a pre-compiled callback.
+    ///
+    /// Use this when you want to compile the filter once and reuse it.
+    pub fn filter_stream_with_callback<'a>(
+        &'a self,
+        batch_size: usize,
+        callback: &'a dyn FilterCallback,
+        ctx: &'a FilterContext<'a>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        let table_stream = self.list_stream(batch_size);
+
+        async_stream::stream! {
+            futures::pin_mut!(table_stream);
+            while let Some(batch_result) = table_stream.next().await {
+                match batch_result {
+                    Err(e) => { yield Err(e); return; }
+                    Ok(batch) => {
+                        let filtered: Vec<_> = batch
+                            .into_iter()
+                            .filter(|(_, record)| callback.matches(record, ctx))
+                            .collect();
+                        if !filtered.is_empty() {
+                            yield Ok(filtered);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// tx-aware streaming variant of [`list_stream`].
+    ///
+    /// Forwards to [`list_stream`] for the actual data, then — when `tx` is
+    /// `Some` and the tx is Serializable — records each *materialised*
+    /// record's key into the read-set (HIGH-C). The yielded batches are
+    /// byte-for-byte the same as [`list_stream`]; recording is a pure
+    /// side-effect threaded lazily through the stream, so the lazy-yield
+    /// contract is preserved (a consumer that stops early only records the
+    /// keys it actually pulled).
+    ///
+    /// Streaming-scan SSI scope: this records the keys the scan *yields*. It
+    /// does NOT install predicate / range locks, so phantom inserts into the
+    /// scanned range by a concurrent tx are not detected — full SSI predicate
+    /// locking over a stream is a known harder problem and out of scope here.
+    /// Point reads ([`read_one_tx`]) and materialised scan reads are covered.
+    ///
+    /// KNOWN LIMITATION — no read-your-own-writes for scans. Streaming scans
+    /// do NOT overlay the tx's own `write_set`: a record this tx staged
+    /// (inserted/updated/deleted but not yet committed) is **invisible** to an
+    /// in-tx stream — a staged insert is absent, a staged delete still appears,
+    /// a staged update yields the committed value. Only point reads
+    /// ([`read_one_tx`]) overlay staging (read-your-own-writes). A staged
+    /// change becomes visible to a scan only after commit. Full streaming RYOW
+    /// (inject staged inserts, drop staged deletes, override staged updates,
+    /// all while preserving the lazy-yield + SSI recording contract) is a
+    /// follow-up. The `list_stream_tx_does_not_see_staged_insert` test pins
+    /// this current behaviour so the limitation cannot regress silently.
+    pub fn list_stream_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        // Phase C (Step 6): defensive coarse recording for streams
+        // reached directly (bypassing read_tx). Zero-overhead: gate on
+        // Serializable before any work.
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
+                    table_token: self.table_token(),
+                });
+            }
+        }
+        let inner = self.list_stream(batch_size);
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        Self::record_scan_reads(inner, tx, token, mvcc)
+    }
+
+    /// tx-aware streaming variant of [`filter_stream`].
+    ///
+    /// Same materialised-read SSI recording as [`list_stream_tx`]: each
+    /// record that survives the filter and is yielded gets recorded into the
+    /// read-set (Serializable only). Same streaming-scan SSI scope note, and
+    /// the same KNOWN LIMITATION: scans do NOT overlay the tx `write_set`
+    /// (no read-your-own-writes for scans — see [`list_stream_tx`]).
+    pub async fn filter_stream_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+        filter: &Filter,
+        ctx: &'a FilterContext<'a>,
+    ) -> DbResult<impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a> {
+        // Phase C (Step 6): predicate recording for filter streams
+        // reached directly (bypassing read_tx). Zero-overhead: gate on
+        // Serializable before any work.
+        if let Some(t) = tx {
+            if t.isolation == shamir_tx::IsolationLevel::Serializable {
+                let token = self.table_token();
+                let deps = crate::query::filter::eval::predicate_to_index_range(
+                    filter,
+                    self.sorted_indexes(),
+                    ctx.interner,
+                    token,
+                );
+                if deps.is_empty() {
+                    t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
+                        table_token: token,
+                    });
+                } else {
+                    for d in deps {
+                        t.record_predicate_shared(d);
+                    }
+                }
+            }
+        }
+        let inner = self.filter_stream(batch_size, filter, ctx).await?;
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        Ok(Self::record_scan_reads(inner, tx, token, mvcc))
+    }
+
+    /// tx-aware streaming variant of [`filter_stream_with_callback`].
+    ///
+    /// Same materialised-read SSI recording as [`list_stream_tx`], and the
+    /// same KNOWN LIMITATION: scans do NOT overlay the tx `write_set` (no
+    /// read-your-own-writes for scans — see [`list_stream_tx`]).
+    pub fn filter_stream_with_callback_tx<'a>(
+        &'a self,
+        tx: Option<&'a shamir_tx::TxContext>,
+        batch_size: usize,
+        callback: &'a dyn FilterCallback,
+        ctx: &'a FilterContext<'a>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        let inner = self.filter_stream_with_callback(batch_size, callback, ctx);
+        let token = self.table_token();
+        let mvcc = self.mvcc_store.clone();
+        Self::record_scan_reads(inner, tx, token, mvcc)
+    }
+
+    /// Wrap a record stream so that, for a Serializable tx, each yielded
+    /// record's key is recorded into the read-set at the version observed
+    /// when it is pulled. The wrapper is transparent: it yields exactly what
+    /// the inner stream yields, in the same order. For `tx == None` or a
+    /// non-Serializable tx it adds no per-record work beyond a single
+    /// up-front isolation check (the `version_of` lookup and recording are
+    /// skipped entirely). `mvcc` is `None` → version `0` (conservative
+    /// default, see [`read_one_tx`]).
+    pub(super) fn record_scan_reads<'a, S>(
+        inner: S,
+        tx: Option<&'a shamir_tx::TxContext>,
+        token: u64,
+        mvcc: Option<Arc<shamir_tx::MvccStore>>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a
+    where
+        S: futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a,
+    {
+        // Only Serializable txs track reads; everything else is a pass-through
+        // so the non-SSI scan path pays nothing per record.
+        let recording_tx = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable);
+        async_stream::stream! {
+            futures::pin_mut!(inner);
+            while let Some(batch_result) = inner.next().await {
+                if let (Ok(batch), Some(tx)) = (&batch_result, recording_tx) {
+                    for (rid, _) in batch {
+                        let key = rid.to_bytes();
+                        let version = mvcc.as_ref().map_or(0, |m| m.version_of(key.as_ref()));
+                        tx.record_read_shared(token, key, version);
+                    }
+                }
+                yield batch_result;
+            }
+        }
+    }
+
+    /// FINAL-A helper: drain `list_stream` into a vec of `(RecordId, InnerValue)`.
+    /// Used by `create_index` / `create_unique_index` to backfill from the seam
+    /// rather than the raw `data_store` when an MvccStore is attached.
+    pub(super) async fn collect_all_current_records(
+        &self,
+    ) -> DbResult<Vec<(RecordId, InnerValue)>> {
+        let mut out = Vec::new();
+        let stream = self.list_stream(1000);
+        futures::pin_mut!(stream);
+        while let Some(batch) = stream.next().await {
+            out.extend(batch?);
+        }
+        Ok(out)
+    }
+
+    /// tx-aware single-record read.
+    ///
+    /// - `tx == None` → same as [`get`]: direct read from main data_store.
+    /// - `tx == Some(tx)` and no `mvcc_store` attached → same as [`get`].
+    /// - `tx == Some(tx)` and `mvcc_store` attached →
+    ///   `mvcc.get_at(rid.to_bytes(), tx.snapshot_version)`:
+    ///     - `Some(bytes)` → deserialize and return.
+    ///     - `None` → `DbError::NotFound`.
+    ///
+    /// I.4 — read-your-own-writes. Before consulting the snapshot base, the
+    /// tx's own staging overlay (`tx.write_set[token]`, the `StagingStore`
+    /// holding this tx's un-committed set/remove ops) is checked for `key`:
+    ///   - staged `Set(bytes)` → return the staged value (read-your-own-write);
+    ///   - staged `Remove`     → return `NotFound` (read-your-own-delete);
+    ///   - not staged          → fall through to `get_at(snapshot)` (the base).
+    ///
+    /// HIGH-C — SSI read tracking. When `tx` is `Some`, the key and the
+    /// version observed at read time are recorded into the tx's read-set via
+    /// [`record_read_shared`](shamir_tx::TxContext::record_read_shared) (a
+    /// no-op under Snapshot isolation, so callers pay nothing there).
+    pub async fn read_one_tx(
+        &self,
+        id: RecordId,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<InnerValue> {
+        if let Some(tx) = tx {
+            let key = id.to_bytes();
+            // Level-3: acquire a Shared lock on the key before reading.
+            // No-op for Snapshot / Serializable (the helper self-gates).
+            // A wound-wait abort surfaces as DbError::Conflict and the tx
+            // must abort (the executor / commit path handles it).
+            self.acquire_pessimistic_read_lock(key.clone(), tx).await?;
+            // Capture the version at read time, then record the SSI read
+            // dependency. No-op for Snapshot isolation.
+            let version = self
+                .mvcc_store
+                .as_ref()
+                .map_or(0, |mvcc| mvcc.version_of(key.as_ref()));
+            tx.record_read_shared(self.table_token(), key.clone(), version);
+
+            // I.4 read-your-own-writes: the tx's own staging overlay wins
+            // over the snapshot base. A targeted per-key probe (alloc-free,
+            // no fall-through to base): staged Set → return the staged value,
+            // staged Remove → NotFound, not staged → fall through to the
+            // snapshot base below. Only the table's own staging is probed
+            // (guarded by the write_set lookup), so a tx that never wrote this
+            // table pays nothing.
+            if let Some(staging) = tx.write_set.get(&self.table_token()) {
+                match staging.staged_op(key.as_ref()) {
+                    Some(shamir_tx::staging_store::StagedKind::Set(v)) => {
+                        return InnerValue::from_bytes(v).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize InnerValue: {}",
+                                e
+                            ))
+                        });
+                    }
+                    Some(shamir_tx::staging_store::StagedKind::Removed) => {
+                        return Err(shamir_storage::error::DbError::NotFound(format!(
+                            "record staged-removed in tx: {:?}",
+                            id
+                        )));
+                    }
+                    None => {}
+                }
+            }
+
+            if let Some(mvcc) = self.mvcc_store.as_ref() {
+                match mvcc.get_at(key.as_ref(), tx.snapshot_version).await? {
+                    Some(bytes) => {
+                        return InnerValue::from_bytes(bytes).map_err(|e| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "Failed to deserialize InnerValue: {}",
+                                e
+                            ))
+                        });
+                    }
+                    None => {
+                        return Err(shamir_storage::error::DbError::NotFound(format!(
+                            "record not found at snapshot {}: {:?}",
+                            tx.snapshot_version, id
+                        )));
+                    }
+                }
+            }
+        }
+        self.get(id).await
+    }
+
+    /// tx-aware read-query execution (Vector I.1).
+    ///
+    /// The wire `execute_batch` path dispatches `BatchOp::Read` here when a
+    /// `transactional` batch is in flight, so a Serializable batch's SELECT
+    /// populates the tx read-set and SSI write-skew detection becomes live
+    /// end-to-end.
+    pub async fn read_tx(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<crate::query::read::QueryResult> {
+        // Only a Serializable tx records reads; for everything else the
+        // recording pass is pure overhead, so dispatch straight to `read`.
+        let recording = tx
+            .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
+            .is_some();
+        if recording {
+            // Phase C (Step 6): one-shot predicate-set recording derived
+            // from query.r#where. Zero-overhead: this block only runs for
+            // Serializable txs.
+            let tx_ref = tx.expect("recording=true implies tx is Some");
+            let token = self.table_token();
+            match query.r#where.as_ref() {
+                None => {
+                    // No WHERE → coarse TableScan over the whole table.
+                    tx_ref.record_predicate_shared(
+                        shamir_tx::predicate_set::PredicateDep::TableScan { table_token: token },
+                    );
+                }
+                Some(filter) => {
+                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                        filter,
+                        self.sorted_indexes(),
+                        ctx.interner,
+                        token,
+                    );
+                    if deps.is_empty() {
+                        tx_ref.record_predicate_shared(
+                            shamir_tx::predicate_set::PredicateDep::TableScan {
+                                table_token: token,
+                            },
+                        );
+                    } else {
+                        for dep in deps {
+                            tx_ref.record_predicate_shared(dep);
+                        }
+                    }
+                }
+            }
+
+            // Existing per-record recording pass (unchanged) — captures
+            // point-key reads for the read_set, complementing the
+            // predicate_set.
+            self.record_query_reads(query, ctx, tx).await?;
+        }
+        // Level-3: acquire a Shared lock on every record the query touches
+        // BEFORE reading. Reuses the same scan streams as the Serializable
+        // recording pass (`record_query_reads`) so the locked set matches the
+        // read set. Zero-overhead: only runs for Pessimistic txs. A wound-wait
+        // abort surfaces as DbError::Conflict and propagates up.
+        if let Some(t) = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Pessimistic) {
+            self.lock_query_reads(query, ctx, t).await?;
+        }
+        self.read(query, ctx).await
+    }
+
+    /// Level-3: acquire a `Shared` lock on every record matching `query`'s
+    /// WHERE clause (or the whole table when there is no WHERE), mirroring
+    /// [`record_query_reads`] but locking instead of recording. Pessimistic
+    /// only — never called for Snapshot / Serializable.
+    async fn lock_query_reads(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: &shamir_tx::TxContext,
+    ) -> DbResult<()> {
+        let batch_size = 1000;
+        match query.r#where.as_ref() {
+            Some(filter) => {
+                let stream = self.filter_stream(batch_size, filter, ctx).await?;
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    for (rid, _) in batch? {
+                        self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
+                            .await?;
+                    }
+                }
+            }
+            None => {
+                let stream = self.list_stream(batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    for (rid, _) in batch? {
+                        self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
+                            .await?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Record SSI read dependencies for `query` into the tx read-set.
+    ///
+    /// Reuses the existing tx-aware scan streams ([`filter_stream_tx`] /
+    /// [`list_stream_tx`]) purely for their per-record recording side-effect:
+    /// draining the stream records each matching record's key at the version
+    /// observed when it is pulled. The yielded batches are discarded — only the
+    /// read-set mutation matters here. Caller guarantees `tx` is `Some` and
+    /// Serializable (the streams self-gate, but we never reach here otherwise).
+    async fn record_query_reads(
+        &self,
+        query: &crate::query::read::ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<()> {
+        let batch_size = 1000;
+        match query.r#where.as_ref() {
+            Some(filter) => {
+                let stream = self.filter_stream_tx(tx, batch_size, filter, ctx).await?;
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    batch?;
+                }
+            }
+            None => {
+                let stream = self.list_stream_tx(tx, batch_size);
+                futures::pin_mut!(stream);
+                while let Some(batch) = stream.next().await {
+                    batch?;
+                }
+            }
+        }
+        Ok(())
+    }
+}

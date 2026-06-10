@@ -2,8 +2,7 @@
 
 use serde_json::json;
 use shamir_collections::new_map;
-use shamir_query_types::batch::types::SubBatchOp;
-use shamir_query_types::batch::BatchOp;
+use shamir_query_types::batch::{BatchOp, SubBatchOp};
 use shamir_query_types::filter::FilterValue;
 
 use crate::batch::Batch;

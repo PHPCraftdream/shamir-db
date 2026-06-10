@@ -1,0 +1,115 @@
+//! Runtime handle for a launched server instance.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use shamir_db::ShamirDb;
+use shamir_tunables::runtime::RuntimeTunables;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+
+use crate::audit_appender::RedbAuditAppender;
+use crate::scheduler::Scheduler;
+
+/// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
+/// `JoinHandle` so [`ServerHandle::shutdown`] can wake the task out of its
+/// `interval.tick()` immediately rather than waiting up to one full
+/// interval.
+pub(super) struct MetaSnapshotTask {
+    pub(super) handle: JoinHandle<()>,
+    pub(super) stop: Arc<Notify>,
+}
+
+/// Owner of the runtime state of a launched server.
+pub struct ServerHandle {
+    /// Addresses the server actually bound, in the same order as
+    /// `config.listeners`. `None` entries correspond to skipped listeners
+    /// (WS / plain are not yet supported by this MVP boot path).
+    pub bound_addrs: Vec<Option<SocketAddr>>,
+    /// Per-listener accept-loop join handles.
+    pub(super) listener_tasks: Vec<JoinHandle<()>>,
+    /// Background task scheduler.
+    pub(super) scheduler: Scheduler,
+    /// Audit-log appender (drained on shutdown).
+    pub(super) audit_appender: Arc<RedbAuditAppender>,
+    /// Notify that signals all accept loops to stop.
+    pub(super) shutdown_notify: Arc<Notify>,
+    /// Optional observability HTTP server.
+    pub(super) observability: Option<crate::observability::ObservabilityHandle>,
+    /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
+    /// state). One 60s tick persists BOTH the lockout store and the
+    /// rate-limiter buckets. Awaited on shutdown so the redb file lock on
+    /// `server_meta.redb` is released cleanly before a same-data-dir
+    /// restart can succeed.
+    pub(super) meta_snapshot_task: Option<MetaSnapshotTask>,
+    /// Phase B Stage 6 — periodic reaper for expired interactive txs.
+    /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
+    /// task drops and any lingering open txs are dropped (RAII abort).
+    pub(super) interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
+    /// ShamirDb reference — needed on shutdown to drain all repo
+    /// MemBuffers to durable backing, closing the ~500 ms buffered-
+    /// commit loss window on graceful stop.
+    pub(super) shamir: Arc<ShamirDb>,
+    /// RAII single-instance guard: an advisory OS file lock on
+    /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
+    /// when this `File` is dropped (or the process crashes), so a second
+    /// `shamir-server` that tries to open the same `data_dir` gets
+    /// `BootError::AlreadyRunning` instead of silently corrupting the
+    /// redb stores. Do NOT explicitly unlock — drop is the release.
+    pub(super) _data_dir_lock: std::fs::File,
+    /// Instance-level runtime tunables. Initialized from `instance_defaults`
+    /// consts — reads are a single atomic load (instant, non-blocking).
+    /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
+    /// slice to keep this slice small and behaviour-identical.
+    pub tunables: Arc<RuntimeTunables>,
+}
+
+impl ServerHandle {
+    /// Stop accepting new connections, then drain the scheduler + audit log.
+    /// In-flight per-connection tasks are NOT awaited explicitly — they
+    /// finish on their own once their TcpStreams close.
+    pub async fn shutdown(self) {
+        // 1. Tell all accept loops to stop.
+        self.shutdown_notify.notify_waiters();
+        // 2. Wait for them to finish — they exit promptly since
+        //    `select!` on `notify.notified()` short-circuits.
+        for task in self.listener_tasks {
+            let _ = task.await;
+        }
+        // 3. Drain the audit chain + scheduler.
+        self.audit_appender.shutdown().await;
+        self.scheduler.shutdown().await;
+        // 4. Flush all repo MemBuffers to durable backing so buffered
+        //    commits in the last ~500 ms window are not lost on graceful
+        //    stop. Must happen AFTER accept loops have stopped (no new
+        //    writes can arrive) and BEFORE redb locks are released.
+        if let Err(e) = self.shamir.flush_all().await {
+            tracing::warn!("shutdown: flush_all failed: {}", e);
+        }
+        // 5. Stop the observability HTTP server (if any).
+        if let Some(obs) = self.observability {
+            obs.shutdown().await;
+        }
+        // 5. Stop the meta-snapshot task and let it drop its
+        //    Arc<ServerMetaStore> reference so the redb file lock
+        //    on `server_meta.redb` releases for a same-data-dir
+        //    restart. The task writes one final lockout + rate-limit
+        //    snapshot inside its shutdown branch (best-effort).
+        if let Some(snap) = self.meta_snapshot_task {
+            snap.stop.notify_waiters();
+            let _ = snap.handle.await;
+        }
+        // 6. Stop the interactive-tx reaper so the Arc<TxRegistry> drops
+        //    and any lingering open txs are dropped (RAII abort).
+        if let Some(reaper) = self.interactive_tx_reaper {
+            reaper.stop.notify_waiters();
+            let _ = reaper.handle.await;
+        }
+    }
+
+    /// Returns the first bound TCP+TLS-exporter address — useful for
+    /// integration tests that just want "where do I connect?".
+    pub fn first_tls_exporter_addr(&self) -> Option<SocketAddr> {
+        self.bound_addrs.iter().filter_map(|a| *a).next()
+    }
+}

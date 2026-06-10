@@ -546,7 +546,7 @@ fn map_outcome_to_info(
 
 #[test]
 fn deferred_outcome_maps_to_materialized_false() {
-    use crate::tx::commit::MaterializationState;
+    use crate::tx::tx_outcome::MaterializationState;
 
     let complete = crate::tx::TxOutcome {
         tx_id: 11,

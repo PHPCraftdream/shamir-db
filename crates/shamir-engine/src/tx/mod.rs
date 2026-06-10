@@ -1,10 +1,13 @@
 pub mod commit;
+pub mod commit_phases;
 pub mod predicate_range;
 pub mod recovery;
+pub mod tx_outcome;
 
 pub(crate) use commit::release_pessimistic_locks;
-pub use commit::{commit_tx, TxError as CommitError, TxOutcome};
+pub use commit::{commit_tx, wal_ops_from_tx, TxError as CommitError};
 pub use recovery::{recover_inflight_v2, replay_v2_entry, replay_v2_op};
+pub use tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
 // Phase B — re-export the `shamir-tx` overlay/handle types through the
 // engine's public surface so the `shamir-db` facade (which depends on the

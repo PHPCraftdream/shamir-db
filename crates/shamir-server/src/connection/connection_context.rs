@@ -9,10 +9,9 @@
 //! latency, audit_chain, ServerHandshake, dispatch_request_view).
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
@@ -37,7 +36,7 @@ use shamir_connect::server::lockout::{
 };
 use shamir_connect::server::rate_limit::{RateDecision, RateLimiter};
 use shamir_connect::server::resume::{
-    process_resume, ConsumedCounterStore, ResumeConfig, ResumeRequest, UserStateLookup,
+    process_resume, ConsumedCounterStore, ResumeConfig, ResumeRequest,
 };
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::{
@@ -46,17 +45,20 @@ use shamir_connect::server::session::{
 use shamir_connect::server::user_record::UserRecord;
 use shamir_connect::Error as ConnectError;
 
+use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
+
 use crate::framer::{FrameReader, FrameWriter, Framer};
 use crate::user_directory::RedbUserDirectory;
 use crate::version::check_handshake_proto;
+
+use super::in_flight_guard::InFlightGuard;
+use super::user_state_lookup::RedbUserStateLookup;
 
 /// Helper for the auth_attempts_total counter — keeps the result label
 /// values consistent across emit sites.
 fn record_auth_attempt(result: &'static str) {
     metrics::counter!("auth_attempts_total", "result" => result).increment(1);
 }
-
-use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
 /// Wire view of `auth_init`, `challenge`, `client_proof`, `auth_ok` —
 /// these match the shapes used by the transport-tcp e2e test, kept
@@ -182,6 +184,65 @@ pub struct ConnectionContext {
     /// capacity in [`request_loop`]. `1` gives lock-step semantics;
     /// default is [`shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT`].
     pub max_in_flight: usize,
+}
+
+impl ConnectionContext {
+    /// Borrow the current Ed25519 keypair for `verify_proof`. Wrapped here
+    /// so the call site can stay short and the shamir-connect API stays
+    /// keypair-based.
+    fn identity_keypair_for_verify(&self) -> &shamir_connect::common::crypto::Ed25519Keypair {
+        // ServerIdentityState exposes sign_with_current but not the
+        // raw keypair. For this binding we shadow-copy the keypair into
+        // ConnectionContext during boot (main.rs constructs both from
+        // the same seed). See the field below.
+        &self.identity_keypair_inner
+    }
+
+    /// Build a ConnectionContext from its fields plus an explicit keypair
+    /// reference. The keypair MUST share its seed with `identity` — the
+    /// boot path enforces this.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        identity: Arc<ServerIdentityState>,
+        identity_keypair: shamir_connect::common::crypto::Ed25519Keypair,
+        secrets: Arc<ServerSecrets>,
+        kdf_defaults: KdfParams,
+        session_store: Arc<SessionStore>,
+        user_dir: Arc<RedbUserDirectory>,
+        lockout: Arc<dyn LockoutStore>,
+        rate_limit: Arc<dyn RateLimiter>,
+        argon2_sem: Arc<Argon2Semaphore>,
+        audit: Arc<AuditChainWriter>,
+        resume_config: Arc<ResumeConfig>,
+        consumed_counters: Arc<dyn ConsumedCounterStore>,
+        handler: Arc<dyn RequestHandler>,
+        binding_mode: BindingMode,
+        transport_kind: TransportKind,
+        kdf_override: Option<KdfParams>,
+        auth_init_timeout: Duration,
+        max_in_flight: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            identity,
+            identity_keypair_inner: identity_keypair,
+            secrets,
+            kdf_defaults,
+            session_store,
+            user_dir,
+            lockout,
+            rate_limit,
+            argon2_sem,
+            audit,
+            resume_config,
+            consumed_counters,
+            handler,
+            binding_mode,
+            transport_kind,
+            kdf_override,
+            auth_init_timeout,
+            max_in_flight,
+        })
+    }
 }
 
 /// Top-level entry — drive a single accepted connection through the
@@ -394,38 +455,6 @@ enum HandshakeError {
     /// Transient storage failure during role lookup (§C2: must not silently
     /// downgrade to empty roles).
     Storage(String),
-}
-
-/// Adapter: implement [`UserStateLookup`] against [`RedbUserDirectory`].
-///
-/// Returns the user's `tickets_invalid_before_ns` if they exist, `None`
-/// if the user_id is not found. An unrecognised user_id causes
-/// `process_resume` to return `AuthFailed` per spec §5.4 step 8.
-struct RedbUserStateLookup<'a>(&'a RedbUserDirectory);
-
-impl UserStateLookup for RedbUserStateLookup<'_> {
-    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
-        // `tickets_invalid_before_ns_by_user_id` returns 0 when the user
-        // exists but the field was never explicitly set (i.e. all tickets
-        // are valid). Return `None` only when the user is completely absent
-        // from the directory so that `process_resume` rejects unknown users.
-        //
-        // The user_id→username reverse lookup is needed first to confirm
-        // the user exists. We use the same `user_id` path the request loop
-        // uses for `tickets_invalid_before_ns`.
-        //
-        // If the user exists the directory returns their tib value (≥ 0).
-        // We wrap the result: Some(tib) when found, None when absent.
-        let tib = self.0.tickets_invalid_before_ns_by_user_id(user_id);
-        // tickets_invalid_before_ns_by_user_id returns 0 for unknown users
-        // AND for users with tib=0. Distinguish by looking up user existence.
-        // Use a lightweight existence check: look up by user_id directly.
-        // The RedbUserDirectory exposes `user_id_exists` for this purpose,
-        // but if that method is absent we fall back to treating 0 as valid
-        // (conservative: all tickets valid) — the anti-replay counter still
-        // protects against replays.
-        Some(tib)
-    }
 }
 
 /// Session-resume fast-path (SESSION_RESUMPTION §5).
@@ -867,23 +896,6 @@ enum WriterMsg {
     ReplyAndClose(Vec<u8>),
 }
 
-/// Guard that decrements the `requests_in_flight` gauge on drop.
-/// Ensures decrement happens even if the dispatch task panics (§B21/rust-intel).
-struct InFlightGuard;
-
-impl InFlightGuard {
-    fn new() -> Self {
-        metrics::gauge!("requests_in_flight").increment(1.0);
-        InFlightGuard
-    }
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        metrics::gauge!("requests_in_flight").decrement(1.0);
-    }
-}
-
 /// Duplex post-handshake request loop for a single connection.
 ///
 /// # Duplex model
@@ -1173,82 +1185,3 @@ fn audit_emit(
         now_ns,
     );
 }
-
-// ----------------------------------------------------------------------------
-// Compatibility shim for verify_proof — see comment in step 7. We add a
-// lightweight method on ConnectionContext that returns a borrowed keypair
-// reference for the duration of the verify call. The keypair is stored as
-// an extra field alongside the ServerIdentityState.
-// ----------------------------------------------------------------------------
-impl ConnectionContext {
-    /// Borrow the current Ed25519 keypair for `verify_proof`. Wrapped here
-    /// so the call site can stay short and the shamir-connect API stays
-    /// keypair-based.
-    fn identity_keypair_for_verify(&self) -> &shamir_connect::common::crypto::Ed25519Keypair {
-        // ServerIdentityState exposes sign_with_current but not the
-        // raw keypair. For this binding we shadow-copy the keypair into
-        // ConnectionContext during boot (main.rs constructs both from
-        // the same seed). See the field below.
-        &self.identity_keypair_inner
-    }
-}
-
-// Patch the struct: add the keypair field. Defined here as a helper to
-// keep the change local; main.rs constructs both ServerIdentityState
-// and the keypair from the same seed via ServerMetaStore.
-impl ConnectionContext {
-    /// Build a ConnectionContext from its fields plus an explicit keypair
-    /// reference. The keypair MUST share its seed with `identity` — the
-    /// boot path enforces this.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        identity: Arc<ServerIdentityState>,
-        identity_keypair: shamir_connect::common::crypto::Ed25519Keypair,
-        secrets: Arc<ServerSecrets>,
-        kdf_defaults: KdfParams,
-        session_store: Arc<SessionStore>,
-        user_dir: Arc<RedbUserDirectory>,
-        lockout: Arc<dyn LockoutStore>,
-        rate_limit: Arc<dyn RateLimiter>,
-        argon2_sem: Arc<Argon2Semaphore>,
-        audit: Arc<AuditChainWriter>,
-        resume_config: Arc<ResumeConfig>,
-        consumed_counters: Arc<dyn ConsumedCounterStore>,
-        handler: Arc<dyn RequestHandler>,
-        binding_mode: BindingMode,
-        transport_kind: TransportKind,
-        kdf_override: Option<KdfParams>,
-        auth_init_timeout: Duration,
-        max_in_flight: usize,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            identity,
-            identity_keypair_inner: identity_keypair,
-            secrets,
-            kdf_defaults,
-            session_store,
-            user_dir,
-            lockout,
-            rate_limit,
-            argon2_sem,
-            audit,
-            resume_config,
-            consumed_counters,
-            handler,
-            binding_mode,
-            transport_kind,
-            kdf_override,
-            auth_init_timeout,
-            max_in_flight,
-        })
-    }
-}
-
-// Re-declare the struct to include the extra inner keypair field. This
-// is technically incompatible with the earlier struct declaration; we
-// fold it into the canonical definition above by re-declaring the
-// fields as a single source of truth.
-//
-// To keep the file compilable, the struct definition above MUST list
-// `identity_keypair_inner` — so we patch by editing the struct above
-// rather than duplicating it here.

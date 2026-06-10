@@ -1,0 +1,462 @@
+use shamir_storage::error::{DbError, DbResult};
+use shamir_types::types::record_id::RecordId;
+use shamir_types::types::value::InnerValue;
+
+use super::table_manager::TableManager;
+
+impl TableManager {
+    // ---- index2 event hooks (used by crud + replication) ----
+
+    pub(super) async fn index2_on_insert(&self, rid: &RecordId, rec: &InnerValue) {
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_insert(*rid, rec).await {
+                let _ =
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
+            }
+        }
+    }
+
+    pub(super) async fn index2_on_update(
+        &self,
+        rid: &RecordId,
+        old: &InnerValue,
+        new: &InnerValue,
+    ) {
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_update(*rid, old, new).await {
+                let _ =
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
+            }
+        }
+    }
+
+    pub(super) async fn index2_on_delete(&self, rid: &RecordId, rec: &InnerValue) {
+        for backend in self.index2_registry.all_backends().await {
+            if let Ok(ops) = backend.plan_delete(*rid, rec).await {
+                let _ =
+                    crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref()).await;
+            }
+        }
+    }
+
+    // ---- public CRUD surface ----
+
+    /// Insert an InnerValue, returns RecordId (with counter and index update)
+    ///
+    /// Validates unique indexes BEFORE insert, returns error if constraint violated.
+    ///
+    /// cancel-safe: NO — sequence is data-write → counter-bump → 3 index
+    /// updates with no WAL marker around it (unlike `insert_many` which
+    /// uses `wal.begin_with_delta`/`commit`). Cancellation between the
+    /// data write (`self.table.insert`) and the index hooks leaves the
+    /// data store with orphan records that the indexes don't see; the
+    /// doctor's `repair()` pass is the recovery path. Do NOT call this
+    /// under `tokio::select!` or `tokio::time::timeout` — use
+    /// `insert_many(&[value])` for the WAL-covered single-record path.
+    pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
+        let (id, _version) = self.insert_returning_version(value).await?;
+        Ok(id)
+    }
+
+    /// Like [`insert`](Self::insert) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached.
+    pub(crate) async fn insert_returning_version(
+        &self,
+        value: &InnerValue,
+    ) -> DbResult<(RecordId, u64)> {
+        let _guard = if self.index_manager.has_unique_indexes() {
+            Some(self.unique_write_lock.lock().await)
+        } else {
+            None
+        };
+
+        // 1. Validate unique indexes BEFORE write
+        self.index_manager.validate_unique_for_create(value).await?;
+
+        // 2. Write to table. Route through MvccStore (SSI / version cache
+        //    + history archival under active snapshots) when one is
+        //    attached; otherwise fall back to a direct data_store write.
+        //    Pre-generating the RecordId here lets us use the keyed
+        //    `set_versioned` path instead of `Table::insert`'s auto-key
+        //    `data_store.insert`. The MvccStore writes to `main` (same
+        //    physical layout as direct `set`), so observers reading via
+        //    `data_store.get` see the new record identically.
+        let id = RecordId::new();
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+        let version = if let Some(mvcc) = &self.mvcc_store {
+            mvcc.set_versioned(id.to_bytes(), bytes).await?
+        } else {
+            self.table.data_store().set(id.to_bytes(), bytes).await?;
+            0
+        };
+        self.counter.increment(1).await?;
+
+        // 3. Update indexes AFTER write
+        self.index_manager.on_record_created(&id, value).await?;
+        self.index_manager
+            .on_record_created_unique(&id, value)
+            .await?;
+        self.sorted_indexes
+            .on_record_created(&id, value, version)
+            .await?;
+        self.index2_on_insert(&id, value).await;
+
+        // SSI footprint: record this non-tx insert so Serializable txs see it.
+        let ssi_ops = self
+            .sorted_indexes
+            .plan_record_created(&id, value, version)
+            .unwrap_or_default();
+        self.record_nontx_ssi_footprint(version, &ssi_ops);
+
+        Ok((id, version))
+    }
+
+    /// Batched insert of N records. Validates unique indexes first
+    /// for all values, then issues one batched `Table::insert_many`
+    /// (which dispatches to `Store::insert_many` — on nebari / persy /
+    /// redb that's a single transaction = one fsync for the data
+    /// store). Counter increments by N once; index updates still
+    /// loop per-record (a follow-up sprint can batch the index
+    /// writes through `info_store.set_many`).
+    ///
+    /// Atomicity matches `Store::insert_many` for the chosen backend
+    /// (transactional all-or-nothing on nebari / persy / redb;
+    /// per-record on backends using the default loop impl).
+    pub async fn insert_many(&self, values: &[InnerValue]) -> DbResult<Vec<RecordId>> {
+        let (ids, _version) = self.insert_many_returning_version(values).await?;
+        Ok(ids)
+    }
+
+    /// Like [`insert_many`](Self::insert_many) but also returns the
+    /// maximum MVCC version assigned across the batch (for changefeed
+    /// version alignment). Returns `0` when no `MvccStore` is attached
+    /// or the batch is empty.
+    pub(crate) async fn insert_many_returning_version(
+        &self,
+        values: &[InnerValue],
+    ) -> DbResult<(Vec<RecordId>, u64)> {
+        if values.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+
+        // 1. Validate unique indexes for every value first. Two
+        //    layers of check: persisted state (via
+        //    `validate_unique_for_create`) AND batch-local seen
+        //    map, because two rows within ONE batch with the same
+        //    unique value would otherwise both pass the persisted
+        //    check and silently overwrite each other in step 3.
+        if self.index_manager.has_unique_indexes() {
+            // Map: (unique_index_name_interned, encoded_values_key)
+            // → first index in the batch that claimed it. Cheap
+            // bincode-based key avoids fighting `InnerValue` hash
+            // requirements (Map keyed by interner ids isn't `Hash`).
+            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>)> =
+                std::collections::HashSet::new();
+            for (i, v) in values.iter().enumerate() {
+                self.index_manager.validate_unique_for_create(v).await?;
+                // Now record this row's unique-index claims so the
+                // next iteration sees them.
+                for def in self.index_manager.iter_unique_indexes() {
+                    if let Some(vs) =
+                        crate::index::index_manager::IndexManager::extract_index_values(
+                            v, &def.paths,
+                        )
+                    {
+                        let key = bincode::serialize(&vs)
+                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                        if !batch_seen.insert((def.name_interned, key)) {
+                            return Err(shamir_storage::error::DbError::DuplicateKey(format!(
+                                "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
+                                def.name_interned, i
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Data-store write. When an MvccStore is attached, route the
+        //    whole batch through `set_versioned_many` (III.4) so
+        //    `version_cache` and history archival stay consistent with
+        //    non-tx writes WHILE collapsing the main writes into a single
+        //    `Store::transact` — one fsync instead of N on backends that
+        //    override `transact`. The previous per-record `set_versioned`
+        //    loop re-introduced the N× fsync amplification this path now
+        //    avoids. Without an MvccStore we keep the legacy batched path
+        //    (one transaction = one fsync on backends that override
+        //    `insert_many`).
+        let (ids, batch_version): (Vec<RecordId>, u64) = if let Some(mvcc) = &self.mvcc_store {
+            let mut ids = Vec::with_capacity(values.len());
+            let mut items = Vec::with_capacity(values.len());
+            for v in values {
+                let rid = RecordId::new();
+                let bytes = v.to_bytes().map_err(|e| {
+                    shamir_storage::error::DbError::Codec(format!(
+                        "Failed to serialize InnerValue: {}",
+                        e
+                    ))
+                })?;
+                items.push((rid.to_bytes(), bytes));
+                ids.push(rid);
+            }
+            let ver = mvcc.set_versioned_many(items).await?;
+            (ids, ver)
+        } else {
+            let ids = self.table.insert_many(values).await?;
+            (ids, 0)
+        };
+
+        // 3. Open a WAL marker — records the record_ids we just
+        //    inserted so that crash recovery can scope its check
+        //    to exactly these records. The marker write is one
+        //    info_store.set call; on backends with eventual flush
+        //    (sled / redb-Durability::None) it amortises through
+        //    the same flush window as the rest of the batch — no
+        //    extra fsync on the happy path.
+        //
+        //    Gap: a crash between step 2 and step 3 leaves orphan
+        //    records in data_store with no WAL marker; doctor's
+        //    full-rebuild (`TableManager::repair()`) handles that
+        //    fallback case.
+        let txn_id = self.wal.fresh_txn_id();
+        self.wal
+            .begin_with_delta(
+                txn_id,
+                shamir_wal::WalManager::ops_record_created(&ids),
+                ids.len() as i64,
+            )
+            .await?;
+
+        // 4. counter + indexes (all in info_store).
+        self.counter.increment(ids.len() as i64).await?;
+        let pairs_iter = || ids.iter().zip(values.iter());
+        self.index_manager
+            .on_records_created_batch(pairs_iter())
+            .await?;
+        self.index_manager
+            .on_records_created_unique_batch(pairs_iter())
+            .await?;
+        self.sorted_indexes
+            .on_records_created_batch(pairs_iter(), batch_version)
+            .await?;
+        for (id, value) in pairs_iter() {
+            self.index2_on_insert(id, value).await;
+        }
+
+        // 5. Clear the WAL marker — durable batch from here on.
+        self.wal.commit(txn_id).await?;
+
+        // 6. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES
+        //    operations a background verify fires and logs any
+        //    inconsistency. Non-blocking, single-flight, best-
+        //    effort signal.
+        self.bump_write_counter(ids.len() as u64);
+
+        // SSI footprint: record the batch insert so Serializable txs see it.
+        // One CommitWriteRecord at batch_version with all SetPosting keys.
+        let ssi_ops = self
+            .sorted_indexes
+            .plan_records_created_batch(ids.iter().zip(values.iter()), batch_version)
+            .unwrap_or_default();
+        self.record_nontx_ssi_footprint(batch_version, &ssi_ops);
+
+        Ok((ids, batch_version))
+    }
+
+    /// Delete a record by RecordId (with counter and index update)
+    ///
+    /// cancel-safe: NO — data-delete → counter decrement → 3 index
+    /// deletes without WAL coverage. Cancellation after the data delete
+    /// but before the index hooks leaves orphan index entries (a record
+    /// the data store no longer has but the indexes still point to).
+    /// The batch path `execute_delete` uses WAL; this single-record path
+    /// does not. Do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout`.
+    pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
+        let (removed, _version) = self.delete_returning_version(id).await?;
+        Ok(removed)
+    }
+
+    /// Like [`delete`](Self::delete) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached or the
+    /// record did not exist.
+    pub(crate) async fn delete_returning_version(&self, id: RecordId) -> DbResult<(bool, u64)> {
+        // Get old value before deletion for index cleanup
+        let old_value = self.get(id).await.ok();
+        // Route through MvccStore when attached so the old bytes are
+        // archived to history under active snapshots and `version_cache`
+        // is bumped.
+        let (removed, version) = if let Some(mvcc) = &self.mvcc_store {
+            if old_value.is_some() {
+                let v = mvcc.delete_versioned(id.to_bytes()).await?;
+                (true, v)
+            } else {
+                (false, 0)
+            }
+        } else {
+            let r = self.table.delete(id).await?;
+            (r, 0)
+        };
+        if removed {
+            self.counter.increment(-1).await?;
+            if let Some(ref old) = old_value {
+                self.index_manager.on_record_deleted(&id, old).await?;
+                self.index_manager
+                    .on_record_deleted_unique(&id, old)
+                    .await?;
+                self.sorted_indexes.on_record_deleted(&id, old).await?;
+                self.index2_on_delete(&id, old).await;
+            }
+            // SSI footprint: delete touches the table (coarse TableScan
+            // detection). No new index postings for a delete.
+            self.record_nontx_ssi_footprint(version, &[]);
+        }
+        Ok((removed, version))
+    }
+
+    /// Set a record by RecordId - creates if not exists, updates if exists (with counter and index update)
+    ///
+    /// Validates unique indexes BEFORE write, returns error if constraint violated.
+    ///
+    /// cancel-safe: NO — read-then-validate-then-write-then-index-update
+    /// without WAL coverage. Cancellation between the table write and
+    /// the index hooks leaves stale index entries (indexes point at the
+    /// previous value while the data store holds the new one). Use the
+    /// batch path (`execute_update` / `insert_many`) when atomicity
+    /// matters; do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout`.
+    pub async fn set(&self, id: RecordId, value: &InnerValue) -> DbResult<bool> {
+        let (created, _version) = self.set_returning_version(id, value).await?;
+        Ok(created)
+    }
+
+    /// Like [`set`](Self::set) but also returns the MVCC version
+    /// assigned by the underlying store (for changefeed version
+    /// alignment). Returns `0` when no `MvccStore` is attached.
+    pub(crate) async fn set_returning_version(
+        &self,
+        id: RecordId,
+        value: &InnerValue,
+    ) -> DbResult<(bool, u64)> {
+        let _guard = if self.index_manager.has_unique_indexes() {
+            Some(self.unique_write_lock.lock().await)
+        } else {
+            None
+        };
+
+        // Get old value before update for index maintenance
+        let old_value = self.get(id).await.ok();
+
+        // 1. Validate unique indexes BEFORE write
+        if let Some(ref old) = old_value {
+            self.index_manager
+                .validate_unique_for_update(&id, old, value)
+                .await?;
+        } else {
+            self.index_manager.validate_unique_for_create(value).await?;
+        }
+
+        // 2. Write to table. Route through MvccStore when attached so
+        //    `version_cache` is updated for SSI conflict detection and
+        //    the old bytes are archived to history under active snapshots.
+        //    `created` is derived from the pre-read above (same semantics
+        //    as the previous `self.table.set` which internally did the
+        //    same exists-check).
+        let bytes = value.to_bytes().map_err(|e| {
+            shamir_storage::error::DbError::Codec(format!("Failed to serialize InnerValue: {}", e))
+        })?;
+        let created = old_value.is_none();
+        let version = if let Some(mvcc) = &self.mvcc_store {
+            mvcc.set_versioned(id.to_bytes(), bytes).await?
+        } else {
+            self.table.data_store().set(id.to_bytes(), bytes).await?;
+            0
+        };
+
+        // 3. Update indexes AFTER write
+        let ssi_ops = if created {
+            self.counter.increment(1).await?;
+            self.index_manager.on_record_created(&id, value).await?;
+            self.index_manager
+                .on_record_created_unique(&id, value)
+                .await?;
+            self.sorted_indexes
+                .on_record_created(&id, value, version)
+                .await?;
+            self.index2_on_insert(&id, value).await;
+            self.sorted_indexes
+                .plan_record_created(&id, value, version)
+                .unwrap_or_default()
+        } else if let Some(ref old) = old_value {
+            self.index_manager
+                .on_record_updated(&id, old, value)
+                .await?;
+            self.index_manager
+                .on_record_updated_unique(&id, old, value)
+                .await?;
+            self.sorted_indexes
+                .on_record_updated(&id, old, value, version)
+                .await?;
+            self.index2_on_update(&id, old, value).await;
+            self.sorted_indexes
+                .plan_record_updated(&id, old, value, version)
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
+
+        // SSI footprint: record this non-tx write so Serializable txs see it.
+        self.record_nontx_ssi_footprint(version, &ssi_ops);
+
+        Ok((created, version))
+    }
+
+    /// Count records (uses stored counter for O(1) performance)
+    pub async fn count(&self) -> DbResult<usize> {
+        Ok(self.counter.get().await? as usize)
+    }
+
+    /// Get a record by RecordId
+    pub async fn get(&self, id: RecordId) -> DbResult<InnerValue> {
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            match mvcc.get_current(id.to_bytes()).await? {
+                Some(bytes) => InnerValue::from_bytes(bytes)
+                    .map_err(|e| DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))),
+                None => Err(DbError::NotFound(format!("record not found: {id:?}"))),
+            }
+        } else {
+            self.table.get(id).await
+        }
+    }
+
+    /// Vectored current-version read through the seam. FINAL-A: when an
+    /// MvccStore is attached, reads from the version log (`get_current`);
+    /// otherwise falls through to the raw `table.get_many` (data_store).
+    /// Returns `None` for a slot when the key is absent or tombstoned.
+    pub async fn get_many(&self, ids: &[RecordId]) -> DbResult<Vec<Option<InnerValue>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mut out = Vec::with_capacity(ids.len());
+            for id in ids {
+                match mvcc.get_current(id.to_bytes()).await? {
+                    Some(bytes) => {
+                        let v = InnerValue::from_bytes(bytes).map_err(|e| {
+                            DbError::Codec(format!("Failed to deserialize InnerValue: {e}"))
+                        })?;
+                        out.push(Some(v));
+                    }
+                    None => out.push(None),
+                }
+            }
+            Ok(out)
+        } else {
+            self.table.get_many(ids).await
+        }
+    }
+}

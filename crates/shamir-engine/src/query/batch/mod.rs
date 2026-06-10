@@ -137,15 +137,16 @@
 //! }
 //! ```
 
-mod executor;
+mod executor_traits;
+mod query_runner;
 
 // Only the executor (which actually drives a TableManager) lives here.
 // DTOs, the topological planner, and the `$query` reference parser are
 // all pure-data and live in `shamir-query-types::batch` — re-exported
 // here so callers keep using `shamir_db::query::batch::*` paths.
-pub use executor::{
-    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, AdminExecutor,
-    FunctionInvoker, QueryRunner, TableResolver,
+pub use executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+pub use query_runner::{
+    commit_interactive_tx, execute_batch, execute_in_open_tx, open_interactive_tx, QueryRunner,
 };
 pub use shamir_query_types::batch::{
     BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest, BatchResponse,
@@ -154,7 +155,7 @@ pub use shamir_query_types::batch::{
 
 // Retained for engine-level unit tests; not accessible outside test builds.
 #[cfg(test)]
-pub(crate) use executor::execute_batch_with_permissions;
+pub(crate) use query_runner::execute_batch_with_permissions;
 
 #[cfg(test)]
 mod tests;

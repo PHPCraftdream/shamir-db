@@ -1,0 +1,534 @@
+use base64::Engine;
+use serde_json::json;
+use std::sync::Arc;
+
+use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
+use crate::{DbError, DbResult};
+use shamir_engine::function::{
+    compile_rust_source, BatchContext, CreateFunctionOptions, FnBatch, FnCtx, FunctionError,
+    FunctionMeta, FunctionRegistry, GlobalVars, Params, WasmFunction, WasmLimits,
+};
+use shamir_types::types::value::QueryValue;
+
+use super::{FunctionSource, ShamirDb};
+
+impl ShamirDb {
+    // ========================================================================
+    // Function lifecycle API (slice 4)
+    // ========================================================================
+
+    /// Access the live function registry.
+    ///
+    /// Built-in functions (e.g. `argon2id`) live in the registry but are NOT
+    /// persisted in the durable catalogue. Calling `drop_function` on a
+    /// builtin removes it from the live registry only; it will not
+    /// resurrect on restart (the next `init` calls `with_builtins()` and
+    /// re-registers it). This is acceptable — builtins are an
+    /// implementation detail, not user-managed functions.
+    pub fn functions(&self) -> &Arc<FunctionRegistry> {
+        &self.functions
+    }
+
+    /// Register a WASM function from pre-compiled binary bytes.
+    ///
+    /// If `replace` is false and a function with the same name already exists
+    /// (either a builtin or a previously registered function), returns
+    /// [`DbError::Function`].
+    pub async fn create_function_from_wasm(
+        &self,
+        name: &str,
+        wasm: &[u8],
+        replace: bool,
+    ) -> DbResult<()> {
+        self.create_function_from_wasm_as(name, wasm, replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_function_from_wasm`] but with an explicit [`Actor`].
+    pub async fn create_function_from_wasm_as(
+        &self,
+        name: &str,
+        wasm: &[u8],
+        replace: bool,
+        actor: Actor,
+    ) -> DbResult<()> {
+        let opts = CreateFunctionOptions {
+            replace,
+            ..CreateFunctionOptions::default()
+        };
+        self.create_function_with_opts_as(name, FunctionSource::Wasm(wasm), opts, actor)
+            .await
+    }
+
+    /// Compile a Rust source string to WASM and register the function.
+    ///
+    /// Returns [`DbError::Function`] with a toolchain message if cargo or the
+    /// `wasm32-unknown-unknown` target is not installed.
+    pub async fn create_function_from_source(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+    ) -> DbResult<()> {
+        self.create_function_from_source_as(name, source, replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_function_from_source`] but with an explicit [`Actor`].
+    pub async fn create_function_from_source_as(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+        actor: Actor,
+    ) -> DbResult<()> {
+        let opts = CreateFunctionOptions {
+            replace,
+            ..CreateFunctionOptions::default()
+        };
+        self.create_function_with_opts_as(name, FunctionSource::Source(source), opts, actor)
+            .await
+    }
+
+    /// Canonical function creation with full options (slice 9).
+    ///
+    /// `source_or_wasm` is either a pre-compiled binary or Rust source.
+    /// `opts` carries replace, visibility, security, and secret_grants.
+    pub async fn create_function_with_opts(
+        &self,
+        name: &str,
+        source: FunctionSource<'_>,
+        opts: CreateFunctionOptions,
+    ) -> DbResult<()> {
+        self.create_function_with_opts_as(name, source, opts, Actor::System)
+            .await
+    }
+
+    /// Like [`create_function_with_opts`] but with an explicit [`Actor`].
+    pub async fn create_function_with_opts_as(
+        &self,
+        name: &str,
+        source: FunctionSource<'_>,
+        opts: CreateFunctionOptions,
+        actor: Actor,
+    ) -> DbResult<()> {
+        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?;
+        let (wasm, lang_tag, source_str) = match source {
+            FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
+            FunctionSource::Source(src) => {
+                let compiled = compile_rust_source(src).map_err(|e| match e {
+                    FunctionError::ToolchainUnavailable(msg) => {
+                        DbError::Function(format!("toolchain unavailable: {}", msg))
+                    }
+                    other => DbError::Function(other.to_string()),
+                })?;
+                (compiled, "rust", Some(src.to_string()))
+            }
+        };
+
+        // Validate the wasm by compiling it.
+        let wf = WasmFunction::from_binary(self.wasm_engine.clone(), &wasm, WasmLimits::default())
+            .map_err(|e| DbError::Function(e.to_string()))?;
+
+        let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
+        let wasm_hash = format!("{:016x}", fxhash::hash64(&wasm));
+
+        if !opts.replace && self.functions.contains(name) {
+            return Err(DbError::Function(format!(
+                "function '{}' already exists",
+                name
+            )));
+        }
+
+        let meta = FunctionMeta::new(opts.visibility, opts.security, opts.secret_grants.clone());
+
+        let version = 1u64;
+        let mut record = json!({
+            "name": name,
+            "wasm_b64": wasm_b64,
+            "wasm_hash": wasm_hash,
+            "lang": lang_tag,
+            "source": source_str,
+            "version": version,
+        });
+        meta.inject_into(&mut record);
+        self.system_store
+            .save_function(name, &record, &ResourceMeta::owned_by(actor.clone()))
+            .await?;
+
+        if opts.replace {
+            self.functions.replace(name, Arc::new(wf));
+        } else {
+            self.functions
+                .register(name, Arc::new(wf))
+                .map_err(|e| DbError::Function(e.to_string()))?;
+        }
+
+        // Populate in-memory metadata.
+        let _ = self.function_meta.remove(name);
+        let _ = self.function_meta.insert(name.to_string(), meta);
+
+        Ok(())
+    }
+
+    /// Drop a function by name. Returns `true` if it existed.
+    ///
+    /// For built-in functions (not in the durable catalogue), this only
+    /// removes from the live registry. For user functions, both the durable
+    /// record and the live entry are removed.
+    pub async fn drop_function(&self, name: &str) -> DbResult<bool> {
+        self.drop_function_as(name, Actor::System).await
+    }
+
+    /// Like [`drop_function`] but with an explicit [`Actor`].
+    pub async fn drop_function_as(&self, name: &str, actor: Actor) -> DbResult<bool> {
+        self.authorize_access(
+            &actor,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Delete,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+        let existed = self.functions.remove(name);
+        let _ = self.function_meta.remove(name);
+        // Best-effort catalogue removal — ignore if there was no durable record
+        // (e.g. builtins don't have one).
+        if let Err(e) = self.system_store.remove_function(name).await {
+            log::warn!(
+                "shamir_db::drop_function: failed to remove '{}' from catalogue: {}",
+                name,
+                e
+            );
+        }
+        Ok(existed)
+    }
+
+    /// Rename a function. The underlying WASM module is not recompiled.
+    ///
+    /// Fails if `from` does not exist or `to` is already taken.
+    pub async fn rename_function(&self, from: &str, to: &str) -> DbResult<()> {
+        self.rename_function_as(from, to, Actor::System).await
+    }
+
+    /// Like [`rename_function`] but with an explicit [`Actor`].
+    pub async fn rename_function_as(&self, from: &str, to: &str, actor: Actor) -> DbResult<()> {
+        self.authorize_access(
+            &actor,
+            &ResourcePath::Function {
+                name: from.to_string(),
+            },
+            Action::Write,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+        // Load the old catalogue record to re-key it.
+        let fn_records = self.system_store.load_functions().await?;
+        let old_record = fn_records
+            .iter()
+            .find(|r| r["name"].as_str() == Some(from))
+            .cloned();
+
+        // Rename in the live registry first.
+        self.functions
+            .rename(from, to)
+            .map_err(|e| DbError::Function(e.to_string()))?;
+
+        // Migrate in-memory metadata.
+        if let Some((_, meta)) = self.function_meta.remove(from) {
+            self.function_meta.insert(to.to_string(), meta);
+        }
+
+        // If there was a durable record, re-key it, preserving the
+        // existing owner/group/mode.
+        if let Some(mut rec) = old_record {
+            let existing_meta = ResourceMeta::from_record(&rec);
+            self.system_store.remove_function(from).await?;
+            rec["name"] = json!(to);
+            self.system_store
+                .save_function(to, &rec, &existing_meta)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// List all registered function names (sorted alphabetically).
+    ///
+    /// Includes builtins (e.g. `argon2id`) since they live in the live
+    /// registry.
+    pub async fn list_functions(&self) -> DbResult<Vec<String>> {
+        let mut names = self.functions.list();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Look up a function's in-memory metadata.
+    ///
+    /// Returns `None` for builtins (they have no catalogue entry).
+    pub fn function_meta(&self, name: &str) -> Option<FunctionMeta> {
+        self.function_meta.get(name).map(|r| r.value().clone())
+    }
+
+    // ========================================================================
+    // Function folder lifecycle API (#118)
+    // ========================================================================
+
+    /// Create a function folder with `mkdir -p` semantics.
+    ///
+    /// For each prefix of `path_segments` that does not already have a
+    /// persisted record, a new folder record is created with `actor` as
+    /// owner. Existing folders are not overwritten.
+    ///
+    /// Returns the list of newly created path keys (slash-joined).
+    pub async fn create_function_folder_as(
+        &self,
+        path_segments: &[String],
+        actor: Actor,
+    ) -> DbResult<Vec<String>> {
+        let mut created = Vec::new();
+        for i in 1..=path_segments.len() {
+            let prefix = &path_segments[..i];
+            let path_key = prefix.join("/");
+            // Check if already exists.
+            let existing = self.system_store.load_function_folder(&path_key).await?;
+            if existing.is_some() {
+                continue;
+            }
+            let record = json!({
+                "path": path_key,
+                "segments": prefix,
+            });
+            self.system_store
+                .save_function_folder(&path_key, &record, &ResourceMeta::owned_by(actor.clone()))
+                .await?;
+            created.push(path_key);
+        }
+        Ok(created)
+    }
+
+    /// List all persisted function folder path keys.
+    pub async fn list_function_folders(&self) -> DbResult<Vec<String>> {
+        let records = self.system_store.load_function_folders().await?;
+        let mut paths: Vec<String> = records
+            .iter()
+            .filter_map(|r| r["path"].as_str().map(|s| s.to_string()))
+            .collect();
+        paths.sort();
+        Ok(paths)
+    }
+
+    // ========================================================================
+    // Function invocation
+    // ========================================================================
+
+    /// Access the database-global variables store.
+    pub fn globals(&self) -> &Arc<GlobalVars> {
+        &self.globals
+    }
+
+    /// Create a fresh batch context for use with [`invoke_function_with_batch`].
+    pub fn new_batch_context(&self) -> Arc<BatchContext> {
+        Arc::new(BatchContext::new())
+    }
+
+    /// Set the network egress allowlist (host patterns for HTTP fetch).
+    ///
+    /// Default is empty (deny all). Must be called before any function
+    /// invocation that uses `ctx.http_fetch()`.
+    pub fn set_net_allowlist(&mut self, allowlist: Vec<String>) {
+        self.net_allowlist = Arc::new(allowlist);
+    }
+
+    /// Invoke a function by name with the given parameters.
+    ///
+    /// Each call gets a fresh per-invocation batch context (no data sharing
+    /// between calls). Use [`invoke_function_with_batch`] for multi-call
+    /// batched invocation.
+    pub async fn invoke_function(&self, name: &str, params: Params) -> DbResult<QueryValue> {
+        self.invoke_function_as(name, params, Actor::System).await
+    }
+
+    /// Like [`invoke_function`] but with an explicit [`Actor`].
+    pub async fn invoke_function_as(
+        &self,
+        name: &str,
+        params: Params,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
+        self.authorize_access(
+            &caller,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
+        let ctx = self.build_invoke_ctx(name, actor);
+        self.functions
+            .invoke(name, &ctx, &FnBatch::new(), &params)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))
+    }
+
+    /// Invoke a function sharing an existing batch context.
+    ///
+    /// Multiple invocations sharing the same `batch` can exchange data
+    /// through it ("function A writes, function B reads").
+    pub async fn invoke_function_with_batch(
+        &self,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+    ) -> DbResult<QueryValue> {
+        self.invoke_function_with_batch_as(name, params, batch, Actor::System)
+            .await
+    }
+
+    /// Like [`invoke_function_with_batch`] but with an explicit [`Actor`].
+    pub async fn invoke_function_with_batch_as(
+        &self,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
+        self.authorize_access(
+            &caller,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
+        let ctx = self.build_invoke_ctx(name, actor);
+        self.functions
+            .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))
+    }
+
+    /// Invoke a function with database read/write access (slice 8b).
+    ///
+    /// Builds an [`FnCtx`] that carries a [`DbGateway`] routing through
+    /// [`ShamirDb::execute`] so the function can call
+    /// `ctx.db().table("t").insert(doc)` / `.query(filter)` / `.get(key)`.
+    ///
+    /// Each db host-import call is autocommitted independently (no enclosing
+    /// transaction). Full transactional integration (RYOW/SSI) is deferred
+    /// until functions execute as batch ops.
+    ///
+    /// `db_name` is the database to route through, `repo` is the default
+    /// repository for table operations.
+    pub async fn invoke_function_in_db(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+    ) -> DbResult<QueryValue> {
+        self.invoke_function_in_db_as(db_name, repo, name, params, Actor::System)
+            .await
+    }
+
+    /// Like [`invoke_function_in_db`] but with an explicit [`Actor`].
+    pub async fn invoke_function_in_db_as(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
+        self.authorize_access(
+            &caller,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
+        let gateway = Arc::new(super::db_gateway::FacadeDbGateway {
+            shamir: self.clone(),
+            db_name: db_name.to_string(),
+            actor: actor.clone(),
+        });
+        let grants = self
+            .function_meta(name)
+            .map(|m| m.secret_grants)
+            .unwrap_or_default();
+        let ctx = FnCtx::with_globals(self.globals.clone())
+            .with_registry(self.functions.clone())
+            .with_db(gateway, repo.to_string())
+            .with_net(self.build_net_gateway())
+            .with_secret_grants(grants)
+            .with_actor(actor);
+        self.functions
+            .invoke(name, &ctx, &FnBatch::new(), &params)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))
+    }
+
+    /// Like [`invoke_function_in_db`] but shares an existing batch context.
+    pub async fn invoke_function_in_db_with_batch(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+    ) -> DbResult<QueryValue> {
+        self.invoke_function_in_db_with_batch_as(db_name, repo, name, params, batch, Actor::System)
+            .await
+    }
+
+    /// Like [`invoke_function_in_db_with_batch`] but with an explicit [`Actor`].
+    pub async fn invoke_function_in_db_with_batch_as(
+        &self,
+        db_name: &str,
+        repo: &str,
+        name: &str,
+        params: Params,
+        batch: &Arc<BatchContext>,
+        caller: Actor,
+    ) -> DbResult<QueryValue> {
+        self.authorize_access(
+            &caller,
+            &ResourcePath::Function {
+                name: name.to_string(),
+            },
+            Action::Execute,
+        )
+        .await
+        .map_err(|e| DbError::Function(e.to_string()))?;
+        let actor = self.effective_fn_actor(name, &caller).await;
+        let gateway = Arc::new(super::db_gateway::FacadeDbGateway {
+            shamir: self.clone(),
+            db_name: db_name.to_string(),
+            actor: actor.clone(),
+        });
+        let grants = self
+            .function_meta(name)
+            .map(|m| m.secret_grants)
+            .unwrap_or_default();
+        let ctx = FnCtx::with_globals(self.globals.clone())
+            .with_registry(self.functions.clone())
+            .with_db(gateway, repo.to_string())
+            .with_net(self.build_net_gateway())
+            .with_secret_grants(grants)
+            .with_actor(actor);
+        self.functions
+            .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))
+    }
+}
