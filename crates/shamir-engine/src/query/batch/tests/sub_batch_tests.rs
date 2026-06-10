@@ -5,8 +5,7 @@
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::{self, doc};
-use shamir_query_types::batch::types::SubBatchOp;
-use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry};
+use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::write::InsertOp;
 use shamir_types::access::Actor;

@@ -14,6 +14,8 @@ use crate::query::filter::eval::{
     compare_values, intern_field_path, resolve_field_ref, resolve_filter_value,
 };
 use crate::query::filter::{compile_filter, FilterContext, FilterValue, FnCall};
+use crate::query::read::hashable_json::HashableJson;
+pub use crate::query::read::select_projection::SelectProjection;
 use crate::query::read::{
     AggFunc, AggregateField, GroupBy, NullsOrder, OrderBy, OrderDirection, Pagination,
     PaginationInfo, QueryResult, Select, SelectItem,
@@ -67,98 +69,8 @@ fn group_key_item(val: Option<&InnerValue>, interner: &Interner) -> GroupKeyItem
 }
 
 // ============================================================================
-// Select projection
+// Select projection (public API)
 // ============================================================================
-
-/// Pre-resolved select projection info (avoids re-interning paths per record).
-///
-/// Output keys (alias or last path segment) are pre-allocated as
-/// `String` at compile time — `project()` clones them per record
-/// instead of paying `to_string()` for each field on each row.
-pub struct SelectProjection {
-    /// true → just convert whole record to JSON
-    is_all: bool,
-    /// (interned_path, pre-built output key)
-    fields: Vec<(Option<Vec<u64>>, String)>,
-    /// Scalar-function projections: (output key, FnCall-shaped FilterValue).
-    /// Evaluated per record via `resolve_filter_value`, reusing the filter
-    /// value model (`$ref` / literals / nested `$fn`).
-    funcs: Vec<(String, FilterValue)>,
-    /// Empty resolved-refs map so `project` can build a `FilterContext`
-    /// without `$query` support (projection scalar fns see only the row).
-    empty_refs: TMap<String, QueryResult>,
-}
-
-impl SelectProjection {
-    /// Build a reusable projection from a Select + Interner.
-    pub fn new(select: &Select, interner: &Interner) -> Self {
-        let is_all =
-            select.items.is_empty() || select.items.iter().any(|i| matches!(i, SelectItem::All));
-
-        let (fields, funcs) = if is_all {
-            (Vec::new(), Vec::new())
-        } else {
-            let mut fields = Vec::new();
-            let mut funcs = Vec::new();
-            for item in &select.items {
-                match item {
-                    SelectItem::Field { path, alias } => {
-                        let interned = intern_field_path(path, interner);
-                        let key = alias
-                            .clone()
-                            .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-                        fields.push((interned, key));
-                    }
-                    SelectItem::Function { name, args, alias } => {
-                        let key = alias.clone().unwrap_or_else(|| name.clone());
-                        let fv = FilterValue::FnCall {
-                            call: FnCall::complex(name.clone(), args.clone()),
-                        };
-                        funcs.push((key, fv));
-                    }
-                    _ => {}
-                }
-            }
-            (fields, funcs)
-        };
-
-        Self {
-            is_all,
-            fields,
-            funcs,
-            empty_refs: new_map_wc(0),
-        }
-    }
-
-    /// Project a single InnerValue record to JSON.
-    pub fn project(&self, record: &InnerValue, interner: &Interner) -> json::Value {
-        if self.is_all {
-            return inner_to_json_value(record, interner).unwrap_or(json::Value::Null);
-        }
-        if self.fields.is_empty() && self.funcs.is_empty() {
-            return json::Value::Object(json::Map::new());
-        }
-        let mut obj = json::Map::new();
-        for (interned_path, key) in &self.fields {
-            let val = interned_path
-                .as_ref()
-                .and_then(|p| resolve_field_ref(record, p))
-                .map(|v| inner_to_json_value(v, interner).unwrap_or(json::Value::Null))
-                .unwrap_or(json::Value::Null);
-            obj.insert(key.clone(), val);
-        }
-        if !self.funcs.is_empty() {
-            let ctx = FilterContext::new(interner, &self.empty_refs);
-            for (key, fv) in &self.funcs {
-                let val = resolve_filter_value(fv, record, &ctx)
-                    .map(|v| inner_to_json_value(&v, interner).unwrap_or(json::Value::Null))
-                    .unwrap_or(json::Value::Null);
-                obj.insert(key.clone(), val);
-            }
-        }
-        json::Value::Object(obj)
-    }
-}
 
 /// Apply SELECT projection to raw records, producing JSON values.
 ///
@@ -800,7 +712,7 @@ pub fn apply_order_by(records: &mut Vec<json::Value>, order_by: &OrderBy) {
 /// Typed column buffer — one variant per scalar type we can extract.
 /// The `Str` variant borrows from the source `records` slice; the borrow
 /// is released before the mutable permutation in phase 3 (same pattern as
-/// `PreResolvedKeys` in the general path).
+/// `PreResolvedKeys<'_>` in the general path).
 enum ColBuf<'a> {
     I64(Vec<i64>),
     F64(Vec<f64>),
@@ -1204,76 +1116,6 @@ pub fn apply_pagination(
 // ============================================================================
 // Distinct
 // ============================================================================
-
-/// Wrapper that gives `json::Value` a `Hash + Eq` implementation backed by
-/// a structural walk of the tree. `json::Value::eq` is structural already;
-/// the missing piece was `Hash`, which the standard library can't provide
-/// because `serde_json::Number` carries non-totally-ordered floats. We
-/// hash float bits — the same canonical form the old `to_string()` path
-/// produced, just without allocating a `String` per record.
-struct HashableJson(json::Value);
-
-impl PartialEq for HashableJson {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-impl Eq for HashableJson {}
-
-impl std::hash::Hash for HashableJson {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        hash_json(&self.0, h);
-    }
-}
-
-fn hash_json<H: std::hash::Hasher>(v: &json::Value, h: &mut H) {
-    use std::hash::Hash;
-    match v {
-        json::Value::Null => h.write_u8(0),
-        json::Value::Bool(b) => {
-            h.write_u8(1);
-            h.write_u8(*b as u8);
-        }
-        json::Value::Number(n) => {
-            h.write_u8(2);
-            if let Some(i) = n.as_i64() {
-                h.write_u8(0);
-                h.write_i64(i);
-            } else if let Some(u) = n.as_u64() {
-                h.write_u8(1);
-                h.write_u64(u);
-            } else if let Some(f) = n.as_f64() {
-                h.write_u8(2);
-                h.write_u64(f.to_bits());
-            } else {
-                h.write_u8(3);
-                // Falls back through Display; rare path.
-                n.to_string().hash(h);
-            }
-        }
-        json::Value::String(s) => {
-            h.write_u8(3);
-            h.write(s.as_bytes());
-            h.write_u8(0xff);
-        }
-        json::Value::Array(arr) => {
-            h.write_u8(4);
-            h.write_u64(arr.len() as u64);
-            for x in arr {
-                hash_json(x, h);
-            }
-        }
-        json::Value::Object(map) => {
-            h.write_u8(5);
-            h.write_u64(map.len() as u64);
-            for (k, v) in map {
-                h.write(k.as_bytes());
-                h.write_u8(0);
-                hash_json(v, h);
-            }
-        }
-    }
-}
 
 /// Remove duplicate JSON values. Walks each value's structure for the
 /// hash instead of `record.to_string()` — no per-record JSON

@@ -1,8 +1,7 @@
 use shamir_collections::{new_map, TMap};
 
 use crate::batch::planner::BatchPlanner;
-use crate::batch::types::SubBatchOp;
-use crate::batch::{BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry};
+use crate::batch::{BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp};
 use crate::filter::FilterValue;
 use crate::read::ReadQuery;
 

@@ -1,8 +1,7 @@
 use shamir_collections::TMap;
 
 use crate::admin::{GroupRef, ResourceRef};
-use crate::batch::types::{BatchLimits, BatchRequest, SubBatchOp, TransactionInfo};
-use crate::batch::{BatchOp, QueryEntry};
+use crate::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, SubBatchOp, TransactionInfo};
 use crate::filter::FilterValue;
 
 fn roundtrip(json: &str) -> BatchOp {

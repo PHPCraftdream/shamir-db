@@ -1,68 +1,21 @@
-//! Batch query executor.
+//! Batch query executor — `QueryRunner` and supporting free functions.
 //!
 //! Executes a BatchPlan stage by stage, passing results between
 //! dependent queries via FilterContext::resolved_refs.
 
 use std::time::Instant;
 
-#[cfg(test)]
-use crate::query::auth::SessionPermissions;
+use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{
     BatchError, BatchOp, BatchPlan, BatchRequest, BatchResponse, QueryEntry,
 };
-#[cfg(test)]
-use crate::query::filter::Filter;
 use crate::query::filter::FilterContext;
 use crate::query::read::{QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
-use crate::table::TableManager;
-use shamir_query_types::CallOp;
-use shamir_storage::error::DbResult;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::InnerValue;
-
-/// Trait for resolving table references to TableManager instances.
-#[async_trait::async_trait]
-pub trait TableResolver: Send + Sync {
-    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager>;
-
-    /// Resolve a repository by name to its [`crate::repo::RepoInstance`].
-    ///
-    /// Used by tx-aware paths to obtain the per-repo coordinator
-    /// (gate, WAL, commit lifecycle). Cross-repo guard upstream
-    /// guarantees `repo_name` is well-defined for transactional batches.
-    async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::repo::RepoInstance>;
-}
-
-/// Trait for executing admin (DDL) operations.
-#[async_trait::async_trait]
-pub trait AdminExecutor: Send + Sync {
-    async fn execute_admin(&self, op: &BatchOp) -> Result<QueryResult, BatchError>;
-}
-
-/// Trait for invoking stored procedures / callable getter-functions.
-///
-/// The engine executor does not know how to run a WASM function — that
-/// lives in `shamir-db` (`ShamirDb::invoke_function_in_db_as`). This
-/// trait is the thin channel that lets `QueryRunner::run` dispatch a
-/// `BatchOp::Call` to the facade without a circular dependency.
-///
-/// Injected alongside [`AdminExecutor`] (same pattern, same lifecycle).
-#[async_trait::async_trait]
-pub trait FunctionInvoker: Send + Sync {
-    /// Invoke a stored procedure named by `op.call` with the given
-    /// positional `op.params` (already resolved — `$query` refs
-    /// expanded by the executor) under authority of `actor`, returning
-    /// the function's `QueryValue` mapped into a `QueryResult.value`.
-    async fn invoke_call(
-        &self,
-        op: &CallOp,
-        actor: &Actor,
-        resolved_refs: &TMap<String, QueryResult>,
-    ) -> Result<QueryResult, BatchError>;
-}
 
 /// Execute a batch request against a table resolver.
 ///
@@ -224,7 +177,7 @@ pub async fn execute_batch_with_permissions(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
     admin: Option<&dyn AdminExecutor>,
-    permissions: &SessionPermissions,
+    permissions: &crate::query::auth::SessionPermissions,
     db_name: &str,
 ) -> Result<BatchResponse, BatchError> {
     // 0. Permission check — fail fast before any work
@@ -252,13 +205,13 @@ pub async fn execute_batch_with_permissions(
 /// Read/Update/Delete are restricted; other ops are left unchanged
 /// (Insert/Set row-match validation is a separate follow-up).
 #[cfg(test)]
-fn apply_row_filter(op: &mut BatchOp, rf: Filter) {
+fn apply_row_filter(op: &mut BatchOp, rf: crate::query::filter::Filter) {
     match op {
         BatchOp::Read(q) => q.r#where = Some(and_combine(q.r#where.take(), rf)),
         BatchOp::Update(u) => u.where_clause = Some(and_combine(u.where_clause.take(), rf)),
         BatchOp::Delete(d) => {
             let existing = d.where_clause.clone();
-            d.where_clause = Filter::And {
+            d.where_clause = crate::query::filter::Filter::And {
                 filters: vec![existing, rf],
             };
         }
@@ -268,9 +221,12 @@ fn apply_row_filter(op: &mut BatchOp, rf: Filter) {
 
 /// Combine an optional existing filter with a row filter via AND.
 #[cfg(test)]
-fn and_combine(existing: Option<Filter>, rf: Filter) -> Filter {
+fn and_combine(
+    existing: Option<crate::query::filter::Filter>,
+    rf: crate::query::filter::Filter,
+) -> crate::query::filter::Filter {
     match existing {
-        Some(f) => Filter::And {
+        Some(f) => crate::query::filter::Filter::And {
             filters: vec![f, rf],
         },
         None => rf,
@@ -675,7 +631,7 @@ async fn execute_transactional_impl(
 pub async fn open_interactive_tx(
     repo: &crate::repo::RepoInstance,
     iso: shamir_tx::IsolationLevel,
-) -> DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
+) -> shamir_storage::error::DbResult<(shamir_tx::TxContext, shamir_tx::SnapshotGuard)> {
     repo.begin_tx(iso).await
 }
 

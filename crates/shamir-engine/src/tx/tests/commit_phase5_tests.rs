@@ -34,7 +34,8 @@ use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
-use crate::tx::commit::{MaterializationState, FAIL_VECTOR_PROMOTE_TX_ID};
+use crate::tx::commit_phases::FAIL_VECTOR_PROMOTE_TX_ID;
+use crate::tx::tx_outcome::MaterializationState;
 use serial_test::serial;
 
 fn make_repo() -> RepoInstance {

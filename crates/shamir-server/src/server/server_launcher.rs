@@ -1,18 +1,11 @@
-//! Boot orchestration — extracted from `main.rs` so it is reusable from
-//! integration tests.
-//!
-//! [`ServerLauncher`] owns the [`Config`] + bootstrap policy and produces
-//! a [`ServerHandle`] when launched. The handle holds the bound listener
-//! addresses (so test code can connect a real client to them) plus
-//! shutdown plumbing for the listener tasks, the background scheduler,
-//! and the audit appender.
+//! Boot orchestration — [`ServerLauncher`] owns the [`Config`] + bootstrap
+//! policy and produces a [`ServerHandle`] when launched.
 //!
 //! The launcher does NOT install the rustls crypto provider — callers
 //! must do that exactly once per process (`rustls::crypto::aws_lc_rs::default_provider().install_default()`).
 //! This is enforced by rustls itself: a second install is a no-op.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,12 +18,8 @@ use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainW
 use shamir_connect::server::config::ServerSecrets;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::durable_counters::RedbConsumedCounters;
-use shamir_connect::server::lockout::{
-    InMemoryLockoutStore, LockoutSnapshot, LockoutSnapshotError, LockoutSnapshotSink,
-};
-use shamir_connect::server::rate_limit::{
-    InMemoryRateLimiter, RateLimitSnapshot, RateLimitSnapshotError, RateLimitSnapshotSink,
-};
+use shamir_connect::server::lockout::{InMemoryLockoutStore, LockoutSnapshotSink};
+use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
 use shamir_connect::server::resume::{InMemoryConsumedCounters, ResumeConfig};
 use shamir_connect::server::session::SessionStore;
 
@@ -48,13 +37,10 @@ use shamir_transport_ws::browser::BrowserOriginPolicy;
 use shamir_transport_ws::listener::{bind_validated as bind_ws, WsListenerProfile};
 use shamir_transport_ws::server::{accept_browser_ws, accept_native_ws};
 
-use crate::framer::{TcpFramer, WsFramer};
-
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
-use zeroize::Zeroizing;
 
 use crate::audit_appender::RedbAuditAppender;
 use crate::bootstrap::{
@@ -64,167 +50,16 @@ use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::conn_limiter::ConnLimiter;
 use crate::connection::{handle_connection, ConnectionContext};
 use crate::db_handler::{AdminGlue, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap};
+use crate::framer::{TcpFramer, WsFramer};
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
+use crate::server::boot_error::BootError;
+use crate::server::bootstrap_mode::BootstrapMode;
+use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaRateLimitSink};
+use crate::server::server_handle::ServerHandle;
 use crate::server_meta::ServerMetaStore;
 use crate::tables_registry::TablesRegistry;
 use crate::tls::{load_or_generate, subject_alts_from_addrs, LoadedTls};
 use crate::user_directory::RedbUserDirectory;
-
-/// Bootstrap policy options exposed at boot time.
-pub enum BootstrapMode {
-    /// Use the supplied password verbatim.
-    Password {
-        username: String,
-        password: Zeroizing<Vec<u8>>,
-    },
-    /// Generate a 32-byte random token (printed to logs + written to
-    /// `data_dir/bootstrap_token.txt`). Username defaults to `admin`.
-    RandomToken {
-        /// Optional override of the default `admin` username.
-        username: Option<String>,
-    },
-    /// Skip bootstrap entirely; assume the directory already has a
-    /// superuser. Used when the operator manages users out-of-band.
-    Skip,
-}
-
-impl Default for BootstrapMode {
-    fn default() -> Self {
-        BootstrapMode::RandomToken { username: None }
-    }
-}
-
-/// Errors that can happen during boot.
-#[derive(Debug, thiserror::Error)]
-pub enum BootError {
-    #[error("config: {0}")]
-    Config(#[from] crate::config::ConfigError),
-    #[error("server_meta: {0}")]
-    ServerMeta(String),
-    #[error("user_directory: {0}")]
-    UserDirectory(String),
-    #[error("counters: {0}")]
-    Counters(String),
-    #[error("audit_appender: {0}")]
-    AuditAppender(String),
-    #[error("shamir_db init: {0}")]
-    ShamirDbInit(String),
-    #[error("tls: {0}")]
-    Tls(#[from] crate::tls::TlsError),
-    #[error("bootstrap: {0}")]
-    Bootstrap(#[from] crate::bootstrap::BootstrapError),
-    #[error("listener bind: {0}")]
-    Bind(String),
-    #[error("another shamir-server instance is already using {0} (lock held); refusing to start")]
-    AlreadyRunning(PathBuf),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("tables_registry: {0}")]
-    TablesRegistry(#[from] crate::tables_registry::RegistryError),
-}
-
-/// Owner of the runtime state of a launched server.
-pub struct ServerHandle {
-    /// Addresses the server actually bound, in the same order as
-    /// `config.listeners`. `None` entries correspond to skipped listeners
-    /// (WS / plain are not yet supported by this MVP boot path).
-    pub bound_addrs: Vec<Option<SocketAddr>>,
-    /// Per-listener accept-loop join handles.
-    listener_tasks: Vec<JoinHandle<()>>,
-    /// Background task scheduler.
-    scheduler: Scheduler,
-    /// Audit-log appender (drained on shutdown).
-    audit_appender: Arc<RedbAuditAppender>,
-    /// Notify that signals all accept loops to stop.
-    shutdown_notify: Arc<Notify>,
-    /// Optional observability HTTP server.
-    observability: Option<crate::observability::ObservabilityHandle>,
-    /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
-    /// state). One 60s tick persists BOTH the lockout store and the
-    /// rate-limiter buckets. Awaited on shutdown so the redb file lock on
-    /// `server_meta.redb` is released cleanly before a same-data-dir
-    /// restart can succeed.
-    meta_snapshot_task: Option<MetaSnapshotTask>,
-    /// Phase B Stage 6 — periodic reaper for expired interactive txs.
-    /// Drained on shutdown so the `Arc<TxRegistry>` reference held by the
-    /// task drops and any lingering open txs are dropped (RAII abort).
-    interactive_tx_reaper: Option<crate::tx_registry::ReaperTask>,
-    /// ShamirDb reference — needed on shutdown to drain all repo
-    /// MemBuffers to durable backing, closing the ~500 ms buffered-
-    /// commit loss window on graceful stop.
-    shamir: Arc<ShamirDb>,
-    /// RAII single-instance guard: an advisory OS file lock on
-    /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
-    /// when this `File` is dropped (or the process crashes), so a second
-    /// `shamir-server` that tries to open the same `data_dir` gets
-    /// `BootError::AlreadyRunning` instead of silently corrupting the
-    /// redb stores. Do NOT explicitly unlock — drop is the release.
-    _data_dir_lock: std::fs::File,
-    /// Instance-level runtime tunables. Initialized from `instance_defaults`
-    /// consts — reads are a single atomic load (instant, non-blocking).
-    /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
-    /// slice to keep this slice small and behaviour-identical.
-    pub tunables: Arc<RuntimeTunables>,
-}
-
-/// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
-/// `JoinHandle` so [`ServerHandle::shutdown`] can wake the task out of its
-/// `interval.tick()` immediately rather than waiting up to one full
-/// interval.
-struct MetaSnapshotTask {
-    handle: JoinHandle<()>,
-    stop: Arc<Notify>,
-}
-
-impl ServerHandle {
-    /// Stop accepting new connections, then drain the scheduler + audit log.
-    /// In-flight per-connection tasks are NOT awaited explicitly — they
-    /// finish on their own once their TcpStreams close.
-    pub async fn shutdown(self) {
-        // 1. Tell all accept loops to stop.
-        self.shutdown_notify.notify_waiters();
-        // 2. Wait for them to finish — they exit promptly since
-        //    `select!` on `notify.notified()` short-circuits.
-        for task in self.listener_tasks {
-            let _ = task.await;
-        }
-        // 3. Drain the audit chain + scheduler.
-        self.audit_appender.shutdown().await;
-        self.scheduler.shutdown().await;
-        // 4. Flush all repo MemBuffers to durable backing so buffered
-        //    commits in the last ~500 ms window are not lost on graceful
-        //    stop. Must happen AFTER accept loops have stopped (no new
-        //    writes can arrive) and BEFORE redb locks are released.
-        if let Err(e) = self.shamir.flush_all().await {
-            tracing::warn!("shutdown: flush_all failed: {}", e);
-        }
-        // 5. Stop the observability HTTP server (if any).
-        if let Some(obs) = self.observability {
-            obs.shutdown().await;
-        }
-        // 5. Stop the meta-snapshot task and let it drop its
-        //    Arc<ServerMetaStore> reference so the redb file lock
-        //    on `server_meta.redb` releases for a same-data-dir
-        //    restart. The task writes one final lockout + rate-limit
-        //    snapshot inside its shutdown branch (best-effort).
-        if let Some(snap) = self.meta_snapshot_task {
-            snap.stop.notify_waiters();
-            let _ = snap.handle.await;
-        }
-        // 6. Stop the interactive-tx reaper so the Arc<TxRegistry> drops
-        //    and any lingering open txs are dropped (RAII abort).
-        if let Some(reaper) = self.interactive_tx_reaper {
-            reaper.stop.notify_waiters();
-            let _ = reaper.handle.await;
-        }
-    }
-
-    /// Returns the first bound TCP+TLS-exporter address — useful for
-    /// integration tests that just want "where do I connect?".
-    pub fn first_tls_exporter_addr(&self) -> Option<SocketAddr> {
-        self.bound_addrs.iter().filter_map(|a| *a).next()
-    }
-}
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
 pub struct ServerLauncher {
@@ -787,6 +622,10 @@ impl ServerLauncher {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Private helpers — only used within ServerLauncher::launch
+// ---------------------------------------------------------------------------
+
 /// Per-listener loop dispatch — picked at config-validation time, used at
 /// boot to decide which `accept_loop_*` to spawn.
 enum AcceptPath {
@@ -1102,155 +941,4 @@ fn log_bootstrap_outcome(name: &str, outcome: &BootstrapOutcome) {
         server_secret: [0u8; 32],
         lockout_secret: [0u8; 32],
     };
-}
-
-// ---------------------------------------------------------------------------
-// Lockout snapshot persistence
-// ---------------------------------------------------------------------------
-
-/// Default interval between lockout-snapshot writes. 60s matches the
-/// audit-checkpoint cadence and balances disk pressure (one redb write
-/// per minute) against the loss window for failed-auth bookkeeping
-/// (worst-case ~60s of new failures lost on hard crash). The spec IMPL
-/// §1.3 ceiling is 5s but is not normative for failed-auth state —
-/// the lockout subsystem just needs durability across CLEAN restart, and
-/// the rate-limiter's warmup window (spec §8.6) already covers any
-/// drift during the recovery window.
-const LOCKOUT_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
-
-/// [`LockoutSnapshotSink`] adapter that writes through to the durable
-/// `ServerMetaStore`. The store handles its own write transaction +
-/// `Durability::Immediate` fsync, so this sink is just a thin glue
-/// translator between the trait error type and `MetaError::to_string()`.
-struct MetaLockoutSink {
-    meta: Arc<ServerMetaStore>,
-}
-
-impl MetaLockoutSink {
-    fn new(meta: Arc<ServerMetaStore>) -> Self {
-        Self { meta }
-    }
-}
-
-impl LockoutSnapshotSink for MetaLockoutSink {
-    fn save(&self, snapshot: &LockoutSnapshot) -> Result<(), LockoutSnapshotError> {
-        self.meta
-            .store_lockout_snapshot(snapshot)
-            .map_err(|e| LockoutSnapshotError::Storage(e.to_string()))
-    }
-
-    fn load(&self) -> Result<Option<LockoutSnapshot>, LockoutSnapshotError> {
-        self.meta
-            .lockout_snapshot()
-            .map_err(|e| LockoutSnapshotError::Storage(e.to_string()))
-    }
-}
-
-/// [`RateLimitSnapshotSink`] adapter that writes through to the durable
-/// `ServerMetaStore` — the rate-limiter analogue of [`MetaLockoutSink`].
-struct MetaRateLimitSink {
-    meta: Arc<ServerMetaStore>,
-}
-
-impl MetaRateLimitSink {
-    fn new(meta: Arc<ServerMetaStore>) -> Self {
-        Self { meta }
-    }
-}
-
-impl RateLimitSnapshotSink for MetaRateLimitSink {
-    fn save(&self, snapshot: &RateLimitSnapshot) -> Result<(), RateLimitSnapshotError> {
-        self.meta
-            .store_ratelimit_snapshot(snapshot)
-            .map_err(|e| RateLimitSnapshotError::Storage(e.to_string()))
-    }
-
-    fn load(&self) -> Result<Option<RateLimitSnapshot>, RateLimitSnapshotError> {
-        self.meta
-            .ratelimit_snapshot()
-            .map_err(|e| RateLimitSnapshotError::Storage(e.to_string()))
-    }
-}
-
-/// Background task: every [`LOCKOUT_SNAPSHOT_INTERVAL`], capture the
-/// current in-memory lockout state AND rate-limiter buckets and push them
-/// through their installed sinks. One tick persists both — no second
-/// timer, single shutdown drain. Persist failures are logged at `warn` and
-/// the loop continues — losing one snapshot is recoverable on the next
-/// tick.
-///
-/// Shutdown is driven by the returned `stop` `Notify`. The task writes one
-/// final snapshot of each on the way out so a clean restart sees the
-/// freshest possible state — important for both the durability story and
-/// for integration tests that boot, do work, shut down, and reboot from
-/// the same data dir (the redb file lock on `server_meta.redb` cannot be
-/// re-acquired until this task drops its `Arc<ServerMetaStore>`).
-fn spawn_meta_snapshot_task(
-    lockout: Arc<InMemoryLockoutStore>,
-    rate_limit: Arc<InMemoryRateLimiter>,
-) -> MetaSnapshotTask {
-    let stop = Arc::new(Notify::new());
-    let stop_inner = stop.clone();
-    let handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(LOCKOUT_SNAPSHOT_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // Discard the immediate first tick — no point in writing an
-        // empty snapshot the moment the server boots.
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                biased;
-                _ = stop_inner.notified() => {
-                    tracing::debug!("meta_snapshot: shutdown notified, writing final snapshots");
-                    if let Err(e) = lockout.persist_snapshot() {
-                        tracing::warn!(error = %e, "final lockout snapshot persist failed");
-                    }
-                    if let Err(e) = rate_limit.persist_snapshot() {
-                        tracing::warn!(error = %e, "final rate-limit snapshot persist failed");
-                    }
-                    break;
-                }
-                _ = interval.tick() => {
-                    // `persist_snapshot` is synchronous (sync redb write
-                    // under the hood). It's short — measured << 1ms for
-                    // typical state sizes — so running it on the runtime
-                    // thread is fine. If it ever grows we can wrap in
-                    // `spawn_blocking`.
-                    match lockout.persist_snapshot() {
-                        Ok(true) => {
-                            tracing::trace!(
-                                failures = lockout.failure_pair_count(),
-                                lockouts = lockout.active_lockout_count(),
-                                "lockout snapshot persisted",
-                            );
-                        }
-                        Ok(false) => {
-                            // No sink installed — should not happen in
-                            // production paths since `launch()` always
-                            // wires one.
-                            tracing::trace!("meta snapshot task: no lockout sink installed");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "lockout snapshot persist failed");
-                        }
-                    }
-                    match rate_limit.persist_snapshot() {
-                        Ok(true) => {
-                            tracing::trace!(
-                                subnets = rate_limit.tracked_subnets(),
-                                "rate-limit snapshot persisted",
-                            );
-                        }
-                        Ok(false) => {
-                            tracing::trace!("meta snapshot task: no rate-limit sink installed");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "rate-limit snapshot persist failed");
-                        }
-                    }
-                }
-            }
-        }
-    });
-    MetaSnapshotTask { handle, stop }
 }

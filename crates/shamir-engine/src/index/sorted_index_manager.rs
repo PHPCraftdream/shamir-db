@@ -7,22 +7,6 @@
 //! `shamir_types::core::sort_codec`) and storing one info-store
 //! record per `(value, record_id)` pair.
 //!
-//! Layout per entry in info_store:
-//!
-//! ```text
-//!   physical_key  = SORTED_TAG (1 byte)
-//!                 ||  name_interned (8 bytes BE)
-//!                 ||  encoded_value (variable)
-//!                 ||  record_id (16 bytes)
-//!   physical_value = empty Bytes
-//! ```
-//!
-//! `SORTED_TAG` is chosen to be distinct from the hash-index tag so
-//! the two indexes never collide in the same info_store. Within one
-//! `name_interned`, all entries share that prefix, so a prefix scan
-//! returns every record matching this index in **value order** —
-//! that's the whole point.
-//!
 //! What's supported in this first cut:
 //! - Single-field index over a scalar column (Int / Float / String /
 //!   Bool / U64).
@@ -41,8 +25,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use dashmap::DashMap;
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
-
+// Re-export so existing callers that import `SortedIndexDefinition` from this
+// module continue to compile unchanged after the type moved to its own file.
+pub use crate::index::sorted_index_definition::SortedIndexDefinition;
+use crate::index::sorted_index_definition::{SortedIndexDefinitionV1, SORTED_TAG};
 use crate::index2::write_ops::IndexWriteOp;
 use crate::meta::MetaKey;
 use shamir_storage::error::DbResult;
@@ -52,103 +38,6 @@ use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-
-/// Distinguishes sorted-index physical keys from any other key kind
-/// that lives in the same info_store. Must NOT collide with
-/// `IndexRecordKey::TAG` (see index_record_key.rs) or any system
-/// RecordId byte pattern. RecordId::system uses a 4-byte zero prefix
-/// followed by name bytes — first byte is 0x00. Hash-index keys
-/// start with the unique flag (0 or 1). So 0x80 is a safe pick.
-const SORTED_TAG: u8 = 0x80;
-
-/// Definition of a sorted index — minimal, since we only support
-/// single-field for now.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SortedIndexDefinition {
-    /// Interned id of the index name.
-    pub name_interned: u64,
-    /// Single field path, expressed as interner keys (matches the
-    /// regular `IndexInfoItem::path`).
-    pub field_path: Vec<u64>,
-    /// Covering index: extra field paths (as raw string segments) whose
-    /// values are projected into the index entry's physical_value.
-    /// Persisted so the metadata survives restarts.
-    #[serde(default)]
-    pub included_fields: Vec<Vec<String>>,
-    /// Pre-interned form of `included_fields` — transient, not
-    /// persisted. Populated at registration time (see
-    /// `SortedIndexManager::intern_included_paths`) or rebuilt after
-    /// load from disk. Empty means "no covering projection".
-    #[serde(skip)]
-    pub included_fields_interned: Vec<Vec<u64>>,
-}
-
-impl SortedIndexDefinition {
-    pub fn new(name_interned: u64, field_path: Vec<u64>) -> Self {
-        Self {
-            name_interned,
-            field_path,
-            included_fields: Vec::new(),
-            included_fields_interned: Vec::new(),
-        }
-    }
-
-    /// Construct with covering-index included field paths (string form only;
-    /// call `SortedIndexManager::intern_included_paths` or use
-    /// `with_included_interned` to populate the interned form).
-    pub fn with_included(
-        name_interned: u64,
-        field_path: Vec<u64>,
-        included_fields: Vec<Vec<String>>,
-    ) -> Self {
-        Self {
-            name_interned,
-            field_path,
-            included_fields,
-            included_fields_interned: Vec::new(),
-        }
-    }
-
-    /// Construct with covering-index included field paths, providing
-    /// both the string and pre-interned forms.
-    pub fn with_included_interned(
-        name_interned: u64,
-        field_path: Vec<u64>,
-        included_fields: Vec<Vec<String>>,
-        included_fields_interned: Vec<Vec<u64>>,
-    ) -> Self {
-        Self {
-            name_interned,
-            field_path,
-            included_fields,
-            included_fields_interned,
-        }
-    }
-
-    /// True if this is a covering index (has included fields).
-    pub fn is_covering(&self) -> bool {
-        !self.included_fields_interned.is_empty()
-    }
-}
-
-/// Legacy on-disk layout without `included_fields`. Used only during
-/// backward-compatible load of pre-covering-index persisted data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SortedIndexDefinitionV1 {
-    name_interned: u64,
-    field_path: Vec<u64>,
-}
-
-impl From<SortedIndexDefinitionV1> for SortedIndexDefinition {
-    fn from(v1: SortedIndexDefinitionV1) -> Self {
-        Self {
-            name_interned: v1.name_interned,
-            field_path: v1.field_path,
-            included_fields: Vec::new(),
-            included_fields_interned: Vec::new(),
-        }
-    }
-}
 
 /// Manages a set of sorted indexes for one table. The set itself is
 /// kept in memory (`DashMap`) and persisted to a single system
@@ -858,7 +747,6 @@ impl SortedIndexManager {
     /// Count of entries currently in the sorted index — used by the
     /// doctor's verify pass. O(K) where K is the entry count.
     pub async fn entry_count(&self, name_interned: u64) -> DbResult<u64> {
-        use futures::StreamExt;
         let prefix = self.entry_prefix(name_interned);
         let mut count: u64 = 0;
         let stream = self.info_store.scan_prefix_stream(prefix, 1024);

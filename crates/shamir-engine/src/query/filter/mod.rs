@@ -9,13 +9,15 @@
 
 pub mod eval;
 pub mod eval_context;
+pub mod filter_callback;
+pub mod filter_node;
 
 // Re-export DTOs from the shared types crate.
-pub use eval::{
-    compare_values, compile_filter, filter_value_to_inner, intern_field_path, resolve_field,
-    FilterCallback,
-};
 pub use eval_context::FilterContext;
+pub use filter_callback::FilterCallback;
+pub use filter_node::{
+    compare_values, compile_filter, filter_value_to_inner, intern_field_path, resolve_field,
+};
 pub use shamir_query_types::filter::{
     Cond, FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall,
 };

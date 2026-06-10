@@ -6,7 +6,9 @@
 //! stay here because they touch Interner / runtime state.
 
 pub mod exec;
+pub(crate) mod hashable_json;
 mod parser;
+pub mod select_projection;
 
 // Re-export DTOs from the shared types crate.
 pub use parser::query_from_value;
