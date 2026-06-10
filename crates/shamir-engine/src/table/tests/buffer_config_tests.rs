@@ -12,11 +12,12 @@ use std::sync::Arc;
 use crate::db_instance::db_instance::DbInstance;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
+use crate::table::buffer_config::{load, save};
 use crate::table::TableConfig;
 use crate::table::TableManager;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::MemBufferConfig;
-use shamir_storage::types::Repo;
+use shamir_storage::types::{Repo, Store};
 
 async fn make_table(name: &str) -> TableManager {
     let configs = vec![TableConfig::new(name)];
@@ -247,4 +248,53 @@ async fn per_table_configs_are_independent() {
     let beta_got = beta.get_buffer_config().await.unwrap();
     assert!(alpha_got.is_some());
     assert!(beta_got.is_none(), "beta must remain untouched");
+}
+
+// ---- Low-level unit tests for buffer_config::save / load ----
+
+fn cfg() -> MemBufferConfig {
+    MemBufferConfig {
+        max_bytes: 1024 * 1024,
+        max_entries: 200,
+        ttl_ms: Some(5_000),
+        flush_interval_ms: 250,
+        flush_batch_size: 64,
+    }
+}
+
+#[tokio::test]
+async fn save_then_load_roundtrip() {
+    let repo = InMemoryRepo::new();
+    let info_store: Arc<dyn Store> = repo.store_get("info").await.unwrap();
+    save(&info_store, &cfg()).await.unwrap();
+    let loaded = load(&info_store).await.unwrap().expect("config present");
+    assert_eq!(loaded.max_bytes, cfg().max_bytes);
+    assert_eq!(loaded.max_entries, cfg().max_entries);
+    assert_eq!(loaded.ttl_ms, cfg().ttl_ms);
+    assert_eq!(loaded.flush_interval_ms, cfg().flush_interval_ms);
+    assert_eq!(loaded.flush_batch_size, cfg().flush_batch_size);
+}
+
+#[tokio::test]
+async fn load_returns_none_when_absent() {
+    let repo = InMemoryRepo::new();
+    let info_store: Arc<dyn Store> = repo.store_get("info").await.unwrap();
+    let loaded = load(&info_store).await.unwrap();
+    assert!(loaded.is_none());
+}
+
+#[tokio::test]
+async fn save_overwrites_previous_config() {
+    let repo = InMemoryRepo::new();
+    let info_store: Arc<dyn Store> = repo.store_get("info").await.unwrap();
+    save(&info_store, &cfg()).await.unwrap();
+
+    let mut updated = cfg();
+    updated.max_bytes = 64 * 1024 * 1024;
+    updated.ttl_ms = None;
+    save(&info_store, &updated).await.unwrap();
+
+    let loaded = load(&info_store).await.unwrap().unwrap();
+    assert_eq!(loaded.max_bytes, 64 * 1024 * 1024);
+    assert_eq!(loaded.ttl_ms, None);
 }

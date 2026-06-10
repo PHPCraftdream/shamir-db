@@ -7,6 +7,9 @@ pub mod filter_expr;
 pub mod filter_value;
 pub mod fn_call;
 
+#[cfg(test)]
+mod tests;
+
 pub use cond::Cond;
 pub use filter_enum::{check_filter_depth, Filter, MAX_FILTER_DEPTH};
 pub use filter_expr::{FilterExpr, FilterExprOp};

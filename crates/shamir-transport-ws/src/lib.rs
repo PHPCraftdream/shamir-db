@@ -33,3 +33,6 @@ pub use framing::{
 pub use listener::{bind_validated, validate_addr, WsBindError, WsListenerProfile};
 pub use server::{accept_browser_ws, accept_native_ws, WsAcceptError};
 pub use tls_exporter::extract_tls_exporter_from_stream;
+
+#[cfg(test)]
+mod tests;

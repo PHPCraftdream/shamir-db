@@ -1,0 +1,10 @@
+pub mod access_tree_tests;
+pub mod backup_tests;
+pub mod bootstrap_tests;
+pub mod conn_limiter_tests;
+pub mod connection_tests;
+pub mod server_tests;
+pub mod tables_registry_tests;
+pub mod tls_tests;
+pub mod tx_registry_tests;
+pub mod version_tests;

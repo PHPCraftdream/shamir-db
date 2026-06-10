@@ -11,3 +11,6 @@ pub mod recovery_marker;
 
 pub use envelope::{MetaEnvelope, MetaError, ENVELOPE_MAGIC, ENVELOPE_VERSION};
 pub use namespace::MetaKey;
+
+#[cfg(test)]
+mod tests;

@@ -1,5 +1,8 @@
 //! Server-side of the connection protocol.
 
+#[cfg(test)]
+mod tests;
+
 pub mod admin;
 pub mod argon2_semaphore;
 pub mod audit_chain;

@@ -45,6 +45,9 @@ pub mod validator;
 pub mod wire;
 pub mod write;
 
+#[cfg(test)]
+mod tests;
+
 pub use call::CallOp;
 pub use table_ref::TableRef;
 pub use validator::{ValidationError, WriteOp};

@@ -72,7 +72,7 @@ impl Default for EnvPolicy {
 ///
 /// A pattern is split at `*` into literal segments that must appear
 /// consecutively in `text`. A single `*` matches zero or more characters.
-fn glob_matches(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == text;
     }
@@ -103,34 +103,4 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
         return false;
     }
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glob_star_only() {
-        assert!(glob_matches("*", "anything"));
-        assert!(glob_matches("*", ""));
-    }
-
-    #[test]
-    fn glob_prefix_star() {
-        assert!(glob_matches("AWS_*", "AWS_KEY"));
-        assert!(glob_matches("AWS_*", "AWS_"));
-        assert!(!glob_matches("AWS_*", "BWS_KEY"));
-    }
-
-    #[test]
-    fn glob_star_suffix() {
-        assert!(glob_matches("*_KEY", "AWS_KEY"));
-        assert!(!glob_matches("*_KEY", "AWS_VAL"));
-    }
-
-    #[test]
-    fn glob_no_star() {
-        assert!(glob_matches("HOME", "HOME"));
-        assert!(!glob_matches("HOME", "PATH"));
-    }
 }

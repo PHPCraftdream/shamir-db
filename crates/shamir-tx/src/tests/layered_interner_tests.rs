@@ -1,0 +1,197 @@
+use crate::layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
+use scc::HashMap as SccHashMap;
+use shamir_types::core::interner::Interner;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Returns a `LayeredInterner` in Layered mode.
+/// The caller must keep `overlay` and `next` alive for the lifetime
+/// of `layered_interner`.
+fn make_layered<'a>(
+    base: &'a Interner,
+    overlay: &'a SccHashMap<String, u64>,
+    next: &'a AtomicU64,
+) -> LayeredInterner<'a> {
+    LayeredInterner::Layered {
+        base,
+        overlay,
+        next_overlay_id: next,
+    }
+}
+
+#[test]
+fn touch_sync_same_as_async() {
+    let base = Interner::new();
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+
+    let id = li.touch_sync("sync_key");
+    assert!(id >= OVERLAY_ID_BASE);
+
+    // Same key returns same id
+    let id2 = li.touch_sync("sync_key");
+    assert_eq!(id, id2);
+}
+
+#[test]
+fn touch_sync_direct_returns_base_id() {
+    let base = Interner::new();
+    let li = LayeredInterner::Direct(&base);
+    let id = li.touch_sync("hello");
+    assert!(id < OVERLAY_ID_BASE);
+    let got = base.get_ind("hello").expect("should exist in base");
+    assert_eq!(got.id(), id);
+}
+
+#[tokio::test]
+async fn direct_mode_no_overhead() {
+    let base = Interner::new();
+    let li = LayeredInterner::Direct(&base);
+
+    let id = li.touch("hello").await;
+    assert!(id < OVERLAY_ID_BASE);
+
+    let got = base.get_ind("hello").expect("should exist in base");
+    assert_eq!(got.id(), id);
+}
+
+#[tokio::test]
+async fn layered_touch_new_goes_to_overlay() {
+    let base = Interner::new();
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+
+    let id = li.touch("brand_new_key").await;
+    assert!(
+        id >= OVERLAY_ID_BASE,
+        "overlay id must be >= OVERLAY_ID_BASE"
+    );
+
+    assert!(
+        base.get_ind("brand_new_key").is_none(),
+        "base must not know the key yet"
+    );
+    assert!(
+        overlay.read_async("brand_new_key", |_, v| *v).await == Some(id),
+        "overlay should contain the key"
+    );
+}
+
+#[tokio::test]
+async fn layered_touch_existing_in_base_returns_base_id() {
+    let base = Interner::new();
+    let base_id = base
+        .touch_ind("foo")
+        .expect("touch_ind succeeds")
+        .key()
+        .id();
+
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+    let id = li.touch("foo").await;
+    assert_eq!(id, base_id);
+    assert!(id < OVERLAY_ID_BASE);
+}
+
+#[tokio::test]
+async fn layered_touch_repeat_returns_same_overlay_id() {
+    let base = Interner::new();
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+
+    let id1 = li.touch("bar").await;
+    let id2 = li.touch("bar").await;
+    assert_eq!(id1, id2);
+    assert!(id1 >= OVERLAY_ID_BASE);
+}
+
+#[tokio::test]
+async fn get_id_does_not_allocate() {
+    let base = Interner::new();
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+
+    assert!(li.get_id("unknown").await.is_none());
+
+    assert!(base.get_ind("unknown").is_none());
+    assert!(overlay.is_empty());
+}
+
+#[tokio::test]
+async fn get_str_reads_base_and_overlay() {
+    let base = Interner::new();
+    let base_id = base
+        .touch_ind("foo")
+        .expect("touch_ind succeeds")
+        .key()
+        .id();
+
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+    let li = make_layered(&base, &overlay, &next);
+    let overlay_id = li.touch("bar").await;
+
+    assert_eq!(li.get_str(base_id), Some("foo".to_string()));
+    assert_eq!(li.get_str(overlay_id), Some("bar".to_string()));
+}
+
+#[tokio::test]
+async fn commit_overlay_merges_into_base() {
+    let base = Interner::new();
+    let overlay = SccHashMap::new();
+    let next = AtomicU64::new(OVERLAY_ID_BASE);
+
+    let overlay_a = next.fetch_add(1, Ordering::SeqCst);
+    overlay
+        .insert_async("a".to_string(), overlay_a)
+        .await
+        .unwrap();
+    let overlay_b = next.fetch_add(1, Ordering::SeqCst);
+    overlay
+        .insert_async("b".to_string(), overlay_b)
+        .await
+        .unwrap();
+
+    let remap = commit_interner_overlay(&base, &overlay).await.unwrap();
+    assert_eq!(remap.len(), 2);
+
+    let final_a = base.get_ind("a").expect("a should be in base").id();
+    let final_b = base.get_ind("b").expect("b should be in base").id();
+    assert_eq!(remap[&overlay_a], final_a);
+    assert_eq!(remap[&overlay_b], final_b);
+}
+
+#[tokio::test]
+async fn commit_overlay_with_race_uses_existing_base_id() {
+    let base = Interner::new();
+    let existing = base
+        .touch_ind("foo")
+        .expect("touch_ind succeeds")
+        .key()
+        .id();
+
+    let overlay = SccHashMap::new();
+    let overlay_id: u64 = OVERLAY_ID_BASE + 99;
+    overlay
+        .insert_async("foo".to_string(), overlay_id)
+        .await
+        .unwrap();
+
+    let remap = commit_interner_overlay(&base, &overlay).await.unwrap();
+    assert_eq!(remap[&overlay_id], existing);
+}
+
+#[tokio::test]
+async fn commit_overlay_empty_is_noop() {
+    let base = Interner::new();
+    let overlay = SccHashMap::new();
+    let base_len = base.len();
+
+    let remap = commit_interner_overlay(&base, &overlay).await.unwrap();
+    assert!(remap.is_empty());
+    assert_eq!(base.len(), base_len);
+}
