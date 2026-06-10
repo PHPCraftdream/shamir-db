@@ -55,19 +55,15 @@
 //! inside `Ok(bytes)` carrying a [`DbResponse::Error`] payload with a
 //! coarse `kind` tag for clients to switch on without parsing prose.
 //!
-//! # Async bridge — HIGH-7
+//! # Async model
 //!
-//! `RequestHandler::handle` is sync; [`ShamirDb::execute`] is async.
-//! `crate::connection::request_loop` wraps the entire synchronous handler
-//! chain in [`tokio::task::spawn_blocking`] so the call runs on the
-//! blocking-task pool (default 512 threads) rather than parking a runtime
-//! worker for the full batch duration — without this an authenticated
-//! peer issuing slow batches from a handful of connections could starve
-//! every other connection (cap on concurrent in-flight batches was
-//! previously `#worker_threads`). Inside the blocking thread,
-//! [`run_blocking`] spawns the async DB future back onto the runtime and
-//! waits on a `std::sync::mpsc::Receiver`; the future therefore makes
-//! progress concurrently with other connections' I/O on the worker pool.
+//! `RequestHandler::handle` is now async (returns a boxed future). The
+//! `connection::request_loop` awaits it directly — no blocking-pool bridge
+//! (`spawn_blocking` / `run_blocking`) is needed on the dispatch path.
+//! Tokio worker threads are never parked; every `.await` inside the handler
+//! yields the worker back to the scheduler. CPU-bound work (Argon2id key
+//! derivation) is delegated to `tokio::task::spawn_blocking` so the worker
+//! remains free during derivation.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -289,48 +285,64 @@ impl ShamirDbHandler {
 }
 
 impl RequestHandler for ShamirDbHandler {
-    fn handle(&self, session: &Session, req: &[u8]) -> std::result::Result<Vec<u8>, String> {
-        let request: DbRequest =
-            rmp_serde::from_slice(req).map_err(|e| format!("invalid_request: {}", e))?;
+    fn handle<'a>(
+        &'a self,
+        session: &'a Session,
+        req: &'a [u8],
+    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+        Box::pin(async move {
+            let request: DbRequest =
+                rmp_serde::from_slice(req).map_err(|e| format!("invalid_request: {}", e))?;
 
-        let response = match request {
-            DbRequest::Ping => DbResponse::Pong,
-            DbRequest::Execute {
-                query_version,
-                db,
-                batch,
-            } => self.execute(session, query_version, &db, batch),
-            DbRequest::CreateScramUser {
-                name,
-                password,
-                roles,
-            } => self.create_scram_user(session, name, password, roles),
+            let response = match request {
+                DbRequest::Ping => DbResponse::Pong,
+                DbRequest::Execute {
+                    query_version,
+                    db,
+                    batch,
+                } => self.execute(session, query_version, &db, batch).await,
+                DbRequest::CreateScramUser {
+                    name,
+                    password,
+                    roles,
+                } => self.create_scram_user(session, name, password, roles).await,
 
-            // --- Phase B: interactive (multi-call) transactions ---
-            DbRequest::TxBegin {
-                query_version,
-                db,
-                repo,
-                isolation,
-            } => self.tx_begin(session, query_version, &db, &repo, isolation),
-            DbRequest::TxExecute {
-                query_version,
-                db,
-                tx_handle,
-                batch,
-            } => self.tx_execute(session, query_version, &db, tx_handle, batch),
-            DbRequest::TxCommit { db, tx_handle } => self.tx_commit(session, &db, tx_handle),
-            DbRequest::TxRollback { db, tx_handle } => self.tx_rollback(session, &db, tx_handle),
-        };
+                // --- Phase B: interactive (multi-call) transactions ---
+                DbRequest::TxBegin {
+                    query_version,
+                    db,
+                    repo,
+                    isolation,
+                } => {
+                    self.tx_begin(session, query_version, &db, &repo, isolation)
+                        .await
+                }
+                DbRequest::TxExecute {
+                    query_version,
+                    db,
+                    tx_handle,
+                    batch,
+                } => {
+                    self.tx_execute(session, query_version, &db, tx_handle, batch)
+                        .await
+                }
+                DbRequest::TxCommit { db, tx_handle } => {
+                    self.tx_commit(session, &db, tx_handle).await
+                }
+                DbRequest::TxRollback { db, tx_handle } => {
+                    self.tx_rollback(session, &db, tx_handle).await
+                }
+            };
 
-        rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
+            rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
+        })
     }
 }
 
 impl ShamirDbHandler {
     /// Run the version check + admin gate, then forward to
     /// [`ShamirDb::execute`] on the current Tokio worker.
-    fn execute(
+    async fn execute(
         &self,
         session: &Session,
         query_version: u32,
@@ -388,20 +400,8 @@ impl ShamirDbHandler {
             };
         }
 
-        // `run_blocking` now requires a `'static` future (it spawns the
-        // future onto the runtime instead of driving it on the current
-        // thread). The batch is already owned (passed by value); we
-        // clone the shared `ShamirDb` Arc and own the db name string,
-        // then move them into an `async move` block that hands the batch
-        // back to us so the post-exec slow-query log and persistence
-        // registry still see the request.
-        let db = self.db.clone();
-        let db_name_owned = db_name.to_string();
         let actor = session_actor(session);
-        let (batch, exec_result) = run_blocking(async move {
-            let result = db.execute_as(actor, &db_name_owned, &batch).await;
-            (batch, result)
-        });
+        let exec_result = self.db.execute_as(actor, db_name, &batch).await;
         match exec_result {
             Ok(response) => {
                 // Slow-query logging: WARN line for batches whose total
@@ -432,7 +432,7 @@ impl ShamirDbHandler {
 
     /// Phase B BEGIN — open an interactive tx, park it in the registry bound
     /// to this session, reply with the minted handle + snapshot version.
-    fn tx_begin(
+    async fn tx_begin(
         &self,
         session: &Session,
         query_version: u32,
@@ -448,15 +448,8 @@ impl ShamirDbHandler {
         }
         let iso = isolation.unwrap_or_else(|| "snapshot".to_string());
 
-        let db = self.db.clone();
-        let db_name_owned = db_name.to_string();
-        let repo_owned = repo_name.to_string();
-        let iso_for_begin = iso.clone();
         let actor = session_actor(session);
-        let begin = run_blocking(async move {
-            db.tx_begin_as(actor, &db_name_owned, &repo_owned, &iso_for_begin)
-                .await
-        });
+        let begin = self.db.tx_begin_as(actor, db_name, repo_name, &iso).await;
         let (tx, guard) = match begin {
             Ok(pair) => pair,
             Err(e) => {
@@ -500,7 +493,7 @@ impl ShamirDbHandler {
     /// commit). Applies the same per-batch gates as [`Self::execute`]
     /// (version, limits cap, admin, destructive-HMAC), then threads the
     /// parked `TxContext` through the engine glue.
-    fn tx_execute(
+    async fn tx_execute(
         &self,
         session: &Session,
         query_version: u32,
@@ -586,17 +579,14 @@ impl ShamirDbHandler {
             }
         }
 
-        let db = self.db.clone();
-        let db_name_owned = db_name.to_string();
-        let it_for_exec = Arc::clone(&it);
         let actor = session_actor(session);
-        let exec = run_blocking(async move {
-            let mut guard = it_for_exec.ctx().lock().await;
+        let exec = {
+            let mut guard = it.ctx().lock().await;
             match guard.as_mut() {
                 Some(tx) => {
-                    let r = db.tx_execute_as(actor, &db_name_owned, &batch, tx).await;
+                    let r = self.db.tx_execute_as(actor, db_name, &batch, tx).await;
                     if r.is_ok() {
-                        it_for_exec.bump_activity();
+                        it.bump_activity();
                     }
                     // Measure staged size INSIDE the same lock as the engine call.
                     r.map(|resp| (resp, guard.as_ref().map_or(0, |tx| tx.staged_bytes())))
@@ -607,7 +597,7 @@ impl ShamirDbHandler {
                     code: None,
                 }),
             }
-        });
+        };
         match exec {
             Ok((response, staged_bytes)) => {
                 if staged_bytes > self.tx_limits.max_tx_bytes {
@@ -637,7 +627,7 @@ impl ShamirDbHandler {
     /// commit pipeline on its `TxContext`, reply with the `TransactionInfo`.
     /// The owning `Arc` (and thus the `SnapshotGuard`) is held alive until
     /// commit returns, so the MVCC snapshot stays pinned through commit.
-    fn tx_commit(&self, session: &Session, db_name: &str, tx_handle: u64) -> DbResponse {
+    async fn tx_commit(&self, session: &Session, db_name: &str, tx_handle: u64) -> DbResponse {
         let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
             Ok(it) => it,
             Err(TxRegistryError::TxNotFound) => {
@@ -664,25 +654,19 @@ impl ShamirDbHandler {
         // start committing.
         self.tx_registry.remove(tx_handle);
 
-        let db = self.db.clone();
-        let db_name_owned = db_name.to_string();
         let repo = it.repo().to_string();
-        let it_for_commit = Arc::clone(&it);
         let actor = session_actor(session);
-        let commit = run_blocking(async move {
-            let tx = it_for_commit.ctx().lock().await.take();
-            match tx {
-                Some(tx) => db.tx_commit_as(actor, &db_name_owned, &repo, tx).await,
-                None => Err(BatchError::QueryError {
-                    alias: String::new(),
-                    message: "transaction is already committed or rolled back".into(),
-                    code: None,
-                }),
-            }
-            // `it_for_commit` (holding the SnapshotGuard) drops here, AFTER
-            // commit returned — the snapshot stayed pinned through commit.
-        });
-        // Drop our remaining ref now that commit is done.
+        let tx = it.ctx().lock().await.take();
+        let commit = match tx {
+            Some(tx) => self.db.tx_commit_as(actor, db_name, &repo, tx).await,
+            None => Err(BatchError::QueryError {
+                alias: String::new(),
+                message: "transaction is already committed or rolled back".into(),
+                code: None,
+            }),
+        };
+        // `it` (holding the SnapshotGuard) drops here, AFTER commit returned —
+        // the snapshot stayed pinned through commit.
         drop(it);
         match commit {
             Ok(transaction) => DbResponse::TxCommitted { transaction },
@@ -695,7 +679,7 @@ impl ShamirDbHandler {
 
     /// Phase B ROLLBACK — remove the handle and drop the parked tx (RAII
     /// rollback, no storage side effects).
-    fn tx_rollback(&self, session: &Session, db_name: &str, tx_handle: u64) -> DbResponse {
+    async fn tx_rollback(&self, session: &Session, db_name: &str, tx_handle: u64) -> DbResponse {
         let it = match self.tx_registry.get_owned(tx_handle, &session.session_id) {
             Ok(it) => it,
             Err(TxRegistryError::TxNotFound) => {
@@ -751,9 +735,10 @@ impl ShamirDbHandler {
         }
     }
 
-    /// Create a SCRAM-authenticatable user. Server-side Argon2id is run
-    /// inside `block_in_place` to keep the Tokio worker responsive.
-    fn create_scram_user(
+    /// Create a SCRAM-authenticatable user. Server-side Argon2id is CPU-bound
+    /// and is delegated to `tokio::task::spawn_blocking` so the runtime worker
+    /// remains free during derivation.
+    async fn create_scram_user(
         &self,
         session: &Session,
         name: String,
@@ -781,20 +766,30 @@ impl ShamirDbHandler {
         // both the success and error paths drop `pw_buf` before returning.
         let pw_buf: Zeroizing<Vec<u8>> = Zeroizing::new(password.into_bytes());
         let salt: [u8; 16] = random_array();
+        let kdf = admin.kdf;
 
-        // Argon2id is CPU-heavy — wrap in block_in_place so we don't stall
-        // the runtime worker.
-        let derived =
-            match tokio::task::block_in_place(|| DerivedKeys::derive(&pw_buf, &salt, &admin.kdf)) {
-                Ok(d) => d,
-                Err(e) => {
-                    return DbResponse::Error {
-                        code: "query".into(),
-                        message: format!("argon2id: {e}"),
-                    };
-                }
-            };
-        drop(pw_buf);
+        // Argon2id is CPU-heavy — delegate to spawn_blocking so the runtime
+        // worker is free to make progress on other tasks during derivation.
+        let derive_result = tokio::task::spawn_blocking(move || {
+            DerivedKeys::derive(&pw_buf, &salt, &kdf).map(|d| (d, salt))
+        })
+        .await;
+
+        let (derived, salt) = match derive_result {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                return DbResponse::Error {
+                    code: "query".into(),
+                    message: format!("argon2id: {e}"),
+                };
+            }
+            Err(join_err) => {
+                return DbResponse::Error {
+                    code: "query".into(),
+                    message: format!("argon2id task failed: {join_err}"),
+                };
+            }
+        };
 
         let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
         server_key_z.copy_from_slice(&derived.server_key[..]);
@@ -960,60 +955,4 @@ fn error_code(e: &BatchError) -> &str {
         BatchError::CrossRepoNotSupported { .. } => "tx_cross_repo_not_supported",
         BatchError::NestingTooDeep { .. } => "nesting_too_deep",
     }
-}
-
-/// Bridge an async future to a sync caller — context-agnostic.
-///
-/// # Why not `block_in_place + Handle::block_on`?
-///
-/// The previous implementation parked the **current Tokio worker thread**
-/// for the whole batch (HIGH-7). Combined with `max_active_connections =
-/// 10_000` and `max_execution_time_secs = 60` an authenticated peer
-/// could saturate the worker pool (default = #CPU cores) from a fraction
-/// of those connections by issuing slow batches, denying service to
-/// everyone else.
-///
-/// The new shape:
-///   1. Spawn `fut` onto the runtime via `Handle::spawn` — the future
-///      runs on a worker thread that is *free to yield* to other tasks
-///      while `db.execute` awaits internal I/O.
-///   2. The calling thread blocks on a `std::sync::mpsc` channel until
-///      the spawned task sends its result back. We use `std::sync::mpsc`
-///      instead of `tokio::sync::oneshot::blocking_recv` because the
-///      latter goes through `try_enter_blocking_region`, which panics
-///      from a runtime worker that has not been marked via
-///      `block_in_place` first — and `block_in_place` itself panics
-///      from `spawn_blocking` threads. The std primitive is OS-level
-///      and works in every context.
-///
-/// # Threading model
-///
-/// `connection::request_loop` invokes the sync handler chain inside
-/// [`tokio::task::spawn_blocking`] so this function is normally called
-/// from a **blocking-pool** thread (default cap 512). Tests that drive
-/// the handler directly from a `#[tokio::test(flavor = "multi_thread")]`
-/// task call it from a **worker** thread instead. Both paths are
-/// correct:
-///
-///   * Blocking pool → parking that thread is exactly what the pool
-///     exists for; runtime workers stay free.
-///   * Worker → the spawned future runs on a *different* worker; this
-///     thread parks on `recv()`, but the multi-thread runtime in tests
-///     (`worker_threads >= 2`) and production has spare workers, so the
-///     spawned task makes forward progress independently.
-fn run_blocking<F>(fut: F) -> F::Output
-where
-    F: std::future::Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    let handle = tokio::runtime::Handle::current();
-    let (tx, rx) = std::sync::mpsc::sync_channel::<F::Output>(1);
-    handle.spawn(async move {
-        let out = fut.await;
-        // If the receiver was dropped (caller panicked between spawn and
-        // recv) we silently discard the result.
-        let _ = tx.send(out);
-    });
-    rx.recv()
-        .expect("run_blocking: spawned task dropped its sender — runtime shut down mid-call")
 }

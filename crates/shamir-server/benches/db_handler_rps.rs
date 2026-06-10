@@ -41,17 +41,6 @@ fn fixture_session() -> Session {
     )
 }
 
-fn build_handler() -> (ShamirDbHandler, Session) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let db = rt.block_on(async { ShamirDb::init_memory().await.unwrap() });
-    let handler = ShamirDbHandler::new(Arc::new(db));
-    let session = fixture_session();
-    (handler, session)
-}
-
 /// Spin up a handler with a `prod` DB / `main` repo / `users` table
 /// already created and `count` records inserted. Returns
 /// `(handler, session, runtime)` — the runtime owns its current_thread
@@ -105,7 +94,7 @@ fn build_loaded_handler(count: usize) -> (ShamirDbHandler, Session, tokio::runti
             batch,
         };
         let bytes = rmp_serde::to_vec_named(&seed_req).unwrap();
-        handler.handle(&session, &bytes).unwrap();
+        handler.handle(&session, &bytes).await.unwrap();
 
         (handler, session)
     });
@@ -131,12 +120,22 @@ fn bench(c: &mut Criterion) {
 
     // -- ping: dispatch upper bound (decode + match + encode only).
     {
-        let (handler, session) = build_handler();
+        // Ping is async now — drive through a single-threaded runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (handler, session) = rt.block_on(async {
+            let db = ShamirDb::init_memory().await.unwrap();
+            let h = ShamirDbHandler::new(Arc::new(db));
+            let s = fixture_session();
+            (h, s)
+        });
         let ping_bytes = rmp_serde::to_vec_named(&DbRequest::Ping).unwrap();
         g.bench_function("ping_inprocess", |b| {
             b.iter(|| {
-                let resp = handler
-                    .handle(black_box(&session), black_box(&ping_bytes))
+                let resp = rt
+                    .block_on(handler.handle(black_box(&session), black_box(&ping_bytes)))
                     .unwrap();
                 black_box(resp);
             });
@@ -166,13 +165,11 @@ fn bench(c: &mut Criterion) {
             }
         }));
         g.bench_function("execute_read_filter_sort_limit_100records", |b| {
-            // `block_in_place` inside `run_blocking` (db_handler.rs:549) wants
-            // a tokio task context — drive iter through the runtime's
-            // `block_on` so each invocation runs under that context.
             b.iter(|| {
                 rt.block_on(async {
                     let resp = handler
                         .handle(black_box(&session), black_box(&read_bytes))
+                        .await
                         .unwrap();
                     black_box(resp);
                 });
@@ -195,6 +192,7 @@ fn bench(c: &mut Criterion) {
                 rt.block_on(async {
                     let resp = handler
                         .handle(black_box(&session), black_box(&read_bytes))
+                        .await
                         .unwrap();
                     black_box(resp);
                 });

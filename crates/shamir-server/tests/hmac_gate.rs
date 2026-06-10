@@ -108,7 +108,7 @@ async fn drop_table_without_hmac_rejected() {
     b.id(1);
     b.drop_table("d", ddl::drop_table("items").repo("main"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _msg) = expect_error(res);
     assert_eq!(code, "hmac_required");
 }
@@ -128,7 +128,7 @@ async fn drop_table_with_wrong_hmac_rejected() {
             .hmac("deadbeef".repeat(8)), // 64 hex chars but bogus
     );
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _msg) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
 }
@@ -146,7 +146,7 @@ async fn drop_table_with_correct_hmac_accepted() {
     b.id(1);
     b.drop_table("d", ddl::drop_table("items").repo("main").hmac(&tag));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["d"].records[0];
     assert_eq!(row["dropped_table"], json!("items"));
@@ -177,7 +177,7 @@ async fn drop_table_tag_bound_to_target_table() {
         ddl::drop_table("other").repo("main").hmac(&tag_for_items),
     );
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
 }
@@ -198,7 +198,7 @@ async fn drop_db_without_hmac_rejected() {
     b.id(1);
     b.drop_db("d", ddl::drop_db("victim"));
     let req = execute_built("scratch", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
 }
@@ -220,7 +220,7 @@ async fn drop_db_with_correct_hmac_accepted() {
     b.id(1);
     b.drop_db("d", ddl::drop_db("victim").hmac(&tag));
     let req = execute_built("scratch", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["d"].records[0];
     assert_eq!(row["dropped"], json!("victim"));
@@ -241,13 +241,13 @@ async fn drop_index_without_hmac_rejected() {
     b.id(0);
     b.create_index("i", ddl::create_index("by_id", "items").field("id"));
     let mk = execute_built("prod", b.build());
-    let _ = handler.handle(&session, &encode(&mk)).unwrap();
+    let _ = handler.handle(&session, &encode(&mk)).await.unwrap();
 
     let mut b = Batch::new();
     b.id(1);
     b.drop_index("d", ddl::drop_index("by_id", "items"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
 }
@@ -262,7 +262,7 @@ async fn drop_index_with_correct_hmac_accepted() {
     b.id(0);
     b.create_index("i", ddl::create_index("by_id", "items").field("id"));
     let mk = execute_built("prod", b.build());
-    let _ = handler.handle(&session, &encode(&mk)).unwrap();
+    let _ = handler.handle(&session, &encode(&mk)).await.unwrap();
 
     let tag = canon::compute_tag_hex(
         &session_key(&session),
@@ -272,7 +272,7 @@ async fn drop_index_with_correct_hmac_accepted() {
     b.id(1);
     b.drop_index("d", ddl::drop_index("by_id", "items").hmac(&tag));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["d"].records[0];
     assert_eq!(row["dropped_index"], json!("by_id"));
@@ -295,7 +295,7 @@ async fn drop_index_unique_flag_changes_canonical() {
         ddl::create_index("by_em", "items").field("email").unique(),
     );
     let mk = execute_built("prod", b.build());
-    let _ = handler.handle(&session, &encode(&mk)).unwrap();
+    let _ = handler.handle(&session, &encode(&mk)).await.unwrap();
 
     // Tag computed for unique=false but request says unique=true.
     let mismatched = canon::compute_tag_hex(
@@ -309,7 +309,7 @@ async fn drop_index_unique_flag_changes_canonical() {
         ddl::drop_index("by_em", "items").unique().hmac(&mismatched),
     );
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
 }
@@ -329,7 +329,7 @@ async fn drop_user_requires_hmac() {
     b.id(1);
     b.drop_user("d", ddl::drop_user("bob"));
     let req = execute_built("scratch", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
 }
@@ -345,7 +345,7 @@ async fn drop_role_requires_hmac() {
     b.id(1);
     b.drop_role("d", ddl::drop_role("admin"));
     let req = execute_built("scratch", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
 }
@@ -364,7 +364,7 @@ async fn read_op_passes_without_hmac() {
     b.id(1);
     b.query("r", shamir_query_builder::Query::from("items"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let resp = expect_batch_ok(res);
     assert_eq!(resp.results["r"].records.len(), 0);
 }
@@ -383,7 +383,7 @@ async fn create_table_passes_without_hmac() {
     b.id(1);
     b.create_table("t", ddl::create_table("x").repo("main"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let resp = expect_batch_ok(res);
     let row = &resp.results["t"].records[0];
     assert_eq!(row["created_table"], json!("x"));
@@ -405,7 +405,7 @@ async fn mixed_batch_one_drop_missing_hmac_fails_whole_batch() {
     b.query("r", Query::from("items"));
     b.drop_table("d", ddl::drop_table("items").repo("main"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, message) = expect_error(res);
     assert_eq!(code, "hmac_required");
     // Error mentions which alias was unsigned.
@@ -437,7 +437,7 @@ async fn tag_signed_with_other_session_key_rejected() {
     b.id(1);
     b.drop_table("d", ddl::drop_table("items").repo("main").hmac(&tag));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
 }

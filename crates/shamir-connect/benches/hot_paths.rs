@@ -191,8 +191,13 @@ fn bench_envelope(c: &mut Criterion) {
 struct EchoHandler;
 
 impl RequestHandler for EchoHandler {
-    fn handle(&self, _: &Session, req: &[u8]) -> Result<Vec<u8>, String> {
-        Ok(req.to_vec())
+    fn handle<'a>(
+        &'a self,
+        _: &'a Session,
+        req: &'a [u8],
+    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+        let out = req.to_vec();
+        Box::pin(async move { Ok(out) })
     }
 }
 
@@ -202,6 +207,12 @@ fn bench_dispatch(c: &mut Criterion) {
     let uid = [0x01u8; 16];
     store.insert(sid, fixture_session(uid));
     let handler = EchoHandler;
+
+    // Benchmarks call async dispatch functions — drive them through a
+    // single-threaded tokio runtime kept alive for the whole group.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
 
     let mut g = c.benchmark_group("dispatch");
     for body_size in [16usize, 256, 4096].iter().copied() {
@@ -213,7 +224,9 @@ fn bench_dispatch(c: &mut Criterion) {
         g.throughput(Throughput::Elements(1));
         g.bench_with_input(BenchmarkId::new("happy_path", body_size), &env, |b, e| {
             b.iter(|| {
-                let outcome = dispatch_request(e, &store, |_| 0u64, &handler).unwrap();
+                let outcome = rt
+                    .block_on(dispatch_request(e, &store, |_| 0u64, &handler))
+                    .unwrap();
                 let DispatchOutcome::Response(_) = outcome else {
                     panic!("expected response")
                 };
@@ -229,7 +242,9 @@ fn bench_dispatch(c: &mut Criterion) {
             |b, bytes| {
                 b.iter(|| {
                     let view = RequestEnvelopeView::from_msgpack(black_box(bytes)).unwrap();
-                    let outcome = dispatch_request_view(&view, &store, |_| 0u64, &handler).unwrap();
+                    let outcome = rt
+                        .block_on(dispatch_request_view(&view, &store, |_| 0u64, &handler))
+                        .unwrap();
                     let DispatchOutcome::Response(_) = outcome else {
                         panic!("expected response")
                     };

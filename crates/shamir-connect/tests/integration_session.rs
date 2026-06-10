@@ -8,12 +8,13 @@ use shamir_connect::server::{dispatch_request, DispatchOutcome, RequestHandler};
 
 struct Echo;
 impl RequestHandler for Echo {
-    fn handle(
-        &self,
-        _session: &shamir_connect::server::Session,
-        req: &[u8],
-    ) -> Result<Vec<u8>, String> {
-        Ok(req.to_vec())
+    fn handle<'a>(
+        &'a self,
+        _session: &'a shamir_connect::server::Session,
+        req: &'a [u8],
+    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+        let out = req.to_vec();
+        Box::pin(async move { Ok(out) })
     }
 }
 
@@ -46,12 +47,12 @@ fn store_insert_lookup_remove() {
     assert!(store.is_empty());
 }
 
-#[test]
-fn dispatch_returns_session_expired_for_unknown_sid() {
+#[tokio::test]
+async fn dispatch_returns_session_expired_for_unknown_sid() {
     let store = SessionStore::new();
     let env = RequestEnvelope::new([0u8; 32], Some(7), b"hello".to_vec());
 
-    let out = dispatch_request(&env, &store, |_| 0, &Echo).unwrap();
+    let out = dispatch_request(&env, &store, |_| 0, &Echo).await.unwrap();
     match out {
         DispatchOutcome::Error(e) => {
             assert_eq!(e.error, "session_expired");
@@ -61,8 +62,8 @@ fn dispatch_returns_session_expired_for_unknown_sid() {
     }
 }
 
-#[test]
-fn dispatch_routes_to_handler_for_valid_session() {
+#[tokio::test]
+async fn dispatch_routes_to_handler_for_valid_session() {
     let store = SessionStore::new();
     let sid = [0x55u8; 32];
     let s = make_session([1u8; 16], 100);
@@ -70,7 +71,7 @@ fn dispatch_routes_to_handler_for_valid_session() {
 
     // tickets_invalid_before_ns = 0 → 100 > 0 → valid
     let env = RequestEnvelope::new(sid, Some(42), b"hello world".to_vec());
-    let out = dispatch_request(&env, &store, |_| 0, &Echo).unwrap();
+    let out = dispatch_request(&env, &store, |_| 0, &Echo).await.unwrap();
     match out {
         DispatchOutcome::Response(r) => {
             assert_eq!(r.request_id, Some(42));
@@ -80,8 +81,8 @@ fn dispatch_routes_to_handler_for_valid_session() {
     }
 }
 
-#[test]
-fn dispatch_kills_session_when_invalidated_per_section_7_5() {
+#[tokio::test]
+async fn dispatch_kills_session_when_invalidated_per_section_7_5() {
     let store = SessionStore::new();
     let sid = [0x55u8; 32];
     let s = make_session([1u8; 16], 100); // created at T=100
@@ -90,7 +91,9 @@ fn dispatch_kills_session_when_invalidated_per_section_7_5() {
     // Admin sets tickets_invalid_before_ns = 200 (future relative to creation).
     // Per §7.5: created_at_ns(100) <= invalid_before(200) → kick.
     let env = RequestEnvelope::new(sid, None, b"x".to_vec());
-    let out = dispatch_request(&env, &store, |_| 200, &Echo).unwrap();
+    let out = dispatch_request(&env, &store, |_| 200, &Echo)
+        .await
+        .unwrap();
 
     match out {
         DispatchOutcome::Error(e) => assert_eq!(e.error, "session_invalidated"),
@@ -100,8 +103,8 @@ fn dispatch_kills_session_when_invalidated_per_section_7_5() {
     assert!(store.lookup(&sid).is_none());
 }
 
-#[test]
-fn dispatch_strict_inequality_at_exact_boundary() {
+#[tokio::test]
+async fn dispatch_strict_inequality_at_exact_boundary() {
     let store = SessionStore::new();
     let sid = [0x55u8; 32];
     let s = make_session([1u8; 16], 100);
@@ -109,22 +112,26 @@ fn dispatch_strict_inequality_at_exact_boundary() {
 
     // created_at_ns(100) == tickets_invalid_before_ns(100) → strict > → invalid
     let env = RequestEnvelope::new(sid, None, b"x".to_vec());
-    let out = dispatch_request(&env, &store, |_| 100, &Echo).unwrap();
+    let out = dispatch_request(&env, &store, |_| 100, &Echo)
+        .await
+        .unwrap();
     match out {
         DispatchOutcome::Error(e) => assert_eq!(e.error, "session_invalidated"),
         _ => panic!("strict > must reject equal timestamps"),
     }
 }
 
-#[test]
-fn dispatch_one_nanosecond_after_invalidation_passes() {
+#[tokio::test]
+async fn dispatch_one_nanosecond_after_invalidation_passes() {
     let store = SessionStore::new();
     let sid = [0x55u8; 32];
     let s = make_session([1u8; 16], 101);
     store.insert(sid, s);
 
     let env = RequestEnvelope::new(sid, None, b"x".to_vec());
-    let out = dispatch_request(&env, &store, |_| 100, &Echo).unwrap();
+    let out = dispatch_request(&env, &store, |_| 100, &Echo)
+        .await
+        .unwrap();
     assert!(matches!(out, DispatchOutcome::Response(_)));
 }
 
@@ -214,8 +221,8 @@ fn permissions_snapshot_admin_detection() {
 
 /// Optim #4: dispatch_request_view operates on a borrowed RequestEnvelopeView
 /// without copying session_id or req. Functionally identical to dispatch_request.
-#[test]
-fn dispatch_request_view_round_trip() {
+#[tokio::test]
+async fn dispatch_request_view_round_trip() {
     use shamir_connect::common::envelope::RequestEnvelopeView;
     use shamir_connect::server::dispatch::dispatch_request_view;
 
@@ -231,7 +238,9 @@ fn dispatch_request_view_round_trip() {
     assert_eq!(view.request_id, Some(7));
     assert_eq!(view.req, b"ping");
 
-    let outcome = dispatch_request_view(&view, &store, |_| 0u64, &Echo).unwrap();
+    let outcome = dispatch_request_view(&view, &store, |_| 0u64, &Echo)
+        .await
+        .unwrap();
     let DispatchOutcome::Response(r) = outcome else {
         panic!("expected response")
     };
@@ -241,8 +250,8 @@ fn dispatch_request_view_round_trip() {
 
 /// Optim #4: dispatch_request_view applies the §7.5 validity check
 /// identically to dispatch_request.
-#[test]
-fn dispatch_request_view_kills_session_when_invalidated() {
+#[tokio::test]
+async fn dispatch_request_view_kills_session_when_invalidated() {
     use shamir_connect::common::envelope::RequestEnvelopeView;
     use shamir_connect::server::dispatch::dispatch_request_view;
 
@@ -257,7 +266,9 @@ fn dispatch_request_view_kills_session_when_invalidated() {
     let view = RequestEnvelopeView::from_msgpack(&bytes).unwrap();
 
     // tickets_invalid_before_ns >= created_at_ns → §7.5 kicks.
-    let outcome = dispatch_request_view(&view, &store, |_| created_at, &Echo).unwrap();
+    let outcome = dispatch_request_view(&view, &store, |_| created_at, &Echo)
+        .await
+        .unwrap();
     let DispatchOutcome::Error(e) = outcome else {
         panic!("expected error")
     };

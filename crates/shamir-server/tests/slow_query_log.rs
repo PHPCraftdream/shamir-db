@@ -93,6 +93,7 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
     let req_bytes = rmp_serde::to_vec_named(&req).expect("encode");
     let _ = handler
         .handle(&make_session(), &req_bytes)
+        .await
         .expect("handle ok");
 
     // 4. Check the captured tracing output.
@@ -152,6 +153,7 @@ async fn no_warn_when_threshold_is_zero() {
     };
     let _ = handler
         .handle(&make_session(), &rmp_serde::to_vec_named(&req).unwrap())
+        .await
         .unwrap();
 
     let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();

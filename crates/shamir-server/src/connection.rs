@@ -656,11 +656,8 @@ async fn run_handshake<F: Framer>(
     Ok(auth_ok.session_id)
 }
 
-/// Outcome of one `spawn_blocking` dispatch — pre-serialised bytes (so
-/// the worker thread can immediately call `write_frame_into` without
-/// holding any references into the request buffer) plus a "break after
-/// writing" flag for the §7.5 session_invalidated / session_expired
-/// paths.
+/// Outcome of one dispatch — serialised bytes plus a "break after
+/// writing" flag for the §7.5 session_invalidated / session_expired paths.
 enum DispatchOutput {
     /// Reply bytes to write to the wire; keep looping afterwards.
     Reply(Vec<u8>),
@@ -690,79 +687,59 @@ async fn request_loop<F: Framer>(
             Err(_) => break, // client closed
         }
 
-        // HIGH-7: dispatch the synchronous handler chain on the
-        // blocking-task pool so workers aren't parked for the full batch
-        // duration. The previous shape (`block_in_place + block_on`
-        // inside `db_handler::run_blocking`) capped concurrent in-flight
-        // batches at `#worker_threads` — with `max_active_connections =
-        // 10_000` and `max_execution_time_secs = 60` an authenticated
-        // peer could DoS the worker pool from a few connections.
-        //
-        // The `spawn_blocking` thread parses the envelope, runs §7.5
-        // session validity, invokes the application handler, and
-        // pre-serialises the reply bytes. We move `frame_buf` into the
-        // closure via `std::mem::take` so the borrow checker is
-        // satisfied and restore it after the join — keeps the
-        // per-connection allocation reuse from Optim #1 / #7.
-        let owned_buf = std::mem::take(frame_buf);
-        let handler = ctx.handler.clone();
-        let session_store = ctx.session_store.clone();
-        let user_dir_for_lookup = ctx.user_dir.clone();
-
-        let join = tokio::task::spawn_blocking(move || -> (Vec<u8>, DispatchOutput) {
-            let view = match RequestEnvelopeView::from_msgpack(&owned_buf) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Malformed envelope — emit generic error envelope back.
-                    let err = ErrorEnvelope::new(None, "invalid_envelope");
-                    let out = match err.to_msgpack() {
-                        Ok(b) => DispatchOutput::Reply(b),
-                        Err(_) => DispatchOutput::Skip,
-                    };
-                    return (owned_buf, out);
-                }
-            };
-
-            let lookup_tib = move |uid: &[u8; 16]| -> u64 {
-                // Spec §7.5 NORMATIVE: each request runs through this
-                // fast read so changes to the user record (role updates,
-                // kickSession, password change) invalidate live sessions
-                // on the next request. Reverse-lookup from `user_id` →
-                // username → UserRecord uses the secondary index
-                // maintained inside `RedbUserDirectory::insert`.
-                user_dir_for_lookup.tickets_invalid_before_ns_by_user_id(uid)
-            };
-
-            // dispatch_request_view requires `H: RequestHandler` which
-            // `dyn` does not satisfy directly — wrap in a thin newtype
-            // that implements the trait by delegation.
-            struct DynRef<'a>(&'a dyn RequestHandler);
-            impl<'a> RequestHandler for DynRef<'a> {
-                fn handle(
-                    &self,
-                    session: &shamir_connect::server::session::Session,
-                    req: &[u8],
-                ) -> std::result::Result<Vec<u8>, String> {
-                    self.0.handle(session, req)
+        // Parse the envelope, run §7.5 session validity, and invoke the
+        // async handler — all directly on the current async task. No
+        // blocking-pool bridge (spawn_blocking) is needed because
+        // RequestHandler::handle is now an async fn. The request loop
+        // remains lock-step (one in-flight request per connection); the
+        // worker is free to yield at every .await inside the handler.
+        let view = match RequestEnvelopeView::from_msgpack(frame_buf) {
+            Ok(v) => v,
+            Err(_) => {
+                // Malformed envelope — emit generic error envelope back.
+                let err = ErrorEnvelope::new(None, "invalid_envelope");
+                let dispatch = match err.to_msgpack() {
+                    Ok(b) => DispatchOutput::Reply(b),
+                    Err(_) => DispatchOutput::Skip,
+                };
+                match dispatch {
+                    DispatchOutput::Skip => continue,
+                    DispatchOutput::Reply(bytes) => {
+                        if framer
+                            .write_frame_into(&bytes, write_scratch)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    DispatchOutput::ReplyAndBreak(_) => unreachable!(),
                 }
             }
-            let dyn_handler = DynRef(handler.as_ref());
+        };
 
-            let outcome =
-                match dispatch_request_view(&view, &session_store, lookup_tib, &dyn_handler) {
-                    Ok(o) => o,
-                    Err(_) => {
-                        // Internal error — best-effort error envelope.
-                        let err = ErrorEnvelope::new(view.request_id, "internal_error");
-                        let out = match err.to_msgpack() {
-                            Ok(b) => DispatchOutput::Reply(b),
-                            Err(_) => DispatchOutput::Skip,
-                        };
-                        return (owned_buf, out);
-                    }
-                };
+        let lookup_tib = |uid: &[u8; 16]| -> u64 {
+            // Spec §7.5 NORMATIVE: each request runs through this fast
+            // read so changes to the user record (role updates,
+            // kickSession, password change) invalidate live sessions on
+            // the next request. Reverse-lookup from `user_id` → username
+            // → UserRecord uses the secondary index maintained inside
+            // `RedbUserDirectory::insert`.
+            ctx.user_dir.tickets_invalid_before_ns_by_user_id(uid)
+        };
 
-            let out = match outcome {
+        // `dyn RequestHandler` implements the trait directly — no DynRef
+        // wrapper needed now that handle() returns a boxed future.
+        let dispatch = match dispatch_request_view(
+            &view,
+            &ctx.session_store,
+            lookup_tib,
+            ctx.handler.as_ref(),
+        )
+        .await
+        {
+            Ok(outcome) => match outcome {
                 DispatchOutcome::Response(resp) => match resp.to_msgpack() {
                     Ok(b) => DispatchOutput::Reply(b),
                     Err(_) => DispatchOutput::Skip,
@@ -781,25 +758,21 @@ async fn request_loop<F: Framer>(
                         Err(_) => DispatchOutput::Skip,
                     }
                 }
-            };
-            (owned_buf, out)
-        });
-
-        // Wait for the blocking dispatch to complete. If the join
-        // panicked (handler bug, OOM in serialiser, etc.) close the
-        // connection.
-        let (returned_buf, dispatch) = match join.await {
-            Ok(t) => t,
-            Err(_join_err) => {
-                tracing::warn!("dispatch task join failed; closing connection");
-                break;
+            },
+            Err(_) => {
+                // Internal error — best-effort error envelope.
+                let err = ErrorEnvelope::new(view.request_id, "internal_error");
+                match err.to_msgpack() {
+                    Ok(b) => DispatchOutput::Reply(b),
+                    Err(_) => DispatchOutput::Skip,
+                }
             }
         };
-        // Restore the per-connection scratch buffer so the next
-        // iteration reuses the same allocation (Optim #1).
-        *frame_buf = returned_buf;
 
         // Apply the dispatch outcome.
+        // The view borrow of frame_buf ends here (last use above); NLL
+        // releases it so frame_buf is reused on the next iteration
+        // as-is (Optim #1 / #7 — capacity is preserved).
         match dispatch {
             DispatchOutput::Skip => continue,
             DispatchOutput::Reply(bytes) => {
