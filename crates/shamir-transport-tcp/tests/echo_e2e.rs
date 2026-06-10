@@ -98,9 +98,14 @@ struct EchoHandler {
 }
 
 impl RequestHandler for EchoHandler {
-    fn handle(&self, _session: &Session, req: &[u8]) -> Result<Vec<u8>, String> {
+    fn handle<'a>(
+        &'a self,
+        _session: &'a Session,
+        req: &'a [u8],
+    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         self.counter.fetch_add(1, Ordering::Relaxed);
-        Ok(req.to_vec())
+        let out = req.to_vec();
+        Box::pin(async move { Ok(out) })
     }
 }
 
@@ -300,6 +305,7 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
                 |_uid| server_tib.load(Ordering::Relaxed),
                 &*server_echo,
             )
+            .await
             .unwrap();
             let reply_bytes = match outcome {
                 DispatchOutcome::Response(r) => r.to_msgpack().unwrap(),

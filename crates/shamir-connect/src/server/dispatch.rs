@@ -6,13 +6,27 @@
 //!
 //! Application-level dispatch (what to do with `req` payload) is left to
 //! the caller via the [`RequestHandler`] trait.
+//!
+//! ## Async model
+//!
+//! [`RequestHandler::handle`] is an async method returning a boxed future.
+//! [`dispatch_request`] and [`dispatch_request_view`] are `async fn` that
+//! `.await` the handler future directly — no blocking-pool bridge is needed.
+//! The request loop stays lock-step (one request at a time per connection);
+//! this is preparation for future duplex multiplexing.
 
 use crate::common::envelope::{
     ErrorEnvelope, RequestEnvelope, RequestEnvelopeView, ResponseEnvelope,
 };
 use crate::common::error::Result;
 use crate::server::session::{Session, SessionStore};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+
+/// Boxed future returned by [`RequestHandler::handle`].
+pub type HandlerFuture<'a> =
+    Pin<Box<dyn Future<Output = std::result::Result<Vec<u8>, String>> + Send + 'a>>;
 
 /// Application-level request handler — receives the validated [`Session`] and
 /// raw `req` bytes, returns either response bytes or an error string.
@@ -21,7 +35,7 @@ pub trait RequestHandler: Send + Sync {
     ///
     /// Returning `Ok(bytes)` → wrap in [`ResponseEnvelope`].
     /// Returning `Err(reason)` → wrap in [`ErrorEnvelope`].
-    fn handle(&self, session: &Session, req: &[u8]) -> std::result::Result<Vec<u8>, String>;
+    fn handle<'a>(&'a self, session: &'a Session, req: &'a [u8]) -> HandlerFuture<'a>;
 }
 
 /// Lookup hook: returns `tickets_invalid_before_ns` for a given user_id.
@@ -45,8 +59,8 @@ pub enum DispatchOutcome {
 /// 3. Run spec §7.5 validity check via `lookup_tickets_invalid_before_ns`.
 ///    Failure → remove session from store + return `session_invalidated`.
 /// 4. Touch `last_activity_ns` (done by `SessionStore::lookup`).
-/// 5. Dispatch `req` bytes to `handler`.
-pub fn dispatch_request<H: RequestHandler, F: Fn(&[u8; 16]) -> u64>(
+/// 5. Dispatch `req` bytes to `handler` (async — directly awaited).
+pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u64>(
     envelope: &RequestEnvelope,
     store: &SessionStore,
     lookup_tickets_invalid_before_ns: F,
@@ -75,8 +89,8 @@ pub fn dispatch_request<H: RequestHandler, F: Fn(&[u8; 16]) -> u64>(
         )));
     }
 
-    // Application-level dispatch.
-    match handler.handle(&session, &envelope.req) {
+    // Application-level dispatch — async, no blocking bridge needed.
+    match handler.handle(&session, &envelope.req).await {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(
             envelope.request_id,
             res_bytes,
@@ -98,7 +112,7 @@ pub fn dispatch_request<H: RequestHandler, F: Fn(&[u8; 16]) -> u64>(
 /// Use this on transport hot paths where you already hold the raw msgpack
 /// bytes; pair with [`shamir-transport-tcp::framing::read_frame_into`] to
 /// keep the entire request path allocation-free.
-pub fn dispatch_request_view<H: RequestHandler, F: Fn(&[u8; 16]) -> u64>(
+pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u64>(
     view: &RequestEnvelopeView<'_>,
     store: &SessionStore,
     lookup_tickets_invalid_before_ns: F,
@@ -125,7 +139,8 @@ pub fn dispatch_request_view<H: RequestHandler, F: Fn(&[u8; 16]) -> u64>(
         )));
     }
 
-    match handler.handle(&session, view.req) {
+    // Application-level dispatch — async, no blocking bridge needed.
+    match handler.handle(&session, view.req).await {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(
             view.request_id,
             res_bytes,

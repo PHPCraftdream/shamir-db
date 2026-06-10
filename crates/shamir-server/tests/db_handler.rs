@@ -105,7 +105,10 @@ async fn ping_returns_pong() {
     let handler = ShamirDbHandler::new(Arc::new(db));
     let session = user_session();
 
-    let res = handler.handle(&session, &encode(&DbRequest::Ping)).unwrap();
+    let res = handler
+        .handle(&session, &encode(&DbRequest::Ping))
+        .await
+        .unwrap();
     assert!(matches!(decode(&res), DbResponse::Pong));
 }
 
@@ -116,7 +119,7 @@ async fn invalid_msgpack_returns_protocol_err() {
     let session = user_session();
 
     let garbage: &[u8] = &[0xff, 0x00, 0x10, 0x42, 0x99, 0x01];
-    let err = handler.handle(&session, garbage).unwrap_err();
+    let err = handler.handle(&session, garbage).await.unwrap_err();
     assert!(err.starts_with("invalid_request:"), "got {:?}", err);
 }
 
@@ -134,7 +137,7 @@ async fn unknown_db_returns_typed_error() {
     b.id(1);
     b.query("ping", Query::from("users"));
     let req = execute_built("nope", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::Error { code, message } => {
             assert_eq!(code, "unknown_db");
@@ -190,7 +193,7 @@ async fn read_with_filter_order_limit_returns_full_payload() {
             .value(doc! { "id" => "e", "qty" => 5 }),
     );
     let seed = execute_built("prod", b.build());
-    let _ = handler.handle(&session, &encode(&seed)).unwrap();
+    let _ = handler.handle(&session, &encode(&seed)).await.unwrap();
 
     // Query: qty >= 3, ordered by qty DESC, limit 2.
     let mut b = Batch::new();
@@ -204,7 +207,7 @@ async fn read_with_filter_order_limit_returns_full_payload() {
             .offset(0),
     );
     let read = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&read)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&read)).await.unwrap());
     let resp = match res {
         DbResponse::Batch { response } => response,
         other => panic!("expected Batch, got {:?}", other),
@@ -282,7 +285,7 @@ async fn multi_query_batch_with_query_reference() {
             .value(doc! { "id" => 102, "user_id" => 2, "amt" => 7 }),
     );
     let seed = execute_built("prod", b.build());
-    let _ = handler.handle(&session, &encode(&seed)).unwrap();
+    let _ = handler.handle(&session, &encode(&seed)).await.unwrap();
 
     // alice's orders: read user, then read orders WHERE user_id = $query
     // reference into the first result.
@@ -294,7 +297,7 @@ async fn multi_query_batch_with_query_reference() {
         Query::from("orders").where_eq("user_id", user_h.first().field("id")),
     );
     let chained = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&chained)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&chained)).await.unwrap());
     let resp = match res {
         DbResponse::Batch { response } => response,
         other => panic!("expected Batch, got {:?}", other),
@@ -345,7 +348,7 @@ async fn admin_batch_allowed_for_superuser() {
     b.id("ddl");
     b.create_table("mk", ddl::create_table("inventory").repo("main"));
     let admin = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&admin)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&admin)).await.unwrap());
     let resp = match res {
         DbResponse::Batch { response } => response,
         other => panic!("expected Batch from create_table, got {:?}", other),
@@ -363,7 +366,7 @@ async fn admin_batch_allowed_for_superuser() {
     );
     b.query("rd", Query::from("inventory"));
     let rw = execute_built("prod", b.build());
-    let res2 = decode(&handler.handle(&session, &encode(&rw)).unwrap());
+    let res2 = decode(&handler.handle(&session, &encode(&rw)).await.unwrap());
     let resp2 = match res2 {
         DbResponse::Batch { response } => response,
         other => panic!("expected Batch on read, got {:?}", other),
@@ -388,7 +391,7 @@ async fn admin_batch_denied_for_non_superuser() {
     b.id("ddl");
     b.drop_table("drop", ddl::drop_table("items").repo("main"));
     let admin = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&admin)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&admin)).await.unwrap());
     match res {
         DbResponse::Error { code, message } => {
             assert_eq!(code, "permission_denied");
@@ -412,7 +415,7 @@ async fn batch_response_echoes_request_id() {
     b.id("client-correlation-token-42");
     b.query("all", Query::from("items"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::Batch { response } => {
             assert_eq!(
@@ -451,7 +454,7 @@ async fn server_query_limits_cap_clamps_max_queries() {
     b.query("q4", Query::from("items"));
     b.query("q5", Query::from("items"));
     let req = execute_built("prod", b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::Error { code, message } => {
             assert_eq!(code, "limits", "TooManyQueries → 'limits' code");
@@ -481,7 +484,7 @@ async fn unsupported_query_version_rejected_before_db_work() {
     b.id("v");
     b.query("all", Query::from("items"));
     let req = execute_built_with_version("prod", 99, b.build());
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::Error { code, message } => {
             assert_eq!(code, "unsupported_query_version");
@@ -505,7 +508,7 @@ async fn current_query_version_accepted() {
         shamir_server::version::CURRENT_QUERY_LANG_VERSION,
         b.build(),
     );
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     assert!(
         matches!(res, DbResponse::Batch { .. }),
         "current version must be accepted; got {:?}",
@@ -537,7 +540,7 @@ async fn create_scram_user_denied_without_admin_glue() {
         password: "correct horse battery staple".into(),
         roles: vec!["user".into()],
     };
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::Error { code, .. } => assert_eq!(code, "not_supported"),
         other => panic!("expected not_supported, got {:?}", other),
@@ -564,7 +567,7 @@ async fn create_scram_user_denied_for_non_superuser() {
         password: "correct horse battery staple".into(),
         roles: vec![],
     };
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::Error { code, .. } => assert_eq!(code, "permission_denied"),
         other => panic!("expected permission_denied, got {:?}", other),
@@ -591,7 +594,7 @@ async fn create_scram_user_success_then_duplicate() {
         password: "correct horse battery staple".into(),
         roles: vec!["read_write".into()],
     };
-    let res = decode(&handler.handle(&session, &encode(&req)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&req)).await.unwrap());
     match res {
         DbResponse::UserCreated { name, user_id } => {
             assert_eq!(name, "bob");
@@ -614,7 +617,7 @@ async fn create_scram_user_success_then_duplicate() {
         password: "another password".into(),
         roles: vec![],
     };
-    let res2 = decode(&handler.handle(&session, &encode(&req2)).unwrap());
+    let res2 = decode(&handler.handle(&session, &encode(&req2)).await.unwrap());
     match res2 {
         DbResponse::Error { code, .. } => assert_eq!(code, "user_exists"),
         other => panic!("expected user_exists, got {:?}", other),
@@ -701,7 +704,7 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
     b.id("rd");
     b.query("r", Query::from("secret"));
     let read = execute_built("acl", b.build());
-    let res = decode(&handler.handle(&eve, &encode(&read)).unwrap());
+    let res = decode(&handler.handle(&eve, &encode(&read)).await.unwrap());
     match res {
         DbResponse::Error { code, message } => {
             assert_eq!(
@@ -718,7 +721,7 @@ async fn shomer_dac_denies_non_owner_through_handler_wire() {
 
     // --- Superuser session (Actor::System) → ALLOWED ---
     let su = root_session();
-    let res = decode(&handler.handle(&su, &encode(&read)).unwrap());
+    let res = decode(&handler.handle(&su, &encode(&read)).await.unwrap());
     match res {
         DbResponse::Batch { response } => {
             let rows = &response.results.get("r").expect("r alias").records;
@@ -755,7 +758,7 @@ async fn tx_too_large_aborts_and_removes_handle() {
         repo: "main".into(),
         isolation: None,
     };
-    let opened = decode(&handler.handle(&session, &encode(&begin)).unwrap());
+    let opened = decode(&handler.handle(&session, &encode(&begin)).await.unwrap());
     let tx_handle = match opened {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
         other => panic!("expected TxOpened, got {:?}", other),
@@ -778,7 +781,7 @@ async fn tx_too_large_aborts_and_removes_handle() {
         tx_handle,
         batch: body,
     };
-    let res = decode(&handler.handle(&session, &encode(&exec)).unwrap());
+    let res = decode(&handler.handle(&session, &encode(&exec)).await.unwrap());
     match res {
         DbResponse::Error { code, message } => {
             assert_eq!(
@@ -801,7 +804,7 @@ async fn tx_too_large_aborts_and_removes_handle() {
         db: "prod".into(),
         tx_handle,
     };
-    let after = decode(&handler.handle(&session, &encode(&commit)).unwrap());
+    let after = decode(&handler.handle(&session, &encode(&commit)).await.unwrap());
     match after {
         DbResponse::Error { code, .. } => assert_eq!(code, "tx_not_found"),
         other => panic!("expected tx_not_found after abort, got {:?}", other),
@@ -823,7 +826,7 @@ async fn tx_under_cap_passes_through() {
         repo: "main".into(),
         isolation: None,
     };
-    let tx_handle = match decode(&handler.handle(&session, &encode(&begin)).unwrap()) {
+    let tx_handle = match decode(&handler.handle(&session, &encode(&begin)).await.unwrap()) {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
         other => panic!("expected TxOpened, got {:?}", other),
     };
@@ -842,6 +845,7 @@ async fn tx_under_cap_passes_through() {
                     batch: body,
                 }),
             )
+            .await
             .unwrap(),
     );
     assert!(matches!(res, DbResponse::TxBatch { .. }), "got {:?}", res);

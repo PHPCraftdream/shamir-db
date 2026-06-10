@@ -96,6 +96,7 @@ async fn interactive_tx_happy_path_wire() {
     let res = decode(
         &handler
             .handle(&s, &encode(&tx_begin("app", "main")))
+            .await
             .unwrap(),
     );
     let tx_handle = match res {
@@ -129,6 +130,7 @@ async fn interactive_tx_happy_path_wire() {
     let wres = decode(
         &handler
             .handle(&s, &encode(&tx_execute_built("app", tx_handle, wb.build())))
+            .await
             .unwrap(),
     );
     let wresp = match wres {
@@ -150,6 +152,7 @@ async fn interactive_tx_happy_path_wire() {
     let rres = decode(
         &handler
             .handle(&s, &encode(&tx_execute_built("app", tx_handle, rb.build())))
+            .await
             .unwrap(),
     );
     let rresp = match rres {
@@ -173,6 +176,7 @@ async fn interactive_tx_happy_path_wire() {
                     tx_handle,
                 }),
             )
+            .await
             .unwrap(),
     );
     match cres {
@@ -189,6 +193,7 @@ async fn interactive_tx_happy_path_wire() {
     let vres = decode(
         &handler
             .handle(&s, &encode(&execute_built("app", vb.build())))
+            .await
             .unwrap(),
     );
     let vresp = match vres {
@@ -210,6 +215,7 @@ async fn interactive_tx_rollback_discards_writes() {
     let tx_handle = match decode(
         &handler
             .handle(&s, &encode(&tx_begin("app", "main")))
+            .await
             .unwrap(),
     ) {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
@@ -227,6 +233,7 @@ async fn interactive_tx_rollback_discards_writes() {
     );
     let _ = handler
         .handle(&s, &encode(&tx_execute_built("app", tx_handle, wb.build())))
+        .await
         .unwrap();
 
     let rb = decode(
@@ -238,6 +245,7 @@ async fn interactive_tx_rollback_discards_writes() {
                     tx_handle,
                 }),
             )
+            .await
             .unwrap(),
     );
     match rb {
@@ -251,6 +259,7 @@ async fn interactive_tx_rollback_discards_writes() {
     let vres = decode(
         &handler
             .handle(&s, &encode(&execute_built("app", vb.build())))
+            .await
             .unwrap(),
     );
     match vres {
@@ -278,6 +287,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
     let tx_handle = match decode(
         &handler
             .handle(&sa, &encode(&tx_begin("app", "main")))
+            .await
             .unwrap(),
     ) {
         DbResponse::TxOpened { tx_handle, .. } => tx_handle,
@@ -300,6 +310,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
                 &sb,
                 &encode(&tx_execute_built("app", tx_handle, wb.build())),
             )
+            .await
             .unwrap(),
     );
     match res {
@@ -317,6 +328,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
                     tx_handle,
                 }),
             )
+            .await
             .unwrap(),
     );
     match res2 {
@@ -334,6 +346,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
                 &sa,
                 &encode(&tx_execute_built("app", 999_999_999, xb.build())),
             )
+            .await
             .unwrap(),
     );
     match res3 {
@@ -350,5 +363,6 @@ async fn interactive_tx_foreign_session_rejected_wire() {
                 tx_handle,
             }),
         )
+        .await
         .unwrap();
 }
