@@ -8,6 +8,9 @@
 
 pub mod runtime;
 
+#[cfg(test)]
+mod tests;
+
 use std::time::Duration;
 
 /// Knobs whose natural owner is the storage backend / store level.

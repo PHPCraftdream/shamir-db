@@ -165,7 +165,7 @@ fn path_to_forward_slash(path: &Path) -> String {
 
 /// Escape a value for curl config file double-quoted strings.
 /// Only `\` and `"` need escaping inside double quotes.
-fn escape_curl_value(s: &str) -> String {
+pub(crate) fn escape_curl_value(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -199,24 +199,4 @@ async fn parse_response_headers(path: &Path) -> Vec<(String, String)> {
         }
     }
     headers
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn escape_curl_value_backslash() {
-        assert_eq!(escape_curl_value(r"a\b"), r"a\\b");
-    }
-
-    #[test]
-    fn escape_curl_value_quotes() {
-        assert_eq!(escape_curl_value(r#"a"b"#), r#"a\"b"#);
-    }
-
-    #[test]
-    fn escape_curl_value_plain() {
-        assert_eq!(escape_curl_value("hello"), "hello");
-    }
 }

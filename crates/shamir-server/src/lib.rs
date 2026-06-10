@@ -37,3 +37,6 @@ pub mod user_directory;
 pub mod version;
 #[cfg(windows)]
 pub mod windows_service;
+
+#[cfg(test)]
+mod tests;

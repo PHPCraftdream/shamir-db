@@ -15,3 +15,6 @@ pub mod access;
 pub mod codecs;
 pub mod core;
 pub mod types;
+
+#[cfg(test)]
+mod tests;

@@ -54,6 +54,9 @@
 //! transaction). Recovery runs in O(operations_per_marker), not
 //! in O(table_size).
 
+#[cfg(test)]
+mod tests;
+
 pub mod active_key;
 pub mod wal_entry;
 pub mod wal_entry_any;

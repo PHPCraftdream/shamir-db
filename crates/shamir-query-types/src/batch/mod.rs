@@ -16,6 +16,9 @@ pub mod planner;
 pub mod reference;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use planner::BatchPlanner;
 pub use reference::{QueryPath, QueryReference, ReferenceParseError};
 pub use types::{

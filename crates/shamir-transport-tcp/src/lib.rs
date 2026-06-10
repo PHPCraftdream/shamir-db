@@ -10,6 +10,9 @@ pub mod listener;
 pub mod tls;
 
 pub use framing::{read_frame, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT};
+#[cfg(test)]
+mod tests;
+
 pub use tls::{
     extract_tls_exporter, generate_self_signed_server_cert, make_client_config_no_ca,
     make_server_config_from_pem,

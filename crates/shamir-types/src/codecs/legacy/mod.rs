@@ -5,6 +5,7 @@
 
 #![allow(deprecated)]
 
+#[cfg(test)]
 pub mod tests;
 pub mod tools;
 

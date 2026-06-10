@@ -10,4 +10,7 @@
 
 pub mod db_message;
 
+#[cfg(test)]
+mod tests;
+
 pub use db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};

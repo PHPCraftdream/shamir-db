@@ -9,3 +9,6 @@ pub mod vector_backend;
 
 pub use adapter::VectorAdapter;
 pub use vector_backend::VectorBackend;
+
+#[cfg(test)]
+mod tests;

@@ -31,3 +31,6 @@ pub mod storage_persy;
 pub mod storage_redb;
 #[cfg(feature = "sled")]
 pub mod storage_sled;
+
+#[cfg(test)]
+mod tests;

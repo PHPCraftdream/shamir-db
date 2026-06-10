@@ -30,6 +30,9 @@
 //! RepoWalManager). Upcoming stages (see `docs/pre-transactional/`):
 //! - Stage 6: `GcWorker`, `TxReaper`
 
+#[cfg(test)]
+mod tests;
+
 pub mod changefeed;
 pub mod id_remap;
 pub mod index_write_op;

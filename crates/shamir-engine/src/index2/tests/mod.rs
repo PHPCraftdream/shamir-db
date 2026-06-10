@@ -1,0 +1,14 @@
+pub mod actor_tests;
+pub mod bm25_tests;
+pub mod descriptor_tests;
+pub mod enum_sizes_tests;
+pub mod expr_tests;
+pub mod fts_backend_tests;
+pub mod fts_ranked_backend_tests;
+pub mod functional_backend_tests;
+pub mod kind_tests;
+pub mod persistence_tests;
+pub mod posting_layout_tests;
+pub mod registry_tests;
+pub mod tokenizer_tests;
+pub mod write_ops_tests;

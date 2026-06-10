@@ -3,6 +3,9 @@
 pub mod access;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use access::{
     AccessTreeOp, AddGroupMemberOp, ChgrpOp, ChmodOp, ChownOp, CreateGroupOp, DropGroupOp,
     GroupRef, RemoveGroupMemberOp, ResourceRef,
