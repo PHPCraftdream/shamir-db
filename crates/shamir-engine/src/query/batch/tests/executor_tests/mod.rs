@@ -1,0 +1,9 @@
+pub mod basic_ops_tests;
+mod common;
+pub mod error_handling_tests;
+pub mod interactive_tx_tests;
+pub mod permissions_tests;
+pub mod query_refs_tests;
+pub mod query_runner_tests;
+pub mod ssi_tests;
+pub mod transactions_tests;

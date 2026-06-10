@@ -137,7 +137,11 @@
 //! }
 //! ```
 
+mod batch_execute;
+mod batch_validate;
 mod executor_traits;
+mod interactive_tx;
+mod param_subst;
 mod query_runner;
 
 // Only the executor (which actually drives a TableManager) lives here.

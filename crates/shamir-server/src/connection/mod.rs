@@ -9,7 +9,12 @@
 //! latency, audit_chain, ServerHandshake, dispatch_request_view).
 
 mod connection_context;
+mod handshake;
 mod in_flight_guard;
+mod request_loop;
 mod user_state_lookup;
+mod wire;
 
-pub use connection_context::{handle_connection, request_loop, ConnectionContext};
+pub use connection_context::ConnectionContext;
+pub use handshake::handle_connection;
+pub use request_loop::request_loop;
