@@ -2,7 +2,7 @@
 
 # Forward Plan — Consolidate → Measure → Build the "I"
 
-**Status:** living plan, revision **2026-06-05**. The single actionable
+**Status:** living plan, revision **2026-06-10**. The single actionable
 "what we just did and what's next" document. Per-area deep-dives stay in
 their own files (linked below); this is the spine that orders them.
 
@@ -57,252 +57,182 @@ per kind.* All the **cheap, safe, no-wide-refactor** work is done.
 
 ---
 
-## 0.2 Snapshot — the inflection (2026-06-05)
+## 0.2 Since §0.1 — temporal, nested batches, duplex transport, TS client
 
-**Where we stand.** Foundation + engine pillars are closed; what's open is
-mostly the *roof* — the **"I"** (P2P / replication / chat), the disk perf
-ceiling (covering index), and usability (browser client). *(There is no
-"query-language v2" — OQL is the interface, by principle; see §3.)*
-18 crates, ~2700 lib tests, green gate, and a dependency graph that now
-**tells the truth** (the `server` / `crypto` features draw the host-only
-line precisely; guest-facing crates are honest leaves).
+Four major tracks landed between the §0.1 resting point and today (152
+commits); each is fully shipped and zero-trust verified.
+
+| Track | What | Key issues |
+|---|---|---|
+| **Temporal arc** | Single-log MVCC refactor: dual-write eliminated; one append-only version-log; `current` / `history` / `temporal` all resolve from it. Temporal OQL — `History` / `AsOf` / `PurgeHistory` / `ChangesSince` (additive, default-invisible). Builder `as_of` / `history` / `with_version`. Retention: per-table `SetRetention` + per-key `max_count` / `min_count` / `max_age` + eager vacuum. See [`TEMPORAL.md`](./TEMPORAL.md), [`MVCC_CELL.md`](./MVCC_CELL.md). | #237 #238 |
+| **Nested batches** | Sub-batches with own tx scope, recursive execution with bind / `$param` (incl. `$param` in write-op values), nesting-depth guard, builder `sub_batch` + `param`. | #282 |
+| **Duplex / multiplexing** | Async `RequestHandler`, splittable `Framer`, duplex request loop, rid-demux in both clients, resume fast-path (skip Argon2id on reconnect). **This is the transport foundation for push subscriptions.** | #292–#298 |
+| **Client-TS** (TS-T0..T17) | Full pure-TypeScript client: builders, batch, interactive tx, `$query` / `$ref`, rid-demux, live-server e2e. | — |
+| **Internal refactoring** | Extracted `shamir-wasm-host` + `shamir-index` from the engine; moved legacy `IndexManager` / `SortedIndexManager` into `shamir-index`; split monoliths; tests → `tests/` dirs. Engine ~64 k → ~46 k lines. Workspace now **21 crates** (was 18 at §0.2). | — |
+
+Additionally:
+- **Subscriptions design (#201)** — the client-facing live-subscriptions /
+  server-push design doc ([`LIVE_SUBSCRIPTIONS.md`](./LIVE_SUBSCRIPTIONS.md))
+  is **written** (no code yet). This is the design on-ramp to Movement C.
+
+Resting point: *the DB speaks a live, temporal, nested-transactional query
+language; the transport is full-duplex; a TypeScript client is feature-
+complete. The foundation for push subscriptions is fully laid.*
+
+---
+
+## 0.3 Snapshot — the inflection (2026-06-10)
+
+**Where we stand.** The foundation, engine pillars, and transport are
+closed. Movements A and B are done (see §2.1). The single live frontier is
+**Movement C — the "I"** (Interconnected): network changefeed → live
+subscriptions → replication → P2P. Everything needed to start C is in
+place.
+
+**Workspace health.** 21 crates, ~2912 lib tests, green gate (fmt +
+clippy `--workspace --all-targets` + lib). `.git-blame-ignore-revs` +
+style-sweep discipline intact.
 
 **Narrative thread.** *"How a record is written, governed, propagated"*
-(the arc, §0) → *"how authors write code that runs inside the DB"* (stored
-procedures + SDK + builder-in-guest, §0.1). The guest is now a first-class
-**local client**: one query language, one builder, one executor, three
-callers — network client, in-process client, WASM procedure.
-
-**Health.** Gate green (fmt + clippy `--workspace --all-targets` + lib;
-`functions_lifecycle` 18/18 after the #207 trap-text fix). History hygiene
-(`.git-blame-ignore-revs` + style-sweep discipline) intact.
-
-### Quick wins — low-hanging fruit (pull anytime; each ≪ a movement)
-Cheap, low-risk, independently shippable — good warm-up / filler work, none
-blocking. (The big items live in the movements below.)
-
-| # | Item | Effort | Notes |
-|---|---|---|---|
-| **QW1** | `.gitignore` hygiene | ~5 min | add `server-cert.pem`, `crates/shamir-client-node/{target/,Cargo.lock}` — currently untracked noise in `git status`. |
-| **QW2** | CLAUDE.md crate count | ~10 min | "ships **10** crates" is stale — reality is **18** (adds sdk, sdk-macros, query-builder(+macros), funclib, wal, tx, collections). Update the count + list (or reframe as "core crates: …"). |
-| **QW3** | SDK `q!` / `filter!` reach | ~30 min | the Stage-B "remaining nicety": make `shamir_sdk::builder::{q, filter, doc}` cleanly reachable (+ a compile example), so a procedure author gets the macro sugar, not only `where_gte`. |
-| **QW4** | Targeted Miri one-shot | ~30 min | `cargo +nightly miri test -p shamir-transport-tcp -p shamir-query-types` over the pure-logic unsafe (`framing.rs` `set_len`, `secret.rs` `as_bytes_mut`). Verification-only; record the result. Needs nightly + `rustup component add miri`. |
-| **QW5** | Push `0875cb6` | ~1 min | the depth-limit test fix is committed, not yet pushed. |
-
-> Not quick (live in the movements): `H₂` Persistable (~1 day) · feature-
-> overhead benches (moderate) · covering index `Opt O` (headline perf win,
-> large) · network changefeed + subscriptions #201 (large).
+(the arc, §0) → *"how authors write code that runs inside the DB"*
+(§0.1) → *"temporal history, nested transactions, full-duplex transport,
+TypeScript client"* (§0.2) → **next: "how clients subscribe to live data
+and replicas follow a leader"** (Movement C).
 
 ---
 
 ## 1. Maturity map
 
-**Closed and solid (foundation + engine):**
+**Closed and solid (foundation + engine + transport):**
 storage (6 backends, one dumb-KV trait) · transactions (SI → SSI → true
-serializability + interactive + crash recovery) · query engine
-(WHERE/SELECT/GROUP BY/ORDER BY/pagination/cross-refs) · secondary /
-sorted / functional / HNSW-vector / FTS indexes · WASM functions ("M") ·
-access fabric (Shomer, now enforced) · DDL (now complete) · validators +
-CAS · changefeed · wire security (TLS 1.3 + SCRAM-Argon2id + Ed25519,
-tickets, audit-HMAC, RBAC, rate-limit) · TCP / WS transports · ~2667 lib
-tests + property tests + **27 benchmarks**.
+serializability + interactive + crash recovery + Level-3 pessimistic wound-
+wait locking) · query engine (WHERE / SELECT / GROUP BY / ORDER BY /
+pagination / cross-refs) · secondary / sorted / functional / HNSW-vector /
+FTS indexes · **covering index (Opt O)** · WASM functions ("M") · access
+fabric (Shomer, enforced) · DDL (complete) · validators + CAS · changefeed
+(durable-journal + watermark + gap signal; version == commit_version) ·
+temporal OQL + retention + MVCC single-log · nested batches + `$param` ·
+stored procedures · wire security (TLS 1.3 + SCRAM-Argon2id + Ed25519,
+tickets, audit-HMAC, RBAC, rate-limit) · duplex TCP / WS transports +
+rid-demux + resume tickets · TypeScript client · ~2912 lib tests + property
+tests + **29 benchmarks**.
 
-**Open (charter pillars + usability + perf-ceiling):** the **"I"**
-(P2P / replication / chat) · browser WASM client ·
-QUIC/UDP/Unix transports · auth v1.1+ / PQ identity · vectors/FTS
-hardening · backup tooling · the disk perf ceiling (covering index).
+**Open (charter pillar + usability + on-demand):** the **"I"**
+(network changefeed → live subscriptions → replication → P2P) · browser
+WASM client · QUIC / UDP / Unix transports · auth v1.1+ / PQ identity ·
+vectors / FTS hardening · backup / restore tooling.
 
 ---
 
-## 2. Forward order — three movements, then on-demand
+## 2. Forward order — Movement C is the live frontier
 
-Before laying the next floor (P2P), reinforce what was just built — "take
-down the scaffolding." Cheap, removes regression risk, then accelerate,
-then build the new pillar.
+Movements A and B are fully done (§2.1). The foundation for Movement C is
+fully laid. The remaining work is building the "I".
 
-### Movement A — Consolidate (quality) · cheap, do first
-- **Adversarial code-review of this cycle's 12 commits** (agent-built under
-  a green gate, but never human-reviewed as a whole). Focus the hot/subtle
-  spots:
-  - changefeed concurrency on the commit-path (non-blocking guarantee,
-    broadcast `Lagged` / journal-channel overflow behaviour);
-  - CAS canonicalisation determinism (security-sensitive — byte-stable
-    hash across key orderings);
-  - the enforcement gate (no bypass path; every data + admin op gated);
-  - the `set_versioned` always-bump invariant (#179 touched a deep MVCC
-    primitive — confirm SI/SSI unaffected; tests pass, eyes still wanted).
-- **`H₂` — `Persistable` trait + registry** (PERF §Opt H₂): end the
-  write-amplification recurrence pattern (interner + counter fixed twice
-  by hand). ~1 day.
-- **Housekeeping debt:** `.gitignore` (`server-cert.pem`,
-  `crates/shamir-client-node/target/`); nightly `cargo-fuzz` on the
-  version codec (proptest covers the bulk).
+### Movement A — Consolidate (quality) · ✅ DONE
+Adversarial 5-lens arc review; all findings remediated:
+- **SEC** — 13 unauthorised admin / DDL ops gated; fail-closed
+  `effective_fn_actor`; test-only bypass gated.
+- **COR-1** — canonical_hash round-trip for Dec / Big.
+- **MVCC-1** — non-tx writes join the SSI ledger.
+- **CF-1 / CF-2** — durable-journal watermark + gap signal.
+- Trust-boundary truncations.
+- **H₂** Persistable trait + PersistRegistry.
+- Miri-able framing tests.
 
-### Movement B — Measure → Accelerate (perf)
-- **Bench the new features first** — there are *no* measurements yet of the
-  overhead we added: changefeed emission on the commit-path, `authorize_access`
-  per DML op, the validator pass, CAS `canonical_hash`. Prove we did **not**
-  slow the hot paths before building further. (New benches alongside the
-  existing 27; reuse the `/opti` before→after discipline.)
-- **Sprint γ (the biggest untapped win)** — see PERF_OPPORTUNITIES:
-  - `Opt R` — reverse iteration on `Store` (unblocks MAX / `ORDER BY DESC
-    LIMIT`).
-  - `Opt O` — **covering index** — eliminates the N-random-read penalty on
-    disk range queries (**100–1000× on disk**; the path to Postgres-class
-    range latency). The single most impactful item left.
-  - `Opt P` — vectored `Store::get_many` for non-covered queries.
-  - Then `M1` (ORDER BY single-column columnar, ~37→10ms) and `M2`
-    (streaming JSON serializer, −30% on the SELECT wire path) — already
-    profiled and bench-fixtured.
+### Movement B — Measure → Accelerate (perf) · ✅ DONE
+- R / P shipped pre-arc.
+- M1 (single-column columnar ORDER BY) + M2 (streaming JSON projection for
+  SELECT *, 3.4×) + B1 overhead guard bench landed.
+- **Opt O (covering index) — ✅ DONE** (see P3 below). DDL `include:[...]` +
+  per-index meta; covered-projection write-side; versioned covering-posting
+  envelope; RecordCell high-water mark (bump-first); validated covering
+  index-only read reusing M2; A/B bench + Opt O verdict. Eliminates the
+  N-random-read disk penalty for covered range queries.
 
-### Movement C — Build the "I" (the open charter pillar)
-The changefeed (3b) is the foundation; #179 aligned event version with the
-data version exactly so a replica can apply by version. Natural ladder:
-1. **Network changefeed (pull-API)** — a wire request `changefeed from
-   version V` over the existing journal (`read_changelog_from`). Resumable
-   cursor; the deferred Variant-2 of 3b.
-2. **Live business subscriptions (server-push)** — *design task, see below.*
-   Long-lived client connections that **hang waiting** for "new data /
-   updated data" notifications — the push-to-client application layer on
-   top of (1). The client-facing consumer of the changefeed.
+### Movement C — Build the "I" (the live frontier)
+
+The foundation is fully in place:
+- changefeed event-version == `commit_version` — a replica can apply by version;
+- `ChangesSince` one-shot temporal query — the pull precursor;
+- durable journal + watermark + gap signal — resumability primitives;
+- duplex transport + rid-demux + resume tickets — the push channel;
+- subscriptions design doc (#201) written.
+
+**Natural ladder:**
+
+1. **Network changefeed (pull-API)** — wire-stream the journal over the
+   existing `read_changelog_from`; `ChangesSince` is the one-shot precursor.
+   Cheapest next step; no new subsystem.
+2. **Live subscriptions / server-push (#201)** — design written; the duplex
+   channel is the pipe. Hanging connections, filtered live-queries, resumable
+   via `last_seen_version`, non-blocking fan-out, per-subscriber access
+   filtering (events pass through `authorize_access`).
 3. **Leader-follower replication** — a follower subscribes to the leader's
-   changefeed and applies changes by `commit_version`.
+   changefeed and applies changes by `commit_version`. Write `REPLICATION.md`
+   when this starts; don't author it ahead of need.
 4. **P2P / gossip → chat** — the decentralised end-state of the name.
-   *(Sharding is explicitly a separate, later direction — not a prerequisite
-   for replication.)*
-
-#### Task — design "hanging" business subscriptions (live-queries / push)
-**Status: PROPOSED — design first, no code yet.** A business client opens a
-connection and *waits* to be told when data it cares about appears or
-changes (the inverse of polling). This is the user-visible payoff of the
-whole changefeed arc. Open questions to settle in a `SUBSCRIPTIONS.md`
-design doc before building:
-- **Subscription granularity** — whole-repo / per-table / per-query
-  (filtered live-query, "tell me about rows matching WHERE …") / per-record.
-  A filtered live-query is the valuable-but-hard end (needs predicate
-  evaluation on each emitted event).
-- **Transport / protocol** — over which channel does the push flow? WS is
-  the natural fit (already a transport); TCP needs a server→client frame.
-  A wire op like `subscribe(filter, from_version)` → a stream of events.
-- **Resumability** — client reconnects with `last_seen_version`; bridge the
-  live broadcast + the durable journal (exactly the 3b hybrid) so a slow /
-  disconnected client misses nothing (`read_changelog_from`).
-- **Backpressure & fan-out** — many hanging clients, one commit-path. MUST
-  stay non-blocking (`try_send` + per-subscriber journal cursor, never block
-  the writer — concurrency invariants). What happens to a `Lagged` slow
-  consumer (drop → resync from journal vs disconnect).
-- **Access control** — a subscriber only sees events for resources it may
-  read; the changefeed event must be filtered through `authorize_access`
-  per subscriber (don't leak governed data via the push channel).
-- **Initial-state semantics** — "snapshot + then live" (current matching
-  rows, then the delta stream) vs "deltas only from now". Consistent cutoff
-  via `commit_version` (the snapshot read version == the stream start).
-- **Lifecycle** — unsubscribe, connection drop cleanup, server-side resource
-  cap (max subscriptions / client), idle timeout.
-> Depends on (1) network changefeed landing first. Write `SUBSCRIPTIONS.md`
-> when this task starts; don't author ahead of need.
-> A dedicated `REPLICATION.md` design doc is **PROPOSED** — to be written
-> when Movement C starts (don't author it ahead of need).
+   *(Sharding is a separate, later direction — not a prerequisite.)*
 
 ### Parallel — on demand, not ahead of need
-Browser
-WASM client ([`BROWSER_WASM_PLAN.md`](./BROWSER_WASM_PLAN.md)) · transports
-QUIC/UDP/Unix · auth v1.1+ & PQ identity ([`ROADMAP.md`](./ROADMAP.md)) ·
-vectors/FTS hardening ([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md),
-[`FULL_TEXT_SEARCH.md`](./FULL_TEXT_SEARCH.md)) · backup/restore tooling.
-
-### Done since (was "deferred — expensive chains")
-- **SDK builder-in-guest (Stage B2)** — ✅ **DONE** (§0.1). The "costly
-  chain" dissolved: contemplation found P4's premise false (`query-types`
-  has no `QueryValue` — DTOs use `serde_json::Value` + self-contained
-  `FilterValue`). The **thin-waist** (a `shamir-collections` leaf + a
-  `server` feature-gate) made the builder guest-lean with **no `Value`
-  refactor**; B2 was then a small `db_execute` shim + SDK feature. See
-  `SDK_AUTHORING.md` Stage B.
-- **WASM `shamir-value` ABI crate (P4)** — ⊘ **RETIRED** (premise false;
-  not a weight win — see `WASM_SLIMMING.md` Phase 4 banner).
+Browser WASM client ([`BROWSER_WASM_PLAN.md`](./BROWSER_WASM_PLAN.md)) ·
+transports QUIC / UDP / Unix · auth v1.1+ & PQ identity
+([`ROADMAP.md`](./ROADMAP.md)) · vectors / FTS hardening
+([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md),
+[`FULL_TEXT_SEARCH.md`](./FULL_TEXT_SEARCH.md)) · backup / restore tooling ·
+non-blocking batched namespaced logging.
 
 ### Still deferred — on real need only
 - **SDK function-packs (Stage D)** — multiple functions per wasm; only when
   libraries of related procedures actually appear. Default stays one fn/wasm.
 
+---
+
 ## 2.1 Status of the movements
-Movements A/B/C below were the **original** forward order; the recent
-stored-proc / WASM / SDK tracks (§0.1) ran first by request. A/B/C are
-**still ahead** and unstarted:
-- **A (consolidate)** — ✅ **DONE**: adversarial 5-lens review of the arc;
-  all 8 findings remediated (`H₂`/gitignore earlier; SEC-1/2/3, COR-1,
-  MVCC-1, CF-1/2, truncations this arc) + Miri-able framing test.
-- **B (perf)** — ✅ **mostly DONE**: R/P shipped pre-arc, M1/M2 + H₂ + the
-  overhead guards landed; **only Opt O (covering index) remains** (tripwire
-  fired — build at wide+large, see §2.2 P3).
-- **C (the "I")** — **parked by request**; network changefeed →
-  subscriptions #201 resume later. CF-1 `gap_at` + CF-2 watermark already
-  laid its resume-protocol foundation.
+
+| Movement | Status | Notes |
+|---|---|---|
+| **A — Consolidate** | ✅ **DONE** | Adversarial 5-lens review; all 8 findings remediated (SEC-1/2/3, COR-1, MVCC-1, CF-1/2, truncations, H₂/gitignore) + Miri-able framing test. |
+| **B — Measure/Accelerate** | ✅ **DONE** | R/P shipped pre-arc; M1/M2 + H₂ + overhead guards landed; Opt O (covering index) done — the last open perf item. |
+| **C — the "I"** | **LIVE FRONTIER** | Foundation fully laid; design doc written (#201). Step 1 (network changefeed pull-API) is the cheapest entry point. |
 
 ---
 
-## 2.2 Now — solving "the rest" (subscriptions #201 parked)
+## 2.2 Status of P1–P4 (the "solving the rest" wave)
 
-The review arc is closed. What's left is **composition of primitives we
-already built** (monotonic version · footprint · journal+gap+watermark ·
-streaming serializer+index · the filter engine) — *not* new subsystems,
-except Level-3 locking. Ordered cheap→heavy:
+All four items are resolved. The wave is closed.
 
-### P1 — SSI-footprint overhead gate (#233) · ~½ day
-MVCC-1 records an SSI footprint on **every** non-tx write; it is only
-needed while a Serializable tx watches.
-- Gate gains `active_serializable_count: AtomicU64` (++ when a Serializable
-  snapshot opens, −− in the `SnapshotGuard` Drop — the guard carries an
-  `is_serializable` flag). (`active_snapshots` today doesn't distinguish
-  isolation, so this is a new counter.)
-- `record_nontx_ssi_footprint` early-returns when the count is 0 (one
-  relaxed load).
-- Verify: B1 changefeed-overhead bench — non-tx write baseline restored
-  when no Serializable tx is alive; the `mvcc1_*` tests stay green
-  (footprint still recorded while a Serializable tx IS alive).
-- Honours level-1's "no watchers → no overhead."
+### P1 — SSI-footprint overhead gate (#233) · ✅ DONE
+Gated non-tx SSI footprint on active Serializable txns via
+`active_serializable_count: AtomicU64` (++ when a Serializable snapshot
+opens, −− in `SnapshotGuard` Drop). `record_nontx_ssi_footprint` early-
+returns when the count is 0 (one relaxed load). B1 bench confirmed the
+non-tx write baseline is restored when no Serializable tx is alive.
 
-### P2 — close the fast-path TOCTOU (MVCC-2 / #232) · ~½ day · pair with P1
-- `MvccStore::set_versioned` fast path **always** upserts `version_cache`
-  (drop the skip). The version_cache *is* the per-entity atomic the design
-  wanted; a snapshot opened mid-write then reads the correct version.
-- Flip the `mvcc2_simulated_toctou_*` test to "no phantom"; the stress test
-  stays green. Closes the last MVCC structural smell (LOW — bites only
-  async-disk today).
+### P2 — MVCC-2 TOCTOU (#232) · ✅ RESOLVED BY CONSTRUCTION
+**Not fixed via `set_versioned` always-bump** as originally planned.
+The TOCTOU dissolved structurally: the temporal arc (T1a / #238) refactored
+the MVCC store to a single append-only version-log (dual-write eliminated).
+With one log, no read-modify-write interleaving is possible — the flaw is
+architecturally impossible in the new design. The planned `set_versioned`
+patch was made moot by a better design. Noted explicitly so the original
+fix is not re-attempted. See [`TEMPORAL.md`](./TEMPORAL.md),
+[`MVCC_CELL.md`](./MVCC_CELL.md).
 
-### P3 — covering index (Opt O / #218) · ~1 week · see `MOVEMENT_B_PERF.md` §B2
-Tripwire fired: at 10k/wide records the indexed path is **56×** full scan,
-and **~83 %** of that is decode of K wide records the narrow SELECT throws
-away. Composition of the sorted index + M2:
-1. DDL `"include": [...]` + per-index meta.
-2. index entry `physical_value = bincode(projected fields)` (was empty).
-3. write-path maintenance (refresh the projection on every record change)
-   — **measure the write-amplification** (re-run write benches).
-4. planner recognises a *covered* query (filter on the indexed field +
-   `SELECT ⊆ include`).
-5. index-only read **reusing M2**: index → projected `InnerValue` →
-   `inner_to_json` streaming — zero `data_store` touch, zero `Value` tree.
-6. bench covered vs non-covered vs full scan; report read-win **and**
-   write-cost together. `include:[...]` is a plain `create_index` DTO field
-   (OQL — no text parsing).
+### P3 — Covering index (Opt O / #218, #236) · ✅ DONE
+DDL `include:[...]` + per-index meta; covered-projection write-side;
+versioned covering-posting envelope; RecordCell high-water mark
+(bump-first); validated covering index-only read reusing M2; A/B bench +
+Opt O verdict. Eliminates the N-random-read disk penalty for covered range
+queries. Write-amplification measured and reported alongside the read win.
 
-### P4 — Level-3 pessimistic locking · **DESIGN now, BUILD on real need**
-The one genuinely-new subsystem (the user's isolation level 3 — "watch,
-interfere, drive to completion"). First deliverable = a `LOCKING.md`
-design:
-- level-3 = **block** conflictors instead of aborting self;
-- **wound-wait on the monotonic version** → deadlock-free *by
-  construction* (the version is a total order; no wait-cycle can form; no
-  deadlock detector needed — Rosenkrantz et al.);
-- lock granularity = the same **footprint** (table / index-range) SSI uses;
-- honest caveat: wound-wait still *wounds* younger txns (rare), so "always
-  completes" means "block-not-abort where possible," not absolute.
-- **Build deferred:** SI (L1) + SSI (L2) cover almost everything; pull L3
-  only when a high-contention workload makes retry costlier than blocking.
-
-**Sequence:** **P1 → P2** (cheap MVCC follow-ups, one wave) → **P3**
-(the week-long scale win) → **P4** (write the design doc; defer the build).
+### P4 — Level-3 pessimistic locking (#234, keystone #235) · ✅ BUILT
+Originally "design now, build on real need" — it shipped. Wound-wait on the
+monotonic version; deadlock-free by construction (the version is a total
+order; no wait-cycle can form; no deadlock detector needed). Block-
+conflictors-instead-of-aborting. The design was folded into
+[`MVCC_CELL.md`](./MVCC_CELL.md) (the record cell unifies P2/P3.2/P4); the
+implementation follows the wound-wait (Rosenkrantz et al.) protocol.
 
 ---
 
@@ -344,17 +274,20 @@ commit. Spiral docs (#124, Phase 4) remain deferred until requested.
 ---
 
 ## Open follow-ups
-None blocking — #177 / #178 / #179 closed this cycle. The perf backlog
-lives in [`PERF_OPPORTUNITIES.md`](./PERF_OPPORTUNITIES.md); two known
-quality items (changefeed network slice, `REPLICATION.md` design) are
-folded into Movements B/C above.
+None blocking. The perf backlog lives in
+[`PERF_OPPORTUNITIES.md`](./PERF_OPPORTUNITIES.md). The next actionable
+item is Movement C step 1: network changefeed pull-API
+(`read_changelog_from` over the wire). The subscriptions design
+([`LIVE_SUBSCRIPTIONS.md`](./LIVE_SUBSCRIPTIONS.md)) and replication design
+(`REPLICATION.md`, to be written when replication starts) are the two
+pending design docs for Movement C steps 2 and 3.
 
 ---
 
-_Plan revision 2026-06-05 — after the DDL → access → write-lifecycle arc
-(`016d68b`..`a620115`) plus the stored-procedures + WASM-perf + WASM/SDK-
-slimming tracks (`66e09a0`..`c0c27fe`, §0.1) and the thin-waist +
-builder-in-guest B2 (`52be3b3`..`ca79b1f`; P4 retired) and the #207
-trap-text fix (`0875cb6`). Added §0.2 snapshot + a **quick-wins batch**
-(QW1–QW5). Next: Movement A (consolidate) recommended. Updated as movements
-land._
+_Plan revision 2026-06-10 — Movements A and B fully done; P1–P4 wave
+closed (P2 dissolved by construction via the temporal single-log refactor;
+P4 shipped despite "deferred" label). §0.2 captures the 152-commit wave
+since §0.1: temporal arc, nested batches, duplex transport, TS client,
+internal refactoring. Movement C (the "I") is the single live frontier,
+with its foundation fully laid and design doc written. Updated §2.1/§2.2
+reflect truth; §3/§4 preserved._

@@ -2,15 +2,23 @@
 
 Future features beyond v1 spec. Не нормативные, не binding обещания.
 
-> **Current state (2026-05-31):** the transactional layer is COMPLETE —
+> **Current state (2026-06-10):** the transactional layer is COMPLETE —
 > SI + SSI + true serializability (phantom protection), single-batch and
-> interactive multi-call, crash-safe, property-covered. See
+> interactive multi-call, crash-safe, property-covered — and has since gained:
+> Level-3 pessimistic locking (wound-wait, deadlock-free by construction);
+> single append-only version-log MVCC (dual-write eliminated); temporal reads
+> (History / AsOf / PurgeHistory / ChangesSince) + retention policy; covering
+> indexes (Opt O). The charter S / H / A / M / R pillars are closed. The open
+> pillar is **I** (Interconnected): its foundation is laid (changefeed,
+> ChangesSince, durable journal + watermark/gap, duplex transport + rid-demux,
+> resume tickets, subscriptions design), and Movement C — network changefeed →
+> subscriptions → replication → P2P — is the live frontier. See
 > [`../PROJECT_STATE.md`](../PROJECT_STATE.md) for the full snapshot and
-> [`NEXT_PHASES.md`](./NEXT_PHASES.md) for the post-Phase-A index. The items
-> below are still-future (auth v1.1+, transports, PQ, cluster) plus the
-> Database-Engine section (replication / sharding / backup tooling — not
-> started). *(No "query-language v2": the query language is OQL by
-> principle — see [`PLAN.md`](./PLAN.md) §3.)*
+> [`PLAN.md`](./PLAN.md) for the post-Phase-A index. The items below are
+> still-future (auth v1.1+, transports, PQ, cluster) plus the Database-Engine
+> section (replication / sharding / backup tooling — not started). *(No
+> "query-language v2": the query language is OQL by principle — see
+> [`PLAN.md`](./PLAN.md) §3.)*
 
 ## Auth Protocol
 
