@@ -1,5 +1,7 @@
 pub mod commit;
 pub mod commit_phases;
+pub(super) mod materialize;
+pub(super) mod pre_commit;
 pub mod predicate_range;
 pub mod recovery;
 pub mod tx_outcome;

@@ -3,6 +3,9 @@ pub mod doctor;
 pub mod interner_manager;
 pub mod persistable;
 mod read_exec;
+mod read_index_scan;
+mod read_planner;
+mod read_temporal;
 pub mod record_counter;
 #[allow(clippy::module_inception)]
 pub mod table;
@@ -19,6 +22,7 @@ mod table_manager_streaming;
 mod table_manager_tx_ops;
 mod table_manager_validators;
 mod write_exec;
+mod write_helpers;
 
 #[cfg(test)]
 pub mod tests;
