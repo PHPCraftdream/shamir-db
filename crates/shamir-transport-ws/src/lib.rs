@@ -27,7 +27,9 @@ pub mod server;
 pub mod tls_exporter;
 
 pub use browser::{validate_origin, BrowserOriginPolicy, OriginRejected};
-pub use framing::{ws_recv, ws_recv_into, ws_send, WsFrameError};
+pub use framing::{
+    ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, WsFrameError,
+};
 pub use listener::{bind_validated, validate_addr, WsBindError, WsListenerProfile};
 pub use server::{accept_browser_ws, accept_native_ws, WsAcceptError};
 pub use tls_exporter::extract_tls_exporter_from_stream;
