@@ -34,4 +34,13 @@ pub mod instance_defaults {
     /// Poll/backoff interval for server housekeeping loops (sleep between
     /// non-blocking checks).
     pub const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    /// Maximum number of requests in-flight concurrently per connection.
+    ///
+    /// Controls the size of the per-connection semaphore (reader back-pressure)
+    /// and the mpsc channel capacity to the writer task.
+    ///
+    /// * `1` → lock-step (identical to the old sequential loop).
+    /// * Default `32` → up to 32 pipelined requests before the reader stalls.
+    pub const CONN_MAX_IN_FLIGHT: usize = 32;
 }
