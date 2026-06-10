@@ -26,6 +26,7 @@ pub mod fts_backend;
 pub mod fts_ranked_backend;
 pub mod functional_backend;
 pub mod kind;
+pub mod legacy;
 pub mod meta_envelope;
 pub mod persistence;
 

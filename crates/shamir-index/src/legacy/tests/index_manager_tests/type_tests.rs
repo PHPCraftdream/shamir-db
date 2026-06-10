@@ -1,6 +1,6 @@
 use super::helpers::{create_manager, create_test_value};
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info_item::IndexInfoItem;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::TSet;
 use shamir_types::types::record_id::RecordId;

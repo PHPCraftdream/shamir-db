@@ -12,10 +12,10 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::index::sorted_index_manager::{
+use crate::legacy::sorted_index_manager::{
     decode_covering_projection, SortedIndexDefinition, SortedIndexManager,
 };
-use crate::index2::write_ops::IndexWriteOp;
+use crate::write_ops::IndexWriteOp;
 
 use super::helpers::{fresh_mgr, record_with_int};
 
@@ -144,7 +144,7 @@ async fn backward_compat_v1_defs_load_with_empty_included_fields() {
     };
 
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let sys_id = crate::meta::MetaKey::SortedIndexes.as_record_id();
+    let sys_id = RecordId::system("sorted_indexes");
     info_store
         .set(sys_id.to_bytes(), Bytes::from(old_bytes))
         .await

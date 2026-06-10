@@ -10,7 +10,7 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
+use crate::legacy::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
 
 use super::helpers::{enc_i64, enc_str, fresh_mgr, record_with_int, record_with_str};
 

@@ -7,8 +7,8 @@ use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
 
-use crate::index::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
-use crate::index2::write_ops::IndexWriteOp;
+use crate::legacy::sorted_index_manager::{SortedIndexDefinition, SortedIndexManager};
+use crate::write_ops::IndexWriteOp;
 
 use super::helpers::{fresh_mgr, record_with_int};
 

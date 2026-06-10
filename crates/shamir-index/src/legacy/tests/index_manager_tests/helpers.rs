@@ -1,4 +1,4 @@
-use crate::index::index_manager::IndexManager;
+use crate::legacy::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;

@@ -3,14 +3,13 @@
 //! Реализация вынесена в отдельный файл для разделения ответственности:
 //! этот модуль отвечает за гарантии уникальности значений.
 
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_keys::{
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_keys::{
     build_index_key, build_index_key_from_refs, extract_index_values, extract_index_values_ref,
 };
-use crate::index::index_manager::IndexManager;
-use crate::index::index_record_key::IndexRecordKey;
-use crate::index2::write_ops::IndexWriteOp;
-use crate::meta::MetaKey;
+use crate::legacy::index_manager::IndexManager;
+use crate::legacy::index_record_key::IndexRecordKey;
+use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
@@ -465,7 +464,7 @@ impl IndexManager {
 
     /// Сохраняет метаданные уникальных индексов в служебное хранилище.
     pub(super) async fn save_index_info_unique(&self) -> DbResult<()> {
-        let indexes_key = MetaKey::LegacyIndexesUnique.as_record_id().to_bytes();
+        let indexes_key = RecordId::system("indexes_unique").to_bytes();
         let bytes = bincode::serialize(&*self.indexes_unique)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(indexes_key, Bytes::from(bytes)).await?;

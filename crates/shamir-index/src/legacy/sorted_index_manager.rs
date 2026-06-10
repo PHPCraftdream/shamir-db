@@ -27,10 +27,9 @@ use dashmap::DashMap;
 use futures::StreamExt;
 // Re-export so existing callers that import `SortedIndexDefinition` from this
 // module continue to compile unchanged after the type moved to its own file.
-pub use crate::index::sorted_index_definition::SortedIndexDefinition;
-use crate::index::sorted_index_definition::{SortedIndexDefinitionV1, SORTED_TAG};
-use crate::index2::write_ops::IndexWriteOp;
-use crate::meta::MetaKey;
+pub use crate::legacy::sorted_index_definition::SortedIndexDefinition;
+use crate::legacy::sorted_index_definition::{SortedIndexDefinitionV1, SORTED_TAG};
+use crate::write_ops::IndexWriteOp;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
@@ -792,7 +791,7 @@ impl SortedIndexManager {
         let bytes = bincode::serialize(&defs).map_err(|e| {
             shamir_storage::error::DbError::Codec(format!("sorted-index defs encode: {e}"))
         })?;
-        let sys_id = MetaKey::SortedIndexes.as_record_id();
+        let sys_id = RecordId::system("sorted_indexes");
         self.info_store
             .set(sys_id.to_bytes(), Bytes::from(bytes))
             .await?;
@@ -800,7 +799,7 @@ impl SortedIndexManager {
     }
 
     async fn load(&self) -> DbResult<()> {
-        let sys_id = MetaKey::SortedIndexes.as_record_id();
+        let sys_id = RecordId::system("sorted_indexes");
         let bytes = match self.info_store.get(sys_id.to_bytes()).await {
             Ok(b) => b,
             Err(_) => return Ok(()),
@@ -903,7 +902,7 @@ fn build_covering_projection(
 /// decode (callers treat `None` as "fall back to a full fetch").
 ///
 /// Used by slice A3 (index-only read path).
-pub(crate) fn decode_covering_projection(value: &[u8]) -> Option<(u64, Vec<(String, InnerValue)>)> {
+pub fn decode_covering_projection(value: &[u8]) -> Option<(u64, Vec<(String, InnerValue)>)> {
     if value.len() < 8 {
         return None;
     }

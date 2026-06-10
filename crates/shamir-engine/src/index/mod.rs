@@ -1,13 +1,10 @@
-pub mod index_definition;
-pub mod index_info;
-pub mod index_info_item;
-pub mod index_keys;
-pub mod index_manager;
-pub mod index_manager_unique;
-pub mod index_record_key;
-pub mod index_status;
-pub mod sorted_index_definition;
-pub mod sorted_index_manager;
-
-#[cfg(test)]
-pub mod tests;
+pub use shamir_index::legacy::index_definition;
+pub use shamir_index::legacy::index_info;
+pub use shamir_index::legacy::index_info_item;
+pub use shamir_index::legacy::index_keys;
+pub use shamir_index::legacy::index_manager;
+pub use shamir_index::legacy::index_manager_unique;
+pub use shamir_index::legacy::index_record_key;
+pub use shamir_index::legacy::index_status;
+pub use shamir_index::legacy::sorted_index_definition;
+pub use shamir_index::legacy::sorted_index_manager;

@@ -9,7 +9,7 @@ use shamir_types::core::sort_codec;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
 
-use crate::index::sorted_index_manager::SortedIndexManager;
+use crate::legacy::sorted_index_manager::SortedIndexManager;
 
 pub(super) async fn fresh_mgr() -> (Arc<dyn Store>, SortedIndexManager) {
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());

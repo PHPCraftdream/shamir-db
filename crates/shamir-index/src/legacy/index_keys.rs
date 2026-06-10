@@ -3,8 +3,8 @@
 //! These are free functions shared by `index_manager` and
 //! `index_manager_unique`. They do not access any `IndexManager` fields.
 
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_record_key::IndexRecordKey;
+use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_record_key::IndexRecordKey;
 use bytes::Bytes;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;

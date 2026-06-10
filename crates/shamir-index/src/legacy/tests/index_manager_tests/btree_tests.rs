@@ -1,6 +1,6 @@
 use super::helpers::{create_manager, create_test_value};
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info_item::IndexInfoItem;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -113,7 +113,7 @@ async fn test_update_moves_record_between_index_values() {
 
 #[tokio::test]
 async fn test_delete_last_record_removes_index_key() {
-    use crate::index::index_record_key::IndexRecordKey;
+    use crate::legacy::index_record_key::IndexRecordKey;
 
     let (_, info_store, manager) = create_manager();
 

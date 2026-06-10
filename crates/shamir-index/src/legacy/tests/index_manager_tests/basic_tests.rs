@@ -1,9 +1,8 @@
 use super::helpers::{create_manager, create_nested_value, create_test_value};
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info::IndexInfo;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_manager::IndexManager;
-use crate::meta::MetaKey;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info::IndexInfo;
+use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
@@ -29,7 +28,7 @@ async fn test_has_indexes_true_after_load() {
 
     let index_def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
     let indexes = IndexInfo::from_definitions(vec![index_def]);
-    let indexes_key = MetaKey::LegacyIndexes.as_record_id().to_bytes();
+    let indexes_key = RecordId::system("indexes").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
     info_store.set(indexes_key, bytes.into()).await.unwrap();
 
@@ -46,7 +45,7 @@ async fn test_has_unique_indexes_true_after_load() {
 
     let index_def = IndexDefinition::new(1002, vec![IndexInfoItem::new(vec![1])]);
     let indexes = IndexInfo::from_definitions(vec![index_def]);
-    let indexes_unique_key = MetaKey::LegacyIndexesUnique.as_record_id().to_bytes();
+    let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
     let bytes = bincode::serialize(&indexes).unwrap();
     info_store
         .set(indexes_unique_key, bytes.into())

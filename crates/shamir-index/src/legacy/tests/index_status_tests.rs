@@ -1,4 +1,4 @@
-use crate::index::index_status::IndexStatus;
+use crate::legacy::index_status::IndexStatus;
 
 #[test]
 fn test_index_status_from_u8() {
