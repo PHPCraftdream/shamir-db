@@ -31,7 +31,10 @@ mod client;
 mod error;
 mod wire_frames;
 
-pub use client::{Client, ConnectOptions};
+#[cfg(test)]
+mod tests;
+
+pub use client::{Client, ConnectOptions, ResumeOptions};
 pub use error::ClientError;
 
 // Re-export the wire payloads so callers don't need to depend on

@@ -37,6 +37,11 @@ pub enum ClientError {
     /// Username failed normalisation (NFC + UsernameCaseMapped).
     #[error("invalid username: {0}")]
     InvalidUsername(String),
+
+    /// The connection was closed (EOF, I/O error, or explicit `close()`)
+    /// before the response arrived.
+    #[error("connection closed")]
+    ConnectionClosed,
 }
 
 impl From<rustls::Error> for ClientError {
