@@ -3788,7 +3788,6 @@ name = "shamir-engine"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "argon2",
  "async-stream",
  "async-trait",
  "bincode",
@@ -3798,20 +3797,19 @@ dependencies = [
  "dhat",
  "futures",
  "fxhash",
- "hnsw_rs",
  "indexmap",
  "log",
  "rand 0.8.5",
  "regex",
  "rmp-serde",
  "rmpv",
- "rust-stemmers",
  "scc",
  "serde",
  "serde_bytes",
  "serde_json",
  "serial_test",
  "shamir-funclib",
+ "shamir-index",
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-storage",
@@ -3819,11 +3817,11 @@ dependencies = [
  "shamir-tx",
  "shamir-types",
  "shamir-wal",
+ "shamir-wasm-host",
  "smallvec 1.15.1",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "wasmtime",
 ]
 
 [[package]]
@@ -3849,6 +3847,32 @@ dependencies = [
  "strsim",
  "subtle",
  "unicode-normalization",
+]
+
+[[package]]
+name = "shamir-index"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bincode",
+ "bytes",
+ "futures",
+ "fxhash",
+ "hnsw_rs",
+ "log",
+ "rust-stemmers",
+ "scc",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "shamir-storage",
+ "shamir-tx",
+ "shamir-types",
+ "smallvec 1.15.1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -4103,6 +4127,24 @@ dependencies = [
  "shamir-storage",
  "shamir-types",
  "tokio",
+]
+
+[[package]]
+name = "shamir-wasm-host"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "log",
+ "scc",
+ "serde",
+ "serde_json",
+ "shamir-funclib",
+ "shamir-types",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasmtime",
 ]
 
 [[package]]

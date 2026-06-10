@@ -17,9 +17,11 @@ shamir-query-types = { path = "../shamir-query-types" }
 # Built-in scalar + aggregate function library. Dispatched from the
 # filter / set / group-by paths via the engine's shared registries.
 shamir-funclib = { path = "../shamir-funclib" }
+shamir-wasm-host = { path = "../shamir-wasm-host" }
 shamir-tunables = { path = "../shamir-tunables" }
 shamir-wal = { path = "../shamir-wal" }
 shamir-tx = { path = "../shamir-tx" }
+shamir-index = { path = "../shamir-index" }
 
 # Async / runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -45,22 +47,9 @@ rmp-serde = "1.3.0"       # query result encoding helpers
 rmpv = { version = "1.3.1", features = ["serde"] }
 bincode = "1.3.3"         # admin / index serialisation
 serde_bytes = "0.11"      # efficient byte-slice serde for shadow log
-thiserror = "2.0"         # error types for index2/* (Phase 0)
-rust-stemmers = "1.2"    # snowball stemming for FTS tokenizers
-scc = "2.2"               # lock-free concurrent hashmap (index2::registry)
-arc-swap = "1.7"          # RCU-style atomic Arc swap (index2::actor snapshots)
-hnsw_rs = "0.3"           # HNSW approximate nearest neighbor (vector index)
-# Pulls Cranelift — the function-engine Wasm runtime (slice 2+).
-wasmtime = { version = "45", default-features = false, features = [
-    "cranelift",
-    "runtime",
-    "std",
-    "wat",
-    "async",
-    "cache",
-    "pooling-allocator",
-] }
-tempfile = "3.10.1"
+thiserror = "2.0"         # error types throughout engine
+scc = "2.2"               # lock-free concurrent hashmap (repo, validator)
+arc-swap = "1.7"          # RCU-style atomic Arc swap (table_manager)
 
 [features]
 # Cascade `shamir-storage`'s per-backend features upward so callers can
@@ -87,7 +76,6 @@ dhat = "0.3"
 [dev-dependencies]
 tempfile = "3.10.1"
 serial_test = "3.3.1"
-argon2 = "0.5"            # independent KAT reference in function::tests::argon2id_tests
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 # Tests build queries via the typed query builder instead of raw JSON.
 # query-builder depends only on query-types/types — no cycle on engine.

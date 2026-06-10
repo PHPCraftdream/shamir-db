@@ -9,9 +9,9 @@
 //! paths keep resolving without caller-side changes.
 
 pub mod db_instance;
-pub mod function;
+pub use shamir_wasm_host as function;
 pub mod index;
-pub mod index2;
+pub use shamir_index as index2;
 pub mod meta;
 pub mod migration;
 pub mod query;

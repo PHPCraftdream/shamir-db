@@ -1,0 +1,405 @@
+//! Minimal tokenizers for FTS indexes.
+//!
+//! Zero-copy on ASCII paths (Cow::Borrowed), allocates only for
+//! case-folding non-ASCII. No heavy deps — just std + manual
+//! iteration.
+
+use std::borrow::Cow;
+
+use crate::kind::StemLanguage;
+
+pub trait Tokenizer: Send + Sync {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>>;
+}
+
+/// Split on whitespace, lowercase each token.
+pub struct WhitespaceTokenizer;
+
+impl Tokenizer for WhitespaceTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        text.split_whitespace()
+            .map(|word| {
+                if word
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || !b.is_ascii_alphabetic())
+                {
+                    Cow::Borrowed(word)
+                } else {
+                    Cow::Owned(word.to_lowercase())
+                }
+            })
+            .collect()
+    }
+}
+
+/// Split on non-alphanumeric boundaries (unicode-aware), lowercase.
+pub struct UnicodeTokenizer;
+
+impl Tokenizer for UnicodeTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        let mut tokens = Vec::new();
+        let mut start = None;
+        for (i, ch) in text.char_indices() {
+            if ch.is_alphanumeric() {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            } else if let Some(s) = start.take() {
+                let word = &text[s..i];
+                tokens.push(lowercase_cow(word));
+            }
+        }
+        if let Some(s) = start {
+            tokens.push(lowercase_cow(&text[s..]));
+        }
+        tokens
+    }
+}
+
+fn lowercase_cow(word: &str) -> Cow<'_, str> {
+    if word.chars().all(|c| !c.is_uppercase()) {
+        Cow::Borrowed(word)
+    } else {
+        Cow::Owned(word.to_lowercase())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Character n-gram tokenizer
+// ---------------------------------------------------------------------------
+
+/// Character n-gram tokenizer: splits on non-alphanumeric (unicode-aware),
+/// lowercases, then emits sliding character n-grams of length `n` per word.
+/// A word shorter than `n` is emitted whole (so short words remain findable).
+/// `n == 0` is treated as `1`. Enables substring / CJK / fuzzy matching where
+/// word-boundary tokenization fails.
+pub struct NgramTokenizer {
+    n: usize,
+}
+
+impl NgramTokenizer {
+    pub fn new(n: u8) -> Self {
+        Self {
+            n: (n as usize).max(1),
+        }
+    }
+}
+
+impl Tokenizer for NgramTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        let mut tokens = Vec::new();
+        // Iterate words the same way UnicodeTokenizer does (alphanumeric runs).
+        let mut start = None;
+        for (i, ch) in text.char_indices() {
+            if ch.is_alphanumeric() {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            } else if let Some(s) = start.take() {
+                emit_ngrams(&text[s..i], self.n, &mut tokens);
+            }
+        }
+        if let Some(s) = start {
+            emit_ngrams(&text[s..], self.n, &mut tokens);
+        }
+        tokens
+    }
+}
+
+/// Lowercase a word, then emit character n-grams (or the whole word if
+/// shorter than `n`).
+fn emit_ngrams<'a>(word: &str, n: usize, out: &mut Vec<Cow<'a, str>>) {
+    let lowered = word.to_lowercase();
+    let chars: Vec<char> = lowered.chars().collect();
+    if chars.len() <= n {
+        out.push(Cow::Owned(lowered));
+    } else {
+        for i in 0..=chars.len() - n {
+            let gram: String = chars[i..i + n].iter().collect();
+            out.push(Cow::Owned(gram));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full pipeline tokenizer (stopwords + stemming)
+// ---------------------------------------------------------------------------
+
+/// Returns the curated stopword set for a language, if one exists.
+///
+/// Currently only English and Russian have curated stopword lists.
+/// For all other Snowball languages the function returns `None`;
+/// stemming still works — stopword filtering is simply skipped.
+/// Non-EN/RU stopword lists are a future addition.
+fn stopwords_for(lang: StemLanguage) -> Option<&'static std::collections::HashSet<&'static str>> {
+    match lang {
+        StemLanguage::English => Some(english_stopwords()),
+        StemLanguage::Russian => Some(russian_stopwords()),
+        StemLanguage::Arabic
+        | StemLanguage::Danish
+        | StemLanguage::Dutch
+        | StemLanguage::Finnish
+        | StemLanguage::French
+        | StemLanguage::German
+        | StemLanguage::Greek
+        | StemLanguage::Hungarian
+        | StemLanguage::Italian
+        | StemLanguage::Norwegian
+        | StemLanguage::Portuguese
+        | StemLanguage::Romanian
+        | StemLanguage::Spanish
+        | StemLanguage::Swedish
+        | StemLanguage::Tamil
+        | StemLanguage::Turkish => None,
+    }
+}
+
+/// Map [`StemLanguage`] → [`rust_stemmers::Algorithm`].
+/// Exhaustive — no wildcard arm, so adding a new variant to
+/// `StemLanguage` is a compile error until mapped here.
+fn stem_algorithm(lang: StemLanguage) -> rust_stemmers::Algorithm {
+    match lang {
+        StemLanguage::English => rust_stemmers::Algorithm::English,
+        StemLanguage::Russian => rust_stemmers::Algorithm::Russian,
+        StemLanguage::Arabic => rust_stemmers::Algorithm::Arabic,
+        StemLanguage::Danish => rust_stemmers::Algorithm::Danish,
+        StemLanguage::Dutch => rust_stemmers::Algorithm::Dutch,
+        StemLanguage::Finnish => rust_stemmers::Algorithm::Finnish,
+        StemLanguage::French => rust_stemmers::Algorithm::French,
+        StemLanguage::German => rust_stemmers::Algorithm::German,
+        StemLanguage::Greek => rust_stemmers::Algorithm::Greek,
+        StemLanguage::Hungarian => rust_stemmers::Algorithm::Hungarian,
+        StemLanguage::Italian => rust_stemmers::Algorithm::Italian,
+        StemLanguage::Norwegian => rust_stemmers::Algorithm::Norwegian,
+        StemLanguage::Portuguese => rust_stemmers::Algorithm::Portuguese,
+        StemLanguage::Romanian => rust_stemmers::Algorithm::Romanian,
+        StemLanguage::Spanish => rust_stemmers::Algorithm::Spanish,
+        StemLanguage::Swedish => rust_stemmers::Algorithm::Swedish,
+        StemLanguage::Tamil => rust_stemmers::Algorithm::Tamil,
+        StemLanguage::Turkish => rust_stemmers::Algorithm::Turkish,
+    }
+}
+
+/// Full-pipeline FTS tokenizer: whitespace split → lowercase →
+/// optional language-specific stopwords → optional snowball stemming.
+///
+/// Read-only after construction; safe to share across threads without
+/// any mutex.
+pub struct FullTokenizer {
+    stopwords: Option<&'static std::collections::HashSet<&'static str>>,
+    stemmer: Option<rust_stemmers::Stemmer>,
+}
+
+impl FullTokenizer {
+    pub fn new(language: StemLanguage, stopwords: bool, stem: bool) -> Self {
+        let stop_set = if stopwords {
+            stopwords_for(language)
+        } else {
+            None
+        };
+        let stemmer = if stem {
+            Some(rust_stemmers::Stemmer::create(stem_algorithm(language)))
+        } else {
+            None
+        };
+        Self {
+            stopwords: stop_set,
+            stemmer,
+        }
+    }
+}
+
+impl Tokenizer for FullTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        let mut out = Vec::new();
+        for word in text.split_whitespace() {
+            let lowered: Cow<'a, str> = if word
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || !b.is_ascii_alphabetic())
+            {
+                Cow::Borrowed(word)
+            } else {
+                Cow::Owned(word.to_lowercase())
+            };
+            if let Some(sw) = self.stopwords {
+                if sw.contains(lowerd_str(&lowered)) {
+                    continue;
+                }
+            }
+            if let Some(ref stemmer) = self.stemmer {
+                let stemmed = stemmer.stem(lowerd_str(&lowered)).into_owned();
+                out.push(Cow::Owned(stemmed));
+            } else {
+                out.push(lowered);
+            }
+        }
+        out
+    }
+}
+
+fn lowerd_str<'a>(cow: &'a Cow<'a, str>) -> &'a str {
+    cow.as_ref()
+}
+
+fn english_stopwords() -> &'static std::collections::HashSet<&'static str> {
+    use std::sync::OnceLock;
+    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        [
+            "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into",
+            "is", "it", "no", "not", "of", "on", "or", "such", "that", "the", "their", "then",
+            "there", "these", "they", "this", "to", "was", "will", "with",
+        ]
+        .iter()
+        .copied()
+        .collect()
+    })
+}
+
+fn russian_stopwords() -> &'static std::collections::HashSet<&'static str> {
+    use std::sync::OnceLock;
+    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        [
+            "и",
+            "в",
+            "во",
+            "не",
+            "что",
+            "он",
+            "на",
+            "я",
+            "с",
+            "со",
+            "как",
+            "а",
+            "то",
+            "все",
+            "она",
+            "так",
+            "его",
+            "но",
+            "да",
+            "ты",
+            "к",
+            "у",
+            "же",
+            "вы",
+            "за",
+            "бы",
+            "по",
+            "только",
+            "её",
+            "мне",
+            "было",
+            "вот",
+            "от",
+            "меня",
+            "ещё",
+            "нет",
+            "о",
+            "из",
+            "ему",
+            "теперь",
+            "когда",
+            "даже",
+            "ну",
+            "ли",
+            "если",
+            "уже",
+            "или",
+            "ни",
+            "быть",
+            "был",
+            "него",
+            "до",
+            "вас",
+            "нибудь",
+            "опять",
+            "уж",
+            "вам",
+            "ведь",
+            "там",
+            "потом",
+            "себя",
+            "ничего",
+            "ей",
+            "может",
+            "они",
+            "тут",
+            "где",
+            "есть",
+            "надо",
+            "ней",
+            "для",
+            "мы",
+            "тебя",
+            "их",
+            "чем",
+            "была",
+            "сам",
+            "чтоб",
+            "без",
+            "будто",
+            "чего",
+            "раз",
+            "тоже",
+            "себе",
+            "под",
+            "будет",
+            "ж",
+            "тогда",
+            "кто",
+            "этот",
+            "того",
+            "потому",
+            "этого",
+            "какой",
+            "совсем",
+            "ним",
+            "здесь",
+            "этом",
+            "один",
+            "почти",
+            "мой",
+            "тем",
+            "чтобы",
+            "нее",
+            "сейчас",
+            "были",
+            "туда",
+            "откуда",
+            "этой",
+            "перед",
+            "иногда",
+            "ведь",
+            "тоже",
+        ]
+        .iter()
+        .copied()
+        .collect()
+    })
+}
+
+/// Build a `Box<dyn Tokenizer>` from a [`TokenizerKind`].
+pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> Box<dyn Tokenizer> {
+    match kind {
+        crate::kind::TokenizerKind::Whitespace => Box::new(WhitespaceTokenizer),
+        crate::kind::TokenizerKind::Unicode => Box::new(UnicodeTokenizer),
+        crate::kind::TokenizerKind::Ngram { n } => Box::new(NgramTokenizer::new(*n)),
+        crate::kind::TokenizerKind::Full {
+            language,
+            stopwords,
+            stem,
+        } => Box::new(FullTokenizer::new(*language, *stopwords, *stem)),
+    }
+}
+
+/// Hash a token to u64 for posting keys.
+pub fn token_hash(token: &str) -> u64 {
+    use fxhash::FxHasher;
+    use std::hash::Hasher;
+    let mut h = FxHasher::default();
+    h.write(token.as_bytes());
+    h.finish()
+}
