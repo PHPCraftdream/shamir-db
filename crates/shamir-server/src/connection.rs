@@ -39,7 +39,7 @@ use shamir_connect::server::session::{
 use shamir_connect::server::user_record::UserRecord;
 use shamir_connect::Error as ConnectError;
 
-use crate::framer::Framer;
+use crate::framer::{FrameReader, FrameWriter, Framer};
 use crate::user_directory::RedbUserDirectory;
 use crate::version::check_handshake_proto;
 
@@ -263,9 +263,15 @@ pub async fn handle_connection<F>(
         tokio::time::sleep(pad).await;
     }
 
+    // Split the framer into directional halves so the future duplex
+    // request loop (M1) can hand each half to its own task.  The lock-step
+    // loop below owns both halves sequentially — semantics are unchanged.
+    let (mut reader, mut writer) = framer.split();
+
     request_loop(
         &ctx,
-        &mut framer,
+        &mut reader,
+        &mut writer,
         &mut frame_buf,
         &mut write_scratch,
         session_id,
@@ -274,9 +280,9 @@ pub async fn handle_connection<F>(
 
     // Terminal: 5s grace is a transport-layer concept (the session sticks
     // around in SessionStore after disconnect; resume can re-bind within
-    // grace). Here we simply close the framer; the session remains in the
-    // store until session GC evicts it by idle TTL.
-    framer.shutdown().await;
+    // grace). Here we simply close the write half; the session remains in
+    // the store until session GC evicts it by idle TTL.
+    writer.shutdown().await;
 }
 
 #[derive(Debug)]
@@ -671,15 +677,16 @@ enum DispatchOutput {
     Skip,
 }
 
-async fn request_loop<F: Framer>(
+async fn request_loop<R: FrameReader, W: FrameWriter>(
     ctx: &ConnectionContext,
-    framer: &mut F,
+    reader: &mut R,
+    writer: &mut W,
     frame_buf: &mut Vec<u8>,
     write_scratch: &mut Vec<u8>,
     sid: [u8; 32],
 ) {
     loop {
-        match framer
+        match reader
             .read_frame_into(MAX_FRAME_SIZE_DEFAULT, frame_buf)
             .await
         {
@@ -705,7 +712,7 @@ async fn request_loop<F: Framer>(
                 match dispatch {
                     DispatchOutput::Skip => continue,
                     DispatchOutput::Reply(bytes) => {
-                        if framer
+                        if writer
                             .write_frame_into(&bytes, write_scratch)
                             .await
                             .is_err()
@@ -776,7 +783,7 @@ async fn request_loop<F: Framer>(
         match dispatch {
             DispatchOutput::Skip => continue,
             DispatchOutput::Reply(bytes) => {
-                if framer
+                if writer
                     .write_frame_into(&bytes, write_scratch)
                     .await
                     .is_err()
@@ -785,7 +792,7 @@ async fn request_loop<F: Framer>(
                 }
             }
             DispatchOutput::ReplyAndBreak(bytes) => {
-                let _ = framer.write_frame_into(&bytes, write_scratch).await;
+                let _ = writer.write_frame_into(&bytes, write_scratch).await;
                 // §7.5 has already removed the session; close the loop.
                 break;
             }
