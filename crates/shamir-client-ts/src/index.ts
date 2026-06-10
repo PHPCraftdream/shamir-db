@@ -7,7 +7,7 @@
 
 import { ShamirClient } from './core/client.js';
 import { NodePlatform } from './platform/node.js';
-import type { ConnectOptions } from './core/types/index.js';
+import type { ConnectOptions, ResumeOptions } from './core/types/index.js';
 
 /**
  * Open an authenticated ShamirDB connection from Node.js.
@@ -17,8 +17,17 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
   return ShamirClient.connect(NodePlatform, opts);
 }
 
+/**
+ * Fast reconnection from Node.js using a resumption ticket from a previous
+ * session. Skips the full SCRAM handshake.
+ */
+export async function resume(opts: ResumeOptions): Promise<ShamirClient> {
+  return ShamirClient.resume(NodePlatform, opts);
+}
+
 export { ShamirClient };
 export type { TxOpened, ScramUserCreated } from './core/client.js';
+export type { ResumeOptions };
 export type { Db, Tx } from './core/db.js';
 
 // Builders: per-domain namespace objects (filter / select / write / ddl /

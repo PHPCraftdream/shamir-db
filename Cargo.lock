@@ -3689,6 +3689,7 @@ dependencies = [
 name = "shamir-client"
 version = "0.1.0"
 dependencies = [
+ "rand 0.8.5",
  "rmp-serde",
  "rustls",
  "serde",

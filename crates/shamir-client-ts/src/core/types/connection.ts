@@ -7,6 +7,24 @@
  * PLATFORM-AGNOSTIC.
  */
 
+/**
+ * Options for {@link ShamirClient.resume} — fast reconnection using a
+ * resumption ticket obtained from a previous session.
+ */
+export interface ResumeOptions {
+  host: string;
+  port: number;
+  /** Resumption ticket bytes obtained from a previous session. */
+  ticket: Uint8Array;
+  /** Server public key pinned from the first connection. */
+  serverPubKey: Uint8Array;
+  tls?: { rejectUnauthorized?: boolean };
+  /**
+   * Origin header sent on the WS upgrade. Defaults to `https://${host}`.
+   */
+  origin?: string;
+}
+
 /** Connection parameters (mirrors the napi `ConnectOptions`). */
 export interface ConnectOptions {
   host: string;

@@ -31,7 +31,7 @@ use shamir_connect::server::lockout::{
 use shamir_connect::server::rate_limit::{
     InMemoryRateLimiter, RateLimitSnapshot, RateLimitSnapshotError, RateLimitSnapshotSink,
 };
-use shamir_connect::server::resume::ResumeConfig;
+use shamir_connect::server::resume::{InMemoryConsumedCounters, ResumeConfig};
 use shamir_connect::server::session::SessionStore;
 
 use shamir_tunables::runtime::RuntimeTunables;
@@ -848,6 +848,7 @@ fn build_ctx(
         argon2_sem.clone(),
         audit_writer.clone(),
         resume_config.clone(),
+        Arc::new(InMemoryConsumedCounters::new()),
         handler.clone(),
         binding_mode,
         transport_kind,

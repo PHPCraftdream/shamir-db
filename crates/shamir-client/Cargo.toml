@@ -22,6 +22,9 @@ serde       = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 rmp-serde   = "1"
 
+# RNG — for nonce generation in Client::resume
+rand      = "0.8"
+
 # Misc
 zeroize   = "1.8"
 thiserror = "2"

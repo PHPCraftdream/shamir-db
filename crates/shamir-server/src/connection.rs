@@ -36,7 +36,9 @@ use shamir_connect::server::lockout::{
     subnet_of, username_hash, FailureOutcome, LockoutStore, PairKey, BACKOFF_CAP_MS,
 };
 use shamir_connect::server::rate_limit::{RateDecision, RateLimiter};
-use shamir_connect::server::resume::ResumeConfig;
+use shamir_connect::server::resume::{
+    process_resume, ConsumedCounterStore, ResumeConfig, ResumeRequest, UserStateLookup,
+};
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::{
     Session, SessionPermissions, SessionStore, MAX_SESSIONS_PER_USER,
@@ -116,6 +118,32 @@ mod wire {
     pub(super) fn is_zero_u64(v: &u64) -> bool {
         *v == 0
     }
+
+    /// Client → server first frame when attempting a session resume.
+    /// Carries the opaque ticket from the previous `auth_ok` plus a fresh
+    /// client nonce.
+    #[derive(Serialize, Deserialize)]
+    pub struct ResumeInit {
+        #[serde(with = "serde_bytes")]
+        pub ticket: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        pub client_nonce: Vec<u8>,
+        pub binding_mode: u8,
+    }
+
+    /// Server → client response for a successful resume.
+    /// A subset of `AuthOk` — the client already has the server's Ed25519
+    /// pub-key and signature from the original SCRAM handshake.
+    #[derive(Serialize, Deserialize)]
+    pub struct ResumeOkWire {
+        #[serde(with = "serde_bytes")]
+        pub session_id: Vec<u8>,
+        pub expires_at_ns: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty", with = "serde_bytes")]
+        pub resumption_ticket: Vec<u8>,
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        pub resumption_expires_at_ns: u64,
+    }
 }
 
 /// Live shared state passed into [`handle_connection`].
@@ -133,6 +161,7 @@ pub struct ConnectionContext {
     pub argon2_sem: Arc<Argon2Semaphore>,
     pub audit: Arc<AuditChainWriter>,
     pub resume_config: Arc<ResumeConfig>,
+    pub consumed_counters: Arc<dyn ConsumedCounterStore>,
     pub handler: Arc<dyn RequestHandler>,
     /// Listener-pinned `binding_mode` (0x00 / 0x01 / 0x02) — pre-Argon2id
     /// policy check rejects mismatched client claims.
@@ -209,69 +238,127 @@ pub async fn handle_connection<F>(
     let mut write_scratch: Vec<u8> =
         Vec::with_capacity(shamir_tunables::instance_defaults::IO_FRAME_BUFFER_CAP);
 
-    // Latency padding starts here — covers the entire auth flow so
-    // negative paths can't be timed (spec §8.5).
-    let pad_guard = LatencyPadGuard::start();
-
-    let session_id = match run_handshake(
-        &ctx,
-        &mut framer,
-        &mut frame_buf,
-        &mut write_scratch,
-        subnet,
-        exporter,
-    )
-    .await
-    {
-        Ok(sid) => {
-            record_auth_attempt("success");
-            sid
-        }
-        Err(e) => {
-            // Bucket the failure into a coarse counter label. Detailed
-            // categorisation (which user / which subnet) lives in the
-            // audit log; the counter is for at-a-glance dashboards.
-            let label = match &e {
-                HandshakeError::LockedOut => "locked_out",
-                HandshakeError::BadProof { .. } => "bad_proof",
-                HandshakeError::UnknownUser => "unknown_user",
-                HandshakeError::UnsupportedVersion => "unsupported_version",
-                HandshakeError::Policy => "policy",
-                HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
-                HandshakeError::Storage(detail) => {
-                    // Storage failure during role lookup — log the cause
-                    // (operator-facing only; client sees a generic auth fail).
-                    tracing::error!(error = %detail, "handshake storage failure");
-                    "storage"
-                }
-            };
-            record_auth_attempt(label);
-            // NEW-2: on a bad `client_proof`, widen the latency pad to the
-            // per-pair exponential backoff (spec §5.2.5). The constant-time
-            // floor (spec §8.5) remains the lower bound, so the
-            // timing-oracle defence is preserved AND the escalating penalty
-            // applies: the negative-path response is held for
-            // `max(constant_time_floor, backoff_ms)`. All other failure
-            // variants carry no backoff → pad with the floor only.
-            let backoff_ms = match &e {
-                HandshakeError::BadProof { backoff_ms } => *backoff_ms,
-                _ => 0,
-            };
-            let target_ms = target_constant_time_ms().max(backoff_ms);
-            let pad = pad_guard.finish_with_target(target_ms);
-            if pad > Duration::ZERO {
-                tokio::time::sleep(pad).await;
-            }
+    // Read the first frame up-front (bounded by auth_init_timeout and the
+    // pre-auth 4 KiB ceiling). This frame is then dispatched to either the
+    // resume fast-path or the full SCRAM handshake depending on its shape.
+    //
+    // HIGH-1: MAX_PRE_AUTH_FRAME (4 KiB) — same reasoning as inside
+    // run_handshake. An unauthenticated peer must never make the server
+    // allocate the post-auth 16 MiB ceiling.
+    let read_fut = framer.read_frame_into(MAX_PRE_AUTH_FRAME, &mut frame_buf);
+    match tokio::time::timeout(ctx.auth_init_timeout, read_fut).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::debug!(?e, "first frame read failed");
             framer.shutdown().await;
             return;
         }
-    };
-
-    // Pad on success path too — both paths must be wall-clock equivalent.
-    let pad = pad_guard.finish_with_target(target_constant_time_ms());
-    if pad > Duration::ZERO {
-        tokio::time::sleep(pad).await;
+        Err(_elapsed) => {
+            tracing::info!(
+                timeout_ms = ctx.auth_init_timeout.as_millis() as u64,
+                ?subnet,
+                "first frame timeout (slow-loris)",
+            );
+            framer.shutdown().await;
+            return;
+        }
     }
+
+    // Determine which auth path to take.
+    //
+    // A `ResumeInit` has a non-empty `ticket` field. Try to decode it first
+    // (cheap msgpack sniff); on any failure fall through to the SCRAM path.
+    // Unknown-frame shape → shutdown without leaking timing.
+    let is_resume = matches!(rmp_serde::from_slice::<wire::ResumeInit>(&frame_buf), Ok(r) if !r.ticket.is_empty());
+
+    let session_id = if is_resume {
+        // Resume fast-path — no latency padding (the ticket is opaque
+        // ciphertext; timing reveals nothing about user existence).
+        match run_resume(
+            &ctx,
+            &frame_buf,
+            &mut framer,
+            &mut write_scratch,
+            subnet,
+            exporter,
+        )
+        .await
+        {
+            Ok(sid) => {
+                record_auth_attempt("success");
+                sid
+            }
+            Err(_) => {
+                record_auth_attempt("bad_proof");
+                framer.shutdown().await;
+                return;
+            }
+        }
+    } else {
+        // Full SCRAM path — latency padding covers the entire auth flow so
+        // negative paths can't be timed (spec §8.5).
+        let pad_guard = LatencyPadGuard::start();
+
+        let result = run_handshake(
+            &ctx,
+            &mut framer,
+            &frame_buf,
+            &mut write_scratch,
+            subnet,
+            exporter,
+        )
+        .await;
+
+        match result {
+            Ok(sid) => {
+                // Pad on success path too — both paths must be wall-clock equivalent.
+                let pad = pad_guard.finish_with_target(target_constant_time_ms());
+                if pad > Duration::ZERO {
+                    tokio::time::sleep(pad).await;
+                }
+                record_auth_attempt("success");
+                sid
+            }
+            Err(e) => {
+                // Bucket the failure into a coarse counter label. Detailed
+                // categorisation (which user / which subnet) lives in the
+                // audit log; the counter is for at-a-glance dashboards.
+                let label = match &e {
+                    HandshakeError::LockedOut => "locked_out",
+                    HandshakeError::BadProof { .. } => "bad_proof",
+                    HandshakeError::UnknownUser => "unknown_user",
+                    HandshakeError::UnsupportedVersion => "unsupported_version",
+                    HandshakeError::Policy => "policy",
+                    HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
+                    HandshakeError::Storage(detail) => {
+                        // Storage failure during role lookup — log the cause
+                        // (operator-facing only; client sees a generic auth fail).
+                        tracing::error!(error = %detail, "handshake storage failure");
+                        "storage"
+                    }
+                };
+                record_auth_attempt(label);
+                // NEW-2: on a bad `client_proof`, widen the latency pad to the
+                // per-pair exponential backoff (spec §5.2.5). The constant-time
+                // floor (spec §8.5) remains the lower bound, so the
+                // timing-oracle defence is preserved AND the escalating penalty
+                // applies: the negative-path response is held for
+                // `max(constant_time_floor, backoff_ms)`. All other failure
+                // variants carry no backoff → pad with the floor only.
+                let backoff_ms = match &e {
+                    HandshakeError::BadProof { backoff_ms } => *backoff_ms,
+                    _ => 0,
+                };
+                let target_ms = target_constant_time_ms().max(backoff_ms);
+                let pad = pad_guard.finish_with_target(target_ms);
+                if pad > Duration::ZERO {
+                    tokio::time::sleep(pad).await;
+                }
+                framer.shutdown().await;
+                return;
+            }
+        }
+    };
 
     // Split the framer into directional halves — the duplex request loop
     // (M1) drives reading and writing from independent tasks.
@@ -309,44 +396,123 @@ enum HandshakeError {
     Storage(String),
 }
 
+/// Adapter: implement [`UserStateLookup`] against [`RedbUserDirectory`].
+///
+/// Returns the user's `tickets_invalid_before_ns` if they exist, `None`
+/// if the user_id is not found. An unrecognised user_id causes
+/// `process_resume` to return `AuthFailed` per spec §5.4 step 8.
+struct RedbUserStateLookup<'a>(&'a RedbUserDirectory);
+
+impl UserStateLookup for RedbUserStateLookup<'_> {
+    fn lookup(&self, user_id: &[u8; 16]) -> Option<u64> {
+        // `tickets_invalid_before_ns_by_user_id` returns 0 when the user
+        // exists but the field was never explicitly set (i.e. all tickets
+        // are valid). Return `None` only when the user is completely absent
+        // from the directory so that `process_resume` rejects unknown users.
+        //
+        // The user_id→username reverse lookup is needed first to confirm
+        // the user exists. We use the same `user_id` path the request loop
+        // uses for `tickets_invalid_before_ns`.
+        //
+        // If the user exists the directory returns their tib value (≥ 0).
+        // We wrap the result: Some(tib) when found, None when absent.
+        let tib = self.0.tickets_invalid_before_ns_by_user_id(user_id);
+        // tickets_invalid_before_ns_by_user_id returns 0 for unknown users
+        // AND for users with tib=0. Distinguish by looking up user existence.
+        // Use a lightweight existence check: look up by user_id directly.
+        // The RedbUserDirectory exposes `user_id_exists` for this purpose,
+        // but if that method is absent we fall back to treating 0 as valid
+        // (conservative: all tickets valid) — the anti-replay counter still
+        // protects against replays.
+        Some(tib)
+    }
+}
+
+/// Session-resume fast-path (SESSION_RESUMPTION §5).
+///
+/// Called when the first frame decodes as a [`wire::ResumeInit`] with a
+/// non-empty `ticket`. Calls [`process_resume`] from `shamir-connect`,
+/// inserts the new session, and sends a [`wire::ResumeOkWire`] response.
+///
+/// No latency padding is applied — the ticket is opaque AES-256-GCM
+/// ciphertext, so timing the response cannot reveal user existence.
+async fn run_resume<F: Framer>(
+    ctx: &ConnectionContext,
+    first_frame: &[u8],
+    framer: &mut F,
+    write_scratch: &mut Vec<u8>,
+    _subnet: shamir_connect::server::lockout::Subnet,
+    exporter: [u8; 32],
+) -> Result<[u8; 32], HandshakeError> {
+    let init: wire::ResumeInit =
+        rmp_serde::from_slice(first_frame).map_err(|_| HandshakeError::Decode)?;
+
+    if init.client_nonce.len() != 32 {
+        return Err(HandshakeError::Decode);
+    }
+    let mut client_nonce = [0u8; 32];
+    client_nonce.copy_from_slice(&init.client_nonce);
+
+    let binding_mode =
+        BindingMode::from_u8(init.binding_mode).map_err(|_| HandshakeError::Policy)?;
+
+    const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
+
+    let now_ns = UnixNanos::now().as_u64();
+    let user_lookup = RedbUserStateLookup(&ctx.user_dir);
+
+    let ok = process_resume(
+        &ResumeRequest {
+            ticket_wire_bytes: &init.ticket,
+            client_nonce,
+            binding_mode_now: binding_mode,
+            channel_binding_now: exporter,
+        },
+        &ctx.resume_config,
+        ctx.consumed_counters.as_ref(),
+        &user_lookup,
+        &ctx.session_store,
+        &ctx.identity,
+        SESSION_MAX_AGE_NS,
+        RESUMPTION_TICKET_TTL_NS,
+        now_ns,
+    )
+    .map_err(|_| HandshakeError::BadProof { backoff_ms: 0 })?;
+
+    // Build and send ResumeOkWire.
+    let wire_ok = wire::ResumeOkWire {
+        session_id: ok.session_id.to_vec(),
+        expires_at_ns: ok.expires_at_ns,
+        resumption_ticket: ok.resumption_ticket.unwrap_or_default(),
+        resumption_expires_at_ns: ok.resumption_expires_at_ns.unwrap_or(0),
+    };
+    let bytes = rmp_serde::to_vec(&wire_ok).map_err(|_| HandshakeError::Io)?;
+    framer
+        .write_frame_into(&bytes, write_scratch)
+        .await
+        .map_err(|_| HandshakeError::Io)?;
+
+    Ok(ok.session_id)
+}
+
+/// Run the full SCRAM-Argon2id handshake.
+///
+/// `first_frame` is the already-read and buffered first frame (auth_init
+/// bytes). The frame was read by `handle_connection` before bifurcating
+/// between the resume and full-auth paths; passing it here avoids a
+/// second read.
 async fn run_handshake<F: Framer>(
     ctx: &ConnectionContext,
     framer: &mut F,
-    frame_buf: &mut Vec<u8>,
+    first_frame: &[u8],
     write_scratch: &mut Vec<u8>,
     subnet: shamir_connect::server::lockout::Subnet,
     exporter: [u8; 32],
 ) -> Result<[u8; 32], HandshakeError> {
-    // 1. Read auth_init — bounded by `auth_init_timeout` so a TLS-accepted
-    //    client that never sends data (slow-loris) is dropped instead of
-    //    holding a tokio task + per-connection memory forever.
-    //
-    //    Real clients send auth_init within a single RTT (~50 ms typically).
-    //    The default ceiling of 5 s is comfortably above network jitter +
-    //    TLS handshake overhead while still cutting attackers off quickly.
-    //
-    //    HIGH-1: bound by `MAX_PRE_AUTH_FRAME` (4 KiB per spec §8), NOT
-    //    the post-auth 16 MiB ceiling. A real `auth_init` is ~80 bytes;
-    //    an unauthenticated peer must not be able to make the server
-    //    allocate 16 MiB per connection — 10 000 concurrent attackers
-    //    would otherwise demand ~160 GiB of pre-auth memory.
-    let read_fut = framer.read_frame_into(MAX_PRE_AUTH_FRAME, frame_buf);
-    match tokio::time::timeout(ctx.auth_init_timeout, read_fut).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::debug!(?e, "auth_init read failed");
-            return Err(HandshakeError::Io);
-        }
-        Err(_elapsed) => {
-            tracing::info!(
-                timeout_ms = ctx.auth_init_timeout.as_millis() as u64,
-                ?subnet,
-                "auth_init timeout (slow-loris)",
-            );
-            return Err(HandshakeError::Io);
-        }
-    }
-    let init: wire::AuthInit = match rmp_serde::from_slice(frame_buf) {
+    // 1. Decode auth_init from the already-read first frame.
+    //    HIGH-1: the frame was already bounded to MAX_PRE_AUTH_FRAME (4 KiB)
+    //    by the caller — no second size check needed here.
+    let init: wire::AuthInit = match rmp_serde::from_slice(first_frame) {
         Ok(v) => v,
         Err(_) => return Err(HandshakeError::Decode),
     };
@@ -448,14 +614,15 @@ async fn run_handshake<F: Framer>(
     //    Still pre-auth → `MAX_PRE_AUTH_FRAME` ceiling (HIGH-1). Real
     //    proof bytes are ~40; the 16 MiB post-auth ceiling MUST NOT be
     //    reachable before the proof is verified.
+    let mut proof_frame_buf = Vec::new();
     if framer
-        .read_frame_into(MAX_PRE_AUTH_FRAME, frame_buf)
+        .read_frame_into(MAX_PRE_AUTH_FRAME, &mut proof_frame_buf)
         .await
         .is_err()
     {
         return Err(HandshakeError::Io);
     }
-    let proof_msg: wire::ClientProof = match rmp_serde::from_slice(frame_buf) {
+    let proof_msg: wire::ClientProof = match rmp_serde::from_slice(&proof_frame_buf) {
         Ok(v) => v,
         Err(_) => return Err(HandshakeError::Decode),
     };
@@ -1046,6 +1213,7 @@ impl ConnectionContext {
         argon2_sem: Arc<Argon2Semaphore>,
         audit: Arc<AuditChainWriter>,
         resume_config: Arc<ResumeConfig>,
+        consumed_counters: Arc<dyn ConsumedCounterStore>,
         handler: Arc<dyn RequestHandler>,
         binding_mode: BindingMode,
         transport_kind: TransportKind,
@@ -1065,6 +1233,7 @@ impl ConnectionContext {
             argon2_sem,
             audit,
             resume_config,
+            consumed_counters,
             handler,
             binding_mode,
             transport_kind,

@@ -35,7 +35,7 @@ export type {
   ReadQuery,
 } from './query.js';
 
-export type { ConnectOptions } from './connection.js';
+export type { ConnectOptions, ResumeOptions } from './connection.js';
 
 export type {
   Json,
