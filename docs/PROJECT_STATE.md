@@ -2,28 +2,37 @@
 
 # ShamirDB — Project State
 
-**Snapshot date:** 2026-06-05. The canonical "where we are" document — what
+**Snapshot date:** 2026-06-10. The canonical "where we are" document — what
 ShamirDB is, what shipped, and where it goes next. The actionable forward
 plan lives in [`roadmap/PLAN.md`](roadmap/PLAN.md); the (now historical)
 transactional index in [`roadmap/NEXT_PHASES.md`](roadmap/NEXT_PHASES.md);
 per-feature plans under [`roadmap/`](roadmap/).
 
-Since the last snapshot, a full **write-lifecycle arc** landed
-(`016d68b`..`a620115`): **DDL completed** (idempotency, referential
-integrity, introspection, function folders, structured error codes) and
-made to read like DML via the query builder; the **Shomer access fabric
-flipped to real enforcement** (table-level DML gate + admin-op
-authorization + owner delegation + setuid "getter-only" data-firewall);
-**table validators + optimistic CAS sequenced writes** (canonical record
-hash); and a **changefeed** (hybrid live-push broadcast + durable journal,
-covering tx and non-tx writes, event version == MVCC version) — the AFTER
-half of BEFORE→commit→AFTER and the foundation for the "I" pillar. See
-[`roadmap/PLAN.md`](roadmap/PLAN.md), [`roadmap/DDL.md`](roadmap/DDL.md),
-[`roadmap/VALIDATORS.md`](roadmap/VALIDATORS.md).
+Since the last snapshot (`a620115`..`f80070b`, 152 commits), a dense
+**second arc** landed across six fronts: **temporal reads + single-log
+MVCC** (#237/#238/#232 — the old TOCTOU is structurally dissolved);
+**covering index** (Opt O / #218/#236 — Postgres-class range latency);
+**Level-3 pessimistic locking** (#234/#235 — wound-wait, deadlock-free by
+construction); **stored procedures** (BatchOp::Call first-class);
+**nested batches** (#282 — sub-tx scope, $param in write values,
+NestingTooDeep guard); **duplex/multiplexing** (#292–#298 — splittable
+Framer, rid-demux, resume fast-path); a **full TypeScript client**
+(TS-T0–T17 — platform-agnostic core, OQL/Batch/Call builders, live-server
+e2e); a **shamir-tunables** crate (zero-overhead atomic runtime knobs);
+**WASM/SDK slimming** (−34 % wasm size, guest-lean query-types, builder
+compiles to wasm32, runs in guest); **runtime perf** (InstancePre cache
+−40 %, AOT disk cache ~2×, M1/M2 fast paths); and an **internal
+refactor** that extracted `shamir-wasm-host` and `shamir-index` from the
+engine monolith and migrated all inline tests to `tests/` directories. See
+[`roadmap/PLAN.md`](roadmap/PLAN.md),
+[`roadmap/TEMPORAL.md`](roadmap/TEMPORAL.md),
+[`roadmap/MVCC_CELL.md`](roadmap/MVCC_CELL.md).
 
-Earlier: a **WASM function engine** ("M") built end-to-end
-([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) and the
-behavior-preserving substrate of the **Shomer access fabric**
+Earlier: a **write-lifecycle arc** (`016d68b`..`a620115`): DDL completed,
+Shomer access fabric enforced, validators + CAS, changefeed. Before that:
+**WASM function engine** ("M")
+([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) and the substrate of the
+**Shomer access fabric**
 ([`roadmap/ACCESS_FABRIC.md`](roadmap/ACCESS_FABRIC.md),
 [`roadmap/ACCESS_REFACTOR.md`](roadmap/ACCESS_REFACTOR.md)).
 
@@ -45,29 +54,37 @@ recovery). Dual-licensed **MIT OR Apache-2.0**.
 
 ---
 
-## 2. Architecture — 15 crates, layered bottom-up
+## 2. Architecture — 21 crates, layered bottom-up
+
+21 crates in the workspace. Plus 2 non-workspace packages: `shamir-client-node`
+(napi/MSVC binding, excluded) and `shamir-client-ts` (pure-TypeScript package,
+no Cargo.toml).
 
 | Crate | Role |
 |---|---|
+| `shamir-collections` | TMap/TSet leaf, guest-lean, re-exported by `shamir-types` |
 | `shamir-types` | Value model, RecordId, codecs, **sort_codec**, string→u64 interner |
 | `shamir-storage` | `Store`/`Repo` trait + **6 backends** (Sled, Redb, Fjall, Nebari, Persy, Canopy), feature-gated |
+| `shamir-tunables` | Runtime tunables — zero-overhead atomic knob reads |
 | `shamir-wal` | WAL V2 (crash recovery) |
-| `shamir-tx` | **MVCC over dumb-KV** (`<key>::<version_be>`), `RepoTxGate`, `TxContext`, SSI, **predicate locks** |
-| `shamir-query-types` | Wire DTOs (filter/read/write/batch + `DbRequest`/`DbResponse`) |
-| `shamir-engine` | Table engine, JSON batch query, planner, secondary indexes, HNSW vectors, FTS, **commit pipeline** |
+| `shamir-tx` | **MVCC over dumb-KV** — now a **single append-only version-log**; `RepoTxGate`, `TxContext`, SSI, predicate locks, **Level-3 pessimistic locking** |
+| `shamir-query-types` | Wire DTOs (filter/read/write/batch + `DbRequest`/`DbResponse`); guest-lean via `server` feature-gate |
+| `shamir-query-builder` | Typed Rust query builder — `q!`/`filter!`/`doc!`; guest-lean, compiles to wasm32 |
+| `shamir-query-builder-macros` | Proc-macro support for `shamir-query-builder` |
+| `shamir-funclib` | Built-in scalar + aggregate function library |
+| `shamir-wasm-host` | WASM function host — Wasmtime runtime, registry, host imports, gateways, compile-from-source; **extracted from engine this cycle** |
+| `shamir-index` | Index subsystem — legacy IndexManager/SortedIndexManager + FTS/Functional/Vector (HNSW) backends + **covering index** + meta-envelope; **extracted from engine this cycle** |
+| `shamir-engine` | Table engine, OQL batch query, planner, **commit pipeline**, **temporal reads**; function engine and index subsystem live in their own crates and are re-exported |
 | `shamir-db` | Facade: `ShamirDb`, SystemStore, durable DDL catalogue |
 | `shamir-connect` | Wire protocol: TLS 1.3 + SCRAM-Argon2id + Ed25519 channel binding, session tickets |
-| `shamir-transport-tcp` / `-ws` | TCP (TLS) and WebSocket (native + browser) |
-| `shamir-server` | ServerLauncher: bootstrap, RBAC, audit HMAC chain, rate-limit, **interactive-tx registry** |
-| `shamir-client` | Client SDK |
-| `shamir-client-node` | napi binding (MSVC-only, excluded from the workspace) |
-| `shamir-sdk` | function authoring SDK (guest): `Ctx`/`Batch`/`Params`/`Value`, host-call shims; builds to wasm32 |
-| `shamir-sdk-macros` | the `#[shamir::function]` proc-macro — hides the whole guest ABI from the author |
+| `shamir-transport-tcp` / `-ws` | TCP/TLS and WebSocket native+browser; **splittable Framer** (FrameReader/FrameWriter) |
+| `shamir-server` | ServerLauncher: bootstrap, RBAC, audit HMAC chain, rate-limit, interactive-tx registry, **duplex request loop** |
+| `shamir-client` | Client SDK; **rid-demux multiplexer**, resume fast-path |
+| `shamir-sdk` | Function authoring SDK (guest): typed `#[scalar]`/`#[procedure]` kinds, builder-in-guest; builds to wasm32 |
+| `shamir-sdk-macros` | Proc-macros for `shamir-sdk` |
 
-The **function engine** itself lives in `shamir-engine` (`function/`:
-runtime, registry, Wasmtime backend, host imports, gateways) + `shamir-db`
-(durable catalogue, lifecycle API). The **Shomer access fabric** primitives
-live in `shamir-types` (`access`: `Actor`/`ResourcePath`/`Action`/the gate).
+The **Shomer access fabric** primitives live in `shamir-types` (`access`:
+`Actor`/`ResourcePath`/`Action`/the gate).
 
 **Architectural leitmotif** (held throughout): *the truth lives in one place
 — the versioned MVCC store; everything derived (indexes, the HNSW graph,
@@ -145,92 +162,137 @@ paths.
   DEFINER: Execute a function with no table Read → a data-firewall through
   procedures) both proven end-to-end. See
   [`roadmap/ACCESS_FABRIC.md`](roadmap/ACCESS_FABRIC.md).
-- Quality: **15 crates, ~2667 lib tests** + integration; property tests
-  (`proptest`: version codec + SSI read-set validation); **27 benchmarks**
+- **Temporal OQL** (additive, default-invisible): `History` (per-record version
+  timeline), `AsOf` (point-in-time read), `PurgeHistory` (imperative
+  time-predicate purge), `ChangesSince` (one-shot delta since version V);
+  builder methods `as_of`/`history`/`with_version`. Retention: per-table
+  `max_count`/`min_count`/`max_age` knobs, eager vacuum for `CurrentOnly`
+  default. Single append-only version-log — the old MVCC-2 TOCTOU is
+  dissolved by construction. See [`roadmap/TEMPORAL.md`](roadmap/TEMPORAL.md),
+  [`roadmap/MVCC_CELL.md`](roadmap/MVCC_CELL.md).
+- **Covering index** (Opt O): DDL `include:[...]`; index entry stores bincode
+  projected fields; write-path maintenance; planner recognises covered queries;
+  index-only reads reusing the M2 streaming serialiser — zero data-store touch
+  for covered range queries.
+- **Level-3 pessimistic locking**: wound-wait on the monotonic version (total
+  order → deadlock-free by construction); block-conflictors isolation level;
+  complements SI (L1) + SSI (L2).
+- **Stored procedures**: `BatchOp::Call` (wire + core); join the dependency
+  graph (params + result as `$query`); `Batch::call` + `q!(call ...)`.
+- **Nested batches**: sub-batches with their own tx scope; `$param` in
+  write-op values; recursive own-tx execution; `NestingTooDeep` guard;
+  builder `sub_batch`/`param`.
+- **Duplex / multiplexing**: splittable Framer (`FrameReader`/`FrameWriter`);
+  duplex request loop (concurrent per-connection dispatch); rid-demux
+  multiplexer (concurrent requests over a single connection) in both Rust and
+  TS clients; resume fast-path (reconnect via ticket, skip Argon2id).
+- **TypeScript client** (`shamir-client-ts`): platform-agnostic core + Node/
+  Browser adapters + WS/SCRAM transport; OQL read/write/DDL/ACL/RBAC builders;
+  Batch + Call fluent builders; interactive-tx + `db.tx(fn)` auto-managed
+  wrapper; `$query`/`$ref` helpers; bound `Db` handle; rid-demux; live-server
+  e2e; README.
+- **shamir-tunables**: zero-overhead atomic runtime knobs; storage/engine/tx
+  scan batches + server frame-buffer/poll-interval routed through knobs.
+- **WASM/SDK slimming + thin-waist**: wasm size −34 %; typed
+  `#[scalar]`/`#[procedure]` macros; query-types `server` feature-gate
+  (guest-lean); `shamir-collections` leaf; query builder compiles to wasm32
+  and runs in the guest (`ctx.db().execute(&Batch)` via `db_execute` host
+  import). Example guest 337 KB.
+- **Runtime perf**: InstancePre cache (per-call −40 %); AOT disk cache (~2×
+  restart compile); pooling allocator + CoW (+12 % concurrent); M1
+  single-column columnar ORDER BY fast path; M2 streaming JSON projection for
+  SELECT * (3.4×); H₂ `Persistable` trait + `PersistRegistry`.
+- Quality: **21 crates, ~2912 lib tests** + integration; property tests
+  (`proptest`: version codec + SSI read-set validation); **29 benchmarks**
   across engine/tx/storage/connect/server; green gate (`fmt --all --check`
   · `clippy --workspace --all-targets -D warnings` · `test --workspace
   --lib` · `test --workspace --test '*'`).
 
 ---
 
-## 4. What shipped this cycle (transactional layer → production-grade)
+## 4. What shipped this cycle (temporal + single-log MVCC, covering index, duplex, TS client, tunables, refactor)
 
-Commit arc roughly `2cfb7f6 → dfaed28`:
+Commit arc `a620115`..`f80070b` (152 commits):
 
-1. **Phase A hardening** (3 adversarial audit waves): read-your-own-writes,
-   batched MVCC inserts, HNSW promote outside `commit_lock`, C6 empty-tx
-   fast-path, honest multi-table deferral contract, idempotent recovery, D12
-   atomic rid-slot-claim, observable `materialized` flag, alloc-free RYOW.
-2. **Phase B — interactive multi-call transactions**: wire DTOs →
-   `TxRegistry` → engine glue → facade → handler dispatch (ownership +
-   single-repo pin), idle/absolute-deadline reaper, per-tx staging budget
-   (`tx_too_large`).
-3. **Phase C — true serializability (phantom protection)**: predicate/range
-   SIREAD locks, `Filter → IndexRange` bridge (sort-codec), commit-time
-   write-key log on `RepoTxGate`, Phase 2-bis in `pre_commit`
-   (`PhantomConflict`), 22 anomaly/precision/zero-overhead tests.
-4. **Quality & pipelines**: `proptest` property tests; three flaky tests
-   de-flaked at the root (argon2 semaphore, sled transact observer,
-   vector-migration approximate-top-k); roadmap planning docs + `NEXT_PHASES`
-   index.
-5. **CI hardened & green**: the `clippy` job had been red since 2026-05-29
-   from `@stable` drift (new lints on untouched code). Fixed durably by
-   **pinning the toolchain** (`rust-toolchain.toml` + `dtolnay/rust-toolchain@1.93.0`
-   in all CI jobs) so local and CI lint identically — green here == green in
-   CI. Bumped `actions/checkout@v4 → @v5` (Node 20 EOL). Added
-   [`../CONTRIBUTING.md`](../CONTRIBUTING.md): the exact four-command gate +
-   the toolchain-bump procedure. Benches never run in CI (`--lib` +
-   `--test '*'` exclude `[[bench]]`).
+1. **Temporal + single-log MVCC** (#237/#238/#232) — the headline arc. MVCC
+   store is now ONE append-only version-log (dual-write main/archive
+   eliminated). `History`/`AsOf`/`PurgeHistory`/`ChangesSince` OQL ops;
+   builder temporal methods; per-table retention knobs; eager vacuum. The old
+   MVCC-2 TOCTOU dissolved by construction.
+2. **Covering index** (Opt O / #218/#236) — DDL `include:[...]`; index entry
+   stores bincode projected fields; write-path maintenance; planner covers
+   queries; index-only reads reuse M2 streaming serialiser — zero data-store
+   touch for covered range queries. Backed by versioned covering-posting
+   envelope + RecordCell high-water mark.
+3. **Level-3 pessimistic locking** (#234/#235) — wound-wait on monotonic
+   version; deadlock-free by construction; block-conflictors isolation level.
+4. **Stored procedures** — `BatchOp::Call`; join dependency graph; `Batch::call`
+   + `q!(call ...)`.
+5. **Nested batches** (#282) — sub-tx scope; `$param` in write-op values;
+   recursive execution; `NestingTooDeep` guard; builder `sub_batch`/`param`.
+6. **Duplex / multiplexing** (#292–#298) — splittable Framer; duplex request
+   loop; rid-demux multiplexer in both Rust and TS clients; resume fast-path.
+7. **TypeScript client** (TS-T0–T17) — full pure-TS client: platform-agnostic
+   core + Node/Browser adapters; OQL/Batch/Call builders; interactive-tx;
+   rid-demux; live-server e2e; README.
+8. **shamir-tunables** (new crate) — zero-overhead atomic runtime knobs;
+   storage/engine/tx/server parameters routed through knobs; TUNABLES.md index.
+9. **WASM/SDK slimming + thin-waist** — wasm −34 %; typed `#[scalar]`/
+   `#[procedure]` macros; `shamir-collections` leaf; query builder runs in
+   guest. Example guest 337 KB.
+10. **Runtime perf** — InstancePre cache −40 %; AOT disk cache ~2×; M1/M2
+    fast paths (columnar ORDER BY, streaming SELECT *); H₂ `Persistable` trait.
+11. **Consolidation / security** (Movement A) — 13 unauthorized admin/DDL ops
+    gated; fail-closed `effective_fn_actor`; `canonical_hash` round-trip;
+    non-tx writes join SSI ledger; durable-journal watermark + gap signal;
+    trust-boundary truncations closed.
+12. **Internal refactor** — `shamir-wasm-host` and `shamir-index` extracted
+    from the engine monolith; all inline tests migrated to `tests/` dirs; monolith
+    trimmed ~64 k → ~46 k lines; `shamir-index` consolidated the legacy
+    IndexManager/SortedIndexManager.
+13. **CI** — cross-platform matrix (ubuntu/windows/macos).
 
-Method: multi-agent workflows (smart `aoh` research, parallel → `ao46l`
-implementation, sequential → verify) with a zero-trust backstop review (diffs
-and semantics confirmed by independent gate runs, never by agent claims).
+Method: multi-agent workflows (smart research, parallel implementation,
+sequential verify) with zero-trust backstop review (diffs and semantics
+confirmed by independent gate runs, never by agent claims).
 
 ---
 
 ## 5. Next steps
 
-**Small tails (optional, non-blocking):**
-- Phase B/C benches (zero-overhead already test-proven; measurement is nice
-  to have) — see [`roadmap/PERF_OPPORTUNITIES.md`](roadmap/PERF_OPPORTUNITIES.md).
-- Nightly `cargo-fuzz` target for the version codec (proptest covers the bulk).
-- `.gitignore` housekeeping: `server-cert.pem`, `crates/shamir-client-node/target/`.
-- Periodically bump the pinned toolchain (currently `1.93.0`) + fix any new
-  lints — procedure in [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
-- Task #17 ("transactions within a batch — MemBuffer + WAL") is effectively
-  **closed** by Phase A + Phase B.
+**Charter status.** S (Secure), H (High-performance), A (Async), M (Modular
+WASM), R (Repository) are all closed. The one open pillar is **I
+(Interconnected)**. Movement A (consolidate) ✅ DONE; Movement B (perf, incl.
+covering index) ✅ DONE; **Movement C (the "I") is the live frontier.**
 
-**Priority recommendation.** The foundation (storage + transactions +
-protocol + security), the **WASM function engine ("M")**, the **complete
-DDL surface**, **enforced access fabric**, **validators + CAS**, and the
-**changefeed** all shipped. Access enforcement (former Shomer P4) and
-function/validator wire-DDL are **DONE**. The actionable order now lives in
-[`roadmap/PLAN.md`](roadmap/PLAN.md):
-1. **Consolidate (quality)** — adversarial review of the new arc's hot
-   spots (changefeed concurrency, CAS canonicalisation, the enforcement
-   gate, the `set_versioned` always-bump invariant); `H₂` Persistable
-   refactor; `.gitignore`/fuzz debt.
-2. **Measure → accelerate (perf)** — bench the new features' overhead
-   (changefeed / enforcement / validators / CAS) to prove the hot paths
-   weren't slowed; then **sprint γ** (`Opt O` covering index — the disk
-   range-query ceiling — plus `R`/`P`, and `M1`/`M2`). See
-   [`roadmap/PERF_OPPORTUNITIES.md`](roadmap/PERF_OPPORTUNITIES.md).
-3. **Build the "I"** — network changefeed (pull-API) → leader-follower
-   replication (apply by `commit_version`) → P2P / chat. The changefeed is
-   the foundation; #179 aligned event version with data version for this.
-Each taken the same way: research → implementation → zero-trust verify →
-green CI. Discipline throughout: "don't over-build" — pull each slice by
-real need, not ahead of it. (Sharding is a separate, later direction — not
-a prerequisite for replication.)
+The foundation for "I" is fully laid: changefeed with event version ==
+`commit_version`, `ChangesSince` one-shot query, durable journal + watermark +
+gap signal, duplex transport + rid-demux, resume tickets, written subscriptions
+design doc (#201). The ladder:
+
+1. **Network changefeed** — wire-streaming over the journal; `ChangesSince` is
+   the one-shot precursor.
+2. **Live subscriptions / server-push** (#201) — design written; the duplex
+   channel is the pipe.
+3. **Leader-follower replication** — apply by `commit_version`.
+4. **P2P / gossip → chat.**
+
+Pull-on-demand parallels (by real need, not ahead): browser-WASM client, QUIC/
+UDP/Unix transports, auth v1.1+ / PQ identity, vectors/FTS hardening, backup/
+restore tooling, non-blocking batched namespaced logging.
 
 **Large directions** (per [`roadmap/`](roadmap/)):
 
 | Direction | Plan |
 |---|---|
 | WASM modules (user logic — the "M") | ✅ **shipped** ([`roadmap/FUNCTIONS.md`](roadmap/FUNCTIONS.md)) |
-| P2P / interconnected (chat — the "I") | foundation laid (changefeed); ladder in [`roadmap/PLAN.md`](roadmap/PLAN.md) Movement C |
+| Temporal reads + single-log MVCC | ✅ **shipped** ([`roadmap/TEMPORAL.md`](roadmap/TEMPORAL.md), [`roadmap/MVCC_CELL.md`](roadmap/MVCC_CELL.md)) |
+| Covering index (Opt O) | ✅ **shipped** |
+| Level-3 pessimistic locking | ✅ **shipped** |
+| TypeScript client | ✅ **shipped** |
+| P2P / interconnected (chat — the "I") | Movement C — ladder above; live subscriptions design in [`roadmap/PLAN.md`](roadmap/PLAN.md) |
 | Replication / sharding / backup tooling | [`roadmap/PLAN.md`](roadmap/PLAN.md) (replication), [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
-| Query language: **OQL is final — no textual/SQL frontend, ever** (principle, see [`roadmap/PLAN.md`](roadmap/PLAN.md) §3); default→Serializable now phantoms are closed | [`roadmap/PLAN.md`](roadmap/PLAN.md), [`roadmap/TRANSACTIONS.md`](roadmap/TRANSACTIONS.md) |
+| Query language: **OQL is final — no textual/SQL frontend, ever** | [`roadmap/PLAN.md`](roadmap/PLAN.md), [`roadmap/TRANSACTIONS.md`](roadmap/TRANSACTIONS.md) |
 | Browser WASM client (Argon2id in a Web Worker) | [`roadmap/BROWSER_WASM_PLAN.md`](roadmap/BROWSER_WASM_PLAN.md) |
 | Vectors / embeddings hardening | [`roadmap/EMBEDDINGS_AND_VECTORS.md`](roadmap/EMBEDDINGS_AND_VECTORS.md) |
 | Full-text search hardening | [`roadmap/FULL_TEXT_SEARCH.md`](roadmap/FULL_TEXT_SEARCH.md) |
@@ -238,18 +300,18 @@ a prerequisite for replication.)
 | Auth v1.1+ (HIBP, WebAuthn 2FA, DPoP); PQ identity (Ed25519+ML-DSA) | [`roadmap/ROADMAP.md`](roadmap/ROADMAP.md) |
 | Production hardening / server plan | [`roadmap/PRODUCTION_HARDENING_ROADMAP.md`](roadmap/PRODUCTION_HARDENING_ROADMAP.md), [`roadmap/PRODUCTION_SERVER_PLAN.md`](roadmap/PRODUCTION_SERVER_PLAN.md) |
 
-The transactional foundation is complete and solid (SI → SSI → true
-serializability, single-batch + interactive, crash-safe, property-covered),
-all on one backend-agnostic dumb-KV foundation. On top of it the engine
-("M"), the complete DDL surface, the enforced access fabric, validators +
-CAS, and the changefeed are now done. The natural next steps are
-**consolidate (quality) → measure/accelerate (perf, covering index) →
-build the "I" (replication → P2P)** — ordered in
+The foundation (storage + MVCC + transactions + protocol + security + WASM +
+DDL + access + changefeed + temporal + covering index + duplex + TS client) is
+complete and solid. The natural next step is **Movement C — build the "I"
+(subscriptions → replication → P2P)** — ordered in
 [`roadmap/PLAN.md`](roadmap/PLAN.md).
 
 ---
 
-_Maintained as the project's state snapshot. Last updated 2026-06-05 after
-the DDL → access → write-lifecycle arc (`016d68b`..`a620115`): complete
-DDL, enforced Shomer, validators + CAS, changefeed. Prior: Phase A
-hardening + Phase B (interactive tx) + Phase C (phantom protection)._
+_Maintained as the project's state snapshot. Last updated 2026-06-10 after
+the temporal + single-log MVCC, covering index, Level-3 pessimistic locking,
+stored procedures, nested batches, duplex/rid-demux, TypeScript client,
+shamir-tunables, WASM slimming, perf, and internal-refactor arc
+(`a620115`..`f80070b`): Movement A (consolidate) and Movement B (perf) are
+DONE; Movement C (the "I" — subscriptions → replication → P2P) is the live
+frontier. Prior: DDL → access → write-lifecycle arc (`016d68b`..`a620115`)._
