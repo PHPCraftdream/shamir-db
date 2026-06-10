@@ -113,5 +113,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "db_handler_rps"
 harness = false
 
+[[bench]]
+name = "duplex_throughput"
+harness = false
+
 [lints.clippy]
 all = "warn"
