@@ -125,6 +125,11 @@ serialisation for unique-index validation).
   readability.
 * `mod.rs` files contain re-exports only. Types and logic live in
   sibling files.
+* **One file = one primary export.** Each `.rs` file (except `mod.rs`)
+  owns one struct, enum, trait, or closely-coupled group (e.g. a trait +
+  its blanket impl). If a file defines multiple unrelated public types,
+  split them into separate files. This keeps diffs atomic and
+  `git blame` meaningful.
 * No new files unless the task genuinely needs them. Prefer extending
   an existing module.
 
@@ -196,6 +201,28 @@ crates/shamir-types/src/types/
     ├── value_tests.rs
     └── record_id_tests.rs
 ```
+
+---
+
+## 📦 Imports at the top
+
+All `use` statements live in the **file header** (or the enclosing
+module's header), never inside a function or block body. A function that
+reaches for `use std::io::Write;` mid-body must instead have that import
+hoisted to the top of the file.
+
+Documented exceptions — keep the local `use` only when hoisting would
+break or mislead:
+
+* **`use super::*;` inside a `#[cfg(test)] mod tests`** — module-local by
+  design (and such blocks are themselves being migrated to `tests/`).
+* **A trait imported solely to call one method, where a top-level import
+  would collide** with another trait of the same name in scope. Add a
+  one-line comment stating the collision.
+* **Macro-generated or `cfg`-gated bodies** where the import is only valid
+  under a specific `cfg` and hoisting would pull it into the wrong scope.
+
+Everywhere else → top of file.
 
 ---
 
