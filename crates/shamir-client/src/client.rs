@@ -1,29 +1,43 @@
-//! Async TLS+SCRAM client.
+//! Async TLS+SCRAM client with rid-demux multiplexer.
+//!
+//! After the handshake a background reader task owns the `ReadHalf` and
+//! routes every incoming frame to the caller that is waiting for its
+//! `request_id` via a `oneshot` channel stored in a pending map.
+//!
+//! Concurrent callers can issue multiple requests in flight simultaneously:
+//! each `execute`/`ping` call registers its oneshot **before** writing to the
+//! socket, sends, then awaits the oneshot independently. Responses arrive in
+//! completion order (not send order); the reader task matches each by `rid`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::io::{split, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{split, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::TlsConnector;
 use zeroize::{Zeroize, Zeroizing};
 
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
-use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
+use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
-use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
+use shamir_transport_tcp::framing::{read_frame, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::error::ClientError;
-use crate::wire_frames::{WireAuthInit, WireAuthOk, WireChallenge, WireClientProof};
+use crate::wire_frames::{
+    WireAuthInit, WireAuthOk, WireChallenge, WireClientProof, WireResumeInit, WireResumeOk,
+};
 
 /// Connection parameters.
 pub struct ConnectOptions {
@@ -48,16 +62,150 @@ pub struct ConnectOptions {
     pub trusted_pin: Option<[u8; 32]>,
 }
 
-/// Connected, authenticated client. One TLS stream + one session.
+/// Options for fast session resumption via a previously-issued ticket.
 ///
-/// Roundtrips are serialized via internal mutexes — call sites can
-/// share `&Client` across tasks; each `execute`/`ping` runs to
-/// completion before the next starts. (Multi-in-flight pipelining
-/// would require either request_id-keyed dispatcher or a per-call
-/// stream split; not needed today.)
+/// Obtain the ticket and `pinned_hash` from a prior [`Client::connect`] via
+/// [`Client::resumption_ticket`] and [`Client::server_pub_key_pin`].
+pub struct ResumeOptions {
+    /// Server address (host:port).
+    pub addr: SocketAddr,
+    /// SNI hostname for TLS.
+    pub server_name: String,
+    /// Resumption ticket bytes obtained from a prior session.
+    pub ticket: Vec<u8>,
+    /// `SHA256(server_ed25519_pub_key)` pinned during the initial connection.
+    /// The resumed session will carry the same pin.
+    pub pinned_hash: [u8; 32],
+}
+
+/// Result of a demux decode: either a response payload or a transport-level
+/// error string, both tagged with the correlation id.
+enum DemuxResult {
+    /// Success envelope: `(rid, payload_bytes)`.
+    Response { rid: Option<u32>, payload: Vec<u8> },
+    /// Error envelope: `(rid, error_string)`.
+    Error { rid: Option<u32>, error: String },
+}
+
+/// Decode one raw frame into a [`DemuxResult`].
+///
+/// Strategy: try `ResponseEnvelope` first (contains `res` bytes field);
+/// on failure try `ErrorEnvelope` (contains `error` string field).
+/// If both fail, return `None` so the reader task can log-and-drop.
+fn decode_frame(buf: &[u8]) -> Option<DemuxResult> {
+    if let Ok(env) = ResponseEnvelope::from_msgpack(buf) {
+        return Some(DemuxResult::Response {
+            rid: env.request_id,
+            payload: env.res,
+        });
+    }
+    if let Ok(env) = ErrorEnvelope::from_msgpack(buf) {
+        return Some(DemuxResult::Error {
+            rid: env.request_id,
+            error: env.error,
+        });
+    }
+    None
+}
+
+/// Per-pending-request slot: either resolved with response bytes or with a
+/// transport-level error.
+pub(crate) type PendingSender = oneshot::Sender<Result<Vec<u8>, ClientError>>;
+pub(crate) type PendingMap = Arc<StdMutex<HashMap<u32, PendingSender>>>;
+
+/// Background reader loop.  Owns `ReadHalf`; demuxes frames to pending waiters.
+///
+/// On EOF or I/O error: marks `closed`, drains `pending` (sends
+/// `ConnectionClosed` to every waiter), then exits.
+pub(crate) async fn reader_task<R>(mut reader: R, pending: PendingMap, closed: Arc<AtomicBool>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    loop {
+        let buf = match read_frame(&mut reader, MAX_FRAME_SIZE_DEFAULT).await {
+            Ok(b) => b,
+            Err(FrameError::PeerClose) => {
+                // Graceful close from server.
+                break;
+            }
+            Err(e) => {
+                tracing::debug!("reader_task: read_frame error: {e}");
+                break;
+            }
+        };
+
+        let result = match decode_frame(&buf) {
+            Some(r) => r,
+            None => {
+                tracing::debug!(
+                    "reader_task: could not decode frame ({} bytes), dropping",
+                    buf.len()
+                );
+                continue;
+            }
+        };
+
+        let (rid, outcome) = match result {
+            DemuxResult::Response { rid, payload } => (rid, Ok(payload)),
+            DemuxResult::Error { rid, error } => (
+                rid,
+                Err(ClientError::Protocol(format!(
+                    "server error envelope: {error}"
+                ))),
+            ),
+        };
+
+        let rid = match rid {
+            Some(r) => r,
+            None => {
+                // No rid — future push/subscription frame; ignore for now.
+                tracing::debug!("reader_task: frame without rid, dropping");
+                continue;
+            }
+        };
+
+        let sender = {
+            // SAFETY of lock: std::sync::Mutex, no .await while held.
+            let mut map = pending.lock().unwrap_or_else(|p| p.into_inner());
+            map.remove(&rid)
+        };
+
+        match sender {
+            Some(tx) => {
+                // Ignore the error: the waiter may have been cancelled.
+                let _ = tx.send(outcome);
+            }
+            None => {
+                // Late response for a cancelled/timed-out request.
+                tracing::debug!("reader_task: no waiter for rid={rid}, dropping");
+            }
+        }
+    }
+
+    // Connection is dead — mark closed and drain pending map.
+    closed.store(true, Ordering::Release);
+    let waiters: Vec<PendingSender> = {
+        let mut map = pending.lock().unwrap_or_else(|p| p.into_inner());
+        map.drain().map(|(_, tx)| tx).collect()
+    };
+    for tx in waiters {
+        let _ = tx.send(Err(ClientError::ConnectionClosed));
+    }
+}
+
+/// Connected, authenticated client.
+///
+/// Concurrent calls to `execute`/`ping`/`create_scram_user` are fully
+/// supported: multiple requests can be in flight simultaneously on the same
+/// connection.  The server may send responses in any order (completion order,
+/// not send order); a background reader task correlates each response to its
+/// caller via the `rid` (request-id) field of the wire envelopes.
+///
+/// Each public method registers a `oneshot` receiver in the pending map
+/// **before** writing to the socket (avoiding a race with a very fast server),
+/// then awaits its own channel independently.
 pub struct Client {
     write: tokio::sync::Mutex<WriteHalf<TlsStream<TcpStream>>>,
-    read: tokio::sync::Mutex<ReadHalf<TlsStream<TcpStream>>>,
     session_id: [u8; 32],
     pinned_hash: [u8; 32],
     expires_at_ns: u64,
@@ -66,6 +214,12 @@ pub struct Client {
     resumption_ticket: Option<Zeroizing<Vec<u8>>>,
     resumption_expires_at_ns: Option<u64>,
     next_request_id: AtomicU32,
+    /// Outstanding oneshot senders keyed by request_id.
+    pending: PendingMap,
+    /// True once the reader task has encountered EOF or I/O error.
+    closed: Arc<AtomicBool>,
+    /// §B21: JoinHandle is stored so we can abort on close/drop.
+    reader_handle: Option<JoinHandle<()>>,
 }
 
 impl Client {
@@ -215,8 +369,8 @@ impl Client {
         // TOFU pin capture: if user supplied trusted_pin we already
         // pre-loaded it; otherwise the callback fires once with the
         // discovered pin.
-        let pin_capture: Arc<std::sync::Mutex<Option<[u8; 32]>>> =
-            Arc::new(std::sync::Mutex::new(opts.trusted_pin));
+        let pin_capture: Arc<StdMutex<Option<[u8; 32]>>> =
+            Arc::new(StdMutex::new(opts.trusted_pin));
         let pin_for_cb = pin_capture.clone();
 
         let success = hs
@@ -238,15 +392,110 @@ impl Client {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .expect("either trusted_pin pre-set or TOFU callback fired");
 
+        // ---- Spawn background reader ----
+        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+
+        // §B21: store JoinHandle — never drop silently.
+        let reader_handle = tokio::spawn(reader_task(r, pending.clone(), closed.clone()));
+
         Ok(Self {
             write: tokio::sync::Mutex::new(w),
-            read: tokio::sync::Mutex::new(r),
             session_id: success.session_id,
             pinned_hash,
             expires_at_ns: success.expires_at_ns,
             resumption_ticket: resumption_ticket.map(Zeroizing::new),
             resumption_expires_at_ns,
             next_request_id: AtomicU32::new(1),
+            pending,
+            closed,
+            reader_handle: Some(reader_handle),
+        })
+    }
+
+    /// Resume a session using a previously-issued resumption ticket, bypassing
+    /// the full Argon2id SCRAM handshake.
+    ///
+    /// # Flow
+    /// 1. Open a new TLS connection (same as `connect`).
+    /// 2. Send [`WireResumeInit`] with the ticket, a fresh 32-byte nonce, and
+    ///    the TLS-exporter channel-binding mode.
+    /// 3. Read [`WireResumeOk`] — the server validates the ticket and responds
+    ///    with a new session id and optionally a rotated ticket.
+    /// 4. Spawn background reader task; return ready `Client`.
+    pub async fn resume(opts: ResumeOptions) -> Result<Self, ClientError> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // ---- TLS ----
+        let client_cfg = make_client_config_no_ca();
+        let connector = TlsConnector::from(client_cfg);
+        let server_name = rustls::pki_types::ServerName::try_from(opts.server_name.clone())
+            .map_err(|e| ClientError::Tls(e.to_string()))?;
+        let tcp = TcpStream::connect(opts.addr).await?;
+        let tls = connector.connect(server_name, tcp).await?;
+        // Verify TLS exporter is available (required for channel-binding). The
+        // exporter value will be used by the server to verify binding; the
+        // client sends it implicitly via binding_mode in WireResumeInit.
+        let _exporter = extract_tls_exporter(&tls)
+            .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
+
+        // ---- Generate 32-byte client nonce ----
+        let mut client_nonce = [0u8; 32];
+        {
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut client_nonce);
+        }
+
+        let (mut r, mut w) = split(tls);
+
+        // ---- Send ResumeInit ----
+        let init_wire = WireResumeInit {
+            ticket: opts.ticket,
+            client_nonce: client_nonce.to_vec(),
+            binding_mode: BindingMode::TlsExporter as u8,
+        };
+        write_frame(&mut w, &rmp_serde::to_vec(&init_wire)?)
+            .await
+            .map_err(|e| ClientError::Transport(format!("send resume_init: {e}")))?;
+
+        // ---- Read ResumeOk ----
+        let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .map_err(|e| ClientError::Transport(format!("read resume_ok: {e}")))?;
+        let ok_wire: WireResumeOk = rmp_serde::from_slice(&ok_bytes)?;
+
+        let session_id: [u8; 32] = ok_wire
+            .session_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| ClientError::Protocol("resume: session_id size".into()))?;
+
+        let (resumption_ticket, resumption_expires_at_ns) = if ok_wire.resumption_ticket.is_empty()
+        {
+            (None, None)
+        } else {
+            (
+                Some(ok_wire.resumption_ticket),
+                Some(ok_wire.resumption_expires_at_ns),
+            )
+        };
+
+        // ---- Spawn background reader ----
+        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let reader_handle = tokio::spawn(reader_task(r, pending.clone(), closed.clone()));
+
+        Ok(Self {
+            write: tokio::sync::Mutex::new(w),
+            session_id,
+            pinned_hash: opts.pinned_hash,
+            expires_at_ns: ok_wire.expires_at_ns,
+            resumption_ticket: resumption_ticket.map(Zeroizing::new),
+            resumption_expires_at_ns,
+            next_request_id: AtomicU32::new(1),
+            pending,
+            closed,
+            reader_handle: Some(reader_handle),
         })
     }
 
@@ -336,53 +585,85 @@ impl Client {
         }
     }
 
-    /// Send a request and read its matching response. Holds both
-    /// halves' locks for the duration — i.e. requests serialize per
-    /// `Client` instance.
+    /// Send a request and route the response via the rid-demux pending map.
+    ///
+    /// 1. Allocate rid and register the oneshot **before** writing (no race
+    ///    with a fast server response).
+    /// 2. Take the write mutex only for the duration of `write_frame`.
+    /// 3. Await the oneshot; the reader task delivers the result.
     async fn roundtrip(&self, req: &DbRequest) -> Result<DbResponse, ClientError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(ClientError::ConnectionClosed);
+        }
+
         let req_bytes = rmp_serde::to_vec_named(req)?;
-        let rid = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let rid = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let envelope = RequestEnvelope::new(self.session_id, Some(rid), req_bytes);
         let envelope_bytes = envelope
             .to_msgpack()
             .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")))?;
 
-        let mut write = self.write.lock().await;
-        let mut read = self.read.lock().await;
-
-        write_frame(&mut *write, &envelope_bytes)
-            .await
-            .map_err(|e| ClientError::Transport(format!("send: {e}")))?;
-
-        let resp_bytes = read_frame(&mut *read, MAX_FRAME_SIZE_DEFAULT)
-            .await
-            .map_err(|e| ClientError::Transport(format!("recv: {e}")))?;
-
-        let resp_envelope = ResponseEnvelope::from_msgpack(&resp_bytes)
-            .map_err(|e| ClientError::Protocol(format!("envelope decode: {e}")))?;
-
-        if resp_envelope.request_id != Some(rid) {
-            return Err(ClientError::RequestIdMismatch {
-                sent: Some(rid),
-                got: resp_envelope.request_id,
-            });
+        // Register BEFORE writing — avoid a race where the server sends the
+        // response before we reach the oneshot registration.
+        let (tx, rx) = oneshot::channel();
+        {
+            // §B2 audit: std::sync::Mutex, no .await while held — fine.
+            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            map.insert(rid, tx);
         }
 
-        let response: DbResponse = rmp_serde::from_slice(&resp_envelope.res)?;
-        if let DbResponse::Error { code, message } = &response {
-            return Err(ClientError::Db {
-                code: code.clone(),
-                message: message.clone(),
-            });
+        // Send the request.  If write fails, remove the pending entry and
+        // propagate the error so the caller is not left waiting on a dead rx.
+        {
+            let mut write = self.write.lock().await;
+            if let Err(e) = write_frame(&mut *write, &envelope_bytes).await {
+                // Clean up pending entry.
+                let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+                map.remove(&rid);
+                return Err(ClientError::Transport(format!("send: {e}")));
+            }
         }
-        Ok(response)
+
+        // Await our oneshot.  The reader task delivers Ok(payload) or Err.
+        match rx.await {
+            Ok(Ok(payload)) => {
+                let response: DbResponse = rmp_serde::from_slice(&payload)?;
+                if let DbResponse::Error { code, message } = &response {
+                    return Err(ClientError::Db {
+                        code: code.clone(),
+                        message: message.clone(),
+                    });
+                }
+                Ok(response)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                // oneshot sender was dropped — reader task died.
+                Err(ClientError::ConnectionClosed)
+            }
+        }
     }
 
-    /// Close the TLS write half cleanly. The read half drops with the
-    /// `Client`. After this, the session is dead on the server too
+    /// Close the TLS write half cleanly and abort the reader task.
+    ///
+    /// After this call the session is dead on the server side too
     /// (TCP close → session evicted).
-    pub async fn close(self) {
+    pub async fn close(mut self) {
+        // Abort reader task first — then shut down write half.
+        if let Some(handle) = self.reader_handle.take() {
+            handle.abort();
+        }
         let mut w = self.write.lock().await;
         let _ = AsyncWriteExt::shutdown(&mut *w).await;
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        // §B21: abort the reader task when the Client drops without an
+        // explicit `close()` call so the task does not outlive the Client.
+        if let Some(handle) = self.reader_handle.take() {
+            handle.abort();
+        }
     }
 }
