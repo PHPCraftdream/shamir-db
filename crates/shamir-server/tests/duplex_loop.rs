@@ -124,6 +124,7 @@ fn make_ctx_with_session(
 
     let resume = Arc::new(ResumeConfig::new([0x44u8; 32], None, false, false));
 
+    let counters = Arc::new(shamir_connect::server::resume::InMemoryConsumedCounters::new());
     let ctx = shamir_server::connection::ConnectionContext::new(
         Arc::new(identity),
         keypair,
@@ -136,6 +137,7 @@ fn make_ctx_with_session(
         Arc::new(Argon2Semaphore::with_capacity(4)),
         audit,
         resume,
+        counters,
         Arc::new(StubHandler),
         BindingMode::TlsExporter,
         TransportKind::Tcp,

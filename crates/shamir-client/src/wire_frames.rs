@@ -37,6 +37,28 @@ pub(crate) struct WireClientProof {
     pub client_proof: Vec<u8>,
 }
 
+/// Sent by the client as the first frame when resuming a session via ticket.
+#[derive(Serialize)]
+pub(crate) struct WireResumeInit {
+    #[serde(with = "serde_bytes")]
+    pub ticket: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub client_nonce: Vec<u8>,
+    pub binding_mode: u8,
+}
+
+/// Server response to a successful [`WireResumeInit`].
+#[derive(Deserialize)]
+pub(crate) struct WireResumeOk {
+    #[serde(with = "serde_bytes")]
+    pub session_id: Vec<u8>,
+    pub expires_at_ns: u64,
+    #[serde(default, with = "serde_bytes")]
+    pub resumption_ticket: Vec<u8>,
+    #[serde(default)]
+    pub resumption_expires_at_ns: u64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct WireAuthOk {
     #[serde(with = "serde_bytes")]

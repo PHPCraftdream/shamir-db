@@ -60,6 +60,9 @@ export interface HandshakeResult {
   sessionId: Uint8Array;
   serverPubKey: Uint8Array;
   expiresAtNs: bigint;
+  /** Optional resumption ticket for fast reconnection (if server issued one). */
+  resumptionTicket?: Uint8Array;
+  resumptionExpiresAtNs?: bigint;
 }
 
 /**
@@ -159,5 +162,14 @@ export async function runHandshake(
   }
 
   const expiresAtNs = BigInt(okRaw[OK_EXPIRES_AT_NS] as number | bigint);
-  return { sessionId, serverPubKey, expiresAtNs };
+
+  // Optional trailing fields: resumption_ticket, resumption_expires_at_ns
+  const resumptionTicket =
+    okRaw[5] instanceof Uint8Array ? okRaw[5] : undefined;
+  const resumptionExpiresAtNs =
+    okRaw[6] !== undefined && okRaw[6] !== null
+      ? BigInt(okRaw[6] as number | bigint)
+      : undefined;
+
+  return { sessionId, serverPubKey, expiresAtNs, resumptionTicket, resumptionExpiresAtNs };
 }
