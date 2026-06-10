@@ -1,5 +1,5 @@
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info_item::IndexInfoItem;
 use shamir_types::codecs::basic::bincode;
 
 #[test]

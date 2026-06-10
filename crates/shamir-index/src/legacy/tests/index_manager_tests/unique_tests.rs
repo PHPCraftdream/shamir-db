@@ -1,7 +1,7 @@
 use super::helpers::{create_manager, create_test_value};
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_manager::IndexManager;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

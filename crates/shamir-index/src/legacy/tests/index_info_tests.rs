@@ -1,7 +1,7 @@
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info::IndexInfo;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_status::IndexStatus;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info::IndexInfo;
+use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_status::IndexStatus;
 use shamir_types::codecs::basic::bincode;
 
 #[test]

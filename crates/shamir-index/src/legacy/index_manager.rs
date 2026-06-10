@@ -14,16 +14,15 @@
 //! Для быстрой проверки наличия индексов используются атомарные флаги,
 //! что позволяет избежать блокировок на чтение в большинстве случаев.
 
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info::IndexInfo;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_keys::{
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info::IndexInfo;
+use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_keys::{
     build_index_key, build_index_key_from_refs, build_posting_key, extract_index_values,
     extract_index_values_ref,
 };
-use crate::index::index_record_key::IndexRecordKey;
-use crate::index2::write_ops::IndexWriteOp;
-use crate::meta::MetaKey;
+use crate::legacy::index_record_key::IndexRecordKey;
+use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use dashmap::DashMap;
 use shamir_storage::error::DbResult;
@@ -126,8 +125,8 @@ impl IndexManager {
         info_store: Arc<dyn Store>,
     ) -> Result<Self, shamir_storage::error::DbError> {
         // Ключи для хранения метаданных индексов в служебном хранилище
-        let indexes_key = MetaKey::LegacyIndexes.as_record_id().to_bytes();
-        let indexes_unique_key = MetaKey::LegacyIndexesUnique.as_record_id().to_bytes();
+        let indexes_key = RecordId::system("indexes").to_bytes();
+        let indexes_unique_key = RecordId::system("indexes_unique").to_bytes();
 
         // Загружаем обычные индексы или создаём пустую структуру
         let indexes = match info_store.get(indexes_key.clone()).await {
@@ -366,7 +365,7 @@ impl IndexManager {
     /// Сериализует напрямую без клонирования — IndexInfo::serialize конвертирует
     /// DashMap в BTreeMap внутри себя.
     pub(super) async fn save_index_info(&self) -> DbResult<()> {
-        let indexes_key = MetaKey::LegacyIndexes.as_record_id().to_bytes();
+        let indexes_key = RecordId::system("indexes").to_bytes();
         let bytes = bincode::serialize(&*self.indexes)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         self.info_store.set(indexes_key, Bytes::from(bytes)).await?;

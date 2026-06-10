@@ -1,4 +1,4 @@
-use crate::index::index_record_key::IndexRecordKey;
+use crate::legacy::index_record_key::IndexRecordKey;
 use bytes::Bytes;
 
 #[test]

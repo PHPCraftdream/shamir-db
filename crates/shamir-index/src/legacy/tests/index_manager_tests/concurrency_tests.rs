@@ -1,7 +1,7 @@
 use super::helpers::{create_manager, create_test_value};
-use crate::index::index_definition::IndexDefinition;
-use crate::index::index_info_item::IndexInfoItem;
-use crate::index::index_manager::IndexManager;
+use crate::legacy::index_definition::IndexDefinition;
+use crate::legacy::index_info_item::IndexInfoItem;
+use crate::legacy::index_manager::IndexManager;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
@@ -246,7 +246,7 @@ async fn test_concurrent_reads_with_index() {
 
 #[tokio::test]
 async fn plan_record_created_returns_postings() {
-    use crate::index2::write_ops::IndexWriteOp;
+    use crate::write_ops::IndexWriteOp;
 
     let (_, _, manager) = create_manager();
     let idx1 = IndexDefinition::new(2001, vec![IndexInfoItem::new(vec![1])]);
@@ -279,7 +279,7 @@ async fn plan_record_created_returns_postings() {
 
 #[tokio::test]
 async fn plan_record_deleted_returns_removes() {
-    use crate::index2::write_ops::IndexWriteOp;
+    use crate::write_ops::IndexWriteOp;
 
     let (_, _, manager) = create_manager();
     let idx = IndexDefinition::new(3001, vec![IndexInfoItem::new(vec![1])]);
@@ -329,10 +329,10 @@ async fn equivalence_plan_apply_vs_direct() {
     assert!(!ops.is_empty());
     for op in &ops {
         match op {
-            crate::index2::write_ops::IndexWriteOp::SetPosting { key, value } => {
+            crate::write_ops::IndexWriteOp::SetPosting { key, value } => {
                 info2.set(key.clone(), value.clone()).await.unwrap();
             }
-            crate::index2::write_ops::IndexWriteOp::RemovePosting { key } => {
+            crate::write_ops::IndexWriteOp::RemovePosting { key } => {
                 let _ = info2.remove(key.clone()).await;
             }
             _ => {}
