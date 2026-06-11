@@ -1,11 +1,9 @@
-use regex::Regex;
-use shamir_types::core::interner::Interner;
-use smallvec::SmallVec;
-
 use super::filter_node::{CompareOp, FilterNode};
 use super::fts::like_pattern_to_regex;
-use super::resolve::{filter_value_to_inner, intern_field_path};
+use super::resolve::{filter_value_to_inner, intern_field_path, intern_field_path_compact};
 use crate::query::filter::{Filter, FilterValue};
+use regex::Regex;
+use shamir_types::core::interner::Interner;
 
 /// Compile a Filter AST into a tree of `FilterNode` (static dispatch).
 ///
@@ -35,24 +33,20 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         ),
         Filter::Not { filter } => FilterNode::Not(Box::new(compile_filter(filter, interner))),
 
-        Filter::IsNull { field } => match intern_field_path(field, interner) {
-            Some(path) => FilterNode::IsNull {
-                field_path: SmallVec::from_vec(path),
-            },
+        Filter::IsNull { field } => match intern_field_path_compact(field, interner) {
+            Some(path) => FilterNode::IsNull { field_path: path },
             None => FilterNode::True,
         },
-        Filter::IsNotNull { field } => match intern_field_path(field, interner) {
-            Some(path) => FilterNode::IsNotNull {
-                field_path: SmallVec::from_vec(path),
-            },
+        Filter::IsNotNull { field } => match intern_field_path_compact(field, interner) {
+            Some(path) => FilterNode::IsNotNull { field_path: path },
             None => FilterNode::False,
         },
 
-        Filter::In { field, values } => match intern_field_path(field, interner) {
+        Filter::In { field, values } => match intern_field_path_compact(field, interner) {
             Some(path) => {
                 let pre_resolved = values.iter().map(filter_value_to_inner).collect();
                 FilterNode::In {
-                    field_path: SmallVec::from_vec(path),
+                    field_path: path,
                     values: values.clone(),
                     pre_resolved,
                     negate: false,
@@ -60,11 +54,11 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             }
             None => FilterNode::False,
         },
-        Filter::NotIn { field, values } => match intern_field_path(field, interner) {
+        Filter::NotIn { field, values } => match intern_field_path_compact(field, interner) {
             Some(path) => {
                 let pre_resolved = values.iter().map(filter_value_to_inner).collect();
                 FilterNode::In {
-                    field_path: SmallVec::from_vec(path),
+                    field_path: path,
                     values: values.clone(),
                     pre_resolved,
                     negate: true,
@@ -73,61 +67,61 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             None => FilterNode::True,
         },
 
-        Filter::Like { field, pattern } => match intern_field_path(field, interner) {
+        Filter::Like { field, pattern } => match intern_field_path_compact(field, interner) {
             Some(path) => match like_pattern_to_regex(pattern, false) {
                 Some(regex) => FilterNode::Like {
-                    field_path: SmallVec::from_vec(path),
+                    field_path: path,
                     regex,
                 },
                 None => FilterNode::False,
             },
             None => FilterNode::False,
         },
-        Filter::ILike { field, pattern } => match intern_field_path(field, interner) {
+        Filter::ILike { field, pattern } => match intern_field_path_compact(field, interner) {
             Some(path) => match like_pattern_to_regex(pattern, true) {
                 Some(regex) => FilterNode::Like {
-                    field_path: SmallVec::from_vec(path),
+                    field_path: path,
                     regex,
                 },
                 None => FilterNode::False,
             },
             None => FilterNode::False,
         },
-        Filter::Regex { field, pattern } => match intern_field_path(field, interner) {
+        Filter::Regex { field, pattern } => match intern_field_path_compact(field, interner) {
             Some(path) => match Regex::new(pattern) {
                 Ok(regex) => FilterNode::Regex {
-                    field_path: SmallVec::from_vec(path),
+                    field_path: path,
                     regex,
                 },
                 Err(_) => FilterNode::False,
             },
             None => FilterNode::False,
         },
-        Filter::Contains { field, value } => match intern_field_path(field, interner) {
+        Filter::Contains { field, value } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::Contains {
-                field_path: SmallVec::from_vec(path),
+                field_path: path,
                 pre_resolved: filter_value_to_inner(value),
                 value: value.clone(),
             },
             None => FilterNode::False,
         },
-        Filter::ContainsAny { field, values } => match intern_field_path(field, interner) {
+        Filter::ContainsAny { field, values } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::ContainsAny {
-                field_path: SmallVec::from_vec(path),
+                field_path: path,
                 values: values.clone(),
             },
             None => FilterNode::False,
         },
-        Filter::ContainsAll { field, values } => match intern_field_path(field, interner) {
+        Filter::ContainsAll { field, values } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::ContainsAll {
-                field_path: SmallVec::from_vec(path),
+                field_path: path,
                 values: values.clone(),
             },
             None => FilterNode::False,
         },
-        Filter::Between { field, from, to } => match intern_field_path(field, interner) {
+        Filter::Between { field, from, to } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::Between {
-                field_path: SmallVec::from_vec(path),
+                field_path: path,
                 pre_from: filter_value_to_inner(from),
                 pre_to: filter_value_to_inner(to),
                 from: from.clone(),
@@ -135,16 +129,12 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             },
             None => FilterNode::False,
         },
-        Filter::Exists { field } => match intern_field_path(field, interner) {
-            Some(path) => FilterNode::Exists {
-                field_path: SmallVec::from_vec(path),
-            },
+        Filter::Exists { field } => match intern_field_path_compact(field, interner) {
+            Some(path) => FilterNode::Exists { field_path: path },
             None => FilterNode::False,
         },
-        Filter::NotExists { field } => match intern_field_path(field, interner) {
-            Some(path) => FilterNode::NotExists {
-                field_path: SmallVec::from_vec(path),
-            },
+        Filter::NotExists { field } => match intern_field_path_compact(field, interner) {
+            Some(path) => FilterNode::NotExists { field_path: path },
             None => FilterNode::True,
         },
 
@@ -153,9 +143,9 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::VectorSimilarity { .. } => FilterNode::True,
 
         // FTS brute-force fallback (when no FTS index exists).
-        Filter::Fts { field, query, mode } => match intern_field_path(field, interner) {
+        Filter::Fts { field, query, mode } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::FtsMatch {
-                field_path: SmallVec::from_vec(path),
+                field_path: path,
                 query_tokens: query.split_whitespace().map(|w| w.to_lowercase()).collect(),
                 mode_and: mode != "or",
             },
@@ -217,9 +207,9 @@ pub(super) fn compile_compare(
     op: CompareOp,
     interner: &Interner,
 ) -> FilterNode {
-    match intern_field_path(field, interner) {
+    match intern_field_path_compact(field, interner) {
         Some(path) => FilterNode::Compare {
-            field_path: SmallVec::from_vec(path),
+            field_path: path,
             pre_resolved: filter_value_to_inner(value),
             value: value.clone(),
             op,
