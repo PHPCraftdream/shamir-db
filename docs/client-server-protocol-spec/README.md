@@ -32,6 +32,7 @@
 ### Core (нормативные)
 - **[AUTH_PROTOCOL.md](AUTH_PROTOCOL.md)** — handshake, key derivation, errors. Transport-agnostic.
 - **[SESSION_RESUMPTION.md](SESSION_RESUMPTION.md)** — fast reconnect, anti-downgrade rules.
+- **[SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)** — live subscriptions v1.1: SubscribeOp/UnsubscribeOp, PushEnvelope, grant rejection codes, filter contract, early-buffer rule.
 
 ### Reference (informative)
 - **[SECURITY_MODEL.md](SECURITY_MODEL.md)** — adversary model, threat coverage, non-guarantees.
