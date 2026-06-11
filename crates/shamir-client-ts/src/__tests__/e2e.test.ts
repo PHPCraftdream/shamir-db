@@ -1333,21 +1333,29 @@ describe.skipIf(!SERVER_AVAILABLE)(
         }),
       );
 
+      // Hold ONE next() across the whole assertion. Each next() is its own
+      // waiter; if we timed it out and then called next() again, the brought-
+      // in event would be delivered to the abandoned waiter — not the new one.
+      const pending = subs.messages.next();
+
       // Insert a NON-matching row. The server-side filter drops the event
       // before any push frame is emitted — the wire stays empty.
       await db.batch('noise')
         .add('i', write.insert('messages', [{ id: 'n1', thread_id: 7, body: 'noise' }]))
         .run();
 
-      const none = await withTimeout(subs.messages.next(), 300);
-      expect(none).toBeNull(); // no frame within 300 ms
+      const none = await Promise.race([
+        pending.then((v) => ({ resolved: true as const, v })),
+        new Promise<{ resolved: false }>((r) => setTimeout(() => r({ resolved: false }), 300)),
+      ]);
+      expect(none.resolved).toBe(false); // no frame within 300 ms
 
-      // Now insert a matching row — it must arrive.
+      // Now insert a matching row — it must arrive on the SAME pending next().
       await db.batch('real')
         .add('i', write.insert('messages', [{ id: 'r1', thread_id: 42, body: 'real' }]))
         .run();
 
-      const ev = await withTimeout(subs.messages.next(), 1500);
+      const ev = await withTimeout(pending, 1500);
       expect(ev).not.toBeNull();
       expect(ev!.value.kind).toBe('event');
 
