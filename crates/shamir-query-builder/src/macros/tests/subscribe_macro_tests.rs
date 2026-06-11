@@ -110,6 +110,27 @@ fn deliver_keys() {
 }
 
 #[test]
+fn qualified_path_invocation() {
+    // Invoke via `$crate::subscribe!` path to exercise the recursion-under-
+    // qualification fix (internal `@event` arms must resolve through `$crate`).
+    let from_macro = crate::subscribe! {
+        source: ("main", "users"),
+        where: filter_mod::eq("x", 1),
+        on: any,
+    };
+
+    let expected = Subscribe::source(
+        SourceBuilder::table(TableRef::with_repo("main", "users"))
+            .filter(filter_mod::eq("x", 1))
+            .events(EventMask::All)
+            .build(),
+    )
+    .build();
+
+    assert_eq_wire(&from_macro, &expected);
+}
+
+#[test]
 fn full_form() {
     let from_macro = subscribe! {
         source: ("main", "messages"),

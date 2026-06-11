@@ -102,7 +102,7 @@ macro_rules! subscribe {
             shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
-        $(.events(subscribe!(@event $event)))?
+        $(.events($crate::subscribe!(@event $event)))?
         .build();
 
         #[allow(unused_mut)]
@@ -125,7 +125,7 @@ macro_rules! subscribe {
             shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
-        $(.events(subscribe!(@event $event)))?
+        $(.events($crate::subscribe!(@event $event)))?
         .build();
 
         #[allow(unused_mut)]
@@ -149,7 +149,7 @@ macro_rules! subscribe {
             shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
-        $(.events(subscribe!(@event $event)))?
+        $(.events($crate::subscribe!(@event $event)))?
         .build();
 
         #[allow(unused_mut)]
@@ -176,7 +176,7 @@ macro_rules! subscribe {
             shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
-        $(.events(subscribe!(@event $event)))?
+        $(.events($crate::subscribe!(@event $event)))?
         .build();
 
         #[allow(unused_mut)]

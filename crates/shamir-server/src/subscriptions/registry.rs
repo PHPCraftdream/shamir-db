@@ -16,9 +16,15 @@ impl Drop for ActiveSubscription {
 
 /// Per-connection subscription registry.
 /// Uses `scc::HashMap` for lock-free concurrent access.
-pub(crate) struct SubscriptionRegistry {
+pub struct SubscriptionRegistry {
     subs: SccHashMap<u64, ActiveSubscription>,
     next_id: AtomicU64,
+}
+
+impl Default for SubscriptionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SubscriptionRegistry {
@@ -33,7 +39,7 @@ impl SubscriptionRegistry {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn insert(&self, id: u64, sub: ActiveSubscription) {
+    pub(crate) fn insert(&self, id: u64, sub: ActiveSubscription) {
         let _ = self.subs.insert(id, sub);
     }
 

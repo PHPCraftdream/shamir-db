@@ -1,7 +1,7 @@
 pub(crate) mod bridge;
-pub(crate) mod registry;
+pub mod registry;
 
-pub(crate) use registry::SubscriptionRegistry;
+pub use registry::SubscriptionRegistry;
 
 #[cfg(test)]
 mod tests;

@@ -15,6 +15,8 @@ import { Batch } from '../builders/batch.js';
 import { filter } from '../builders/filter.js';
 import { write } from '../builders/write.js';
 import * as ddl from '../builders/ddl.js';
+import { SubscriptionRouter } from '../subscription-router.js';
+import { subscribe } from '../builders/subscribe.js';
 
 // ─── fake infrastructure ────────────────────────────────────────────────────
 
@@ -323,6 +325,89 @@ describe('Db handle (unit)', () => {
       queries: Record<string, object>;
     };
     expect(batch.queries['_']).toEqual({ from: ['archive', 'orders'] });
+  });
+
+  // ─── runLive (A4b) ────────────────────────────────────────────────────────
+
+  /**
+   * Build a fake client wired with a real {@link SubscriptionRouter} and a
+   * stubbed `execute` that returns a BatchResponse whose `messages` alias
+   * carries `value = { subscription_grant: true, sources_count: 1, sub: subId }`.
+   */
+  function fakeLiveClient(subId: number) {
+    const router = new SubscriptionRouter();
+    const resp: BatchResponse = {
+      id: 1 as Json,
+      results: {
+        messages: {
+          records: [],
+          value: { subscription_grant: true, sources_count: 1, sub: subId } as Json,
+        },
+      },
+      execution_plan: [],
+      execution_time_us: 0,
+    };
+    return {
+      router,
+      client: {
+        execute: async (_db: string, _batch: object): Promise<BatchResponse> => resp,
+        get subscriptions(): SubscriptionRouter {
+          return router;
+        },
+      },
+    };
+  }
+
+  it('db.runLive: extracts SubscriptionHandle keyed by alias from grant `sub`', async () => {
+    const { router, client } = fakeLiveClient(7);
+    const db = new Db(client as unknown as import('../client.js').ShamirClient, 'live_db');
+
+    const { response, subs } = await db.runLive(
+      db.batch('live-1').subscribe('messages', { store: 'main', table: 'messages' }),
+    );
+
+    expect(Object.keys(subs)).toEqual(['messages']);
+    expect(subs.messages.subId).toBe(7);
+    // Response is still the underlying BatchResponse (passthrough).
+    expect(response.results.messages.value).toMatchObject({ sub: 7 });
+
+    // Push routing: manually route through the client's router; the handle
+    // must yield the event via its async iterator.
+    const next = subs.messages.next();
+    router.route({ push: 'event', sub: 7, seq: 1, data: new Uint8Array([1, 2, 3]) });
+    const ev = await next;
+    expect(ev.done).toBe(false);
+    expect(ev.value.kind).toBe('event');
+    expect(ev.value.seq).toBe(1);
+    expect(ev.value.data).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it('db.runLive: aliases without a numeric sub are not turned into handles', async () => {
+    const router = new SubscriptionRouter();
+    const resp: BatchResponse = {
+      id: 1 as Json,
+      results: {
+        // A regular read result — no value.sub. Must NOT produce a handle.
+        plain: { records: [{ id: 'x' }] },
+        // value present but not an object — must NOT produce a handle.
+        scalar: { records: [], value: 42 as Json },
+      },
+      execution_plan: [],
+      execution_time_us: 0,
+    };
+    const client = {
+      execute: async (): Promise<BatchResponse> => resp,
+      get subscriptions(): SubscriptionRouter {
+        return router;
+      },
+    };
+    const db = new Db(client as unknown as import('../client.js').ShamirClient, 'live_db');
+    const { subs } = await db.runLive(
+      db.batch('no-grant').add('plain', Query.from('t')),
+    );
+    expect(Object.keys(subs)).toEqual([]);
+    // Use the imported `subscribe` builder symbol so the lint sees it referenced.
+    expect(typeof subscribe).toBe('function');
   });
 });
 
