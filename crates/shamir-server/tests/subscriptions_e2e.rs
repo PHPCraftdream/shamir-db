@@ -227,6 +227,26 @@ async fn basic_subscribe_yields_event_on_insert() {
         .expect("no Event push captured");
     assert_eq!(env.push, PushKind::Event);
     assert_eq!(env.sub, sub_id);
+
+    // Regression guard: the unfiltered Put path must also ship a de-interned
+    // `value` object in the Event payload. If `make_event_data` ever drops
+    // back to raw interned-key msgpack, the JSON decode below will lose
+    // `value` and this assertion will catch it.
+    let data_bytes = env.data.as_ref().expect("Event frame missing data");
+    let payload: serde_json::Value =
+        serde_json::from_slice(data_bytes).expect("Event data is not JSON");
+    let value = payload
+        .get("value")
+        .expect("Event payload missing `value` field (interner-decode bug?)");
+    let obj = value
+        .as_object()
+        .expect("Event `value` is not a string-keyed object");
+    assert_eq!(
+        obj.get("thread_id").and_then(|n| n.as_i64()),
+        Some(1),
+        "Event `value` must contain de-interned thread_id=1, got {:?}",
+        obj
+    );
 }
 
 // ============================================================================
