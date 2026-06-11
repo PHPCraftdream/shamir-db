@@ -95,6 +95,11 @@ pub(crate) async fn bridge_task(
                     }
                     for event in &jr.events {
                         for change in &event.changes {
+                            // Cheap pre-check: skip the async de-intern entirely
+                            // when no target could match (repo/table/mask).
+                            if !any_target_interested(&targets, repo, &change.table, &change.op) {
+                                continue;
+                            }
                             let value_json = match (&change.op, change.value.as_deref()) {
                                 (ChangeOp::Put, Some(bytes)) => {
                                     db.decode_record_value_json(
@@ -234,6 +239,13 @@ pub(crate) async fn bridge_task(
                     }
                     *wm = event.commit_version;
                     for change in &event.changes {
+                        // Cheap pre-check: skip the async de-intern entirely
+                        // when no target could match (repo/table/mask). On a
+                        // busy repo with a narrow subscription this avoids
+                        // wasted async work for every unrelated change.
+                        if !any_target_interested(&targets, &repo, &change.table, &change.op) {
+                            continue;
+                        }
                         // De-intern the Put value once: the changefeed
                         // ships records as msgpack with `u64` interned
                         // map keys (`InnerValue`), but `filter_matches_value`
@@ -381,6 +393,23 @@ fn try_push_event(
         seq.fetch_add(1, Ordering::Relaxed);
     }
     true
+}
+
+/// Cheap synchronous gate: does any target want this (repo, table, op) at all,
+/// ignoring filter evaluation? Used to short-circuit the per-change async
+/// `decode_record_value_json` call when no subscriber could possibly match.
+/// Filter evaluation still runs in `matches_any` for surviving changes.
+pub(crate) fn any_target_interested(
+    targets: &[(String, String, EventMask, Option<Filter>)],
+    repo: &str,
+    table: &str,
+    op: &ChangeOp,
+) -> bool {
+    targets
+        .iter()
+        .any(|(target_repo, target_table, mask, _filter)| {
+            target_repo == repo && target_table == table && mask_matches(mask, op)
+        })
 }
 
 pub(crate) fn matches_any(
