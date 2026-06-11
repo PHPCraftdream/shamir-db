@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
@@ -92,7 +93,11 @@ async fn warn_line_emitted_when_query_exceeds_threshold() {
     };
     let req_bytes = rmp_serde::to_vec_named(&req).expect("encode");
     let _ = handler
-        .handle(&make_session(), &req_bytes)
+        .handle(
+            &make_session(),
+            &req_bytes,
+            &ConnectionServices::without_push(0),
+        )
         .await
         .expect("handle ok");
 
@@ -152,7 +157,11 @@ async fn no_warn_when_threshold_is_zero() {
         batch: b.build(),
     };
     let _ = handler
-        .handle(&make_session(), &rmp_serde::to_vec_named(&req).unwrap())
+        .handle(
+            &make_session(),
+            &rmp_serde::to_vec_named(&req).unwrap(),
+            &ConnectionServices::without_push(0),
+        )
         .await
         .unwrap();
 

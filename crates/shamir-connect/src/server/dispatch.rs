@@ -19,6 +19,7 @@ use crate::common::envelope::{
     ErrorEnvelope, RequestEnvelope, RequestEnvelopeView, ResponseEnvelope,
 };
 use crate::common::error::Result;
+use crate::server::conn_services::ConnectionServices;
 use crate::server::session::{Session, SessionStore};
 use std::future::Future;
 use std::pin::Pin;
@@ -35,7 +36,12 @@ pub trait RequestHandler: Send + Sync {
     ///
     /// Returning `Ok(bytes)` → wrap in [`ResponseEnvelope`].
     /// Returning `Err(reason)` → wrap in [`ErrorEnvelope`].
-    fn handle<'a>(&'a self, session: &'a Session, req: &'a [u8]) -> HandlerFuture<'a>;
+    fn handle<'a>(
+        &'a self,
+        session: &'a Session,
+        req: &'a [u8],
+        conn: &'a ConnectionServices,
+    ) -> HandlerFuture<'a>;
 }
 
 /// Lookup hook: returns `tickets_invalid_before_ns` for a given user_id.
@@ -65,6 +71,7 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
     store: &SessionStore,
     lookup_tickets_invalid_before_ns: F,
     handler: &H,
+    conn: &ConnectionServices,
 ) -> Result<DispatchOutcome> {
     let sid = envelope.session_id_array()?;
 
@@ -90,7 +97,7 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
     }
 
     // Application-level dispatch — async, no blocking bridge needed.
-    match handler.handle(&session, &envelope.req).await {
+    match handler.handle(&session, &envelope.req, conn).await {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(
             envelope.request_id,
             res_bytes,
@@ -117,6 +124,7 @@ pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) 
     store: &SessionStore,
     lookup_tickets_invalid_before_ns: F,
     handler: &H,
+    conn: &ConnectionServices,
 ) -> Result<DispatchOutcome> {
     let sid = view.session_id_array()?;
 
@@ -140,7 +148,7 @@ pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) 
     }
 
     // Application-level dispatch — async, no blocking bridge needed.
-    match handler.handle(&session, view.req).await {
+    match handler.handle(&session, view.req, conn).await {
         Ok(res_bytes) => Ok(DispatchOutcome::Response(ResponseEnvelope::ok(
             view.request_id,
             res_bytes,

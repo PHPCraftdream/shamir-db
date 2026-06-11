@@ -22,6 +22,7 @@ use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome, RequestHandler};
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
@@ -102,6 +103,7 @@ impl RequestHandler for EchoHandler {
         &'a self,
         _session: &'a Session,
         req: &'a [u8],
+        _conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         self.counter.fetch_add(1, Ordering::Relaxed);
         let out = req.to_vec();
@@ -299,11 +301,13 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
                 Err(_) => break, // client closed
             }
             let view = RequestEnvelopeView::from_msgpack(&frame).unwrap();
+            let conn = ConnectionServices::without_push(0);
             let outcome = dispatch_request_view(
                 &view,
                 &server_session_store,
                 |_uid| server_tib.load(Ordering::Relaxed),
                 &*server_echo,
+                &conn,
             )
             .await
             .unwrap();

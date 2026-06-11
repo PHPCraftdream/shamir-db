@@ -27,6 +27,7 @@ use tokio::io::AsyncWriteExt;
 
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{HandlerFuture, RequestHandler};
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 
@@ -45,7 +46,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 struct DelayHandler;
 
 impl RequestHandler for DelayHandler {
-    fn handle<'a>(&'a self, _session: &'a Session, req: &'a [u8]) -> HandlerFuture<'a> {
+    fn handle<'a>(
+        &'a self,
+        _session: &'a Session,
+        req: &'a [u8],
+        _conn: &'a ConnectionServices,
+    ) -> HandlerFuture<'a> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(1)).await;
             Ok(req.to_vec())

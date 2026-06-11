@@ -40,6 +40,7 @@ pub mod filter;
 #[cfg(feature = "crypto")]
 pub mod hmac;
 pub mod read;
+pub mod subscribe;
 pub mod table_ref;
 pub mod validator;
 pub mod wire;

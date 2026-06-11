@@ -429,6 +429,10 @@ impl SessionPermissions {
             // Sub-batch — no direct resource access at this level; the
             // inner batch's ops are checked recursively at execution time.
             BatchOp::Batch(_) => (Action::Read, Resource::Global),
+
+            // Subscriptions — read-level access; actual table checks happen
+            // when the subscription is activated.
+            BatchOp::Subscribe(_) | BatchOp::Unsubscribe(_) => (Action::Read, Resource::Global),
         }
     }
 }

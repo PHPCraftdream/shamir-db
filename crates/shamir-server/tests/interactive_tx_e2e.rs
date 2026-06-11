@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde_json::json;
 
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 
@@ -95,7 +96,11 @@ async fn interactive_tx_happy_path_wire() {
     // BEGIN
     let res = decode(
         &handler
-            .handle(&s, &encode(&tx_begin("app", "main")))
+            .handle(
+                &s,
+                &encode(&tx_begin("app", "main")),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     );
@@ -129,7 +134,11 @@ async fn interactive_tx_happy_path_wire() {
     );
     let wres = decode(
         &handler
-            .handle(&s, &encode(&tx_execute_built("app", tx_handle, wb.build())))
+            .handle(
+                &s,
+                &encode(&tx_execute_built("app", tx_handle, wb.build())),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     );
@@ -151,7 +160,11 @@ async fn interactive_tx_happy_path_wire() {
     rb.query("top", Query::from("items").order_by_desc("qty"));
     let rres = decode(
         &handler
-            .handle(&s, &encode(&tx_execute_built("app", tx_handle, rb.build())))
+            .handle(
+                &s,
+                &encode(&tx_execute_built("app", tx_handle, rb.build())),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     );
@@ -175,6 +188,7 @@ async fn interactive_tx_happy_path_wire() {
                     db: "app".into(),
                     tx_handle,
                 }),
+                &ConnectionServices::without_push(0),
             )
             .await
             .unwrap(),
@@ -192,7 +206,11 @@ async fn interactive_tx_happy_path_wire() {
     vb.query("all", Query::from("items"));
     let vres = decode(
         &handler
-            .handle(&s, &encode(&execute_built("app", vb.build())))
+            .handle(
+                &s,
+                &encode(&execute_built("app", vb.build())),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     );
@@ -214,7 +232,11 @@ async fn interactive_tx_rollback_discards_writes() {
 
     let tx_handle = match decode(
         &handler
-            .handle(&s, &encode(&tx_begin("app", "main")))
+            .handle(
+                &s,
+                &encode(&tx_begin("app", "main")),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     ) {
@@ -232,7 +254,11 @@ async fn interactive_tx_rollback_discards_writes() {
             .value(doc! { "id" => "x", "qty" => 9 }),
     );
     let _ = handler
-        .handle(&s, &encode(&tx_execute_built("app", tx_handle, wb.build())))
+        .handle(
+            &s,
+            &encode(&tx_execute_built("app", tx_handle, wb.build())),
+            &ConnectionServices::without_push(0),
+        )
         .await
         .unwrap();
 
@@ -244,6 +270,7 @@ async fn interactive_tx_rollback_discards_writes() {
                     db: "app".into(),
                     tx_handle,
                 }),
+                &ConnectionServices::without_push(0),
             )
             .await
             .unwrap(),
@@ -258,7 +285,11 @@ async fn interactive_tx_rollback_discards_writes() {
     vb.query("all", Query::from("items"));
     let vres = decode(
         &handler
-            .handle(&s, &encode(&execute_built("app", vb.build())))
+            .handle(
+                &s,
+                &encode(&execute_built("app", vb.build())),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     );
@@ -286,7 +317,11 @@ async fn interactive_tx_foreign_session_rejected_wire() {
     // Session A opens the tx.
     let tx_handle = match decode(
         &handler
-            .handle(&sa, &encode(&tx_begin("app", "main")))
+            .handle(
+                &sa,
+                &encode(&tx_begin("app", "main")),
+                &ConnectionServices::without_push(0),
+            )
             .await
             .unwrap(),
     ) {
@@ -309,6 +344,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
             .handle(
                 &sb,
                 &encode(&tx_execute_built("app", tx_handle, wb.build())),
+                &ConnectionServices::without_push(0),
             )
             .await
             .unwrap(),
@@ -327,6 +363,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
                     db: "app".into(),
                     tx_handle,
                 }),
+                &ConnectionServices::without_push(0),
             )
             .await
             .unwrap(),
@@ -345,6 +382,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
             .handle(
                 &sa,
                 &encode(&tx_execute_built("app", 999_999_999, xb.build())),
+                &ConnectionServices::without_push(0),
             )
             .await
             .unwrap(),
@@ -362,6 +400,7 @@ async fn interactive_tx_foreign_session_rejected_wire() {
                 db: "app".into(),
                 tx_handle,
             }),
+            &ConnectionServices::without_push(0),
         )
         .await
         .unwrap();
