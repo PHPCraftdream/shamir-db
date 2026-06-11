@@ -31,6 +31,7 @@ import type { DdlOp } from './ddl.js';
 import type { AdminOp } from './admin.js';
 import type { CallOp } from './call.js';
 import type { FilterValue } from './filter.js';
+import type { SubscribeOp, UnsubscribeOp } from './subscribe.js';
 
 // ── Sub-batch operation ─────────────────────────────────────────────
 
@@ -57,7 +58,9 @@ export type BatchOpInput =
   | DdlOp
   | AdminOp
   | CallOp
-  | SubBatchOp;
+  | SubBatchOp
+  | SubscribeOp
+  | UnsubscribeOp;
 
 // ── QueryEntry ──────────────────────────────────────────────────────
 

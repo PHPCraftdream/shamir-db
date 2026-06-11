@@ -21,6 +21,8 @@ import type {
 } from '../types/batch.js';
 import type { FilterValue } from '../types/filter.js';
 import type { ExecCtx } from '../exec-ctx.js';
+import type { SubscribeSource, SubscribeOpts } from './subscribe.js';
+import { subscribe, unsubscribeOp } from './subscribe.js';
 
 /** Something that has a `.build()` method returning a wire op. */
 interface Buildable {
@@ -232,6 +234,25 @@ export class Batch {
   bindCtx(ctx: ExecCtx): this {
     this.ctxValue = ctx;
     return this;
+  }
+
+  /**
+   * Add a subscribe operation under `alias`.
+   * Builds a `SubscribeOp` from user-friendly source config(s).
+   */
+  subscribe(
+    alias: string,
+    source: SubscribeSource | SubscribeSource[],
+    opts?: SubscribeOpts,
+  ): this {
+    return this.add(alias, subscribe(source, opts));
+  }
+
+  /**
+   * Add an unsubscribe operation under `alias`.
+   */
+  unsubscribe(alias: string, subId: number): this {
+    return this.add(alias, unsubscribeOp(subId));
   }
 
   /**

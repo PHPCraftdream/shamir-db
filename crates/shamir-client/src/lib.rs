@@ -29,6 +29,7 @@
 
 mod client;
 mod error;
+pub mod subscription;
 mod wire_frames;
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod tests;
 
 pub use client::{Client, ConnectOptions, ResumeOptions};
 pub use error::ClientError;
+pub use subscription::SubscriptionHandle;
 
 // Re-export the wire payloads so callers don't need to depend on
 // `shamir-query-types` directly.

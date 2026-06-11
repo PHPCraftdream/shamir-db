@@ -12,10 +12,12 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 
 use shamir_connect::common::envelope::{ErrorEnvelope, ResponseEnvelope};
+use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_transport_tcp::framing::write_frame;
 
 use crate::client::{reader_task, PendingMap};
 use crate::error::ClientError;
+use crate::subscription::{EarlyBuffer, SubscriptionMap};
 
 /// Write a [`ResponseEnvelope`] as a length-prefixed frame into `writer`.
 async fn write_response(writer: &mut (impl AsyncWriteExt + Unpin), rid: u32, payload: &[u8]) {
@@ -37,7 +39,21 @@ async fn write_garbage(writer: &mut (impl AsyncWriteExt + Unpin)) {
     write_frame(writer, garbage).await.expect("write_frame");
 }
 
+/// Write a [`PushEnvelope`] as a length-prefixed frame into `writer`.
+async fn write_push(writer: &mut (impl AsyncWriteExt + Unpin), envelope: &PushEnvelope) {
+    let bytes = rmp_serde::to_vec_named(envelope).expect("encode push envelope");
+    write_frame(writer, &bytes).await.expect("write_frame");
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn make_subs() -> SubscriptionMap {
+    Arc::new(StdMutex::new(HashMap::new()))
+}
+
+fn make_early_buffer() -> EarlyBuffer {
+    Arc::new(StdMutex::new(HashMap::new()))
+}
 
 #[allow(clippy::type_complexity)]
 fn make_pending() -> (
@@ -68,7 +84,13 @@ async fn demux_out_of_order_responses() {
     let (mut writer, reader) = tokio::io::duplex(4096);
 
     // Spawn the reader task.
-    let task = tokio::spawn(reader_task(reader, pending, closed.clone()));
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        make_subs(),
+        make_early_buffer(),
+    ));
 
     // Send rid=2 first, then rid=1.
     write_response(&mut writer, 2, b"payload-2").await;
@@ -95,7 +117,13 @@ async fn demux_frame_without_rid_is_dropped() {
 
     let (mut writer, reader) = tokio::io::duplex(4096);
 
-    let task = tokio::spawn(reader_task(reader, pending, closed.clone()));
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        make_subs(),
+        make_early_buffer(),
+    ));
 
     // Inject a frame without a rid before the real responses.
     let no_rid_env = ResponseEnvelope::ok(None, b"push-notification".to_vec());
@@ -123,7 +151,13 @@ async fn demux_garbage_frame_is_dropped() {
 
     let (mut writer, reader) = tokio::io::duplex(4096);
 
-    let task = tokio::spawn(reader_task(reader, pending, closed.clone()));
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        make_subs(),
+        make_early_buffer(),
+    ));
 
     write_garbage(&mut writer).await;
     write_response(&mut writer, 1, b"ok1").await;
@@ -147,7 +181,13 @@ async fn demux_eof_drains_all_pending() {
     // Drop the writer immediately — reader sees EOF right away.
     drop(writer);
 
-    let task = tokio::spawn(reader_task(reader, pending, closed.clone()));
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        make_subs(),
+        make_early_buffer(),
+    ));
     task.await.expect("reader_task panicked");
 
     // Both waiters should have gotten ConnectionClosed.
@@ -177,7 +217,13 @@ async fn demux_error_envelope_routed_to_waiter() {
     let closed = Arc::new(AtomicBool::new(false));
     let (mut writer, reader) = tokio::io::duplex(4096);
 
-    let task = tokio::spawn(reader_task(reader, pending, closed.clone()));
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        make_subs(),
+        make_early_buffer(),
+    ));
 
     write_error(&mut writer, Some(7), "session_expired").await;
     writer.shutdown().await.expect("shutdown");
@@ -203,7 +249,13 @@ async fn demux_late_response_for_unknown_rid_is_dropped() {
     let closed = Arc::new(AtomicBool::new(false));
     let (mut writer, reader) = tokio::io::duplex(4096);
 
-    let task = tokio::spawn(reader_task(reader, pending, closed.clone()));
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        make_subs(),
+        make_early_buffer(),
+    ));
 
     // orphan frame
     write_response(&mut writer, 99, b"orphan").await;
@@ -215,4 +267,99 @@ async fn demux_late_response_for_unknown_rid_is_dropped() {
 
     // rid=1 still got its payload correctly.
     assert_eq!(rx1.await.unwrap().unwrap(), b"mine");
+}
+
+// ─── Push-frame demux tests ────────────────────────────────────────────────
+
+/// A push frame routes to a registered subscription handle.
+#[tokio::test]
+async fn push_frame_routes_to_registered_subscription() {
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let subs = make_subs();
+    let closed = Arc::new(AtomicBool::new(false));
+
+    // Register sub_id=42
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    subs.lock().unwrap().insert(42, tx);
+
+    let (mut writer, reader) = tokio::io::duplex(4096);
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        subs.clone(),
+        make_early_buffer(),
+    ));
+
+    let push = PushEnvelope {
+        push: PushKind::Event,
+        sub: 42,
+        seq: 1,
+        data: Some(b"hello".to_vec()),
+        gap_at: None,
+    };
+    write_push(&mut writer, &push).await;
+    writer.shutdown().await.expect("shutdown");
+
+    task.await.expect("reader_task panicked");
+
+    let received = rx.recv().await.expect("should receive push");
+    assert_eq!(received.sub, 42);
+    assert_eq!(received.seq, 1);
+    assert_eq!(received.data, Some(b"hello".to_vec()));
+}
+
+/// A push frame for an unregistered sub_id is buffered — no panic, no loss.
+#[tokio::test]
+async fn push_frame_for_unknown_sub_is_buffered() {
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let (tx1, rx1) = oneshot::channel();
+    pending.lock().unwrap().insert(1, tx1);
+
+    let subs = make_subs();
+    let eb = make_early_buffer();
+    let closed = Arc::new(AtomicBool::new(false));
+
+    let (mut writer, reader) = tokio::io::duplex(4096);
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        subs,
+        eb.clone(),
+    ));
+
+    let push = PushEnvelope {
+        push: PushKind::Ready,
+        sub: 999,
+        seq: 0,
+        data: None,
+        gap_at: None,
+    };
+    write_push(&mut writer, &push).await;
+
+    write_response(&mut writer, 1, b"ok").await;
+    writer.shutdown().await.expect("shutdown");
+
+    task.await.expect("reader_task panicked");
+    assert_eq!(rx1.await.unwrap().unwrap(), b"ok");
+
+    let buf = eb.lock().unwrap();
+    assert_eq!(buf.get(&999).map(|v| v.len()), Some(1));
+}
+
+/// Dropping a SubscriptionHandle removes its entry from the registry.
+#[tokio::test]
+async fn subscription_handle_drop_removes_from_registry() {
+    use crate::subscription::SubscriptionHandle;
+
+    let subs = make_subs();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    subs.lock().unwrap().insert(7, tx);
+
+    let handle = SubscriptionHandle::new(7, rx, subs.clone());
+    assert!(subs.lock().unwrap().contains_key(&7));
+
+    drop(handle);
+    assert!(!subs.lock().unwrap().contains_key(&7));
 }
