@@ -80,8 +80,9 @@ impl RepoInstance {
 
     fn from_box_repo(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
+        let initial_cap = configs.len().max(16);
         let token_names: scc::HashMap<u64, String, THasher> =
-            scc::HashMap::with_hasher(THasher::default());
+            scc::HashMap::with_capacity_and_hasher(initial_cap, THasher::default());
         for cfg in configs {
             register_token(&token_names, &cfg.name);
             configs_map.insert(cfg.name.clone(), cfg);
@@ -96,7 +97,10 @@ impl RepoInstance {
             tables: Arc::new(tables),
             tx_gate: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
-            per_table_mvcc: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            per_table_mvcc: Arc::new(scc::HashMap::with_capacity_and_hasher(
+                initial_cap,
+                THasher::default(),
+            )),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
             group_commit: Arc::new(GroupCommit::new()),

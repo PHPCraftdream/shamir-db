@@ -434,7 +434,8 @@ pub fn project_event(
     repo: &str,
     commit_version: u64,
 ) -> Option<ChangelogEvent> {
-    let mut changes: Vec<RecordChange> = Vec::new();
+    let total_ops: usize = tx.write_set.values().map(|s| s.len()).sum();
+    let mut changes: Vec<RecordChange> = Vec::with_capacity(total_ops);
     for (token, staging) in &tx.write_set {
         let table = tx
             .table_tokens
