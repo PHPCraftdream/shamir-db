@@ -143,6 +143,10 @@ name = "tx_pipeline"
 harness = false
 
 [[bench]]
+name = "tx_concurrent"
+harness = false
+
+[[bench]]
 name = "wasm_invoke"
 harness = false
 
