@@ -4023,6 +4023,7 @@ dependencies = [
  "nebari",
  "persy",
  "redb",
+ "scc",
  "serde",
  "serial_test",
  "shamir-tunables",
