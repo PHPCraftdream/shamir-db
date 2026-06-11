@@ -313,8 +313,10 @@ dependency lands:
 
 - **SCRAM connect / resume latency** (`wire_latencies.rs` Group 2,
   deferred). Blocked on: lift a reusable `tests/common/live_server.rs`
-  helper. 26 e2e files inline ~100 LOC each of server-spawn harness;
-  consolidation is worth doing in its own right.
+  helper. The `crates/shamir-server/tests/` directory holds ~27
+  integration-test files (10 `*_e2e.rs` + 17 others) that each inline
+  their own server-spawn harness; consolidation is worth doing in its
+  own right.
 
 - **`reactive_call` delivery mode** (`subscription_delivery.rs`).
   Blocked on: a registered in-memory stored function (funclib / WASM
