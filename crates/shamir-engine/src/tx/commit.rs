@@ -132,7 +132,8 @@ pub enum TxError {
 ///   so recovery can resolve target data_store).
 /// - BumpFtsStats is in-memory only and not serialised.
 pub async fn wal_ops_from_tx(tx: &TxContext) -> Vec<WalOpV2> {
-    let mut ops = Vec::new();
+    let mut ops =
+        Vec::with_capacity(tx.counter_deltas.len() + tx.index_write_set.len() + tx.write_set.len());
 
     for (table_id, delta) in &tx.counter_deltas {
         ops.push(WalOpV2::CounterDelta {
@@ -534,7 +535,10 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
     // is an `scc::HashMap<(u64, Bytes), ()>`; scan into a std map (the
     // synchronous visitor cannot await inside).
     let mut by_table: std::collections::HashMap<u64, Vec<bytes::Bytes>, THasher> =
-        std::collections::HashMap::default();
+        std::collections::HashMap::with_capacity_and_hasher(
+            tx.locked_keys.len(),
+            THasher::default(),
+        );
     tx.locked_keys.scan(|(token, key), _| {
         by_table.entry(*token).or_default().push(key.clone());
     });

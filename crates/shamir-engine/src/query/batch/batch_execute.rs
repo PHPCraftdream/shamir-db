@@ -6,7 +6,7 @@ use crate::query::batch::query_runner::{build_resolved_refs, execute_single_impl
 use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 use crate::query::read::QueryResult;
 use shamir_types::access::Actor;
-use shamir_types::types::common::{new_map, TMap};
+use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
 
 /// Execute a batch request against a table resolver.
@@ -254,7 +254,7 @@ pub(super) async fn execute_plan_impl(
     depth: usize,
     params: &TMap<String, InnerValue>,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
-    let mut all_results: TMap<String, QueryResult> = new_map();
+    let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
     for stage in &plan.stages {
         for alias in stage {
@@ -334,7 +334,7 @@ pub(super) async fn execute_plan_tx_impl(
     depth: usize,
     params: &TMap<String, InnerValue>,
 ) -> Result<TMap<String, QueryResult>, BatchError> {
-    let mut all_results: TMap<String, QueryResult> = new_map();
+    let mut all_results: TMap<String, QueryResult> = new_map_wc(queries.len());
 
     for stage in &plan.stages {
         for alias in stage {

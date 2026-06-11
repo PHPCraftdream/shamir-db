@@ -139,7 +139,16 @@ impl TableManager {
             None => None,
         };
 
-        let mut all_errors: Vec<shamir_query_types::validator::ValidationError> = Vec::new();
+        // Allocate with a known lower bound to avoid realloc on the common
+        // single-validator path.
+        let mut all_errors: Vec<shamir_query_types::validator::ValidationError> =
+            Vec::with_capacity(applicable.len());
+
+        // Build ctx and batch once — they carry no per-validator state and
+        // are only borrowed by `call`. Hoisting saves applicable.len()-1
+        // Arc allocs per run_validators invocation.
+        let ctx = FnCtx::new().with_actor(actor.clone());
+        let batch = FnBatch::new();
 
         for binding in &applicable {
             // 4. Resolve validator_id → compiled function.
@@ -149,7 +158,7 @@ impl TableManager {
                         id: binding.validator_id,
                     })?;
 
-            // 5. Build Params and FnCtx.
+            // 5. Build Params per validator (each call gets its own map).
             let mut params = Params::new();
             if let Some(ref rec) = qv_new {
                 params.set("record", rec.clone());
@@ -161,9 +170,6 @@ impl TableManager {
             } else {
                 params.set("old_record", QueryValue::Null);
             }
-
-            let ctx = FnCtx::new().with_actor(actor.clone());
-            let batch = FnBatch::new();
 
             // Invoke the validator.
             let result = validator.call(&ctx, &batch, &params).await;
