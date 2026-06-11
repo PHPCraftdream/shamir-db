@@ -39,6 +39,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -62,7 +64,7 @@ use tokio::task::JoinHandle;
 pub struct ObservabilityState {
     pub ready: AtomicBool,
     pub started_at: std::time::Instant,
-    pub bound_addrs: parking_lot::RwLock<Vec<SocketAddr>>,
+    pub bound_addrs: ArcSwap<Vec<SocketAddr>>,
 }
 
 impl ObservabilityState {
@@ -70,7 +72,7 @@ impl ObservabilityState {
         Arc::new(Self {
             ready: AtomicBool::new(false),
             started_at: std::time::Instant::now(),
-            bound_addrs: parking_lot::RwLock::new(Vec::new()),
+            bound_addrs: ArcSwap::from_pointee(Vec::new()),
         })
     }
 
@@ -79,7 +81,7 @@ impl ObservabilityState {
     }
 
     pub fn set_bound_addrs(&self, addrs: Vec<SocketAddr>) {
-        *self.bound_addrs.write() = addrs;
+        self.bound_addrs.store(Arc::new(addrs));
     }
 }
 
@@ -375,7 +377,7 @@ async fn info_handler(State(s): State<AppState>) -> Response {
         bound_addrs: s
             .state
             .bound_addrs
-            .read()
+            .load()
             .iter()
             .map(|a| a.to_string())
             .collect(),

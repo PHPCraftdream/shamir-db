@@ -1,5 +1,6 @@
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -311,8 +312,8 @@ impl TableManager {
         //    ONE batch claiming the same unique value reject the
         //    later one rather than silently overwriting).
         if self.index_manager.has_unique_indexes() {
-            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>)> =
-                std::collections::HashSet::new();
+            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>), THasher> =
+                std::collections::HashSet::default();
             for (i, v) in values.iter().enumerate() {
                 self.index_manager.validate_unique_for_create(v).await?;
                 for def in self.index_manager.iter_unique_indexes() {

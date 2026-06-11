@@ -2,6 +2,7 @@ use super::super::table::{TableConfig, TableManager};
 use crate::repo::{RepoConfig, RepoInstance};
 use dashmap::DashMap;
 use shamir_storage::error::{DbError, DbResult};
+use shamir_types::types::common::THasher;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use std::sync::Arc;
 /// Manages multiple repositories
 #[derive(Clone)]
 pub struct DbInstance {
-    repos: Arc<DashMap<String, RepoInstance>>,
+    repos: Arc<DashMap<String, RepoInstance, THasher>>,
 }
 
 impl Default for DbInstance {
@@ -21,13 +22,14 @@ impl Default for DbInstance {
 impl DbInstance {
     pub fn new() -> Self {
         Self {
-            repos: Arc::new(DashMap::new()),
+            repos: Arc::new(DashMap::with_hasher(THasher::default())),
         }
     }
 
     /// Creates a DbInstance with pre-configured repos (async for factory creation)
     pub async fn with_repos(configs: Vec<RepoConfig>) -> DbResult<Self> {
-        let instances: DashMap<String, RepoInstance> = DashMap::new();
+        let instances: DashMap<String, RepoInstance, THasher> =
+            DashMap::with_hasher(THasher::default());
         for config in configs {
             let name = config.name.clone();
             let instance =

@@ -28,6 +28,7 @@ use dashmap::DashMap;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{KvOp, Store};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
@@ -88,7 +89,7 @@ pub struct IndexManager {
     /// is independently lockable and the read path on a cache hit is
     /// fully lock-free against unrelated index keys. Cache hits on
     /// the same shard still take the per-shard read lock.
-    pub(super) posting_cache: Arc<DashMap<Bytes, Arc<BTreeSet<RecordId>>>>,
+    pub(super) posting_cache: Arc<DashMap<Bytes, Arc<BTreeSet<RecordId>>, THasher>>,
 }
 
 impl Clone for IndexManager {
@@ -158,7 +159,10 @@ impl IndexManager {
             indexes_unique: Arc::new(indexes_unique),
             has_indexes: Arc::new(AtomicBool::new(has_indexes_flag)),
             has_indexes_unique: Arc::new(AtomicBool::new(has_indexes_unique_flag)),
-            posting_cache: Arc::new(DashMap::with_capacity(POSTING_CACHE_CAP)),
+            posting_cache: Arc::new(DashMap::with_capacity_and_hasher(
+                POSTING_CACHE_CAP,
+                THasher::default(),
+            )),
         };
 
         // Синхронизируем флаги с состоянием IndexInfo

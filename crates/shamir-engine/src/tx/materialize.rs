@@ -1,4 +1,5 @@
 use shamir_tx::{RepoTxGate, RepoWalManager, TxContext};
+use shamir_types::types::common::THasher;
 
 use crate::repo::RepoInstance;
 use crate::tx::commit::maybe_crash;
@@ -129,8 +130,8 @@ pub(super) async fn materialize(
     // BumpFtsStats is not serialised to the WAL; its in-memory counters are
     // rebuilt via `rebuild()` on open.
     if !tx.index_write_set.is_empty() {
-        let mut by_token: std::collections::HashMap<u64, Vec<shamir_tx::IndexWriteOp>> =
-            std::collections::HashMap::new();
+        let mut by_token: std::collections::HashMap<u64, Vec<shamir_tx::IndexWriteOp>, THasher> =
+            std::collections::HashMap::default();
         for (token, op) in &tx.index_write_set {
             by_token.entry(*token).or_default().push(op.clone());
         }

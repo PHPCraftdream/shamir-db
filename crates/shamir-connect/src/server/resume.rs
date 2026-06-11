@@ -20,7 +20,17 @@ use crate::server::ticket::{
     ticket_limits, validate_ticket_enums, TicketPlain, TicketWire,
 };
 use dashmap::DashMap;
+use fxhash::FxHasher;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
+
+/// Fast non-cryptographic hasher alias used for in-memory dashmaps.
+type FxBuild = BuildHasherDefault<FxHasher>;
+
+/// Map key: `(user_id, family_id)`.
+type CounterKey = ([u8; 16], [u8; limits::TICKET_FAMILY_ID_BYTES]);
+/// Map value: `(last_counter, last_observed_at_ns)`.
+type CounterValue = (u64, u64);
 
 /// Pluggable per-(user_id, family_id) counter store.
 ///
@@ -46,14 +56,14 @@ pub trait ConsumedCounterStore: Send + Sync {
 /// In-memory counter store — DashMap of `(user_id, family_id) → (last_counter, last_observed_at_ns)`.
 #[derive(Debug, Default)]
 pub struct InMemoryConsumedCounters {
-    map: DashMap<([u8; 16], [u8; limits::TICKET_FAMILY_ID_BYTES]), (u64, u64)>,
+    map: DashMap<CounterKey, CounterValue, FxBuild>,
 }
 
 impl InMemoryConsumedCounters {
     /// Empty store.
     pub fn new() -> Self {
         Self {
-            map: DashMap::new(),
+            map: DashMap::with_hasher(FxBuild::default()),
         }
     }
 

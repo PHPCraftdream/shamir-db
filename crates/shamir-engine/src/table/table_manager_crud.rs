@@ -1,4 +1,5 @@
 use shamir_storage::error::{DbError, DbResult};
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -153,8 +154,8 @@ impl TableManager {
             // → first index in the batch that claimed it. Cheap
             // bincode-based key avoids fighting `InnerValue` hash
             // requirements (Map keyed by interner ids isn't `Hash`).
-            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>)> =
-                std::collections::HashSet::new();
+            let mut batch_seen: std::collections::HashSet<(u64, Vec<u8>), THasher> =
+                std::collections::HashSet::default();
             for (i, v) in values.iter().enumerate() {
                 self.index_manager.validate_unique_for_create(v).await?;
                 // Now record this row's unique-index claims so the
