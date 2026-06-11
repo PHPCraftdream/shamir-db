@@ -46,6 +46,7 @@ pub fn filter_matches_value(filter: &Filter, value: &serde_json::Value) -> bool 
 /// Walk a field path and return a reference into the original JSON value.
 /// Returns `&serde_json::Value::Null` (via a static) when any segment is
 /// missing, avoiding a heap allocation for the miss case.
+#[inline]
 fn resolve_field<'v>(value: &'v serde_json::Value, path: &[String]) -> &'v serde_json::Value {
     let mut current = value;
     for segment in path {
@@ -59,6 +60,7 @@ fn resolve_field<'v>(value: &'v serde_json::Value, path: &[String]) -> &'v serde
 
 /// Compare a resolved JSON value against a `FilterValue` without allocating.
 /// Returns `true` when the two represent equal values.
+#[inline]
 fn json_eq_fv(json: &serde_json::Value, fv: &FilterValue) -> bool {
     match fv {
         FilterValue::Null => json.is_null(),

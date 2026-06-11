@@ -268,12 +268,11 @@ impl Store for CachedStore {
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
         let cache = self.cache.clone();
-        let prefix_slice = prefix.to_vec();
 
         Box::pin(stream! {
             let matching_items: Vec<(RecordKey, Bytes)> = cache
                 .iter()
-                .filter(|ref_| ref_.key().starts_with(&prefix_slice[..]))
+                .filter(|ref_| ref_.key().starts_with(prefix.as_ref()))
                 .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
                 .collect();
 
