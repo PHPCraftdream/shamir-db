@@ -30,7 +30,7 @@ pub mod scheduler;
 pub mod server;
 pub mod server_meta;
 pub mod service;
-pub(crate) mod subscriptions;
+pub mod subscriptions;
 pub mod tables_registry;
 pub mod tls;
 pub mod tx_registry;

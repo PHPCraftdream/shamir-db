@@ -15,7 +15,17 @@ import type { Json } from './types/write.js';
 import type { ExecCtx } from './exec-ctx.js';
 import { Batch } from './builders/batch.js';
 import { Query } from './builders/query.js';
+import { SubscriptionHandle } from './subscription-handle.js';
 import * as ddl from './builders/ddl.js';
+
+/**
+ * Result of {@link Db.runLive}: the underlying {@link BatchResponse} plus a map
+ * of alias → live {@link SubscriptionHandle} for every subscribe op in the batch.
+ */
+export interface RunLiveResult {
+  response: BatchResponse;
+  subs: Record<string, SubscriptionHandle>;
+}
 
 /** Something that has a `.build()` method returning a wire op. */
 interface Buildable {
@@ -78,6 +88,43 @@ export class Db {
   /** Create a bound `Batch`. */
   batch(id?: Json): Batch {
     return Batch.create(id).bindCtx(this.ctx);
+  }
+
+  /**
+   * Run a batch that contains one or more `subscribe` ops and wire each
+   * grant into a live {@link SubscriptionHandle}.
+   *
+   * Walks `response.results` and for every alias whose `value` is an object
+   * carrying a numeric `sub` field (the server-assigned subscription id),
+   * constructs a `SubscriptionHandle` registered on the client's shared
+   * `SubscriptionRouter`. Push frames already buffered in the router (the
+   * server may begin pushing before the response arrives) are flushed into
+   * the handle on registration.
+   *
+   * Returns the raw `BatchResponse` (so non-subscribe ops in the same batch
+   * are still observable) and `subs` keyed by alias.
+   */
+  async runLive(batch: Batch): Promise<RunLiveResult> {
+    const response = await batch.run();
+    const subs: Record<string, SubscriptionHandle> = {};
+    for (const [alias, result] of Object.entries(response.results)) {
+      const value = result.value;
+      if (
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        typeof (value as { sub?: unknown }).sub === 'number'
+      ) {
+        const subId = (value as { sub: number }).sub;
+        subs[alias] = new SubscriptionHandle(
+          subId,
+          this.client.subscriptions,
+          this.client,
+          this.name,
+        );
+      }
+    }
+    return { response, subs };
   }
 
   /**
