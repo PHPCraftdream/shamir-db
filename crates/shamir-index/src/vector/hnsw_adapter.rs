@@ -118,15 +118,16 @@ impl HnswAdapter {
             config.ef_construction,
             dist,
         );
+        let cap = config.max_elements;
         Self {
             dim,
             metric,
             ef_search: config.ef_search,
             hnsw: Arc::new(hnsw),
-            rid_map: scc::HashMap::with_hasher(THasher::default()),
-            rid_to_internal: scc::HashMap::with_hasher(THasher::default()),
-            vectors: scc::HashMap::with_hasher(THasher::default()),
-            deleted: scc::HashMap::with_hasher(THasher::default()),
+            rid_map: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
+            rid_to_internal: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
+            vectors: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
+            deleted: scc::HashMap::with_capacity_and_hasher(cap, THasher::default()),
             next_id: AtomicUsize::new(0),
         }
     }

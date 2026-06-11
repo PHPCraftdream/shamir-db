@@ -84,7 +84,7 @@ impl TableManager {
         let table_token = self.table_token();
         let mut footprint = shamir_tx::TableWriteFootprint {
             touched: true,
-            inserted_index_keys: Vec::new(),
+            inserted_index_keys: Vec::with_capacity(index_ops.len()),
         };
         for op in index_ops {
             if let shamir_tx::IndexWriteOp::SetPosting { key, .. } = op {
