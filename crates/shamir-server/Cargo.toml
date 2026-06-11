@@ -139,5 +139,9 @@ harness = false
 name = "subscription_delivery"
 harness = false
 
+[[bench]]
+name = "subscription_fanout"
+harness = false
+
 [lints.clippy]
 all = "warn"
