@@ -2,8 +2,10 @@ use std::cmp::Ordering;
 
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::value::InnerValue;
+use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
+use super::filter_node::CompactPath;
 use crate::query::filter::FilterValue;
 use crate::query::read::QueryResult;
 
@@ -37,6 +39,23 @@ pub fn resolve_field(record: &InnerValue, path: &[u64]) -> Option<InnerValue> {
 /// Resolve a field path (segments) into interned u64 keys.
 pub fn intern_field_path(field: &[String], interner: &Interner) -> Option<Vec<u64>> {
     let mut keys = Vec::with_capacity(field.len());
+    for part in field {
+        let interned = interner.get_ind(part)?;
+        keys.push(interned.id());
+    }
+    Some(keys)
+}
+
+/// Inline-allocated variant of [`intern_field_path`] for hot compile paths.
+///
+/// Returns a `CompactPath` (`SmallVec<[u64; 4]>`) so `FilterNode` callers
+/// that store the result in `field_path` avoid a heap allocation for the
+/// typical 1-3 segment case.
+pub(super) fn intern_field_path_compact(
+    field: &[String],
+    interner: &Interner,
+) -> Option<CompactPath> {
+    let mut keys: CompactPath = SmallVec::with_capacity(field.len());
     for part in field {
         let interned = interner.get_ind(part)?;
         keys.push(interned.id());
