@@ -60,7 +60,7 @@ pub(crate) async fn bridge_task(
 
         // Subscribe to each repo's changefeed FIRST — before journal backfill —
         // so we don't miss events between journal read and live subscription.
-        let mut receivers = Vec::new();
+        let mut receivers = Vec::with_capacity(repos.len());
         for repo in &repos {
             match db.subscribe_changelog(&db_name, repo).await {
                 Some(rx) => receivers.push(rx),

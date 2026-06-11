@@ -94,7 +94,7 @@ impl TableManager {
             .zip(inner_values.iter())
             .filter_map(|(id, iv)| self.put_change(*id, iv))
             .collect();
-        self.emit_nontx_changefeed(batch_version, changes).await;
+        self.emit_nontx_changefeed(batch_version, changes);
 
         let affected = records.len() as u64;
         Ok(WriteResult {
@@ -237,10 +237,10 @@ impl TableManager {
         };
 
         let mut affected: u64 = 0;
-        let mut result_records: Vec<json::Value> = Vec::new();
+        let mut result_records: Vec<json::Value> = Vec::with_capacity(matched.len());
         // Changefeed (Phase 3b follow-up): collect (id, new_value) for each
         // changed record so a Put can be emitted after the batch is durable.
-        let mut changefeed_puts: Vec<(RecordId, InnerValue)> = Vec::new();
+        let mut changefeed_puts: Vec<(RecordId, InnerValue)> = Vec::with_capacity(matched.len());
         // Track the maximum MVCC version across per-record writes so the
         // changefeed event carries the batch's commit-version.
         let mut max_write_version: u64 = 0;
@@ -328,7 +328,7 @@ impl TableManager {
             .iter()
             .filter_map(|(id, iv)| self.put_change(*id, iv))
             .collect();
-        self.emit_nontx_changefeed(max_write_version, changes).await;
+        self.emit_nontx_changefeed(max_write_version, changes);
 
         Ok(WriteResult {
             affected,
@@ -403,7 +403,7 @@ impl TableManager {
         };
 
         let mut affected: u64 = 0;
-        let mut result_records: Vec<json::Value> = Vec::new();
+        let mut result_records: Vec<json::Value> = Vec::with_capacity(matched.len());
         let return_mode = op
             .select
             .as_ref()
@@ -522,7 +522,7 @@ impl TableManager {
         let mut affected: u64 = 0;
         // Changefeed (Phase 3b follow-up): record the ids actually removed
         // (a `delete` that found no record contributes no event).
-        let mut deleted_ids: Vec<RecordId> = Vec::new();
+        let mut deleted_ids: Vec<RecordId> = Vec::with_capacity(to_delete.len());
         let mut max_write_version: u64 = 0;
         for id in to_delete {
             let (removed, ver) = self.delete_returning_version(id).await?;
@@ -550,7 +550,7 @@ impl TableManager {
             .iter()
             .map(|id| self.delete_change(*id))
             .collect();
-        self.emit_nontx_changefeed(max_write_version, changes).await;
+        self.emit_nontx_changefeed(max_write_version, changes);
 
         Ok(WriteResult {
             affected,
@@ -735,7 +735,7 @@ impl TableManager {
         // version the data was written at (best-effort, non-blocking).
         let (put_id, put_val) = changefeed_put;
         let changes: Vec<_> = self.put_change(put_id, &put_val).into_iter().collect();
-        self.emit_nontx_changefeed(write_version, changes).await;
+        self.emit_nontx_changefeed(write_version, changes);
 
         Ok(WriteResult {
             affected: 1,
