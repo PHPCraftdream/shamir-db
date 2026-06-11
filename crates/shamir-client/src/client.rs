@@ -36,7 +36,9 @@ use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::error::ClientError;
-use crate::subscription::{EarlyBuffer, SubscriptionHandle, SubscriptionMap, EARLY_BUFFER_CAP};
+use crate::subscription::{
+    EarlyBuffer, SubscriptionHandle, SubscriptionMap, CLIENT_SUB_CHANNEL_CAP, EARLY_BUFFER_CAP,
+};
 use crate::wire_frames::{
     WireAuthInit, WireAuthOk, WireChallenge, WireClientProof, WireResumeInit, WireResumeOk,
 };
@@ -151,7 +153,19 @@ pub(crate) async fn reader_task<R>(
                         map.get(&envelope.sub).cloned()
                     };
                     if let Some(tx) = sender {
-                        let _ = tx.send(envelope);
+                        match tx.try_send(envelope) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
+                                tracing::warn!(
+                                    "client mpsc full for sub={}; dropping push",
+                                    env.sub
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                // Consumer dropped — SubscriptionHandle::Drop has or
+                                // will clean up the registry entry.
+                            }
+                        }
                     } else {
                         let mut buf = early_buffer.lock().unwrap_or_else(|p| p.into_inner());
                         let entry = buf.entry(envelope.sub).or_default();
@@ -585,7 +599,7 @@ impl Client {
     /// and obtained the `sub_id`. Push frames arriving for this `sub_id`
     /// will be routed to the returned handle.
     pub fn subscribe_push(&self, sub_id: u64) -> SubscriptionHandle {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(CLIENT_SUB_CHANNEL_CAP);
         {
             let mut map = self.subscriptions.lock().unwrap_or_else(|p| p.into_inner());
             map.insert(sub_id, tx.clone());
@@ -595,7 +609,19 @@ impl Client {
             let mut buf = self.early_buffer.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(buffered) = buf.remove(&sub_id) {
                 for envelope in buffered {
-                    let _ = tx.send(envelope);
+                    match tx.try_send(envelope) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
+                            tracing::warn!(
+                                "client mpsc full for sub={} while flushing early buffer; dropping push",
+                                env.sub
+                            );
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // Receiver gone before we finished flushing — bail.
+                            break;
+                        }
+                    }
                 }
             }
         }

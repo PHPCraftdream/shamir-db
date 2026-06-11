@@ -279,7 +279,7 @@ async fn push_frame_routes_to_registered_subscription() {
     let closed = Arc::new(AtomicBool::new(false));
 
     // Register sub_id=42
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     subs.lock().unwrap().insert(42, tx);
 
     let (mut writer, reader) = tokio::io::duplex(4096);
@@ -348,13 +348,67 @@ async fn push_frame_for_unknown_sub_is_buffered() {
     assert_eq!(buf.get(&999).map(|v| v.len()), Some(1));
 }
 
+/// A stalled consumer (never calling `recv`) must not balloon memory:
+/// the bounded mpsc channel drops new pushes (with a warn log) past its
+/// capacity. We use a small explicit cap so the test is fast and
+/// deterministic, independent of `CLIENT_SUB_CHANNEL_CAP` tuning.
+#[tokio::test]
+async fn push_frame_bounded_channel_drops_on_full() {
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let subs = make_subs();
+    let closed = Arc::new(AtomicBool::new(false));
+
+    // Tiny cap to exercise the full-channel branch quickly.
+    let cap: usize = 4;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(cap);
+    subs.lock().unwrap().insert(11, tx);
+
+    let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+    let task = tokio::spawn(reader_task(
+        reader,
+        pending,
+        closed.clone(),
+        subs.clone(),
+        make_early_buffer(),
+    ));
+
+    // Stream many push frames without the consumer calling recv. Tokio's
+    // bounded mpsc may admit a small implementation-defined slack beyond
+    // `cap`, so we assert "no more than cap + small slack" rather than
+    // exact equality, and verify no panic occurs.
+    let n_writes: usize = cap * 8;
+    for seq in 0..n_writes {
+        let env = PushEnvelope {
+            push: PushKind::Event,
+            sub: 11,
+            seq: seq as u64,
+            data: None,
+            gap_at: None,
+        };
+        write_push(&mut writer, &env).await;
+    }
+    writer.shutdown().await.expect("shutdown");
+    task.await.expect("reader_task panicked");
+
+    // Drain whatever the channel admitted.
+    let mut delivered: usize = 0;
+    while rx.try_recv().is_ok() {
+        delivered += 1;
+    }
+
+    assert!(
+        delivered >= cap && delivered <= cap + 2,
+        "bounded channel should admit ~cap entries, got {delivered} (cap={cap})"
+    );
+}
+
 /// Dropping a SubscriptionHandle removes its entry from the registry.
 #[tokio::test]
 async fn subscription_handle_drop_removes_from_registry() {
     use crate::subscription::SubscriptionHandle;
 
     let subs = make_subs();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
     subs.lock().unwrap().insert(7, tx);
 
     let handle = SubscriptionHandle::new(7, rx, subs.clone());
