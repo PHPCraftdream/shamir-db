@@ -25,7 +25,7 @@ impl TableManager {
     /// For batches with per-record versions the caller passes the MAX
     /// (= last) version, matching the commit-version-per-batch semantic
     /// the tx path uses.
-    pub(crate) async fn emit_nontx_changefeed(
+    pub(crate) fn emit_nontx_changefeed(
         &self,
         commit_version: u64,
         changes: Vec<shamir_tx::RecordChange>,
