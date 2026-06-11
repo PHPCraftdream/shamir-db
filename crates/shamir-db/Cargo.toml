@@ -82,6 +82,10 @@ harness = false
 name = "changelog_read"
 harness = false
 
+[[bench]]
+name = "record_size_axis"
+harness = false
+
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
