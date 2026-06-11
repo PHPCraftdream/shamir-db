@@ -79,6 +79,28 @@ describe('SubscriptionRouter', () => {
     expect(received[0].kind).toBe('closed');
   });
 
+  it('caps earlyBuffer at 256 entries per sub (drop NEW)', () => {
+    const router = new SubscriptionRouter();
+    // Silence the console.warn the drop path emits.
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      for (let i = 0; i < 257; i++) {
+        router.route({ push: 'event', sub: 99, seq: i });
+      }
+    } finally {
+      console.warn = origWarn;
+    }
+
+    const received: SubscriptionEvent[] = [];
+    router.register(99, (ev) => received.push(ev));
+
+    // 256 retained; the 257th (seq=256) was dropped on arrival.
+    expect(received).toHaveLength(256);
+    expect(received[0].seq).toBe(0);
+    expect(received[255].seq).toBe(255);
+  });
+
   it('clear() wipes all state', () => {
     const router = new SubscriptionRouter();
     const received: SubscriptionEvent[] = [];
