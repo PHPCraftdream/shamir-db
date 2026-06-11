@@ -2,6 +2,7 @@
 //!
 //! Implements execute_insert, execute_update, execute_delete for TableManager.
 
+use std::borrow::Cow;
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -44,7 +45,7 @@ impl TableManager {
         // Resolve computed fields and intern in a single pass — avoids
         // materialising a temporary `resolved_values` Vec before we can
         // start building `inner_values`.
-        let mut resolved_values: Vec<json::Value> = Vec::with_capacity(op.values.len());
+        let mut resolved_values: Vec<Cow<'_, json::Value>> = Vec::with_capacity(op.values.len());
         let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
         for value in &op.values {
             let resolved = resolve_computed_record(value, interner)
@@ -75,7 +76,7 @@ impl TableManager {
         //    values, so computed fields are echoed with their results).
         let mut records = Vec::with_capacity(resolved_values.len());
         for (value, id) in resolved_values.iter().zip(ids.iter()) {
-            let mut obj = match value {
+            let mut obj = match &**value {
                 json::Value::Object(map) => map.clone(),
                 _ => json::Map::new(),
             };
@@ -123,7 +124,7 @@ impl TableManager {
         // Resolve computed fields and intern in a single pass — avoids
         // materialising a temporary `resolved_values` Vec before we can
         // start building `inner_values`.
-        let mut resolved_values: Vec<json::Value> = Vec::with_capacity(op.values.len());
+        let mut resolved_values: Vec<Cow<'_, json::Value>> = Vec::with_capacity(op.values.len());
         let inner_values: Vec<InnerValue> = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
@@ -158,7 +159,7 @@ impl TableManager {
 
         let mut records = Vec::with_capacity(resolved_values.len());
         for (value, id) in resolved_values.iter().zip(ids.iter()) {
-            let mut obj = match value {
+            let mut obj = match &**value {
                 json::Value::Object(map) => map.clone(),
                 _ => json::Map::new(),
             };
