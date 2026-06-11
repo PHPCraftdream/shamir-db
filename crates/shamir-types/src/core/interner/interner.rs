@@ -1,6 +1,6 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
 use arc_swap::ArcSwap;
-use parking_lot::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::{InternerKey, TouchInd, UserKey};
@@ -25,7 +25,7 @@ pub struct Interner {
     /// Reverse direction — `vec[id as usize] = Some(UserKey)`. Indexed
     /// by raw `id`; entry `0` is always `None` (sentinel, ids start at 1).
     reverse: ArcSwap<Vec<Option<UserKey>>>,
-    current_id: Mutex<u64>,
+    current_id: AtomicU64,
 }
 
 impl Default for Interner {
@@ -40,7 +40,7 @@ impl Interner {
         Interner {
             map_user_to_interned: new_dash_map_wc(64),
             reverse: ArcSwap::from_pointee(vec![None]), // index 0 reserved
-            current_id: Mutex::new(0),
+            current_id: AtomicU64::new(0),
         }
     }
 
@@ -72,7 +72,7 @@ impl Interner {
         Interner {
             map_user_to_interned,
             reverse: ArcSwap::from_pointee(reverse),
-            current_id: Mutex::new(max_id),
+            current_id: AtomicU64::new(max_id),
         }
     }
 
@@ -90,39 +90,38 @@ impl Interner {
 
         let key = UserKey::from_str(s);
 
-        // Reserve a new ID + serialize the reverse update under
-        // the same mutex. Concurrent writers each clone the
-        // current reverse Vec and swap; without serialization a
-        // later writer's store would clobber an earlier writer's
-        // append (lost update). Reads are unaffected — they
-        // never take this lock.
-        let mut current_id = self.current_id.lock();
-        *current_id += 1;
-        let new_key = InternerKey::new(*current_id);
-        let new_id = new_key.id();
+        // Reserve a fresh ID lock-free. If the forward-map CAS below
+        // loses the race (Occupied branch), this slot is silently leaked
+        // — the interner is monotonic and small leaks are harmless.
+        let new_id = self.current_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let new_key = InternerKey::new(new_id);
 
         // CAS into forward map — another thread may have raced us.
         use dashmap::mapref::entry::Entry;
         match self.map_user_to_interned.entry(key.clone()) {
             Entry::Occupied(existing) => {
                 // Race: another thread inserted between our get() and entry().
-                // We allocated `new_id` but won't use it (small wasted slot
-                // — interner is monotonic, leaks are harmless).
+                // `new_id` is wasted (small leaked slot, harmless).
                 Ok(TouchInd::Exists(existing.get().clone()))
             }
             Entry::Vacant(vacant) => {
                 vacant.insert(new_key.clone());
-                // Clone the current reverse vec, grow if needed,
-                // place the key, swap atomically. The current_id
-                // mutex is still held — so this is the only
-                // writer in flight and the swap is unambiguous.
-                let mut new_rev = (**self.reverse.load()).clone();
-                if (new_id as usize) >= new_rev.len() {
-                    new_rev.resize((new_id as usize) + 1, None);
+                // CAS-loop: grow and populate the reverse vec without a mutex.
+                // Multiple concurrent insertions each retry until their slot
+                // lands, so no writer's update is lost.
+                loop {
+                    let cur = self.reverse.load_full();
+                    let mut new_rev = (*cur).clone();
+                    if (new_id as usize) >= new_rev.len() {
+                        new_rev.resize((new_id as usize) + 1, None);
+                    }
+                    new_rev[new_id as usize] = Some(key.clone());
+                    let prev = self.reverse.compare_and_swap(&cur, Arc::new(new_rev));
+                    if Arc::ptr_eq(&prev, &cur) {
+                        break;
+                    }
+                    // Another writer's swap landed first — reload and retry.
                 }
-                new_rev[new_id as usize] = Some(key);
-                self.reverse.store(Arc::new(new_rev));
-                drop(current_id);
                 Ok(TouchInd::New(new_key))
             }
         }
