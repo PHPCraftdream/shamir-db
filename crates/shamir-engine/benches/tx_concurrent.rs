@@ -2,7 +2,8 @@
 //! coverage. Complements the single-threaded `tx_pipeline` / `tx_overhead`
 //! benches (which only measure the no-contention floor).
 //!
-//! Four groups:
+//! Six groups (four original + two follow-ups added after first-round
+//! review surfaced the structural-zero-aborts / zero-wounds findings):
 //!
 //! 1. `tx_concurrent/disjoint_inserts` — N concurrent writers, each inserting
 //!    into the same table at DISJOINT keys (no SSI / lock conflict). Reveals
@@ -32,8 +33,27 @@
 //!    simply wait on older holders rather than wound them. The whole
 //!    iteration is bounded — a real deadlock would manifest as a hang,
 //!    not a wrong number. Counter printed via `eprintln!`.  N ∈ {2,4,8}.
-//!    Follow-up: a reverse-age variant (`tx_v = base + (n - w)`) would
-//!    flip arrivals to wound the prior holder, exercising the wound path.
+//!
+//! 5. `tx_concurrent/hot_key_serializable` — Group 2's sibling under
+//!    Serializable isolation. `update_tx`'s internal old-value read
+//!    populates the read-set; concurrent updates create overlapping
+//!    read/write sets; `validate_read_set` aborts the losers; the retry-
+//!    loop kicks in. Abort rates measured (eprintln'd): ~0.49 (n=2) →
+//!    1.33 (n=4) → 3.01 (n=8) aborts per successful commit. This IS the
+//!    real SSI conflict cost — Group 2 is the floor where it doesn't fire.
+//!    Retry cap raised to 20 (vs Group 2's 10) since Serializable
+//!    contention can chain.  N ∈ {2,4,8}.
+//!
+//! 6. `tx_concurrent/pess_lock_contended_reverse_age` — Group 4's mirror
+//!    with `tx_v = base + (n - 1 - w)`: youngest tasks acquire first,
+//!    older arrivals SHOULD wound the holder. **In current measurement
+//!    the wound rate is still 0** — the critical section (one
+//!    `yield_now`) is too short; by the time the older arrival reaches
+//!    `lock_key`, the younger holder has already released. Real follow-up
+//!    needed: insert a synchronisation barrier so all N tasks hold the
+//!    lock-attempt phase simultaneously before any release, then wounds
+//!    will fire. Group 6 lands the spawn-order-correctness scaffold; the
+//!    barrier-driven variant is the next bench-debt item.  N ∈ {2,4,8}.
 //!
 //! Noise budget. Contention benches are inherently noisier than
 //! single-thread benches: schedulers, futex wake latency, and abort-retry
@@ -390,11 +410,219 @@ fn bench_pess_lock_contended(c: &mut Criterion) {
     }
 }
 
+// --- Group 2b: hot-key SSI Serializable ------------------------------------
+//
+// Sibling of `bench_hot_key_snapshot`. The ONLY difference is the isolation
+// level: Serializable. Under Serializable, `update_tx`'s internal old-value
+// read populates the SSI read-set; concurrent updates produce overlapping
+// read/write sets; `validate_read_set` aborts the losers — the retry-loop
+// kicks in. Retry cap bumped to 20 (vs 10 for Snapshot) because contention
+// tails can be longer here.
+
+fn bench_hot_key_serializable(c: &mut Criterion) {
+    let rt = rt();
+    let mut group = c.benchmark_group("tx_concurrent/hot_key_serializable");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(5));
+
+    let abort_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        group.throughput(Throughput::Elements(n as u64));
+        let fn_name = format!("n_{}", n);
+        let counters = Arc::clone(&abort_counts);
+        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
+            let counters = Arc::clone(&counters);
+            b.to_async(&rt).iter_custom(move |iters| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let repo = make_repo();
+                        let tbl = repo.get_table("bench_table").await.unwrap();
+                        let rid = tbl.insert(&InnerValue::Str("seed".into())).await.unwrap();
+                        drop(tbl);
+
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(n);
+                        for w in 0..n {
+                            let repo = repo.clone();
+                            let counters = Arc::clone(&counters);
+                            handles.push(tokio::spawn(async move {
+                                let mut attempts = 0u64;
+                                loop {
+                                    attempts += 1;
+                                    let (mut tx, _g) = repo
+                                        .begin_tx(IsolationLevel::Serializable)
+                                        .await
+                                        .unwrap();
+                                    let tbl = repo.get_table("bench_table").await.unwrap();
+                                    let upd = tbl
+                                        .update_tx(
+                                            rid,
+                                            &InnerValue::Str(format!("v{}_{}", w, attempts)),
+                                            Some(&mut tx),
+                                        )
+                                        .await;
+                                    if upd.is_err() {
+                                        drop(tx);
+                                        if attempts < 20 {
+                                            continue;
+                                        }
+                                        panic!("hot-key serializable writer exhausted 20 retries on stage");
+                                    }
+                                    let res = repo.commit_tx(tx).await;
+                                    match res {
+                                        Ok(out) => {
+                                            black_box(&out);
+                                            counters[idx]
+                                                .1
+                                                .fetch_add(attempts - 1, Ordering::Relaxed);
+                                            counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                            return;
+                                        }
+                                        Err(_) if attempts < 20 => continue,
+                                        Err(e) => panic!(
+                                            "hot-key serializable writer exhausted 20 retries: {e:?}"
+                                        ),
+                                    }
+                                }
+                            }));
+                        }
+                        for h in handles {
+                            h.await.unwrap();
+                        }
+                        total += start.elapsed();
+                    }
+                    total
+                }
+            });
+        });
+    }
+
+    group.finish();
+
+    for (n, aborts, commits) in abort_counts.iter() {
+        let a = aborts.load(Ordering::Relaxed);
+        let c = commits.load(Ordering::Relaxed);
+        if c > 0 {
+            eprintln!(
+                "hot_key_serializable n={n}: {a} aborts over {c} successful commits (~{:.2} aborts/commit)",
+                a as f64 / c as f64
+            );
+        }
+    }
+}
+
+// --- Group 4b: pessimistic-lock contended, REVERSE age ---------------------
+//
+// Sibling of `bench_pess_lock_contended`. The only difference: tx_v is
+// assigned in REVERSE spawn order — spawn-0 gets the highest tx_v
+// (youngest), spawn-(n-1) gets the lowest (oldest). Older arrivals then
+// wound the younger holder. (Empirically the wound path may still stay
+// near-zero if the critical section is short enough that arrivals
+// serialize cleanly via the wait queue.)
+
+fn bench_pess_lock_contended_reverse_age(c: &mut Criterion) {
+    let rt = rt();
+    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_reverse_age");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(5));
+
+    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        group.throughput(Throughput::Elements(n as u64));
+        let fn_name = format!("n_{}", n);
+        let counters = Arc::clone(&wound_counts);
+        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
+            let counters = Arc::clone(&counters);
+            b.to_async(&rt).iter_custom(move |iters| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut total = Duration::ZERO;
+                    for iter_i in 0..iters {
+                        let mvcc = make_mvcc();
+                        let key = Bytes::from_static(b"contended_key");
+
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(n);
+                        for w in 0..n {
+                            // REVERSE age: spawn-0 = youngest (highest tx_v),
+                            // spawn-(n-1) = oldest (lowest tx_v). Older
+                            // arrivals wound the younger holder.
+                            let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
+                            let mvcc = Arc::clone(&mvcc);
+                            let key = key.clone();
+                            let counters = Arc::clone(&counters);
+                            handles.push(tokio::spawn(async move {
+                                let wounded = Arc::new(AtomicBool::new(false));
+                                let notify = Arc::new(tokio::sync::Notify::new());
+                                let res = mvcc
+                                    .lock_key(
+                                        key.clone(),
+                                        tx_v,
+                                        Arc::clone(&wounded),
+                                        Arc::clone(&notify),
+                                        LockMode::Exclusive,
+                                    )
+                                    .await;
+                                match res {
+                                    Ok(()) => {
+                                        tokio::task::yield_now().await;
+                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(_) => {
+                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }));
+                        }
+                        for h in handles {
+                            h.await.unwrap();
+                        }
+                        total += start.elapsed();
+                    }
+                    total
+                }
+            });
+        });
+    }
+
+    group.finish();
+
+    for (n, wounds, acquires) in wound_counts.iter() {
+        let w = wounds.load(Ordering::Relaxed);
+        let a = acquires.load(Ordering::Relaxed);
+        let tot = w + a;
+        if tot > 0 {
+            eprintln!(
+                "pess_lock_contended_reverse_age n={n}: {w} wounds, {a} clean acquires \
+                 ({:.1}% wound rate)",
+                100.0 * w as f64 / tot as f64
+            );
+        }
+    }
+}
+
 criterion_group!(
     benches,
     bench_disjoint_inserts,
     bench_hot_key_snapshot,
+    bench_hot_key_serializable,
     bench_pess_lock_uncontended,
     bench_pess_lock_contended,
+    bench_pess_lock_contended_reverse_age,
 );
 criterion_main!(benches);
