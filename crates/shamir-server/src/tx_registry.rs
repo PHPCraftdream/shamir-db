@@ -21,6 +21,7 @@
 //! alive by the caller until commit returns, so the MVCC snapshot stays
 //! pinned through commit (SSI validation + history reads need it), then drops.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -86,12 +87,19 @@ pub struct InteractiveTx {
     db: String,
     /// Repo the handle is pinned to — the engine tx commits against one repo.
     repo: String,
-    /// Idle-timeout bookkeeping; bumped on each `TxExecute`. `parking_lot`
-    /// (server layer) — a brief lock, never held across `.await`.
-    last_activity: parking_lot::Mutex<Instant>,
-    /// Absolute deadline = created_at + max-lifetime. Bounds how long any one
-    /// interactive tx can pin GC, even if the client keeps it busy.
-    deadline: Instant,
+    /// Construction baseline. All time-since-creation is computed against
+    /// this `Instant` so `last_activity` and `deadline` are stored as
+    /// `u64` nanos (cheap atomic load/store on the bump path).
+    created_at: Instant,
+    /// Nanos since `created_at` of the last activity bump. Atomic load on
+    /// every TxExecute — replaces the prior `parking_lot::Mutex<Instant>`.
+    /// Single-writer per handle (the owning session), so `Relaxed` is
+    /// sound for both bump and sweep read; we use `Release`/`Acquire` for
+    /// happens-before clarity with the reaper task on another thread.
+    last_activity_nanos: AtomicU64,
+    /// Nanos since `created_at` for the absolute deadline. Set once at
+    /// construction and never mutated.
+    deadline_nanos: u64,
 }
 
 impl InteractiveTx {
@@ -115,8 +123,9 @@ impl InteractiveTx {
             owner_user_id,
             db,
             repo,
-            last_activity: parking_lot::Mutex::new(now),
-            deadline: now + max_lifetime,
+            created_at: now,
+            last_activity_nanos: AtomicU64::new(0),
+            deadline_nanos: max_lifetime.as_nanos() as u64,
         }
     }
 
@@ -149,19 +158,21 @@ impl InteractiveTx {
     }
 
     /// Mark activity (call on each successful `TxExecute`) to defer the idle
-    /// timeout.
+    /// timeout. Single atomic store — no lock takt.
     pub fn bump_activity(&self) {
-        *self.last_activity.lock() = Instant::now();
+        let elapsed = self.created_at.elapsed().as_nanos() as u64;
+        self.last_activity_nanos.store(elapsed, Ordering::Release);
     }
 
     /// Whether this tx is past its absolute deadline OR has been idle longer
     /// than `idle_ttl` as of `now`. The sweep reaps any tx that returns true.
     pub fn is_expired(&self, now: Instant, idle_ttl: Duration) -> bool {
-        if now >= self.deadline {
+        let elapsed_now = now.saturating_duration_since(self.created_at).as_nanos() as u64;
+        if elapsed_now >= self.deadline_nanos {
             return true;
         }
-        let last = *self.last_activity.lock();
-        now.saturating_duration_since(last) >= idle_ttl
+        let last = self.last_activity_nanos.load(Ordering::Acquire);
+        elapsed_now.saturating_sub(last) >= idle_ttl.as_nanos() as u64
     }
 }
 
