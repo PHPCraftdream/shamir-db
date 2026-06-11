@@ -25,6 +25,7 @@ use zeroize::{Zeroize, Zeroizing};
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::push_envelope::PushEnvelope;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
@@ -35,6 +36,7 @@ use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::error::ClientError;
+use crate::subscription::{EarlyBuffer, SubscriptionHandle, SubscriptionMap, EARLY_BUFFER_CAP};
 use crate::wire_frames::{
     WireAuthInit, WireAuthOk, WireChallenge, WireClientProof, WireResumeInit, WireResumeOk,
 };
@@ -117,8 +119,13 @@ pub(crate) type PendingMap = Arc<StdMutex<HashMap<u32, PendingSender>>>;
 ///
 /// On EOF or I/O error: marks `closed`, drains `pending` (sends
 /// `ConnectionClosed` to every waiter), then exits.
-pub(crate) async fn reader_task<R>(mut reader: R, pending: PendingMap, closed: Arc<AtomicBool>)
-where
+pub(crate) async fn reader_task<R>(
+    mut reader: R,
+    pending: PendingMap,
+    closed: Arc<AtomicBool>,
+    subscriptions: SubscriptionMap,
+    early_buffer: EarlyBuffer,
+) where
     R: tokio::io::AsyncRead + Unpin,
 {
     loop {
@@ -137,10 +144,32 @@ where
         let result = match decode_frame(&buf) {
             Some(r) => r,
             None => {
-                tracing::debug!(
-                    "reader_task: could not decode frame ({} bytes), dropping",
-                    buf.len()
-                );
+                // Not a response/error envelope — try push frame.
+                if let Ok(envelope) = rmp_serde::from_slice::<PushEnvelope>(&buf) {
+                    let sender = {
+                        let map = subscriptions.lock().unwrap_or_else(|p| p.into_inner());
+                        map.get(&envelope.sub).cloned()
+                    };
+                    if let Some(tx) = sender {
+                        let _ = tx.send(envelope);
+                    } else {
+                        let mut buf = early_buffer.lock().unwrap_or_else(|p| p.into_inner());
+                        let entry = buf.entry(envelope.sub).or_default();
+                        if entry.len() < EARLY_BUFFER_CAP {
+                            entry.push(envelope);
+                        } else {
+                            tracing::debug!(
+                                "reader_task: early buffer full for sub={}, dropping",
+                                envelope.sub
+                            );
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "reader_task: could not decode frame ({} bytes), dropping",
+                        buf.len()
+                    );
+                }
                 continue;
             }
         };
@@ -158,7 +187,7 @@ where
         let rid = match rid {
             Some(r) => r,
             None => {
-                // No rid — future push/subscription frame; ignore for now.
+                // Response/error envelope without rid — unusual but harmless.
                 tracing::debug!("reader_task: frame without rid, dropping");
                 continue;
             }
@@ -216,6 +245,10 @@ pub struct Client {
     next_request_id: AtomicU32,
     /// Outstanding oneshot senders keyed by request_id.
     pending: PendingMap,
+    /// Active subscription channels keyed by sub_id.
+    subscriptions: SubscriptionMap,
+    /// Early-buffered pushes for subs not yet registered via `subscribe_push`.
+    early_buffer: EarlyBuffer,
     /// True once the reader task has encountered EOF or I/O error.
     closed: Arc<AtomicBool>,
     /// §B21: JoinHandle is stored so we can abort on close/drop.
@@ -394,10 +427,18 @@ impl Client {
 
         // ---- Spawn background reader ----
         let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(HashMap::new()));
+        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
 
         // §B21: store JoinHandle — never drop silently.
-        let reader_handle = tokio::spawn(reader_task(r, pending.clone(), closed.clone()));
+        let reader_handle = tokio::spawn(reader_task(
+            r,
+            pending.clone(),
+            closed.clone(),
+            subscriptions.clone(),
+            early_buffer.clone(),
+        ));
 
         Ok(Self {
             write: tokio::sync::Mutex::new(w),
@@ -408,6 +449,8 @@ impl Client {
             resumption_expires_at_ns,
             next_request_id: AtomicU32::new(1),
             pending,
+            subscriptions,
+            early_buffer,
             closed,
             reader_handle: Some(reader_handle),
         })
@@ -482,8 +525,16 @@ impl Client {
 
         // ---- Spawn background reader ----
         let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(HashMap::new()));
+        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
-        let reader_handle = tokio::spawn(reader_task(r, pending.clone(), closed.clone()));
+        let reader_handle = tokio::spawn(reader_task(
+            r,
+            pending.clone(),
+            closed.clone(),
+            subscriptions.clone(),
+            early_buffer.clone(),
+        ));
 
         Ok(Self {
             write: tokio::sync::Mutex::new(w),
@@ -494,6 +545,8 @@ impl Client {
             resumption_expires_at_ns,
             next_request_id: AtomicU32::new(1),
             pending,
+            subscriptions,
+            early_buffer,
             closed,
             reader_handle: Some(reader_handle),
         })
@@ -524,6 +577,29 @@ impl Client {
     /// Resumption expiry (paired with [`Self::resumption_ticket`]).
     pub fn resumption_expires_at_ns(&self) -> Option<u64> {
         self.resumption_expires_at_ns
+    }
+
+    /// Register a subscription and get a handle to receive push frames.
+    ///
+    /// The caller must have already sent a subscribe request to the server
+    /// and obtained the `sub_id`. Push frames arriving for this `sub_id`
+    /// will be routed to the returned handle.
+    pub fn subscribe_push(&self, sub_id: u64) -> SubscriptionHandle {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut map = self.subscriptions.lock().unwrap_or_else(|p| p.into_inner());
+            map.insert(sub_id, tx.clone());
+        }
+        // Flush any early-buffered pushes that arrived before registration.
+        {
+            let mut buf = self.early_buffer.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(buffered) = buf.remove(&sub_id) {
+                for envelope in buffered {
+                    let _ = tx.send(envelope);
+                }
+            }
+        }
+        SubscriptionHandle::new(sub_id, rx, self.subscriptions.clone())
     }
 
     /// Health check.

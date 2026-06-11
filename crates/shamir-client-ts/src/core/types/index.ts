@@ -116,6 +116,16 @@ export type {
 } from './call.js';
 
 export type {
+  EventMask,
+  SubscriptionSource,
+  DeliverMode,
+  SubscribeOp,
+  UnsubscribeOp,
+  PushKind,
+  PushEnvelope,
+} from './subscribe.js';
+
+export type {
   SubBatchOp,
   BatchOpInput,
   QueryEntry,

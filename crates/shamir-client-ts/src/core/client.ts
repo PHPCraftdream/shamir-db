@@ -14,6 +14,8 @@ import { WsFramer, encode, decode } from './framing.js';
 import { runHandshake } from './protocol.js';
 import { signCanonical } from './hmac.js';
 import { Db } from './db.js';
+import { SubscriptionRouter } from './subscription-router.js';
+import type { PushEnvelope } from './types/subscribe.js';
 
 /** Result of {@link ShamirClient.txBegin} (`DbResponse::TxOpened`). */
 export interface TxOpened {
@@ -47,6 +49,7 @@ export class ShamirClient {
   private readonly _expiresAtNs: bigint;
   private readonly _resumptionTicket: Uint8Array | undefined;
   private readonly _resumptionExpiresAtNs: bigint | undefined;
+  private readonly subscriptionRouter = new SubscriptionRouter();
   private nextRequestId = 1;
 
   /**
@@ -349,6 +352,10 @@ export class ShamirClient {
       }
 
       // No rid, no error — server-push or subscription frame.
+      if (typeof frame.push === 'string') {
+        this.subscriptionRouter.route(frame as unknown as PushEnvelope);
+        continue;
+      }
       this.onUnroutedFrame?.(frame);
     }
   }
@@ -548,6 +555,11 @@ export class ShamirClient {
    */
   db(name: string): Db {
     return new Db(this, name);
+  }
+
+  /** Access the subscription router for registering/unregistering push handlers. */
+  get subscriptions(): SubscriptionRouter {
+    return this.subscriptionRouter;
   }
 
   /** Close the WS (normal closure). Idempotent. */

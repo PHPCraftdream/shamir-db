@@ -27,6 +27,9 @@ export async function resume(opts: ResumeOptions): Promise<ShamirClient> {
 
 export { ShamirClient };
 export type { TxOpened, ScramUserCreated } from './core/client.js';
+export { SubscriptionRouter } from './core/subscription-router.js';
+export type { SubscriptionEvent } from './core/subscription-router.js';
+export { SubscriptionHandle } from './core/subscription-handle.js';
 export type { ResumeOptions };
 export type { Db, Tx } from './core/db.js';
 
