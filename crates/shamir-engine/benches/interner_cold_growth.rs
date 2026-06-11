@@ -26,6 +26,7 @@ use std::pin::Pin;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use futures::Stream;
+use shamir_bench_utils as bu;
 use tokio::runtime::Runtime;
 
 use shamir_engine::meta::MetaKey;
@@ -175,7 +176,7 @@ fn bench_bytes_written_structural(c: &mut Criterion) {
     let mut group = c.benchmark_group("interner_cold_growth_bytes");
     // Tight measurement window — we want the bytes-written totals,
     // not a tight timing distribution.
-    group.sample_size(10);
+    group.sample_size(bu::sample_size(10));
 
     for &n in &[1000usize, 5000] {
         // Measure NEW total bytes — single run.

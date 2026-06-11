@@ -24,6 +24,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
+use shamir_bench_utils as bu;
 use shamir_connect::common::auth_message::{AuthMessage, AuthMessageInputs};
 use shamir_connect::common::crypto::{
     aes256gcm_cipher, aes256gcm_decrypt, aes256gcm_decrypt_with_cipher, aes256gcm_encrypt,
@@ -749,7 +750,7 @@ fn bench_argon2_derive(c: &mut Criterion) {
     let kdf = KdfParams::DEFAULT;
 
     let mut g = c.benchmark_group("argon2_derive");
-    g.sample_size(10);
+    g.sample_size(bu::sample_size(10));
     g.bench_function("default_params", |b| {
         b.iter(|| {
             criterion::black_box(DerivedKeys::derive(password, &salt, &kdf).unwrap());

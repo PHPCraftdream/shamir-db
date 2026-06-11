@@ -109,6 +109,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use shamir_bench_utils as bu;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::TableConfig;
 use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
@@ -146,8 +147,8 @@ fn make_repo() -> RepoInstance {
 fn bench_disjoint_inserts(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/disjoint_inserts");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     const K: usize = 10; // rows per writer
 
@@ -201,8 +202,8 @@ fn bench_disjoint_inserts(c: &mut Criterion) {
 fn bench_hot_key_snapshot(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/hot_key_snapshot");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     // Observational abort counters. Printed after the criterion run; NOT in
     // the timed window.
@@ -313,8 +314,8 @@ fn make_mvcc() -> Arc<MvccStore> {
 fn bench_pess_lock_uncontended(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/pess_lock_uncontended");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("acquire_release_single_key", |b| {
@@ -353,8 +354,8 @@ fn bench_pess_lock_uncontended(c: &mut Criterion) {
 fn bench_pess_lock_contended(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     // Observational wound counters.
     let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
@@ -459,8 +460,8 @@ fn bench_pess_lock_contended(c: &mut Criterion) {
 fn bench_hot_key_serializable(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/hot_key_serializable");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     let abort_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
         [2usize, 4, 8]
@@ -568,8 +569,8 @@ fn bench_hot_key_serializable(c: &mut Criterion) {
 fn bench_pess_lock_contended_reverse_age(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_reverse_age");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
         [2usize, 4, 8]
@@ -666,8 +667,8 @@ fn bench_pess_lock_contended_reverse_age(c: &mut Criterion) {
 fn bench_pess_lock_contended_barrier(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_barrier");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
         [2usize, 4, 8]
@@ -771,8 +772,8 @@ fn bench_pess_lock_contended_barrier(c: &mut Criterion) {
 fn bench_pess_lock_contended_in_cs_barrier(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_in_cs_barrier");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
         [2usize, 4, 8]

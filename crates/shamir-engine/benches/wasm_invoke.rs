@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
+use shamir_bench_utils as bu;
 use shamir_engine::function::{
     FnBatch, FnCtx, Params, ShamirFunction, WasmEngine, WasmFunction, WasmLimits,
 };
@@ -61,9 +62,9 @@ fn quick() -> bool {
 fn quick_aware_criterion() -> Criterion {
     let c = Criterion::default();
     if quick() {
-        c.sample_size(10)
-            .measurement_time(Duration::from_secs(1))
-            .warm_up_time(Duration::from_millis(100))
+        c.sample_size(bu::sample_size(10))
+            .measurement_time(bu::measurement_time(Duration::from_secs(1)))
+            .warm_up_time(bu::warm_up_time(Duration::from_millis(100)))
     } else {
         c
     }
@@ -86,8 +87,8 @@ fn bench_cold_first_call(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("wasm_cold_first_call");
     if quick() {
-        group.sample_size(10);
-        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(bu::sample_size(10));
+        group.measurement_time(bu::measurement_time(Duration::from_secs(1)));
     }
 
     group.bench_function("identity_compile_and_call", |b| {
@@ -120,8 +121,8 @@ fn bench_hot_repeat_call(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("wasm_hot_repeat_call");
     if quick() {
-        group.sample_size(10);
-        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(bu::sample_size(10));
+        group.measurement_time(bu::measurement_time(Duration::from_secs(1)));
     }
 
     group.bench_function("identity_call_only", |b| {
@@ -147,8 +148,8 @@ fn bench_startup_compile_k(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("wasm_startup_compile_k");
     if quick() {
-        group.sample_size(10);
-        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(bu::sample_size(10));
+        group.measurement_time(bu::measurement_time(Duration::from_secs(1)));
     }
 
     for &k in sizes {
@@ -186,8 +187,8 @@ fn bench_startup_compile_k(c: &mut Criterion) {
 fn bench_compile_cached(c: &mut Criterion) {
     let mut group = c.benchmark_group("wasm_compile_cached");
     if quick() {
-        group.sample_size(10);
-        group.measurement_time(Duration::from_secs(1));
+        group.sample_size(bu::sample_size(10));
+        group.measurement_time(bu::measurement_time(Duration::from_secs(1)));
     }
 
     // Cold cache: first compilation populates the cache entry.
@@ -240,8 +241,8 @@ fn bench_concurrent_calls(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("wasm_concurrent_calls");
     if quick() {
-        group.sample_size(10);
-        group.measurement_time(Duration::from_secs(2));
+        group.sample_size(bu::sample_size(10));
+        group.measurement_time(bu::measurement_time(Duration::from_secs(2)));
     }
 
     for &n in concurrency_levels {

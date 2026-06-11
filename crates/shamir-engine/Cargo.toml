@@ -83,6 +83,7 @@ dhat = "0.3"
 tempfile = "3.10.1"
 serial_test = "3.3.1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+shamir-bench-utils = { path = "../shamir-bench-utils" }
 # Tests build queries via the typed query builder instead of raw JSON.
 # query-builder depends only on query-types/types — no cycle on engine.
 shamir-query-builder = { path = "../shamir-query-builder" }

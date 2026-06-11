@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tokio::runtime::Runtime;
 
+use shamir_bench_utils as bu;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::storage_membuffer::{MemBufferConfig, MemBufferStore};
 use shamir_storage::types::{RecordKey, Store};
@@ -21,7 +22,7 @@ use shamir_types::types::record_id::RecordId;
 fn bench_concurrent_rw(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("membuffer_concurrent_rw");
-    group.sample_size(10);
+    group.sample_size(bu::sample_size(10));
 
     for &readers in &[1usize, 2, 4, 8] {
         group.throughput(Throughput::Elements((readers + 1) as u64));

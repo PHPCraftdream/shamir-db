@@ -32,6 +32,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughpu
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 
+use shamir_bench_utils as bu;
 use shamir_collections::new_map;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::common::types::{BindingMode, TransportKind};
@@ -261,7 +262,7 @@ async fn seed_table(
 
 fn bench_snapshot(c: &mut Criterion) {
     let mut g = c.benchmark_group("subscription_snapshot");
-    g.sample_size(10);
+    g.sample_size(bu::sample_size(10));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -345,7 +346,7 @@ fn bench_reactive(c: &mut Criterion) {
     let mut g = c.benchmark_group("subscription_reactive");
     const N: usize = 100;
     g.throughput(Throughput::Elements(N as u64));
-    g.sample_size(10);
+    g.sample_size(bu::sample_size(10));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

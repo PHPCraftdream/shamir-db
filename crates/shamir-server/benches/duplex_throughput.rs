@@ -25,6 +25,7 @@ use std::time::Duration;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use tokio::io::AsyncWriteExt;
 
+use shamir_bench_utils as bu;
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -230,8 +231,8 @@ fn bench_duplex_vs_lockstep(c: &mut Criterion) {
     let mut group = c.benchmark_group("duplex_throughput");
     // Extend target time: with 1 ms/request × 100 requests × cap=1, each
     // lockstep iteration takes ~100 ms.
-    group.measurement_time(Duration::from_secs(20));
-    group.sample_size(20);
+    group.measurement_time(bu::measurement_time(Duration::from_secs(20)));
+    group.sample_size(bu::sample_size(20));
 
     for &n in &[10u32, 32u32] {
         group.throughput(Throughput::Elements(n as u64));

@@ -23,6 +23,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use serde_json as json;
 
+use shamir_bench_utils as bu;
 use shamir_engine::query::read::exec::{apply_select, apply_select_to_bytes};
 use shamir_engine::query::read::{Select, SelectItem};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
@@ -97,7 +98,7 @@ fn bench(c: &mut Criterion) {
     // ── Scenario 1: SELECT * (full Map projection) ────────────────
     let mut g1 = c.benchmark_group("select_all");
     g1.throughput(Throughput::Elements(n_records));
-    g1.sample_size(10);
+    g1.sample_size(bu::sample_size(10));
     g1.bench_function("select_all_100k", |b| {
         b.iter_batched(
             || (),
@@ -113,7 +114,7 @@ fn bench(c: &mut Criterion) {
     // ── Scenario 2: explicit field list (skips most of the record) ─
     let mut g2 = c.benchmark_group("select_few_fields");
     g2.throughput(Throughput::Elements(n_records));
-    g2.sample_size(10);
+    g2.sample_size(bu::sample_size(10));
     g2.bench_function("select_2_of_6_fields_100k", |b| {
         b.iter_batched(
             || (),
@@ -136,7 +137,7 @@ fn bench(c: &mut Criterion) {
     // serialization.
     let mut g3 = c.benchmark_group("select_then_serialize");
     g3.throughput(Throughput::Elements(n_records));
-    g3.sample_size(10);
+    g3.sample_size(bu::sample_size(10));
     g3.bench_function("select_all_then_serialize_100k", |b| {
         b.iter_batched(
             || (),
@@ -153,7 +154,7 @@ fn bench(c: &mut Criterion) {
     // ── Scenario 4: streaming path (SELECT * only) ────────────────
     let mut g4 = c.benchmark_group("select_streaming");
     g4.throughput(Throughput::Elements(n_records));
-    g4.sample_size(10);
+    g4.sample_size(bu::sample_size(10));
     g4.bench_function("select_all_streaming_100k", |b| {
         b.iter_batched(
             || (),

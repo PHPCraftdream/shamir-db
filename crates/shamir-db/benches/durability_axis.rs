@@ -32,6 +32,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Runtime;
 
+use shamir_bench_utils as bu;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
@@ -81,8 +82,8 @@ fn req_insert(n: usize, level: Durability) -> BatchRequest {
 fn bench_durability(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("durability");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     for &n in &[1usize, 10, 100] {
         for &(level, label) in &[
