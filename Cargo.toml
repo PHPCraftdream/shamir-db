@@ -48,5 +48,15 @@ panic = "abort"
 inherits = "release"
 lto = false
 incremental = true
-# Keep `opt-level = 3` from release so hot inner loops still get
-# the same scalar/SIMD codegen — only cross-crate inlining is lost.
+# `opt-level = 0` (down from release's 3). What hurts iterative /opti
+# is the BUILD step, not the measurement; absolute numbers don't matter
+# inside a cycle — only the **delta to baseline** does, and that delta
+# survives any uniform pessimism. opt-0 compiles ~5× faster than opt-3,
+# ~2× faster than opt-1. Measurements come out 2–5× slow vs. opt-3,
+# but criterion auto-adjusts iter counts per sample so stat-precision
+# survives for both integration (~ms) and micro (~ns) benches.
+#
+# For "final" / publishable absolute numbers, run explicitly with the
+# release profile:
+#   cargo bench -p shamir-db --profile=release
+opt-level = 0
