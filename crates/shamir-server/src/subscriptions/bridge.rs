@@ -95,12 +95,24 @@ pub(crate) async fn bridge_task(
                     }
                     for event in &jr.events {
                         for change in &event.changes {
+                            let value_json = match (&change.op, change.value.as_deref()) {
+                                (ChangeOp::Put, Some(bytes)) => {
+                                    db.decode_record_value_json(
+                                        &db_name,
+                                        repo,
+                                        &change.table,
+                                        bytes,
+                                    )
+                                    .await
+                                }
+                                _ => None,
+                            };
                             if !matches_any(
                                 &targets,
                                 repo,
                                 &change.table,
                                 &change.op,
-                                change.value.as_deref(),
+                                value_json.as_ref(),
                             ) {
                                 continue;
                             }
@@ -110,6 +122,7 @@ pub(crate) async fn bridge_task(
                                 &db_name,
                                 &actor,
                                 change,
+                                value_json.as_ref(),
                                 event.commit_version,
                             )
                             .await;
@@ -221,12 +234,25 @@ pub(crate) async fn bridge_task(
                     }
                     *wm = event.commit_version;
                     for change in &event.changes {
+                        // De-intern the Put value once: the changefeed
+                        // ships records as msgpack with `u64` interned
+                        // map keys (`InnerValue`), but `filter_matches_value`
+                        // and `make_event_data` both consume string-keyed
+                        // `serde_json::Value`. A direct `serde_json` decode
+                        // of the raw bytes fails for any non-empty map.
+                        let value_json = match (&change.op, change.value.as_deref()) {
+                            (ChangeOp::Put, Some(bytes)) => {
+                                db.decode_record_value_json(&db_name, &repo, &change.table, bytes)
+                                    .await
+                            }
+                            _ => None,
+                        };
                         if !matches_any(
                             &targets,
                             &repo,
                             &change.table,
                             &change.op,
-                            change.value.as_deref(),
+                            value_json.as_ref(),
                         ) {
                             continue;
                         }
@@ -236,6 +262,7 @@ pub(crate) async fn bridge_task(
                             &db_name,
                             &actor,
                             change,
+                            value_json.as_ref(),
                             event.commit_version,
                         )
                         .await;
@@ -292,10 +319,11 @@ async fn make_deliver_data(
     db_name: &str,
     actor: &Actor,
     change: &shamir_tx::changefeed::RecordChange,
+    value_json: Option<&serde_json::Value>,
     commit_version: u64,
 ) -> Vec<u8> {
     match deliver {
-        DeliverMode::Records => make_event_data(change, commit_version),
+        DeliverMode::Records => make_event_data(change, value_json, commit_version),
         DeliverMode::Keys => make_keys_data(&change.table, &change.op, &change.key, commit_version),
         DeliverMode::Batch(sub_batch) => {
             execute_reactive_batch(db, db_name, actor, sub_batch, change, commit_version).await
@@ -360,7 +388,7 @@ pub(crate) fn matches_any(
     repo: &str,
     table: &str,
     op: &ChangeOp,
-    value: Option<&[u8]>,
+    value: Option<&serde_json::Value>,
 ) -> bool {
     targets
         .iter()
@@ -369,20 +397,16 @@ pub(crate) fn matches_any(
                 return false;
             }
             match (filter, op) {
-                (Some(f), ChangeOp::Put) => {
-                    let json_val = value
-                        .and_then(|bytes| rmp_serde::from_slice::<serde_json::Value>(bytes).ok());
-                    match json_val {
-                        Some(v) => filter_matches_value(f, &v),
-                        None => {
-                            tracing::warn!(
-                                "subscription filter: msgpack decode failed for Put value, \
-                                 skipping event (fail-closed)"
-                            );
-                            false
-                        }
+                (Some(f), ChangeOp::Put) => match value {
+                    Some(v) => filter_matches_value(f, v),
+                    None => {
+                        tracing::warn!(
+                            "subscription filter: de-intern decode failed for Put value, \
+                             skipping event (fail-closed)"
+                        );
+                        false
                     }
-                }
+                },
                 _ => true,
             }
         })
@@ -479,7 +503,11 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn make_event_data(change: &shamir_tx::changefeed::RecordChange, commit_version: u64) -> Vec<u8> {
+fn make_event_data(
+    change: &shamir_tx::changefeed::RecordChange,
+    value_json: Option<&serde_json::Value>,
+    commit_version: u64,
+) -> Vec<u8> {
     let op_str = match change.op {
         ChangeOp::Put => "put",
         ChangeOp::Delete => "delete",
@@ -492,10 +520,8 @@ fn make_event_data(change: &shamir_tx::changefeed::RecordChange, commit_version:
         "key": key_value,
         "commit_version": commit_version
     });
-    if let Some(ref value_bytes) = change.value {
-        if let Ok(val) = rmp_serde::from_slice::<serde_json::Value>(value_bytes) {
-            obj["value"] = val;
-        }
+    if let Some(val) = value_json {
+        obj["value"] = val.clone();
     }
     serde_json::to_vec(&obj).unwrap_or_default()
 }
