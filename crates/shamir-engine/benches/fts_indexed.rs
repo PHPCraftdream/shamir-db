@@ -31,6 +31,15 @@
 //! backend exposes only `FtsMode::AndAll` / `FtsMode::OrAny`
 //! (`crates/shamir-engine/.../index2/backend.rs`) — there is no
 //! phrase-with-positions path to measure today.
+//!
+//! Long-corpus variant (N=100_000) is gated behind the
+//! `fts_indexed_long` cargo feature, since seeding the fixture takes
+//! several seconds and the default measurement window can't absorb it.
+//! Run with:
+//!
+//! ```text
+//! cargo bench --bench fts_indexed -p shamir-engine --features fts_indexed_long
+//! ```
 
 use std::sync::Arc;
 
@@ -352,5 +361,63 @@ fn bench_fts_indexed_selective(c: &mut Criterion) {
 // 1000 — the ~16x ratio is the real-world FTS-index win this bench
 // was designed to expose.
 
+// --- N=100_000 long variant (feature-gated) -------------------------------
+//
+// Opt-in via `--features fts_indexed_long`. Mirrors the selective-query
+// shape (rare token in 1% of docs) so the indexed/brute ratio reflects
+// the asymptotic FTS-index win at scale. `sample_size(10)` is set
+// explicitly because the per-iteration read cost grows with N and the
+// default 100 samples would push the wall-clock past patience.
+#[cfg(feature = "fts_indexed_long")]
+fn bench_fts_indexed_long_n100k(c: &mut Criterion) {
+    let rt = rt();
+    let q = build_selective_query();
+
+    let mut group = c.benchmark_group("fts_indexed_long");
+    group.sample_size(10);
+    let n: usize = 100_000;
+    group.throughput(Throughput::Elements(n as u64));
+
+    let indexed_table = rt.block_on(build_docs_table_selective(n, true));
+    let brute_table = rt.block_on(build_docs_table_selective(n, false));
+
+    group.bench_function(BenchmarkId::new("indexed_selective", n), |b| {
+        b.to_async(&rt).iter(|| {
+            let table = indexed_table.clone();
+            let q = q.clone();
+            async move {
+                let interner = table.interner().get().await.unwrap();
+                let refs = new_map();
+                let ctx = FilterContext::new(interner, &refs);
+                black_box(table.read(&q, &ctx).await.unwrap());
+            }
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("brute_selective_via_read", n), |b| {
+        b.to_async(&rt).iter(|| {
+            let table = brute_table.clone();
+            let q = q.clone();
+            async move {
+                let interner = table.interner().get().await.unwrap();
+                let refs = new_map();
+                let ctx = FilterContext::new(interner, &refs);
+                black_box(table.read(&q, &ctx).await.unwrap());
+            }
+        });
+    });
+
+    group.finish();
+}
+
+#[cfg(not(feature = "fts_indexed_long"))]
 criterion_group!(benches, bench_fts, bench_fts_indexed_selective);
+
+#[cfg(feature = "fts_indexed_long")]
+criterion_group!(
+    benches,
+    bench_fts,
+    bench_fts_indexed_selective,
+    bench_fts_indexed_long_n100k,
+);
 criterion_main!(benches);
