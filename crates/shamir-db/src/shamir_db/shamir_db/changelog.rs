@@ -1,6 +1,32 @@
 use super::ShamirDb;
+use shamir_types::codecs::interned::json::inner_to_json_value;
+use shamir_types::types::value::InnerValue;
 
 impl ShamirDb {
+    /// Decode a changefeed `RecordChange.value` byte slice (MessagePack
+    /// encoded `InnerValue` with interned `u64` map keys) back into a
+    /// `serde_json::Value` with string keys, using the named table's
+    /// interner for de-interning.
+    ///
+    /// Returns `None` when the database / repo / table doesn't exist,
+    /// the interner can't be loaded, or the bytes don't decode as a
+    /// valid `InnerValue` — callers (specifically the subscription
+    /// bridge's filter evaluator and event payload encoder) treat
+    /// `None` as fail-closed.
+    pub async fn decode_record_value_json(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+        bytes: &[u8],
+    ) -> Option<serde_json::Value> {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        let table_manager = repo_instance.get_table(table).await.ok()?;
+        let interner = table_manager.interner().get().await.ok()?;
+        let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
+        inner_to_json_value(&inner, interner).ok()
+    }
+
     // ============================================================================
     // Changefeed (Phase 3b): live broadcast + durable journal
     // ============================================================================

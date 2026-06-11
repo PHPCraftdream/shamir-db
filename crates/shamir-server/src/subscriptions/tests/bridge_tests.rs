@@ -148,13 +148,12 @@ fn put_with_matching_filter_delivered() {
         "status": "active",
         "name": "alice"
     });
-    let value_bytes = rmp_serde::to_vec_named(&record).unwrap();
     assert!(matches_any(
         &targets,
         "repo",
         "users",
         &ChangeOp::Put,
-        Some(&value_bytes),
+        Some(&record),
     ));
 }
 
@@ -169,13 +168,12 @@ fn put_with_non_matching_filter_skipped() {
         "status": "inactive",
         "name": "bob"
     });
-    let value_bytes = rmp_serde::to_vec_named(&record).unwrap();
     assert!(!matches_any(
         &targets,
         "repo",
         "users",
         &ChangeOp::Put,
-        Some(&value_bytes),
+        Some(&record),
     ));
 }
 
@@ -199,13 +197,12 @@ fn delete_with_filter_delivered_regardless() {
 fn put_without_filter_delivered() {
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, None)];
     let record = serde_json::json!({"status": "anything"});
-    let value_bytes = rmp_serde::to_vec_named(&record).unwrap();
     assert!(matches_any(
         &targets,
         "repo",
         "users",
         &ChangeOp::Put,
-        Some(&value_bytes),
+        Some(&record),
     ));
 }
 
