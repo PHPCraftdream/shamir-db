@@ -2,7 +2,7 @@
 //! coverage. Complements the single-threaded `tx_pipeline` / `tx_overhead`
 //! benches (which only measure the no-contention floor).
 //!
-//! Six groups (four original + two follow-ups added after first-round
+//! Seven groups (four original + three follow-ups added after first-round
 //! review surfaced the structural-zero-aborts / zero-wounds findings):
 //!
 //! 1. `tx_concurrent/disjoint_inserts` — N concurrent writers, each inserting
@@ -54,6 +54,20 @@
 //!    lock-attempt phase simultaneously before any release, then wounds
 //!    will fire. Group 6 lands the spawn-order-correctness scaffold; the
 //!    barrier-driven variant is the next bench-debt item.  N ∈ {2,4,8}.
+//!
+//! 7. `tx_concurrent/pess_lock_contended_barrier` — Group 6's follow-up
+//!    with a `tokio::sync::Barrier::new(n)` released RIGHT BEFORE each
+//!    task's `lock_key` call. All N tasks reach the barrier together,
+//!    are released together, and race for `lock_key` in the same
+//!    instant. Empirical result: **still 0 wounds** at n ∈ {2,4,8}
+//!    over hundreds of thousands of acquires. Finding: the critical
+//!    section is `yield_now` only — by the time a losing contender's
+//!    `lock_key` enqueues, the winner has already released, so the
+//!    wound path is never entered. To actually trigger wounds, the
+//!    holder must STAY in the CS while contenders enqueue — i.e. a
+//!    second barrier (or a `Notify`) parked inside the held section.
+//!    Group 7 lands the pre-lock barrier scaffold; the in-CS barrier
+//!    is the next bench-debt item.  N ∈ {2,4,8}.
 //!
 //! Noise budget. Contention benches are inherently noisier than
 //! single-thread benches: schedulers, futex wake latency, and abort-retry
@@ -616,6 +630,107 @@ fn bench_pess_lock_contended_reverse_age(c: &mut Criterion) {
     }
 }
 
+// --- Group 7: pessimistic-lock contended, REVERSE age + BARRIER ------------
+//
+// Follow-up to Group 6. The reverse-age variant alone produced zero wounds
+// because each task's critical section was so short the younger holder
+// always released before the older arrival reached `lock_key`. Here a
+// `tokio::sync::Barrier::new(n)` is placed RIGHT BEFORE each `lock_key`
+// call: all N tasks reach the barrier, are released together, and race
+// for the lock in the same instant. The youngest (highest tx_v) wins,
+// then older arrivals find a younger holder and wound it.
+
+fn bench_pess_lock_contended_barrier(c: &mut Criterion) {
+    let rt = rt();
+    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_barrier");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(5));
+
+    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        group.throughput(Throughput::Elements(n as u64));
+        let fn_name = format!("n_{}", n);
+        let counters = Arc::clone(&wound_counts);
+        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
+            let counters = Arc::clone(&counters);
+            b.to_async(&rt).iter_custom(move |iters| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut total = Duration::ZERO;
+                    for iter_i in 0..iters {
+                        let mvcc = make_mvcc();
+                        let key = Bytes::from_static(b"contended_key");
+                        let barrier = Arc::new(tokio::sync::Barrier::new(n));
+
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(n);
+                        for w in 0..n {
+                            // REVERSE age, same as Group 6.
+                            let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
+                            let mvcc = Arc::clone(&mvcc);
+                            let key = key.clone();
+                            let counters = Arc::clone(&counters);
+                            let barrier = Arc::clone(&barrier);
+                            handles.push(tokio::spawn(async move {
+                                let wounded = Arc::new(AtomicBool::new(false));
+                                let notify = Arc::new(tokio::sync::Notify::new());
+                                // Synchronise the lock-attempt phase: all N
+                                // tasks reach here, then all leave together.
+                                barrier.wait().await;
+                                let res = mvcc
+                                    .lock_key(
+                                        key.clone(),
+                                        tx_v,
+                                        Arc::clone(&wounded),
+                                        Arc::clone(&notify),
+                                        LockMode::Exclusive,
+                                    )
+                                    .await;
+                                match res {
+                                    Ok(()) => {
+                                        tokio::task::yield_now().await;
+                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                        counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(_) => {
+                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }));
+                        }
+                        for h in handles {
+                            h.await.unwrap();
+                        }
+                        total += start.elapsed();
+                    }
+                    total
+                }
+            });
+        });
+    }
+
+    group.finish();
+
+    for (n, wounds, acquires) in wound_counts.iter() {
+        let w = wounds.load(Ordering::Relaxed);
+        let a = acquires.load(Ordering::Relaxed);
+        let tot = w + a;
+        if tot > 0 {
+            eprintln!(
+                "pess_lock_contended_barrier n={n}: {w} wounds, {a} clean acquires \
+                 ({:.1}% wound rate)",
+                100.0 * w as f64 / tot as f64
+            );
+        }
+    }
+}
+
 criterion_group!(
     benches,
     bench_disjoint_inserts,
@@ -624,5 +739,6 @@ criterion_group!(
     bench_pess_lock_uncontended,
     bench_pess_lock_contended,
     bench_pess_lock_contended_reverse_age,
+    bench_pess_lock_contended_barrier,
 );
 criterion_main!(benches);
