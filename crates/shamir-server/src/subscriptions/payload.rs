@@ -36,6 +36,14 @@ pub fn make_event_data(
     serde_json::to_vec(&payload).unwrap_or_default()
 }
 
+#[derive(Serialize)]
+struct KeysData<'a> {
+    table: &'a str,
+    op: &'a str,
+    key: &'a serde_json::Value,
+    commit_version: u64,
+}
+
 pub fn make_keys_data(table: &str, op: &ChangeOp, key: &[u8], commit_version: u64) -> Vec<u8> {
     let op_str = match op {
         ChangeOp::Put => "put",
@@ -43,11 +51,11 @@ pub fn make_keys_data(table: &str, op: &ChangeOp, key: &[u8], commit_version: u6
     };
     let key_value = rmp_serde::from_slice::<serde_json::Value>(key)
         .unwrap_or_else(|_| serde_json::Value::String(hex_encode(key)));
-    serde_json::to_vec(&serde_json::json!({
-        "table": table,
-        "op": op_str,
-        "key": key_value,
-        "commit_version": commit_version
-    }))
-    .unwrap_or_default()
+    let payload = KeysData {
+        table,
+        op: op_str,
+        key: &key_value,
+        commit_version,
+    };
+    serde_json::to_vec(&payload).unwrap_or_default()
 }

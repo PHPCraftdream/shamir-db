@@ -4,6 +4,7 @@
 //! (computed-field resolution, interning utilities) and the
 //! index-backed lookup helpers used by execute_update / execute_delete / execute_set.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use futures::StreamExt;
@@ -75,16 +76,16 @@ pub(super) fn is_computed_field(v: &json::Value) -> bool {
 /// Non-object values and records with no computed fields are returned
 /// unchanged, so the common (literal-only) write path pays nothing beyond one
 /// `any()` scan.
-pub(super) fn resolve_computed_record(
-    value: &json::Value,
+pub(super) fn resolve_computed_record<'a>(
+    value: &'a json::Value,
     interner: &Interner,
-) -> Result<json::Value, String> {
+) -> Result<Cow<'a, json::Value>, String> {
     let obj = match value {
         json::Value::Object(m) => m,
-        _ => return Ok(value.clone()),
+        _ => return Ok(Cow::Borrowed(value)),
     };
     if !obj.values().any(is_computed_field) {
-        return Ok(value.clone());
+        return Ok(Cow::Borrowed(value));
     }
 
     // `$ref` resolves only against literal fields; a reference to another
@@ -110,7 +111,7 @@ pub(super) fn resolve_computed_record(
             .map_err(|e| format!("computed field '{k}': {e}"))?;
         out.insert(k.clone(), jv);
     }
-    Ok(json::Value::Object(out))
+    Ok(Cow::Owned(json::Value::Object(out)))
 }
 
 /// Evaluate a [`FilterValue`] to an [`InnerValue`] in the write-time computed
