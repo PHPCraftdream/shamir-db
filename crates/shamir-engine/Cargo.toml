@@ -63,6 +63,12 @@ arc-swap = "1.7"          # RCU-style atomic Arc swap (table_manager)
 # feature would compile away the variant constructors.
 default = ["all-backends"]
 all-backends = ["redb", "sled", "fjall", "nebari", "persy", "canopy"]
+# Opt-in: enables the N=100_000 long variant in the `fts_indexed` bench.
+# Setup takes several seconds per fixture (seeding 100k records + FTS
+# postings) and pushes past Criterion's default measurement window, so
+# it's gated to keep the default `cargo bench --bench fts_indexed` run
+# bounded.
+fts_indexed_long = []
 redb   = ["shamir-storage/redb"]
 sled   = ["shamir-storage/sled"]
 fjall  = ["shamir-storage/fjall"]
