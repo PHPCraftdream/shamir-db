@@ -78,6 +78,10 @@ harness = false
 name = "authorize_gate"
 harness = false
 
+[[bench]]
+name = "changelog_read"
+harness = false
+
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
