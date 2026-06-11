@@ -282,6 +282,55 @@ item is Movement C step 1: network changefeed pull-API
 (`REPLICATION.md`, to be written when replication starts) are the two
 pending design docs for Movement C steps 2 and 3.
 
+### Bench-debt (non-blocking; scaffolding landed, follow-ups pending)
+
+The four-wave bench-coverage push (subscriptions hot paths + e2e
+throughput + interactive-tx + journal-read + record-size axis + FTS
+indexed + concurrent tx + subscription fan-out) zeroed the large gaps.
+Three items have scaffolding in place but need one more small patch to
+measure what they claim:
+
+- **`pess_lock_contended_reverse_age` barrier variant**
+  (`crates/shamir-engine/benches/tx_concurrent.rs` Group 6). Reverse-age
+  spawn order is in place, but the trivial critical section means older
+  arrivals see no holder and acquire cleanly (0 wounds / 2.16M acquires).
+  Add a synchronisation barrier so all N tasks hold the lock-attempt
+  phase simultaneously before any release — then wounds fire.
+
+- **`fts_indexed` selective query**
+  (`crates/shamir-engine/benches/fts_indexed.rs`). N parameterised over
+  {1000, 10_000}, but the headline query matches every doc — both
+  indexed and brute materialise the full corpus and that tail dominates.
+  The index's asymptotic win appears only with a SELECTIVE query (a
+  token hitting ~1 % of rows). Add one selective bench function.
+
+- **`fts_indexed` at N=100_000.** Currently caps at N=10_000 to stay
+  inside default measurement-time. A "long" feature-gated variant would
+  show the full asymptotic curve.
+
+Four items are blocked on dependencies — pick up only after the
+dependency lands:
+
+- **SCRAM connect / resume latency** (`wire_latencies.rs` Group 2,
+  deferred). Blocked on: lift a reusable `tests/common/live_server.rs`
+  helper. 26 e2e files inline ~100 LOC each of server-spawn harness;
+  consolidation is worth doing in its own right.
+
+- **`reactive_call` delivery mode** (`subscription_delivery.rs`).
+  Blocked on: a registered in-memory stored function (funclib / WASM
+  module) reachable from the bench harness. `DeliverMode::Batch`
+  already covers the shared `$event.*` injection and reactive wrapper
+  hot path; `Call` adds only the `BatchOp::Call` swap.
+
+- **HNSW insert / index-build cost.** `vector_search` benches the
+  query side; build cost matters at the vectors/embeddings milestone
+  ([`EMBEDDINGS_AND_VECTORS.md`](./EMBEDDINGS_AND_VECTORS.md)).
+
+- **TS-client microbenches** (`SubscriptionRouter.route`, push-frame
+  msgpack decode). Cheap operations; grows in value at the
+  browser-WASM milestone
+  ([`BROWSER_WASM_PLAN.md`](./BROWSER_WASM_PLAN.md)).
+
 ---
 
 _Plan revision 2026-06-10 — Movements A and B fully done; P1–P4 wave
