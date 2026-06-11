@@ -138,6 +138,24 @@ describe('subscribe', () => {
     expect(op.initial).toBe(true);
   });
 
+  it('throws when sources disagree on deliver mode', () => {
+    expect(() =>
+      subscribe([
+        { store: 'main', table: 'a', deliver: 'keys' },
+        { store: 'main', table: 'b', deliver: 'records' },
+      ]),
+    ).toThrow(/conflicting deliver/);
+  });
+
+  it('accepts multiple sources that agree on deliver mode', () => {
+    const op = subscribe([
+      { store: 'main', table: 'a', deliver: 'keys' },
+      { store: 'main', table: 'b', deliver: 'keys' },
+    ]);
+    expect(op.deliver).toBe('keys');
+    expect(op.subscribe).toHaveLength(2);
+  });
+
   it('fromVersion propagates as from_version', () => {
     const op = subscribe(
       { store: 'main', table: 't', where: eq('a', 1) },
