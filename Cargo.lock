@@ -3686,6 +3686,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-bench-utils"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+]
+
+[[package]]
 name = "shamir-client"
 version = "0.1.0"
 dependencies = [
@@ -3742,6 +3749,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "shamir-bench-utils",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
@@ -3769,6 +3777,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "shamir-bench-utils",
  "shamir-collections",
  "shamir-engine",
  "shamir-funclib",
@@ -3808,6 +3817,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serial_test",
+ "shamir-bench-utils",
  "shamir-funclib",
  "shamir-index",
  "shamir-query-builder",
@@ -3971,6 +3981,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "serial_test",
+ "shamir-bench-utils",
  "shamir-client",
  "shamir-collections",
  "shamir-connect",

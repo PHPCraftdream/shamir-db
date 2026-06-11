@@ -46,6 +46,7 @@ use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Runtime;
 use tokio::time::timeout;
 
+use shamir_bench_utils as bu;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::ShamirDb;
@@ -113,7 +114,7 @@ fn bench_insert_by_size(c: &mut Criterion) {
     for &(size, label) in SIZES {
         group.throughput(Throughput::Bytes(size as u64));
         if label == "1mb" {
-            group.sample_size(20);
+            group.sample_size(bu::sample_size(20));
         }
         group.bench_function(format!("value_{label}"), |b| {
             b.to_async(&rt).iter_custom(|iters| async move {
@@ -165,7 +166,7 @@ fn bench_read_by_size(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(size as u64));
         if label == "1mb" {
-            group.sample_size(20);
+            group.sample_size(bu::sample_size(20));
         }
         group.bench_function(format!("value_{label}"), |b| {
             let shamir = Arc::clone(&shamir);

@@ -38,6 +38,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 use serde_json as json;
 
+use shamir_bench_utils as bu;
 use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
 use shamir_engine::query::read::{
     OrderBy, OrderByItem, OrderDirection, Pagination, Select, SelectItem,
@@ -119,7 +120,7 @@ fn bench(c: &mut Criterion) {
     // ── Scenario 1: indexed field + LIMIT 100 ─────────────────────
     let mut g1 = c.benchmark_group("order_by_indexed_field_limit_100");
     g1.throughput(Throughput::Elements(n_records));
-    g1.sample_size(10);
+    g1.sample_size(bu::sample_size(10));
     g1.bench_function("score_asc_limit_100", |b| {
         b.iter_batched(
             || projected.clone(),
@@ -143,7 +144,7 @@ fn bench(c: &mut Criterion) {
     // ── Scenario 2: non-indexed field + LIMIT 100 ─────────────────
     let mut g2 = c.benchmark_group("order_by_non_indexed_field_limit_100");
     g2.throughput(Throughput::Elements(n_records));
-    g2.sample_size(10);
+    g2.sample_size(bu::sample_size(10));
     g2.bench_function("email_asc_limit_100", |b| {
         b.iter_batched(
             || projected.clone(),
@@ -167,7 +168,7 @@ fn bench(c: &mut Criterion) {
     // ── Scenario 3: non-indexed field, full sort (no LIMIT) ───────
     let mut g3 = c.benchmark_group("order_by_non_indexed_field_full");
     g3.throughput(Throughput::Elements(n_records));
-    g3.sample_size(10);
+    g3.sample_size(bu::sample_size(10));
     g3.bench_function("email_asc_full", |b| {
         b.iter_batched(
             || projected.clone(),
@@ -221,7 +222,7 @@ fn bench(c: &mut Criterion) {
 
     let mut g4 = c.benchmark_group("order_by_single_column_typed");
     g4.throughput(Throughput::Elements(n_records));
-    g4.sample_size(10);
+    g4.sample_size(bu::sample_size(10));
     g4.bench_function("id_i64_asc_full", |b| {
         b.iter_batched(
             || projected.clone(),
@@ -272,7 +273,7 @@ fn bench(c: &mut Criterion) {
     // single-column path.
     let mut g5 = c.benchmark_group("order_by_multi_column");
     g5.throughput(Throughput::Elements(n_records));
-    g5.sample_size(10);
+    g5.sample_size(bu::sample_size(10));
     g5.bench_function("active_then_email_asc_full", |b| {
         b.iter_batched(
             || projected.clone(),

@@ -14,6 +14,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughpu
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 
+use shamir_bench_utils as bu;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
@@ -133,7 +134,7 @@ fn bench_bridge_throughput_single_sub(c: &mut Criterion) {
     let mut g = c.benchmark_group("subscription_bridge_throughput");
     const N: usize = 100;
     g.throughput(Throughput::Elements(N as u64));
-    g.sample_size(10);
+    g.sample_size(bu::sample_size(10));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

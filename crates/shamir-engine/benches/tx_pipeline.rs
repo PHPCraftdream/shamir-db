@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use shamir_bench_utils as bu;
 use shamir_engine::query::batch::{
     execute_batch, BatchOp, BatchRequest, QueryEntry, TableResolver,
 };
@@ -379,8 +380,8 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
         .build()
         .unwrap();
     let mut group = c.benchmark_group("commit_tx/phase5c_indexed_sled");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(bu::sample_size(10));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(15)));
 
     for &n in &[100usize, 1000usize] {
         group.throughput(Throughput::Elements(n as u64));
@@ -469,8 +470,8 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
         .unwrap();
 
     let mut group = c.benchmark_group("commit_tx/async_visibility_index_heavy");
-    group.sample_size(20);
-    group.measurement_time(Duration::from_secs(8));
+    group.sample_size(bu::sample_size(20));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(8)));
 
     for &n in &[100usize, 1000usize] {
         group.throughput(Throughput::Elements(n as u64));

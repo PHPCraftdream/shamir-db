@@ -36,6 +36,7 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use serde_json::json;
 
+use shamir_bench_utils as bu;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
@@ -339,7 +340,7 @@ fn bench_handshake_paths(c: &mut Criterion) {
     g.throughput(Throughput::Elements(1));
 
     // -- full_scram_connect: Argon2id-bound; small sample for sane wall-clock.
-    g.sample_size(10);
+    g.sample_size(bu::sample_size(10));
     g.bench_function("full_scram_connect", |b| {
         b.iter(|| {
             rt.block_on(async {
@@ -369,7 +370,7 @@ fn bench_handshake_paths(c: &mut Criterion) {
     // SCRAM connect for EACH measured iteration. The setup cost is
     // excluded from the measurement, the resume call is what's timed.
     let password_arc = std::sync::Arc::new(password.clone());
-    g.sample_size(20);
+    g.sample_size(bu::sample_size(20));
     g.bench_function("resume_fast_path", |b| {
         let pwd = password_arc.clone();
         b.iter_batched(

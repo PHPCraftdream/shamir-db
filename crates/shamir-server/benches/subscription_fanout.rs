@@ -31,6 +31,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+use shamir_bench_utils as bu;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
@@ -223,8 +224,8 @@ async fn setup_subscribers(handler: &ShamirDbHandler, n: usize) -> (Vec<Subscrib
 
 fn bench_fanout(c: &mut Criterion) {
     let mut g = c.benchmark_group("subscription_fanout");
-    g.sample_size(20);
-    g.measurement_time(Duration::from_secs(5));
+    g.sample_size(bu::sample_size(20));
+    g.measurement_time(bu::measurement_time(Duration::from_secs(5)));
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)

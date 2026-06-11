@@ -45,6 +45,8 @@ use std::sync::Arc;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
+#[cfg(feature = "fts_indexed_long")]
+use shamir_bench_utils as bu;
 use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::ReadQuery;
 use shamir_engine::table::table_manager::TableManager;
@@ -374,7 +376,7 @@ fn bench_fts_indexed_long_n100k(c: &mut Criterion) {
     let q = build_selective_query();
 
     let mut group = c.benchmark_group("fts_indexed_long");
-    group.sample_size(10);
+    group.sample_size(bu::sample_size(10));
     let n: usize = 100_000;
     group.throughput(Throughput::Elements(n as u64));
 

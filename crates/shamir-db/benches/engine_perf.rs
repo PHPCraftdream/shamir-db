@@ -22,6 +22,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use serde_json::{json, Value as JsonValue};
 use tokio::runtime::Runtime;
 
+use shamir_bench_utils as bu;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::batch::BatchRequest;
@@ -1157,8 +1158,8 @@ fn bench_range_query_with_index(c: &mut Criterion) {
 fn bench_bulk_insert_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("bulk_insert_sled");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(8));
+    group.sample_size(bu::sample_size(10));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(8)));
 
     for &count in bulk_sweep() {
         group.throughput(Throughput::Elements(count as u64));
@@ -1191,8 +1192,8 @@ macro_rules! bench_bulk_insert_for_backend {
         fn $fn_name(c: &mut Criterion) {
             let rt = Runtime::new().unwrap();
             let mut group = c.benchmark_group($group);
-            group.sample_size(10);
-            group.measurement_time(Duration::from_secs(10));
+            group.sample_size(bu::sample_size(10));
+            group.measurement_time(bu::measurement_time(Duration::from_secs(10)));
             for &count in bulk_sweep() {
                 group.throughput(Throughput::Elements(count as u64));
                 group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
@@ -1296,8 +1297,8 @@ fn bench_bulk_insert_membuffer_in_memory(c: &mut Criterion) {
 fn bench_bulk_insert_with_index_sled(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("bulk_insert_with_index_sled");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(bu::sample_size(10));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(10)));
 
     for &count in bulk_sweep() {
         group.throughput(Throughput::Elements(count as u64));
@@ -1665,8 +1666,8 @@ fn bench_range_query_wide_highk_with_covering_index_sled(c: &mut Criterion) {
 fn bench_steady_state_insert(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("steady_state_insert_10k");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(30));
+    group.sample_size(bu::sample_size(10));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(30)));
     group.throughput(Throughput::Elements(10_000));
 
     group.bench_function("membuffer_in_memory", |b| {
@@ -1721,7 +1722,7 @@ fn bench_ttl_sweep_50k(c: &mut Criterion) {
 
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("ttl_sweep");
-    group.sample_size(10);
+    group.sample_size(bu::sample_size(10));
     group.throughput(Throughput::Elements(50_000));
 
     // No TTL — baseline for "what does a cache lookup look like"
@@ -1802,7 +1803,7 @@ fn bench_eviction_byte_pressure(c: &mut Criterion) {
 
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("eviction_byte_pressure");
-    group.sample_size(10);
+    group.sample_size(bu::sample_size(10));
     group.throughput(Throughput::Elements(1_000));
 
     group.bench_function("seed_8k_then_insert_1k", |b| {
@@ -1856,8 +1857,8 @@ fn bench_eviction_byte_pressure(c: &mut Criterion) {
 fn bench_wal_high_qps(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("wal_high_qps");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(20));
+    group.sample_size(bu::sample_size(10));
+    group.measurement_time(bu::measurement_time(Duration::from_secs(20)));
     group.throughput(Throughput::Elements(1_000));
 
     group.bench_function("1000_single_record_batches", |b| {
@@ -2036,8 +2037,8 @@ fn bench_nested_batch(c: &mut Criterion) {
     let mut group = c.benchmark_group("nested_batch");
     if quick() {
         group
-            .sample_size(10)
-            .measurement_time(Duration::from_secs(1));
+            .sample_size(bu::sample_size(10))
+            .measurement_time(bu::measurement_time(Duration::from_secs(1)));
     }
 
     group.bench_function("flat", |b| {
@@ -2080,9 +2081,9 @@ fn bench_nested_batch(c: &mut Criterion) {
 fn quick_aware_criterion() -> Criterion {
     let c = Criterion::default();
     if quick() {
-        c.sample_size(10)
-            .measurement_time(Duration::from_secs(1))
-            .warm_up_time(Duration::from_millis(100))
+        c.sample_size(bu::sample_size(10))
+            .measurement_time(bu::measurement_time(Duration::from_secs(1)))
+            .warm_up_time(bu::warm_up_time(Duration::from_millis(100)))
     } else {
         c
     }
@@ -2218,7 +2219,7 @@ fn bench_ddl_create_index_on_seeded(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("ddl_create_index");
-    group.sample_size(10);
+    group.sample_size(bu::sample_size(10));
     for n_records in [100, 1000] {
         group.bench_with_input(
             BenchmarkId::new("records", n_records),

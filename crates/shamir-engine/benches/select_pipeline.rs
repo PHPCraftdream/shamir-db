@@ -16,6 +16,7 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 use serde_json as json;
+use shamir_bench_utils as bu;
 use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::exec::{apply_order_by, apply_pagination, apply_select};
 use shamir_engine::query::read::{
@@ -268,7 +269,7 @@ fn bench_pushdown(c: &mut Criterion) {
         .unwrap();
 
     let mut group = c.benchmark_group("read_limit_pushdown");
-    group.sample_size(20);
+    group.sample_size(bu::sample_size(20));
 
     for &n in &[10_000usize, 100_000usize] {
         let table = rt.block_on(build_table_with_n(n));

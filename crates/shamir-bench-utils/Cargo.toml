@@ -1,0 +1,13 @@
+[package]
+name = "shamir-bench-utils"
+version = "0.1.0"
+edition = "2021"
+description = "Bench helpers shared across the workspace — BENCH_QUICK env-var support for /opti baseline/after pairs."
+license = "MIT OR Apache-2.0"
+
+[lib]
+# Tests live alongside their callers; this crate is a thin helper.
+doctest = false
+
+[dependencies]
+criterion = { version = "0.5", default-features = false }
