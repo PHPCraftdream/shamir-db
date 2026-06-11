@@ -2,7 +2,7 @@
 //! coverage. Complements the single-threaded `tx_pipeline` / `tx_overhead`
 //! benches (which only measure the no-contention floor).
 //!
-//! Seven groups (four original + three follow-ups added after first-round
+//! Eight groups (four original + four follow-ups added after first-round
 //! review surfaced the structural-zero-aborts / zero-wounds findings):
 //!
 //! 1. `tx_concurrent/disjoint_inserts` — N concurrent writers, each inserting
@@ -68,6 +68,29 @@
 //!    second barrier (or a `Notify`) parked inside the held section.
 //!    Group 7 lands the pre-lock barrier scaffold; the in-CS barrier
 //!    is the next bench-debt item.  N ∈ {2,4,8}.
+//!
+//! 8. `tx_concurrent/pess_lock_contended_in_cs_barrier` — Group 7's
+//!    follow-up. Two synchronisation points: (a) the same pre-lock
+//!    `Barrier::new(n)` to align all N tasks before they race for the
+//!    lock, and (b) an in-CS HOLD — the winning acquirer sleeps for
+//!    2 ms before releasing, long enough for the N-1 contenders to
+//!    enter `lock_key` and reach the wound/wait decision while the
+//!    holder is still in the CS. Reverse-age `tx_v` (same shape as
+//!    Group 6/7). Crucially, the wound SIGNAL is read from the
+//!    holder's `wounded` AtomicBool AFTER the CS — not from the
+//!    contender's `lock_key` return — because in wound-wait the older
+//!    contender just flips the younger holder's `wounded` flag and
+//!    then itself acquires `Ok(())` once the (now-dead) holder
+//!    releases. Empirically this fires the wound path: at n=2 ~1
+//!    wound/iter, at n=4/8 most spawn-groups produce ≥1 wound.
+//!    Per-iter time is ≥2 ms by construction (the in-CS sleep is the
+//!    dominant cost). Alternative considered: a `tokio::sync::Notify`
+//!    coordinated from contenders into the holder; rejected because
+//!    contenders that park in `lock_key`'s wait queue cannot easily
+//!    signal "I have enqueued" without instrumenting the lock itself.
+//!    The 2 ms sleep is a heuristic — long enough for wake-up jitter
+//!    on a multi-thread runtime, short enough to keep the bench
+//!    tractable.  N ∈ {2,4,8}.
 //!
 //! Noise budget. Contention benches are inherently noisier than
 //! single-thread benches: schedulers, futex wake latency, and abort-retry
@@ -731,6 +754,128 @@ fn bench_pess_lock_contended_barrier(c: &mut Criterion) {
     }
 }
 
+// --- Group 8: pessimistic-lock contended, pre-lock barrier + in-CS hold ----
+//
+// Follow-up to Group 7. Group 7 confirmed that a pre-lock barrier alone is
+// not enough to fire the wound path: the winner's CS (`yield_now`) is so
+// short it releases before any losing contender enters `lock_key`. Here the
+// winner additionally sleeps inside the CS so that contenders DO enter the
+// lock wait queue while the (younger) holder is still holding.
+//
+// Wound signal source: NOT the contender's `lock_key` return value. In
+// wound-wait, an older contender that finds a younger holder flips the
+// holder's `wounded` flag and then waits / re-loops; the contender itself
+// acquires `Ok(())` once the dead holder releases. So we read the wound
+// signal from the holder's own `wounded` AtomicBool AFTER releasing.
+
+fn bench_pess_lock_contended_in_cs_barrier(c: &mut Criterion) {
+    let rt = rt();
+    let mut group = c.benchmark_group("tx_concurrent/pess_lock_contended_in_cs_barrier");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(5));
+
+    let wound_counts: Arc<Vec<(usize, AtomicU64, AtomicU64)>> = Arc::new(
+        [2usize, 4, 8]
+            .iter()
+            .map(|&n| (n, AtomicU64::new(0), AtomicU64::new(0)))
+            .collect(),
+    );
+
+    for (idx, &n) in [2usize, 4, 8].iter().enumerate() {
+        group.throughput(Throughput::Elements(n as u64));
+        let fn_name = format!("n_{}", n);
+        let counters = Arc::clone(&wound_counts);
+        group.bench_function(BenchmarkId::from_parameter(&fn_name), |b| {
+            let counters = Arc::clone(&counters);
+            b.to_async(&rt).iter_custom(move |iters| {
+                let counters = Arc::clone(&counters);
+                async move {
+                    let mut total = Duration::ZERO;
+                    for iter_i in 0..iters {
+                        let mvcc = make_mvcc();
+                        let key = Bytes::from_static(b"contended_key");
+                        let barrier = Arc::new(tokio::sync::Barrier::new(n));
+
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(n);
+                        for w in 0..n {
+                            // REVERSE age, same as Group 6/7.
+                            let tx_v = 2_000_000u64 + iter_i * 100 + (n as u64 - 1 - w as u64);
+                            let mvcc = Arc::clone(&mvcc);
+                            let key = key.clone();
+                            let counters = Arc::clone(&counters);
+                            let barrier = Arc::clone(&barrier);
+                            handles.push(tokio::spawn(async move {
+                                let wounded = Arc::new(AtomicBool::new(false));
+                                let notify = Arc::new(tokio::sync::Notify::new());
+                                // Pre-lock barrier: all N tasks align here.
+                                barrier.wait().await;
+                                let res = mvcc
+                                    .lock_key(
+                                        key.clone(),
+                                        tx_v,
+                                        Arc::clone(&wounded),
+                                        Arc::clone(&notify),
+                                        LockMode::Exclusive,
+                                    )
+                                    .await;
+                                match res {
+                                    Ok(()) => {
+                                        // In-CS HOLD: stay in the critical
+                                        // section long enough for the other
+                                        // N-1 tasks to enter `lock_key` and
+                                        // (if older than us) wound us via
+                                        // our `wounded` flag. 2 ms is a
+                                        // heuristic — long vs wake-up
+                                        // jitter, short enough to bench.
+                                        tokio::time::sleep(Duration::from_millis(2)).await;
+                                        mvcc.release_locks(tx_v, std::slice::from_ref(&key)).await;
+                                        // Read the wound signal from OUR
+                                        // own wounded flag — older
+                                        // contenders set it on us, then
+                                        // themselves acquire Ok after we
+                                        // release. `lock_key` returning Err
+                                        // is the OTHER path (we were
+                                        // already wounded while waiting).
+                                        if wounded.load(Ordering::Acquire) {
+                                            counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            counters[idx].2.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        counters[idx].1.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }));
+                        }
+                        for h in handles {
+                            h.await.unwrap();
+                        }
+                        total += start.elapsed();
+                    }
+                    total
+                }
+            });
+        });
+    }
+
+    group.finish();
+
+    for (n, wounds, acquires) in wound_counts.iter() {
+        let w = wounds.load(Ordering::Relaxed);
+        let a = acquires.load(Ordering::Relaxed);
+        let tot = w + a;
+        if tot > 0 {
+            eprintln!(
+                "pess_lock_contended_in_cs_barrier n={n}: {w} wounds, {a} clean acquires \
+                 ({:.1}% wound rate)",
+                100.0 * w as f64 / tot as f64
+            );
+        }
+    }
+}
+
 criterion_group!(
     benches,
     bench_disjoint_inserts,
@@ -740,5 +885,6 @@ criterion_group!(
     bench_pess_lock_contended,
     bench_pess_lock_contended_reverse_age,
     bench_pess_lock_contended_barrier,
+    bench_pess_lock_contended_in_cs_barrier,
 );
 criterion_main!(benches);
