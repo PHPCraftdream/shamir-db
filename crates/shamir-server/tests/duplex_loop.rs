@@ -21,6 +21,7 @@ use tokio::time::timeout;
 
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{HandlerFuture, RequestHandler};
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 
@@ -41,7 +42,12 @@ use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME
 struct StubHandler;
 
 impl RequestHandler for StubHandler {
-    fn handle<'a>(&'a self, _session: &'a Session, req: &'a [u8]) -> HandlerFuture<'a> {
+    fn handle<'a>(
+        &'a self,
+        _session: &'a Session,
+        req: &'a [u8],
+        _conn: &'a ConnectionServices,
+    ) -> HandlerFuture<'a> {
         Box::pin(async move {
             match req {
                 b"slow" => {

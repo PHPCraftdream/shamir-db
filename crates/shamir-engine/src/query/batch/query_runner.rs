@@ -15,6 +15,7 @@ use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::InnerValue;
 
 use crate::query::batch::param_subst::substitute_params;
+use shamir_query_types::filter::Filter;
 
 /// Build resolved_refs map containing only the declared dependencies.
 pub(super) fn build_resolved_refs(
@@ -207,6 +208,66 @@ impl<'a> QueryRunner<'a> {
                     code: None,
                 }),
             };
+        }
+
+        // Subscribe — validate sources exist, return a grant marker.
+        // Real activation happens in the server handler post-processing.
+        if let BatchOp::Subscribe(op) = &entry.op {
+            let unique_repos: std::collections::HashSet<&str> =
+                op.subscribe.iter().map(|s| s.table.repo.as_str()).collect();
+            if unique_repos.len() > 1 {
+                return Err(BatchError::QueryError {
+                    alias: alias.to_string(),
+                    message: "multi-repo subscriptions not yet supported".to_string(),
+                    code: Some("multi_repo_subscriptions_not_supported".to_string()),
+                });
+            }
+
+            for src in &op.subscribe {
+                self.resolver
+                    .resolve(&src.table)
+                    .await
+                    .map_err(|_| BatchError::QueryError {
+                        alias: alias.to_string(),
+                        message: format!("table not found: {}", src.table),
+                        code: Some("table_not_found".to_string()),
+                    })?;
+
+                if let Some(ref filter) = src.filter {
+                    if let Some(unsupported) = find_unsupported_subscription_filter(filter) {
+                        return Err(BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: format!(
+                                "subscription filter uses unsupported operator: {unsupported}"
+                            ),
+                            code: Some("subscription_filter_unsupported_operator".to_string()),
+                        });
+                    }
+                }
+            }
+
+            return Ok(QueryResult {
+                records: Vec::new(),
+                stats: None,
+                pagination: None,
+                value: Some(serde_json::json!({
+                    "subscription_grant": true,
+                    "sources_count": op.subscribe.len()
+                })),
+            });
+        }
+
+        // Unsubscribe — return a grant marker; real deactivation is server-side.
+        if let BatchOp::Unsubscribe(op) = &entry.op {
+            return Ok(QueryResult {
+                records: Vec::new(),
+                stats: None,
+                pagination: None,
+                value: Some(serde_json::json!({
+                    "unsubscribe_grant": true,
+                    "sub_id": op.unsubscribe
+                })),
+            });
         }
 
         let table_ref = entry.op.table_ref().unwrap();
@@ -467,6 +528,46 @@ pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
         }),
         pagination: None,
         value: None,
+    }
+}
+
+/// Recursively walks a filter tree and returns `Some("variant_name")` for the
+/// first variant that is NOT supported by the live subscription bridge evaluator.
+///
+/// Supported: Eq, Ne, Gt, Gte, Lt, Lte, In, NotIn, IsNull, IsNotNull,
+/// Exists, NotExists, And, Or, Not.
+fn find_unsupported_subscription_filter(filter: &Filter) -> Option<&'static str> {
+    match filter {
+        Filter::Eq { .. }
+        | Filter::Ne { .. }
+        | Filter::Gt { .. }
+        | Filter::Gte { .. }
+        | Filter::Lt { .. }
+        | Filter::Lte { .. }
+        | Filter::In { .. }
+        | Filter::NotIn { .. }
+        | Filter::IsNull { .. }
+        | Filter::IsNotNull { .. }
+        | Filter::Exists { .. }
+        | Filter::NotExists { .. } => None,
+        Filter::And { filters } => filters
+            .iter()
+            .find_map(find_unsupported_subscription_filter),
+        Filter::Or { filters } => filters
+            .iter()
+            .find_map(find_unsupported_subscription_filter),
+        Filter::Not { filter: f } => find_unsupported_subscription_filter(f),
+        Filter::Like { .. } => Some("like"),
+        Filter::ILike { .. } => Some("ilike"),
+        Filter::Regex { .. } => Some("regex"),
+        Filter::Contains { .. } => Some("contains"),
+        Filter::ContainsAny { .. } => Some("contains_any"),
+        Filter::ContainsAll { .. } => Some("contains_all"),
+        Filter::Between { .. } => Some("between"),
+        Filter::FieldEq { .. } => Some("field_eq"),
+        Filter::Fts { .. } => Some("fts"),
+        Filter::VectorSimilarity { .. } => Some("vector_similarity"),
+        Filter::Computed { .. } => Some("computed"),
     }
 }
 

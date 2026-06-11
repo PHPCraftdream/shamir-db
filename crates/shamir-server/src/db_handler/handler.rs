@@ -68,6 +68,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 
@@ -85,6 +86,7 @@ use crate::tx_registry::TxRegistry;
 
 use super::admin::{check_destructive_hmacs, create_scram_user, AdminGlue};
 use super::config::{QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
+use super::subscribe_handler;
 
 /// Absolute lifetime cap for an interactive (Phase B) transaction — bounds
 /// how long any one open tx can pin MVCC GC, even if a client keeps it busy.
@@ -212,6 +214,7 @@ impl RequestHandler for ShamirDbHandler {
         &'a self,
         session: &'a Session,
         req: &'a [u8],
+        conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         Box::pin(async move {
             let request: DbRequest =
@@ -223,7 +226,7 @@ impl RequestHandler for ShamirDbHandler {
                     query_version,
                     db,
                     batch,
-                } => self.execute(session, query_version, &db, batch).await,
+                } => self.execute(session, query_version, &db, batch, conn).await,
                 DbRequest::CreateScramUser {
                     name,
                     password,
@@ -271,6 +274,7 @@ impl ShamirDbHandler {
         query_version: u32,
         db_name: &str,
         mut batch: BatchRequest,
+        conn: &ConnectionServices,
     ) -> DbResponse {
         // Query-language version dispatch — fast reject before any DB work.
         if let Err(e) = crate::version::check_query_lang(query_version) {
@@ -324,9 +328,9 @@ impl ShamirDbHandler {
         }
 
         let actor = session_actor(session);
-        let exec_result = self.db.execute_as(actor, db_name, &batch).await;
+        let exec_result = self.db.execute_as(actor.clone(), db_name, &batch).await;
         match exec_result {
-            Ok(response) => {
+            Ok(mut response) => {
                 // Slow-query logging: WARN line for batches whose total
                 // execution time exceeds the configured threshold. Useful
                 // for spotting unindexed queries in production. Threshold
@@ -344,6 +348,14 @@ impl ShamirDbHandler {
                     );
                 }
                 self.persist_table_lifecycle(db_name, &batch);
+                subscribe_handler::activate_subscriptions(
+                    conn,
+                    &self.db,
+                    db_name,
+                    &batch,
+                    &mut response,
+                    actor.clone(),
+                );
                 DbResponse::Batch { response }
             }
             Err(e) => DbResponse::Error {

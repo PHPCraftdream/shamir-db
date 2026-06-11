@@ -16,6 +16,7 @@ use crate::admin::{
 use crate::auth::{CreateRoleOp, CreateUserOp, DropRoleOp, DropUserOp, GrantRoleOp, RevokeRoleOp};
 use crate::call::CallOp;
 use crate::read::ReadQuery;
+use crate::subscribe::{SubscribeOp, UnsubscribeOp};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use super::sub_batch_op::SubBatchOp;
@@ -116,6 +117,12 @@ pub enum BatchOp {
 
     /// Nested sub-batch — recursive execution with its own tx scope.
     Batch(SubBatchOp),
+
+    /// Subscribe to table change events.
+    Subscribe(SubscribeOp),
+
+    /// Cancel an active subscription.
+    Unsubscribe(UnsubscribeOp),
 }
 
 impl Serialize for BatchOp {
@@ -171,6 +178,8 @@ impl Serialize for BatchOp {
             BatchOp::ChangesSince(op) => op.serialize(serializer),
             BatchOp::Call(op) => op.serialize(serializer),
             BatchOp::Batch(op) => op.serialize(serializer),
+            BatchOp::Subscribe(op) => op.serialize(serializer),
+            BatchOp::Unsubscribe(op) => op.serialize(serializer),
         }
     }
 }
@@ -379,6 +388,14 @@ impl<'de> Deserialize<'de> for BatchOp {
             serde_json::from_value(value)
                 .map(BatchOp::Batch)
                 .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("subscribe") {
+            serde_json::from_value(value)
+                .map(BatchOp::Subscribe)
+                .map_err(serde::de::Error::custom)
+        } else if obj.contains_key("unsubscribe") {
+            serde_json::from_value(value)
+                .map(BatchOp::Unsubscribe)
+                .map_err(serde::de::Error::custom)
         } else if obj.contains_key("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value)
@@ -399,7 +416,7 @@ impl BatchOp {
             BatchOp::Update(u) => Some(&u.update),
             BatchOp::Set(s) => Some(&s.set),
             BatchOp::Delete(d) => Some(&d.delete_from),
-            BatchOp::Batch(_) => None,
+            BatchOp::Batch(_) | BatchOp::Subscribe(_) | BatchOp::Unsubscribe(_) => None,
             _ => None,
         }
     }

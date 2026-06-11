@@ -53,6 +53,16 @@ impl ShamirDb {
         Some(jr.events)
     }
 
+    /// Returns the current (last committed) version for a repo.
+    ///
+    /// Returns `None` when the database or repository does not exist, or
+    /// the tx gate has not been initialised yet. Used by the subscription
+    /// bridge to seed watermarks after an initial snapshot.
+    pub async fn current_commit_version(&self, db: &str, repo: &str) -> Option<u64> {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        repo_instance.current_commit_version().await.ok()
+    }
+
     /// Like [`read_changelog_from`](Self::read_changelog_from) but returns the
     /// full [`shamir_engine::JournalRead`] so the caller can inspect `gap_at`
     /// and decide whether a snapshot resync is needed.

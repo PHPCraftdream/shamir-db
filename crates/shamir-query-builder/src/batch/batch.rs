@@ -4,6 +4,7 @@ use shamir_query_types::batch::{BatchLimits, BatchOp, BatchRequest, QueryEntry, 
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::ReadQuery;
+use shamir_query_types::subscribe::{SubscribeOp, UnsubscribeOp};
 
 use super::build_error::BuildError;
 use super::durability::Durability;
@@ -535,6 +536,24 @@ impl Batch {
         inner: impl Into<BatchRequest>,
     ) -> Handle {
         self.sub_batch(alias, inner, new_map())
+    }
+
+    // ── subscriptions ─────────────────────────────────────────────
+
+    /// Subscribe to table change events.
+    pub fn subscribe(&mut self, alias: impl Into<String>, sub: SubscribeOp) -> Handle {
+        self.add_entry(alias, BatchOp::Subscribe(sub), true)
+    }
+
+    /// Cancel an active subscription.
+    pub fn unsubscribe(&mut self, alias: impl Into<String>, sub_id: u64) -> Handle {
+        self.add_entry(
+            alias,
+            BatchOp::Unsubscribe(UnsubscribeOp {
+                unsubscribe: sub_id,
+            }),
+            true,
+        )
     }
 
     // ── escape hatches ────────────────────────────────────────────

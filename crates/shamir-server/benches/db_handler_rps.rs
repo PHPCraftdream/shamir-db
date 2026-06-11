@@ -1,7 +1,7 @@
 //! In-process RPS bench for `ShamirDbHandler::handle`.
 //!
 //! Spins up an in-memory ShamirDb, builds a fixture Session, then loops
-//! `handler.handle(&session, &req_bytes)` in a tight loop. Measures the
+//! `handler.handle(&session, &req_bytes, &ConnectionServices::without_push(0))` in a tight loop. Measures the
 //! cost of every layer the request envelope flows through once it's been
 //! decoded into bytes — msgpack decode, dispatch match, response encode.
 //!
@@ -19,6 +19,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::Session;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
@@ -94,7 +95,10 @@ fn build_loaded_handler(count: usize) -> (ShamirDbHandler, Session, tokio::runti
             batch,
         };
         let bytes = rmp_serde::to_vec_named(&seed_req).unwrap();
-        handler.handle(&session, &bytes).await.unwrap();
+        handler
+            .handle(&session, &bytes, &ConnectionServices::without_push(0))
+            .await
+            .unwrap();
 
         (handler, session)
     });
@@ -135,7 +139,11 @@ fn bench(c: &mut Criterion) {
         g.bench_function("ping_inprocess", |b| {
             b.iter(|| {
                 let resp = rt
-                    .block_on(handler.handle(black_box(&session), black_box(&ping_bytes)))
+                    .block_on(handler.handle(
+                        black_box(&session),
+                        black_box(&ping_bytes),
+                        &ConnectionServices::without_push(0),
+                    ))
                     .unwrap();
                 black_box(resp);
             });
@@ -168,7 +176,11 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     let resp = handler
-                        .handle(black_box(&session), black_box(&read_bytes))
+                        .handle(
+                            black_box(&session),
+                            black_box(&read_bytes),
+                            &ConnectionServices::without_push(0),
+                        )
                         .await
                         .unwrap();
                     black_box(resp);
@@ -191,7 +203,11 @@ fn bench(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     let resp = handler
-                        .handle(black_box(&session), black_box(&read_bytes))
+                        .handle(
+                            black_box(&session),
+                            black_box(&read_bytes),
+                            &ConnectionServices::without_push(0),
+                        )
                         .await
                         .unwrap();
                     black_box(resp);

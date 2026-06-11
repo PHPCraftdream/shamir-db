@@ -46,4 +46,12 @@ pub mod instance_defaults {
     /// * `1` → lock-step (identical to the old sequential loop).
     /// * Default `32` → up to 32 pipelined requests before the reader stalls.
     pub const CONN_MAX_IN_FLIGHT: usize = 32;
+
+    /// Number of consecutive push failures before a subscription bridge
+    /// declares the consumer "slow" and tears down the subscription.
+    pub const SLOW_CONSUMER_THRESHOLD: u32 = 100;
+
+    /// Maximum number of journal events to backfill when a subscription
+    /// resumes from a specific `from_version`.
+    pub const JOURNAL_BACKFILL_LIMIT: usize = 10_000;
 }

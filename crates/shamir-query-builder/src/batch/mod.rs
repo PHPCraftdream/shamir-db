@@ -13,6 +13,7 @@ mod durability;
 mod handle;
 mod into_batch_op;
 mod isolation;
+pub mod subscribe;
 
 pub use batch::*;
 pub use build_error::*;
@@ -20,6 +21,7 @@ pub use durability::*;
 pub use handle::*;
 pub use into_batch_op::*;
 pub use isolation::*;
+pub use subscribe::{SourceBuilder, Subscribe};
 
 #[cfg(test)]
 mod tests;

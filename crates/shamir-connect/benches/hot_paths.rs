@@ -41,6 +41,7 @@ use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, ProtocolVersion, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{
     dispatch_request, dispatch_request_view, DispatchOutcome, RequestHandler,
 };
@@ -195,6 +196,7 @@ impl RequestHandler for EchoHandler {
         &'a self,
         _: &'a Session,
         req: &'a [u8],
+        _conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         let out = req.to_vec();
         Box::pin(async move { Ok(out) })
@@ -225,7 +227,13 @@ fn bench_dispatch(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("happy_path", body_size), &env, |b, e| {
             b.iter(|| {
                 let outcome = rt
-                    .block_on(dispatch_request(e, &store, |_| 0u64, &handler))
+                    .block_on(dispatch_request(
+                        e,
+                        &store,
+                        |_| 0u64,
+                        &handler,
+                        &ConnectionServices::without_push(0),
+                    ))
                     .unwrap();
                 let DispatchOutcome::Response(_) = outcome else {
                     panic!("expected response")
@@ -243,7 +251,13 @@ fn bench_dispatch(c: &mut Criterion) {
                 b.iter(|| {
                     let view = RequestEnvelopeView::from_msgpack(black_box(bytes)).unwrap();
                     let outcome = rt
-                        .block_on(dispatch_request_view(&view, &store, |_| 0u64, &handler))
+                        .block_on(dispatch_request_view(
+                            &view,
+                            &store,
+                            |_| 0u64,
+                            &handler,
+                            &ConnectionServices::without_push(0),
+                        ))
                         .unwrap();
                     let DispatchOutcome::Response(_) = outcome else {
                         panic!("expected response")

@@ -35,22 +35,28 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
+use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome};
 use shamir_connect::Error as ConnectError;
+
+use super::push_sink::MpscPushSink;
 
 use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
 use crate::framer::{FrameReader, FrameWriter};
+use crate::subscriptions::SubscriptionRegistry;
 
 use super::connection_context::ConnectionContext;
 use super::in_flight_guard::InFlightGuard;
 
 /// Message sent from dispatch tasks to the writer task.
-enum WriterMsg {
+pub(crate) enum WriterMsg {
     /// Write these bytes and keep running.
     Reply(Vec<u8>),
     /// Write these bytes, then shut down the connection.
     ReplyAndClose(Vec<u8>),
+    /// Server-initiated push frame (subscription event).
+    Push(Vec<u8>),
 }
 
 /// Duplex post-handshake request loop for a single connection.
@@ -103,6 +109,16 @@ pub async fn request_loop<R, W>(
     let semaphore = Arc::new(Semaphore::new(cap));
     let (tx, mut rx) = mpsc::channel::<WriterMsg>(cap);
 
+    // Build a ConnectionServices with a real push channel so subscription
+    // bridges can send server-initiated frames to this connection's writer.
+    let push_sink = Arc::new(MpscPushSink::new(tx.clone()));
+    let registry = Arc::new(SubscriptionRegistry::new());
+    let conn = Arc::new(ConnectionServices {
+        conn_id: 0,
+        push: Some(push_sink),
+        extensions: Some(Arc::clone(&registry) as Arc<dyn std::any::Any + Send + Sync>),
+    });
+
     // Shared flag: set to true by a dispatch task that sends ReplyAndClose.
     // The reader loop checks this flag and stops accepting new frames.
     let close_requested = Arc::new(AtomicBool::new(false));
@@ -124,6 +140,11 @@ pub async fn request_loop<R, W>(
                     // DEFECT C fix: on write error (broken pipe / dead client)
                     // break immediately so the JoinHandle resolves and the
                     // reader's select! branch wakes up (Defect B fix).
+                    if writer.write_frame_into(&bytes, &mut scratch).await.is_err() {
+                        break;
+                    }
+                }
+                Some(WriterMsg::Push(bytes)) => {
                     if writer.write_frame_into(&bytes, &mut scratch).await.is_err() {
                         break;
                     }
@@ -226,6 +247,7 @@ pub async fn request_loop<R, W>(
         let tx_clone = tx.clone();
         let close_flag = Arc::clone(&close_requested);
         let sid_copy = sid;
+        let conn_clone = Arc::clone(&conn);
 
         join_set.spawn(async move {
             let _guard = InFlightGuard::new();
@@ -241,6 +263,7 @@ pub async fn request_loop<R, W>(
                         &ctx_clone.session_store,
                         lookup_tib,
                         ctx_clone.handler.as_ref(),
+                        &conn_clone,
                     )
                     .await
                     {
@@ -297,8 +320,16 @@ pub async fn request_loop<R, W>(
     }
 
     // --- Teardown ------------------------------------------------------------
-    // Cancel all in-flight dispatch tasks (they hold permits and tx_clones).
+    // Cancel all active subscriptions (aborts bridge tasks that hold
+    // Arc<MpscPushSink> clones — must happen before dropping conn/tx).
+    registry.close_all();
+    // Cancel all in-flight dispatch tasks (they hold Arc<conn> + tx clones).
     join_set.abort_all();
+    // Drain the JoinSet so aborted tasks drop their Arc<conn>/tx clones.
+    while join_set.join_next().await.is_some() {}
+    // Drop conn (holds Arc<MpscPushSink> → tx.clone()) so the writer
+    // channel can close once all senders are gone.
+    drop(conn);
     // Dropping tx closes the mpsc channel; the writer task sees None on its
     // next recv() and exits gracefully after flushing what it has.
     drop(tx);

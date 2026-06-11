@@ -5,6 +5,7 @@ mod identity_tests;
 mod kdf_params_tests;
 mod latency_tests;
 mod password_tests;
+mod push_envelope_tests;
 mod scram_tests;
 mod types_tests;
 mod username_tests;

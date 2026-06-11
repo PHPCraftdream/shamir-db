@@ -11,6 +11,7 @@
 mod connection_context;
 mod handshake;
 mod in_flight_guard;
+mod push_sink;
 mod request_loop;
 mod user_state_lookup;
 mod wire;

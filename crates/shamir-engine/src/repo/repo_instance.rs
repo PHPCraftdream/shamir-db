@@ -329,6 +329,15 @@ impl RepoInstance {
     /// repo's `"__tx__"` store; cancellation drops the future with no
     /// state change.
     ///
+    /// Returns the current (last committed) version for this repo.
+    ///
+    /// This is the highest `commit_version` that has been fully committed
+    /// and published. Useful for seeding subscription watermarks.
+    pub async fn current_commit_version(&self) -> DbResult<u64> {
+        let gate = self.tx_gate().await?;
+        Ok(gate.last_committed())
+    }
+
     /// Highest `commit_version` across all durable inflight V2 WAL
     /// entries, or `0` if there are none. Used to seed the tx gate's
     /// version floor (CRIT-B) so recovered commit versions are never

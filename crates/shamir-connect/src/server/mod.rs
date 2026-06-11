@@ -9,6 +9,8 @@ pub mod audit_chain;
 pub mod bootstrap;
 pub mod changepw;
 pub mod config;
+/// Per-connection services passed into request handlers.
+pub mod conn_services;
 pub mod dispatch;
 pub mod handshake;
 pub mod lockout;
@@ -22,6 +24,7 @@ pub mod session;
 pub mod ticket;
 pub mod user_record;
 
+pub use conn_services::{ConnectionServices, PushRejected, PushSink};
 pub use dispatch::{dispatch_request, DispatchOutcome, RequestHandler};
 pub use session::{PendingChangePwChallenge, Session, SessionPermissions, SessionStore};
 

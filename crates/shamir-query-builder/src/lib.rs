@@ -49,5 +49,9 @@ pub use shamir_query_types::batch::{BatchRequest, BatchResponse};
 // without a direct shamir-query-types dependency.
 pub use shamir_query_types::read::{At, OrderDirection, Temporal};
 
+// Re-export subscribe builder types for convenience.
+pub use batch::subscribe::{SourceBuilder, Subscribe};
+pub use shamir_query_types::subscribe::{DeliverMode, EventMask};
+
 // Re-export proc-macros so users get `shamir_query_builder::{filter, q}`.
 pub use shamir_query_builder_macros::{filter, q};
