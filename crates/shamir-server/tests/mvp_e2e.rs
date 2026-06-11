@@ -19,7 +19,6 @@
 //!      expected records.
 //!   7. Server shuts down cleanly.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,7 +28,6 @@ use tempfile::TempDir;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use zeroize::Zeroizing;
 
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::sha256;
@@ -41,11 +39,9 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
-use shamir_server::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
-};
 use shamir_server::db_handler::{DbRequest, DbResponse};
-use shamir_server::server::{BootstrapMode, ServerLauncher};
+
+mod common;
 
 // --------------------------------------------------------------------------
 // Wire-frame mirrors of the auth_init / challenge / client_proof / auth_ok
@@ -137,73 +133,15 @@ where
 // Test fixtures
 // --------------------------------------------------------------------------
 
-fn fast_kdf() -> KdfConfig {
-    // Spec floor — fast enough for tests, real enough that the full code
-    // path runs.
-    KdfConfig {
-        memory_kb: 19_456,
-        time: 2,
-        parallelism: 1,
-        argon2_version: 0x13,
-    }
-}
-
-fn make_test_config(temp: &TempDir) -> Config {
-    let data_dir: PathBuf = temp.path().to_path_buf();
-    Config {
-        data_dir: data_dir.clone(),
-        logging: LoggingConfig {
-            level: "warn".into(),
-            slow_query_threshold_ms: 0,
-            file: None,
-            flush_interval_ms: 2000,
-        },
-        kdf_defaults: fast_kdf(),
-        argon2_concurrent_max: 4,
-        listeners: vec![ListenerConfig {
-            kind: ListenerKind::Tcp,
-            // Port 0 = OS picks a free port; we read it back via
-            // `handle.first_tls_exporter_addr()`.
-            addr: "127.0.0.1:0".to_string(),
-            profile: ProfileKind::TlsExporter,
-            path: None,
-            kdf_override: None,
-            browser_origin_allowlist: vec![],
-        }],
-        tls: TlsConfig {
-            cert_path: data_dir.join("cert.pem"),
-            key_path: data_dir.join("key.pem"),
-        },
-        security: Default::default(),
-        audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig {
-            addr: String::new(),
-        },
-    }
-}
-
 // --------------------------------------------------------------------------
 // The test
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mvp_full_pipeline_tls_scram_batch_query() {
-    // Install rustls crypto provider once (idempotent).
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
     let temp = TempDir::new().expect("tempdir");
-    let config = make_test_config(&temp);
-
-    // Bootstrap an `admin` superuser with a known password — `Skip` would
-    // leave us with nothing to log in as.
     let password = b"correct horse battery staple".to_vec();
-    let bootstrap = BootstrapMode::Password {
-        username: "admin".into(),
-        password: Zeroizing::new(password.clone()),
-    };
-
-    let launcher = ServerLauncher { config, bootstrap };
-    let handle = launcher.launch().await.expect("launcher boot");
+    let handle = common::spawn_ephemeral(&temp, &password).await;
 
     let server_addr = handle
         .first_tls_exporter_addr()
