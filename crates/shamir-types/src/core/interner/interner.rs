@@ -132,6 +132,7 @@ impl Interner {
     /// **Hot path (Opt G):** one `ArcSwap::load` (single atomic
     /// load, no read-lock acquire/release) + bounds-check + clone.
     /// Scales linearly across cores under read-heavy load.
+    #[inline]
     pub fn get_str(&self, id: &InternerKey) -> Option<UserKey> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;
@@ -147,6 +148,7 @@ impl Interner {
         self.reverse.load_full()
     }
 
+    #[inline]
     pub fn with_str<R>(&self, id: &InternerKey, f: impl FnOnce(&str) -> R) -> Option<R> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;
@@ -176,6 +178,7 @@ impl Interner {
     }
 
     /// Create an InternedKey from a numeric ID.
+    #[inline]
     pub fn make_key(&self, id: u64) -> InternerKey {
         InternerKey::new(id)
     }
