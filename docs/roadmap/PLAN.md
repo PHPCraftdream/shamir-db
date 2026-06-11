@@ -282,41 +282,42 @@ item is Movement C step 1: network changefeed pull-API
 (`REPLICATION.md`, to be written when replication starts) are the two
 pending design docs for Movement C steps 2 and 3.
 
-### Bench-debt (non-blocking; scaffolding landed, follow-ups pending)
+### Bench-debt — WAVE CLOSED
 
-The four-wave bench-coverage push (subscriptions hot paths + e2e
+The six-wave bench-coverage push (subscriptions hot paths + e2e
 throughput + interactive-tx + journal-read + record-size axis + FTS
-indexed + concurrent tx + subscription fan-out) zeroed the large gaps.
-Three items have scaffolding in place but need one more small patch to
-measure what they claim:
+indexed + concurrent tx + subscription fan-out + durability axis +
+SCRAM connect/resume + wound-wait) zeroed every gap whose dependency
+already exists. 41 bench files at landing. Magistral focus returns to
+Movement C — replication.
 
-- **`pess_lock_contended_reverse_age` barrier variant**
-  (`crates/shamir-engine/benches/tx_concurrent.rs` Group 6). Reverse-age
-  spawn order is in place, but the trivial critical section means older
-  arrivals see no holder and acquire cleanly (0 wounds / 2.16M acquires).
-  Add a synchronisation barrier so all N tasks hold the lock-attempt
-  phase simultaneously before any release — then wounds fire.
+**Headline findings across the push:**
 
-- **`fts_indexed` selective query**
-  (`crates/shamir-engine/benches/fts_indexed.rs`). N parameterised over
-  {1000, 10_000}, but the headline query matches every doc — both
-  indexed and brute materialise the full corpus and that tail dominates.
-  The index's asymptotic win appears only with a SELECTIVE query (a
-  token hitting ~1 % of rows). Add one selective bench function.
+- Bridge de-intern fix necessary — discovered during e2e run, fixed,
+  pinned by a RED→GREEN regression test (commits `0f1a645` + e2e).
+- Interner is O(fields), NOT O(bytes): payload bulk is essentially
+  free; field-key count is what costs (`record_size_axis` headline).
+- Subscription fan-out is sub-linear: 100× more subscribers → only
+  2.7× wall-clock per event (`subscription_fanout`).
+- SSI aborts under Serializable scale honestly with N: 0.49 → 1.33
+  → 3.01 aborts/commit at N=2/4/8 (`hot_key_serializable`).
+- Snapshot isolation structurally cannot abort blind writes — the
+  read-set is empty under Snapshot, validate_read_set is a no-op.
+- Wound-wait path measurement required reading the **holder's**
+  `wounded.load()` after the CS, NOT the contender's `lock_key`
+  return value — the latter returns `Ok` to the loser AFTER the
+  holder's tx is killed. With the right signal source: 56.8% wound
+  rate at N=8 (`pess_lock_contended_in_cs_barrier`).
+- Resume vs full SCRAM ≈ 7× (50 ms Argon2id-dominated vs 7 ms
+  TLS+ticket-validate) — first measurement of the resume feature's
+  claimed value (`wire_latencies::handshake_paths`).
+- Synced vs Buffered durability cost: ~1.97× @ N=1 amortising to
+  ~1.52× @ N=100 — fsync delta is ~10 ms regardless of batch size
+  on redb, so larger batches make synced cheaper per row.
 
-- **`fts_indexed` at N=100_000.** Currently caps at N=10_000 to stay
-  inside default measurement-time. A "long" feature-gated variant would
-  show the full asymptotic curve.
-
-Four items are blocked on dependencies — pick up only after the
-dependency lands:
-
-- **SCRAM connect / resume latency** (`wire_latencies.rs` Group 2,
-  deferred). Blocked on: lift a reusable `tests/common/live_server.rs`
-  helper. The `crates/shamir-server/tests/` directory holds ~27
-  integration-test files (10 `*_e2e.rs` + 17 others) that each inline
-  their own server-spawn harness; consolidation is worth doing in its
-  own right.
+**Three items remain blocked on dependencies** — pick up only after
+the dependency lands; not bench-debt, just future work tied to
+larger milestones:
 
 - **`reactive_call` delivery mode** (`subscription_delivery.rs`).
   Blocked on: a registered in-memory stored function (funclib / WASM
