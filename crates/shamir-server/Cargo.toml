@@ -135,5 +135,9 @@ harness = false
 name = "wire_latencies"
 harness = false
 
+[[bench]]
+name = "subscription_delivery"
+harness = false
+
 [lints.clippy]
 all = "warn"
