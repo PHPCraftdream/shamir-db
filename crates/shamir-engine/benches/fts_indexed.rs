@@ -230,5 +230,127 @@ fn bench_fts(c: &mut Criterion) {
 // not the predicate. The FTS index removes the predicate cost but
 // inherits the materialisation cost.
 
-criterion_group!(benches, bench_fts);
+// --- Selective-query group ------------------------------------------------
+//
+// The `fts_indexed_vs_brute` group above queries "user alpha" — token
+// "user" matches every doc, so the indexed "or" path returns the full
+// corpus and both paths pay the same materialisation tail. To expose
+// the index's real win we need a SELECTIVE query: a rare token that
+// hits ~1% of documents. The indexed path then fetches ~N/100 RIDs
+// directly from the postings; the brute path still scans every row.
+//
+// Corpus shape: 99% of docs hold `format!("user-{i}")`, 1% additionally
+// hold the rare token "needle". Query `"needle"` (single-token, mode
+// doesn't matter, "or" used). At N=1000 the indexed path is expected to
+// be 5-20x faster than brute; if smaller, the engine isn't actually
+// skipping non-matching docs and that's a deeper finding.
+
+const SELECTIVE_N: usize = 1000;
+const SELECTIVE_HIT_RATIO: usize = 100; // every 100th doc has the rare token
+
+async fn build_docs_table_selective(n: usize, with_fts_index: bool) -> TableManager {
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mgr = TableManager::create("docs".into(), data, info)
+        .await
+        .unwrap();
+
+    if with_fts_index {
+        let op = ddl::create_index("body_fts", "docs")
+            .field("body")
+            .index_type("fts")
+            .fts_tokenizer("whitespace")
+            .build();
+        let create_op = match op {
+            BatchOp::CreateIndex(o) => o,
+            other => panic!("expected BatchOp::CreateIndex from builder, got {other:?}"),
+        };
+        mgr.create_index_v2(&create_op).await.unwrap();
+    }
+
+    let body_k = {
+        let i = mgr.interner().get().await.unwrap();
+        match i.touch_ind("body").unwrap() {
+            TouchInd::Exists(k) | TouchInd::New(k) => k,
+        }
+    };
+
+    for i in 0..n {
+        let mut m = new_map_wc(1);
+        let body = if i % SELECTIVE_HIT_RATIO == 0 {
+            // ~1% of docs carry the rare token.
+            format!("user-{i} needle")
+        } else {
+            format!("user-{i}")
+        };
+        m.insert(body_k.clone(), InnerValue::Str(body));
+        mgr.insert(&InnerValue::Map(m)).await.unwrap();
+    }
+
+    mgr
+}
+
+fn build_selective_query() -> ReadQuery {
+    // Single rare token; mode irrelevant for a single-token query but
+    // pick "or" for parity with the existing group.
+    Query::from("docs")
+        .where_(fts("body", "needle", "or"))
+        .build()
+}
+
+fn bench_fts_indexed_selective(c: &mut Criterion) {
+    let rt = rt();
+    let q = build_selective_query();
+
+    let mut group = c.benchmark_group("fts_indexed_selective");
+    let n = SELECTIVE_N;
+    group.throughput(Throughput::Elements(n as u64));
+
+    let indexed_table = rt.block_on(build_docs_table_selective(n, true));
+    let brute_table = rt.block_on(build_docs_table_selective(n, false));
+
+    group.bench_function(BenchmarkId::new("indexed_selective", n), |b| {
+        b.to_async(&rt).iter(|| {
+            let table = indexed_table.clone();
+            let q = q.clone();
+            async move {
+                let interner = table.interner().get().await.unwrap();
+                let refs = new_map();
+                let ctx = FilterContext::new(interner, &refs);
+                black_box(table.read(&q, &ctx).await.unwrap());
+            }
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("brute_selective_via_read", n), |b| {
+        b.to_async(&rt).iter(|| {
+            let table = brute_table.clone();
+            let q = q.clone();
+            async move {
+                let interner = table.interner().get().await.unwrap();
+                let refs = new_map();
+                let ctx = FilterContext::new(interner, &refs);
+                black_box(table.read(&q, &ctx).await.unwrap());
+            }
+        });
+    });
+
+    group.finish();
+}
+
+// Selective-query numbers (one local run; sample-size 10, 3 s measurement):
+//
+//   N=1000  rare-token "needle" (~10 hits, 1% of corpus)
+//     indexed_selective:           ~97  µs
+//     brute_selective_via_read:    ~1.57 ms
+//     ratio (brute / indexed):     ~16x  — index win clearly visible
+//
+// Compare against the non-selective group above where both paths are
+// within noise: that's the materialisation tail dominating because
+// "user" matches every doc. With ~1% selectivity, the indexed path
+// fetches only ~10 RIDs via get_many while brute still scans all
+// 1000 — the ~16x ratio is the real-world FTS-index win this bench
+// was designed to expose.
+
+criterion_group!(benches, bench_fts, bench_fts_indexed_selective);
 criterion_main!(benches);
