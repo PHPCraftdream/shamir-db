@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use shamir_engine::query::filter::eval_context::FilterContext;
 use shamir_engine::query::read::ReadQuery;
@@ -56,7 +56,13 @@ use shamir_types::core::interner::TouchInd;
 use shamir_types::types::common::{new_map, new_map_wc};
 use shamir_types::types::value::InnerValue;
 
-const N: usize = 1000;
+/// Corpus sizes benched. N=1000 mirrors the predicate-only baseline in
+/// `filter_eval.rs`; N=10_000 widens the asymptotic gap between the
+/// indexed and brute paths (the per-call materialisation tail no longer
+/// dominates at 10k rows). Larger N (100k+) is a follow-up: seed cost
+/// pushes past Criterion's default `measurement_time` and likely needs a
+/// dedicated "long" feature gate.
+const NS: &[usize] = &[1000, 10_000];
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -65,11 +71,11 @@ fn rt() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-/// Build a `docs` TableManager populated with 1000 records whose
+/// Build a `docs` TableManager populated with `n` records whose
 /// `body` field holds `format!("user-{i}")`. When `with_fts_index` is
 /// true, an FTS (whitespace tokenizer) index on `body` is created
 /// **before** inserts so postings are populated incrementally.
-async fn build_docs_table(with_fts_index: bool) -> TableManager {
+async fn build_docs_table(n: usize, with_fts_index: bool) -> TableManager {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mgr = TableManager::create("docs".into(), data, info)
@@ -96,7 +102,7 @@ async fn build_docs_table(with_fts_index: bool) -> TableManager {
         }
     };
 
-    for i in 0..N {
+    for i in 0..n {
         let mut m = new_map_wc(1);
         m.insert(body_k.clone(), InnerValue::Str(format!("user-{i}")));
         mgr.insert(&InnerValue::Map(m)).await.unwrap();
@@ -114,76 +120,89 @@ fn build_query(mode: &str) -> ReadQuery {
 fn bench_fts(c: &mut Criterion) {
     let rt = rt();
 
-    let indexed_table = rt.block_on(build_docs_table(true));
-    let brute_table = rt.block_on(build_docs_table(false));
-
     let q_and = build_query("and");
     let q_or = build_query("or");
 
     let mut group = c.benchmark_group("fts_indexed_vs_brute");
-    group.throughput(Throughput::Elements(N as u64));
 
-    group.bench_function("indexed_and_1000", |b| {
-        b.to_async(&rt).iter(|| {
-            let table = indexed_table.clone();
-            let q = q_and.clone();
-            async move {
-                let interner = table.interner().get().await.unwrap();
-                let refs = new_map();
-                let ctx = FilterContext::new(interner, &refs);
-                black_box(table.read(&q, &ctx).await.unwrap());
-            }
-        });
-    });
+    for &n in NS {
+        let indexed_table = rt.block_on(build_docs_table(n, true));
+        let brute_table = rt.block_on(build_docs_table(n, false));
+        group.throughput(Throughput::Elements(n as u64));
 
-    group.bench_function("indexed_or_1000", |b| {
-        b.to_async(&rt).iter(|| {
-            let table = indexed_table.clone();
-            let q = q_or.clone();
-            async move {
-                let interner = table.interner().get().await.unwrap();
-                let refs = new_map();
-                let ctx = FilterContext::new(interner, &refs);
-                black_box(table.read(&q, &ctx).await.unwrap());
-            }
+        group.bench_with_input(BenchmarkId::new("indexed_and", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let table = indexed_table.clone();
+                let q = q_and.clone();
+                async move {
+                    let interner = table.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    black_box(table.read(&q, &ctx).await.unwrap());
+                }
+            });
         });
-    });
 
-    group.bench_function("brute_and_1000_via_read", |b| {
-        b.to_async(&rt).iter(|| {
-            let table = brute_table.clone();
-            let q = q_and.clone();
-            async move {
-                let interner = table.interner().get().await.unwrap();
-                let refs = new_map();
-                let ctx = FilterContext::new(interner, &refs);
-                black_box(table.read(&q, &ctx).await.unwrap());
-            }
+        group.bench_with_input(BenchmarkId::new("indexed_or", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let table = indexed_table.clone();
+                let q = q_or.clone();
+                async move {
+                    let interner = table.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    black_box(table.read(&q, &ctx).await.unwrap());
+                }
+            });
         });
-    });
 
-    group.bench_function("brute_or_1000_via_read", |b| {
-        b.to_async(&rt).iter(|| {
-            let table = brute_table.clone();
-            let q = q_or.clone();
-            async move {
-                let interner = table.interner().get().await.unwrap();
-                let refs = new_map();
-                let ctx = FilterContext::new(interner, &refs);
-                black_box(table.read(&q, &ctx).await.unwrap());
-            }
+        group.bench_with_input(BenchmarkId::new("brute_and_via_read", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let table = brute_table.clone();
+                let q = q_and.clone();
+                async move {
+                    let interner = table.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    black_box(table.read(&q, &ctx).await.unwrap());
+                }
+            });
         });
-    });
+
+        group.bench_with_input(BenchmarkId::new("brute_or_via_read", n), &n, |b, _| {
+            b.to_async(&rt).iter(|| {
+                let table = brute_table.clone();
+                let q = q_or.clone();
+                async move {
+                    let interner = table.interner().get().await.unwrap();
+                    let refs = new_map();
+                    let ctx = FilterContext::new(interner, &refs);
+                    black_box(table.read(&q, &ctx).await.unwrap());
+                }
+            });
+        });
+    }
 
     group.finish();
 }
 
-// Comparison (one local run; 20 samples, 3 s measurement):
+// Comparison (one local run; sample-size 10, 3 s measurement):
 //
-//   indexed_and_1000          ~1.48 ms   (0 hits — postings intersect empty)
-//   indexed_or_1000           ~1.47 ms   (1000 hits — full "user" posting set)
-//   brute_and_1000_via_read   ~1.50 ms   (0 hits — scan + per-doc tokenize)
-//   brute_or_1000_via_read    ~2.02 ms   (1000 hits — scan + materialise all)
+// N=1000  — indexed_and:  ~1.50 ms   brute_and: ~1.57 ms   (~1.05x indexed)
+// N=1000  — indexed_or:   ~1.70 ms   brute_or:  ~1.57 ms   (~within noise)
+// N=10000 — indexed_and: ~22.3  ms   brute_and: ~20.2 ms   (~within noise)
+// N=10000 — indexed_or:  ~23.5  ms   brute_or:  ~18.6 ms   (~within noise)
+//
+// At both N values, the per-call materialisation tail in `read_exec.rs`
+// (`get_many` + `inner_to_json_value` for matched rows) dominates the
+// predicate cost. The original N=1000 numbers below stand as the
+// reference shape; the N=10000 sample run did NOT widen the indexed/brute
+// gap on this corpus the way we expected — likely because `"user"`
+// matches *every* doc on the "or" path (so both paths must materialise
+// the full corpus), and the "and" path returns 0 hits at both sizes
+// (so brute short-circuits cheaply on the first token miss). A more
+// selective query (a token that hits, say, 1% of rows) is needed to
+// expose the index's asymptotic win. Filed as follow-up.
 //
 // Findings:
 //   - On 1000 rows with `where_` returning every doc ("or" mode), the
