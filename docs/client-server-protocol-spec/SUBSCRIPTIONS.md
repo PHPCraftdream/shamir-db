@@ -30,6 +30,40 @@ Subscriptions are scoped to one connection. They terminate on `UnsubscribeOp`,
 connection close, slow-consumer breach, or any bridge-side fatal error. Termination is
 always announced by a `closed` push (best-effort).
 
+### 1.1. Volatility contract (normative)
+
+Subscriptions are **volatile by design**. They are an application-reactivity primitive,
+not a durable replication channel. The following is the contract both sides MUST observe:
+
+1. **Connection-bound lifetime.** Every subscription dies with the connection that
+   carried its grant. On WS close — clean or abrupt — the server tears down every
+   bridge on that connection. Clients MUST treat connection close as equivalent to
+   a `closed` push for every active subscription on that connection.
+
+2. **No automatic resubscription.** Reference clients (TS / Rust) do **not** silently
+   re-issue subscriptions on reconnect. A new connection starts with zero
+   subscriptions. The grant's `sub` id from a previous connection is meaningless on
+   any other.
+
+3. **Gap recovery is the application's responsibility.** Events that occurred while a
+   client was disconnected — or that fell behind a `slow_consumer` drop — are
+   **not** retransmitted on reconnect. Applications that need to catch up MUST
+   do so explicitly, for example via a one-shot `ChangesSince` query or via
+   application-level checkpoints. The `from_version` field on `SubscribeOp` is
+   intended for *initial* state alignment (e.g. "I have a checkpoint at v100, give
+   me events after that"), not for transparent reconnect-resumption.
+
+4. **For durable change-data-capture, use replication, not subscriptions.** Subscriptions
+   are best-effort push for reactivity (UI updates, notifications, live queries).
+   Workloads that require guaranteed gap-free delivery — leader/follower replication,
+   audit pipelines, outbox patterns — should use the pull-based changefeed protocols,
+   which own their own resume semantics. (See `REPLICATION.md` when that protocol
+   is documented.)
+
+This contract is deliberate: it keeps the subscription primitive small, composable, and
+honest about its failure mode. An "always-on" abstraction that hides reconnect gaps
+turns missed events into invisible application bugs.
+
 ---
 
 ## 2. Lifecycle
