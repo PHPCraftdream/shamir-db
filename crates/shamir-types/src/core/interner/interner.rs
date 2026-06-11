@@ -139,6 +139,15 @@ impl Interner {
         rev.get(idx).and_then(|slot| slot.clone())
     }
 
+    /// Snapshots the reverse-vec via a single `ArcSwap` load and
+    /// returns the owning `Arc` so callers can do many lookups
+    /// against the same slice without re-loading. Used by codecs
+    /// that walk a value tree and resolve many keys against the
+    /// interner in tight succession.
+    pub fn reverse_snapshot(&self) -> Arc<Vec<Option<UserKey>>> {
+        self.reverse.load_full()
+    }
+
     pub fn with_str<R>(&self, id: &InternerKey, f: impl FnOnce(&str) -> R) -> Option<R> {
         let rev = self.reverse.load();
         let idx = id.id() as usize;

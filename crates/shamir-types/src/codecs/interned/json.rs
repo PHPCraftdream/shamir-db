@@ -3,9 +3,9 @@
 //! This module provides JSON encoding/decoding directly to/from InnerValue
 //! without using UserValue (which is deprecated and for tests only).
 
-use crate::codecs::interned::common::{deintern_key, intern_string_key};
+use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
-use crate::core::interner::{Interner, InternerKey};
+use crate::core::interner::{Interner, InternerKey, UserKey};
 use crate::types::common::new_map;
 use crate::types::value::{InnerValue, Value};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
@@ -181,10 +181,24 @@ pub fn json_value_to_inner(
     json_value_to_inner_with(json_value, &|key| intern_string_key(interner, key))
 }
 
-/// Converts InnerValue to serde_json::Value, de-interning all keys
+/// Converts InnerValue to serde_json::Value, de-interning all keys.
+///
+/// Hoists the interner's reverse-vec `ArcSwap` load to a single
+/// acquisition for the entire walk, instead of paying one
+/// `ArcSwap::load` + bounds check per map key as the recursion
+/// descends (per-Put cost in the subscription filter hot path was
+/// `O(fields)` ArcSwap loads — 50 for a 50-field record).
 pub fn inner_to_json_value(
     value: &InnerValue,
     interner: &Interner,
+) -> Result<json::Value, CodecError> {
+    let rev = interner.reverse_snapshot();
+    inner_to_json_value_with_rev(value, rev.as_slice())
+}
+
+fn inner_to_json_value_with_rev(
+    value: &InnerValue,
+    rev: &[Option<UserKey>],
 ) -> Result<json::Value, CodecError> {
     match value {
         Value::Null => Ok(json::Value::Null),
@@ -210,20 +224,31 @@ pub fn inner_to_json_value(
                 .collect(),
         )),
         Value::List(l) => {
-            let arr: Result<Vec<_>, _> =
-                l.iter().map(|v| inner_to_json_value(v, interner)).collect();
+            let arr: Result<Vec<_>, _> = l
+                .iter()
+                .map(|v| inner_to_json_value_with_rev(v, rev))
+                .collect();
             Ok(json::Value::Array(arr?))
         }
         Value::Set(s) => {
-            let arr: Result<Vec<_>, _> =
-                s.iter().map(|v| inner_to_json_value(v, interner)).collect();
+            let arr: Result<Vec<_>, _> = s
+                .iter()
+                .map(|v| inner_to_json_value_with_rev(v, rev))
+                .collect();
             Ok(json::Value::Array(arr?))
         }
         Value::Map(m) => {
             let mut obj = json::Map::new();
             for (interned_key, val) in m {
-                let key_str = deintern_key(interner, interned_key)?;
-                obj.insert(key_str, inner_to_json_value(val, interner)?);
+                let idx = interned_key.id() as usize;
+                let key_str = rev
+                    .get(idx)
+                    .and_then(|slot| slot.as_ref())
+                    .map(|k| k.as_str().to_string())
+                    .ok_or_else(|| {
+                        CodecError::Decode(format!("Interned key not found: {:?}", interned_key))
+                    })?;
+                obj.insert(key_str, inner_to_json_value_with_rev(val, rev)?);
             }
             Ok(json::Value::Object(obj))
         }
