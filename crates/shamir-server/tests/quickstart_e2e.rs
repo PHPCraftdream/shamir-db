@@ -5,71 +5,19 @@
 //! PUTs a document via `set`, GETs it via `from`. This is the exact path
 //! documented in `docs/guide/00-quickstart.md` — keep them in sync.
 
-use std::path::PathBuf;
-
 use serde_json::json;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use shamir_client::{Client, ConnectOptions};
-use shamir_server::config::{
-    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
-};
-use shamir_server::server::{BootstrapMode, ServerLauncher};
 
-fn make_test_config(temp: &TempDir) -> Config {
-    let data_dir: PathBuf = temp.path().to_path_buf();
-    Config {
-        data_dir: data_dir.clone(),
-        logging: LoggingConfig {
-            level: "warn".into(),
-            slow_query_threshold_ms: 0,
-            file: None,
-            flush_interval_ms: 2000,
-        },
-        kdf_defaults: KdfConfig {
-            memory_kb: 19_456,
-            time: 2,
-            parallelism: 1,
-            argon2_version: 0x13,
-        },
-        argon2_concurrent_max: 4,
-        listeners: vec![ListenerConfig {
-            kind: ListenerKind::Tcp,
-            addr: "127.0.0.1:0".to_string(),
-            profile: ProfileKind::TlsExporter,
-            path: None,
-            kdf_override: None,
-            browser_origin_allowlist: vec![],
-        }],
-        tls: TlsConfig {
-            cert_path: data_dir.join("cert.pem"),
-            key_path: data_dir.join("key.pem"),
-        },
-        security: Default::default(),
-        audit: Default::default(),
-        observability: shamir_server::config::ObservabilityConfig {
-            addr: String::new(),
-        },
-    }
-}
+mod common;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quickstart_kv_in_default_store() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-
     let temp = TempDir::new().expect("tempdir");
-    let config = make_test_config(&temp);
-
     let admin_pw = b"change-me-admin".to_vec();
-    let launcher = ServerLauncher {
-        config,
-        bootstrap: BootstrapMode::Password {
-            username: "admin".into(),
-            password: Zeroizing::new(admin_pw.clone()),
-        },
-    };
-    let handle = launcher.launch().await.expect("boot");
+    let handle = common::spawn_ephemeral(&temp, &admin_pw).await;
     let addr = handle.first_tls_exporter_addr().expect("bound");
 
     // Step 2 — connect as the bootstrap admin.
