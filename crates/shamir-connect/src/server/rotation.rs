@@ -1,5 +1,9 @@
 //! Server-side identity rotation state machine (spec §6.4, §6.5, §12.2).
 
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+
 use crate::common::crypto::Ed25519Keypair;
 use crate::common::error::{Error, Result};
 use crate::common::rotation::{build_rotate_event_input, build_rotation_proof_input};
@@ -16,13 +20,14 @@ pub const ROTATION_OVERLAP_NS: u64 = 7 * ns::DAY;
 /// lock-free with `Relaxed` ordering instead of acquiring the RwLock. Saves
 /// ~3 ns per resume.
 pub struct ServerIdentityState {
-    inner: parking_lot::RwLock<ServerIdentityInner>,
-    /// Lock-free mirror of `inner.current_version`. Updated under the same
-    /// write lock as `inner.current_version` in [`Self::rotate`] so they
-    /// stay coherent for resume-path reads.
+    inner: ArcSwap<ServerIdentityInner>,
+    /// Lock-free mirror of `inner.current_version`. Updated in [`Self::rotate`]
+    /// (under the same logical write as the ArcSwap store) so they stay
+    /// coherent for resume-path reads.
     current_version_atomic: std::sync::atomic::AtomicU64,
 }
 
+#[derive(Clone)]
 struct ServerIdentityInner {
     current: Ed25519Keypair,
     previous: Option<Ed25519Keypair>,
@@ -39,7 +44,7 @@ impl ServerIdentityState {
     /// Construct from a freshly-generated keypair (`current_version = 0`).
     pub fn fresh() -> Self {
         Self {
-            inner: parking_lot::RwLock::new(ServerIdentityInner {
+            inner: ArcSwap::from_pointee(ServerIdentityInner {
                 current: Ed25519Keypair::generate(),
                 previous: None,
                 rotation_until_ns: None,
@@ -60,7 +65,7 @@ impl ServerIdentityState {
         current_version: u64,
     ) -> Self {
         Self {
-            inner: parking_lot::RwLock::new(ServerIdentityInner {
+            inner: ArcSwap::from_pointee(ServerIdentityInner {
                 current: Ed25519Keypair::from_seed(current_seed),
                 previous: previous_seed.map(Ed25519Keypair::from_seed),
                 rotation_until_ns,
@@ -101,26 +106,26 @@ impl ServerIdentityState {
 
     /// Current public key.
     pub fn current_pub(&self) -> [u8; 32] {
-        self.inner.read().current.public_bytes()
+        self.inner.load().current.public_bytes()
     }
 
     /// Previous public key during overlap (if any).
     pub fn previous_pub(&self) -> Option<[u8; 32]> {
         self.inner
-            .read()
+            .load()
             .previous
             .as_ref()
-            .map(|kp| kp.public_bytes())
+            .map(|kp: &Ed25519Keypair| kp.public_bytes())
     }
 
     /// `transition_until_ns` if currently in overlap.
     pub fn rotation_until_ns(&self) -> Option<u64> {
-        self.inner.read().rotation_until_ns
+        self.inner.load().rotation_until_ns
     }
 
     /// Whether overlap window is currently active.
     pub fn rotation_in_progress(&self, now_ns: u64) -> bool {
-        match self.inner.read().rotation_until_ns {
+        match self.inner.load().rotation_until_ns {
             Some(t) => now_ns < t,
             None => false,
         }
@@ -128,52 +133,65 @@ impl ServerIdentityState {
 
     /// Sign a message with the **current** priv key.
     pub fn sign_with_current(&self, msg: &[u8]) -> [u8; 64] {
-        self.inner.read().current.sign(msg)
+        self.inner.load().current.sign(msg)
     }
 
     /// Sign a message with the **previous** priv key (if in overlap).
     pub fn sign_with_previous(&self, msg: &[u8]) -> Option<[u8; 64]> {
-        self.inner.read().previous.as_ref().map(|kp| kp.sign(msg))
+        self.inner
+            .load()
+            .previous
+            .as_ref()
+            .map(|kp: &Ed25519Keypair| kp.sign(msg))
     }
 
     /// Execute `rotateServerIdentity` (spec §12.2):
     /// - Pre-condition: not already in overlap (HIGH-5 fix).
     /// - Atomic: previous = current; current = new; rotation_until = now + 7d.
     pub fn rotate(&self, now_ns: u64) -> Result<RotationOutcome> {
-        let mut g = self.inner.write();
-        if let Some(t) = g.rotation_until_ns {
+        let current = (**self.inner.load()).clone();
+        if let Some(t) = current.rotation_until_ns {
             if now_ns < t {
                 return Err(Error::InvalidInput("rotation_in_progress_already"));
             }
         }
-        let old = std::mem::replace(&mut g.current, Ed25519Keypair::generate());
-        let new_pub = g.current.public_bytes();
-        let old_pub = old.public_bytes();
+        let old_pub = current.current.public_bytes();
+        let new_keypair = Ed25519Keypair::generate();
+        let new_pub = new_keypair.public_bytes();
         let transition_until_ns = now_ns.saturating_add(ROTATION_OVERLAP_NS);
-        g.previous = Some(old);
-        g.rotation_until_ns = Some(transition_until_ns);
-        g.current_version = g.current_version.saturating_add(1);
-        // Optim #5: keep atomic mirror in sync — happens under the same
-        // write lock so readers via `is_ticket_version_acceptable` see a
-        // consistent value once they observe the new atomic load.
+        let new_version = current.current_version.saturating_add(1);
+        let new_inner = ServerIdentityInner {
+            current: new_keypair,
+            previous: Some(current.current),
+            rotation_until_ns: Some(transition_until_ns),
+            current_version: new_version,
+        };
+        self.inner.store(Arc::new(new_inner));
+        // Keep atomic mirror in sync so `is_ticket_version_acceptable` sees
+        // the updated version without loading the Arc.
         self.current_version_atomic
-            .store(g.current_version, std::sync::atomic::Ordering::Relaxed);
+            .store(new_version, std::sync::atomic::Ordering::Relaxed);
         Ok(RotationOutcome {
             old_pub,
             new_pub,
             transition_until_ns,
-            new_version: g.current_version,
+            new_version,
         })
     }
 
     /// Background task: when `now_ns >= rotation_until_ns`, zeroize previous
     /// and clear the overlap state. Returns `true` if cleanup happened.
     pub fn try_finalize(&self, now_ns: u64) -> bool {
-        let mut g = self.inner.write();
-        match g.rotation_until_ns {
+        let current = (**self.inner.load()).clone();
+        match current.rotation_until_ns {
             Some(t) if now_ns >= t => {
-                g.previous = None;
-                g.rotation_until_ns = None;
+                let new_inner = ServerIdentityInner {
+                    current: current.current,
+                    previous: None,
+                    rotation_until_ns: None,
+                    current_version: current.current_version,
+                };
+                self.inner.store(Arc::new(new_inner));
                 true
             }
             _ => false,
@@ -205,7 +223,7 @@ pub fn build_identity_rotation_event(
     state: &ServerIdentityState,
     recipient_session_id: &[u8; 32],
 ) -> Result<IdentityRotationEvent> {
-    let inner = state.inner.read();
+    let inner = state.inner.load();
     let previous = inner
         .previous
         .as_ref()
@@ -255,7 +273,7 @@ pub fn build_rotation_in_progress_payload(
     state: &ServerIdentityState,
     identity_input: &[u8],
 ) -> Result<RotationInProgressPayload> {
-    let inner = state.inner.read();
+    let inner = state.inner.load();
     let previous = inner
         .previous
         .as_ref()

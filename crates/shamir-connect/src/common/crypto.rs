@@ -166,6 +166,14 @@ pub struct Ed25519Keypair {
     signing: SigningKey,
 }
 
+impl Clone for Ed25519Keypair {
+    fn clone(&self) -> Self {
+        Self {
+            signing: self.signing.clone(),
+        }
+    }
+}
+
 impl core::fmt::Debug for Ed25519Keypair {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let pub_bytes = self.signing.verifying_key().to_bytes();

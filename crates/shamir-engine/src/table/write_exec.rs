@@ -41,18 +41,18 @@ impl TableManager {
         //    client never sees the unevaluated marker. Then convert all JSON
         //    values to InnerValue upfront — any codec error fails the whole
         //    insert with nothing written (the first bad value aborts).
+        // Resolve computed fields and intern in a single pass — avoids
+        // materialising a temporary `resolved_values` Vec before we can
+        // start building `inner_values`.
         let mut resolved_values: Vec<json::Value> = Vec::with_capacity(op.values.len());
+        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
         for value in &op.values {
-            resolved_values.push(
-                resolve_computed_record(value, interner)
-                    .map_err(shamir_storage::error::DbError::Codec)?,
-            );
-        }
-        let mut inner_values: Vec<InnerValue> = Vec::with_capacity(resolved_values.len());
-        for value in &resolved_values {
-            let inner = json_value_to_inner(value, interner)
+            let resolved = resolve_computed_record(value, interner)
+                .map_err(shamir_storage::error::DbError::Codec)?;
+            let inner = json_value_to_inner(&resolved, interner)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
             inner_values.push(inner);
+            resolved_values.push(resolved);
         }
 
         // 2a. S3: run validators on each record (fail-closed, before
@@ -120,21 +120,21 @@ impl TableManager {
 
         // Resolve inline `$fn` computed fields first (fail-closed), then
         // intern field names through the tx overlay.
+        // Resolve computed fields and intern in a single pass — avoids
+        // materialising a temporary `resolved_values` Vec before we can
+        // start building `inner_values`.
         let mut resolved_values: Vec<json::Value> = Vec::with_capacity(op.values.len());
-        for value in &op.values {
-            resolved_values.push(
-                resolve_computed_record(value, interner)
-                    .map_err(shamir_storage::error::DbError::Codec)?,
-            );
-        }
         let inner_values: Vec<InnerValue> = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
-            let mut vals = Vec::with_capacity(resolved_values.len());
-            for value in &resolved_values {
-                let inner = json_value_to_inner_with(value, &intern_fn)
+            let mut vals = Vec::with_capacity(op.values.len());
+            for value in &op.values {
+                let resolved = resolve_computed_record(value, interner)
+                    .map_err(shamir_storage::error::DbError::Codec)?;
+                let inner = json_value_to_inner_with(&resolved, &intern_fn)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 vals.push(inner);
+                resolved_values.push(resolved);
             }
             vals
         };
