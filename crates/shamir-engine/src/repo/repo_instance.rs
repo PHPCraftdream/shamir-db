@@ -3,7 +3,7 @@ use super::group_commit::GroupCommit;
 use super::repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{Repo, Store};
-use shamir_types::types::common::{new_dash_map_wc, TDashMap};
+use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub struct RepoInstance {
     /// on demand when `create_table_context` instantiates a
     /// TableManager — both share the same data_store reference.
     /// Key = `table_token_for(name)` (deterministic).
-    per_table_mvcc: Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>>,
+    per_table_mvcc: Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>>,
     /// Reverse index `table_token_for(name) → name`, maintained at table
     /// *registration* time (`from_box_repo` + `add_table`), independent of
     /// whether the table has been instantiated yet. Lets `table_by_token`
@@ -33,7 +33,7 @@ pub struct RepoInstance {
     /// re-hashing its name under the per-repo `commit_lock` (III.1). The
     /// token is a pure function of the name, so this is just a
     /// pre-computed inverse of that function.
-    token_names: Arc<scc::HashMap<u64, String>>,
+    token_names: Arc<scc::HashMap<u64, String, THasher>>,
     /// Atomic tx telemetry counters.
     tx_metrics: Arc<shamir_tx::TxMetrics>,
     /// Group-commit coordinator for `synced` durability flushes.
@@ -80,7 +80,8 @@ impl RepoInstance {
 
     fn from_box_repo(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
         let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
-        let token_names: scc::HashMap<u64, String> = scc::HashMap::new();
+        let token_names: scc::HashMap<u64, String, THasher> =
+            scc::HashMap::with_hasher(THasher::default());
         for cfg in configs {
             register_token(&token_names, &cfg.name);
             configs_map.insert(cfg.name.clone(), cfg);
@@ -95,7 +96,7 @@ impl RepoInstance {
             tables: Arc::new(tables),
             tx_gate: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
-            per_table_mvcc: Arc::new(scc::HashMap::new()),
+            per_table_mvcc: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             token_names: Arc::new(token_names),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
             group_commit: Arc::new(GroupCommit::new()),
@@ -125,7 +126,7 @@ impl RepoInstance {
 
     /// Per-table MvccStore map used by the commit pipeline to route
     /// data writes through version-aware storage.
-    pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>>> {
+    pub fn per_table_mvcc(&self) -> &Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>> {
         &self.per_table_mvcc
     }
     /// Atomic transaction telemetry counters.
@@ -861,7 +862,7 @@ pub fn repo_token(name: &str) -> u64 {
 ///   situation is visible instead of silently corrupting `table_by_token`
 ///   for the first table. The second table is then unresolvable by token —
 ///   the caller should rename it.
-fn register_token(token_names: &scc::HashMap<u64, String>, name: &str) {
+fn register_token(token_names: &scc::HashMap<u64, String, THasher>, name: &str) {
     let token = table_token_for(name);
     if let Err((_, attempted)) = token_names.insert(token, name.to_string()) {
         // Key already present — inspect the existing mapping.

@@ -7,6 +7,7 @@
 //! tables reference the validator so `drop` can refuse when bindings exist.
 
 use crate::function::ShamirFunction;
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -32,20 +33,20 @@ pub enum ValidatorRegistryError {
 /// and `bound_in` (referential integrity — `drop` refuses while bound).
 pub struct ValidatorRegistry {
     /// Compiled validator artifact, keyed by catalogue `_id`.
-    by_id: scc::HashMap<RecordId, Arc<dyn ShamirFunction>>,
+    by_id: scc::HashMap<RecordId, Arc<dyn ShamirFunction>, THasher>,
     /// Unique-name → id reverse index.
-    name_to_id: scc::HashMap<String, RecordId>,
+    name_to_id: scc::HashMap<String, RecordId, THasher>,
     /// Tables each validator is bound to (canonical `"db/repo/table"` keys).
-    bound_in: scc::HashMap<RecordId, BTreeSet<String>>,
+    bound_in: scc::HashMap<RecordId, BTreeSet<String>, THasher>,
 }
 
 impl ValidatorRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            by_id: scc::HashMap::new(),
-            name_to_id: scc::HashMap::new(),
-            bound_in: scc::HashMap::new(),
+            by_id: scc::HashMap::with_hasher(THasher::default()),
+            name_to_id: scc::HashMap::with_hasher(THasher::default()),
+            bound_in: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 

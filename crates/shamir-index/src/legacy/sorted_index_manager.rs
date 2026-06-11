@@ -35,6 +35,7 @@ use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::core::interner::Interner;
 use shamir_types::core::sort_codec;
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -45,7 +46,7 @@ use shamir_types::types::value::InnerValue;
 pub struct SortedIndexManager {
     info_store: Arc<dyn Store>,
     /// `name_interned → definition`
-    indexes: Arc<DashMap<u64, SortedIndexDefinition>>,
+    indexes: Arc<DashMap<u64, SortedIndexDefinition, THasher>>,
 }
 
 impl Clone for SortedIndexManager {
@@ -62,7 +63,7 @@ impl SortedIndexManager {
     pub async fn new(info_store: Arc<dyn Store>) -> DbResult<Self> {
         let m = Self {
             info_store,
-            indexes: Arc::new(DashMap::new()),
+            indexes: Arc::new(DashMap::with_hasher(THasher::default())),
         };
         m.load().await?;
         Ok(m)

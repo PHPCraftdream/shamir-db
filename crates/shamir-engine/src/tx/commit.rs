@@ -1,5 +1,6 @@
 use shamir_storage::error::DbError;
 use shamir_tx::TxContext;
+use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
@@ -532,8 +533,8 @@ pub(crate) async fn release_pessimistic_locks(tx: &TxContext, repo: &RepoInstanc
     // Group keys by table_token so each MvccStore is hit once. `locked_keys`
     // is an `scc::HashMap<(u64, Bytes), ()>`; scan into a std map (the
     // synchronous visitor cannot await inside).
-    let mut by_table: std::collections::HashMap<u64, Vec<bytes::Bytes>> =
-        std::collections::HashMap::new();
+    let mut by_table: std::collections::HashMap<u64, Vec<bytes::Bytes>, THasher> =
+        std::collections::HashMap::default();
     tx.locked_keys.scan(|(token, key), _| {
         by_table.entry(*token).or_default().push(key.clone());
     });

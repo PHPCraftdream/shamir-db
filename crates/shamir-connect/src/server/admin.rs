@@ -12,8 +12,13 @@ use crate::common::kdf_params::KdfParams;
 use crate::common::types::limits;
 use crate::server::session::{Session, SessionStore};
 use crate::server::user_record::UserRecord;
+use fxhash::FxHasher;
+use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+/// Fast non-cryptographic hasher alias used for the in-memory directory.
+type FxBuild = BuildHasherDefault<FxHasher>;
 
 /// Minimal trait for the user-storage backend used by admin commands.
 ///
@@ -272,7 +277,7 @@ pub fn unlock_user<A: AuditSink, F: FnOnce(&str)>(
 /// Reference in-memory implementation of [`UserDirectory`].
 #[derive(Debug, Default)]
 pub struct InMemoryUserDirectory {
-    by_name: dashmap::DashMap<String, ([u8; 16], UserRecord)>,
+    by_name: dashmap::DashMap<String, ([u8; 16], UserRecord), FxBuild>,
     next_id: parking_lot::Mutex<u128>,
 }
 
@@ -280,7 +285,7 @@ impl InMemoryUserDirectory {
     /// Empty directory.
     pub fn new() -> Self {
         Self {
-            by_name: dashmap::DashMap::new(),
+            by_name: dashmap::DashMap::with_hasher(FxBuild::default()),
             next_id: parking_lot::Mutex::new(1),
         }
     }

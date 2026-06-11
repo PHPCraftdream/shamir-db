@@ -13,6 +13,7 @@ use crate::kind::VectorMetric;
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::hnsw::Hnsw;
+use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -97,13 +98,13 @@ pub struct HnswAdapter {
     metric: VectorMetric,
     ef_search: usize,
     hnsw: Arc<Hnsw<'static, f32, ShamirDist>>,
-    pub(crate) rid_map: scc::HashMap<usize, RecordId>,
-    rid_to_internal: scc::HashMap<RecordId, usize>,
+    pub(crate) rid_map: scc::HashMap<usize, RecordId, THasher>,
+    rid_to_internal: scc::HashMap<RecordId, usize, THasher>,
     /// Raw vectors retained (keyed by internal id) so a small index can be
     /// searched EXACTLY by brute force — see [`BRUTE_FORCE_MAX`]. Tombstoned
     /// entries are removed here on replace/delete.
-    vectors: scc::HashMap<usize, Vec<f32>>,
-    pub(crate) deleted: scc::HashMap<usize, ()>,
+    vectors: scc::HashMap<usize, Vec<f32>, THasher>,
+    pub(crate) deleted: scc::HashMap<usize, (), THasher>,
     next_id: AtomicUsize,
 }
 
@@ -122,10 +123,10 @@ impl HnswAdapter {
             metric,
             ef_search: config.ef_search,
             hnsw: Arc::new(hnsw),
-            rid_map: scc::HashMap::new(),
-            rid_to_internal: scc::HashMap::new(),
-            vectors: scc::HashMap::new(),
-            deleted: scc::HashMap::new(),
+            rid_map: scc::HashMap::with_hasher(THasher::default()),
+            rid_to_internal: scc::HashMap::with_hasher(THasher::default()),
+            vectors: scc::HashMap::with_hasher(THasher::default()),
+            deleted: scc::HashMap::with_hasher(THasher::default()),
             next_id: AtomicUsize::new(0),
         }
     }

@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_tx::{MvccStore, VersionProvider};
+use shamir_types::types::common::THasher;
 
 pub struct RepoVersionProvider {
-    pub per_table_mvcc: Arc<scc::HashMap<u64, Arc<MvccStore>>>,
+    pub per_table_mvcc: Arc<scc::HashMap<u64, Arc<MvccStore>, THasher>>,
 }
 
 impl VersionProvider for RepoVersionProvider {
