@@ -134,7 +134,10 @@ pub(crate) async fn materialize_async_tail(
     // Phase 5c: index postings.
     if !tx.index_write_set.is_empty() {
         let mut by_token: std::collections::HashMap<u64, Vec<IndexWriteOp>, THasher> =
-            std::collections::HashMap::default();
+            std::collections::HashMap::with_capacity_and_hasher(
+                tx.index_write_set.len(),
+                THasher::default(),
+            );
         for (token, op) in &tx.index_write_set {
             by_token.entry(*token).or_default().push(op.clone());
         }
@@ -271,7 +274,7 @@ pub(crate) fn collect_data_batches(
     std::sync::Arc<dyn shamir_storage::types::Store>,
     Vec<shamir_storage::types::KvOp>,
 )> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(tx.write_set.len());
     for (table_id, staging) in std::mem::take(&mut tx.write_set) {
         let base = staging.base().clone();
         let ops = staging.drain();

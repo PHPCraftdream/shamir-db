@@ -11,7 +11,7 @@ use crate::query::read::{QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
-use shamir_types::types::common::{new_map, TMap};
+use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
 
 use crate::query::batch::param_subst::substitute_params;
@@ -22,7 +22,8 @@ pub(super) fn build_resolved_refs(
     all_results: &TMap<String, QueryResult>,
     deps: Option<&shamir_types::types::common::TSet<String>>,
 ) -> TMap<String, QueryResult> {
-    let mut refs = new_map();
+    let cap = deps.map_or(0, |s| s.len());
+    let mut refs = new_map_wc(cap);
     if let Some(dep_set) = deps {
         for dep_alias in dep_set {
             if let Some(result) = all_results.get(dep_alias) {
