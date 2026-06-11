@@ -111,6 +111,9 @@ shamir-transport-tcp = { path = "../shamir-transport-tcp" }
 # Fluent request builder — used by e2e tests to construct read/write batches.
 shamir-query-builder = { path = "../shamir-query-builder" }
 criterion = { version = "0.5", features = ["html_reports"] }
+# Used by subscription_hot_paths bench to construct `shamir_tx::RecordChange`
+# instances (its `key`/`value` fields are `bytes::Bytes`).
+bytes = "1"
 
 [[bench]]
 name = "db_handler_rps"
@@ -118,6 +121,14 @@ harness = false
 
 [[bench]]
 name = "duplex_throughput"
+harness = false
+
+[[bench]]
+name = "subscription_hot_paths"
+harness = false
+
+[[bench]]
+name = "subscription_throughput"
 harness = false
 
 [lints.clippy]

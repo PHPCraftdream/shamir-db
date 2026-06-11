@@ -8,7 +8,7 @@ use super::filter_eval::filter_matches_value;
 /// ignoring filter evaluation? Used to short-circuit the per-change async
 /// `decode_record_value_json` call when no subscriber could possibly match.
 /// Filter evaluation still runs in `matches_any` for surviving changes.
-pub(crate) fn any_target_interested(
+pub fn any_target_interested(
     targets: &[(String, String, EventMask, Option<Filter>)],
     repo: &str,
     table: &str,
@@ -21,7 +21,7 @@ pub(crate) fn any_target_interested(
         })
 }
 
-pub(crate) fn matches_any(
+pub fn matches_any(
     targets: &[(String, String, EventMask, Option<Filter>)],
     repo: &str,
     table: &str,
@@ -50,7 +50,7 @@ pub(crate) fn matches_any(
         })
 }
 
-pub(crate) fn mask_matches(mask: &EventMask, op: &ChangeOp) -> bool {
+pub fn mask_matches(mask: &EventMask, op: &ChangeOp) -> bool {
     matches!(
         (mask, op),
         (EventMask::All, _)
