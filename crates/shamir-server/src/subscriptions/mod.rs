@@ -1,10 +1,16 @@
 pub(crate) mod bridge;
-pub(crate) mod filter_eval;
-pub(crate) mod payload;
+// `pub` (was `pub(crate)`): exposed for `benches/subscription_hot_paths.rs`
+// to call `filter_eval::filter_matches_value` directly.
+pub mod filter_eval;
+// `pub` (was `pub(crate)`): exposed for `benches/subscription_hot_paths.rs`
+// to call `payload::make_event_data` directly.
+pub mod payload;
 pub(crate) mod push;
 pub(crate) mod reactive;
 pub mod registry;
-pub(crate) mod target_match;
+// `pub` (was `pub(crate)`): exposed for `benches/subscription_hot_paths.rs`
+// to call `target_match::matches_any` directly.
+pub mod target_match;
 
 pub use registry::SubscriptionRegistry;
 

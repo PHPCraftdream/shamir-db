@@ -1,6 +1,6 @@
 use shamir_query_types::filter::{Filter, FilterValue};
 
-pub(crate) fn filter_matches_value(filter: &Filter, value: &serde_json::Value) -> bool {
+pub fn filter_matches_value(filter: &Filter, value: &serde_json::Value) -> bool {
     match filter {
         Filter::Eq { field, value: fv } => resolve_field(value, field) == filter_value_to_json(fv),
         Filter::Ne { field, value: fv } => resolve_field(value, field) != filter_value_to_json(fv),
