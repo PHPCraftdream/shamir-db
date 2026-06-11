@@ -92,19 +92,49 @@ substitute for running the gate yourself before committing.
 
 ---
 
-## 🔒 Concurrency invariants
+## 🔒 Code ideology (NORMATIVE)
 
-Engine code paths must stay lock-free where the runtime is involved:
+Five pillars, applied **everywhere** — pick the right primitive for the
+shape of the access pattern, in this order of preference:
 
-* `scc::HashMap` for shared registries (CAS-based, no `RwLock` poisoning).
-* `arc_swap::ArcSwap` for RCU-style snapshot reads.
-* `AtomicU*` / `AtomicBool` for counters and flags.
-* `tokio::task::spawn_blocking` for CPU-bound work (HNSW, hashing).
+1. **lock-free** — atomics + RCU + CAS-based concurrent maps. No
+   `Mutex`/`RwLock` on hot paths.
+2. **async** — every I/O-bound op is `async fn`. CPU-bound work
+   crosses to `tokio::task::spawn_blocking`.
+3. **O(x → 0)** — drive per-op asymptotic cost toward constant.
+   Prefer batched + amortized over per-row. Avoid hidden O(N)/O(N²)
+   in helpers (full scans, repeated lookups, allocation in loops).
+4. **Fx hash** — `shamir_collections::THasher = BuildHasherDefault<FxHasher>`
+   is the workspace default for every hash-keyed structure.
+   `DashMap::with_hasher(THasher::default())`,
+   `scc::HashMap::with_hasher(THasher::default())`,
+   `HashMap::<K, V, THasher>::default()`. `RandomState` (Rust default)
+   is DOS-protection traded against 2–5× speed on cache-friendly
+   short keys — and we don't accept untrusted hash inputs here.
+   `TMap`/`TSet` (IndexMap/IndexSet with `THasher`) already cover
+   ordered cases.
+5. **`scc`/`dashmap` for concurrent maps** — `scc::HashMap`,
+   `scc::TreeIndex` (sorted, lock-free B+ tree), `dashmap::DashMap`
+   (sharded). Single-writer-many-reader → `arc_swap::ArcSwap`.
 
-Avoid `std::sync::Mutex`, `std::sync::RwLock`, and `parking_lot::*` in
-hot paths. `tokio::sync::Mutex` is permitted only when the guard must
-live across an `.await` and the contention is bounded (e.g. write
-serialisation for unique-index validation).
+### Concurrency invariants (drop-in checklist)
+
+| Use case | Right primitive |
+|---|---|
+| Shared registry, key-value | `scc::HashMap<K, V, THasher>` |
+| Sorted key range / prefix scan | `scc::TreeIndex<K, V>` |
+| Sharded high-fanout map | `DashMap::with_hasher(THasher::default())` |
+| Snapshot-style RCU read | `arc_swap::ArcSwap<T>` |
+| Counter / flag / monotonic id | `AtomicU64` / `AtomicBool` |
+| Insertion-ordered map (single-thread) | `shamir_collections::TMap` (IndexMap + Fx) |
+| Set (single-thread) | `shamir_collections::TSet` |
+| CPU-bound long block | `tokio::task::spawn_blocking` |
+| Guard across `.await`, bounded contention | `tokio::sync::Mutex` (sanctioned exception) |
+
+**Banned in hot paths:** `std::sync::Mutex`, `std::sync::RwLock`,
+`parking_lot::*` — they exist only as low-frequency / setup-only fallbacks
+(bootstrap, one-shot init, test fixtures). Every hot-path use must be
+justified inline with a comment that names the contention model.
 
 ---
 
