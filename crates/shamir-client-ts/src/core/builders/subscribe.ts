@@ -100,10 +100,26 @@ export function subscribe(
     return ws;
   });
 
-  let deliver: DeliverMode | undefined;
+  // Server-side `deliver` is op-level: one DeliverMode for the whole
+  // SubscribeOp. If sources disagree, user intent is ambiguous — throw
+  // rather than silently picking the first.
+  const resolvedModes: DeliverMode[] = [];
   for (const src of arr) {
-    deliver = resolveDeliverMode(src);
-    if (deliver) break;
+    const m = resolveDeliverMode(src);
+    if (m !== undefined) resolvedModes.push(m);
+  }
+  let deliver: DeliverMode | undefined;
+  if (resolvedModes.length > 0) {
+    const first = resolvedModes[0];
+    const firstKey = JSON.stringify(first);
+    for (let i = 1; i < resolvedModes.length; i++) {
+      if (JSON.stringify(resolvedModes[i]) !== firstKey) {
+        throw new Error(
+          'subscribe: conflicting deliver/handle across sources — all sources in one subscription must agree on delivery mode',
+        );
+      }
+    }
+    deliver = first;
   }
 
   const op: SubscribeOp = { subscribe: wireSources };
