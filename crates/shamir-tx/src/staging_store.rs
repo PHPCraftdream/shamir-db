@@ -115,6 +115,18 @@ impl StagingStore {
         let _ = self.writes.upsert_async(k, StagedOp::Set(v)).await;
     }
 
+    /// Stage multiple sets in a single synchronous pass — no `.await` per key.
+    ///
+    /// Equivalent to calling `set(k, v).await` for each `(k, v)` in `items`,
+    /// but avoids the async-fn scheduling overhead on every entry.
+    /// Uses `scc::HashMap::upsert` (sync, CAS-based) which is safe because
+    /// the StagingStore is per-tx and only the owning task writes to it.
+    pub fn set_many(&self, items: impl IntoIterator<Item = (RecordKey, Bytes)>) {
+        for (k, v) in items {
+            self.writes.upsert(k, StagedOp::Set(v));
+        }
+    }
+
     /// Stage a remove.
     ///
     /// cancel-safe: yes — same reasoning as `set`.
