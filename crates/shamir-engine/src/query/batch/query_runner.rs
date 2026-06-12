@@ -362,8 +362,12 @@ impl<'a> QueryRunner<'a> {
                     Err(e) => return Err(e),
                 };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_insert_tx(op_ref, tx).await,
-                    None => table.execute_insert(op_ref).await,
+                    Some(tx) => {
+                        table
+                            .execute_insert_tx(op_ref, tx, entry.return_result)
+                            .await
+                    }
+                    None => table.execute_insert(op_ref, entry.return_result).await,
                 }
                 .map_err(|e| BatchError::QueryError {
                     alias: alias.to_string(),

@@ -150,6 +150,56 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
         }
     }
 
+    // fire-and-forget variant — same as above but return_result=false,
+    // exercising the result_build skip fast-path added in the P8 cycle.
+    for &n in &[1usize, 10, 100] {
+        group.throughput(Throughput::Elements(n as u64));
+
+        for transactional in [false, true] {
+            let label = if transactional { "tx" } else { "non_tx" };
+            group.bench_function(format!("{}/{}_no_result", label, n), |b| {
+                b.to_async(&rt).iter(|| {
+                    let resolver = &resolver;
+                    async move {
+                        let mut queries = new_map();
+                        queries.insert(
+                            "ins".to_string(),
+                            QueryEntry {
+                                op: BatchOp::Insert(InsertOp {
+                                    insert_into: TableRef::new("bench_table"),
+                                    values: (0..n)
+                                        .map(|i| {
+                                            shamir_types::types::value::QueryValue::from(
+                                                serde_json::json!({"i": i}),
+                                            )
+                                        })
+                                        .collect(),
+                                }),
+                                return_result: false,
+                                after: Vec::new(),
+                            },
+                        );
+                        let request = BatchRequest {
+                            id: serde_json::json!(1),
+                            name: None,
+                            transactional,
+                            isolation: None,
+                            durability: None,
+                            queries,
+                            return_all: false,
+                            return_only: None,
+                            limits: Default::default(),
+                        };
+                        let _ =
+                            execute_batch(&request, resolver, None, None, Actor::System, "bench")
+                                .await
+                                .unwrap();
+                    }
+                });
+            });
+        }
+    }
+
     // Indexed variant — exercises the per-row vs batched cost on
     // the heavier write path: 1 unique index (`uniq_email`) + 1
     // regular index (`by_city`). Each iteration runs against a fresh

@@ -206,7 +206,7 @@ async fn execute_insert_tx_stages_all_records() {
         .rows([json!("v1"), json!("v2"), json!("v3")])
         .build();
 
-    let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
+    let result = tbl.execute_insert_tx(&op, &mut tx, true).await.unwrap();
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
     for r in &result.records {
@@ -224,7 +224,7 @@ async fn execute_insert_tx_empty_values() {
     let mut tx = TxContext::new(TxId::new(41), 0, u64::MAX, IsolationLevel::Snapshot);
 
     let op = write::insert("t").build();
-    let result = tbl.execute_insert_tx(&op, &mut tx).await.unwrap();
+    let result = tbl.execute_insert_tx(&op, &mut tx, true).await.unwrap();
     assert_eq!(result.affected, 0);
     assert!(result.records.is_empty());
 }

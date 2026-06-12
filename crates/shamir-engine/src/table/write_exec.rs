@@ -33,7 +33,13 @@ impl TableManager {
     ///
     /// Converts each QueryValue to InnerValue, inserts into the table,
     /// and returns the inserted records with their generated IDs.
-    pub async fn execute_insert(&self, op: &InsertOp) -> DbResult<WriteResult> {
+    /// When `return_result` is `false` the per-record JSON map assembly
+    /// is skipped entirely — `WriteResult::records` will be empty.
+    pub async fn execute_insert(
+        &self,
+        op: &InsertOp,
+        return_result: bool,
+    ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let interner = self.interner().get().await?;
 
@@ -71,22 +77,29 @@ impl TableManager {
 
         // 3. Build the result records in input order (from the resolved
         //    values, so computed fields are echoed with their results).
-        let mut records = Vec::with_capacity(resolved_values.len());
-        for (value, id) in resolved_values.iter().zip(ids.iter()) {
-            let mut obj = match &**value {
-                Value::Map(map) => {
-                    // Convert QueryValue map to serde_json::Map for the response
-                    let mut jmap = json::Map::new();
-                    for (k, v) in map {
-                        jmap.insert(k.clone(), json::Value::from(v.clone()));
+        //    Skip entirely when the caller does not need the result back
+        //    (fire-and-forget batch inserts with return_result=false).
+        let records = if return_result {
+            let mut recs = Vec::with_capacity(resolved_values.len());
+            for (value, id) in resolved_values.iter().zip(ids.iter()) {
+                let mut obj = match &**value {
+                    Value::Map(map) => {
+                        // Convert QueryValue map to serde_json::Map for the response
+                        let mut jmap = json::Map::new();
+                        for (k, v) in map {
+                            jmap.insert(k.clone(), json::Value::from(v.clone()));
+                        }
+                        jmap
                     }
-                    jmap
-                }
-                _ => json::Map::new(),
-            };
-            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-            records.push(json::Value::Object(obj));
-        }
+                    _ => json::Map::new(),
+                };
+                obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+                recs.push(json::Value::Object(obj));
+            }
+            recs
+        } else {
+            Vec::new()
+        };
 
         // Persist any newly interned keys.
         self.flush_metadata().await?;
@@ -100,7 +113,7 @@ impl TableManager {
             .collect();
         self.emit_nontx_changefeed(batch_version, changes);
 
-        let affected = records.len() as u64;
+        let affected = ids.len() as u64;
         Ok(WriteResult {
             affected,
             records,
@@ -119,6 +132,7 @@ impl TableManager {
         &self,
         op: &InsertOp,
         tx: &mut shamir_tx::TxContext,
+        return_result: bool,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
         let interner = self.interner().get().await?;
@@ -158,23 +172,31 @@ impl TableManager {
         // staged_vectors, same counter delta.
         let ids: Vec<RecordId> = self.insert_tx_many(&inner_values, tx).await?;
 
-        let mut records = Vec::with_capacity(resolved_values.len());
-        for (value, id) in resolved_values.iter().zip(ids.iter()) {
-            let mut obj = match &**value {
-                Value::Map(map) => {
-                    let mut jmap = json::Map::new();
-                    for (k, v) in map {
-                        jmap.insert(k.clone(), json::Value::from(v.clone()));
+        // Skip result-map assembly for fire-and-forget inserts
+        // (return_result=false) — avoids per-row serde_json::Map build
+        // and QueryValue→json::Value clone on the hot batch-insert path.
+        let records = if return_result {
+            let mut recs = Vec::with_capacity(resolved_values.len());
+            for (value, id) in resolved_values.iter().zip(ids.iter()) {
+                let mut obj = match &**value {
+                    Value::Map(map) => {
+                        let mut jmap = json::Map::new();
+                        for (k, v) in map {
+                            jmap.insert(k.clone(), json::Value::from(v.clone()));
+                        }
+                        jmap
                     }
-                    jmap
-                }
-                _ => json::Map::new(),
-            };
-            obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-            records.push(json::Value::Object(obj));
-        }
+                    _ => json::Map::new(),
+                };
+                obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+                recs.push(json::Value::Object(obj));
+            }
+            recs
+        } else {
+            Vec::new()
+        };
 
-        let affected = records.len() as u64;
+        let affected = ids.len() as u64;
         Ok(WriteResult {
             affected,
             records,
