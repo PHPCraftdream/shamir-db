@@ -42,6 +42,33 @@ Prefer `--workspace` flags over per-crate invocations.
 
 ---
 
+## ⏱️ Bench cache isolation (iterative /opti)
+
+`cargo bench`, `cargo test`, `cargo clippy --all-targets` write to the
+**same** `target/` root but produce different artefacts per profile —
+running them in sequence invalidates each other's incremental cache and
+forces a full rebuild on every cycle. For iterative perf work this is
+fatal: each /opti cycle pays 30–60 s of rebuild between baseline and
+post-change runs.
+
+**Rule.** Always run benchmarks with a dedicated target directory:
+
+```
+CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench \
+  cargo bench -p <crate> --bench <name>
+```
+
+The bench artefacts live in `.cargo-target-bench/`, fully isolated from
+`target/debug/` (used by `test` and `clippy --all-targets`). The bench
+incremental cache survives across test / clippy runs.
+
+**Workflow rule.** Within a single /opti cycle: run the full
+gate (`fmt --check` + `clippy --all-targets` + `test --lib`) **once at
+the end**, not between baseline / post-change bench runs. Spacing gate
+checks through the cycle invalidates the bench cache for nothing.
+
+---
+
 ## 🧹 Code quality (MANDATORY)
 
 **Pre-commit gate.** Before committing each task (feature, fix, test,

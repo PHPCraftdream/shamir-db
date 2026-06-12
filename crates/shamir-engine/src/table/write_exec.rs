@@ -3,9 +3,11 @@
 //! Implements execute_insert, execute_update, execute_delete for TableManager.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::time::Instant;
 
 use futures::StreamExt;
+use fxhash::FxHashMap;
 use serde_json as json;
 
 use crate::query::filter::eval::compile_filter;
@@ -139,10 +141,32 @@ impl TableManager {
 
         // Resolve inline `$fn` computed fields first (fail-closed), then
         // intern field names through the tx overlay.
+        //
+        // Per-batch intern cache (C1): field names repeat across every row in
+        // the batch (e.g. all 100 rows have "email", "city", "score"). Without
+        // the cache, `touch_sync` does a DashMap lookup per field per row —
+        // O(N×k) sharded-map operations. With the cache we pay one DashMap
+        // lookup per unique field name per batch and amortise the rest to an
+        // FxHashMap lookup — 3-5× cheaper for typical short batches with
+        // uniform schema.
         let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
         let inner_values: Vec<InnerValue> = {
             let layered = make_layered_interner(interner, tx);
-            let intern_fn = intern_via_layered(&layered);
+            let base_intern_fn = intern_via_layered(&layered);
+            // RefCell lets the closure capture and mutate the cache while
+            // satisfying the `Fn` (not `FnMut`) bound on `query_value_to_inner_with`.
+            let cache: RefCell<FxHashMap<String, InternerKey>> = RefCell::new(FxHashMap::default());
+            let intern_fn = |key: &str| -> Result<InternerKey, shamir_types::codecs::CodecError> {
+                {
+                    let c = cache.borrow();
+                    if let Some(ik) = c.get(key) {
+                        return Ok(ik.clone());
+                    }
+                }
+                let ik = base_intern_fn(key)?;
+                cache.borrow_mut().insert(key.to_string(), ik.clone());
+                Ok(ik)
+            };
             let mut vals = Vec::with_capacity(op.values.len());
             for value in &op.values {
                 let resolved = resolve_computed_record(value, interner)
