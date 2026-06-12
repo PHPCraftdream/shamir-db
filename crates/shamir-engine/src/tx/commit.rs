@@ -7,7 +7,7 @@ use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
     apply_counter_phase, apply_data_phase, materialize_async_tail, promote_vectors,
 };
-use crate::tx::materialize::materialize;
+use crate::tx::materialize::{materialize, post_publish_cleanup};
 use crate::tx::pre_commit::{pre_commit, PreCommit};
 use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
@@ -366,36 +366,34 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
 
     let outcome = match visibility {
         shamir_tx::CommitVisibility::Synchronous => {
-            // === Sync mode (default, unchanged behaviour) ===
+            // === Sync mode (default) ===
             //
             // `materialize` runs Phases 5a (data) → 5b (counter) → 5c (index)
-            // → 6 (publish) → 6.5 (markers) → 7 (wal.commit), all UNDER
-            // `commit_lock`. It NO LONGER promotes HNSW vectors: that
-            // derived, rebuildable read-accelerator is moved out of the
-            // critical section below (III.5).
-            let materialization = materialize(
-                &mut tx,
-                repo,
-                gate.as_ref(),
-                commit_version,
-                wal.as_ref(),
-                uwl_guards,
-            )
-            .await;
+            // → 6 (publish) → 6-bis (SSI write-log) UNDER `commit_lock`.
+            // Phase 6.5 (markers) and Phase 7 (WAL cleanup) run OUTSIDE the
+            // lock via `post_publish_cleanup` — they are I/O-bound crash-
+            // recovery bookkeeping that does not affect in-memory visibility
+            // and does not need serialisation against other committers.
+            let post_publish =
+                materialize(&mut tx, repo, gate.as_ref(), commit_version, uwl_guards).await;
 
             repo.tx_metrics().on_tx_committed();
+
+            // === Release `commit_lock` BEFORE Phase 6.5/7 and HNSW. ===
+            //
+            // Everything that determines visibility (data → main, counter,
+            // index → info) and publishes the version has already run under
+            // the lock. Drop the guard here so other committers proceed
+            // while this tx runs the recovery-only cleanup + vector promote.
+            drop(commit_guard);
+
+            // Phase 6.5 + 7: markers + WAL cleanup, outside the lock.
+            let materialization =
+                post_publish_cleanup(post_publish, repo, gate.as_ref(), wal.as_ref()).await;
+
             if materialization == MaterializationState::Deferred {
                 repo.tx_metrics().on_tx_materialization_deferred();
             }
-
-            // === III.5: release `commit_lock` BEFORE the HNSW promote. ===
-            //
-            // Everything that determines visibility (data → main, counter,
-            // index → info), publishes the version, persists recovery
-            // markers, and removes the WAL marker has already run under the
-            // lock. Drop the guard here so other committers proceed while
-            // this tx promotes its vectors.
-            drop(commit_guard);
 
             // Changefeed emit (Phase 3b): publish already happened inside
             // `materialize` (Phase 6). Fan the pre-projected event out to the
