@@ -210,7 +210,7 @@ async fn execute_insert_tx_stages_all_records() {
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
     for r in &result.records {
-        assert!(r.get("_id").is_some(), "_id must be attached");
+        assert!(r.as_json().get("_id").is_some(), "_id must be attached");
     }
 
     let token = tbl.table_token();
@@ -328,7 +328,7 @@ async fn execute_set_tx_insert_path() {
     let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
-    assert_eq!(result.records[0]["_created"], json!(true));
+    assert_eq!(result.records[0].as_json()["_created"], json!(true));
 
     let token = tbl.table_token();
     assert_eq!(*tx.counter_deltas.get(&token).unwrap(), 1);
@@ -355,7 +355,7 @@ async fn execute_set_tx_update_path() {
 
     let result = tbl.execute_set_tx(&op, &mut tx).await.unwrap();
     assert_eq!(result.affected, 1);
-    assert_eq!(result.records[0]["_created"], json!(false));
+    assert_eq!(result.records[0].as_json()["_created"], json!(false));
 
     let token = tbl.table_token();
     assert_eq!(

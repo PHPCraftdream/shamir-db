@@ -3918,6 +3918,7 @@ dependencies = [
  "fxhash",
  "hmac",
  "indexmap",
+ "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",

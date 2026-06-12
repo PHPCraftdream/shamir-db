@@ -5,7 +5,8 @@
 //! `crate::query::write::*` paths inside the engine resolve unchanged.
 
 pub use shamir_query_types::write::{
-    DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect, WriteResult,
+    DeleteOp, InsertOp, InsertedRecord, SetOp, UpdateOp, UpdateReturnMode, UpdateSelect,
+    WriteResult,
 };
 
 #[cfg(test)]

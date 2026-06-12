@@ -84,9 +84,9 @@ async fn test_execute_insert_single() {
 
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
-    assert_eq!(result.records[0]["name"], "Alice");
-    assert_eq!(result.records[0]["age"], 30);
-    assert!(result.records[0].get("_id").is_some());
+    assert_eq!(result.records[0].as_json()["name"], "Alice");
+    assert_eq!(result.records[0].as_json()["age"], 30);
+    assert!(result.records[0].as_json().get("_id").is_some());
 
     // Verify record count
     assert_eq!(table.count().await.unwrap(), 1);
@@ -167,7 +167,7 @@ async fn test_execute_update_returns_changed() {
     assert_eq!(result.records.len(), 2);
     // All returned records should have status = "premium"
     for record in &result.records {
-        assert_eq!(record["status"], "premium");
+        assert_eq!(record.as_json()["status"], "premium");
     }
 }
 
@@ -204,7 +204,7 @@ async fn test_execute_update_all_records() {
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
     for record in &result.records {
-        assert_eq!(record["verified"], true);
+        assert_eq!(record.as_json()["verified"], true);
     }
 }
 
@@ -315,7 +315,7 @@ async fn test_insert_update_delete_pipeline() {
         .build();
     let r = table.execute_update(&update_op, &ctx).await.unwrap();
     assert_eq!(r.affected, 1);
-    assert_eq!(r.records[0]["score"], 75);
+    assert_eq!(r.records[0].as_json()["score"], 75);
 
     // 3. Delete: remove low scorers
     let delete_op = write::delete("users")
@@ -343,8 +343,8 @@ async fn test_execute_set_insert_new() {
     let result = table.execute_set(&op).await.unwrap();
 
     assert_eq!(result.affected, 1);
-    assert_eq!(result.records[0]["_created"], true);
-    assert_eq!(result.records[0]["name"], "Alice");
+    assert_eq!(result.records[0].as_json()["_created"], true);
+    assert_eq!(result.records[0].as_json()["name"], "Alice");
     assert_eq!(table.count().await.unwrap(), 1);
 }
 
@@ -367,10 +367,10 @@ async fn test_execute_set_update_existing() {
     let result = table.execute_set(&op).await.unwrap();
 
     assert_eq!(result.affected, 1);
-    assert_eq!(result.records[0]["_created"], false);
-    assert_eq!(result.records[0]["status"], "vip");
+    assert_eq!(result.records[0].as_json()["_created"], false);
+    assert_eq!(result.records[0].as_json()["status"], "vip");
     // Original field "age" should be preserved (merge)
-    assert_eq!(result.records[0]["age"], 30);
+    assert_eq!(result.records[0].as_json()["age"], 30);
     assert_eq!(table.count().await.unwrap(), 3); // no new record
 }
 
@@ -385,7 +385,7 @@ async fn test_execute_set_no_match_inserts() {
 
     let result = table.execute_set(&op).await.unwrap();
 
-    assert_eq!(result.records[0]["_created"], true);
+    assert_eq!(result.records[0].as_json()["_created"], true);
     assert_eq!(table.count().await.unwrap(), 4); // new record added
 }
 
@@ -495,8 +495,11 @@ async fn test_insert_computed_field_lowercase() {
     let result = table.execute_insert(&op, true).await.unwrap();
     assert_eq!(result.affected, 1);
     // The literal field is untouched; the computed field holds the result.
-    assert_eq!(result.records[0]["email"], "Alice@Example.COM");
-    assert_eq!(result.records[0]["email_norm"], "alice@example.com");
+    assert_eq!(result.records[0].as_json()["email"], "Alice@Example.COM");
+    assert_eq!(
+        result.records[0].as_json()["email_norm"],
+        "alice@example.com"
+    );
 }
 
 #[tokio::test]
@@ -513,7 +516,7 @@ async fn test_set_computed_field() {
         .build();
 
     let result = table.execute_set(&op).await.unwrap();
-    assert_eq!(result.records[0]["email_norm"], "x@y.z");
+    assert_eq!(result.records[0].as_json()["email_norm"], "x@y.z");
 }
 
 #[tokio::test]
