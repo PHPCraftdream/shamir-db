@@ -54,4 +54,16 @@ pub mod instance_defaults {
     /// Maximum number of journal events to backfill when a subscription
     /// resumes from a specific `from_version`.
     pub const JOURNAL_BACKFILL_LIMIT: usize = 10_000;
+
+    /// Number of commits between automatic interner checkpoint persists.
+    ///
+    /// After A5 the interner is no longer persisted synchronously on each
+    /// commit — the WAL carries the delta for crash recovery. A background
+    /// checkpoint every N commits flushes accumulated deltas to the
+    /// interner's durable chunk store, advancing the high-water mark so
+    /// Phase 7 WAL truncation can proceed for entries whose deltas are
+    /// now covered. Lower N = more frequent I/O; higher N = more WAL
+    /// entries retained before truncation (recovery-time cost, not
+    /// correctness).
+    pub const INTERNER_CHECKPOINT_INTERVAL: u64 = 64;
 }

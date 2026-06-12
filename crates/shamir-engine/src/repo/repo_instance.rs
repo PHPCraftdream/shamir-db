@@ -730,6 +730,21 @@ impl RepoInstance {
                     first_err = Some(e);
                 }
             }
+            // A5: persist each table's interner on graceful shutdown so
+            // all in-memory (name, id) mappings are durable before the
+            // process exits. After this, WAL entries whose deltas covered
+            // these ids can be safely truncated on next boot.
+            if let Err(e) = table.interner().persist().await {
+                log::warn!(
+                    "flush_buffers: interner persist {}/{}: {}",
+                    self.name,
+                    table_name,
+                    e
+                );
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
             if let Err(e) = table.info_store().flush().await {
                 log::warn!(
                     "flush_buffers: info_store {}/{}: {}",

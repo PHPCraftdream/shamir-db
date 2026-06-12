@@ -71,7 +71,14 @@ pub(super) async fn pre_commit(
                             .map_err(DbError::Codec)?;
                     }
                 }
-                tbl.interner().persist().await?;
+                // A5: interner persist removed from the commit critical
+                // path. The WAL entry carries the interner delta
+                // (`interner_deltas`), so crash recovery replays new
+                // (name, id) mappings via `touch_with_id`. A background
+                // checkpoint (every INTERNER_CHECKPOINT_INTERVAL commits)
+                // flushes the delta to the durable chunk store, advancing
+                // the persisted high-water mark so Phase 7 WAL truncation
+                // can proceed. Graceful shutdown flushes all interners.
             }
         }
     }
