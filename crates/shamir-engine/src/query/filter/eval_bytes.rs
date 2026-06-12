@@ -19,22 +19,32 @@
 //! Restriction: only top-level and nested map fields (any depth) are resolved.
 //! The raw-msgpack path supports the same depth as `resolve_field_ref` — it
 //! iterates through nested maps one level at a time.
+//!
+//! # Zero-alloc cursor
+//!
+//! `matches_msgpack_bytes` no longer calls `rmpv::decode::read_value`
+//! (which allocates an `Rv` tree for the whole record).  Instead,
+//! `eval_node_raw` seeks each filter atom's target field directly inside
+//! the raw bytes:
+//!
+//! - `seek_msgpack_field` walks the map header and key/value pairs at one
+//!   nesting level, comparing binary keys without any allocation.
+//! - `skip_msgpack_value` skips an arbitrary msgpack value (recursing for
+//!   maps/arrays) so the cursor can advance past unmatched entries.
+//! - `decode_scalar_at` reads exactly the scalar at the matched position
+//!   and returns a `RawScalar` enum for comparison — zero heap.
+//!
+//! Only rows that pass the pre-filter proceed to the full rmpv decode, so
+//! the allocating path is paid only on matched (hit) rows.
 
 use std::cmp::Ordering;
-
-use rmpv::Value as Rv;
 
 use super::filter_node::{CompareOp, FilterNode};
 use crate::query::filter::FilterValue;
 
-/// Walk a msgpack `Rv::Map` to the field described by `path` (a slice of
-/// interned `u64` keys).  Returns `None` if any segment is missing.
-///
-/// On-disk format: `InternerKey::serialize` calls `serialize_bytes`, so map
-/// keys are encoded as msgpack `bin` containing the variable-width
-/// little-endian ID (1/2/4/8 bytes per `InternerKey::new`).  The helper
-/// re-encodes each path segment using the same scheme and compares as bytes.
-/// A minimal `AsRef<[u8]>` wrapper for the variable-length key bytes.
+// ── key encoding (unchanged) ──────────────────────────────────────────────────
+
+/// A minimal `AsRef<[u8]>` wrapper for the variable-length interned key bytes.
 struct KeyBuf([u8; 8], usize);
 impl AsRef<[u8]> for KeyBuf {
     fn as_ref(&self) -> &[u8] {
@@ -42,6 +52,8 @@ impl AsRef<[u8]> for KeyBuf {
     }
 }
 
+/// Re-encode an interned `u64` key the same way `InternerKey::serialize`
+/// does: variable-width little-endian bytes, 1/2/4/8 bytes.
 fn interned_key_bytes(id: u64) -> KeyBuf {
     let mut buf = [0u8; 8];
     let len = if id <= u8::MAX as u64 {
@@ -62,76 +74,415 @@ fn interned_key_bytes(id: u64) -> KeyBuf {
     KeyBuf(buf, len)
 }
 
-fn find_field_bytes<'a>(root: &'a Rv, path: &[u64]) -> Option<&'a Rv> {
-    let mut cur = root;
-    for &id in path {
-        let expected = interned_key_bytes(id);
-        match cur {
-            Rv::Map(entries) => {
-                cur = entries.iter().find_map(|(k, v)| {
-                    if let Rv::Binary(kb) = k {
-                        if kb.as_slice() == expected.as_ref() {
-                            return Some(v);
-                        }
-                    }
-                    None
-                })?;
-            }
-            _ => return None,
-        }
-    }
-    Some(cur)
+// ── zero-alloc msgpack cursor ─────────────────────────────────────────────────
+
+/// Read a big-endian u16 from `bytes[pos..]`.
+#[inline]
+fn read_u16_be(bytes: &[u8], pos: usize) -> Option<u16> {
+    let b = bytes.get(pos..pos + 2)?;
+    Some(u16::from_be_bytes([b[0], b[1]]))
 }
 
-/// Compare a msgpack scalar `Rv` against a `FilterValue` literal.
+/// Read a big-endian u32 from `bytes[pos..]`.
+#[inline]
+fn read_u32_be(bytes: &[u8], pos: usize) -> Option<u32> {
+    let b = bytes.get(pos..pos + 4)?;
+    Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Read a big-endian u64 from `bytes[pos..]`.
+#[inline]
+fn read_u64_be(bytes: &[u8], pos: usize) -> Option<u64> {
+    let b = bytes.get(pos..pos + 8)?;
+    Some(u64::from_be_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
+}
+
+/// Skip a single msgpack value starting at `bytes[pos]`.
 ///
-/// Returns `None` if either side is not a comparable scalar (array, map,
-/// ext, non-literal `FilterValue`) — the caller must fall back to full decode.
-fn compare_rv_to_filter(rv: &Rv, fv: &FilterValue) -> Option<Ordering> {
-    match (rv, fv) {
-        // Null
-        (Rv::Nil, FilterValue::Null) => Some(Ordering::Equal),
-        (_, FilterValue::Null) => None, // null vs non-null: not clearly ordered — fall back
+/// Returns the position immediately after the skipped value, or `None` on
+/// malformed/truncated bytes or on `Ext` (which we never emit).
+fn skip_msgpack_value(bytes: &[u8], pos: usize) -> Option<usize> {
+    let b = *bytes.get(pos)?;
+    let pos = pos + 1; // consume type byte
 
-        // Bool
-        (Rv::Boolean(a), FilterValue::Bool(b)) => a.partial_cmp(b),
+    match b {
+        // nil / bool
+        0xc0 | 0xc2 | 0xc3 => Some(pos),
 
-        // Int vs Int
-        (Rv::Integer(n), FilterValue::Int(b)) => {
-            let a = n.as_i64().or_else(|| n.as_u64().map(|u| u as i64))?;
-            a.partial_cmp(b)
+        // positive fixint (0x00..=0x7f) — value encoded in the byte itself
+        0x00..=0x7f => Some(pos),
+
+        // negative fixint (0xe0..=0xff)
+        0xe0..=0xff => Some(pos),
+
+        // uint8 / int8
+        0xcc | 0xd0 => Some(pos + 1),
+        // uint16 / int16
+        0xcd | 0xd1 => Some(pos + 2),
+        // uint32 / int32 / float32
+        0xce | 0xd2 | 0xca => Some(pos + 4),
+        // uint64 / int64 / float64
+        0xcf | 0xd3 | 0xcb => Some(pos + 8),
+
+        // fixstr (0xa0..=0xbf) — lower 5 bits = length
+        0xa0..=0xbf => {
+            let len = (b & 0x1f) as usize;
+            Some(pos + len)
         }
-        // Float vs Float
-        (Rv::F64(a), FilterValue::Float(b)) => a.partial_cmp(b),
-        (Rv::F32(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
-        // Int vs Float (widening)
-        (Rv::Integer(n), FilterValue::Float(b)) => {
-            let a = n
-                .as_i64()
-                .map(|i| i as f64)
-                .or_else(|| n.as_u64().map(|u| u as f64))?;
-            a.partial_cmp(b)
+        // str8
+        0xd9 => {
+            let len = *bytes.get(pos)? as usize;
+            Some(pos + 1 + len)
         }
-        // Float vs Int (widening)
-        (Rv::F64(a), FilterValue::Int(b)) => a.partial_cmp(&(*b as f64)),
-        (Rv::F32(a), FilterValue::Int(b)) => (*a as f64).partial_cmp(&(*b as f64)),
-
-        // Str vs Str
-        (Rv::String(s), FilterValue::String(b)) => {
-            let a = s.as_str()?;
-            Some(a.cmp(b.as_str()))
+        // str16
+        0xda => {
+            let len = read_u16_be(bytes, pos)? as usize;
+            Some(pos + 2 + len)
+        }
+        // str32
+        0xdb => {
+            let len = read_u32_be(bytes, pos)? as usize;
+            Some(pos + 4 + len)
         }
 
-        // Binary vs Binary
-        (Rv::Binary(a), FilterValue::Binary(b)) => Some(a.as_slice().cmp(b.as_slice())),
+        // bin8
+        0xc4 => {
+            let len = *bytes.get(pos)? as usize;
+            Some(pos + 1 + len)
+        }
+        // bin16
+        0xc5 => {
+            let len = read_u16_be(bytes, pos)? as usize;
+            Some(pos + 2 + len)
+        }
+        // bin32
+        0xc6 => {
+            let len = read_u32_be(bytes, pos)? as usize;
+            Some(pos + 4 + len)
+        }
 
-        // Mismatched / unsupported types → fall back to full decode
+        // fixarray (0x90..=0x9f) — lower 4 bits = count
+        0x90..=0x9f => {
+            let count = (b & 0x0f) as usize;
+            skip_n_values(bytes, pos, count)
+        }
+        // array16
+        0xdc => {
+            let count = read_u16_be(bytes, pos)? as usize;
+            skip_n_values(bytes, pos + 2, count)
+        }
+        // array32
+        0xdd => {
+            let count = read_u32_be(bytes, pos)? as usize;
+            skip_n_values(bytes, pos + 4, count)
+        }
+
+        // fixmap (0x80..=0x8f) — lower 4 bits = entry count
+        0x80..=0x8f => {
+            let count = (b & 0x0f) as usize;
+            // each entry = key + value
+            skip_n_values(bytes, pos, count * 2)
+        }
+        // map16
+        0xde => {
+            let count = read_u16_be(bytes, pos)? as usize;
+            skip_n_values(bytes, pos + 2, count * 2)
+        }
+        // map32
+        0xdf => {
+            let count = read_u32_be(bytes, pos)? as usize;
+            skip_n_values(bytes, pos + 4, count * 2)
+        }
+
+        // ext — we never emit ext; return None (safe fall-through)
+        0xc7 | 0xc8 | 0xc9 | 0xd4..=0xd8 => None,
+
+        // 0xc1 is unused in the msgpack spec
         _ => None,
     }
 }
 
-/// Apply a `CompareOp` to an `Ordering`, matching the semantics of
-/// `filter_node.rs::matches` for the `Compare` variant.
+/// Skip `n` consecutive msgpack values starting at `bytes[pos]`.
+fn skip_n_values(bytes: &[u8], mut pos: usize, n: usize) -> Option<usize> {
+    for _ in 0..n {
+        pos = skip_msgpack_value(bytes, pos)?;
+    }
+    Some(pos)
+}
+
+/// Parse the map header at `bytes[pos]`.
+///
+/// Returns `(entry_count, position_of_first_key)` or `None` if `bytes[pos]`
+/// is not a map header.
+fn read_map_header(bytes: &[u8], pos: usize) -> Option<(usize, usize)> {
+    let b = *bytes.get(pos)?;
+    match b {
+        0x80..=0x8f => Some(((b & 0x0f) as usize, pos + 1)),
+        0xde => {
+            let count = read_u16_be(bytes, pos + 1)? as usize;
+            Some((count, pos + 3))
+        }
+        0xdf => {
+            let count = read_u32_be(bytes, pos + 1)? as usize;
+            Some((count, pos + 5))
+        }
+        _ => None,
+    }
+}
+
+/// Read a binary (bin) key at `bytes[pos]`.
+///
+/// On-disk format: interned keys are serialised as msgpack `bin` via
+/// `serialize_bytes`.  Returns `(key_bytes_slice, pos_after_key)`.
+fn read_bin_key(bytes: &[u8], pos: usize) -> Option<(&[u8], usize)> {
+    let b = *bytes.get(pos)?;
+    let pos = pos + 1;
+    match b {
+        0xc4 => {
+            let len = *bytes.get(pos)? as usize;
+            let payload = bytes.get(pos + 1..pos + 1 + len)?;
+            Some((payload, pos + 1 + len))
+        }
+        0xc5 => {
+            let len = read_u16_be(bytes, pos)? as usize;
+            let payload = bytes.get(pos + 2..pos + 2 + len)?;
+            Some((payload, pos + 2 + len))
+        }
+        0xc6 => {
+            let len = read_u32_be(bytes, pos)? as usize;
+            let payload = bytes.get(pos + 4..pos + 4 + len)?;
+            Some((payload, pos + 4 + len))
+        }
+        _ => None, // key is not bin — unexpected format → fall through
+    }
+}
+
+/// Seek a single map level for a key matching `target_key_bytes`.
+///
+/// Starts scanning the map header at `bytes[map_pos]`.  Returns
+/// `Some(value_pos)` where `value_pos` is the offset of the matching entry's
+/// value, or `None` if the key is not present or bytes are malformed.
+fn seek_map_key(bytes: &[u8], map_pos: usize, target_key_bytes: &[u8]) -> Option<usize> {
+    let (entry_count, mut pos) = read_map_header(bytes, map_pos)?;
+    for _ in 0..entry_count {
+        let (key_bytes, value_pos) = read_bin_key(bytes, pos)?;
+        if key_bytes == target_key_bytes {
+            return Some(value_pos);
+        }
+        // Skip the value to advance to the next key.
+        pos = skip_msgpack_value(bytes, value_pos)?;
+    }
+    None
+}
+
+/// Navigate a multi-segment field path through nested msgpack maps.
+///
+/// Each segment in `path` names one interned `u64` key.  Returns the byte
+/// offset of the innermost value, or `None` if any segment is absent or the
+/// bytes are malformed.
+fn find_field_pos(bytes: &[u8], path: &[u64]) -> Option<usize> {
+    // Start at offset 0 (the root map).
+    let mut cur_map_pos = 0usize;
+    let mut segments = path.iter().peekable();
+    while let Some(&id) = segments.next() {
+        let key_buf = interned_key_bytes(id);
+        let value_pos = seek_map_key(bytes, cur_map_pos, key_buf.as_ref())?;
+        if segments.peek().is_some() {
+            // More segments → the value must itself be a map; descend.
+            cur_map_pos = value_pos;
+        } else {
+            return Some(value_pos);
+        }
+    }
+    None // empty path
+}
+
+// ── raw scalar decoder ────────────────────────────────────────────────────────
+
+/// A zero-alloc representation of a decoded msgpack scalar.
+///
+/// Only the types that appear in `FilterValue` literals are represented.
+/// Everything else maps to `Other` which causes a `None` (fall-through)
+/// result from the comparison helper.
+enum RawScalar<'a> {
+    Nil,
+    Bool(bool),
+    I64(i64),
+    U64(u64),
+    F32(f32),
+    F64(f64),
+    Str(&'a [u8]), // UTF-8 bytes, compared as bytes
+    Bin(&'a [u8]),
+    /// Map, array, ext, or unsupported type byte — caller returns None.
+    Other,
+}
+
+/// Decode the scalar at `bytes[pos]`.  Returns `(scalar, pos_after_value)`.
+fn decode_scalar_at(bytes: &[u8], pos: usize) -> Option<(RawScalar<'_>, usize)> {
+    let b = *bytes.get(pos)?;
+    let after = pos + 1; // position after the type byte
+
+    let s = match b {
+        0xc0 => (RawScalar::Nil, after),
+        0xc2 => (RawScalar::Bool(false), after),
+        0xc3 => (RawScalar::Bool(true), after),
+
+        // positive fixint
+        0x00..=0x7f => (RawScalar::I64(i64::from(b)), after),
+        // negative fixint
+        0xe0..=0xff => (RawScalar::I64(i64::from(b as i8)), after),
+
+        // uint8
+        0xcc => {
+            let v = *bytes.get(after)? as u64;
+            (RawScalar::U64(v), after + 1)
+        }
+        // uint16
+        0xcd => {
+            let v = read_u16_be(bytes, after)? as u64;
+            (RawScalar::U64(v), after + 2)
+        }
+        // uint32
+        0xce => {
+            let v = read_u32_be(bytes, after)? as u64;
+            (RawScalar::U64(v), after + 4)
+        }
+        // uint64
+        0xcf => {
+            let v = read_u64_be(bytes, after)?;
+            (RawScalar::U64(v), after + 8)
+        }
+
+        // int8
+        0xd0 => {
+            let v = *bytes.get(after)? as i8;
+            (RawScalar::I64(i64::from(v)), after + 1)
+        }
+        // int16
+        0xd1 => {
+            let v = read_u16_be(bytes, after)? as i16;
+            (RawScalar::I64(i64::from(v)), after + 2)
+        }
+        // int32
+        0xd2 => {
+            let v = read_u32_be(bytes, after)? as i32;
+            (RawScalar::I64(i64::from(v)), after + 4)
+        }
+        // int64
+        0xd3 => {
+            let v = read_u64_be(bytes, after)? as i64;
+            (RawScalar::I64(v), after + 8)
+        }
+
+        // float32
+        0xca => {
+            let raw = read_u32_be(bytes, after)?;
+            (RawScalar::F32(f32::from_bits(raw)), after + 4)
+        }
+        // float64
+        0xcb => {
+            let raw = read_u64_be(bytes, after)?;
+            (RawScalar::F64(f64::from_bits(raw)), after + 8)
+        }
+
+        // fixstr
+        0xa0..=0xbf => {
+            let len = (b & 0x1f) as usize;
+            let payload = bytes.get(after..after + len)?;
+            (RawScalar::Str(payload), after + len)
+        }
+        // str8
+        0xd9 => {
+            let len = *bytes.get(after)? as usize;
+            let payload = bytes.get(after + 1..after + 1 + len)?;
+            (RawScalar::Str(payload), after + 1 + len)
+        }
+        // str16
+        0xda => {
+            let len = read_u16_be(bytes, after)? as usize;
+            let payload = bytes.get(after + 2..after + 2 + len)?;
+            (RawScalar::Str(payload), after + 2 + len)
+        }
+        // str32
+        0xdb => {
+            let len = read_u32_be(bytes, after)? as usize;
+            let payload = bytes.get(after + 4..after + 4 + len)?;
+            (RawScalar::Str(payload), after + 4 + len)
+        }
+
+        // bin8
+        0xc4 => {
+            let len = *bytes.get(after)? as usize;
+            let payload = bytes.get(after + 1..after + 1 + len)?;
+            (RawScalar::Bin(payload), after + 1 + len)
+        }
+        // bin16
+        0xc5 => {
+            let len = read_u16_be(bytes, after)? as usize;
+            let payload = bytes.get(after + 2..after + 2 + len)?;
+            (RawScalar::Bin(payload), after + 2 + len)
+        }
+        // bin32
+        0xc6 => {
+            let len = read_u32_be(bytes, after)? as usize;
+            let payload = bytes.get(after + 4..after + 4 + len)?;
+            (RawScalar::Bin(payload), after + 4 + len)
+        }
+
+        // map / array / ext — composite, return Other
+        _ => (RawScalar::Other, after),
+    };
+    Some(s)
+}
+
+// ── scalar comparison ─────────────────────────────────────────────────────────
+
+/// Compare a `RawScalar` decoded from msgpack bytes against a `FilterValue`
+/// literal.  Returns `None` for type mismatches or unsupported shapes.
+fn compare_raw_to_filter(raw: &RawScalar<'_>, fv: &FilterValue) -> Option<Ordering> {
+    match (raw, fv) {
+        (RawScalar::Nil, FilterValue::Null) => Some(Ordering::Equal),
+        // null vs non-null: not clearly ordered → fall back
+        (_, FilterValue::Null) => None,
+
+        (RawScalar::Bool(a), FilterValue::Bool(b)) => a.partial_cmp(b),
+
+        // Int (positive) vs Int
+        (RawScalar::U64(a), FilterValue::Int(b)) => {
+            if *b < 0 {
+                Some(Ordering::Greater) // a is non-negative, b is negative
+            } else {
+                a.partial_cmp(&(*b as u64))
+            }
+        }
+        // Int (signed) vs Int
+        (RawScalar::I64(a), FilterValue::Int(b)) => a.partial_cmp(b),
+
+        // Float vs Float
+        (RawScalar::F64(a), FilterValue::Float(b)) => a.partial_cmp(b),
+        (RawScalar::F32(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
+        // Int (signed) vs Float (widening)
+        (RawScalar::I64(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
+        // Int (unsigned) vs Float (widening)
+        (RawScalar::U64(a), FilterValue::Float(b)) => (*a as f64).partial_cmp(b),
+        // Float vs Int (widening)
+        (RawScalar::F64(a), FilterValue::Int(b)) => a.partial_cmp(&(*b as f64)),
+        (RawScalar::F32(a), FilterValue::Int(b)) => (*a as f64).partial_cmp(&(*b as f64)),
+
+        // Str vs Str — compare as bytes (UTF-8 is byte-ordered correctly for Ord)
+        (RawScalar::Str(a), FilterValue::String(b)) => Some((*a).cmp(b.as_bytes())),
+
+        // Bin vs Bin
+        (RawScalar::Bin(a), FilterValue::Binary(b)) => Some((*a).cmp(b.as_slice())),
+
+        // Mismatch / unsupported → fall back to full decode
+        _ => None,
+    }
+}
+
+/// Apply a `CompareOp` to an `Ordering`.
 #[inline]
 fn apply_op(ord: Ordering, op: CompareOp) -> bool {
     match op {
@@ -144,29 +495,15 @@ fn apply_op(ord: Ordering, op: CompareOp) -> bool {
     }
 }
 
-impl FilterNode {
-    /// Try to evaluate this filter against raw msgpack bytes without decoding
-    /// to `InnerValue`.
-    ///
-    /// # Returns
-    /// - `Some(false)` — row is definitely rejected; skip full decode.
-    /// - `Some(true)` — row passes; proceed to full decode + normal filter.
-    /// - `None` — filter shape is unsupported here; fall back to full decode.
-    ///
-    /// **Precondition**: `bytes` must be a valid msgpack encoding of an
-    /// `InnerValue::Map` with `u64` (interned) keys.  Bytes produced by
-    /// any other codec return `None` (safe fall-through).
-    pub fn matches_msgpack_bytes(&self, bytes: &[u8]) -> Option<bool> {
-        // Parse the top-level msgpack value once; reuse the `Rv` tree for the
-        // full filter walk.  On a parse error we return `None` — the row will
-        // be decoded normally and the error surfaces there as usual.
-        let rv = rmpv::decode::read_value(&mut &*bytes).ok()?;
-        eval_node(self, &rv)
-    }
-}
+// ── raw-bytes filter evaluation ───────────────────────────────────────────────
 
-/// Recursive filter evaluation on an already-parsed `Rv` tree.
-fn eval_node(node: &FilterNode, root: &Rv) -> Option<bool> {
+/// Evaluate a `FilterNode` directly against raw msgpack `bytes` without ever
+/// allocating an `Rv` tree.
+///
+/// Returns the same tri-state as `matches_msgpack_bytes`:
+/// `Some(false)` = definite reject, `Some(true)` = definite accept,
+/// `None` = fall through to full decode.
+fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
     match node {
         FilterNode::True => Some(true),
         FilterNode::False => Some(false),
@@ -178,38 +515,43 @@ fn eval_node(node: &FilterNode, root: &Rv) -> Option<bool> {
             pre_resolved,
             op,
         } => {
-            let rv_field = find_field_bytes(root, field_path)?;
-
-            // Only handle literals pre-resolved at compile time or simple
-            // FilterValue literals.  Dynamic variants (FieldRef, QueryRef,
-            // Param, etc.) need the full InnerValue context → return None.
-            let ord = if let Some(pre) = pre_resolved {
-                // Fast path: pre-resolved literal available.
-                // Compare rv_field against pre-resolved using the same
-                // compare_rv_to_filter helper.
-                use crate::query::filter::FilterValue as Fv;
-                let fv_lit: Fv = inner_value_to_filter_value_lit(pre)?;
-                compare_rv_to_filter(rv_field, &fv_lit)?
+            let fv_lit: FilterValue = if let Some(pre) = pre_resolved {
+                inner_value_to_filter_value_lit(pre)?
             } else {
-                // FilterValue is dynamic or complex (FieldRef, QueryRef…) → fall back.
                 match value {
                     FilterValue::Null
                     | FilterValue::Bool(_)
                     | FilterValue::Int(_)
                     | FilterValue::Float(_)
                     | FilterValue::String(_)
-                    | FilterValue::Binary(_) => compare_rv_to_filter(rv_field, value)?,
-                    _ => return None,
+                    | FilterValue::Binary(_) => value.clone(),
+                    _ => return None, // dynamic FieldRef / Param / etc.
                 }
             };
-            Some(apply_op(ord, *op))
+
+            match find_field_pos(bytes, field_path) {
+                None => {
+                    // Field absent: treat as null.
+                    // Null vs non-null comparisons are semantically defined in
+                    // the normal filter path.  Here we conservatively fall back
+                    // so the full-decode path handles the semantics correctly.
+                    None
+                }
+                Some(val_pos) => {
+                    let (scalar, _) = decode_scalar_at(bytes, val_pos)?;
+                    if matches!(scalar, RawScalar::Other) {
+                        return None; // composite value → full decode
+                    }
+                    let ord = compare_raw_to_filter(&scalar, &fv_lit)?;
+                    Some(apply_op(ord, *op))
+                }
+            }
         }
 
         // ── Logical ──────────────────────────────────────────────────────────
         FilterNode::And(children) => {
-            // Short-circuit: any None → None (fall back), any false → false.
             for child in children {
-                match eval_node(child, root) {
+                match eval_node_raw(child, bytes) {
                     Some(false) => return Some(false),
                     None => return None,
                     Some(true) => {}
@@ -219,7 +561,7 @@ fn eval_node(node: &FilterNode, root: &Rv) -> Option<bool> {
         }
         FilterNode::Or(children) => {
             for child in children {
-                match eval_node(child, root) {
+                match eval_node_raw(child, bytes) {
                     Some(true) => return Some(true),
                     None => return None,
                     Some(false) => {}
@@ -227,18 +569,28 @@ fn eval_node(node: &FilterNode, root: &Rv) -> Option<bool> {
             }
             Some(false)
         }
-        FilterNode::Not(inner) => eval_node(inner, root).map(|b| !b),
+        FilterNode::Not(inner) => eval_node_raw(inner, bytes).map(|b| !b),
 
         // ── Existence checks ─────────────────────────────────────────────────
-        FilterNode::Exists { field_path } => Some(find_field_bytes(root, field_path).is_some()),
-        FilterNode::NotExists { field_path } => Some(find_field_bytes(root, field_path).is_none()),
+        FilterNode::Exists { field_path } => Some(find_field_pos(bytes, field_path).is_some()),
+        FilterNode::NotExists { field_path } => Some(find_field_pos(bytes, field_path).is_none()),
         FilterNode::IsNull { field_path } => {
-            let rv = find_field_bytes(root, field_path);
-            Some(matches!(rv, None | Some(Rv::Nil)))
+            match find_field_pos(bytes, field_path) {
+                None => Some(true), // absent == null
+                Some(val_pos) => {
+                    let b = bytes.get(val_pos)?;
+                    Some(*b == 0xc0) // 0xc0 = nil
+                }
+            }
         }
         FilterNode::IsNotNull { field_path } => {
-            let rv = find_field_bytes(root, field_path);
-            Some(!matches!(rv, None | Some(Rv::Nil)))
+            match find_field_pos(bytes, field_path) {
+                None => Some(false), // absent == null, so not-null is false
+                Some(val_pos) => {
+                    let b = bytes.get(val_pos)?;
+                    Some(*b != 0xc0)
+                }
+            }
         }
 
         // ── Unsupported atoms — fall back to full decode ──────────────────────
@@ -253,6 +605,28 @@ fn eval_node(node: &FilterNode, root: &Rv) -> Option<bool> {
         | FilterNode::In { .. } => None,
     }
 }
+
+// ── public entry point ────────────────────────────────────────────────────────
+
+impl FilterNode {
+    /// Try to evaluate this filter against raw msgpack bytes without decoding
+    /// to `InnerValue`.
+    ///
+    /// # Returns
+    /// - `Some(false)` — row is definitely rejected; skip full decode.
+    /// - `Some(true)` — row passes; proceed to full decode + normal filter.
+    /// - `None` — filter shape is unsupported here; fall back to full decode.
+    ///
+    /// **Precondition**: `bytes` must be a valid msgpack encoding of an
+    /// `InnerValue::Map` with `u64` (interned) keys serialised as `bin`.
+    /// Bytes produced by any other codec return `None` (safe fall-through).
+    pub fn matches_msgpack_bytes(&self, bytes: &[u8]) -> Option<bool> {
+        // Zero-alloc raw-cursor path: no rmpv tree is allocated.
+        eval_node_raw(self, bytes)
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Convert a pre-resolved `InnerValue` literal into a `FilterValue` literal
 /// for the scalar comparison helper.  Non-scalar variants return `None`.
