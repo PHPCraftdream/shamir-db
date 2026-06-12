@@ -460,26 +460,21 @@ impl TableManager {
                     }
                 }
             }
-
-            // Existing per-record recording pass (unchanged) — captures
-            // point-key reads for the read_set, complementing the
-            // predicate_set.
-            self.record_query_reads(query, ctx, tx).await?;
         }
         // Level-3: acquire a Shared lock on every record the query touches
-        // BEFORE reading. Reuses the same scan streams as the Serializable
-        // recording pass (`record_query_reads`) so the locked set matches the
-        // read set. Zero-overhead: only runs for Pessimistic txs. A wound-wait
-        // abort surfaces as DbError::Conflict and propagates up.
+        // BEFORE reading. Zero-overhead: only runs for Pessimistic txs. A
+        // wound-wait abort surfaces as DbError::Conflict and propagates up.
         if let Some(t) = tx.filter(|t| t.isolation == shamir_tx::IsolationLevel::Pessimistic) {
             self.lock_query_reads(query, ctx, t).await?;
         }
-        self.read(query, ctx).await
+        // Fused SSI path: read_for_tx uses tx-aware streams in the full-scan
+        // fallback so SSI read-set recording is folded into the single scan
+        // that emits rows (eliminates the previous double-scan).
+        self.read_for_tx(query, ctx, tx).await
     }
 
     /// Level-3: acquire a `Shared` lock on every record matching `query`'s
-    /// WHERE clause (or the whole table when there is no WHERE), mirroring
-    /// [`record_query_reads`] but locking instead of recording. Pessimistic
+    /// WHERE clause (or the whole table when there is no WHERE). Pessimistic
     /// only — never called for Snapshot / Serializable.
     async fn lock_query_reads(
         &self,
@@ -507,40 +502,6 @@ impl TableManager {
                         self.acquire_pessimistic_read_lock(rid.to_bytes(), tx)
                             .await?;
                     }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Record SSI read dependencies for `query` into the tx read-set.
-    ///
-    /// Reuses the existing tx-aware scan streams ([`filter_stream_tx`] /
-    /// [`list_stream_tx`]) purely for their per-record recording side-effect:
-    /// draining the stream records each matching record's key at the version
-    /// observed when it is pulled. The yielded batches are discarded — only the
-    /// read-set mutation matters here. Caller guarantees `tx` is `Some` and
-    /// Serializable (the streams self-gate, but we never reach here otherwise).
-    async fn record_query_reads(
-        &self,
-        query: &crate::query::read::ReadQuery,
-        ctx: &FilterContext<'_>,
-        tx: Option<&shamir_tx::TxContext>,
-    ) -> DbResult<()> {
-        let batch_size = 1000;
-        match query.r#where.as_ref() {
-            Some(filter) => {
-                let stream = self.filter_stream_tx(tx, batch_size, filter, ctx).await?;
-                futures::pin_mut!(stream);
-                while let Some(batch) = stream.next().await {
-                    batch?;
-                }
-            }
-            None => {
-                let stream = self.list_stream_tx(tx, batch_size);
-                futures::pin_mut!(stream);
-                while let Some(batch) = stream.next().await {
-                    batch?;
                 }
             }
         }
