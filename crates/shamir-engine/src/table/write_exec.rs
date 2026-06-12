@@ -12,7 +12,9 @@ use serde_json as json;
 
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
+use crate::query::write::{
+    DeleteOp, InsertOp, InsertedRecord, SetOp, UpdateOp, UpdateReturnMode, WriteResult,
+};
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     inner_to_json_value, query_value_to_inner, query_value_to_inner_with,
@@ -259,7 +261,7 @@ impl TableManager {
         };
 
         let mut affected: u64 = 0;
-        let mut result_records: Vec<json::Value> = Vec::with_capacity(matched.len());
+        let mut result_records: Vec<InsertedRecord> = Vec::with_capacity(matched.len());
         // Changefeed (Phase 3b follow-up): collect (id, new_value) for each
         // changed record so a Put can be emitted after the batch is durable.
         let mut changefeed_puts: Vec<(RecordId, InnerValue)> = Vec::with_capacity(matched.len());
@@ -328,7 +330,10 @@ impl TableManager {
                     UpdateReturnMode::Unchanged => !changed,
                 };
                 if should_include {
-                    result_records.push(inner_to_json_value(&new_record, interner)?);
+                    result_records.push(InsertedRecord::Json(inner_to_json_value(
+                        &new_record,
+                        interner,
+                    )?));
                 }
             }
         }
@@ -425,7 +430,7 @@ impl TableManager {
         };
 
         let mut affected: u64 = 0;
-        let mut result_records: Vec<json::Value> = Vec::with_capacity(matched.len());
+        let mut result_records: Vec<InsertedRecord> = Vec::with_capacity(matched.len());
         let return_mode = op
             .select
             .as_ref()
@@ -460,7 +465,10 @@ impl TableManager {
                     UpdateReturnMode::Unchanged => !changed,
                 };
                 if should_include {
-                    result_records.push(inner_to_json_value(&new_record, interner)?);
+                    result_records.push(InsertedRecord::Json(inner_to_json_value(
+                        &new_record,
+                        interner,
+                    )?));
                 }
             }
         }
@@ -761,7 +769,7 @@ impl TableManager {
 
         Ok(WriteResult {
             affected: 1,
-            records: vec![json::Value::Object(result_obj)],
+            records: vec![InsertedRecord::Json(json::Value::Object(result_obj))],
             execution_time_us: start.elapsed().as_micros() as u64,
         })
     }
@@ -892,38 +900,28 @@ impl TableManager {
 
         Ok(WriteResult {
             affected: 1,
-            records: vec![json::Value::Object(result_obj)],
+            records: vec![InsertedRecord::Json(json::Value::Object(result_obj))],
             execution_time_us: start.elapsed().as_micros() as u64,
         })
     }
 }
 
-/// Build the `Vec<serde_json::Value>` result for an INSERT response.
+/// Build the `Vec<InsertedRecord>` result for an INSERT response.
 ///
-/// For each (resolved value, id) pair: convert the `QueryValue::Map` fields
-/// into a `serde_json::Map` pre-allocated to the known field count + 1 (for
-/// `_id`), avoiding reallocation from the default-capacity new(). Non-map
-/// values get a single-entry map `{"_value": ..., "_id": ...}`.
+/// Returns `Direct` variants — no `serde_json::Map` is allocated per row.
+/// The serialiser emits the same msgpack map shape as the old `Json` path.
 fn build_insert_result_records(
     resolved_values: &[std::borrow::Cow<'_, QueryValue>],
     ids: &[RecordId],
-) -> Vec<json::Value> {
-    let mut recs = Vec::with_capacity(resolved_values.len());
-    for (value, id) in resolved_values.iter().zip(ids.iter()) {
-        let mut obj = match &**value {
-            Value::Map(map) => {
-                let mut jmap = json::Map::with_capacity(map.len() + 1);
-                for (k, v) in map {
-                    jmap.insert(k.clone(), json::Value::from(v.clone()));
-                }
-                jmap
-            }
-            _ => json::Map::with_capacity(2),
-        };
-        obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-        recs.push(json::Value::Object(obj));
-    }
-    recs
+) -> Vec<InsertedRecord> {
+    resolved_values
+        .iter()
+        .zip(ids.iter())
+        .map(|(value, id)| InsertedRecord::Direct {
+            id: *id,
+            fields: (**value).clone(),
+        })
+        .collect()
 }
 
 /// Merge set_map fields into an existing InnerValue record.

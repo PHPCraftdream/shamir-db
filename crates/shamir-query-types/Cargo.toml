@@ -36,7 +36,8 @@ crypto  = ["dep:hmac", "dep:sha2", "dep:zeroize"]
 server  = []
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion  = { version = "0.5", features = ["html_reports"] }
+rmp-serde  = "1.3"
 
 [[bench]]
 name = "batch_planner"

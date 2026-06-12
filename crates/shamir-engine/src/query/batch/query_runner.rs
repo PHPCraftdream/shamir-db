@@ -524,7 +524,11 @@ pub(super) async fn execute_single_impl(
 /// Convert WriteResult to QueryResult for BatchResponse compatibility.
 pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
     QueryResult {
-        records: wr.records,
+        records: wr
+            .records
+            .into_iter()
+            .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+            .collect(),
         stats: Some(QueryStats {
             index_used: None,
             records_scanned: wr.affected,
