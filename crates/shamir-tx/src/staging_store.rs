@@ -299,4 +299,58 @@ impl StagingStore {
         }
         Ok(())
     }
+
+    /// cancel-safe: NO — same reasoning as [`rewrite_set_bytes`].
+    ///
+    /// Rewrite all staged `Set` values via an `InnerValue`-level transform.
+    ///
+    /// **Fast path for `Live` rows:** the closure receives the already-decoded
+    /// `InnerValue` directly — no msgpack round-trip. `Bytes` rows are
+    /// decoded once, transformed, and stored back as `Live` (so subsequent
+    /// access also skips re-serialization until commit/WAL emit).
+    ///
+    /// Used by `TxContext::apply_id_remap` in place of [`rewrite_set_bytes`]
+    /// to save one full msgpack deserialize + one full msgpack reserialize
+    /// per `Live` row during the intern-id remap commit phase.
+    pub async fn rewrite_set_inner<F>(&self, mut f: F) -> Result<(), String>
+    where
+        F: FnMut(&mut InnerValue) -> Result<(), String>,
+    {
+        let keys: Vec<RecordKey> = {
+            let mut out = Vec::new();
+            self.writes.scan_async(|k, _v| out.push(k.clone())).await;
+            out
+        };
+        for k in keys {
+            let mut err: Option<String> = None;
+            self.writes
+                .update_async(&k, |_kk, op| {
+                    if let StagedOp::Set(row) = op {
+                        // Decode only if needed; Live rows skip this.
+                        let mut inner = match row {
+                            StagedRow::Live(v) => {
+                                // Take value out temporarily; replaced below.
+                                std::mem::replace(v, InnerValue::Null)
+                            }
+                            StagedRow::Bytes(b) => match InnerValue::from_bytes(b) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    err = Some(format!("remap decode: {e}"));
+                                    return;
+                                }
+                            },
+                        };
+                        match f(&mut inner) {
+                            Ok(()) => *row = StagedRow::Live(inner),
+                            Err(e) => err = Some(e),
+                        }
+                    }
+                })
+                .await;
+            if let Some(e) = err {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
 }
