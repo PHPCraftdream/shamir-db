@@ -45,6 +45,30 @@ impl TableManager {
     /// 2. **Counting** — count_total without ORDER BY, memory ~ page_size
     /// 3. **Collecting** — ORDER BY / GROUP BY / DISTINCT / aggregates
     pub async fn read(&self, query: &ReadQuery, ctx: &FilterContext<'_>) -> DbResult<QueryResult> {
+        self.read_impl(query, ctx, None).await
+    }
+
+    /// tx-aware variant of [`read`] used by [`read_tx`] to fuse the SSI
+    /// read-set recording pass into the single scan that emits rows.
+    /// For the full-scan fallback the three sub-methods use tx-aware streams
+    /// so no second scan is needed. For index/shortcut paths, predicate-level
+    /// SSI recording (already installed by `read_tx` before this call) is
+    /// sufficient.
+    pub(super) async fn read_for_tx(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<QueryResult> {
+        self.read_impl(query, ctx, tx).await
+    }
+
+    async fn read_impl(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+    ) -> DbResult<QueryResult> {
         let start = Instant::now();
         let batch_size = 1000;
         let interner = self.interner().get().await?;
@@ -414,6 +438,7 @@ impl TableManager {
                 filter_cb.as_ref().map(Arc::clone),
                 batch_size,
                 start,
+                tx,
             )
             .await
         } else if query.count_total {
@@ -425,6 +450,7 @@ impl TableManager {
                 ctx,
                 batch_size,
                 start,
+                tx,
             )
             .await
         } else {
@@ -436,6 +462,7 @@ impl TableManager {
                 ctx,
                 batch_size,
                 start,
+                tx,
             )
             .await
         }
@@ -457,6 +484,7 @@ impl TableManager {
         pre_filter: Option<Arc<FilterNode>>,
         batch_size: usize,
         start: Instant,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<QueryResult> {
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
@@ -465,9 +493,17 @@ impl TableManager {
         // Use bytes-level pre-filter when a compiled filter is present: rows
         // that definitely don't match are skipped before full InnerValue decode.
         // Both arms are boxed to unify the two opaque `impl Stream` types.
-        let mut stream: DynBatchStream<'_> = match pre_filter {
-            Some(pf) => Box::pin(self.list_stream_filtered(batch_size, pf)),
-            None => Box::pin(self.list_stream(batch_size)),
+        // When a tx context is present, use tx-aware list_stream_tx so SSI
+        // read-set recording is fused into this single scan. The bytes-level
+        // pre-filter is skipped in that case — SSI correctness requires
+        // recording every candidate row (not just pre-filter survivors), and
+        // the compiled filter_cb in the loop below is the authoritative gate.
+        let mut stream: DynBatchStream<'_> = if tx.is_some() {
+            Box::pin(self.list_stream_tx(tx, batch_size))
+        } else if let Some(pf) = pre_filter {
+            Box::pin(self.list_stream_filtered(batch_size, pf))
+        } else {
+            Box::pin(self.list_stream(batch_size))
         };
 
         let mut records_scanned: u64 = 0;
@@ -569,6 +605,7 @@ impl TableManager {
         ctx: &FilterContext<'_>,
         batch_size: usize,
         start: Instant,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<QueryResult> {
         let (skip, take) = query.pagination.resolve();
         let skip = skip as usize;
@@ -576,9 +613,14 @@ impl TableManager {
 
         let proj = exec::SelectProjection::new(&query.select, interner);
 
-        let mut stream: DynBatchStream<'_> = match pre_filter {
-            Some(pf) => Box::pin(self.list_stream_filtered(batch_size, pf)),
-            None => Box::pin(self.list_stream(batch_size)),
+        // When a tx context is present, use tx-aware list_stream_tx so SSI
+        // read-set recording is fused into this single scan (see read_collecting).
+        let mut stream: DynBatchStream<'_> = if tx.is_some() {
+            Box::pin(self.list_stream_tx(tx, batch_size))
+        } else if let Some(pf) = pre_filter {
+            Box::pin(self.list_stream_filtered(batch_size, pf))
+        } else {
+            Box::pin(self.list_stream(batch_size))
         };
 
         let mut records_scanned: u64 = 0;
@@ -654,6 +696,7 @@ impl TableManager {
         ctx: &FilterContext<'_>,
         batch_size: usize,
         start: Instant,
+        tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<QueryResult> {
         let (skip, take) = query.pagination.resolve();
         let skip = skip as usize;
@@ -661,9 +704,14 @@ impl TableManager {
 
         let proj = exec::SelectProjection::new(&query.select, interner);
 
-        let mut stream: DynBatchStream<'_> = match pre_filter {
-            Some(pf) => Box::pin(self.list_stream_filtered(batch_size, pf)),
-            None => Box::pin(self.list_stream(batch_size)),
+        // When a tx context is present, use tx-aware list_stream_tx so SSI
+        // read-set recording is fused into this single scan (see read_collecting).
+        let mut stream: DynBatchStream<'_> = if tx.is_some() {
+            Box::pin(self.list_stream_tx(tx, batch_size))
+        } else if let Some(pf) = pre_filter {
+            Box::pin(self.list_stream_filtered(batch_size, pf))
+        } else {
+            Box::pin(self.list_stream(batch_size))
         };
 
         let mut records_scanned: u64 = 0;
