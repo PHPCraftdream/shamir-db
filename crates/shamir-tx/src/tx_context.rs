@@ -5,7 +5,7 @@
 //! no storage side-effects.
 
 use bytes::Bytes;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -502,6 +502,42 @@ impl TxContext {
             Some(c) => Err(c),
             None => Ok(()),
         }
+    }
+
+    /// Iterate `(table_token, &RecordKey)` for every staged write across all tables.
+    // Added for Stage D (group-commit conflict detection).
+    #[allow(dead_code)]
+    pub fn write_set_keys(
+        &self,
+    ) -> impl Iterator<Item = (u64, &shamir_storage::types::RecordKey)> + '_ {
+        self.write_set
+            .iter()
+            .flat_map(|(token, staging)| staging.keys().map(move |k| (*token, k)))
+    }
+
+    /// Total number of staged write-keys across all tables.
+    // Added for Stage D (group-commit conflict detection).
+    #[allow(dead_code)]
+    fn write_set_size(&self) -> usize {
+        self.write_set.values().map(|s| s.len()).sum()
+    }
+
+    /// Returns `true` if `self` and `other` write to any common `(table, key)` pair.
+    ///
+    /// The group-commit leader calls this to reject a follower whose write-set
+    /// conflicts with the leader's. O(min(|self|, |other|)) HashSet build +
+    /// O(max) scan.
+    // Added for Stage D (group-commit conflict detection).
+    #[allow(dead_code)]
+    pub fn conflicts_with(&self, other: &TxContext) -> bool {
+        let (smaller, larger) = if self.write_set_size() <= other.write_set_size() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let smaller_set: HashSet<(u64, &shamir_storage::types::RecordKey), THasher> =
+            smaller.write_set_keys().collect();
+        larger.write_set_keys().any(|k| smaller_set.contains(&k))
     }
 
     /// Get-or-create a StagingStore for the given table token.
