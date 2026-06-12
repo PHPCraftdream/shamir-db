@@ -204,6 +204,31 @@ impl Table {
             }
         }
     }
+
+    /// Like [`list_stream`], but applies a bytes-level pre-filter before
+    /// decoding each record to `InnerValue`.  Rows that the pre-filter
+    /// definitively rejects (`Some(false)`) are skipped without allocation.
+    ///
+    /// When the pre-filter returns `None` (unsupported filter shape) the row
+    /// is decoded normally; the caller's compiled filter re-runs on the
+    /// `InnerValue` and is the authoritative decision.
+    pub(super) fn list_stream_filtered<'a>(
+        &self,
+        batch_size: usize,
+        pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
+    ) -> impl Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + 'a {
+        let table = self.clone();
+
+        stream! {
+            let mut storage_stream = table.data_store.iter_stream(batch_size);
+            while let Some(batch_result) = storage_stream.next().await {
+                let batch_bytes = batch_result?;
+                for decoded in Self::decode_raw_batch_filtered(batch_bytes, &pre_filter) {
+                    yield decoded;
+                }
+            }
+        }
+    }
 }
 
 impl Table {
@@ -255,6 +280,62 @@ impl Table {
         // each error yields as its own item, then a non-empty decoded batch
         // yields once at the end. An empty decoded batch yields nothing
         // (matching the former `if !batch.is_empty() { yield Ok(batch) }`).
+        let mut out: Vec<DbResult<Vec<(RecordId, InnerValue)>>> =
+            errors.into_iter().map(Err).collect();
+        if !batch.is_empty() {
+            out.push(Ok(batch));
+        }
+        out.into_iter()
+    }
+
+    /// Like [`decode_raw_batch`], but applies a bytes-level pre-filter before
+    /// fully decoding each record.
+    ///
+    /// For each row:
+    /// - `Some(false)` from the pre-filter → row is skipped (no `InnerValue`
+    ///   allocation).
+    /// - `Some(true)` or `None` → full decode proceeds; the compiled filter
+    ///   re-runs on the decoded `InnerValue` in the caller.
+    ///
+    /// Error semantics are identical to [`decode_raw_batch`].
+    pub(super) fn decode_raw_batch_filtered(
+        batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
+        pre_filter: &crate::query::filter::FilterNode,
+    ) -> impl Iterator<Item = DbResult<Vec<(RecordId, InnerValue)>>> {
+        let mut batch = Vec::new();
+        let mut errors: Vec<DbError> = Vec::new();
+
+        for (key_bytes, value_bytes) in batch_bytes {
+            let arr: [u8; 16] = match key_bytes.as_ref().try_into() {
+                Ok(a) => a,
+                Err(_) => {
+                    errors.push(DbError::Internal(
+                        "Failed to convert key bytes to RecordId".to_string(),
+                    ));
+                    continue;
+                }
+            };
+            let id = RecordId(arr);
+
+            // Bytes-level pre-filter: skip rows that definitely don't match.
+            // `Some(false)` → skip; `Some(true)` or `None` → full decode.
+            if pre_filter.matches_msgpack_bytes(&value_bytes) == Some(false) {
+                continue;
+            }
+
+            match InnerValue::from_bytes(value_bytes) {
+                Ok(inner_value) => {
+                    batch.push((id, inner_value));
+                }
+                Err(e) => {
+                    errors.push(DbError::Codec(format!(
+                        "Failed to deserialize record: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
         let mut out: Vec<DbResult<Vec<(RecordId, InnerValue)>>> =
             errors.into_iter().map(Err).collect();
         if !batch.is_empty() {

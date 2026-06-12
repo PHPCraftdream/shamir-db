@@ -9,6 +9,7 @@
 
 pub mod compile;
 pub mod eval;
+pub mod eval_bytes;
 pub mod eval_context;
 pub mod filter_callback;
 pub mod filter_node;
