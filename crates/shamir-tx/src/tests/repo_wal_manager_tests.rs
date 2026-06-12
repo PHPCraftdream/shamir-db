@@ -3,7 +3,7 @@ use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
-use shamir_wal::{WalActiveKey, WalEntry, WalEntryV2, WalOp};
+use shamir_wal::{WalActiveKey, WalEntry, WalEntryV2, WalOp, WalOpV2};
 use std::sync::Arc;
 
 fn rid(n: u8) -> RecordId {
@@ -239,4 +239,56 @@ async fn recovery_round_trip_all_op_variants() {
         inflight[0], entry,
         "round-tripped entry must match original"
     );
+}
+
+#[tokio::test]
+async fn begin_many_round_trip() {
+    let store = make_store();
+    let mgr = make_manager(&store);
+
+    let entries: Vec<WalEntryV2> = (0..5)
+        .map(|i| {
+            WalEntryV2::new(
+                700 + i,
+                0,
+                vec![WalOpV2::Put {
+                    table_id_interned: 0,
+                    rid: rid(i as u8 + 1),
+                    body: Bytes::from(format!("body-{i}")),
+                }],
+            )
+        })
+        .collect();
+
+    mgr.begin_many(&entries).await.unwrap();
+
+    let mut inflight = mgr.list_inflight().await.unwrap();
+    inflight.sort_by_key(|e| e.txn_id);
+    assert_eq!(inflight.len(), 5);
+    for (i, entry) in inflight.iter().enumerate() {
+        assert_eq!(entry.txn_id, 700 + i as u64);
+        assert_eq!(entry.ops.len(), 1);
+        assert_eq!(entries[i], *entry, "entry {i} must round-trip identically");
+    }
+
+    // Commit two, verify remaining three.
+    mgr.commit(701).await.unwrap();
+    mgr.commit(703).await.unwrap();
+    let mut ids: Vec<u64> = mgr
+        .list_inflight()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.txn_id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec![700, 702, 704]);
+}
+
+#[tokio::test]
+async fn begin_many_empty_is_noop() {
+    let store = make_store();
+    let mgr = make_manager(&store);
+    mgr.begin_many(&[]).await.unwrap();
+    assert!(mgr.list_inflight().await.unwrap().is_empty());
 }
