@@ -298,6 +298,22 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
 /// so without this the version cache would report `0` for recovered keys.
 /// See [`seed_version_cache_for_entry`] for why this matters.
 pub async fn replay_v2_entry(entry: &shamir_wal::WalEntryV2, repo: &RepoInstance) -> DbResult<()> {
+    // A4-recovery: apply interner delta BEFORE replaying data ops.
+    // The ops' record bytes reference intern-ids from the delta, so
+    // the interner must know them before any decode/replay occurs.
+    for (table_token, name, id) in &entry.interner_delta {
+        if let Some(tbl) = repo.table_by_token(*table_token).await? {
+            if let Ok(interner) = tbl.interner().get().await {
+                interner.touch_with_id(name, *id).map_err(|e| {
+                    DbError::Internal(format!(
+                        "replay tx {} interner delta failed: {}",
+                        entry.txn_id, e
+                    ))
+                })?;
+            }
+        }
+    }
+
     for op in &entry.ops {
         replay_v2_op(op, repo).await.map_err(|e| {
             shamir_storage::error::DbError::Internal(format!(

@@ -447,6 +447,68 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     assert_eq!(tbl_post.counter().get().await.unwrap(), 0);
 }
 
+/// A3 + A4-recovery: a WAL entry with a non-empty `interner_delta` must
+/// have its delta applied to the table's interner BEFORE ops are replayed.
+/// This ensures intern-ids referenced in the record body are resolvable.
+#[tokio::test]
+async fn wal_recovery_applies_interner_delta_before_replay() {
+    let repo = make_repo();
+    repo.add_table(TableConfig::new("t"));
+    let tbl = repo.get_table("t").await.unwrap();
+    let token = table_token_for("t");
+
+    let wal = repo.repo_wal().await.unwrap();
+
+    let mut rid_bytes = [0u8; 16];
+    rid_bytes[15] = 50;
+    let rid = RecordId(rid_bytes);
+
+    let body = InnerValue::Str("hello".into()).to_bytes().unwrap();
+
+    // Build entry with an interner_delta that introduces a new field
+    // "fresh_field" at id 42 for table token `token`.
+    let mut entry = WalEntryV2::new(
+        wal.fresh_txn_id(),
+        0,
+        vec![WalOpV2::Put {
+            table_id_interned: token,
+            rid,
+            body,
+        }],
+    )
+    .with_commit_version(1);
+    entry.interner_delta = vec![(token, "fresh_field".to_string(), 42)];
+
+    wal.begin(entry).await.unwrap();
+
+    // Before recovery: the interner should NOT know about "fresh_field".
+    {
+        let interner = tbl.interner().get().await.unwrap();
+        assert!(
+            interner.get_ind("fresh_field").is_none(),
+            "fresh_field must not exist before recovery"
+        );
+    }
+
+    let count = repo.recover_v2_inflight().await.unwrap();
+    assert_eq!(count, 1);
+
+    // After recovery: the interner MUST know "fresh_field" at id 42.
+    {
+        let interner = tbl.interner().get().await.unwrap();
+        let key = interner.get_ind("fresh_field");
+        assert!(
+            key.is_some(),
+            "fresh_field must be in the interner after recovery"
+        );
+        assert_eq!(
+            key.unwrap().id(),
+            42,
+            "fresh_field must map to the id from the delta"
+        );
+    }
+}
+
 // HIGH-5: replay must apply entries in `commit_version` order even
 // when `txn_id` (the WAL active-key sort order) and `commit_version`
 // disagree. Construct two inflight entries that write the same rid:
