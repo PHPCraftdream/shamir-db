@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use serde::Serialize;
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
@@ -10,6 +11,22 @@ use shamir_tunables::instance_defaults::SLOW_CONSUMER_THRESHOLD;
 
 use super::payload::{make_event_data, make_keys_data};
 use super::reactive::{execute_reactive_batch, execute_reactive_call};
+
+/// Borrowing version of [`PushEnvelope`] used for serialization only.
+///
+/// Identical wire format — the `data` field borrows a `&[u8]` instead of
+/// owning a `Vec<u8>`, eliminating a per-subscriber deep-copy of the
+/// cached payload.
+#[derive(Serialize)]
+struct PushEnvelopeRef<'a> {
+    push: PushKind,
+    sub: u64,
+    seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<&'a [u8]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gap_at: Option<u64>,
+}
 
 /// Build deliver payload for a single change, dispatching on `DeliverMode`.
 pub(super) async fn make_deliver_data(
@@ -42,11 +59,11 @@ pub(super) fn try_push_event(
     push: &Arc<dyn PushSink>,
     sub_id: u64,
     seq: &AtomicU64,
-    data: Vec<u8>,
+    data: &[u8],
     consecutive_push_failures: &mut u32,
 ) -> bool {
     let s = seq.load(Ordering::Relaxed);
-    let envelope = PushEnvelope {
+    let envelope = PushEnvelopeRef {
         push: PushKind::Event,
         sub: sub_id,
         seq: s,

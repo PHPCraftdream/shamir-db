@@ -160,7 +160,7 @@ pub(crate) async fn bridge_task(
                                 &push,
                                 sub_id,
                                 &seq,
-                                data,
+                                &data,
                                 &mut consecutive_push_failures,
                             ) {
                                 return;
@@ -209,7 +209,7 @@ pub(crate) async fn bridge_task(
                                     &push,
                                     sub_id,
                                     &seq,
-                                    data,
+                                    &data,
                                     &mut consecutive_push_failures,
                                 ) {
                                     return;
@@ -322,15 +322,21 @@ pub(crate) async fn bridge_task(
                             DeliverMode::Keys => Some(1u8),
                             _ => None,
                         };
-                        let data = if let Some(mode) = deliver_mode_disc {
-                            if let Some(cached) = deliver_cache_get(
+                        // For Records/Keys the payload is shared via Arc —
+                        // we borrow it for serialization (zero-copy fan-out).
+                        // For Batch/Call the payload is built per-subscriber.
+                        let cached_arc;
+                        let owned_buf;
+                        let data_ref: &[u8] = if let Some(mode) = deliver_mode_disc {
+                            if let Some(arc) = deliver_cache_get(
                                 db_id,
                                 &repo,
                                 event.commit_version,
                                 change_idx,
                                 mode,
                             ) {
-                                (*cached).clone()
+                                cached_arc = arc;
+                                &cached_arc
                             } else {
                                 let built = make_deliver_data(
                                     &deliver,
@@ -342,7 +348,7 @@ pub(crate) async fn bridge_task(
                                     event.commit_version,
                                 )
                                 .await;
-                                let arc = deliver_cache_insert(
+                                cached_arc = deliver_cache_insert(
                                     db_id,
                                     &repo,
                                     event.commit_version,
@@ -350,10 +356,10 @@ pub(crate) async fn bridge_task(
                                     mode,
                                     built,
                                 );
-                                (*arc).clone()
+                                &cached_arc
                             }
                         } else {
-                            make_deliver_data(
+                            owned_buf = make_deliver_data(
                                 &deliver,
                                 &db,
                                 &db_name,
@@ -362,13 +368,14 @@ pub(crate) async fn bridge_task(
                                 value_json,
                                 event.commit_version,
                             )
-                            .await
+                            .await;
+                            &owned_buf
                         };
                         if !try_push_event(
                             &push,
                             sub_id,
                             &seq,
-                            data,
+                            data_ref,
                             &mut consecutive_push_failures,
                         ) {
                             return;
