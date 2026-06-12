@@ -292,9 +292,8 @@ impl TableManager {
     ///     `plan_records_created_unique_batch`, sorted-by-def loop);
     ///   * counter delta = +N is bumped once;
     ///   * all per-row data writes go through one `ensure_table_staging`
-    ///     handle (still one `staging.set` per row — StagingStore has
-    ///     no public set_many, and the underlying overlay is a
-    ///     per-tx in-memory map → no fsync amplification).
+    ///     handle via a single `staging.set_many` call — one synchronous
+    ///     pass, no async overhead per key.
     ///
     /// Returns the assigned ids in input order. Empty input returns
     /// an empty Vec without touching `tx`.
@@ -411,15 +410,12 @@ impl TableManager {
         legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
         index_ops.extend(legacy_ops);
 
-        // 6. Single ensure_table_staging, then a tight set loop. We
-        //    can't fold the data writes into index_write_set, but the
-        //    StagingStore overlay is a per-tx in-memory map — no
-        //    fsync per set, all hot in cache. One handle replaces
-        //    N `tx.write_set.entry(...).or_insert_with(...)` walks.
+        // 6. Single ensure_table_staging, then set_many: one synchronous
+        //    pass — no async overhead per key. The StagingStore overlay
+        //    is a per-tx in-memory scc::HashMap; set_many calls the
+        //    sync upsert variant to skip N async yield points.
         let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
-        for (rid, b) in ids.iter().zip(rows_bytes.into_iter()) {
-            staging.set(rid.to_bytes(), b).await;
-        }
+        staging.set_many(ids.iter().map(|rid| rid.to_bytes()).zip(rows_bytes));
 
         // 7. Merge index_ops + counter delta in one go.
         tx.index_write_set
