@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use shamir_collections::THasher;
+
 use crate::TxId;
 
 // ── Phase C: commit-write log structs ──────────────────────────────
@@ -46,7 +48,7 @@ pub struct TableWriteFootprint {
 pub struct CommitWriteRecord {
     pub commit_version: u64,
     /// Keyed by table_token (engine's `table_token()`).
-    pub per_table: HashMap<u64, TableWriteFootprint>,
+    pub per_table: HashMap<u64, TableWriteFootprint, THasher>,
 }
 
 impl CommitWriteRecord {
@@ -426,7 +428,7 @@ fn record_conflicts(rec: &CommitWriteRecord, dep: &crate::predicate_set::Predica
 pub fn build_footprint_from_tx(tx: &crate::TxContext, commit_version: u64) -> CommitWriteRecord {
     let mut rec = CommitWriteRecord {
         commit_version,
-        per_table: HashMap::new(),
+        per_table: HashMap::with_hasher(THasher::default()),
     };
     if tx.isolation != crate::IsolationLevel::Serializable {
         // Zero-overhead: Snapshot/non-tx publishes nothing.

@@ -53,17 +53,13 @@ fn mem_base() -> Arc<dyn shamir_storage::types::Store> {
 /// Build a tx that staged a Put + a Delete on table "users".
 async fn tx_with_writes(tx_id: u64) -> TxContext {
     let mut tx = TxContext::new(TxId::new(tx_id), 7, 10, IsolationLevel::Snapshot);
-    let staging = StagingStore::new(mem_base());
+    let mut staging = StagingStore::new(mem_base());
     // 16-byte record-id-shaped keys.
-    staging
-        .set(
-            Bytes::from_static(b"0123456789abcdef"),
-            Bytes::from_static(b"alice"),
-        )
-        .await;
-    staging
-        .remove(Bytes::from_static(b"fedcba9876543210"))
-        .await;
+    staging.set(
+        Bytes::from_static(b"0123456789abcdef"),
+        Bytes::from_static(b"alice"),
+    );
+    staging.remove(Bytes::from_static(b"fedcba9876543210"));
     let token = 42u64;
     tx.write_set.insert(token, staging);
     tx.table_tokens.insert(token, "users".to_string());

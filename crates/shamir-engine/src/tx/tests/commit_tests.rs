@@ -47,10 +47,8 @@ async fn commit_advances_last_committed() {
     // intentionally does NOT advance the version (see `commit_empty_tx_succeeds`).
     let mut tx = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let staging = StagingStore::new(Arc::clone(&data_store));
-    staging
-        .set(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
-        .await;
+    let mut staging = StagingStore::new(Arc::clone(&data_store));
+    staging.set(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
     tx.write_set.insert(2, staging);
     let outcome = commit_tx(tx, &repo).await.unwrap();
 
@@ -73,10 +71,8 @@ async fn commit_writes_then_clears_wal_entry() {
     // Phase 4 writes the marker and Phase 7 must remove it.
     let mut tx = TxContext::new(TxId::new(3), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let staging = StagingStore::new(Arc::clone(&data_store));
-    staging
-        .set(Bytes::from_static(b"k"), Bytes::from_static(b"v"))
-        .await;
+    let mut staging = StagingStore::new(Arc::clone(&data_store));
+    staging.set(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
     tx.write_set.insert(3, staging);
     let _ = commit_tx(tx, &repo).await.unwrap();
 
@@ -95,20 +91,18 @@ async fn commit_two_txs_monotonic_versions() {
     // version (empty txs now fast-path without consuming a version — C6).
     let staged = |k: &'static [u8]| {
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let s = StagingStore::new(data_store);
+        let mut s = StagingStore::new(data_store);
         let kb = Bytes::from_static(k);
-        async move {
-            s.set(kb, Bytes::from_static(b"v")).await;
-            s
-        }
+        s.set(kb, Bytes::from_static(b"v"));
+        s
     };
 
     let mut tx1 = TxContext::new(TxId::new(10), 0, 0, IsolationLevel::Snapshot);
-    tx1.write_set.insert(10, staged(b"k1").await);
+    tx1.write_set.insert(10, staged(b"k1"));
     let o1 = commit_tx(tx1, &repo).await.unwrap();
 
     let mut tx2 = TxContext::new(TxId::new(11), 0, 0, IsolationLevel::Snapshot);
-    tx2.write_set.insert(11, staged(b"k2").await);
+    tx2.write_set.insert(11, staged(b"k2"));
     let o2 = commit_tx(tx2, &repo).await.unwrap();
 
     assert!(o2.commit_version > o1.commit_version);
@@ -160,10 +154,8 @@ async fn commit_phase5_applies_write_set_to_base_store() {
 
     let mut tx = TxContext::new(TxId::new(100), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let staging = StagingStore::new(Arc::clone(&data_store));
-    staging
-        .set(Bytes::from_static(b"rid_1"), Bytes::from_static(b"payload"))
-        .await;
+    let mut staging = StagingStore::new(Arc::clone(&data_store));
+    staging.set(Bytes::from_static(b"rid_1"), Bytes::from_static(b"payload"));
     tx.write_set.insert(42, staging);
 
     assert!(
@@ -186,14 +178,12 @@ async fn commit_applies_multiple_tables_atomically() {
     let s1: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let s2: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
-    let st1 = StagingStore::new(Arc::clone(&s1));
-    st1.set(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
-        .await;
+    let mut st1 = StagingStore::new(Arc::clone(&s1));
+    st1.set(Bytes::from_static(b"a"), Bytes::from_static(b"1"));
     tx.write_set.insert(1, st1);
 
-    let st2 = StagingStore::new(Arc::clone(&s2));
-    st2.set(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
-        .await;
+    let mut st2 = StagingStore::new(Arc::clone(&s2));
+    st2.set(Bytes::from_static(b"b"), Bytes::from_static(b"2"));
     tx.write_set.insert(2, st2);
 
     let _ = commit_tx(tx, &repo).await.unwrap();
@@ -353,14 +343,12 @@ async fn wal_ops_from_tx_emits_put_for_set_remove_for_remove() {
 
     let mut tx = TxContext::new(TxId::new(801), 0, 0, IsolationLevel::Snapshot);
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let staging = StagingStore::new(data);
+    let mut staging = StagingStore::new(data);
 
     let rid_set = RecordId::new();
     let rid_del = RecordId::new();
-    staging
-        .set(rid_set.to_bytes(), Bytes::from_static(b"v"))
-        .await;
-    staging.remove(rid_del.to_bytes()).await;
+    staging.set(rid_set.to_bytes(), Bytes::from_static(b"v"));
+    staging.remove(rid_del.to_bytes());
     tx.write_set.insert(7, staging);
 
     let ops = crate::tx::commit::wal_ops_from_tx(&tx).await;
@@ -574,16 +562,14 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
 
     let staged = |k: &'static [u8]| {
         let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-        let s = StagingStore::new(data_store);
-        async move {
-            s.set(Bytes::from_static(k), Bytes::from_static(b"v")).await;
-            s
-        }
+        let mut s = StagingStore::new(data_store);
+        s.set(Bytes::from_static(k), Bytes::from_static(b"v"));
+        s
     };
 
     // Real tx #1 → assigns version V.
     let mut tx1 = TxContext::new(TxId::new(6001), 0, 0, IsolationLevel::Snapshot);
-    tx1.write_set.insert(6001, staged(b"k1").await);
+    tx1.write_set.insert(6001, staged(b"k1"));
     let v1 = commit_tx(tx1, &repo).await.unwrap().commit_version;
     assert!(v1 > 0);
 
@@ -608,7 +594,7 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
 
     // Real tx #2 → must get V+1 (the empty tx consumed nothing).
     let mut tx3 = TxContext::new(TxId::new(6003), 0, 0, IsolationLevel::Snapshot);
-    tx3.write_set.insert(6003, staged(b"k3").await);
+    tx3.write_set.insert(6003, staged(b"k3"));
     let v2 = commit_tx(tx3, &repo).await.unwrap().commit_version;
     assert_eq!(
         v2,

@@ -88,8 +88,8 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
         .to_bytes()
         .unwrap();
 
-    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body.clone()).await;
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body.clone());
 
     // An index posting (Phase 5c). Recovery replays this as an IndexPut
     // against the table's info_store (table_id_interned = token).
@@ -243,8 +243,8 @@ async fn deferred_materialization_increments_metric() {
     let body = InnerValue::Str("deferred-metric".into())
         .to_bytes()
         .unwrap();
-    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body).await;
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body);
 
     let mut tx = TxContext::new(
         TxId::new(METRIC_INJECT_TX_ID),
@@ -323,8 +323,8 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     // inline — A is NOT injected to fail).
     let rid_a = RecordId::new();
     let body_a = InnerValue::Str("table-a-row".into()).to_bytes().unwrap();
-    let staging_a = StagingStore::new(Arc::clone(tbl_a.data_store()));
-    staging_a.set(rid_a.to_bytes(), body_a).await;
+    let mut staging_a = StagingStore::new(Arc::clone(tbl_a.data_store()));
+    staging_a.set(rid_a.to_bytes(), body_a);
     let posting_a_key = Bytes::from_static(b"table_a_posting_key");
     let posting_a_val = Bytes::from_static(b"table_a_posting_value");
 
@@ -333,8 +333,8 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
     // muddy the "B not materialized" assertion).
     let rid_b = RecordId::new();
     let body_b = InnerValue::Str("table-b-row".into()).to_bytes().unwrap();
-    let staging_b = StagingStore::new(Arc::clone(tbl_b.data_store()));
-    staging_b.set(rid_b.to_bytes(), body_b).await;
+    let mut staging_b = StagingStore::new(Arc::clone(tbl_b.data_store()));
+    staging_b.set(rid_b.to_bytes(), body_b);
 
     let mut tx = TxContext::new(
         TxId::new(MULTI_TABLE_INJECT_TX_ID),

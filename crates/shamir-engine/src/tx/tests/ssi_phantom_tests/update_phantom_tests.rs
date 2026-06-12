@@ -1,6 +1,8 @@
 //! A5 — phantom via UPDATE that moves a row INTO the predicate range.
 
 use std::collections::HashMap;
+
+use shamir_collections::THasher;
 use std::ops::Bound;
 
 use shamir_tx::predicate_set::PredicateDep;
@@ -59,7 +61,7 @@ async fn phantom_via_update_into_range_aborts() {
     );
 
     let posting_key = test_posting_key(idx_id, 35);
-    let mut per_table = HashMap::new();
+    let mut per_table = HashMap::with_hasher(THasher::default());
     per_table.insert(
         table_token,
         TableWriteFootprint {
