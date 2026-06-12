@@ -171,7 +171,26 @@ impl TableManager {
                     ),
                 };
                 if !rids_vec.is_empty() {
-                    let inner_records = self.get_many(&rids_vec).await?;
+                    // Preserve full match count for pagination metadata BEFORE
+                    // any page slice — clients rely on count_total for UI.
+                    let count_total = rids_vec.len() as u64;
+
+                    // Opt #5 (1000×-class): push pagination into index2 path.
+                    // index2 returns a pre-filtered, pre-ranked RID list with no
+                    // residual predicate, so it is safe to slice [skip..skip+take]
+                    // before calling get_many. Gate: finite LIMIT must be present.
+                    let (skip_u64, take_opt) = query.pagination.resolve();
+                    let rids_slice: &[RecordId] = if let Some(take_u64) = take_opt {
+                        let skip = skip_u64 as usize;
+                        let take = take_u64 as usize;
+                        let lo = skip.min(rids_vec.len());
+                        let hi = lo.saturating_add(take).min(rids_vec.len());
+                        &rids_vec[lo..hi]
+                    } else {
+                        &rids_vec
+                    };
+
+                    let inner_records = self.get_many(rids_slice).await?;
                     let mut records = Vec::with_capacity(inner_records.len());
                     for inner in inner_records.into_iter().flatten() {
                         if let Ok(qv) = shamir_types::codecs::interned::inner_value_to_query_value(
@@ -180,17 +199,24 @@ impl TableManager {
                             records.push(crate::query::read::QueryRecord::Direct(qv));
                         }
                     }
-                    let scanned = rids_vec.len() as u64;
                     let returned = records.len() as u64;
+                    let pagination = if query.pagination.is_none() {
+                        None
+                    } else {
+                        Some(PaginationInfo::compute(
+                            &query.pagination,
+                            Some(count_total),
+                        ))
+                    };
                     return Ok(crate::query::read::QueryResult {
                         records,
                         stats: Some(crate::query::read::QueryStats {
                             index_used: Some(index_tag.into()),
-                            records_scanned: scanned,
+                            records_scanned: count_total,
                             records_returned: returned,
                             execution_time_us: start.elapsed().as_micros() as u64,
                         }),
-                        pagination: None,
+                        pagination,
                         value: None,
                     });
                 }
