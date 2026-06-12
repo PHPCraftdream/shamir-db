@@ -12,6 +12,7 @@
 //!   N postings to a sled-backed indexed table; exposes the
 //!   batched-vs-per-key info_store apply cost.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -202,40 +203,52 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
 
     // Indexed variant — exercises the per-row vs batched cost on
     // the heavier write path: 1 unique index (`uniq_email`) + 1
-    // regular index (`by_city`). Each iteration runs against a fresh
-    // in-memory repo so unique-index state doesn't accumulate across
-    // samples. The win is largest here: per-row validate +
-    // legacy index planning + index2 backend scan dominates.
+    // regular index (`by_city`).
+    //
+    // DDL (repo creation + index registration) is hoisted OUTSIDE the
+    // timed section. Each Criterion iteration inserts into the SAME table
+    // using disjoint keys (prefixed by `iter_counter`) so unique-index
+    // constraint violations cannot occur across samples, and DDL cost is
+    // amortised over the whole bench run rather than paid per sample.
     for &n in &[100usize, 1000] {
         group.throughput(Throughput::Elements(n as u64));
 
         for transactional in [false, true] {
             let label = if transactional { "tx" } else { "non_tx" };
+
+            // --- Setup once, outside the timed loop ---
+            let indexed_repo = make_repo();
+            let tbl = rt.block_on(indexed_repo.get_table("bench_table")).unwrap();
+            rt.block_on(tbl.create_unique_index("uniq_email", &["email"]))
+                .unwrap();
+            rt.block_on(tbl.create_index("by_city", &["city"])).unwrap();
+            drop(tbl);
+            let indexed_resolver = Resolver {
+                repo: indexed_repo.clone(),
+            };
+
+            // Shared counter that survives across Criterion's warmup +
+            // measurement calls to the bench closure — guarantees disjoint
+            // email keys on EVERY iteration, including warmup.
+            let iter_counter = Arc::new(AtomicU64::new(0));
+
             group.bench_function(format!("indexed/{}/{}", label, n), |b| {
-                b.to_async(&rt).iter_custom(|iters| async move {
+                let iter_counter = Arc::clone(&iter_counter);
+                b.iter_custom(|iters| {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        // Fresh repo + table per iter so unique-index
-                        // postings don't collide across samples.
-                        let repo = make_repo();
-                        let tbl = repo.get_table("bench_table").await.unwrap();
-                        tbl.create_unique_index("uniq_email", &["email"])
-                            .await
-                            .unwrap();
-                        tbl.create_index("by_city", &["city"]).await.unwrap();
-                        drop(tbl);
-
-                        let resolver = Resolver { repo: repo.clone() };
-                        let mut queries = new_map();
+                        let ic = iter_counter.fetch_add(1, Ordering::Relaxed);
                         let values: Vec<shamir_types::types::value::QueryValue> = (0..n)
                             .map(|i| {
                                 shamir_types::types::value::QueryValue::from(serde_json::json!({
-                                    "email": format!("user_{}@example.com", i),
+                                    // Disjoint across iterations via iter_counter prefix.
+                                    "email": format!("user_{ic}_{i}@example.com"),
                                     "city": format!("c_{}", i % 8),
                                     "score": i,
                                 }))
                             })
                             .collect();
+                        let mut queries = new_map();
                         queries.insert(
                             "ins".to_string(),
                             QueryEntry {
@@ -260,10 +273,15 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                         };
 
                         let start = Instant::now();
-                        let _ =
-                            execute_batch(&request, &resolver, None, None, Actor::System, "bench")
-                                .await
-                                .unwrap();
+                        rt.block_on(execute_batch(
+                            &request,
+                            &indexed_resolver,
+                            None,
+                            None,
+                            Actor::System,
+                            "bench",
+                        ))
+                        .unwrap();
                         total += start.elapsed();
                     }
                     total
