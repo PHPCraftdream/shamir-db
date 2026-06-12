@@ -274,6 +274,54 @@ fn record_predicate_shared_appends_on_serializable() {
     assert_eq!(ctx.predicate_set.len(), 2);
 }
 
+// ── conflicts_with: write-set overlap detection ───────────────────
+
+fn make_tx_with_writes(token: u64, keys: &[&[u8]]) -> TxContext {
+    let mut tx = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+    let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let staging = tx.ensure_table_staging(token, "t", base);
+    for k in keys {
+        staging.set(Bytes::copy_from_slice(k), Bytes::from_static(b"v"));
+    }
+    tx
+}
+
+#[test]
+fn conflicts_with_same_table_same_key_is_true() {
+    let tx1 = make_tx_with_writes(1, &[b"k1", b"k2"]);
+    let tx2 = make_tx_with_writes(1, &[b"k2", b"k3"]);
+    assert!(tx1.conflicts_with(&tx2));
+}
+
+#[test]
+fn conflicts_with_same_table_different_keys_is_false() {
+    let tx1 = make_tx_with_writes(1, &[b"a"]);
+    let tx2 = make_tx_with_writes(1, &[b"b"]);
+    assert!(!tx1.conflicts_with(&tx2));
+}
+
+#[test]
+fn conflicts_with_different_tables_same_key_is_false() {
+    let tx1 = make_tx_with_writes(1, &[b"k"]);
+    let tx2 = make_tx_with_writes(2, &[b"k"]);
+    assert!(!tx1.conflicts_with(&tx2));
+}
+
+#[test]
+fn conflicts_with_one_empty_is_false() {
+    let tx1 = make_tx_with_writes(1, &[b"k"]);
+    let tx2 = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
+    assert!(!tx1.conflicts_with(&tx2));
+    assert!(!tx2.conflicts_with(&tx1));
+}
+
+#[test]
+fn conflicts_with_both_empty_is_false() {
+    let tx1 = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+    let tx2 = TxContext::new(TxId::new(2), 0, 0, IsolationLevel::Snapshot);
+    assert!(!tx1.conflicts_with(&tx2));
+}
+
 // ── proptest: SSI read-set validation properties ──────────────────
 
 /// Reference oracle: independently compute the expected validate_read_set

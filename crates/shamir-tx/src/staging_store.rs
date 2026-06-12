@@ -227,6 +227,11 @@ impl StagingStore {
         self.writes.is_empty()
     }
 
+    /// Iterate keys staged in this store (without cloning the values).
+    pub fn keys(&self) -> impl Iterator<Item = &RecordKey> {
+        self.writes.keys()
+    }
+
     /// cancel-safe: NO — iterates staged keys then transforms each.
     /// Cancellation mid-iteration leaves a subset of staged values rewritten
     /// and others not, breaking the invariant that all overlay ids are remapped.
