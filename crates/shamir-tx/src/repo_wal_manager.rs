@@ -77,6 +77,28 @@ impl RepoWalManager {
         Ok(())
     }
 
+    /// Batch-write N WAL entries in a single `set_many` + `flush`.
+    ///
+    /// Group-commit foundation: the caller collects entries from multiple
+    /// concurrent transactions and lands them with one storage round-trip
+    /// instead of N sequential `begin()` calls.
+    ///
+    /// Each entry is encoded independently — wire format is byte-identical
+    /// to the single-entry [`begin`](Self::begin) path.
+    pub async fn begin_many(&self, entries: &[WalEntryV2]) -> DbResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let encoded = entry.encode()?;
+            items.push((WalActiveKey::new(entry.txn_id).to_bytes(), encoded.into()));
+        }
+        self.info_store.set_many(items).await?;
+        self.info_store.flush().await?;
+        Ok(())
+    }
+
     /// cancel-safe: yes — single `info_store.remove`. Idempotent: a
     /// cancelled remove either lands or doesn't; re-issuing it converges
     /// (a missing key is a no-op).
