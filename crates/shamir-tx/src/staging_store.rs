@@ -174,6 +174,15 @@ impl StagingStore {
         }
     }
 
+    /// Stage multiple `InnerValue` rows in a single synchronous pass (lazy
+    /// serialization). msgpack encoding is deferred to commit Phase 4/5.
+    /// Aborted txs skip encoding entirely.
+    pub fn set_many_live(&self, items: impl IntoIterator<Item = (RecordKey, InnerValue)>) {
+        for (k, v) in items {
+            self.writes.upsert(k, StagedOp::Set(StagedRow::Live(v)));
+        }
+    }
+
     /// Stage a remove.
     ///
     /// cancel-safe: yes — same reasoning as `set`.
