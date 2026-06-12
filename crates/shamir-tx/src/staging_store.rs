@@ -11,11 +11,55 @@ use bytes::Bytes;
 use scc::HashMap;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey, Store};
+use shamir_types::types::value::InnerValue;
+use std::borrow::Cow;
 use std::sync::Arc;
+
+/// Wrapper for staged row payload. Initial implementation holds only
+/// already-serialized Bytes; future cycle (18c) adds a Live(InnerValue)
+/// variant for lazy serialization on the hot insert path.
+#[derive(Debug, Clone)]
+pub enum StagedRow {
+    /// Already-serialized msgpack bytes.
+    Bytes(Bytes),
+    /// Decoded value. Serialization deferred until commit/WAL emit.
+    Live(InnerValue),
+}
+
+impl StagedRow {
+    /// Serialize to msgpack Bytes. Identity for the Bytes variant; allocates
+    /// for the Live variant.
+    pub fn as_bytes(&self) -> Bytes {
+        match self {
+            StagedRow::Bytes(b) => b.clone(),
+            StagedRow::Live(v) => v
+                .to_bytes()
+                .expect("InnerValue::to_bytes never fails on valid data"),
+        }
+    }
+
+    /// Exact serialized byte length.
+    pub fn len_bytes(&self) -> usize {
+        match self {
+            StagedRow::Bytes(b) => b.len(),
+            StagedRow::Live(_) => self.as_bytes().len(),
+        }
+    }
+
+    /// Borrow the decoded value. Live is zero-copy; Bytes deserializes.
+    pub fn as_inner(&self) -> Cow<'_, InnerValue> {
+        match self {
+            StagedRow::Live(v) => Cow::Borrowed(v),
+            StagedRow::Bytes(b) => Cow::Owned(
+                InnerValue::from_bytes(b).expect("StagedRow::Bytes always holds valid msgpack"),
+            ),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 enum StagedOp {
-    Set(Bytes),
+    Set(StagedRow),
     Remove,
 }
 
@@ -66,7 +110,7 @@ impl StagingStore {
     pub async fn get(&self, k: RecordKey) -> DbResult<Bytes> {
         if let Some(op) = self.writes.read_async(&k, |_, v| v.clone()).await {
             return match op {
-                StagedOp::Set(b) => Ok(b),
+                StagedOp::Set(row) => Ok(row.as_bytes()),
                 StagedOp::Remove => Err(DbError::NotFound(format!("staged remove: {:?}", k))),
             };
         }
@@ -102,7 +146,7 @@ impl StagingStore {
     /// not restricted to 16-byte record ids.
     pub fn staged_op(&self, key: &[u8]) -> Option<StagedKind> {
         self.writes.read(key, |_, v| match v {
-            StagedOp::Set(b) => StagedKind::Set(b.clone()),
+            StagedOp::Set(row) => StagedKind::Set(row.as_bytes()),
             StagedOp::Remove => StagedKind::Removed,
         })
     }
@@ -112,7 +156,10 @@ impl StagingStore {
     /// cancel-safe: yes — `upsert_async` either completes the upsert or leaves
     /// the map unchanged on cancellation (CAS-based, no partial state).
     pub async fn set(&self, k: RecordKey, v: Bytes) {
-        let _ = self.writes.upsert_async(k, StagedOp::Set(v)).await;
+        let _ = self
+            .writes
+            .upsert_async(k, StagedOp::Set(StagedRow::Bytes(v)))
+            .await;
     }
 
     /// Stage multiple sets in a single synchronous pass — no `.await` per key.
@@ -123,7 +170,7 @@ impl StagingStore {
     /// the StagingStore is per-tx and only the owning task writes to it.
     pub fn set_many(&self, items: impl IntoIterator<Item = (RecordKey, Bytes)>) {
         for (k, v) in items {
-            self.writes.upsert(k, StagedOp::Set(v));
+            self.writes.upsert(k, StagedOp::Set(StagedRow::Bytes(v)));
         }
     }
 
@@ -143,7 +190,7 @@ impl StagingStore {
     pub fn snapshot_ops(&self) -> Vec<KvOp> {
         let mut ops = Vec::new();
         self.writes.scan(|k, v| match v {
-            StagedOp::Set(bytes) => ops.push(KvOp::Set(k.clone(), bytes.clone())),
+            StagedOp::Set(row) => ops.push(KvOp::Set(k.clone(), row.as_bytes())),
             StagedOp::Remove => ops.push(KvOp::Remove(k.clone())),
         });
         ops
@@ -159,7 +206,7 @@ impl StagingStore {
         let mut ops = Vec::new();
         // scc::HashMap::scan is synchronous — closure receives (&K, &V).
         self.writes.scan(|k, v| match v {
-            StagedOp::Set(bytes) => ops.push(KvOp::Set(k.clone(), bytes.clone())),
+            StagedOp::Set(row) => ops.push(KvOp::Set(k.clone(), row.as_bytes())),
             StagedOp::Remove => ops.push(KvOp::Remove(k.clone())),
         });
         ops
@@ -185,7 +232,11 @@ impl StagingStore {
     pub fn staged_bytes(&self) -> usize {
         let mut total: usize = 0;
         self.writes.scan(|k, v| match v {
-            StagedOp::Set(b) => total = total.saturating_add(k.len()).saturating_add(b.len()),
+            StagedOp::Set(row) => {
+                total = total
+                    .saturating_add(k.len())
+                    .saturating_add(row.len_bytes())
+            }
             StagedOp::Remove => total = total.saturating_add(k.len()),
         });
         total
@@ -224,9 +275,10 @@ impl StagingStore {
             let mut err: Option<String> = None;
             self.writes
                 .update_async(&k, |_kk, op| {
-                    if let StagedOp::Set(bytes) = op {
-                        match f(bytes) {
-                            Ok(new_bytes) => *bytes = new_bytes,
+                    if let StagedOp::Set(row) = op {
+                        let bytes = row.as_bytes();
+                        match f(&bytes) {
+                            Ok(new_bytes) => *row = StagedRow::Bytes(new_bytes),
                             Err(e) => err = Some(e),
                         }
                     }
