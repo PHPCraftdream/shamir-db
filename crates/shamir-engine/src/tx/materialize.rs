@@ -146,7 +146,7 @@ pub(super) async fn materialize(
         }
         for (token, ops) in by_token {
             if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-                apply_index_batch(repo, token, ops.clone(), tx_id)
+                apply_index_batch(repo, token, &ops, tx_id)
             })
             .await
             {
