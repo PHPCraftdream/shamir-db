@@ -5,6 +5,7 @@ use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, Table
 use crate::query::batch::query_runner::{build_resolved_refs, execute_single_impl, QueryRunner};
 use crate::query::batch::{BatchError, BatchPlan, BatchRequest, BatchResponse, QueryEntry};
 use crate::query::read::QueryResult;
+use shamir_tx::CommitVisibility;
 use shamir_types::access::Actor;
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
@@ -425,6 +426,12 @@ pub(super) async fn execute_transactional_impl(
         })?;
     // Thread the actor into the tx for commit-time provenance (R2).
     tx.set_actor(actor.clone());
+    // Opt into async-index commit visibility when the wire client requests it.
+    // "buffered" (default) and "synced" keep CommitVisibility::Synchronous so
+    // existing behaviour is byte-identical.
+    if request.durability.as_deref() == Some("async_index") {
+        tx.set_visibility(CommitVisibility::AsyncIndex);
+    }
     let _snapshot_version = tx.snapshot_version;
     let tx_id = tx.tx_id.0;
 

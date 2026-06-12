@@ -94,10 +94,30 @@ fn build_handler(rt: &tokio::runtime::Runtime) -> ShamirDbHandler {
 /// Encode a one-shot transactional `Execute` carrying a single upsert of
 /// key `k{i}`. Each call produces a fully independent payload so N callers
 /// can dispatch in parallel without sharing a hot row.
+/// Like [`execute_bytes_with_durability`] with `durability = None`.
+#[allow(dead_code)]
 fn execute_bytes(i: usize) -> Vec<u8> {
+    execute_bytes_with_durability(i, None)
+}
+
+/// Like [`execute_bytes`] but with a wire-level `durability` knob — used by
+/// the `async_index` group to compare against the default `Synchronous`
+/// commit visibility (default `transactional` mode).
+fn execute_bytes_with_durability(i: usize, durability: Option<&str>) -> Vec<u8> {
     let id = format!("k{i}");
     let mut b = Batch::new();
     b.transactional();
+    if let Some(d) = durability {
+        match d {
+            "async_index" => {
+                b.durability(shamir_query_builder::batch::Durability::AsyncIndex);
+            }
+            "synced" => {
+                b.durability(shamir_query_builder::batch::Durability::Synced);
+            }
+            other => panic!("unknown durability: {other}"),
+        }
+    }
     b.upsert(
         format!("w{i}"),
         upsert("items")
@@ -178,31 +198,36 @@ fn bench_wire_pipelining(c: &mut Criterion) {
     let handler = build_handler(&rt);
     let session = fixture_session();
 
-    let mut g = c.benchmark_group("wire_pipelining");
+    // Two groups: default (Synchronous commit visibility) and async_index
+    // (Phase 5c+6.5+7 deferred to a tokio::spawn'd background task). The
+    // pair side-by-side is the comparison that proves whether the
+    // commit_mutex critical section shrink lifts the pipelining ceiling.
+    for (mode_label, durability_str) in [("sync", None), ("async_index", Some("async_index"))] {
+        let mut g = c.benchmark_group(format!("wire_pipelining/{mode_label}"));
 
-    for &n in &[1_usize, 8, 32, 128] {
-        // Pre-build N disjoint payloads. Keys are fixed (k0..k{N-1}) so
-        // repeated iterations operate on the same key set — upserts are
-        // idempotent, so this is fine and keeps the bench deterministic.
-        let payloads: Vec<Vec<u8>> = (0..n).map(execute_bytes).collect();
+        for &n in &[1_usize, 8, 32, 128] {
+            let payloads: Vec<Vec<u8>> = (0..n)
+                .map(|i| execute_bytes_with_durability(i, durability_str))
+                .collect();
 
-        g.throughput(Throughput::Elements(n as u64));
-        bu::tune(&mut g, 30, 5, 3);
+            g.throughput(Throughput::Elements(n as u64));
+            bu::tune(&mut g, 30, 5, 3);
 
-        g.bench_function(format!("n_{n}"), |b| {
-            b.iter_custom(|iters| {
-                let mut total = std::time::Duration::ZERO;
-                for _ in 0..iters {
-                    let start = Instant::now();
-                    run_concurrent_burst(&rt, &handler, &session, &payloads);
-                    total += start.elapsed();
-                }
-                total
+            g.bench_function(format!("n_{n}"), |b| {
+                b.iter_custom(|iters| {
+                    let mut total = std::time::Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        run_concurrent_burst(&rt, &handler, &session, &payloads);
+                        total += start.elapsed();
+                    }
+                    total
+                });
             });
-        });
-    }
+        }
 
-    g.finish();
+        g.finish();
+    }
 }
 
 criterion_group!(benches, bench_wire_pipelining);

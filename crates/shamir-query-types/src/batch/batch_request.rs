@@ -70,6 +70,11 @@ pub struct BatchRequest {
     /// - `"synced"` — before ack, flush the durable backing of every
     ///   repo this batch touched, so a committed write survives even
     ///   an immediate hard crash.
+    /// - `"async_index"` — ack after WAL fsync + data apply + MVCC publish;
+    ///   index posting apply, recovery markers, WAL cleanup, and HNSW promote
+    ///   run on a background task. Shortens the pre-ACK critical section while
+    ///   preserving WAL durability and read-your-own-writes on data. Only
+    ///   meaningful for `transactional: true` batches; ignored otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub durability: Option<String>,
 
