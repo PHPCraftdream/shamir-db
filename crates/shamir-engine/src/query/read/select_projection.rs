@@ -5,10 +5,11 @@ use serde_json as json;
 use crate::query::filter::eval::{intern_field_path, resolve_field_ref, resolve_filter_value};
 use crate::query::filter::{FilterContext, FilterValue, FnCall};
 use crate::query::read::{QueryResult, Select, SelectItem};
-use shamir_types::codecs::interned::inner_to_json_value;
+use shamir_types::codecs::interned::{inner_to_json_value, inner_value_to_query_value};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::QueryValue;
 
 /// Pre-resolved select projection info (avoids re-interning paths per record).
 ///
@@ -97,5 +98,39 @@ impl SelectProjection {
             }
         }
         json::Value::Object(obj)
+    }
+
+    /// Project a single InnerValue record to QueryValue.
+    ///
+    /// Mirrors `project` exactly — same branching, same field/func
+    /// handling — but builds `QueryValue` (string-keyed) instead of
+    /// `serde_json::Value`.  Callers switch to this once the read path
+    /// stops needing `serde_json`.
+    pub fn project_value(&self, record: &InnerValue, interner: &Interner) -> QueryValue {
+        if self.is_all {
+            return inner_value_to_query_value(record, interner).unwrap_or(QueryValue::Null);
+        }
+        if self.fields.is_empty() && self.funcs.is_empty() {
+            return QueryValue::Map(shamir_types::types::common::new_map_wc(0));
+        }
+        let mut obj = shamir_types::types::common::new_map_wc(self.fields.len() + self.funcs.len());
+        for (interned_path, key) in &self.fields {
+            let val = interned_path
+                .as_ref()
+                .and_then(|p| resolve_field_ref(record, p))
+                .map(|v| inner_value_to_query_value(v, interner).unwrap_or(QueryValue::Null))
+                .unwrap_or(QueryValue::Null);
+            obj.insert(key.clone(), val);
+        }
+        if !self.funcs.is_empty() {
+            let ctx = FilterContext::new(interner, &self.empty_refs);
+            for (key, fv) in &self.funcs {
+                let val = resolve_filter_value(fv, record, &ctx)
+                    .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
+                    .unwrap_or(QueryValue::Null);
+                obj.insert(key.clone(), val);
+            }
+        }
+        QueryValue::Map(obj)
     }
 }

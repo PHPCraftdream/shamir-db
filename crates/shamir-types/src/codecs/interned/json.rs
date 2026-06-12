@@ -237,6 +237,66 @@ where
     }
 }
 
+/// Converts [`InnerValue`] (interned keys) to [`QueryValue`] (string keys),
+/// de-interning map keys via a single reverse-snapshot acquisition.
+///
+/// Mirrors the semantics of [`inner_to_json_value`] — same key-resolution
+/// behaviour and same error handling for missing intern keys — but builds
+/// the allocation-light `QueryValue` tree instead of a `serde_json::Value`.
+pub fn inner_value_to_query_value(
+    value: &InnerValue,
+    interner: &Interner,
+) -> Result<crate::types::value::QueryValue, CodecError> {
+    let rev = interner.reverse_snapshot();
+    inner_value_to_query_value_with_rev(value, rev.as_slice())
+}
+
+fn inner_value_to_query_value_with_rev(
+    value: &InnerValue,
+    rev: &[Option<UserKey>],
+) -> Result<crate::types::value::QueryValue, CodecError> {
+    use crate::types::common::{new_map_wc, TSet};
+    match value {
+        Value::Null => Ok(crate::types::value::QueryValue::Null),
+        Value::Bool(b) => Ok(crate::types::value::QueryValue::Bool(*b)),
+        Value::Int(i) => Ok(crate::types::value::QueryValue::Int(*i)),
+        Value::F64(f) => Ok(crate::types::value::QueryValue::F64(*f)),
+        Value::Dec(d) => Ok(crate::types::value::QueryValue::Dec(*d)),
+        Value::Big(b) => Ok(crate::types::value::QueryValue::Big(b.clone())),
+        Value::Str(s) => Ok(crate::types::value::QueryValue::Str(s.clone())),
+        Value::Bin(b) => Ok(crate::types::value::QueryValue::Bin(b.clone())),
+        Value::List(l) => {
+            let arr: Result<Vec<_>, _> = l
+                .iter()
+                .map(|v| inner_value_to_query_value_with_rev(v, rev))
+                .collect();
+            Ok(crate::types::value::QueryValue::List(arr?))
+        }
+        Value::Set(s) => {
+            let converted: Result<TSet<crate::types::value::QueryValue>, _> = s
+                .iter()
+                .map(|v| inner_value_to_query_value_with_rev(v, rev))
+                .collect();
+            Ok(crate::types::value::QueryValue::Set(converted?))
+        }
+        Value::Map(m) => {
+            let mut obj = new_map_wc(m.len());
+            for (interned_key, val) in m {
+                let idx = interned_key.id() as usize;
+                let key_str = rev
+                    .get(idx)
+                    .and_then(|slot| slot.as_ref())
+                    .map(|k| k.as_str().to_string())
+                    .ok_or_else(|| {
+                        CodecError::Decode(format!("Interned key not found: {:?}", interned_key))
+                    })?;
+                obj.insert(key_str, inner_value_to_query_value_with_rev(val, rev)?);
+            }
+            Ok(crate::types::value::QueryValue::Map(obj))
+        }
+    }
+}
+
 /// Converts InnerValue to serde_json::Value, de-interning all keys.
 ///
 /// Hoists the interner's reverse-vec `ArcSwap` load to a single
