@@ -271,7 +271,7 @@ impl fmt::Display for Actor {
 /// ```
 /// [`parent`](Self::parent) walks toward the root so the gate can require
 /// traversal (`Execute`) on every ancestor container.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ResourcePath {
     /// The system root — the admin domain.
     Root,
@@ -488,7 +488,7 @@ impl fmt::Display for ResourcePath {
 /// POSIX-flavoured: `Read`/`Write`/`Execute` map to `r`/`w`/`x`; `Create`
 /// and `Delete` are writes on a container; `List` is read on a container;
 /// `Manage` is the owner/admin-only class (chmod/chown/chgrp/grant).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Read,
     Write,

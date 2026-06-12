@@ -17,6 +17,8 @@ use crate::query::batch::{
     BatchRequest, BatchResponse, TransactionInfo,
 };
 
+use fxhash::FxHashMap;
+
 use super::super::shamir_db::ShamirDb;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::function_invoker::ShamirFunctionInvoker;
@@ -126,6 +128,14 @@ impl ShamirDb {
         .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
 
         // Per-op DML authorization (mirrors execute_as).
+        //
+        // ACL inline cache: within a single tx_execute_as call every
+        // (path, action) pair resolves to the same answer — the actor,
+        // the ACL tree, and the requested resource do not change between
+        // ops. The first call pays the full async traversal; subsequent
+        // calls for the same key hit a HashMap and cost ~50 ns. The cache
+        // is stack-local and dropped at function exit (no cross-call sharing).
+        let mut acl_cache: FxHashMap<(ResourcePath, Action), bool> = FxHashMap::default();
         for entry in request.queries.values() {
             if let Some(tref) = entry.op.table_ref() {
                 let action = match &entry.op {
@@ -140,9 +150,21 @@ impl ShamirDb {
                     store: tref.repo.clone(),
                     table: tref.table.clone(),
                 };
-                self.authorize_access(&actor, &path, action)
-                    .await
-                    .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
+                let key = (path.clone(), action);
+                let allowed = if let Some(&cached) = acl_cache.get(&key) {
+                    cached
+                } else {
+                    let ok = self.authorize_access(&actor, &path, action).await.is_ok();
+                    acl_cache.insert(key, ok);
+                    ok
+                };
+                if !allowed {
+                    return Err(BatchError::query_coded(
+                        "",
+                        "access_denied",
+                        format!("access denied: {:?} on {:?}", action, path),
+                    ));
+                }
             }
         }
 
