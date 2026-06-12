@@ -348,11 +348,14 @@ impl TableManager {
             rows_bytes.push(b);
         }
 
-        // 2b. Level-3: acquire Exclusive locks on every new rid before
+        // 2b. Precompute Bytes keys once — reused in the lock loop and
+        //    set_many below, halving to_bytes() calls from 2N to N.
+        let id_bytes: Vec<bytes::Bytes> = ids.iter().map(|rid| rid.to_bytes()).collect();
+
+        // Level-3: acquire Exclusive locks on every new rid before
         // staging. No-op for Snapshot / Serializable (self-gates).
-        for rid in &ids {
-            self.acquire_pessimistic_write_lock(rid.to_bytes(), tx)
-                .await?;
+        for key in &id_bytes {
+            self.acquire_pessimistic_write_lock(key.clone(), tx).await?;
         }
 
         // 3. Record UniqueGuards per row per unique index it claims.
@@ -415,7 +418,7 @@ impl TableManager {
         //    is a per-tx in-memory scc::HashMap; set_many calls the
         //    sync upsert variant to skip N async yield points.
         let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
-        staging.set_many(ids.iter().map(|rid| rid.to_bytes()).zip(rows_bytes));
+        staging.set_many(id_bytes.into_iter().zip(rows_bytes));
 
         // 7. Merge index_ops + counter delta in one go.
         tx.index_write_set
