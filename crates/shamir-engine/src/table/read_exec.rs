@@ -3,6 +3,7 @@
 //! Implements read(), index scan planning, and read execution strategies
 //! (collecting, counting, streaming) for TableManager.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -18,6 +19,16 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
 use super::table_manager::TableManager;
+
+/// Boxed, `Send`-able stream of decoded record batches used by the three scan
+/// execution paths (`read_collecting`, `read_counting`, `read_streaming`).
+type DynBatchStream<'a> = std::pin::Pin<
+    Box<
+        dyn futures::Stream<Item = shamir_storage::error::DbResult<Vec<(RecordId, InnerValue)>>>
+            + Send
+            + 'a,
+    >,
+>;
 
 impl TableManager {
     // ============================================================================
@@ -361,20 +372,46 @@ impl TableManager {
         let has_order = query.order_by.is_some();
         let has_distinct = query.select.distinct;
 
-        let filter_cb: Option<FilterNode> =
-            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+        let filter_cb: Option<Arc<FilterNode>> = query
+            .r#where
+            .as_ref()
+            .map(|f| Arc::new(compile_filter(f, interner)));
 
         let needs_full_collect = has_group_by || has_agg || has_order || has_distinct;
 
         if needs_full_collect {
-            self.read_collecting(query, ctx, interner, filter_cb.as_ref(), batch_size, start)
-                .await
+            self.read_collecting(
+                query,
+                ctx,
+                interner,
+                filter_cb.as_deref(),
+                filter_cb.as_ref().map(Arc::clone),
+                batch_size,
+                start,
+            )
+            .await
         } else if query.count_total {
-            self.read_counting(query, interner, filter_cb.as_ref(), ctx, batch_size, start)
-                .await
+            self.read_counting(
+                query,
+                interner,
+                filter_cb.as_deref(),
+                filter_cb.as_ref().map(Arc::clone),
+                ctx,
+                batch_size,
+                start,
+            )
+            .await
         } else {
-            self.read_streaming(query, interner, filter_cb.as_ref(), ctx, batch_size, start)
-                .await
+            self.read_streaming(
+                query,
+                interner,
+                filter_cb.as_deref(),
+                filter_cb.as_ref().map(Arc::clone),
+                ctx,
+                batch_size,
+                start,
+            )
+            .await
         }
     }
 
@@ -384,12 +421,14 @@ impl TableManager {
     /// For GROUP BY / aggregates — accumulates raw InnerValues (needed for
     /// field extraction). For plain SELECT + ORDER BY / DISTINCT — accumulates
     /// already-projected JSON values (smaller footprint than raw records).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_collecting(
         &self,
         query: &ReadQuery,
         ctx: &FilterContext<'_>,
         interner: &Interner,
         filter_cb: Option<&FilterNode>,
+        pre_filter: Option<Arc<FilterNode>>,
         batch_size: usize,
         start: Instant,
     ) -> DbResult<QueryResult> {
@@ -397,8 +436,13 @@ impl TableManager {
         let has_agg = exec::has_aggregates(&query.select);
         let needs_raw = has_group_by || has_agg;
 
-        let stream = self.list_stream(batch_size);
-        futures::pin_mut!(stream);
+        // Use bytes-level pre-filter when a compiled filter is present: rows
+        // that definitely don't match are skipped before full InnerValue decode.
+        // Both arms are boxed to unify the two opaque `impl Stream` types.
+        let mut stream: DynBatchStream<'_> = match pre_filter {
+            Some(pf) => Box::pin(self.list_stream_filtered(batch_size, pf)),
+            None => Box::pin(self.list_stream(batch_size)),
+        };
 
         let mut records_scanned: u64 = 0;
 
@@ -489,11 +533,13 @@ impl TableManager {
     /// Used when `count_total = true` but no ORDER BY / GROUP BY / DISTINCT /
     /// aggregates — i.e. the order is natural (insertion order) so we can
     /// paginate on-the-fly while still counting everything.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_counting(
         &self,
         query: &ReadQuery,
         interner: &Interner,
         filter_cb: Option<&FilterNode>,
+        pre_filter: Option<Arc<FilterNode>>,
         ctx: &FilterContext<'_>,
         batch_size: usize,
         start: Instant,
@@ -504,8 +550,10 @@ impl TableManager {
 
         let proj = exec::SelectProjection::new(&query.select, interner);
 
-        let stream = self.list_stream(batch_size);
-        futures::pin_mut!(stream);
+        let mut stream: DynBatchStream<'_> = match pre_filter {
+            Some(pf) => Box::pin(self.list_stream_filtered(batch_size, pf)),
+            None => Box::pin(self.list_stream(batch_size)),
+        };
 
         let mut records_scanned: u64 = 0;
         let mut matched_total: u64 = 0;
@@ -570,11 +618,13 @@ impl TableManager {
     /// Streaming path: SELECT + PAGINATION only (no ORDER BY, GROUP BY, DISTINCT,
     /// aggregates, count_total). Projects on-the-fly, fetches up to `limit + 1`
     /// to determine `has_next` accurately, then stops. Memory ~ page_size.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn read_streaming(
         &self,
         query: &ReadQuery,
         interner: &Interner,
         filter_cb: Option<&FilterNode>,
+        pre_filter: Option<Arc<FilterNode>>,
         ctx: &FilterContext<'_>,
         batch_size: usize,
         start: Instant,
@@ -585,8 +635,10 @@ impl TableManager {
 
         let proj = exec::SelectProjection::new(&query.select, interner);
 
-        let stream = self.list_stream(batch_size);
-        futures::pin_mut!(stream);
+        let mut stream: DynBatchStream<'_> = match pre_filter {
+            Some(pf) => Box::pin(self.list_stream_filtered(batch_size, pf)),
+            None => Box::pin(self.list_stream(batch_size)),
+        };
 
         let mut records_scanned: u64 = 0;
         let mut skipped: usize = 0;

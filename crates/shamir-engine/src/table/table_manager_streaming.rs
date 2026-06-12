@@ -53,6 +53,45 @@ impl TableManager {
         }
     }
 
+    /// Like [`list_stream`], but applies a bytes-level pre-filter before
+    /// decoding each record to `InnerValue`.  Rows that the pre-filter
+    /// definitively rejects (`Some(false)`) are skipped without a full
+    /// `InnerValue` decode.  Rows where the pre-filter returns `None`
+    /// (unsupported filter shape) are decoded normally — the caller's
+    /// compiled filter is the authoritative decision in all cases.
+    pub(crate) fn list_stream_filtered(
+        &self,
+        batch_size: usize,
+        pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
+    ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + '_ {
+        type DynStream<'a> = std::pin::Pin<
+            Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Send + 'a>,
+        >;
+        if let Some(mvcc) = self.mvcc_store_ref() {
+            let mvcc = Arc::clone(mvcc);
+            let s: DynStream<'_> = Box::pin(async_stream::stream! {
+                let mut raw = mvcc.current_stream(batch_size);
+                while let Some(batch_result) = raw.next().await {
+                    let batch_bytes = match batch_result {
+                        Ok(b) => b,
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    };
+                    for decoded in Table::decode_raw_batch_filtered(batch_bytes, &pre_filter) {
+                        yield decoded;
+                    }
+                }
+            });
+            s
+        } else {
+            let pf = Arc::clone(&pre_filter);
+            let s: DynStream<'_> = Box::pin(self.table.list_stream_filtered(batch_size, pf));
+            s
+        }
+    }
+
     /// Stream records filtered by a compiled filter callback.
     ///
     /// Compiles the Filter AST into a callback network, then yields
