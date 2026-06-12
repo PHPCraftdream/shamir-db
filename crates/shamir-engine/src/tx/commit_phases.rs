@@ -138,8 +138,8 @@ pub(crate) async fn materialize_async_tail(
                 tx.index_write_set.len(),
                 THasher::default(),
             );
-        for (token, op) in &tx.index_write_set {
-            by_token.entry(*token).or_default().push(op.clone());
+        for (token, op) in std::mem::take(&mut tx.index_write_set) {
+            by_token.entry(token).or_default().push(op);
         }
         for (token, ops) in by_token {
             if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
