@@ -27,8 +27,8 @@ impl TableManager {
             self.table.data_store().clone(),
         );
         match m.data_op {
-            KvOp::Set(k, v) => staging.set(k, v).await,
-            KvOp::Remove(k) => staging.remove(k).await,
+            KvOp::Set(k, v) => staging.set(k, v),
+            KvOp::Remove(k) => staging.remove(k),
         }
         let token = self.table_token();
         tx.index_write_set

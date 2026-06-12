@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use shamir_collections::THasher;
+
 use shamir_tx::predicate_set::PredicateDep;
 use shamir_tx::repo_tx_gate::{CommitWriteRecord, TableWriteFootprint};
 use shamir_tx::IsolationLevel;
@@ -50,7 +52,7 @@ async fn commit_write_log_not_pruned_below_live_snapshot() {
     gate.publish_committed(v2);
     gate.record_commit_writes(CommitWriteRecord {
         commit_version: v2,
-        per_table: HashMap::from([(
+        per_table: HashMap::<_, _, THasher>::from_iter([(
             table_token_for("t"),
             TableWriteFootprint {
                 touched: true,
@@ -130,7 +132,7 @@ async fn snapshot_skips_phase_2bis() {
 
     let gate = repo.tx_gate().await.unwrap();
     let tx1_commit_v = gate.assign_next_version();
-    let mut per_table = HashMap::new();
+    let mut per_table = HashMap::with_hasher(THasher::default());
     per_table.insert(
         table_token,
         TableWriteFootprint {

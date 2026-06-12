@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 shamir-types = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
 # Backends inherit `shamir-storage`'s feature set — the engine doesn't
 # need any backend-specific code, but its `BoxRepoFactory` variants
 # are gated by the same flags so they cascade through.

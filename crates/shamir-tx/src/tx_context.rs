@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use shamir_collections::THasher;
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
 
@@ -102,7 +103,7 @@ pub struct TxContext {
 
     /// Per-table write staging. Key = table name (interned u64).
     /// Each `StagingStore` buffers set/remove ops for that table.
-    pub write_set: HashMap<u64, StagingStore>,
+    pub write_set: HashMap<u64, StagingStore, THasher>,
 
     /// Accumulated index write ops across all tables, with per-op table
     /// attribution. Each entry is `(table_token, op)`. Applied atomically
@@ -115,7 +116,7 @@ pub struct TxContext {
     /// graph atomically at commit (Phase 5d); discarded by RAII drop on
     /// abort — exactly like every other tx-local field. This is the home
     /// for vector staging: nothing lives outside the `TxContext` anymore.
-    pub staged_vectors: HashMap<u64, Vec<(RecordId, Vec<f32>)>>,
+    pub staged_vectors: HashMap<u64, Vec<(RecordId, Vec<f32>)>, THasher>,
 
     /// Interner overlay: new `(key_name → id)` mappings created during
     /// this tx. Merged into base interner on commit; dropped on abort.
@@ -128,7 +129,7 @@ pub struct TxContext {
 
     /// Per-table counter delta. Applied at commit:
     /// `counter.add(delta)` for each table.
-    pub counter_deltas: HashMap<u64, i64>,
+    pub counter_deltas: HashMap<u64, i64, THasher>,
 
     /// SSI read-set: `(table_id, key) → version_seen`. Only populated
     /// when `isolation == Serializable`. Validated at commit:
@@ -150,7 +151,7 @@ pub struct TxContext {
     /// Token → original table name. Populated alongside `write_set`
     /// entries. Used at commit time to look up table names for WAL
     /// emission and interner merge (Stage 5).
-    pub table_tokens: HashMap<u64, String>,
+    pub table_tokens: HashMap<u64, String, THasher>,
 
     /// Optional version provider for SSI read-set validation.
     /// When `None`, commit_tx Phase 2 falls back to a stub provider
@@ -233,14 +234,14 @@ impl TxContext {
             repo_id,
             snapshot_version,
             isolation,
-            write_set: HashMap::new(),
+            write_set: HashMap::with_hasher(THasher::default()),
             index_write_set: Vec::new(),
-            staged_vectors: HashMap::new(),
+            staged_vectors: HashMap::with_hasher(THasher::default()),
             interner_overlay: scc::HashMap::new(),
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
-            counter_deltas: HashMap::new(),
+            counter_deltas: HashMap::with_hasher(THasher::default()),
             read_set: scc::HashMap::new(),
-            table_tokens: HashMap::new(),
+            table_tokens: HashMap::with_hasher(THasher::default()),
             version_provider: None,
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),
@@ -561,7 +562,7 @@ impl TxContext {
         if remap.is_empty() {
             return Ok(());
         }
-        for staging in self.write_set.values() {
+        for staging in self.write_set.values_mut() {
             staging
                 .rewrite_set_inner(|inner| {
                     crate::id_remap::remap_value(inner, remap);

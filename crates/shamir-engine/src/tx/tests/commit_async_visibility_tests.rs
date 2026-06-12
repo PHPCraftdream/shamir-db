@@ -65,8 +65,8 @@ async fn async_commit_data_visible_immediately() {
         .to_bytes()
         .unwrap();
 
-    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body).await;
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body);
 
     let mut tx = TxContext::new(
         TxId::new(ASYNC_INJECT_TX_ID),
@@ -117,8 +117,8 @@ async fn async_commit_index_converges_after_tail() {
     let body = InnerValue::Str("async-index-converges".into())
         .to_bytes()
         .unwrap();
-    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body).await;
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body);
 
     let posting_key = Bytes::from_static(b"async_posting_k");
     let posting_val = Bytes::from_static(b"async_posting_v");
@@ -183,8 +183,8 @@ async fn async_commit_background_failure_is_recovered() {
     let body = InnerValue::Str("async-recovered".into())
         .to_bytes()
         .unwrap();
-    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body).await;
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body);
 
     let posting_key = Bytes::from_static(b"async_recover_posting_k");
     let posting_val = Bytes::from_static(b"async_recover_posting_v");
@@ -270,8 +270,8 @@ async fn sync_default_mode_returns_no_background_handle() {
 
     let rid = RecordId::new();
     let body = InnerValue::Str("sync-default".into()).to_bytes().unwrap();
-    let staging = StagingStore::new(Arc::clone(tbl.data_store()));
-    staging.set(rid.to_bytes(), body).await;
+    let mut staging = StagingStore::new(Arc::clone(tbl.data_store()));
+    staging.set(rid.to_bytes(), body);
 
     let posting_key = Bytes::from_static(b"sync_default_posting_k");
     let posting_val = Bytes::from_static(b"sync_default_posting_v");

@@ -84,19 +84,20 @@ fn bench_staging_store(c: &mut Criterion) {
     let mut group = c.benchmark_group("staging_store");
     let rt = rt();
     let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let staging = StagingStore::new(base);
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("set_then_get", |b| {
         let mut counter = 0u64;
         b.to_async(&rt).iter(|| {
+            let base = Arc::clone(&base);
             let key: shamir_storage::types::RecordKey =
                 Bytes::copy_from_slice(&counter.to_be_bytes());
             counter = counter.wrapping_add(1);
-            let staging = &staging;
+            let key2 = key.clone();
             async move {
-                staging.set(key.clone(), Bytes::from_static(b"v")).await;
-                let _ = staging.get(key).await.unwrap();
+                let mut staging = StagingStore::new(base);
+                staging.set(key, Bytes::from_static(b"v"));
+                let _ = staging.get(key2).await.unwrap();
             }
         });
     });

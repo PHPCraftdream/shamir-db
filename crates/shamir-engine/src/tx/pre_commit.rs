@@ -58,7 +58,7 @@ pub(super) async fn pre_commit(
                 let remap =
                     shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
                 if !remap.is_empty() {
-                    if let Some(staging) = tx.write_set.get(table_id) {
+                    if let Some(staging) = tx.write_set.get_mut(table_id) {
                         staging
                             .rewrite_set_inner(|inner| {
                                 shamir_tx::remap_value(inner, &remap);

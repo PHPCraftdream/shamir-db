@@ -76,13 +76,13 @@ async fn apply_id_remap_rewrites_write_set_bytes() {
     let mut tx = TxContext::new(TxId::new(1), 0, 10, IsolationLevel::Snapshot);
 
     let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let staging = StagingStore::new(base);
+    let mut staging = StagingStore::new(base);
 
     let mut m = TMap::default();
     m.insert(InternerKey::new(100), InnerValue::Str("v".into()));
     let val = InnerValue::Map(m);
     let key: RecordKey = Bytes::from_static(b"k1");
-    staging.set(key.clone(), val.to_bytes().unwrap()).await;
+    staging.set(key.clone(), val.to_bytes().unwrap());
 
     tx.write_set.insert(7, staging);
 
@@ -208,9 +208,7 @@ async fn staged_bytes_accumulates_across_fields() {
     // Add a write_set entry: Set("k1", "val") → 2 + 3 = 5 bytes.
     let base: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let staging = tx.ensure_table_staging(42, "users", base);
-    staging
-        .set(Bytes::from_static(b"k1"), Bytes::from_static(b"val"))
-        .await;
+    staging.set(Bytes::from_static(b"k1"), Bytes::from_static(b"val"));
     let after_write = tx.staged_bytes();
     assert!(after_write > 0, "write_set should contribute");
     assert_eq!(after_write, 5);
