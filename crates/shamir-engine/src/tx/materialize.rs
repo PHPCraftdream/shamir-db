@@ -1,3 +1,4 @@
+use futures::future::join_all;
 use shamir_tx::{RepoTxGate, RepoWalManager, TxContext};
 use shamir_types::types::common::THasher;
 
@@ -64,19 +65,25 @@ pub(super) async fn materialize(
     // when available so version_cache stays current for SSI conflict
     // detection; fall back to direct `base.transact` otherwise.
     let data_batches = collect_data_batches(tx);
-    for (table_id, base, ops) in data_batches {
-        if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_data_batch(
-                repo,
-                table_id,
-                base.clone(),
-                ops.clone(),
-                commit_version,
-                tx_id,
-            )
+    let data_futs: Vec<_> = data_batches
+        .into_iter()
+        .map(|(table_id, base, ops)| async move {
+            let res = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                apply_data_batch(
+                    repo,
+                    table_id,
+                    base.clone(),
+                    ops.clone(),
+                    commit_version,
+                    tx_id,
+                )
+            })
+            .await;
+            (table_id, res)
         })
-        .await
-        {
+        .collect();
+    for (table_id, res) in join_all(data_futs).await {
+        if let Err(e) = res {
             log::warn!(
                 "commit_tx materialization Phase 5a (data) failed for tx {tx_id} \
                  commit_version {commit_version} table {table_id}: {e}; deferring to recovery"
@@ -144,12 +151,18 @@ pub(super) async fn materialize(
         for (token, op) in std::mem::take(&mut tx.index_write_set) {
             by_token.entry(token).or_default().push(op);
         }
-        for (token, ops) in by_token {
-            if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-                apply_index_batch(repo, token, &ops, tx_id)
+        let index_futs: Vec<_> = by_token
+            .into_iter()
+            .map(|(token, ops)| async move {
+                let res = retry_materialize(MATERIALIZE_ATTEMPTS, || {
+                    apply_index_batch(repo, token, &ops, tx_id)
+                })
+                .await;
+                (token, res)
             })
-            .await
-            {
+            .collect();
+        for (token, res) in join_all(index_futs).await {
+            if let Err(e) = res {
                 log::warn!(
                     "commit_tx materialization Phase 5c (index) failed for tx {tx_id} \
                      commit_version {commit_version} table {token}: {e}; deferring to recovery"
