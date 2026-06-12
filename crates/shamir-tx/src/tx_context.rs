@@ -153,6 +153,13 @@ pub struct TxContext {
     /// emission and interner merge (Stage 5).
     pub table_tokens: HashMap<u64, String, THasher>,
 
+    /// Per-table interner delta: entries genuinely new to the base
+    /// interner that were merged during commit Phase 1. Each entry is
+    /// `(field_name, base_id)`. Populated by `pre_commit` Phase 1 and
+    /// threaded into the `WalEntryV2.interner_delta` field so recovery
+    /// can replay them via `touch_with_id` BEFORE replaying data ops.
+    pub interner_deltas: HashMap<u64, Vec<(String, u64)>, THasher>,
+
     /// Optional version provider for SSI read-set validation.
     /// When `None`, commit_tx Phase 2 falls back to a stub provider
     /// `|_, _| 0` that trivially passes — Snapshot and Serializable
@@ -242,6 +249,7 @@ impl TxContext {
             counter_deltas: HashMap::with_hasher(THasher::default()),
             read_set: scc::HashMap::new(),
             table_tokens: HashMap::with_hasher(THasher::default()),
+            interner_deltas: HashMap::with_hasher(THasher::default()),
             version_provider: None,
             started_at: std::time::Instant::now(),
             unique_guards: Vec::new(),

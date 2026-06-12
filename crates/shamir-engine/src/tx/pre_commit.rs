@@ -55,10 +55,11 @@ pub(super) async fn pre_commit(
         for table_id in &table_ids {
             if let Some(tbl) = repo.table_by_token(*table_id).await? {
                 let base_interner = tbl.interner().get().await?;
-                let shamir_tx::OverlayCommitResult {
-                    remap,
-                    delta: _delta,
-                } = shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
+                let shamir_tx::OverlayCommitResult { remap, delta } =
+                    shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
+                if !delta.is_empty() {
+                    tx.interner_deltas.insert(*table_id, delta);
+                }
                 if !remap.is_empty() {
                     if let Some(staging) = tx.write_set.get_mut(table_id) {
                         staging
@@ -248,8 +249,20 @@ pub(super) async fn pre_commit(
     // `txn_id` (the `WalActiveKey` byte order) is not a safe proxy because
     // tx allocation and commit ordering are independent.
     let wal_ops = wal_ops_from_tx(tx).await;
-    let entry =
+    // A3: flatten per-table interner deltas into the WAL entry so
+    // recovery can replay them via `touch_with_id` before data ops.
+    let interner_delta: Vec<(u64, String, u64)> = tx
+        .interner_deltas
+        .iter()
+        .flat_map(|(token, deltas)| {
+            deltas
+                .iter()
+                .map(move |(name, id)| (*token, name.clone(), *id))
+        })
+        .collect();
+    let mut entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
+    entry.interner_delta = interner_delta;
     wal.begin(entry).await?;
 
     // Crash seam (test-only): a HARD crash here is AT the commit point —
