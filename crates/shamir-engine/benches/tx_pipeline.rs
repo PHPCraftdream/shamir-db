@@ -117,7 +117,13 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
                             QueryEntry {
                                 op: BatchOp::Insert(InsertOp {
                                     insert_into: TableRef::new("bench_table"),
-                                    values: (0..n).map(|i| serde_json::json!({"i": i})).collect(),
+                                    values: (0..n)
+                                        .map(|i| {
+                                            shamir_types::types::value::QueryValue::from(
+                                                serde_json::json!({"i": i}),
+                                            )
+                                        })
+                                        .collect(),
                                 }),
                                 return_result: true,
                                 after: Vec::new(),
@@ -171,13 +177,13 @@ fn bench_batch_insert_pipeline(c: &mut Criterion) {
 
                         let resolver = Resolver { repo: repo.clone() };
                         let mut queries = new_map();
-                        let values: Vec<serde_json::Value> = (0..n)
+                        let values: Vec<shamir_types::types::value::QueryValue> = (0..n)
                             .map(|i| {
-                                serde_json::json!({
+                                shamir_types::types::value::QueryValue::from(serde_json::json!({
                                     "email": format!("user_{}@example.com", i),
                                     "city": format!("c_{}", i % 8),
                                     "score": i,
-                                })
+                                }))
                             })
                             .collect();
                         queries.insert(
@@ -406,8 +412,12 @@ fn bench_commit_phase5c_indexed_sled(c: &mut Criterion) {
 
                     let resolver = Resolver { repo: repo.clone() };
                     let mut queries = new_map();
-                    let values: Vec<serde_json::Value> = (0..n)
-                        .map(|i| serde_json::json!({"city": format!("c_{}", i % 8), "score": i}))
+                    let values: Vec<shamir_types::types::value::QueryValue> = (0..n)
+                        .map(|i| {
+                            shamir_types::types::value::QueryValue::from(
+                                serde_json::json!({"city": format!("c_{}", i % 8), "score": i}),
+                            )
+                        })
                         .collect();
                     queries.insert(
                         "ins".to_string(),

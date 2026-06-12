@@ -61,8 +61,8 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({"name": op.create_user}),
-            value: user_json,
+            key: json!({"name": op.create_user}).into(),
+            value: user_json.into(),
         };
         table
             .execute_set(&set_op)
@@ -183,8 +183,8 @@ impl ShamirAdminExecutor {
             .map_err(|e| err(e.to_string()))?;
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("roles"),
-            key: json!({"name": op.create_role}),
-            value: role_json,
+            key: json!({"name": op.create_role}).into(),
+            value: role_json.into(),
         };
         table
             .execute_set(&set_op)
@@ -316,8 +316,8 @@ impl ShamirAdminExecutor {
         }
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({"name": op.user}),
-            value: user_json,
+            key: json!({"name": op.user}).into(),
+            value: user_json.into(),
         };
         table
             .execute_set(&set_op)
@@ -397,8 +397,8 @@ impl ShamirAdminExecutor {
         }
         let set_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({"name": op.user}),
-            value: user_json,
+            key: json!({"name": op.user}).into(),
+            value: user_json.into(),
         };
         table
             .execute_set(&set_op)

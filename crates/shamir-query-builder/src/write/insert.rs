@@ -51,7 +51,7 @@ impl Insert {
     pub fn build(self) -> InsertOp {
         InsertOp {
             insert_into: self.table_ref,
-            values: self.values,
+            values: self.values.into_iter().map(Into::into).collect(),
         }
     }
 }

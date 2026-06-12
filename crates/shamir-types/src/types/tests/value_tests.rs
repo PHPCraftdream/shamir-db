@@ -665,12 +665,22 @@ mod tests {
     }
 
     #[test]
-    fn test_json_prefix_unknown_error() {
+    fn test_json_prefix_unknown_treated_as_plain_key() {
+        // Unknown prefixes are treated as plain field names (supports
+        // user data with colons, e.g. "xml:lang", "urn:isbn:...").
         let json = r#"{
             "unknown:key": "value"
         }"#;
-        let result: Result<UserValue, _> = serde_json::from_str(json);
-        assert!(result.is_err());
+        let val: UserValue = serde_json::from_str(json).unwrap();
+        match val {
+            UserValue::Map(m) => {
+                assert_eq!(
+                    m.get("unknown:key"),
+                    Some(&UserValue::Str("value".to_string()))
+                );
+            }
+            _ => panic!("expected Map"),
+        }
     }
 
     #[test]

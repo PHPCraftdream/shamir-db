@@ -227,11 +227,15 @@ where
                 Some("arr") => map.next_value::<Vec<Value<Key>>>().map(Value::List)?,
                 Some("set") => map.next_value::<TSet<Value<Key>>>().map(Value::Set)?,
                 None => map.next_value()?,
-                Some(unknown) => {
-                    return Err(de::Error::custom(format!(
-                        "unknown type prefix: '{}'",
-                        unknown
-                    )));
+                Some(_) => {
+                    // Unknown prefix — treat the full original key as a
+                    // plain field name (supports user data with colons,
+                    // e.g. "xml:lang", "urn:isbn:...").
+                    let val: Value<Key> = map.next_value()?;
+                    let map_key =
+                        Key::deserialize(de::IntoDeserializer::into_deserializer(key_str.clone()))?;
+                    inner_map.insert(map_key, val);
+                    continue;
                 }
             };
 
@@ -280,6 +284,176 @@ impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> PartialEq for Value<Key> 
 }
 
 impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Eq for Value<Key> {}
+
+// ============================================================================
+// Index and comparison impls for QueryValue (Value<String>)
+// ============================================================================
+
+/// Sentinel value returned when indexing into a non-map or missing key.
+static QUERY_VALUE_NULL: std::sync::LazyLock<Value<String>> =
+    std::sync::LazyLock::new(|| Value::Null);
+
+impl std::ops::Index<&str> for Value<String> {
+    type Output = Value<String>;
+
+    fn index(&self, key: &str) -> &Self::Output {
+        match self {
+            Value::Map(m) => m.get(key).unwrap_or(&QUERY_VALUE_NULL),
+            _ => &QUERY_VALUE_NULL,
+        }
+    }
+}
+
+impl std::ops::Index<usize> for Value<String> {
+    type Output = Value<String>;
+
+    fn index(&self, idx: usize) -> &Self::Output {
+        match self {
+            Value::List(l) => l.get(idx).unwrap_or(&QUERY_VALUE_NULL),
+            _ => &QUERY_VALUE_NULL,
+        }
+    }
+}
+
+impl PartialEq<&str> for Value<String> {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, Value::Str(s) if s == *other)
+    }
+}
+
+impl PartialEq<str> for Value<String> {
+    fn eq(&self, other: &str) -> bool {
+        matches!(self, Value::Str(s) if s == other)
+    }
+}
+
+impl PartialEq<bool> for Value<String> {
+    fn eq(&self, other: &bool) -> bool {
+        matches!(self, Value::Bool(b) if b == other)
+    }
+}
+
+impl PartialEq<i64> for Value<String> {
+    fn eq(&self, other: &i64) -> bool {
+        matches!(self, Value::Int(i) if i == other)
+    }
+}
+
+impl PartialEq<i32> for Value<String> {
+    fn eq(&self, other: &i32) -> bool {
+        matches!(self, Value::Int(i) if *i == *other as i64)
+    }
+}
+
+impl PartialEq<f64> for Value<String> {
+    fn eq(&self, other: &f64) -> bool {
+        matches!(self, Value::F64(f) if f == other)
+    }
+}
+
+impl Value<String> {
+    /// Returns true if this value is Null.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Value::Null)
+    }
+
+    /// Returns the value as a JSON-style object map, if it is a Map.
+    pub fn as_object(&self) -> Option<&TMap<String, Value<String>>> {
+        match self {
+            Value::Map(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as a list slice, if it is a List.
+    pub fn as_array(&self) -> Option<&Vec<Value<String>>> {
+        match self {
+            Value::List(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    /// Returns the value as a string slice, if it is a Str.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Conversions: serde_json::Value ↔ QueryValue
+// ============================================================================
+
+impl From<serde_json::Value> for Value<String> {
+    fn from(jv: serde_json::Value) -> Self {
+        match jv {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Value::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    Value::F64(f)
+                } else if let Some(u) = n.as_u64() {
+                    if u <= i64::MAX as u64 {
+                        Value::Int(u as i64)
+                    } else {
+                        Value::Str(u.to_string())
+                    }
+                } else {
+                    Value::Str(n.to_string())
+                }
+            }
+            serde_json::Value::String(s) => Value::Str(s),
+            serde_json::Value::Array(arr) => {
+                Value::List(arr.into_iter().map(Value::from).collect())
+            }
+            serde_json::Value::Object(map) => {
+                let mut m = crate::types::common::new_map();
+                for (k, v) in map {
+                    m.insert(k, Value::from(v));
+                }
+                Value::Map(m)
+            }
+        }
+    }
+}
+
+impl From<Value<String>> for serde_json::Value {
+    fn from(qv: Value<String>) -> Self {
+        match qv {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(b) => serde_json::Value::Bool(b),
+            Value::Int(i) => serde_json::Value::Number(i.into()),
+            Value::F64(f) => serde_json::Number::from_f64(f)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(f.to_string())),
+            Value::Dec(d) => serde_json::Value::String(d.to_string()),
+            Value::Big(b) => serde_json::Value::String(b.to_string()),
+            Value::Str(s) => serde_json::Value::String(s),
+            Value::Bin(b) => serde_json::Value::Array(
+                b.iter()
+                    .map(|&byte| serde_json::Value::Number(byte.into()))
+                    .collect(),
+            ),
+            Value::List(l) => {
+                serde_json::Value::Array(l.into_iter().map(serde_json::Value::from).collect())
+            }
+            Value::Set(s) => {
+                serde_json::Value::Array(s.into_iter().map(serde_json::Value::from).collect())
+            }
+            Value::Map(m) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in m {
+                    obj.insert(k, serde_json::Value::from(v));
+                }
+                serde_json::Value::Object(obj)
+            }
+        }
+    }
+}
 
 impl<Key: Eq + Hash + Ord + Clone + Serialize + Debug> Hash for Value<Key> {
     fn hash<H: Hasher>(&self, state: &mut H) {

@@ -84,7 +84,7 @@ impl Update {
         UpdateOp {
             update: self.table_ref,
             where_clause: self.where_clause,
-            set: self.set_value,
+            set: self.set_value.into(),
             select: self.select,
         }
     }

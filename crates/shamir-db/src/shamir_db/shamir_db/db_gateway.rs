@@ -172,7 +172,7 @@ impl DbGateway for FacadeDbGateway {
 
         let insert_op = InsertOp {
             insert_into: table_ref,
-            values: vec![json_val],
+            values: vec![json_val.into()],
         };
 
         let mut queries = new_map();

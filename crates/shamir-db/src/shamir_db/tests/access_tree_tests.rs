@@ -40,8 +40,8 @@ async fn access_tree_structure_meta_and_principals() {
         let table = shamir.system_store().users_table().await.unwrap();
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new("users"),
-            key: json!({ "name": "alice" }),
-            value: json!({ "name": "alice" }),
+            key: json!({ "name": "alice" }).into(),
+            value: json!({ "name": "alice" }).into(),
         };
         table.execute_set(&op).await.unwrap();
     }

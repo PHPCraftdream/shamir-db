@@ -3,7 +3,7 @@
 //! Core types for database write operations.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use shamir_types::types::value::QueryValue;
 
 use crate::filter::Filter;
 use crate::TableRef;
@@ -47,8 +47,8 @@ pub struct InsertOp {
     /// Target table (optionally qualified with repo).
     pub insert_into: TableRef,
 
-    /// Records to insert.
-    pub values: Vec<Value>,
+    /// Records to insert (format-agnostic; deserialized directly from wire).
+    pub values: Vec<QueryValue>,
 }
 
 /// Update operation - updates records matching a filter.
@@ -61,8 +61,8 @@ pub struct UpdateOp {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "where")]
     pub where_clause: Option<Filter>,
 
-    /// Fields to update (partial) or full record.
-    pub set: Value,
+    /// Fields to update (partial) or full record (format-agnostic).
+    pub set: QueryValue,
 
     /// Optional select configuration for returning updated records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,11 +75,11 @@ pub struct SetOp {
     /// Target table (optionally qualified with repo).
     pub set: TableRef,
 
-    /// Key to match (id or unique field).
-    pub key: Value,
+    /// Key to match (id or unique field, format-agnostic).
+    pub key: QueryValue,
 
-    /// Value to set (merged with existing on update).
-    pub value: Value,
+    /// Value to set (merged with existing on update, format-agnostic).
+    pub value: QueryValue,
 }
 
 /// Delete operation - deletes records matching a filter.

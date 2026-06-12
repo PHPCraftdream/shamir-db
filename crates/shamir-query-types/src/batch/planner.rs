@@ -44,8 +44,8 @@
 
 use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
 use crate::filter::Filter;
-use serde_json::Value;
 use shamir_collections::{new_map, new_set, TMap, TSet};
+use shamir_types::types::value::QueryValue;
 
 // Maximum stack depth for the iterative nesting-depth walk (safety cap).
 const NESTING_WALK_LIMIT: usize = 64;
@@ -209,10 +209,10 @@ impl BatchPlanner {
         deps
     }
 
-    /// Extract dependencies from a JSON value.
-    fn extract_deps_from_value(value: &Value, deps: &mut TSet<String>) {
+    /// Extract dependencies from a QueryValue.
+    fn extract_deps_from_value(value: &QueryValue, deps: &mut TSet<String>) {
         match value {
-            Value::Object(map) => {
+            QueryValue::Map(map) => {
                 // Check for $query reference
                 if let Some(query_ref) = map.get("$query") {
                     if let Some(alias) = query_ref.as_str() {
@@ -225,7 +225,7 @@ impl BatchPlanner {
                     Self::extract_deps_from_value(v, deps);
                 }
             }
-            Value::Array(arr) => {
+            QueryValue::List(arr) => {
                 for v in arr {
                     Self::extract_deps_from_value(v, deps);
                 }

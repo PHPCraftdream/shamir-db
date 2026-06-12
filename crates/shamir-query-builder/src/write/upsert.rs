@@ -54,8 +54,8 @@ impl Upsert {
     pub fn build(self) -> SetOp {
         SetOp {
             set: self.table_ref,
-            key: self.key,
-            value: self.value,
+            key: self.key.into(),
+            value: self.value.into(),
         }
     }
 }

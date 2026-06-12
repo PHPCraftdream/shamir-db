@@ -110,8 +110,8 @@ impl SystemStore {
             json_value_to_inner(&rec, interner).map_err(|e| DbError::Codec(e.to_string()))?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
-            key: json!({"name": name}),
-            value: rec,
+            key: json!({"name": name}).into(),
+            value: rec.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -169,8 +169,8 @@ impl SystemStore {
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_REPOSITORIES),
-            key: json!({"db_name": db_name, "repo_name": repo_name}),
-            value: record,
+            key: json!({"db_name": db_name, "repo_name": repo_name}).into(),
+            value: record.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -251,8 +251,9 @@ impl SystemStore {
                 "db_name": db_name,
                 "repo_name": repo_name,
                 "table_name": table_name,
-            }),
-            value: record,
+            })
+            .into(),
+            value: record.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -318,8 +319,8 @@ impl SystemStore {
         let table = self.table(TABLE_SETTINGS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_SETTINGS),
-            key: json!({"key": key}),
-            value: json!({"key": key, "value": value}),
+            key: json!({"key": key}).into(),
+            value: json!({"key": key, "value": value}).into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -377,8 +378,8 @@ impl SystemStore {
         let table = self.table(TABLE_FUNCTIONS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            key: json!({"name": name}),
-            value: rec,
+            key: json!({"name": name}).into(),
+            value: rec.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -460,8 +461,8 @@ impl SystemStore {
         let table = self.table(TABLE_GROUPS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_GROUPS),
-            key: json!({"group_id": group_id}),
-            value: record,
+            key: json!({"group_id": group_id}).into(),
+            value: record.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -639,8 +640,8 @@ impl SystemStore {
             json_value_to_inner(record, interner).map_err(|e| DbError::Codec(e.to_string()))?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
-            key: json!({"name": name}),
-            value: record.clone(),
+            key: json!({"name": name}).into(),
+            value: record.clone().into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -655,8 +656,8 @@ impl SystemStore {
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_REPOSITORIES),
-            key: json!({"db_name": db_name, "repo_name": repo_name}),
-            value: record.clone(),
+            key: json!({"db_name": db_name, "repo_name": repo_name}).into(),
+            value: record.clone().into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -676,8 +677,9 @@ impl SystemStore {
                 "db_name": db_name,
                 "repo_name": repo_name,
                 "table_name": table_name,
-            }),
-            value: record.clone(),
+            })
+            .into(),
+            value: record.clone().into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -702,8 +704,8 @@ impl SystemStore {
         let table = self.table(TABLE_VALIDATORS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_VALIDATORS),
-            key: json!({"name": name}),
-            value: rec,
+            key: json!({"name": name}).into(),
+            value: rec.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -767,8 +769,8 @@ impl SystemStore {
         let table = self.table(TABLE_FUNCTIONS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            key: json!({"name": name}),
-            value: record.clone(),
+            key: json!({"name": name}).into(),
+            value: record.clone().into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -794,8 +796,8 @@ impl SystemStore {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
-            key: json!({"path": path_key}),
-            value: rec,
+            key: json!({"path": path_key}).into(),
+            value: rec.into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;
@@ -862,8 +864,8 @@ impl SystemStore {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
-            key: json!({"path": path_key}),
-            value: record.clone(),
+            key: json!({"path": path_key}).into(),
+            value: record.clone().into(),
         };
         table.execute_set(&op).await?;
         table.interner().persist().await?;

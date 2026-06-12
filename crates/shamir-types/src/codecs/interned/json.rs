@@ -181,6 +181,62 @@ pub fn json_value_to_inner(
     json_value_to_inner_with(json_value, &|key| intern_string_key(interner, key))
 }
 
+/// Converts a [`QueryValue`] (string-keyed) to [`InnerValue`] (interned keys).
+///
+/// This is the key function for the zero-JSON write path: once user data
+/// is deserialized as `QueryValue` (format-agnostic), this pass interns
+/// the map keys to produce the engine-native representation.
+pub fn query_value_to_inner(
+    qv: &crate::types::value::QueryValue,
+    interner: &Interner,
+) -> Result<InnerValue, CodecError> {
+    query_value_to_inner_with(qv, &|key| intern_string_key(interner, key))
+}
+
+/// Converts a [`QueryValue`] to [`InnerValue`] using a custom interning function.
+pub fn query_value_to_inner_with<F>(
+    qv: &crate::types::value::QueryValue,
+    intern_key: &F,
+) -> Result<InnerValue, CodecError>
+where
+    F: Fn(&str) -> Result<InternerKey, CodecError>,
+{
+    use crate::types::value::Value;
+    match qv {
+        Value::Null => Ok(InnerValue::Null),
+        Value::Bool(b) => Ok(InnerValue::Bool(*b)),
+        Value::Int(i) => Ok(InnerValue::Int(*i)),
+        Value::F64(f) => Ok(InnerValue::F64(*f)),
+        Value::Dec(d) => Ok(InnerValue::Dec(*d)),
+        Value::Big(b) => Ok(InnerValue::Big(b.clone())),
+        Value::Str(s) => Ok(InnerValue::Str(s.clone())),
+        Value::Bin(b) => Ok(InnerValue::Bin(b.clone())),
+        Value::List(l) => {
+            let converted: Result<Vec<InnerValue>, CodecError> = l
+                .iter()
+                .map(|v| query_value_to_inner_with(v, intern_key))
+                .collect();
+            Ok(InnerValue::List(converted?))
+        }
+        Value::Set(s) => {
+            let converted: Result<crate::types::common::TSet<InnerValue>, CodecError> = s
+                .iter()
+                .map(|v| query_value_to_inner_with(v, intern_key))
+                .collect();
+            Ok(InnerValue::Set(converted?))
+        }
+        Value::Map(m) => {
+            let mut converted = crate::types::common::new_map();
+            for (key_str, val) in m {
+                let interned_key = intern_key(key_str)?;
+                let converted_val = query_value_to_inner_with(val, intern_key)?;
+                converted.insert(interned_key, converted_val);
+            }
+            Ok(InnerValue::Map(converted))
+        }
+    }
+}
+
 /// Converts InnerValue to serde_json::Value, de-interning all keys.
 ///
 /// Hoists the interner's reverse-vec `ArcSwap` load to a single

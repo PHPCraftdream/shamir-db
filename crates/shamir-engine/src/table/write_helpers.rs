@@ -8,7 +8,6 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use futures::StreamExt;
-use serde_json as json;
 
 use crate::function::builtin_scalars;
 use crate::query::filter::eval::resolve_field;
@@ -19,8 +18,9 @@ use shamir_funclib::registry::ScalarRegistry;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{inner_to_json_value, json_value_to_inner};
 use shamir_types::core::interner::Interner;
+use shamir_types::types::common::TMap;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue, Value};
 
 use crate::validator::ValidatorFailure;
 
@@ -54,11 +54,14 @@ pub(super) fn validator_failure_to_db_error(
 // Computed write values ("установка знаний" via inline `$fn`)
 // ============================================================================
 
-/// Detect whether a JSON field value encodes an inline function call
+/// Detect whether a QueryValue field value encodes an inline function call
 /// (`{ "$fn": ... }`). Such fields are evaluated at write time and replaced
 /// by their computed result before the record is interned and persisted.
-pub(super) fn is_computed_field(v: &json::Value) -> bool {
-    v.as_object().is_some_and(|o| o.contains_key("$fn"))
+pub(super) fn is_computed_field(v: &QueryValue) -> bool {
+    match v {
+        Value::Map(m) => m.contains_key("$fn"),
+        _ => false,
+    }
 }
 
 /// Resolve any inline `$fn` computed fields in a record (the "computed value
@@ -77,11 +80,11 @@ pub(super) fn is_computed_field(v: &json::Value) -> bool {
 /// unchanged, so the common (literal-only) write path pays nothing beyond one
 /// `any()` scan.
 pub(super) fn resolve_computed_record<'a>(
-    value: &'a json::Value,
+    value: &'a QueryValue,
     interner: &Interner,
-) -> Result<Cow<'a, json::Value>, String> {
+) -> Result<Cow<'a, QueryValue>, String> {
     let obj = match value {
-        json::Value::Object(m) => m,
+        Value::Map(m) => m,
         _ => return Ok(Cow::Borrowed(value)),
     };
     if !obj.values().any(is_computed_field) {
@@ -91,27 +94,29 @@ pub(super) fn resolve_computed_record<'a>(
     // `$ref` resolves only against literal fields; a reference to another
     // computed field is intentionally unresolved (fail-closed) so computed
     // fields can't depend on evaluation order.
-    let literal: json::Map<String, json::Value> = obj
+    let literal: serde_json::Map<String, serde_json::Value> = obj
         .iter()
         .filter(|(_, v)| !is_computed_field(v))
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.clone(), serde_json::Value::from(v.clone())))
         .collect();
 
     let scalars = builtin_scalars();
-    let mut out = obj.clone();
+    let mut out: TMap<String, QueryValue> = obj.clone();
     for (k, v) in obj {
         if !is_computed_field(v) {
             continue;
         }
+        // Convert the computed field value to serde_json::Value for FilterValue parsing
+        let jv = serde_json::Value::from(v.clone());
         let fv: FilterValue =
-            serde_json::from_value(v.clone()).map_err(|e| format!("computed field '{k}': {e}"))?;
+            serde_json::from_value(jv).map_err(|e| format!("computed field '{k}': {e}"))?;
         let result = eval_write_value(&fv, &literal, interner, scalars)
             .map_err(|e| format!("computed field '{k}': {e}"))?;
-        let jv = inner_to_json_value(&result, interner)
+        let result_jv = inner_to_json_value(&result, interner)
             .map_err(|e| format!("computed field '{k}': {e}"))?;
-        out.insert(k.clone(), jv);
+        out.insert(k.clone(), QueryValue::from(result_jv));
     }
-    Ok(Cow::Owned(json::Value::Object(out)))
+    Ok(Cow::Owned(Value::Map(out)))
 }
 
 /// Evaluate a [`FilterValue`] to an [`InnerValue`] in the write-time computed
@@ -120,7 +125,7 @@ pub(super) fn resolve_computed_record<'a>(
 /// registry.
 pub(super) fn eval_write_value(
     fv: &FilterValue,
-    literal: &json::Map<String, json::Value>,
+    literal: &serde_json::Map<String, serde_json::Value>,
     interner: &Interner,
     scalars: &ScalarRegistry,
 ) -> Result<InnerValue, String> {
@@ -152,9 +157,9 @@ pub(super) fn eval_write_value(
 
 /// Navigate a field path through a JSON object (`["address","zip"]`).
 pub(super) fn json_nav<'a>(
-    obj: &'a json::Map<String, json::Value>,
+    obj: &'a serde_json::Map<String, serde_json::Value>,
     path: &[String],
-) -> Option<&'a json::Value> {
+) -> Option<&'a serde_json::Value> {
     let mut cur = obj.get(path.first()?)?;
     for seg in &path[1..] {
         cur = cur.as_object()?.get(seg)?;
