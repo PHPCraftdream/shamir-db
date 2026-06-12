@@ -13,11 +13,11 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::write::{DeleteOp, InsertOp, SetOp, UpdateOp, UpdateReturnMode, WriteResult};
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
-    inner_to_json_value, json_value_to_inner, json_value_to_inner_with,
+    inner_to_json_value, query_value_to_inner, query_value_to_inner_with,
 };
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue, Value};
 
 use crate::validator::WriteOp;
 use shamir_types::access::Actor;
@@ -31,7 +31,7 @@ use super::write_helpers::{
 impl TableManager {
     /// Execute an INSERT operation.
     ///
-    /// Converts each JSON value to InnerValue, inserts into the table,
+    /// Converts each QueryValue to InnerValue, inserts into the table,
     /// and returns the inserted records with their generated IDs.
     pub async fn execute_insert(&self, op: &InsertOp) -> DbResult<WriteResult> {
         let start = Instant::now();
@@ -39,18 +39,15 @@ impl TableManager {
 
         // 1. Resolve inline `$fn` computed fields first (fail-closed); the
         //    resolved record is what we both store and echo back, so the
-        //    client never sees the unevaluated marker. Then convert all JSON
+        //    client never sees the unevaluated marker. Then convert all
         //    values to InnerValue upfront — any codec error fails the whole
         //    insert with nothing written (the first bad value aborts).
-        // Resolve computed fields and intern in a single pass — avoids
-        // materialising a temporary `resolved_values` Vec before we can
-        // start building `inner_values`.
-        let mut resolved_values: Vec<Cow<'_, json::Value>> = Vec::with_capacity(op.values.len());
+        let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
         let mut inner_values: Vec<InnerValue> = Vec::with_capacity(op.values.len());
         for value in &op.values {
             let resolved = resolve_computed_record(value, interner)
                 .map_err(shamir_storage::error::DbError::Codec)?;
-            let inner = json_value_to_inner(&resolved, interner)
+            let inner = query_value_to_inner(&resolved, interner)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
             inner_values.push(inner);
             resolved_values.push(resolved);
@@ -77,7 +74,14 @@ impl TableManager {
         let mut records = Vec::with_capacity(resolved_values.len());
         for (value, id) in resolved_values.iter().zip(ids.iter()) {
             let mut obj = match &**value {
-                json::Value::Object(map) => map.clone(),
+                Value::Map(map) => {
+                    // Convert QueryValue map to serde_json::Map for the response
+                    let mut jmap = json::Map::new();
+                    for (k, v) in map {
+                        jmap.insert(k.clone(), json::Value::from(v.clone()));
+                    }
+                    jmap
+                }
                 _ => json::Map::new(),
             };
             obj.insert("_id".to_string(), json::Value::String(id.to_string()));
@@ -121,10 +125,7 @@ impl TableManager {
 
         // Resolve inline `$fn` computed fields first (fail-closed), then
         // intern field names through the tx overlay.
-        // Resolve computed fields and intern in a single pass — avoids
-        // materialising a temporary `resolved_values` Vec before we can
-        // start building `inner_values`.
-        let mut resolved_values: Vec<Cow<'_, json::Value>> = Vec::with_capacity(op.values.len());
+        let mut resolved_values: Vec<Cow<'_, QueryValue>> = Vec::with_capacity(op.values.len());
         let inner_values: Vec<InnerValue> = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
@@ -132,7 +133,7 @@ impl TableManager {
             for value in &op.values {
                 let resolved = resolve_computed_record(value, interner)
                     .map_err(shamir_storage::error::DbError::Codec)?;
-                let inner = json_value_to_inner_with(&resolved, &intern_fn)
+                let inner = query_value_to_inner_with(&resolved, &intern_fn)
                     .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                 vals.push(inner);
                 resolved_values.push(resolved);
@@ -160,7 +161,13 @@ impl TableManager {
         let mut records = Vec::with_capacity(resolved_values.len());
         for (value, id) in resolved_values.iter().zip(ids.iter()) {
             let mut obj = match &**value {
-                json::Value::Object(map) => map.clone(),
+                Value::Map(map) => {
+                    let mut jmap = json::Map::new();
+                    for (k, v) in map {
+                        jmap.insert(k.clone(), json::Value::from(v.clone()));
+                    }
+                    jmap
+                }
                 _ => json::Map::new(),
             };
             obj.insert("_id".to_string(), json::Value::String(id.to_string()));
@@ -194,7 +201,7 @@ impl TableManager {
         // fields in the same `set` payload.
         let resolved_set = resolve_computed_record(&op.set, interner)
             .map_err(shamir_storage::error::DbError::Codec)?;
-        let set_inner = json_value_to_inner(&resolved_set, interner)
+        let set_inner = query_value_to_inner(&resolved_set, interner)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
         let set_map = match &set_inner {
             InnerValue::Map(m) => m,
@@ -362,7 +369,7 @@ impl TableManager {
         let set_inner = {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
-            json_value_to_inner_with(&resolved_set, &intern_fn)
+            query_value_to_inner_with(&resolved_set, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
         };
         let set_map = match &set_inner {
@@ -631,17 +638,17 @@ impl TableManager {
         let batch_size = 1000;
         let interner = self.interner().get().await?;
 
-        // Parse key as JSON object → list of (field_path, value) to match
+        // Parse key as map → list of (field_path, value) to match
         // Use touch_ind (not get_ind) because key fields may not be interned yet
         let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
-            json::Value::Object(map) => {
+            Value::Map(map) => {
                 let mut fields = Vec::with_capacity(map.len());
                 for (k, v) in map {
                     let key_id = match interner.touch_ind(k.as_str()) {
                         Ok(t) => t.key().id(),
                         Err(e) => return Err(shamir_storage::error::DbError::Codec(e.to_string())),
                     };
-                    let inner_v = json_value_to_inner(v, interner)
+                    let inner_v = query_value_to_inner(v, interner)
                         .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                     fields.push((vec![key_id], inner_v));
                 }
@@ -664,7 +671,7 @@ impl TableManager {
         // Resolve inline `$fn` computed fields, then convert the new value.
         let resolved_value = resolve_computed_record(&op.value, interner)
             .map_err(shamir_storage::error::DbError::Codec)?;
-        let new_inner = json_value_to_inner(&resolved_value, interner)
+        let new_inner = query_value_to_inner(&resolved_value, interner)
             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
         // Changefeed (Phase 3b follow-up): the upsert always ends in a Put of
@@ -773,11 +780,11 @@ impl TableManager {
             let intern_fn = intern_via_layered(&layered);
 
             let key_fields: Vec<(Vec<u64>, InnerValue)> = match &op.key {
-                json::Value::Object(map) => {
+                Value::Map(map) => {
                     let mut fields = Vec::with_capacity(map.len());
                     for (k, v) in map {
                         let key_id = layered.touch_sync(k.as_str());
-                        let inner_v = json_value_to_inner_with(v, &intern_fn)
+                        let inner_v = query_value_to_inner_with(v, &intern_fn)
                             .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
                         fields.push((vec![key_id], inner_v));
                     }
@@ -790,7 +797,7 @@ impl TableManager {
                 }
             };
 
-            let new_inner = json_value_to_inner_with(&resolved_value, &intern_fn)
+            let new_inner = query_value_to_inner_with(&resolved_value, &intern_fn)
                 .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
 
             (key_fields, new_inner)
@@ -829,9 +836,10 @@ impl TableManager {
                 json::Value::Object(m) => m,
                 _ => json::Map::new(),
             };
-            if let json::Value::Object(overlay) = &op.value {
+            // Overlay op.value fields (QueryValue → serde_json::Value).
+            if let Value::Map(overlay) = &op.value {
                 for (k, v) in overlay {
-                    base_obj.insert(k.clone(), v.clone());
+                    base_obj.insert(k.clone(), json::Value::from(v.clone()));
                 }
             }
             (false, json::Value::Object(base_obj))
@@ -845,7 +853,7 @@ impl TableManager {
             let id = self.insert_tx(&new_inner, Some(&mut *tx)).await?;
             // Build result JSON from original op.value to avoid overlay-id
             // reverse-lookup (overlay ids are not yet in the base interner).
-            let mut obj = match op.value.clone() {
+            let mut obj = match json::Value::from(op.value.clone()) {
                 json::Value::Object(m) => m,
                 other => {
                     let mut m = json::Map::new();

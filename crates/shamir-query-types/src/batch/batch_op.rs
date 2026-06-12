@@ -186,217 +186,234 @@ impl Serialize for BatchOp {
 
 impl<'de> Deserialize<'de> for BatchOp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let obj = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("BatchOp must be a JSON object"))?;
+        // Buffer the map as a format-agnostic QueryValue first.
+        // When the wire format is msgpack this avoids materialising a
+        // serde_json::Value tree — QueryValue deserialises natively
+        // from any serde format.
+        use shamir_types::types::value::{QueryValue, Value};
+
+        let qv = QueryValue::deserialize(deserializer)?;
+
+        // Collect the set of top-level keys for dispatch. This is cheap:
+        // just the key strings, not the values.
+        let keys: Vec<String> = match &qv {
+            Value::Map(m) => m.keys().cloned().collect(),
+            _ => return Err(serde::de::Error::custom("BatchOp must be a map")),
+        };
+        let has = |k: &str| keys.iter().any(|s| s == k);
+
+        // Convert to serde_json::Value for the from_value dispatch.
+        // For write-path ops (Insert, Update, Set) the inner types
+        // now carry QueryValue fields — from_value invokes
+        // QueryValue::deserialize which is a single-pass tree walk.
+        let value = serde_json::Value::from(qv);
 
         // Dispatch by unique key
-        if obj.contains_key("from") {
+        if has("from") {
             serde_json::from_value(value)
                 .map(BatchOp::Read)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("insert_into") {
+        } else if has("insert_into") {
             serde_json::from_value(value)
                 .map(BatchOp::Insert)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("update") {
+        } else if has("update") {
             serde_json::from_value(value)
                 .map(BatchOp::Update)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("delete_from") {
+        } else if has("delete_from") {
             serde_json::from_value(value)
                 .map(BatchOp::Delete)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_db") {
+        } else if has("create_db") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateDb)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_db") {
+        } else if has("drop_db") {
             serde_json::from_value(value)
                 .map(BatchOp::DropDb)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_repo") {
+        } else if has("create_repo") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateRepo)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_repo") {
+        } else if has("drop_repo") {
             serde_json::from_value(value)
                 .map(BatchOp::DropRepo)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_table") {
+        } else if has("create_table") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateTable)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_table") {
+        } else if has("drop_table") {
             serde_json::from_value(value)
                 .map(BatchOp::DropTable)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_index") {
+        } else if has("create_index") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateIndex)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_index") {
+        } else if has("drop_index") {
             serde_json::from_value(value)
                 .map(BatchOp::DropIndex)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("set_buffer_config") {
+        } else if has("set_buffer_config") {
             serde_json::from_value(value)
                 .map(BatchOp::SetBufferConfig)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("get_buffer_config") {
+        } else if has("get_buffer_config") {
             serde_json::from_value(value)
                 .map(BatchOp::GetBufferConfig)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("alter_buffer_config") {
+        } else if has("alter_buffer_config") {
             serde_json::from_value(value)
                 .map(BatchOp::AlterBufferConfig)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("start_migration") {
+        } else if has("start_migration") {
             serde_json::from_value(value)
                 .map(BatchOp::StartMigration)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("commit_migration") {
+        } else if has("commit_migration") {
             serde_json::from_value(value)
                 .map(BatchOp::CommitMigration)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("rollback_migration") {
+        } else if has("rollback_migration") {
             serde_json::from_value(value)
                 .map(BatchOp::RollbackMigration)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("migration_status") {
+        } else if has("migration_status") {
             serde_json::from_value(value)
                 .map(BatchOp::MigrationStatus)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_user") {
+        } else if has("create_user") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateUser)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_user") {
+        } else if has("drop_user") {
             serde_json::from_value(value)
                 .map(BatchOp::DropUser)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_role") {
+        } else if has("create_role") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateRole)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_role") {
+        } else if has("drop_role") {
             serde_json::from_value(value)
                 .map(BatchOp::DropRole)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("grant_role") {
+        } else if has("grant_role") {
             serde_json::from_value(value)
                 .map(BatchOp::GrantRole)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("revoke_role") {
+        } else if has("revoke_role") {
             serde_json::from_value(value)
                 .map(BatchOp::RevokeRole)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("list") {
+        } else if has("list") {
             serde_json::from_value(value)
                 .map(BatchOp::List)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("chmod") {
+        } else if has("chmod") {
             serde_json::from_value(value)
                 .map(BatchOp::Chmod)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("chown") {
+        } else if has("chown") {
             serde_json::from_value(value)
                 .map(BatchOp::Chown)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("chgrp") {
+        } else if has("chgrp") {
             serde_json::from_value(value)
                 .map(BatchOp::Chgrp)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_group") {
+        } else if has("create_group") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateGroup)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_group") {
+        } else if has("drop_group") {
             serde_json::from_value(value)
                 .map(BatchOp::DropGroup)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("add_group_member") {
+        } else if has("add_group_member") {
             serde_json::from_value(value)
                 .map(BatchOp::AddGroupMember)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("remove_group_member") {
+        } else if has("remove_group_member") {
             serde_json::from_value(value)
                 .map(BatchOp::RemoveGroupMember)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("access_tree") {
+        } else if has("access_tree") {
             serde_json::from_value(value)
                 .map(BatchOp::AccessTree)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_function") {
+        } else if has("create_function") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateFunction)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_function") {
+        } else if has("drop_function") {
             serde_json::from_value(value)
                 .map(BatchOp::DropFunction)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("rename_function") {
+        } else if has("rename_function") {
             serde_json::from_value(value)
                 .map(BatchOp::RenameFunction)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_validator") {
+        } else if has("create_validator") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateValidator)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("drop_validator") {
+        } else if has("drop_validator") {
             serde_json::from_value(value)
                 .map(BatchOp::DropValidator)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("rename_validator") {
+        } else if has("rename_validator") {
             serde_json::from_value(value)
                 .map(BatchOp::RenameValidator)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("bind_validator") {
+        } else if has("bind_validator") {
             serde_json::from_value(value)
                 .map(BatchOp::BindValidator)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("unbind_validator") {
+        } else if has("unbind_validator") {
             serde_json::from_value(value)
                 .map(BatchOp::UnbindValidator)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("list_validators") {
+        } else if has("list_validators") {
             serde_json::from_value(value)
                 .map(BatchOp::ListValidators)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("create_function_folder") {
+        } else if has("create_function_folder") {
             serde_json::from_value(value)
                 .map(BatchOp::CreateFunctionFolder)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("purge_history") {
+        } else if has("purge_history") {
             serde_json::from_value(value)
                 .map(BatchOp::PurgeHistory)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("set_retention") {
+        } else if has("set_retention") {
             serde_json::from_value(value)
                 .map(BatchOp::SetRetention)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("changes_since") {
+        } else if has("changes_since") {
             serde_json::from_value(value)
                 .map(BatchOp::ChangesSince)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("call") {
+        } else if has("call") {
             serde_json::from_value(value)
                 .map(BatchOp::Call)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("batch") {
+        } else if has("batch") {
             serde_json::from_value(value)
                 .map(BatchOp::Batch)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("subscribe") {
+        } else if has("subscribe") {
             serde_json::from_value(value)
                 .map(BatchOp::Subscribe)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("unsubscribe") {
+        } else if has("unsubscribe") {
             serde_json::from_value(value)
                 .map(BatchOp::Unsubscribe)
                 .map_err(serde::de::Error::custom)
-        } else if obj.contains_key("set") {
+        } else if has("set") {
             // "set" checked last because UpdateOp also has a "set" field
             serde_json::from_value(value)
                 .map(BatchOp::Set)

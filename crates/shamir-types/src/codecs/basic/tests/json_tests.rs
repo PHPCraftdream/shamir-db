@@ -146,15 +146,18 @@ fn test_serialization_to_string_for_big_types() {
 }
 
 #[test]
-fn test_fail_on_unknown_prefix() {
+fn test_unknown_prefix_treated_as_plain_key() {
+    // Unknown prefixes are treated as plain field names (supports
+    // user data with colons, e.g. "xml:lang", "urn:isbn:...").
     let codec = JsonCodec;
     let json_unknown_prefix = r#"{ "foo:bar": 123 }"#;
-    let result: Result<UserValue, _> = codec.decode(json_unknown_prefix.as_bytes());
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("unknown type prefix: 'foo'"));
+    let result: UserValue = codec.decode(json_unknown_prefix.as_bytes()).unwrap();
+    match result {
+        UserValue::Map(m) => {
+            assert_eq!(m.get("foo:bar"), Some(&UserValue::Int(123)));
+        }
+        _ => panic!("expected Map"),
+    }
 }
 
 #[test]

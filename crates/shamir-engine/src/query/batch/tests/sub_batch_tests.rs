@@ -297,7 +297,7 @@ async fn sub_batch_atomic() {
         QueryEntry {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("users"),
-                values: vec![serde_json::json!({ "name": "atomic_test" })],
+                values: vec![serde_json::json!({ "name": "atomic_test" }).into()],
             }),
             return_result: true,
             after: Vec::new(),
@@ -308,7 +308,7 @@ async fn sub_batch_atomic() {
         QueryEntry {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("nonexistent_table"),
-                values: vec![serde_json::json!({ "name": "should_not_appear" })],
+                values: vec![serde_json::json!({ "name": "should_not_appear" }).into()],
             }),
             return_result: true,
             after: vec!["good".to_string()],
@@ -409,7 +409,7 @@ async fn tx_in_tx_rejected() {
         QueryEntry {
             op: BatchOp::Insert(shamir_query_types::write::InsertOp {
                 insert_into: crate::query::TableRef::new("users"),
-                values: vec![serde_json::json!({ "name": "tx_in_tx" })],
+                values: vec![serde_json::json!({ "name": "tx_in_tx" }).into()],
             }),
             return_result: true,
             after: Vec::new(),
@@ -708,7 +708,7 @@ async fn param_in_insert_values() {
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
-                values: vec![inner_insert_value],
+                values: vec![inner_insert_value.into()],
             }),
             return_result: true,
             after: Vec::new(),
@@ -825,7 +825,7 @@ async fn param_in_insert_nested() {
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
-                values: vec![inner_value],
+                values: vec![inner_value.into()],
             }),
             return_result: true,
             after: Vec::new(),
@@ -943,7 +943,7 @@ async fn param_in_insert_missing_param_errors() {
         QueryEntry {
             op: BatchOp::Insert(InsertOp {
                 insert_into: TableRef::new("orders"),
-                values: vec![inner_value],
+                values: vec![inner_value.into()],
             }),
             return_result: true,
             after: Vec::new(),

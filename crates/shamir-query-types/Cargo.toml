@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 shamir-collections = { path = "../shamir-collections" }
-shamir-types = { path = "../shamir-types", optional = true }
+shamir-types = { path = "../shamir-types" }
 
 # Pure data dependencies — DTOs serialize to JSON / msgpack and use
 # ordered maps for deterministic iteration.
@@ -33,7 +33,7 @@ zeroize    = { version = "1", features = ["derive"], optional = true }
 [features]
 default = ["crypto", "server"]
 crypto  = ["dep:hmac", "dep:sha2", "dep:zeroize"]
-server  = ["dep:shamir-types"]
+server  = []
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
