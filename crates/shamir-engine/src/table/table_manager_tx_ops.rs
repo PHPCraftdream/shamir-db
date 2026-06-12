@@ -334,22 +334,15 @@ impl TableManager {
             }
         }
 
-        // 2. Generate ids + serialise bytes upfront.
+        // 2. Generate ids upfront. Serialization (to_bytes) is deferred to
+        //    commit Phase 4/5 via StagedRow::Live — aborted txs skip it.
         let mut ids: Vec<RecordId> = Vec::with_capacity(values.len());
-        let mut rows_bytes: Vec<bytes::Bytes> = Vec::with_capacity(values.len());
-        for v in values {
+        for _ in values {
             ids.push(RecordId::new());
-            let b = v.to_bytes().map_err(|e| {
-                shamir_storage::error::DbError::Codec(format!(
-                    "Failed to serialize InnerValue: {}",
-                    e
-                ))
-            })?;
-            rows_bytes.push(b);
         }
 
         // 2b. Precompute Bytes keys once — reused in the lock loop and
-        //    set_many below, halving to_bytes() calls from 2N to N.
+        //    set_many_live below.
         let id_bytes: Vec<bytes::Bytes> = ids.iter().map(|rid| rid.to_bytes()).collect();
 
         // Level-3: acquire Exclusive locks on every new rid before
@@ -413,12 +406,12 @@ impl TableManager {
         legacy_ops.extend(self.sorted_indexes.plan_records_created_batch(pairs(), 0)?);
         index_ops.extend(legacy_ops);
 
-        // 6. Single ensure_table_staging, then set_many: one synchronous
-        //    pass — no async overhead per key. The StagingStore overlay
-        //    is a per-tx in-memory scc::HashMap; set_many calls the
-        //    sync upsert variant to skip N async yield points.
+        // 6. Single ensure_table_staging, then set_many_live: one synchronous
+        //    pass — no async overhead per key. InnerValues are stored as
+        //    StagedRow::Live; msgpack encoding is deferred to commit Phase 4/5.
+        //    Aborted txs skip encoding entirely.
         let staging = tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
-        staging.set_many(id_bytes.into_iter().zip(rows_bytes));
+        staging.set_many_live(id_bytes.into_iter().zip(values.iter().cloned()));
 
         // 7. Merge index_ops + counter delta in one go.
         tx.index_write_set
