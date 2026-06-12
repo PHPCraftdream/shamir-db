@@ -1,7 +1,7 @@
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
-use crate::query::read::QueryResult;
+use crate::query::read::{QueryRecord, QueryResult};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::InnerValue;
@@ -23,7 +23,9 @@ fn test_query_ref_eq() {
     refs.insert(
         "users".to_string(),
         QueryResult {
-            records: vec![serde_json::json!({"id": 42, "name": "Alice"})],
+            records: vec![QueryRecord::Json(
+                serde_json::json!({"id": 42, "name": "Alice"}),
+            )],
             stats: None,
             pagination: None,
             value: None,
@@ -56,7 +58,7 @@ fn test_query_ref_no_match() {
     refs.insert(
         "users".to_string(),
         QueryResult {
-            records: vec![serde_json::json!({"id": 42})],
+            records: vec![QueryRecord::Json(serde_json::json!({"id": 42}))],
             stats: None,
             pagination: None,
             value: None,

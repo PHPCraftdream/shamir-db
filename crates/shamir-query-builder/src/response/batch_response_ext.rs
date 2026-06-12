@@ -2,7 +2,7 @@
 //! typed extraction from [`BatchResponse`].
 
 use shamir_query_types::batch::{BatchResponse, TransactionInfo};
-use shamir_query_types::read::QueryResult;
+use shamir_query_types::read::{QueryRecord, QueryResult};
 
 use crate::batch::Handle;
 
@@ -71,7 +71,7 @@ impl std::error::Error for ResponseError {
 // ============================================================================
 
 /// Returned by `rows` / `get_rows` when the alias is absent.
-const EMPTY_SLICE: &[serde_json::Value] = &[];
+const EMPTY_SLICE: &[QueryRecord] = &[];
 
 // ============================================================================
 // BatchResponseExt trait
@@ -83,7 +83,7 @@ pub trait BatchResponseExt {
     fn result(&self, alias: &str) -> Option<&QueryResult>;
 
     /// The raw records for an alias (empty slice if absent).
-    fn rows(&self, alias: &str) -> &[serde_json::Value];
+    fn rows(&self, alias: &str) -> &[QueryRecord];
 
     /// Deserialize every record of an alias into `T`.
     ///
@@ -107,7 +107,7 @@ pub trait BatchResponseExt {
     fn get(&self, handle: &Handle) -> Option<&QueryResult>;
 
     /// `rows` keyed by a `Handle`.
-    fn get_rows(&self, handle: &Handle) -> &[serde_json::Value];
+    fn get_rows(&self, handle: &Handle) -> &[QueryRecord];
 
     /// `rows_as` keyed by a `Handle`.
     fn get_as<T: serde::de::DeserializeOwned>(
@@ -135,7 +135,7 @@ impl BatchResponseExt for BatchResponse {
         self.results.get(alias)
     }
 
-    fn rows(&self, alias: &str) -> &[serde_json::Value] {
+    fn rows(&self, alias: &str) -> &[QueryRecord] {
         self.results
             .get(alias)
             .map(|qr| qr.records.as_slice())
@@ -153,9 +153,11 @@ impl BatchResponseExt for BatchResponse {
         qr.records
             .iter()
             .map(|v| {
-                serde_json::from_value(v.clone()).map_err(|e| ResponseError::Deserialize {
-                    alias: alias.to_owned(),
-                    source: e,
+                serde_json::from_value(v.as_json().into_owned()).map_err(|e| {
+                    ResponseError::Deserialize {
+                        alias: alias.to_owned(),
+                        source: e,
+                    }
                 })
             })
             .collect()
@@ -178,7 +180,7 @@ impl BatchResponseExt for BatchResponse {
                 index,
                 len: qr.records.len(),
             })?;
-        serde_json::from_value(val.clone()).map_err(|e| ResponseError::Deserialize {
+        serde_json::from_value(val.as_json().into_owned()).map_err(|e| ResponseError::Deserialize {
             alias: alias.to_owned(),
             source: e,
         })
@@ -188,7 +190,7 @@ impl BatchResponseExt for BatchResponse {
         self.result(handle.alias())
     }
 
-    fn get_rows(&self, handle: &Handle) -> &[serde_json::Value] {
+    fn get_rows(&self, handle: &Handle) -> &[QueryRecord] {
         self.rows(handle.alias())
     }
 

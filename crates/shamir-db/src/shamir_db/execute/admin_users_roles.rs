@@ -123,7 +123,8 @@ impl ShamirAdminExecutor {
                 .await
                 .map_err(|e| err(e.to_string()))?;
             existing.records.first().and_then(|rec| {
-                rec.get("database")
+                rec.as_json()
+                    .get("database")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             })
@@ -308,7 +309,7 @@ impl ShamirAdminExecutor {
                 format!("User '{}' not found", op.user),
             ));
         }
-        let mut user_json = result.records[0].clone();
+        let mut user_json = result.records[0].as_json().into_owned();
         if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
             if !roles.contains(&json!(op.grant_role)) {
                 roles.push(json!(op.grant_role));
@@ -391,7 +392,7 @@ impl ShamirAdminExecutor {
                 format!("User '{}' not found", op.user),
             ));
         }
-        let mut user_json = result.records[0].clone();
+        let mut user_json = result.records[0].as_json().into_owned();
         if let Some(roles) = user_json.get_mut("roles").and_then(|r| r.as_array_mut()) {
             roles.retain(|r| r != &json!(op.revoke_role));
         }

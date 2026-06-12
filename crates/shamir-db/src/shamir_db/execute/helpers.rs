@@ -1,7 +1,7 @@
 //! Shared helper functions used across admin executor sub-modules.
 
 use crate::query::batch::BatchError;
-use crate::query::read::{QueryResult, QueryStats};
+use crate::query::read::{QueryRecord, QueryResult, QueryStats};
 use crate::query::FilterValue;
 use crate::types::common::TMap;
 use crate::types::value::QueryValue;
@@ -9,7 +9,7 @@ use crate::types::value::QueryValue;
 /// Construct a `QueryResult` for a successful admin operation.
 pub(super) fn admin_result(data: serde_json::Value) -> QueryResult {
     QueryResult {
-        records: vec![data],
+        records: vec![QueryRecord::Json(data)],
         stats: Some(QueryStats {
             index_used: None,
             records_scanned: 0,
@@ -246,7 +246,10 @@ pub(super) fn filter_value_to_query_value(
                 let arr: Vec<QueryValue> = qr
                     .records
                     .iter()
-                    .map(|r| json_value_to_query_value(r, None))
+                    .map(|r| {
+                        let jv = r.as_json();
+                        json_value_to_query_value(&jv, None)
+                    })
                     .collect();
                 QueryValue::List(arr)
             } else {
@@ -258,14 +261,15 @@ pub(super) fn filter_value_to_query_value(
                     if let Some(end) = rest.find(']') {
                         if let Ok(idx) = rest[..end].parse::<usize>() {
                             if let Some(record) = qr.records.get(idx) {
+                                let record_json = record.as_json();
                                 let after = &rest[end + 1..];
                                 if let Some(field_path) = after.strip_prefix('.') {
-                                    if let Some(field_val) = record.get(field_path) {
+                                    if let Some(field_val) = record_json.get(field_path) {
                                         return json_value_to_query_value(field_val, None);
                                     }
                                     return QueryValue::Null;
                                 }
-                                return json_value_to_query_value(record, None);
+                                return json_value_to_query_value(&record_json, None);
                             }
                         }
                     }

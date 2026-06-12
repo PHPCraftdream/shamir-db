@@ -172,11 +172,12 @@ pub(super) fn resolve_query_ref_value(qr: &QueryResult, path: Option<&str>) -> O
     let record = qr.records.get(index)?;
 
     let rest = &path[bracket_end + 1..];
+    let record_json = record.as_json();
     if rest.is_empty() {
-        return json_to_inner_value(record);
+        return json_to_inner_value(&record_json);
     }
     let rest = rest.strip_prefix('.')?;
-    let field_val = record.get(rest)?;
+    let field_val = record_json.get(rest)?;
     json_to_inner_value(field_val)
 }
 
@@ -200,7 +201,8 @@ pub(super) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> 
     qr.records
         .iter()
         .filter_map(|record| {
-            let val = record.get(field)?;
+            let record_json = record.as_json();
+            let val = record_json.get(field)?;
             json_to_inner_value(val)
         })
         .collect()

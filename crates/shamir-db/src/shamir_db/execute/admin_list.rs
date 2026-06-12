@@ -93,11 +93,12 @@ impl ShamirAdminExecutor {
                 let users: Vec<serde_json::Value> = result
                     .records
                     .into_iter()
-                    .map(|mut r| {
-                        if let Some(obj) = r.as_object_mut() {
+                    .map(|r| {
+                        let mut jv = serde_json::Value::from(r);
+                        if let Some(obj) = jv.as_object_mut() {
                             obj.remove("password_hash");
                         }
-                        r
+                        jv
                     })
                     .collect();
                 Ok(admin_result(json!({"users": users})))

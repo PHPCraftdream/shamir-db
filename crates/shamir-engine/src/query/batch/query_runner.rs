@@ -7,7 +7,7 @@ use crate::query::batch::batch_execute::execute_batch_impl;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
-use crate::query::read::{QueryResult, QueryStats};
+use crate::query::read::{QueryRecord, QueryResult, QueryStats};
 use crate::query::write::WriteResult;
 use crate::query::TableRef;
 use shamir_types::access::{authorize, Action, Actor, ResourcePath};
@@ -527,7 +527,7 @@ pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
         records: wr
             .records
             .into_iter()
-            .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+            .map(|r| QueryRecord::Json(serde_json::to_value(r).unwrap_or(serde_json::Value::Null)))
             .collect(),
         stats: Some(QueryStats {
             index_used: None,

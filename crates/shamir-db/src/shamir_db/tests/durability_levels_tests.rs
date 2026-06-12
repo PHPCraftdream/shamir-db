@@ -71,8 +71,9 @@ async fn synced_batch_survives_immediate_drop() {
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(records.len(), 1, "synced batch must survive immediate drop");
-    assert_eq!(records[0]["name"], "widget");
-    assert_eq!(records[0]["qty"], 42);
+    let r0 = records[0].as_json();
+    assert_eq!(r0.get("name").and_then(|v| v.as_str()), Some("widget"));
+    assert_eq!(r0.get("qty").and_then(|v| v.as_i64()), Some(42));
 }
 
 /// A non-transactional insert batch with `durability` absent (i.e.

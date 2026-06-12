@@ -152,7 +152,7 @@ impl DbGateway for FacadeDbGateway {
 
         match result.records.first() {
             Some(rec) => {
-                let qv = serde_json::from_value(rec.clone())
+                let qv = serde_json::from_value(rec.as_json().into_owned())
                     .map_err(|e| format!("get: record decode error: {e}"))?;
                 Ok(Some(qv))
             }
@@ -209,7 +209,7 @@ impl DbGateway for FacadeDbGateway {
 
         match result.records.first() {
             Some(rec) => {
-                let qv = serde_json::from_value(rec.clone())
+                let qv = serde_json::from_value(rec.as_json().into_owned())
                     .map_err(|e| format!("insert: record decode error: {e}"))?;
                 Ok(qv)
             }
@@ -292,7 +292,7 @@ impl DbGateway for FacadeDbGateway {
             .records
             .iter()
             .map(|rec| {
-                serde_json::from_value(rec.clone())
+                serde_json::from_value(rec.as_json().into_owned())
                     .map_err(|e| format!("query: record decode error: {e}"))
             })
             .collect()

@@ -1,7 +1,7 @@
 use crate::query::filter::eval::compile_filter;
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
-use crate::query::read::QueryResult;
+use crate::query::read::{QueryRecord, QueryResult};
 use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::InnerValue;
@@ -88,9 +88,9 @@ fn test_in_query_ref_column() {
         "allowed_users".to_string(),
         QueryResult {
             records: vec![
-                serde_json::json!({"id": 1}),
-                serde_json::json!({"id": 2}),
-                serde_json::json!({"id": 5}),
+                QueryRecord::Json(serde_json::json!({"id": 1})),
+                QueryRecord::Json(serde_json::json!({"id": 2})),
+                QueryRecord::Json(serde_json::json!({"id": 5})),
             ],
             stats: None,
             pagination: None,
@@ -125,7 +125,10 @@ fn test_in_query_ref_column_no_match() {
     refs.insert(
         "allowed_users".to_string(),
         QueryResult {
-            records: vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
+            records: vec![
+                QueryRecord::Json(serde_json::json!({"id": 1})),
+                QueryRecord::Json(serde_json::json!({"id": 2})),
+            ],
             stats: None,
             pagination: None,
             value: None,
@@ -158,7 +161,10 @@ fn test_not_in_query_ref_column() {
     refs.insert(
         "blocked".to_string(),
         QueryResult {
-            records: vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
+            records: vec![
+                QueryRecord::Json(serde_json::json!({"id": 1})),
+                QueryRecord::Json(serde_json::json!({"id": 2})),
+            ],
             stats: None,
             pagination: None,
             value: None,

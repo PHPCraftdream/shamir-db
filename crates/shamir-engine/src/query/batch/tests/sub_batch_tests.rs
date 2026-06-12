@@ -133,7 +133,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
         resp.results["read"].records
     );
     assert_eq!(
-        resp.results["read"].records[0]["name"],
+        resp.results["read"].records[0].as_json()["name"],
         serde_json::json!("p3_alice")
     );
 
@@ -790,13 +790,14 @@ async fn param_in_insert_values() {
         "read_back must find exactly 1 order with user_id=42; got {:?}",
         records
     );
+    let rec0_json = records[0].as_json();
     assert_eq!(
-        records[0]["user_id"],
+        rec0_json["user_id"],
         serde_json::json!(42),
         "inserted order must have user_id == 42 (from $param uid)"
     );
     assert_eq!(
-        records[0]["note"],
+        rec0_json["note"],
         serde_json::json!("order1"),
         "note field must be preserved verbatim"
     );
@@ -915,8 +916,9 @@ async fn param_in_insert_nested() {
         .unwrap();
     let rows = &read_resp.results["r"].records;
     assert_eq!(rows.len(), 1, "must find the inserted row by label");
+    let row0_json = rows[0].as_json();
     assert_eq!(
-        rows[0]["meta"]["created_by"],
+        row0_json["meta"]["created_by"],
         serde_json::json!(99),
         "nested $param must have been substituted to 99"
     );

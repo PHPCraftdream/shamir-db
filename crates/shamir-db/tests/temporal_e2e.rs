@@ -144,7 +144,11 @@ async fn run_query(shamir: &ShamirDb, db: &str, q: Query) -> Vec<serde_json::Val
         .execute(db, &b.to_request_via_msgpack())
         .await
         .expect("query execute");
-    resp.results["q"].records.clone()
+    resp.results["q"]
+        .records
+        .iter()
+        .map(|r| r.as_json().into_owned())
+        .collect()
 }
 
 /// Run `ChangesSince { changes_since: cursor }` against `(db, main)` and
@@ -157,7 +161,7 @@ async fn run_changes_since(shamir: &ShamirDb, db: &str, cursor: u64) -> serde_js
         .execute(db, &b.to_request_via_msgpack())
         .await
         .expect("ChangesSince execute");
-    resp.results["cs"].records[0].clone()
+    resp.results["cs"].records[0].as_json().into_owned()
 }
 
 // ---------------------------------------------------------------------------

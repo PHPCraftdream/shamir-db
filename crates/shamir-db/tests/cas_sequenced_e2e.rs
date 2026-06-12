@@ -226,7 +226,7 @@ async fn current_hash(db: &ShamirDb) -> String {
         .unwrap();
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1, "expected exactly one stored row");
-    canonical_hash(&json_record_to_query_value(&records[0]))
+    canonical_hash(&json_record_to_query_value(&records[0].as_json()))
 }
 
 // ═══════════════════════════════════════════════════════════════════════

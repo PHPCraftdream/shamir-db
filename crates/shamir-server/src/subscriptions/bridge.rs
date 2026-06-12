@@ -168,7 +168,8 @@ pub(crate) async fn bridge_task(
                     Ok(response) => {
                         for qr in response.results.values() {
                             for record in &qr.records {
-                                let key_value = record
+                                let record_json = record.as_json();
+                                let key_value = record_json
                                     .get("_id")
                                     .cloned()
                                     .unwrap_or(serde_json::Value::Null);
@@ -177,7 +178,7 @@ pub(crate) async fn bridge_task(
                                     "op": "put",
                                     "key": key_value,
                                     "commit_version": 0,
-                                    "value": record
+                                    "value": *record_json
                                 });
                                 let data = serde_json::to_vec(&obj).unwrap_or_default();
                                 if !try_push_event(

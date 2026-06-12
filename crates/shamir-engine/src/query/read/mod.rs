@@ -21,8 +21,8 @@ pub use order::apply_order_by;
 pub use parser::query_from_value;
 pub use shamir_query_types::read::{
     AggFunc, AggregateField, At, GroupBy, NullsOrder, OrderBy, OrderByItem, OrderDirection,
-    Pagination, PaginationInfo, QueryResult, QueryStats, ReadQuery, Select, SelectExpr,
-    SelectExprValue, SelectItem, Temporal,
+    Pagination, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery, Select,
+    SelectExpr, SelectExprValue, SelectItem, Temporal,
 };
 
 #[cfg(test)]

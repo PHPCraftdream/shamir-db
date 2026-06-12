@@ -86,11 +86,7 @@ fn extract_names_from_result(result: &crate::query::read::QueryResult) -> Vec<St
     let mut names: Vec<String> = result
         .records
         .iter()
-        .filter_map(|r| {
-            r.get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
+        .filter_map(|r| r.get_str("name"))
         .collect();
     names.sort();
     names

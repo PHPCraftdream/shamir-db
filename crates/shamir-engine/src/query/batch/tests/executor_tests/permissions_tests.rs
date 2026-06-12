@@ -131,10 +131,8 @@ async fn rls_read_returns_only_matching_rows() {
         "RLS must restrict Read to active rows only; got {:?}",
         records
     );
-    let names: Vec<&str> = records
-        .iter()
-        .filter_map(|r| r.get("name").and_then(|v| v.as_str()))
-        .collect();
+    let names: Vec<String> = records.iter().filter_map(|r| r.get_str("name")).collect();
+    let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     assert!(names.contains(&"Alice"), "Alice is active");
     assert!(names.contains(&"Carol"), "Carol is active");
     assert!(
@@ -202,8 +200,8 @@ async fn rls_delete_only_removes_matching_rows() {
         "only the inactive row should remain after RLS-scoped delete"
     );
     assert_eq!(
-        remaining[0]["name"].as_str().unwrap(),
-        "Bob",
+        remaining[0].get_str("name").as_deref(),
+        Some("Bob"),
         "the surviving row must be the inactive one"
     );
 }
