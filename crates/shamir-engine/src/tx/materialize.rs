@@ -9,19 +9,29 @@ use crate::tx::commit_phases::{
 };
 use crate::tx::tx_outcome::MaterializationState;
 
+/// Phases 5a–6-bis of the commit pipeline, run UNDER `commit_lock`.
+///
 /// cancel-safe: NO, and it does NOT need to be — by the time this runs
 /// the tx is already COMMITTED (Phase 4 succeeded). It applies the WAL
 /// entry's visibility-bearing projections (data → main, counter, index →
-/// info), publishes the version, persists recovery markers, and removes
-/// the WAL marker. It does NOT promote HNSW vectors — that derived,
-/// rebuild-on-open read-accelerator moved OUT of the commit critical
-/// section (III.5): `commit_tx_inner` drops `commit_lock` after Phase 7
-/// and then calls `promote_vectors`. NONE of the projections here may
-/// abort the tx: a sub-phase failure is logged and the WAL marker is left
-/// inflight so recovery re-applies the entry on the next open (recovery is
-/// the materialization guarantor — `Put`/`Delete`/`IndexPut`/`IndexDel`
-/// are last-write-wins, counter replay is intentionally skipped, HNSW is
-/// rebuilt on open). Returns the observed [`MaterializationState`].
+/// info), publishes the version, and records the SSI write footprint.
+/// It does NOT promote HNSW vectors — that derived, rebuild-on-open
+/// read-accelerator moved OUT of the commit critical section (III.5).
+/// NONE of the projections here may abort the tx: a sub-phase failure is
+/// logged and the WAL marker is left inflight so recovery re-applies the
+/// entry on the next open (recovery is the materialization guarantor —
+/// `Put`/`Delete`/`IndexPut`/`IndexDel` are last-write-wins, counter
+/// replay is intentionally skipped, HNSW is rebuilt on open).
+///
+/// Returns a [`PostPublishState`] that the caller passes to
+/// [`post_publish_cleanup`] AFTER releasing `commit_lock`. Phase 6.5
+/// (markers) and Phase 7 (WAL cleanup) are I/O-bound but do NOT need
+/// the commit lock — they only affect crash-recovery state, and recovery
+/// tolerates stale markers (`recover_inflight_v2` re-persists the floor
+/// when it consumes the inflight entry). Moving them out of the lock
+/// shrinks the critical section from O(rows + index + 2× info_store.set
+/// + WAL remove) to O(rows + index + publish), improving multi-committer
+///   throughput.
 ///
 /// Phase 6 (`publish_committed`) ALWAYS runs — the version is committed
 /// regardless of whether the projections landed inline.
@@ -42,9 +52,8 @@ pub(super) async fn materialize(
     repo: &RepoInstance,
     gate: &RepoTxGate,
     commit_version: u64,
-    wal: &RepoWalManager,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
-) -> MaterializationState {
+) -> PostPublishState {
     let tx_id = tx.tx_id.0;
     let mut ok = true;
 
@@ -189,6 +198,55 @@ pub(super) async fn materialize(
     // The inflight WAL marker survives → recovery materializes the tx.
     maybe_crash("phase6", repo).await;
 
+    // Phase 6.5 + 7 (markers + WAL cleanup) are returned as post-lock
+    // work — the caller runs them AFTER releasing `commit_lock`. See
+    // `post_publish_cleanup`.
+    PostPublishState {
+        tx_id,
+        commit_version,
+        projections_ok: ok,
+    }
+}
+
+/// State carried from [`materialize`] (under `commit_lock`) to
+/// [`post_publish_cleanup`] (outside `commit_lock`).
+pub(super) struct PostPublishState {
+    pub tx_id: u64,
+    pub commit_version: u64,
+    /// True iff Phases 5a–5c all succeeded. When false, Phase 7 is
+    /// skipped so the WAL marker stays inflight for recovery.
+    pub projections_ok: bool,
+}
+
+/// Phase 6.5 (markers) + Phase 7 (WAL cleanup), run OUTSIDE `commit_lock`.
+///
+/// These phases are pure crash-recovery bookkeeping: they do not affect
+/// in-memory visibility (Phase 6 already published the version) and do not
+/// need serialisation against other committers. Moving them out of the
+/// lock shrinks the critical section by two `info_store.set` calls + one
+/// WAL remove — measurable I/O that was serialising every committer.
+///
+/// Ordering is preserved: markers BEFORE WAL cleanup (the inverse is
+/// unsafe — see the original Phase 6.5 comment). The only change is that
+/// another committer may now enter the lock while these I/O ops run for
+/// the previous commit. That is safe because:
+///   - `publish_committed` already advanced `last_committed_version`;
+///     the new committer sees the correct MVCC floor.
+///   - Markers are a best-effort snapshot; recovery re-persists the floor
+///     from `gate.last_committed()` when consuming any inflight WAL entry.
+///   - WAL cleanup is idempotent (removing an already-absent marker is OK).
+pub(super) async fn post_publish_cleanup(
+    state: PostPublishState,
+    repo: &RepoInstance,
+    gate: &RepoTxGate,
+    wal: &RepoWalManager,
+) -> MaterializationState {
+    let PostPublishState {
+        tx_id,
+        commit_version,
+        mut projections_ok,
+    } = state;
+
     // Phase 6.5: persist recovery markers (CRIT-1).
     //
     // Write `last_committed_version` + `next_tx_id` to the repo's
@@ -211,16 +269,17 @@ pub(super) async fn materialize(
     // violation on restart.
     //
     // Best-effort post-commit: a marker write failure is logged and flips
-    // `ok` (Phase 7 will be skipped so the marker stays inflight). Even
-    // without these markers, `recover_inflight_v2` re-persists the floor
-    // (`gate.last_committed()`) when it consumes the inflight entry, so the
-    // version floor is restored on the next open.
+    // `projections_ok` (Phase 7 will be skipped so the marker stays
+    // inflight). Even without these markers, `recover_inflight_v2`
+    // re-persists the floor (`gate.last_committed()`) when it consumes
+    // the inflight entry, so the version floor is restored on the next
+    // open.
     if let Err(e) = persist_markers(repo, gate, commit_version).await {
         log::warn!(
             "commit_tx materialization Phase 6.5 (recovery markers) failed for tx {tx_id} \
              commit_version {commit_version}: {e}; deferring to recovery"
         );
-        ok = false;
+        projections_ok = false;
     }
 
     // Crash seam (test-only): everything (data, index, markers) is on
@@ -232,13 +291,13 @@ pub(super) async fn materialize(
     // Phase 7: WAL cleanup — ONLY on full materialization. If any
     // projection deferred, leave the marker inflight so recovery
     // re-applies the entry on the next open.
-    if ok {
+    if projections_ok {
         if let Err(e) = wal.commit(tx_id).await {
             log::warn!(
                 "commit_tx materialization Phase 7 (WAL cleanup) failed for tx {tx_id} \
                  commit_version {commit_version}: {e}; marker left inflight for recovery"
             );
-            ok = false;
+            projections_ok = false;
         } else {
             // Crash seam (test-only): Phase 7 done — the WAL marker is
             // gone and the tx is fully materialized. A HARD crash here
@@ -253,7 +312,7 @@ pub(super) async fn materialize(
         );
     }
 
-    if ok {
+    if projections_ok {
         MaterializationState::Complete
     } else {
         MaterializationState::Deferred
