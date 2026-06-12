@@ -22,7 +22,7 @@ use tokio_stream::{StreamExt, StreamMap};
 use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert};
 use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
 use super::push::{make_deliver_data, try_push_event};
-use super::target_match::{any_target_interested, matches_any};
+use super::target_match::{any_target_interested_indexed, build_target_index, matches_any_indexed};
 
 /// Bridge task: subscribes to the changefeed broadcast for the relevant
 /// repos, filters events by table name and event mask, and pushes
@@ -85,6 +85,9 @@ pub(crate) async fn bridge_task(
             .enumerate()
             .map(|(i, r)| (r.clone(), i))
             .collect();
+        // O(1) target index: (repo_idx, table) → target indices.
+        // Built once at subscribe time; replaces the two O(T) linear scans.
+        let target_index = build_target_index(&targets, &repo_idx);
         let mut watermarks: Vec<u64> = vec![0; repos.len()];
 
         // Journal backfill for from_version resume.
@@ -109,9 +112,16 @@ pub(crate) async fn bridge_task(
                     }
                     for event in &jr.events {
                         for change in &event.changes {
-                            // Cheap pre-check: skip the async de-intern entirely
-                            // when no target could match (repo/table/mask).
-                            if !any_target_interested(&targets, repo, &change.table, &change.op) {
+                            // O(1) pre-check via target index: skip the async
+                            // de-intern entirely when no target could match.
+                            let ri = repo_idx[repo];
+                            if !any_target_interested_indexed(
+                                &targets,
+                                &target_index,
+                                ri,
+                                &change.table,
+                                &change.op,
+                            ) {
                                 continue;
                             }
                             let value_json = match (&change.op, change.value.as_deref()) {
@@ -126,9 +136,10 @@ pub(crate) async fn bridge_task(
                                 }
                                 _ => None,
                             };
-                            if !matches_any(
+                            if !matches_any_indexed(
                                 &targets,
-                                repo,
+                                &target_index,
+                                ri,
                                 &change.table,
                                 &change.op,
                                 value_json.as_ref(),
@@ -250,12 +261,17 @@ pub(crate) async fn bridge_task(
                         continue;
                     }
                     *wm = event.commit_version;
+                    let ri = repo_idx[&repo];
                     for (change_idx, change) in event.changes.iter().enumerate() {
-                        // Cheap pre-check: skip the async de-intern entirely
-                        // when no target could match (repo/table/mask). On a
-                        // busy repo with a narrow subscription this avoids
-                        // wasted async work for every unrelated change.
-                        if !any_target_interested(&targets, &repo, &change.table, &change.op) {
+                        // O(1) pre-check via target index: skip the async
+                        // de-intern entirely when no target could match.
+                        if !any_target_interested_indexed(
+                            &targets,
+                            &target_index,
+                            ri,
+                            &change.table,
+                            &change.op,
+                        ) {
                             continue;
                         }
                         // De-intern the Put value once per event across
@@ -288,7 +304,14 @@ pub(crate) async fn bridge_task(
                             }
                         };
                         let value_json: Option<&serde_json::Value> = (*value_json_arc).as_ref();
-                        if !matches_any(&targets, &repo, &change.table, &change.op, value_json) {
+                        if !matches_any_indexed(
+                            &targets,
+                            &target_index,
+                            ri,
+                            &change.table,
+                            &change.op,
+                            value_json,
+                        ) {
                             continue;
                         }
                         // For Records/Keys modes the payload is identical
