@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use shamir_collections::THasher;
+
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
@@ -77,7 +79,13 @@ pub(crate) async fn bridge_task(
         }
 
         let mut consecutive_push_failures: u32 = 0;
-        let mut watermarks: HashMap<String, u64> = HashMap::new();
+        // repo name → index (built once; repos are fixed at subscribe time).
+        let repo_idx: HashMap<String, usize, THasher> = repos
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.clone(), i))
+            .collect();
+        let mut watermarks: Vec<u64> = vec![0; repos.len()];
 
         // Journal backfill for from_version resume.
         if let Some(fv) = from_version {
@@ -147,7 +155,7 @@ pub(crate) async fn bridge_task(
                                 return;
                             }
                         }
-                        let wm = watermarks.entry(repo.clone()).or_insert(0);
+                        let wm = &mut watermarks[repo_idx[repo]];
                         if event.commit_version > *wm {
                             *wm = event.commit_version;
                         }
@@ -218,13 +226,10 @@ pub(crate) async fn bridge_task(
 
             // Seed watermarks from current commit version to prevent live
             // duplicates of records already delivered in the snapshot.
-            for repo in targets
-                .iter()
-                .map(|(r, _, _, _)| r.as_str())
-                .collect::<std::collections::HashSet<_>>()
-            {
+            // Iterate unique repos via the pre-built index (no per-event alloc).
+            for (repo, &idx) in &repo_idx {
                 if let Some(v) = db.current_commit_version(&db_name, repo).await {
-                    let wm = watermarks.entry(repo.to_string()).or_insert(0);
+                    let wm = &mut watermarks[idx];
                     if v > *wm {
                         *wm = v;
                     }
@@ -240,7 +245,7 @@ pub(crate) async fn bridge_task(
         while let Some((repo, item)) = streams.next().await {
             match item {
                 Ok(event) => {
-                    let wm = watermarks.entry(repo.clone()).or_insert(0);
+                    let wm = &mut watermarks[repo_idx[&repo]];
                     if event.commit_version <= *wm {
                         continue;
                     }
