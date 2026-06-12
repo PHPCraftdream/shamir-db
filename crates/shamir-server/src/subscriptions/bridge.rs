@@ -17,6 +17,7 @@ use shamir_tx::ChangeOp;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{StreamExt, StreamMap};
 
+use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert};
 use super::push::{make_deliver_data, try_push_event};
 use super::target_match::{any_target_interested, matches_any};
 
@@ -240,7 +241,7 @@ pub(crate) async fn bridge_task(
                         continue;
                     }
                     *wm = event.commit_version;
-                    for change in &event.changes {
+                    for (change_idx, change) in event.changes.iter().enumerate() {
                         // Cheap pre-check: skip the async de-intern entirely
                         // when no target could match (repo/table/mask). On a
                         // busy repo with a narrow subscription this avoids
@@ -248,26 +249,37 @@ pub(crate) async fn bridge_task(
                         if !any_target_interested(&targets, &repo, &change.table, &change.op) {
                             continue;
                         }
-                        // De-intern the Put value once: the changefeed
-                        // ships records as msgpack with `u64` interned
-                        // map keys (`InnerValue`), but `filter_matches_value`
-                        // and `make_event_data` both consume string-keyed
-                        // `serde_json::Value`. A direct `serde_json` decode
-                        // of the raw bytes fails for any non-empty map.
-                        let value_json = match (&change.op, change.value.as_deref()) {
+                        // De-intern the Put value once per event across
+                        // all bridge tasks: the decode cache deduplicates
+                        // the expensive msgpack+interner decode so that N
+                        // subscribers pay O(1) instead of O(N).
+                        let value_json_arc = match (&change.op, change.value.as_deref()) {
                             (ChangeOp::Put, Some(bytes)) => {
-                                db.decode_record_value_json(&db_name, &repo, &change.table, bytes)
-                                    .await
+                                if let Some(cached) =
+                                    cache_get(&repo, event.commit_version, change_idx)
+                                {
+                                    cached
+                                } else {
+                                    let decoded = db
+                                        .decode_record_value_json(
+                                            &db_name,
+                                            &repo,
+                                            &change.table,
+                                            bytes,
+                                        )
+                                        .await;
+                                    cache_insert(&repo, event.commit_version, change_idx, decoded)
+                                }
                             }
-                            _ => None,
+                            _ => {
+                                static NONE_ARC: std::sync::OnceLock<
+                                    Arc<Option<serde_json::Value>>,
+                                > = std::sync::OnceLock::new();
+                                Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
+                            }
                         };
-                        if !matches_any(
-                            &targets,
-                            &repo,
-                            &change.table,
-                            &change.op,
-                            value_json.as_ref(),
-                        ) {
+                        let value_json: Option<&serde_json::Value> = (*value_json_arc).as_ref();
+                        if !matches_any(&targets, &repo, &change.table, &change.op, value_json) {
                             continue;
                         }
                         let data = make_deliver_data(
@@ -276,7 +288,7 @@ pub(crate) async fn bridge_task(
                             &db_name,
                             &actor,
                             change,
-                            value_json.as_ref(),
+                            value_json,
                             event.commit_version,
                         )
                         .await;
@@ -289,6 +301,11 @@ pub(crate) async fn bridge_task(
                         ) {
                             return;
                         }
+                    }
+                    // Evict stale cache entries — safe because all bridges
+                    // for this repo advance monotonically past this version.
+                    if event.commit_version > 1 {
+                        cache_evict_up_to(event.commit_version - 1);
                     }
                 }
                 Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {

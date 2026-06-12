@@ -1,4 +1,5 @@
 pub(crate) mod bridge;
+pub(crate) mod decode_cache;
 // `pub` (was `pub(crate)`): exposed for `benches/subscription_hot_paths.rs`
 // to call `filter_eval::filter_matches_value` directly.
 pub mod filter_eval;
