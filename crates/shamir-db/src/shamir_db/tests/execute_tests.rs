@@ -347,7 +347,8 @@ async fn test_create_user_hashes_password_at_rest() {
     let result = table.read(&query, &ctx).await.unwrap();
     assert_eq!(result.records.len(), 1, "alice must be stored");
 
-    let stored = result.records[0]["password_hash"].as_str().unwrap();
+    let stored_json = result.records[0].as_json();
+    let stored = stored_json["password_hash"].as_str().unwrap();
 
     // The stored value must NOT be the plaintext.
     assert_ne!(

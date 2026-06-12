@@ -159,7 +159,11 @@ async fn fetch_online(args: &AccessTreeArgs, addr: &str) -> anyhow::Result<Value
         .records
         .first()
         .ok_or_else(|| anyhow!("empty access_tree result"))?;
-    Ok(rec.get("access_tree").cloned().unwrap_or(Value::Null))
+    Ok(rec
+        .as_json()
+        .get("access_tree")
+        .cloned()
+        .unwrap_or(Value::Null))
 }
 
 // ---------------------------------------------------------------------------

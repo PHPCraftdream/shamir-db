@@ -106,7 +106,9 @@ impl TableManager {
                             let mut obj = serde_json::Map::new();
                             obj.insert(key, json_val);
                             return Ok(QueryResult {
-                                records: vec![serde_json::Value::Object(obj)],
+                                records: vec![crate::query::read::QueryRecord::Json(
+                                    serde_json::Value::Object(obj),
+                                )],
                                 stats: Some(QueryStats {
                                     index_used: Some(format!(
                                         "sorted_idx_{}_min",
@@ -130,7 +132,9 @@ impl TableManager {
                 let mut obj = serde_json::Map::new();
                 obj.insert(key, serde_json::Value::Number(count.into()));
                 return Ok(QueryResult {
-                    records: vec![serde_json::Value::Object(obj)],
+                    records: vec![crate::query::read::QueryRecord::Json(
+                        serde_json::Value::Object(obj),
+                    )],
                     stats: Some(QueryStats {
                         index_used: Some("__record_counter__".to_string()),
                         records_scanned: 0,
@@ -159,10 +163,10 @@ impl TableManager {
                     let inner_records = self.get_many(&rids_vec).await?;
                     let mut records = Vec::with_capacity(inner_records.len());
                     for inner in inner_records.into_iter().flatten() {
-                        if let Ok(json) =
-                            shamir_types::codecs::interned::inner_to_json_value(&inner, interner)
-                        {
-                            records.push(json)
+                        if let Ok(qv) = shamir_types::codecs::interned::inner_value_to_query_value(
+                            &inner, interner,
+                        ) {
+                            records.push(crate::query::read::QueryRecord::Direct(qv));
                         }
                     }
                     let scanned = rids_vec.len() as u64;
@@ -214,7 +218,9 @@ impl TableManager {
                         let mut obj = serde_json::Map::new();
                         obj.insert(key, serde_json::Value::Number(total.into()));
                         return Ok(QueryResult {
-                            records: vec![serde_json::Value::Object(obj)],
+                            records: vec![crate::query::read::QueryRecord::Json(
+                                serde_json::Value::Object(obj),
+                            )],
                             stats: Some(QueryStats {
                                 index_used: Some(format!("idx_{idx_name}")),
                                 records_scanned: total,
@@ -281,7 +287,9 @@ impl TableManager {
                             let mut obj = serde_json::Map::new();
                             obj.insert(key, json_val);
                             return Ok(QueryResult {
-                                records: vec![serde_json::Value::Object(obj)],
+                                records: vec![crate::query::read::QueryRecord::Json(
+                                    serde_json::Value::Object(obj),
+                                )],
                                 stats: Some(QueryStats {
                                     index_used: Some(format!(
                                         "sorted_idx_{}_max",
@@ -394,9 +402,9 @@ impl TableManager {
 
         let mut records_scanned: u64 = 0;
 
-        // Two accumulation modes — raw InnerValues or projected JSON
+        // Two accumulation modes — raw InnerValues or projected QueryRecord
         let mut raw_acc: Vec<(RecordId, InnerValue)> = Vec::new();
-        let mut json_acc: Vec<serde_json::Value> = Vec::new();
+        let mut rec_acc: Vec<crate::query::read::QueryRecord> = Vec::new();
         let proj = if !needs_raw {
             Some(exec::SelectProjection::new(&query.select, interner))
         } else {
@@ -415,33 +423,52 @@ impl TableManager {
                     if needs_raw {
                         raw_acc.push((id, record));
                     } else {
-                        json_acc.push(proj.as_ref().unwrap().project(&record, interner));
+                        rec_acc.push(crate::query::read::QueryRecord::Direct(
+                            proj.as_ref().unwrap().project_value(&record, interner),
+                        ));
                     }
                 }
             }
         }
 
-        let mut result = if has_group_by {
+        let result = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)
+                .into_iter()
+                .map(crate::query::read::QueryRecord::Json)
+                .collect()
         } else if has_agg {
             exec::apply_aggregate_all(&raw_acc, &query.select, interner)
+                .into_iter()
+                .map(crate::query::read::QueryRecord::Json)
+                .collect()
         } else {
-            json_acc
+            rec_acc
         };
 
+        // apply_distinct / apply_order_by / apply_pagination operate on
+        // Vec<serde_json::Value>.  Convert once for these post-processing
+        // steps; the hot streaming/counting paths avoid this conversion
+        // entirely.
+        let mut json_result: Vec<serde_json::Value> =
+            result.into_iter().map(serde_json::Value::from).collect();
+
         if query.select.distinct {
-            result = exec::apply_distinct(result);
+            json_result = exec::apply_distinct(json_result);
         }
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result, order_by);
+            exec::apply_order_by(&mut json_result, order_by);
         }
 
-        let (records, pagination) =
-            exec::apply_pagination(result, &query.pagination, query.count_total);
+        let (json_records, pagination) =
+            exec::apply_pagination(json_result, &query.pagination, query.count_total);
 
         let elapsed = start.elapsed();
-        let records_returned = records.len() as u64;
+        let records_returned = json_records.len() as u64;
+        let records: Vec<crate::query::read::QueryRecord> = json_records
+            .into_iter()
+            .map(crate::query::read::QueryRecord::Json)
+            .collect();
 
         Ok(QueryResult {
             records,
@@ -482,7 +509,7 @@ impl TableManager {
 
         let mut records_scanned: u64 = 0;
         let mut matched_total: u64 = 0;
-        let mut result: Vec<serde_json::Value> = Vec::new();
+        let mut result: Vec<crate::query::read::QueryRecord> = Vec::new();
 
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
@@ -504,12 +531,16 @@ impl TableManager {
                 if idx >= skip {
                     if let Some(lim) = limit {
                         if idx < skip + lim {
-                            result.push(proj.project(record, interner));
+                            result.push(crate::query::read::QueryRecord::Direct(
+                                proj.project_value(record, interner),
+                            ));
                         }
                         // Beyond the page — still count, but don't store
                     } else {
                         // No limit — keep everything from skip onwards
-                        result.push(proj.project(record, interner));
+                        result.push(crate::query::read::QueryRecord::Direct(
+                            proj.project_value(record, interner),
+                        ));
                     }
                 }
             }
@@ -559,7 +590,7 @@ impl TableManager {
 
         let mut records_scanned: u64 = 0;
         let mut skipped: usize = 0;
-        let mut result: Vec<serde_json::Value> = Vec::new();
+        let mut result: Vec<crate::query::read::QueryRecord> = Vec::new();
         let mut has_next = false;
         let mut done = false;
 
@@ -593,7 +624,9 @@ impl TableManager {
                     }
                 }
 
-                result.push(proj.project(record, interner));
+                result.push(crate::query::read::QueryRecord::Direct(
+                    proj.project_value(record, interner),
+                ));
             }
         }
 
@@ -637,7 +670,7 @@ pub(super) fn try_project_page_only(
     query: &ReadQuery,
     matched: &[(RecordId, InnerValue)],
     interner: &Interner,
-) -> Option<(Vec<serde_json::Value>, Option<PaginationInfo>)> {
+) -> Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)> {
     // Gate: every condition below disables the push-down.
     if query.order_by.is_some()
         || query.group_by.is_some()
@@ -670,9 +703,11 @@ pub(super) fn try_project_page_only(
     let page_slice = &matched[page_start..page_end];
 
     let proj = exec::SelectProjection::new(&query.select, interner);
-    let mut paged: Vec<serde_json::Value> = Vec::with_capacity(page_slice.len());
+    let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
-        paged.push(proj.project(record, interner));
+        paged.push(crate::query::read::QueryRecord::Direct(
+            proj.project_value(record, interner),
+        ));
     }
 
     // Pagination metadata mirrors `apply_pagination`'s semantics: when

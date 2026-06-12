@@ -366,16 +366,16 @@ async fn latest_path_unchanged() {
 
     // Exactly one row — the current value.
     assert_eq!(result.records.len(), 1, "Latest returns one row");
-    let n = result.records[0].get("n").and_then(|v| v.as_i64()).unwrap();
+    let n = result.records[0].get_i64("n").unwrap();
     assert_eq!(n, 3, "Latest returns the current value (n=3)");
 
     // No temporal metadata attached.
     assert!(
-        result.records[0].get("_version").is_none(),
+        result.records[0].get_owned("_version").is_none(),
         "Latest must not attach _version"
     );
     assert!(
-        result.records[0].get("_ts").is_none(),
+        result.records[0].get_owned("_ts").is_none(),
         "Latest must not attach _ts"
     );
 

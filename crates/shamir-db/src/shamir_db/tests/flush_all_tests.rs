@@ -85,8 +85,9 @@ async fn buffered_commit_survives_graceful_flush_all() {
         1,
         "data must survive restart after flush_all"
     );
-    assert_eq!(records[0]["name"], "widget");
-    assert_eq!(records[0]["qty"], 42);
+    let r0 = records[0].as_json();
+    assert_eq!(r0.get("name").and_then(|v| v.as_str()), Some("widget"));
+    assert_eq!(r0.get("qty").and_then(|v| v.as_i64()), Some(42));
 }
 
 /// `flush_all` on an in-memory home must return Ok without panicking —

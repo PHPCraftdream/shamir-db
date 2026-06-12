@@ -139,7 +139,7 @@ async fn asof_version_returns_state_at_that_version() {
     q.r#where = Some(eq_name("alice"));
     let result = tbl.read(&q, &ctx).await.unwrap();
     assert_eq!(result.records.len(), 1, "AsOf(v1) returns one row");
-    let n = result.records[0].get("n").and_then(|v| v.as_i64()).unwrap();
+    let n = result.records[0].get_i64("n").unwrap();
     assert_eq!(n, 1, "AsOf(v1) must return n=1 (the v1 value)");
 
     // Latest → must see n = 2
@@ -147,7 +147,7 @@ async fn asof_version_returns_state_at_that_version() {
     q2.r#where = Some(eq_name("alice"));
     let res2 = tbl.read(&q2, &ctx).await.unwrap();
     assert_eq!(res2.records.len(), 1, "Latest returns one row");
-    let n2 = res2.records[0].get("n").and_then(|v| v.as_i64()).unwrap();
+    let n2 = res2.records[0].get_i64("n").unwrap();
     assert_eq!(n2, 2, "Latest must return n=2 (the current value)");
 
     // Stats tag must be temporal_asof.
@@ -207,10 +207,7 @@ async fn asof_excludes_records_not_yet_created() {
         1,
         "AsOf(vA) must return exactly 1 row (A only)"
     );
-    let name = result.records[0]
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let name = result.records[0].get_str("name").unwrap_or_default();
     assert_eq!(
         name, "alice",
         "AsOf(vA) must return alice, not bob (bob did not exist yet)"
@@ -345,10 +342,7 @@ async fn asof_timestamp_resolves_or_errors() {
         1,
         "AsOf(Timestamp(MAX)) must resolve and return the record"
     );
-    let name = res.records[0]
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let name = res.records[0].get_str("name").unwrap_or_default();
     assert_eq!(name, "alice");
 
     let _ = mvcc;
@@ -389,13 +383,10 @@ async fn latest_and_history_unchanged() {
         });
     let res_latest = tbl.read(&q_latest, &ctx).await.unwrap();
     assert_eq!(res_latest.records.len(), 1, "Latest returns one row");
-    let n = res_latest.records[0]
-        .get("n")
-        .and_then(|v| v.as_i64())
-        .unwrap();
+    let n = res_latest.records[0].get_i64("n").unwrap();
     assert_eq!(n, 3, "Latest must return current value n=3");
     assert!(
-        res_latest.records[0].get("_version").is_none(),
+        res_latest.records[0].get_owned("_version").is_none(),
         "Latest must not attach _version"
     );
 
@@ -421,7 +412,7 @@ async fn latest_and_history_unchanged() {
     let versions: Vec<u64> = res_hist
         .records
         .iter()
-        .filter_map(|r| r.get("_version").and_then(|v| v.as_u64()))
+        .filter_map(|r| r.get_u64("_version"))
         .collect();
     assert_eq!(versions, vec![1, 2, 3], "History versions ascending 1,2,3");
 

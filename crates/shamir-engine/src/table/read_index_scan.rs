@@ -10,7 +10,7 @@ use crate::index::sorted_index_manager::decode_covering_projection;
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
-use crate::query::read::{exec, QueryResult, QueryStats, ReadQuery, SelectItem};
+use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem};
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::{new_map, new_set};
@@ -173,12 +173,14 @@ impl TableManager {
                                 });
                             }
 
-                            let result = exec::apply_select(&matched, &query.select, interner);
-                            let (paged, pagination) = exec::apply_pagination(
-                                result,
+                            let result_json = exec::apply_select(&matched, &query.select, interner);
+                            let (paged_json, pagination) = exec::apply_pagination(
+                                result_json,
                                 &query.pagination,
                                 query.count_total,
                             );
+                            let paged: Vec<QueryRecord> =
+                                paged_json.into_iter().map(QueryRecord::Json).collect();
                             let records_returned = paged.len() as u64;
                             return Ok(QueryResult {
                                 records: paged,
@@ -253,7 +255,7 @@ impl TableManager {
             });
         }
 
-        let mut result = if has_group_by {
+        let mut result_json = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
@@ -263,11 +265,12 @@ impl TableManager {
         };
 
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result, order_by);
+            exec::apply_order_by(&mut result_json, order_by);
         }
 
-        let (paged, pagination) =
-            exec::apply_pagination(result, &query.pagination, query.count_total);
+        let (paged_json, pagination) =
+            exec::apply_pagination(result_json, &query.pagination, query.count_total);
+        let paged: Vec<QueryRecord> = paged_json.into_iter().map(QueryRecord::Json).collect();
         let records_returned = paged.len() as u64;
 
         Ok(QueryResult {
@@ -335,8 +338,9 @@ impl TableManager {
             }
         }
 
-        let result = exec::apply_select(&matched, &query.select, interner);
-        let records_returned = result.len() as u64;
+        let result_json = exec::apply_select(&matched, &query.select, interner);
+        let records_returned = result_json.len() as u64;
+        let result: Vec<QueryRecord> = result_json.into_iter().map(QueryRecord::Json).collect();
 
         Ok(QueryResult {
             records: result,
@@ -433,7 +437,7 @@ impl TableManager {
             });
         }
 
-        let mut result = if has_group_by {
+        let mut result_json = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
@@ -443,17 +447,18 @@ impl TableManager {
         };
 
         if query.select.distinct {
-            result = exec::apply_distinct(result);
+            result_json = exec::apply_distinct(result_json);
         }
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result, order_by);
+            exec::apply_order_by(&mut result_json, order_by);
         }
 
-        let (records, pagination) =
-            exec::apply_pagination(result, &query.pagination, query.count_total);
+        let (records_json, pagination) =
+            exec::apply_pagination(result_json, &query.pagination, query.count_total);
 
         let elapsed = start.elapsed();
-        let records_returned = records.len() as u64;
+        let records_returned = records_json.len() as u64;
+        let records: Vec<QueryRecord> = records_json.into_iter().map(QueryRecord::Json).collect();
 
         Ok(QueryResult {
             records,

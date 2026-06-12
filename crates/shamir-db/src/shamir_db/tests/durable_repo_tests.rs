@@ -85,8 +85,9 @@ async fn wire_created_repo_is_durable_across_reopen() {
         1,
         "data must survive restart in a durable repo"
     );
-    assert_eq!(records[0]["name"], "widget");
-    assert_eq!(records[0]["qty"], 42);
+    let r0 = records[0].as_json();
+    assert_eq!(r0.get("name").and_then(|v| v.as_str()), Some("widget"));
+    assert_eq!(r0.get("qty").and_then(|v| v.as_i64()), Some(42));
 }
 
 /// When the caller explicitly requests `engine: "in_memory"` inside a durable

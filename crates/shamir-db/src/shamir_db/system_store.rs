@@ -143,7 +143,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_DATABASES);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     // ========================================================================
@@ -217,7 +221,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_REPOSITORIES);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     // ========================================================================
@@ -307,7 +315,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_TABLES);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     // ========================================================================
@@ -344,7 +356,7 @@ impl SystemStore {
             .records
             .into_iter()
             .next()
-            .map(|r| r["value"].clone()))
+            .and_then(|r| r.as_json().get("value").cloned()))
     }
 
     // ========================================================================
@@ -416,7 +428,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_USERS);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     /// Load every persisted function catalogue record.
@@ -427,7 +443,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTIONS);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     /// Load a single function catalogue record by name.
@@ -443,7 +463,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     // ========================================================================
@@ -478,7 +502,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_GROUPS);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     /// Load a single group record by id.
@@ -494,7 +522,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     /// Add a user to a group. Reads the group, appends the user, and
@@ -568,7 +600,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     /// Load a single repository record by (db_name, repo_name).
@@ -596,7 +632,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     /// Load a single table catalogue record by (db, repo, table).
@@ -629,7 +669,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     /// Persist a replacement database record (for `set_resource_meta`).
@@ -741,7 +785,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_VALIDATORS);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     /// Load a single validator catalogue record by name.
@@ -757,7 +805,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     /// Persist a replacement function catalogue record (for `set_resource_meta`).
@@ -833,7 +885,11 @@ impl SystemStore {
         let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTION_FOLDERS);
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records)
+        Ok(result
+            .records
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect())
     }
 
     /// Load a single function folder catalogue record by path key.
@@ -852,7 +908,11 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
-        Ok(result.records.into_iter().next())
+        Ok(result
+            .records
+            .into_iter()
+            .next()
+            .map(serde_json::Value::from))
     }
 
     /// Persist a replacement function folder record (for `set_resource_meta`).

@@ -9,7 +9,9 @@ use futures::StreamExt;
 
 use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::{exec, At, OrderDirection, QueryResult, QueryStats, ReadQuery};
+use crate::query::read::{
+    exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
+};
 use shamir_storage::error::DbResult;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::core::interner::Interner;
@@ -134,7 +136,7 @@ impl TableManager {
             });
         }
 
-        let mut result = if has_group_by {
+        let mut result_json = if has_group_by {
             let group_by = query.group_by.as_ref().unwrap();
             exec::apply_group_by(&matched, group_by, &query.select, interner, ctx)
         } else if has_agg {
@@ -144,16 +146,17 @@ impl TableManager {
         };
 
         if query.select.distinct {
-            result = exec::apply_distinct(result);
+            result_json = exec::apply_distinct(result_json);
         }
         if let Some(ref order_by) = query.order_by {
-            exec::apply_order_by(&mut result, order_by);
+            exec::apply_order_by(&mut result_json, order_by);
         }
 
-        let (records, pagination) =
-            exec::apply_pagination(result, &query.pagination, query.count_total);
+        let (records_json, pagination) =
+            exec::apply_pagination(result_json, &query.pagination, query.count_total);
 
-        let records_returned = records.len() as u64;
+        let records_returned = records_json.len() as u64;
+        let records: Vec<QueryRecord> = records_json.into_iter().map(QueryRecord::Json).collect();
         Ok(QueryResult {
             records,
             stats: Some(QueryStats {
@@ -295,7 +298,7 @@ impl TableManager {
         // ── 5. Decode each version's value bytes into an InnerValue
         //     and project via `apply_select` on the single
         //     (id, value) pair; then attach `_version` and `_ts`.
-        let mut out_records: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+        let mut out_records: Vec<QueryRecord> = Vec::with_capacity(rows.len());
         for (id, version, ts, value_bytes) in rows {
             // Decode the archived/current bytes into an InnerValue.
             // A corrupt entry is skipped (defensive — history bytes
@@ -341,7 +344,7 @@ impl TableManager {
                 );
                 row = serde_json::Value::Object(map);
             }
-            out_records.push(row);
+            out_records.push(QueryRecord::Json(row));
         }
 
         let records_returned = out_records.len() as u64;

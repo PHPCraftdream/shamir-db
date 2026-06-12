@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::query_record::QueryRecord;
 use super::PaginationInfo;
 
 /// Query execution statistics
@@ -20,8 +21,8 @@ pub struct QueryStats {
 /// Query result
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueryResult {
-    /// Result records (as JSON values)
-    pub records: Vec<serde_json::Value>,
+    /// Result records.
+    pub records: Vec<QueryRecord>,
     /// Execution statistics
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<QueryStats>,
