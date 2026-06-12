@@ -180,13 +180,19 @@ impl WalEntryV2 {
     }
 
     /// Encode as `[magic][version][bincode body]`.
+    ///
+    /// Writes the 5-byte header then serialises directly into the same
+    /// buffer via `bincode::serialize_into`, avoiding the intermediate
+    /// `Vec` that `bincode::serialize` would allocate.
     pub fn encode(&self) -> DbResult<Vec<u8>> {
-        let body = bincode::serialize(self)
-            .map_err(|e| DbError::Internal(format!("wal_v2 encode: {e}")))?;
-        let mut out = Vec::with_capacity(4 + 1 + body.len());
+        // 5-byte header + bincode body.  Start with a reasonable
+        // capacity guess; bincode will grow if needed but one alloc
+        // is the common case.
+        let mut out = Vec::with_capacity(256);
         out.extend_from_slice(&WAL_V2_MAGIC);
         out.push(WAL_V2_VERSION);
-        out.extend_from_slice(&body);
+        bincode::serialize_into(&mut out, self)
+            .map_err(|e| DbError::Internal(format!("wal_v2 encode: {e}")))?;
         Ok(out)
     }
 
