@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use shamir_types::types::record_id::RecordId;
 
-use crate::wal_entry_v2::{WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION};
+use crate::wal_entry_v2::{
+    WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION, WAL_V2_VERSION_LEGACY,
+};
 
 fn rid(n: u8) -> RecordId {
     let mut a = [0u8; 16];
@@ -44,6 +46,7 @@ fn sample_entry() -> WalEntryV2 {
                 delta: -3,
             },
         ],
+        interner_delta: vec![],
     }
 }
 
@@ -114,4 +117,76 @@ fn size_bound_on_large_batch() {
         "encoded size {} should be < 10KB",
         encoded.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// WAL version 2 (with interner_delta) tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn round_trip_v2_with_interner_delta() {
+    let entry = WalEntryV2 {
+        txn_id: 10,
+        repo_id_interned: 3,
+        started_at_ns: 999,
+        commit_version: 7,
+        ops: vec![WalOpV2::Put {
+            table_id_interned: 3,
+            rid: rid(1),
+            body: Bytes::from_static(b"x"),
+        }],
+        interner_delta: vec![(3, "email".into(), 100), (3, "score".into(), 101)],
+    };
+    let encoded = entry.encode().unwrap();
+    assert_eq!(encoded[4], WAL_V2_VERSION); // version 2
+    let decoded = WalEntryV2::decode(&encoded).unwrap();
+    assert_eq!(entry, decoded);
+    assert_eq!(decoded.interner_delta.len(), 2);
+}
+
+#[test]
+fn round_trip_v2_empty_delta() {
+    let entry = sample_entry(); // interner_delta defaults to vec![]
+    assert!(entry.interner_delta.is_empty());
+    let encoded = entry.encode().unwrap();
+    let decoded = WalEntryV2::decode(&encoded).unwrap();
+    assert_eq!(entry, decoded);
+    assert!(decoded.interner_delta.is_empty());
+}
+
+#[test]
+fn decode_legacy_v1_produces_empty_delta() {
+    // Build a v1-shaped entry by encoding with the legacy version byte.
+    // We serialize the legacy struct (without interner_delta) via bincode
+    // and prepend the v1 header.
+    #[derive(serde::Serialize)]
+    struct LegacyEntry {
+        txn_id: u64,
+        repo_id_interned: u64,
+        started_at_ns: u64,
+        commit_version: u64,
+        ops: Vec<WalOpV2>,
+    }
+    let legacy = LegacyEntry {
+        txn_id: 42,
+        repo_id_interned: 7,
+        started_at_ns: 1_234_567_890,
+        commit_version: 123,
+        ops: vec![WalOpV2::Put {
+            table_id_interned: 7,
+            rid: rid(1),
+            body: Bytes::from_static(b"hello"),
+        }],
+    };
+    let mut bytes = Vec::with_capacity(256);
+    bytes.extend_from_slice(&WAL_V2_MAGIC);
+    bytes.push(WAL_V2_VERSION_LEGACY);
+    bincode::serialize_into(&mut bytes, &legacy).unwrap();
+
+    let decoded = WalEntryV2::decode(&bytes).unwrap();
+    assert_eq!(decoded.txn_id, 42);
+    assert_eq!(decoded.repo_id_interned, 7);
+    assert_eq!(decoded.commit_version, 123);
+    assert!(decoded.interner_delta.is_empty());
+    assert_eq!(decoded.ops.len(), 1);
 }

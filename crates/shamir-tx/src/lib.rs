@@ -54,7 +54,9 @@ pub use changefeed::{
 };
 pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
-pub use layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
+pub use layered_interner::{
+    commit_interner_overlay, LayeredInterner, OverlayCommitResult, OVERLAY_ID_BASE,
+};
 pub use metrics::{TxMetrics, TxMetricsSnapshot};
 pub use mvcc_store::{KeyLock, LockMode, MvccStore, Retention, VersionEntry};
 pub use predicate_set::{

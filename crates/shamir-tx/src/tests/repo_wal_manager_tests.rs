@@ -229,6 +229,7 @@ async fn recovery_round_trip_all_op_variants() {
                 delta: -3,
             },
         ],
+        interner_delta: vec![],
     };
 
     mgr.begin(entry.clone()).await.unwrap();

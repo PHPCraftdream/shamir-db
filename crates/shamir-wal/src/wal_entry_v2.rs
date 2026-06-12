@@ -34,7 +34,12 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
 
 pub const WAL_V2_MAGIC: [u8; 4] = *b"WAL2";
-pub const WAL_V2_VERSION: u8 = 1;
+/// Current version written by `encode`. Bumped from 1 → 2 to carry
+/// `interner_delta` (WAL v3 scaffolding, Stage A2).
+pub const WAL_V2_VERSION: u8 = 2;
+
+/// Previous version — decoded for backward compatibility.
+pub(crate) const WAL_V2_VERSION_LEGACY: u8 = 1;
 
 /// One mutating operation buffered inside a transactional WAL entry.
 ///
@@ -146,6 +151,24 @@ pub struct WalEntryV2 {
     #[serde(default)]
     pub commit_version: u64,
     pub ops: Vec<WalOpV2>,
+    /// Interner delta: `(table_token, field_name, intern_id)` triples
+    /// added to the base interner during this tx commit. Empty for
+    /// legacy (version 1) entries and for entries authored before A3
+    /// plumbs the delta from `commit_interner_overlay`.
+    #[serde(default)]
+    pub interner_delta: Vec<(u64, String, u64)>,
+}
+
+/// Legacy shape (version 1) — no `interner_delta` field. Used only for
+/// decoding old WAL entries.
+#[derive(Debug, Deserialize)]
+struct WalEntryV2Legacy {
+    pub txn_id: u64,
+    pub repo_id_interned: u64,
+    pub started_at_ns: u64,
+    #[serde(default)]
+    pub commit_version: u64,
+    pub ops: Vec<WalOpV2>,
 }
 
 impl WalEntryV2 {
@@ -167,6 +190,7 @@ impl WalEntryV2 {
             started_at_ns,
             commit_version: 0,
             ops,
+            interner_delta: vec![],
         }
     }
 
@@ -197,6 +221,9 @@ impl WalEntryV2 {
     }
 
     /// Decode from `[magic][version][bincode body]`.
+    ///
+    /// Supports version 1 (legacy, no interner_delta) and version 2
+    /// (current, with interner_delta). Unknown versions are rejected.
     pub fn decode(bytes: &[u8]) -> DbResult<Self> {
         if bytes.len() < 5 {
             return Err(DbError::Internal("wal_v2 decode: too short".into()));
@@ -208,13 +235,25 @@ impl WalEntryV2 {
             )));
         }
         let version = bytes[4];
-        if version != WAL_V2_VERSION {
-            return Err(DbError::Internal(format!(
+        match version {
+            WAL_V2_VERSION_LEGACY => {
+                let legacy: WalEntryV2Legacy = bincode::deserialize(&bytes[5..])
+                    .map_err(|e| DbError::Internal(format!("wal_v2 decode v1: {e}")))?;
+                Ok(Self {
+                    txn_id: legacy.txn_id,
+                    repo_id_interned: legacy.repo_id_interned,
+                    started_at_ns: legacy.started_at_ns,
+                    commit_version: legacy.commit_version,
+                    ops: legacy.ops,
+                    interner_delta: vec![],
+                })
+            }
+            WAL_V2_VERSION => bincode::deserialize(&bytes[5..])
+                .map_err(|e| DbError::Internal(format!("wal_v2 decode v2: {e}"))),
+            _ => Err(DbError::Internal(format!(
                 "wal_v2 decode: unsupported version {version}"
-            )));
+            ))),
         }
-        bincode::deserialize(&bytes[5..])
-            .map_err(|e| DbError::Internal(format!("wal_v2 decode: {e}")))
     }
 
     /// Returns true if these bytes start with the V2 magic prefix.
