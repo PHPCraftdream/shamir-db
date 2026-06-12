@@ -1,4 +1,5 @@
 use shamir_storage::error::DbError;
+use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{IndexWriteOp, TxContext};
 use shamir_types::types::common::THasher;
 
@@ -175,8 +176,60 @@ pub(crate) async fn materialize_async_tail(
         ok = false;
     }
 
-    // Phase 7: WAL cleanup ONLY on full success.
-    if ok {
+    // A5: capture interner delta max-ids for Phase 7 gating.
+    let interner_delta_max_ids: Vec<(u64, u64)> = tx
+        .interner_deltas
+        .iter()
+        .filter_map(|(token, deltas)| deltas.iter().map(|(_, id)| *id).max().map(|m| (*token, m)))
+        .collect();
+
+    // A5: background interner checkpoint on interval.
+    if commit_version.is_multiple_of(INTERNER_CHECKPOINT_INTERVAL)
+        && !interner_delta_max_ids.is_empty()
+    {
+        let repo_ck = repo.clone();
+        tokio::spawn(async move {
+            for table_name in repo_ck.list_table_names() {
+                match repo_ck.get_table(&table_name).await {
+                    Ok(tbl) => {
+                        if let Err(e) = tbl.interner().persist().await {
+                            log::warn!(
+                                "A5 interner checkpoint (async) failed for table \
+                                 {table_name}: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("A5 interner checkpoint (async): get_table {table_name}: {e}");
+                    }
+                }
+            }
+        });
+    }
+
+    // A5: Phase 7 gating on interner persisted high-water mark.
+    let mut interner_safe = true;
+    if !interner_delta_max_ids.is_empty() {
+        for &(table_token, max_id) in &interner_delta_max_ids {
+            match repo.table_by_token(table_token).await {
+                Ok(Some(tbl)) => {
+                    let hwm = tbl.interner().persisted_high_water() as u64;
+                    if max_id > hwm {
+                        interner_safe = false;
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    interner_safe = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Phase 7: WAL cleanup ONLY on full success AND interner safety.
+    if ok && interner_safe {
         if let Ok(wal) = repo.repo_wal().await {
             if let Err(e) = wal.commit(tx_id).await {
                 log::warn!(
@@ -188,7 +241,7 @@ pub(crate) async fn materialize_async_tail(
         } else {
             ok = false;
         }
-    } else {
+    } else if !ok {
         log::warn!(
             "commit_tx (async) tx {tx_id} commit_version {commit_version} COMMITTED but \
              materialization DEFERRED — WAL marker left inflight; recovery will \

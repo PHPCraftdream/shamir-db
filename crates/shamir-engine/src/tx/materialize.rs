@@ -1,4 +1,5 @@
 use futures::future::join_all;
+use shamir_tunables::instance_defaults::INTERNER_CHECKPOINT_INTERVAL;
 use shamir_tx::{RepoTxGate, RepoWalManager, TxContext};
 use shamir_types::types::common::THasher;
 
@@ -211,6 +212,14 @@ pub(super) async fn materialize(
     // The inflight WAL marker survives → recovery materializes the tx.
     maybe_crash("phase6", repo).await;
 
+    // A5: capture the max interner id per table from the tx's delta so
+    // Phase 7 can gate WAL truncation on the persisted high-water mark.
+    let interner_delta_max_ids: Vec<(u64, u64)> = tx
+        .interner_deltas
+        .iter()
+        .filter_map(|(token, deltas)| deltas.iter().map(|(_, id)| *id).max().map(|m| (*token, m)))
+        .collect();
+
     // Phase 6.5 + 7 (markers + WAL cleanup) are returned as post-lock
     // work — the caller runs them AFTER releasing `commit_lock`. See
     // `post_publish_cleanup`.
@@ -218,6 +227,7 @@ pub(super) async fn materialize(
         tx_id,
         commit_version,
         projections_ok: ok,
+        interner_delta_max_ids,
     }
 }
 
@@ -229,6 +239,10 @@ pub(super) struct PostPublishState {
     /// True iff Phases 5a–5c all succeeded. When false, Phase 7 is
     /// skipped so the WAL marker stays inflight for recovery.
     pub projections_ok: bool,
+    /// A5: max interner id per table from the WAL entry's interner delta.
+    /// Phase 7 checks that each table's persisted high-water mark covers
+    /// these ids before truncating the WAL entry.
+    pub interner_delta_max_ids: Vec<(u64, u64)>,
 }
 
 /// Phase 6.5 (markers) + Phase 7 (WAL cleanup), run OUTSIDE `commit_lock`.
@@ -258,6 +272,7 @@ pub(super) async fn post_publish_cleanup(
         tx_id,
         commit_version,
         mut projections_ok,
+        interner_delta_max_ids,
     } = state;
 
     // Phase 6.5: persist recovery markers (CRIT-1).
@@ -301,10 +316,70 @@ pub(super) async fn post_publish_cleanup(
     // idempotently and cleans the marker.
     maybe_crash("phase6_5", repo).await;
 
-    // Phase 7: WAL cleanup — ONLY on full materialization. If any
-    // projection deferred, leave the marker inflight so recovery
-    // re-applies the entry on the next open.
-    if projections_ok {
+    // A5: background interner checkpoint. Every INTERNER_CHECKPOINT_INTERVAL
+    // commits, persist each touched table's interner so the high-water mark
+    // advances and future Phase 7 passes can truncate older WAL entries.
+    // Spawned fire-and-forget: the persist is not on the commit critical path.
+    if commit_version.is_multiple_of(INTERNER_CHECKPOINT_INTERVAL)
+        && !interner_delta_max_ids.is_empty()
+    {
+        let repo_clone = repo.clone();
+        tokio::spawn(async move {
+            for table_name in repo_clone.list_table_names() {
+                match repo_clone.get_table(&table_name).await {
+                    Ok(tbl) => {
+                        if let Err(e) = tbl.interner().persist().await {
+                            log::warn!("A5 interner checkpoint failed for table {table_name}: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("A5 interner checkpoint: get_table {table_name}: {e}");
+                    }
+                }
+            }
+        });
+    }
+
+    // A5: Phase 7 gating — WAL truncation is safe ONLY when every
+    // interner id in the entry's delta has been durably persisted. If
+    // the delta contains ids beyond a table's persisted high-water mark
+    // the entry MUST stay inflight (the next checkpoint will advance the
+    // hwm and a later Phase 7 pass will clean up).
+    let mut interner_safe = true;
+    if !interner_delta_max_ids.is_empty() {
+        for &(table_token, max_id) in &interner_delta_max_ids {
+            match repo.table_by_token(table_token).await {
+                Ok(Some(tbl)) => {
+                    let hwm = tbl.interner().persisted_high_water() as u64;
+                    if max_id > hwm {
+                        log::debug!(
+                            "Phase 7 gated: table {table_token} interner delta max_id \
+                             {max_id} > persisted hwm {hwm}; deferring WAL truncation \
+                             for tx {tx_id}"
+                        );
+                        interner_safe = false;
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Table gone — delta is stale; safe to truncate (the
+                    // table's interner no longer exists to corrupt).
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Phase 7 gating: table_by_token {table_token}: {e}; \
+                         conservatively deferring WAL truncation for tx {tx_id}"
+                    );
+                    interner_safe = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Phase 7: WAL cleanup — ONLY on full materialization AND when the
+    // interner delta is covered by persisted state (A5 invariant).
+    if projections_ok && interner_safe {
         if let Err(e) = wal.commit(tx_id).await {
             log::warn!(
                 "commit_tx materialization Phase 7 (WAL cleanup) failed for tx {tx_id} \
@@ -317,11 +392,19 @@ pub(super) async fn post_publish_cleanup(
             // leaves a clean committed state; recovery is a no-op.
             maybe_crash("phase7", repo).await;
         }
-    } else {
+    } else if !projections_ok {
         log::warn!(
             "commit_tx tx {tx_id} commit_version {commit_version} COMMITTED but \
              materialization DEFERRED — WAL marker left inflight; recovery will \
              reconcile main/info on the next open"
+        );
+    } else {
+        // projections_ok but !interner_safe: WAL entry stays inflight
+        // until a future checkpoint advances the persisted hwm. NOT a
+        // materialization deferral (data + index are committed).
+        log::debug!(
+            "commit_tx tx {tx_id} commit_version {commit_version} COMMITTED, \
+             projections complete, WAL entry retained pending interner checkpoint"
         );
     }
 

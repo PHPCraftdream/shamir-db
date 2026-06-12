@@ -239,6 +239,20 @@ impl InternerManager {
         Ok(())
     }
 
+    /// Returns the high-water mark of interner ids that have been durably
+    /// persisted to the chunk store. Any WAL entry whose interner delta
+    /// contains only ids ≤ this value can be safely truncated — the
+    /// (name, id) mappings are recoverable from the persisted chunks
+    /// without the WAL.
+    ///
+    /// This is `last_persisted_len` expressed as an id upper bound.
+    /// Interner ids are 1-based and dense, so `last_persisted_len` (which
+    /// tracks the highest gap-free index in the reverse vec that was
+    /// written to a chunk) IS the highest persisted id.
+    pub fn persisted_high_water(&self) -> usize {
+        self.last_persisted_len.load(Ordering::Acquire)
+    }
+
     /// Persist the delta accumulated since the previous `persist()` as
     /// a fresh append-only chunk. No-op when nothing has been added.
     ///
