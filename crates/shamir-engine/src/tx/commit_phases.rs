@@ -143,7 +143,7 @@ pub(crate) async fn materialize_async_tail(
         }
         for (token, ops) in by_token {
             if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-                apply_index_batch(repo, token, ops.clone(), tx_id)
+                apply_index_batch(repo, token, &ops, tx_id)
             })
             .await
             {
@@ -246,7 +246,7 @@ pub(crate) async fn promote_vectors(tx: &TxContext, repo: &RepoInstance, commit_
         .collect::<Vec<_>>();
     for (token, vecs) in vector_batches {
         if let Err(e) = retry_materialize(MATERIALIZE_ATTEMPTS, || {
-            apply_vector_batch(repo, token, vecs.clone(), tx_id)
+            apply_vector_batch(repo, token, &vecs, tx_id)
         })
         .await
         {
@@ -328,7 +328,7 @@ pub(crate) async fn apply_data_batch(
 pub(crate) async fn apply_index_batch(
     repo: &RepoInstance,
     token: u64,
-    ops: Vec<IndexWriteOp>,
+    ops: &[IndexWriteOp],
     _tx_id: u64,
 ) -> Result<(), DbError> {
     // Test-only failure injection: simulate a persistent Phase 5c storage
@@ -343,7 +343,7 @@ pub(crate) async fn apply_index_batch(
 
     if let Some(tbl) = repo.table_by_token(token).await? {
         let backends = tbl.index2_registry().all_backends().await;
-        crate::index2::write_ops::apply_index_ops_at_commit(&ops, tbl.info_store(), &backends)
+        crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
             .await
             .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
     }
@@ -355,7 +355,7 @@ pub(crate) async fn apply_index_batch(
 pub(crate) async fn apply_vector_batch(
     repo: &RepoInstance,
     token: u64,
-    vecs: Vec<(shamir_types::types::record_id::RecordId, Vec<f32>)>,
+    vecs: &[(shamir_types::types::record_id::RecordId, Vec<f32>)],
     _tx_id: u64,
 ) -> Result<(), DbError> {
     // Test-only failure injection: simulate a persistent post-lock HNSW
@@ -372,7 +372,7 @@ pub(crate) async fn apply_vector_batch(
 
     if let Some(tbl) = repo.table_by_token(token).await? {
         for backend in tbl.index2_registry().all_backends().await {
-            backend.apply_staged_vectors(&vecs).await.map_err(|e| {
+            backend.apply_staged_vectors(vecs).await.map_err(|e| {
                 DbError::Internal(format!("hnsw apply_staged_vectors at commit: {e}"))
             })?;
         }
