@@ -82,23 +82,7 @@ impl TableManager {
         //    Skip entirely when the caller does not need the result back
         //    (fire-and-forget batch inserts with return_result=false).
         let records = if return_result {
-            let mut recs = Vec::with_capacity(resolved_values.len());
-            for (value, id) in resolved_values.iter().zip(ids.iter()) {
-                let mut obj = match &**value {
-                    Value::Map(map) => {
-                        // Convert QueryValue map to serde_json::Map for the response
-                        let mut jmap = json::Map::new();
-                        for (k, v) in map {
-                            jmap.insert(k.clone(), json::Value::from(v.clone()));
-                        }
-                        jmap
-                    }
-                    _ => json::Map::new(),
-                };
-                obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-                recs.push(json::Value::Object(obj));
-            }
-            recs
+            build_insert_result_records(&resolved_values, &ids)
         } else {
             Vec::new()
         };
@@ -200,22 +184,7 @@ impl TableManager {
         // (return_result=false) — avoids per-row serde_json::Map build
         // and QueryValue→json::Value clone on the hot batch-insert path.
         let records = if return_result {
-            let mut recs = Vec::with_capacity(resolved_values.len());
-            for (value, id) in resolved_values.iter().zip(ids.iter()) {
-                let mut obj = match &**value {
-                    Value::Map(map) => {
-                        let mut jmap = json::Map::new();
-                        for (k, v) in map {
-                            jmap.insert(k.clone(), json::Value::from(v.clone()));
-                        }
-                        jmap
-                    }
-                    _ => json::Map::new(),
-                };
-                obj.insert("_id".to_string(), json::Value::String(id.to_string()));
-                recs.push(json::Value::Object(obj));
-            }
-            recs
+            build_insert_result_records(&resolved_values, &ids)
         } else {
             Vec::new()
         };
@@ -927,6 +896,34 @@ impl TableManager {
             execution_time_us: start.elapsed().as_micros() as u64,
         })
     }
+}
+
+/// Build the `Vec<serde_json::Value>` result for an INSERT response.
+///
+/// For each (resolved value, id) pair: convert the `QueryValue::Map` fields
+/// into a `serde_json::Map` pre-allocated to the known field count + 1 (for
+/// `_id`), avoiding reallocation from the default-capacity new(). Non-map
+/// values get a single-entry map `{"_value": ..., "_id": ...}`.
+fn build_insert_result_records(
+    resolved_values: &[std::borrow::Cow<'_, QueryValue>],
+    ids: &[RecordId],
+) -> Vec<json::Value> {
+    let mut recs = Vec::with_capacity(resolved_values.len());
+    for (value, id) in resolved_values.iter().zip(ids.iter()) {
+        let mut obj = match &**value {
+            Value::Map(map) => {
+                let mut jmap = json::Map::with_capacity(map.len() + 1);
+                for (k, v) in map {
+                    jmap.insert(k.clone(), json::Value::from(v.clone()));
+                }
+                jmap
+            }
+            _ => json::Map::with_capacity(2),
+        };
+        obj.insert("_id".to_string(), json::Value::String(id.to_string()));
+        recs.push(json::Value::Object(obj));
+    }
+    recs
 }
 
 /// Merge set_map fields into an existing InnerValue record.
