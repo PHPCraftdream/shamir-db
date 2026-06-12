@@ -23,6 +23,8 @@ use shamir_engine::query::batch::{
 };
 use shamir_engine::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
+use shamir_query_builder::query::Query;
+use shamir_query_builder::write::doc;
 use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
@@ -686,6 +688,181 @@ fn bench_async_commit_index_heavy(c: &mut Criterion) {
     group.finish();
 }
 
+/// Read-scan bench: quantifies Stage 21 (QueryRecord elim json::Map alloc)
+/// and Stage 22 (matches_msgpack_bytes skips InnerValue decode on rejects).
+///
+/// 1000 rows are inserted ONCE before measurement. Three variants exercise
+/// different filter selectivities so the Stage 22 skip-decode win is visible
+/// on the filtered cases.
+fn bench_read_scan(c: &mut Criterion) {
+    let rt = rt();
+
+    // ── one-time fixture setup ─────────────────────────────────────────────
+    let repo = {
+        let r = make_repo();
+        // Pre-populate 1000 rows with varied fields for selective filtering.
+        rt.block_on(async {
+            let resolver = Resolver { repo: r.clone() };
+            let mut queries = new_map();
+            let values: Vec<shamir_types::types::value::QueryValue> = (0..1000usize)
+                .map(|i| {
+                    shamir_types::types::value::QueryValue::from(
+                        doc()
+                            .set("id", format!("k{i}"))
+                            .set("score", i as i64)
+                            .set("category", (i % 10) as i64)
+                            .set("name", format!("name_{i}"))
+                            .build(),
+                    )
+                })
+                .collect();
+            queries.insert(
+                "ins".to_string(),
+                QueryEntry {
+                    op: BatchOp::Insert(InsertOp {
+                        insert_into: TableRef::new("bench_table"),
+                        values,
+                    }),
+                    return_result: false,
+                    after: Vec::new(),
+                },
+            );
+            let request = BatchRequest {
+                id: serde_json::json!(1),
+                name: None,
+                transactional: false,
+                isolation: None,
+                durability: None,
+                queries,
+                return_all: false,
+                return_only: None,
+                limits: Default::default(),
+            };
+            execute_batch(&request, &resolver, None, None, Actor::System, "bench")
+                .await
+                .unwrap();
+        });
+        r
+    };
+    let resolver = Resolver { repo: repo.clone() };
+
+    let mut g = c.benchmark_group("read_scan");
+    bu::tune(&mut g, 30, 5, 3);
+
+    // Variant 1: scan all rows — baseline; pure scan + projection cost.
+    // Exercises Stage 21 (no json::Map alloc per row on 3 scan paths).
+    g.bench_function("scan_all_1000", |b| {
+        let q = Query::from("bench_table");
+        let req = {
+            let mut queries = new_map();
+            queries.insert(
+                "r".to_string(),
+                QueryEntry {
+                    op: BatchOp::Read(q.into()),
+                    return_result: true,
+                    after: Vec::new(),
+                },
+            );
+            BatchRequest {
+                id: serde_json::json!(2),
+                name: None,
+                transactional: false,
+                isolation: None,
+                durability: None,
+                queries,
+                return_all: true,
+                return_only: None,
+                limits: Default::default(),
+            }
+        };
+        b.to_async(&rt).iter(|| {
+            let resolver = &resolver;
+            let req = &req;
+            async move {
+                execute_batch(req, resolver, None, None, Actor::System, "bench")
+                    .await
+                    .unwrap()
+            }
+        });
+    });
+
+    // Variant 2: selective filter 10% match (category == 5, 100/1000 rows).
+    // Stage 22: bytes-level filter rejects 900 rows before InnerValue decode.
+    g.bench_function("scan_filtered_10pct", |b| {
+        let q = Query::from("bench_table").where_eq("category", 5i64);
+        let req = {
+            let mut queries = new_map();
+            queries.insert(
+                "r".to_string(),
+                QueryEntry {
+                    op: BatchOp::Read(q.into()),
+                    return_result: true,
+                    after: Vec::new(),
+                },
+            );
+            BatchRequest {
+                id: serde_json::json!(3),
+                name: None,
+                transactional: false,
+                isolation: None,
+                durability: None,
+                queries,
+                return_all: true,
+                return_only: None,
+                limits: Default::default(),
+            }
+        };
+        b.to_async(&rt).iter(|| {
+            let resolver = &resolver;
+            let req = &req;
+            async move {
+                execute_batch(req, resolver, None, None, Actor::System, "bench")
+                    .await
+                    .unwrap()
+            }
+        });
+    });
+
+    // Variant 3: selective filter 0.1% match (score == 42, 1/1000 rows).
+    // Largest Stage 22 win: 999 rows skip InnerValue decode entirely.
+    g.bench_function("scan_filtered_1pct", |b| {
+        let q = Query::from("bench_table").where_eq("score", 42i64);
+        let req = {
+            let mut queries = new_map();
+            queries.insert(
+                "r".to_string(),
+                QueryEntry {
+                    op: BatchOp::Read(q.into()),
+                    return_result: true,
+                    after: Vec::new(),
+                },
+            );
+            BatchRequest {
+                id: serde_json::json!(4),
+                name: None,
+                transactional: false,
+                isolation: None,
+                durability: None,
+                queries,
+                return_all: true,
+                return_only: None,
+                limits: Default::default(),
+            }
+        };
+        b.to_async(&rt).iter(|| {
+            let resolver = &resolver;
+            let req = &req;
+            async move {
+                execute_batch(req, resolver, None, None, Actor::System, "bench")
+                    .await
+                    .unwrap()
+            }
+        });
+    });
+
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_insert_tx_vs_non_tx,
@@ -694,5 +871,6 @@ criterion_group!(
     bench_provider_overhead,
     bench_commit_phase5c_indexed_sled,
     bench_async_commit_index_heavy,
+    bench_read_scan,
 );
 criterion_main!(benches);
