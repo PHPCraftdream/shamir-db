@@ -80,7 +80,7 @@ async fn test_execute_insert_single() {
         .row(doc().set("name", "Alice").set("age", 30_i64))
         .build();
 
-    let result = table.execute_insert(&op).await.unwrap();
+    let result = table.execute_insert(&op, true).await.unwrap();
 
     assert_eq!(result.affected, 1);
     assert_eq!(result.records.len(), 1);
@@ -102,7 +102,7 @@ async fn test_execute_insert_multiple() {
         .row(doc().set("name", "Carol").set("age", 35_i64))
         .build();
 
-    let result = table.execute_insert(&op).await.unwrap();
+    let result = table.execute_insert(&op, true).await.unwrap();
 
     assert_eq!(result.affected, 3);
     assert_eq!(result.records.len(), 3);
@@ -115,7 +115,7 @@ async fn test_execute_insert_empty() {
 
     let op: InsertOp = write::insert("users").build();
 
-    let result = table.execute_insert(&op).await.unwrap();
+    let result = table.execute_insert(&op, true).await.unwrap();
 
     assert_eq!(result.affected, 0);
     assert_eq!(table.count().await.unwrap(), 0);
@@ -300,7 +300,7 @@ async fn test_insert_update_delete_pipeline() {
         .row(doc().set("name", "Alice").set("score", 100_i64))
         .row(doc().set("name", "Bob").set("score", 50_i64))
         .build();
-    let r = table.execute_insert(&insert_op).await.unwrap();
+    let r = table.execute_insert(&insert_op, true).await.unwrap();
     assert_eq!(r.affected, 2);
 
     // Need to re-get interner after insert (new keys may have been interned)
@@ -412,7 +412,7 @@ async fn test_interner_persisted_after_insert() {
         .row(doc().set("brand_new_field", "value1"))
         .row(doc().set("brand_new_field", "value2"))
         .build();
-    table.execute_insert(&op).await.unwrap();
+    table.execute_insert(&op, true).await.unwrap();
 
     // Verify the key was interned
     let interner = table.interner().get().await.unwrap();
@@ -492,7 +492,7 @@ async fn test_insert_computed_field_lowercase() {
         )
         .build();
 
-    let result = table.execute_insert(&op).await.unwrap();
+    let result = table.execute_insert(&op, true).await.unwrap();
     assert_eq!(result.affected, 1);
     // The literal field is untouched; the computed field holds the result.
     assert_eq!(result.records[0]["email"], "Alice@Example.COM");
@@ -525,7 +525,7 @@ async fn test_insert_computed_unknown_function_fails_closed() {
         .build();
 
     // A broken computed value aborts the write rather than storing garbage.
-    assert!(table.execute_insert(&op).await.is_err());
+    assert!(table.execute_insert(&op, true).await.is_err());
 }
 
 #[tokio::test]
@@ -536,5 +536,5 @@ async fn test_insert_computed_bad_ref_fails_closed() {
         .row(doc().set("y", func("strings/lower", [col("missing_field")])))
         .build();
 
-    assert!(table.execute_insert(&op).await.is_err());
+    assert!(table.execute_insert(&op, true).await.is_err());
 }
