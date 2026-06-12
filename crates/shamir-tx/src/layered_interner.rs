@@ -163,25 +163,41 @@ impl<'a> LayeredInterner<'a> {
 /// Must be called under `RepoTxGate::commit_mutex` — no internal
 /// synchronisation. Returns a remap: `overlay_id → final_base_id`.
 /// The caller rewrites any bytes referencing overlay ids before flush.
+/// Result of [`commit_interner_overlay`]: the id remap and the delta of
+/// genuinely new entries inserted into base during merge.
+pub struct OverlayCommitResult {
+    /// `overlay_id → final_base_id` for every overlay entry.
+    pub remap: HashMap<u64, u64>,
+    /// Entries that were **new** to base (not previously present).
+    /// Each tuple is `(field_name, base_id)`.
+    pub delta: Vec<(String, u64)>,
+}
+
 pub async fn commit_interner_overlay(
     base: &Interner,
     overlay: &SccHashMap<String, u64>,
-) -> DbResult<HashMap<u64, u64>> {
+) -> DbResult<OverlayCommitResult> {
     let mut remap = HashMap::new();
+    let mut delta = Vec::new();
     let mut pending: Vec<(String, u64)> = Vec::new();
     overlay
         .scan_async(|k, v| pending.push((k.clone(), *v)))
         .await;
 
     for (key, overlay_id) in pending {
-        let final_id = match base.get_ind(&key) {
-            Some(existing) => existing.id(),
-            None => base
-                .touch_ind(&key)
-                .map(|ti| ti.key().id())
-                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?,
+        let (final_id, is_new) = match base.get_ind(&key) {
+            Some(existing) => (existing.id(), false),
+            None => {
+                let ti = base
+                    .touch_ind(&key)
+                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                (ti.key().id(), ti.is_new())
+            }
         };
         remap.insert(overlay_id, final_id);
+        if is_new {
+            delta.push((key, final_id));
+        }
     }
-    Ok(remap)
+    Ok(OverlayCommitResult { remap, delta })
 }

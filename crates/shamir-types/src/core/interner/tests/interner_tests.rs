@@ -842,6 +842,63 @@ fn test_touch_ind_into_key() {
     assert_eq!(key.id(), 1);
 }
 
+// ---------------------------------------------------------------------------
+// Interner::touch_with_id
+// ---------------------------------------------------------------------------
+
+#[test]
+fn touch_with_id_fresh_insert() {
+    let interner = Interner::new();
+    interner.touch_with_id("email", 5).unwrap();
+    assert_eq!(interner.get_ind("email"), Some(InternerKey::new(5)));
+    assert_eq!(
+        interner.get_str(&InternerKey::new(5)),
+        Some(UserKey::from_str("email"))
+    );
+}
+
+#[test]
+fn touch_with_id_idempotent() {
+    let interner = Interner::new();
+    interner.touch_with_id("email", 5).unwrap();
+    // Same call again — should be no-op.
+    interner.touch_with_id("email", 5).unwrap();
+    assert_eq!(interner.len(), 1);
+}
+
+#[test]
+fn touch_with_id_conflict_different_id_for_known_name() {
+    let interner = Interner::new();
+    interner.touch_with_id("email", 5).unwrap();
+    let err = interner.touch_with_id("email", 10).unwrap_err();
+    assert!(err.contains("already mapped"), "unexpected error: {err}");
+}
+
+#[test]
+fn touch_with_id_collision_id_used_by_different_name() {
+    let interner = Interner::new();
+    interner.touch_with_id("email", 5).unwrap();
+    let err = interner.touch_with_id("score", 5).unwrap_err();
+    assert!(err.contains("already used"), "unexpected error: {err}");
+}
+
+#[test]
+fn touch_with_id_then_touch_ind_no_reuse() {
+    let interner = Interner::new();
+    // Pre-assign id 3 via touch_with_id.
+    interner.touch_with_id("email", 3).unwrap();
+    // touch_ind should allocate id > 3.
+    let ti = interner.touch_ind("score").unwrap();
+    assert!(
+        ti.key().id() > 3,
+        "touch_ind should not reuse id 3, got {}",
+        ti.key().id()
+    );
+    // Both keys accessible.
+    assert_eq!(interner.get_ind("email"), Some(InternerKey::new(3)));
+    assert!(interner.get_ind("score").is_some());
+}
+
 /// Regression test for the silent data-loss bug in `entries_after`:
 /// a `None` gap in the reverse vec caused the loop to `break`,
 /// dropping every populated entry above the gap (never persisted →

@@ -55,8 +55,10 @@ pub(super) async fn pre_commit(
         for table_id in &table_ids {
             if let Some(tbl) = repo.table_by_token(*table_id).await? {
                 let base_interner = tbl.interner().get().await?;
-                let remap =
-                    shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
+                let shamir_tx::OverlayCommitResult {
+                    remap,
+                    delta: _delta,
+                } = shamir_tx::commit_interner_overlay(base_interner, &tx.interner_overlay).await?;
                 if !remap.is_empty() {
                     if let Some(staging) = tx.write_set.get_mut(table_id) {
                         staging

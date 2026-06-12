@@ -195,6 +195,121 @@ impl Interner {
             .collect()
     }
 
+    /// Idempotently associate `name` with the exact `id`. Used by WAL recovery
+    /// to replay interner deltas: each delta entry calls this so recovery
+    /// rebuilds the same intern-id assignments durably present in past WAL
+    /// records, even if the interner persist file was older.
+    ///
+    /// - If `name` is already mapped to `id`: no-op, Ok(()).
+    /// - If `name` is mapped to a different id: Err (corrupt state).
+    /// - If `id` is already used by a different name: Err (id collision).
+    /// - Otherwise: insert atomically.
+    pub fn touch_with_id(&self, name: &str, id: u64) -> Result<(), String> {
+        use dashmap::mapref::entry::Entry;
+
+        if id == 0 {
+            return Err("touch_with_id: id 0 is reserved (sentinel)".into());
+        }
+
+        let key = UserKey::from_str(name);
+
+        // Check if name already exists in the forward map.
+        if let Some(existing) = self.map_user_to_interned.get(name) {
+            let existing_id = existing.id();
+            return if existing_id == id {
+                Ok(()) // idempotent
+            } else {
+                Err(format!(
+                    "touch_with_id: name '{}' already mapped to id {}, cannot remap to {}",
+                    name, existing_id, id
+                ))
+            };
+        }
+
+        // Check reverse map for id collision before inserting.
+        {
+            let rev = self.reverse.load();
+            if let Some(Some(existing_name)) = rev.get(id as usize) {
+                if existing_name.as_str() != name {
+                    return Err(format!(
+                        "touch_with_id: id {} already used by '{}', cannot assign to '{}'",
+                        id,
+                        existing_name.as_str(),
+                        name
+                    ));
+                }
+                // Same name at same id — idempotent (shouldn't normally reach
+                // here since forward map check above would catch it, but
+                // defensive).
+                return Ok(());
+            }
+        }
+
+        // CAS into forward map — another thread may have raced us.
+        match self.map_user_to_interned.entry(key.clone()) {
+            Entry::Occupied(existing) => {
+                let existing_id = existing.get().id();
+                if existing_id == id {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "touch_with_id: name '{}' raced to id {}, cannot assign {}",
+                        name, existing_id, id
+                    ))
+                }
+            }
+            Entry::Vacant(vacant) => {
+                let new_key = InternerKey::new(id);
+                vacant.insert(new_key);
+
+                // Grow and populate the reverse vec via CAS loop.
+                loop {
+                    let cur = self.reverse.load_full();
+                    let mut new_rev = (*cur).clone();
+                    if (id as usize) >= new_rev.len() {
+                        new_rev.resize((id as usize) + 1, None);
+                    }
+                    // Check for collision in the snapshot we're about to swap.
+                    if let Some(Some(existing_name)) = new_rev.get(id as usize) {
+                        if existing_name.as_str() != name {
+                            // Another thread raced and placed a different name at this id.
+                            // The forward map already has our entry — remove it.
+                            self.map_user_to_interned.remove(name);
+                            return Err(format!(
+                                "touch_with_id: id {} raced to '{}', cannot assign '{}'",
+                                id,
+                                existing_name.as_str(),
+                                name
+                            ));
+                        }
+                    }
+                    new_rev[id as usize] = Some(key.clone());
+                    let prev = self.reverse.compare_and_swap(&cur, Arc::new(new_rev));
+                    if Arc::ptr_eq(&prev, &cur) {
+                        break;
+                    }
+                }
+
+                // Bump current_id so subsequent touch_ind won't reuse this id.
+                loop {
+                    let cur = self.current_id.load(Ordering::Relaxed);
+                    if cur >= id {
+                        break;
+                    }
+                    if self
+                        .current_id
+                        .compare_exchange_weak(cur, id, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
     /// Returns the slice of interned entries whose ids fall in
     /// `(start_exclusive .. end_inclusive]`. Used by the persistence
     /// layer to capture only the delta added since the last persist

@@ -156,13 +156,15 @@ async fn commit_overlay_merges_into_base() {
         .await
         .unwrap();
 
-    let remap = commit_interner_overlay(&base, &overlay).await.unwrap();
-    assert_eq!(remap.len(), 2);
+    let result = commit_interner_overlay(&base, &overlay).await.unwrap();
+    assert_eq!(result.remap.len(), 2);
 
     let final_a = base.get_ind("a").expect("a should be in base").id();
     let final_b = base.get_ind("b").expect("b should be in base").id();
-    assert_eq!(remap[&overlay_a], final_a);
-    assert_eq!(remap[&overlay_b], final_b);
+    assert_eq!(result.remap[&overlay_a], final_a);
+    assert_eq!(result.remap[&overlay_b], final_b);
+    // Both entries are new to base.
+    assert_eq!(result.delta.len(), 2);
 }
 
 #[tokio::test]
@@ -181,8 +183,10 @@ async fn commit_overlay_with_race_uses_existing_base_id() {
         .await
         .unwrap();
 
-    let remap = commit_interner_overlay(&base, &overlay).await.unwrap();
-    assert_eq!(remap[&overlay_id], existing);
+    let result = commit_interner_overlay(&base, &overlay).await.unwrap();
+    assert_eq!(result.remap[&overlay_id], existing);
+    // "foo" already existed in base — delta should be empty.
+    assert!(result.delta.is_empty());
 }
 
 #[tokio::test]
@@ -191,7 +195,8 @@ async fn commit_overlay_empty_is_noop() {
     let overlay = SccHashMap::new();
     let base_len = base.len();
 
-    let remap = commit_interner_overlay(&base, &overlay).await.unwrap();
-    assert!(remap.is_empty());
+    let result = commit_interner_overlay(&base, &overlay).await.unwrap();
+    assert!(result.remap.is_empty());
+    assert!(result.delta.is_empty());
     assert_eq!(base.len(), base_len);
 }
