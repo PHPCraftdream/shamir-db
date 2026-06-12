@@ -18,6 +18,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{StreamExt, StreamMap};
 
 use super::decode_cache::{cache_evict_up_to, cache_get, cache_insert};
+use super::deliver_cache::{deliver_cache_evict_up_to, deliver_cache_get, deliver_cache_insert};
 use super::push::{make_deliver_data, try_push_event};
 use super::target_match::{any_target_interested, matches_any};
 
@@ -37,6 +38,9 @@ pub(crate) async fn bridge_task(
     initial: bool,
 ) {
     let seq = AtomicU64::new(0);
+    // Unique per ShamirDb instance — prevents deliver-cache pollution across
+    // distinct in-memory databases in tests.
+    let db_id = Arc::as_ptr(&db) as u64;
 
     let run = async {
         let targets: Vec<(String, String, EventMask, Option<Filter>)> = sources
@@ -282,16 +286,56 @@ pub(crate) async fn bridge_task(
                         if !matches_any(&targets, &repo, &change.table, &change.op, value_json) {
                             continue;
                         }
-                        let data = make_deliver_data(
-                            &deliver,
-                            &db,
-                            &db_name,
-                            &actor,
-                            change,
-                            value_json,
-                            event.commit_version,
-                        )
-                        .await;
+                        // For Records/Keys modes the payload is identical
+                        // across all subscribers — use the deliver cache to
+                        // build it once and share via Arc.
+                        let deliver_mode_disc = match &deliver {
+                            DeliverMode::Records => Some(0u8),
+                            DeliverMode::Keys => Some(1u8),
+                            _ => None,
+                        };
+                        let data = if let Some(mode) = deliver_mode_disc {
+                            if let Some(cached) = deliver_cache_get(
+                                db_id,
+                                &repo,
+                                event.commit_version,
+                                change_idx,
+                                mode,
+                            ) {
+                                (*cached).clone()
+                            } else {
+                                let built = make_deliver_data(
+                                    &deliver,
+                                    &db,
+                                    &db_name,
+                                    &actor,
+                                    change,
+                                    value_json,
+                                    event.commit_version,
+                                )
+                                .await;
+                                let arc = deliver_cache_insert(
+                                    db_id,
+                                    &repo,
+                                    event.commit_version,
+                                    change_idx,
+                                    mode,
+                                    built,
+                                );
+                                (*arc).clone()
+                            }
+                        } else {
+                            make_deliver_data(
+                                &deliver,
+                                &db,
+                                &db_name,
+                                &actor,
+                                change,
+                                value_json,
+                                event.commit_version,
+                            )
+                            .await
+                        };
                         if !try_push_event(
                             &push,
                             sub_id,
@@ -306,6 +350,7 @@ pub(crate) async fn bridge_task(
                     // for this repo advance monotonically past this version.
                     if event.commit_version > 1 {
                         cache_evict_up_to(event.commit_version - 1);
+                        deliver_cache_evict_up_to(event.commit_version - 1);
                     }
                 }
                 Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
