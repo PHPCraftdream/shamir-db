@@ -60,9 +60,9 @@ pub(super) async fn pre_commit(
                 if !remap.is_empty() {
                     if let Some(staging) = tx.write_set.get(table_id) {
                         staging
-                            .rewrite_set_bytes(|bytes| {
-                                shamir_tx::remap_inner_value_bytes(bytes.clone(), &remap)
-                                    .map_err(|e| format!("remap encode: {e}"))
+                            .rewrite_set_inner(|inner| {
+                                shamir_tx::remap_value(inner, &remap);
+                                Ok(())
                             })
                             .await
                             .map_err(DbError::Codec)?;

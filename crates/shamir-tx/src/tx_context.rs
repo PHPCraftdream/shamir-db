@@ -563,9 +563,9 @@ impl TxContext {
         }
         for staging in self.write_set.values() {
             staging
-                .rewrite_set_bytes(|bytes| {
-                    crate::id_remap::remap_inner_value_bytes(bytes.clone(), remap)
-                        .map_err(|e| format!("remap encode: {e}"))
+                .rewrite_set_inner(|inner| {
+                    crate::id_remap::remap_value(inner, remap);
+                    Ok(())
                 })
                 .await?;
         }
