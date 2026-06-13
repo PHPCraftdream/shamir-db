@@ -59,14 +59,12 @@ impl CommitWriteRecord {
 
 /// Per-repo transactional synchronisation point.
 pub struct RepoTxGate {
-    /// Serialises the commit phase. Held across the whole critical
-    /// section: pre-commit (interner-overlay merge → SSI validation →
-    /// unique re-check → WAL begin), then data + index materialization
-    /// (Phase 5a data writes + Phase 5c index writes), publish, durable
-    /// markers, and WAL cleanup — it is released only after
-    /// `materialize` returns. The per-vector HNSW promote runs OUTSIDE
-    /// the lock (post-`materialize`). So the section is O(rows + index
-    /// postings) of storage work, not a fixed wall-clock budget.
+    /// Serialises the commit critical section. After Stage B, the lock
+    /// covers only: SSI validate → phantom validate → assign_version →
+    /// WAL begin → materialize (5a/5b/5c) → publish → record_commit_writes.
+    /// Phase 1 (interner merge) and Phase 2.5/2.6 (uwl_guards + unique
+    /// re-validation) run BEFORE the lock. Phase 6.5/7 (markers + WAL
+    /// cleanup) and HNSW promote run AFTER the lock.
     /// `tokio::sync::Mutex` because the guard lives across `.await`.
     commit_mutex: tokio::sync::Mutex<()>,
 
@@ -211,12 +209,12 @@ impl RepoTxGate {
     /// which is documented cancel-safe (`drop` of the future releases
     /// the wait without acquiring the lock).
     ///
-    /// Lock the commit gate. Returns a tokio `MutexGuard`. The guard is
-    /// held across the entire critical section — pre-commit
-    /// (interner-overlay merge / SSI validation / unique re-check / WAL
-    /// begin) + data and index materialization + publish + durable
-    /// markers + WAL cleanup — and dropped only after `materialize`, so
-    /// the post-lock per-vector HNSW promote runs unserialised.
+    /// Lock the commit gate. Returns a tokio `MutexGuard`. After Stage B,
+    /// the guard covers only the sequencer section: SSI validate → phantom
+    /// validate → assign_version → WAL begin → materialize → publish →
+    /// record_commit_writes. Phase 1 (interner merge) and Phase 2.5/2.6
+    /// (uwl_guards + unique re-validation) run pre-lock. Phase 6.5/7 and
+    /// HNSW promote run post-lock.
     pub async fn commit_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.commit_mutex.lock().await
     }

@@ -8,7 +8,7 @@ use crate::tx::commit_phases::{
     apply_counter_phase, apply_data_phase, materialize_async_tail, promote_vectors,
 };
 use crate::tx::materialize::{materialize, post_publish_cleanup};
-use crate::tx::pre_commit::{pre_commit, PreCommit};
+use crate::tx::pre_commit::{pre_commit_locked, pre_commit_prelock, PreCommit, PreLockResult};
 use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
 const DEFAULT_MAX_TX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300); // 5 min
@@ -286,31 +286,47 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
     let gate = repo.tx_gate().await?;
     let wal = repo.repo_wal().await?;
 
+    // === PRE-LOCK SECTION (concurrent across committers) ===
+    //
+    // Phase 1 (interner overlay merge + remap) and Phase 2.5 + 2.6
+    // (uwl_guards acquisition + unique re-validation) run OUTSIDE
+    // `commit_lock`. Phase 1 is CAS-safe on DashMap (concurrent merges
+    // converge). Phase 2.5/2.6 serialize on per-table uwl_guards in
+    // sorted token order — no global serialization needed. Two committers
+    // touching disjoint unique tables proceed fully in parallel here.
+    let PreLockResult { uwl_guards } = match pre_commit_prelock(&mut tx, repo).await {
+        Ok(r) => r,
+        Err(e) => {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e);
+        }
+    };
+
+    // === CRITICAL SECTION (commit_lock — sequencer) ===
+    //
+    // Only the SSI/phantom validate, version assignment, WAL begin,
+    // materialize, and publish remain under the lock. Phase 1 and
+    // Phase 2.5/2.6 (the I/O-heavy parts for unique-constrained tables)
+    // have already completed above.
     let commit_guard = gate.commit_lock().await;
 
-    // === Pre-commit (Phases 1–4): real aborts live here ===
-    //
-    // Returns `Some((commit_version, uwl_guards))` on a *successful* Phase 4
-    // (the commit point). Any failure before that is a clean abort —
-    // nothing durable, locks released by RAII on the `Err` return. Returns
-    // `None` for the C6 empty-tx fast-path (SSI already validated inside
-    // `pre_commit`; nothing durable to do).
     let PreCommit {
         commit_version,
         uwl_guards,
-    } = match pre_commit(&mut tx, repo, gate.as_ref(), wal.as_ref()).await {
+    } = match pre_commit_locked(&mut tx, repo, gate.as_ref(), wal.as_ref(), uwl_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
             // C6 empty-tx fast-path. SSI read-set validation (Phase 2) has
-            // already run inside `pre_commit`, so a read-only Serializable
-            // tx with a conflict has already returned `Err` above. Here the
-            // tx staged nothing durable: skip Phase 3 (assign_next_version),
-            // Phase 4 (`wal.begin`), and all of `materialize` (publish +
-            // markers + wal.commit). No version is consumed, no WAL write
-            // occurs. Report COMMITTED with `commit_version` pinned to the
-            // tx's snapshot version and materialization `Complete` (there
-            // were no projections to materialize). Counts as a committed tx
-            // for metrics, consistent with the full path.
+            // already run inside `pre_commit_locked`, so a read-only
+            // Serializable tx with a conflict has already returned `Err`
+            // above. Here the tx staged nothing durable: skip Phase 3
+            // (assign_next_version), Phase 4 (`wal.begin`), and all of
+            // `materialize` (publish + markers + wal.commit). No version is
+            // consumed, no WAL write occurs. Report COMMITTED with
+            // `commit_version` pinned to the tx's snapshot version and
+            // materialization `Complete` (there were no projections to
+            // materialize). Counts as a committed tx for metrics, consistent
+            // with the full path.
             repo.tx_metrics().on_tx_committed();
             // Level-3 locks are released on commit too (a read-only
             // Pessimistic tx still holds Shared locks on what it read).
