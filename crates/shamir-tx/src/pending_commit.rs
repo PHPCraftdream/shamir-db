@@ -14,23 +14,25 @@ use crate::TxContext;
 /// The leader drains these from `RepoTxGate::pending_commits`, checks for
 /// write-set conflicts, and materialises the entire batch under a single
 /// WAL fsync.
-#[allow(dead_code)]
 pub struct PendingCommit {
     pub tx: TxContext,
     pub write_set_keys: HashSet<(u64, Bytes), THasher>,
+    /// Per-table unique-write-lock guards acquired in the pre-lock phase.
+    pub uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
     pub result_tx: oneshot::Sender<Result<u64, DbError>>,
 }
 
-#[allow(dead_code)]
 impl PendingCommit {
     pub fn new(
         tx: TxContext,
         write_set_keys: HashSet<(u64, Bytes), THasher>,
+        uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
         result_tx: oneshot::Sender<Result<u64, DbError>>,
     ) -> Self {
         Self {
             tx,
             write_set_keys,
+            uwl_guards,
             result_tx,
         }
     }

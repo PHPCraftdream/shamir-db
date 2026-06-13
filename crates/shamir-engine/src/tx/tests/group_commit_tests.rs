@@ -12,7 +12,7 @@ async fn enqueue_and_drain_pending() {
     let write_set_keys: HashSet<(u64, bytes::Bytes), THasher> = HashSet::default();
     let (result_tx, _rx) = tokio::sync::oneshot::channel();
 
-    let pending = PendingCommit::new(tx, write_set_keys, result_tx);
+    let pending = PendingCommit::new(tx, write_set_keys, Vec::new(), result_tx);
     gate.enqueue_pending(pending);
 
     let batch = gate.drain_pending();
