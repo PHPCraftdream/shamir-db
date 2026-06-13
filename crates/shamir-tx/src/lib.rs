@@ -39,6 +39,7 @@ pub mod index_write_op;
 pub mod layered_interner;
 pub mod metrics;
 pub mod mvcc_store;
+pub mod pending_commit;
 pub mod predicate_set;
 pub mod repo_tx_gate;
 pub mod repo_wal_manager;
@@ -59,6 +60,7 @@ pub use layered_interner::{
 };
 pub use metrics::{TxMetrics, TxMetricsSnapshot};
 pub use mvcc_store::{KeyLock, LockMode, MvccStore, Retention, VersionEntry};
+pub use pending_commit::PendingCommit;
 pub use predicate_set::{
     key_in_interval, PredicateDep, PredicateSet, SORTED_PREFIX_LEN, SORTED_TAG,
 };

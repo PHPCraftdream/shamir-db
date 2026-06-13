@@ -1,5 +1,6 @@
 pub mod commit;
 pub mod commit_phases;
+pub(crate) mod group_commit;
 pub(super) mod materialize;
 pub(super) mod pre_commit;
 pub mod predicate_range;
