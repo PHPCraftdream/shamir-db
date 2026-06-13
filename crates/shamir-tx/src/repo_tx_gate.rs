@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use shamir_collections::THasher;
 
+use crate::pending_commit::PendingCommit;
 use crate::TxId;
 
 // ── Phase C: commit-write log structs ──────────────────────────────
@@ -96,6 +97,12 @@ pub struct RepoTxGate {
     /// on the gate's `commit_lock`. Empty unless at least one
     /// Serializable tx has committed.
     commit_write_log: scc::TreeIndex<u64, Arc<CommitWriteRecord>>,
+
+    /// Stage D scaffolding: queue of transactions awaiting group-commit.
+    /// Short-section `std::sync::Mutex` — only push/drain, no `.await`
+    /// held across. The leader pops the entire vec under lock.
+    #[allow(dead_code)]
+    pending_commits: std::sync::Mutex<Vec<PendingCommit>>,
 }
 
 /// RAII guard that removes a snapshot from `active_snapshots` on drop.
@@ -139,6 +146,7 @@ impl RepoTxGate {
             active_snapshots: Arc::new(scc::HashMap::new()),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
             commit_write_log: scc::TreeIndex::new(),
+            pending_commits: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -308,6 +316,21 @@ impl RepoTxGate {
     /// Peek at the `next_tx_id` counter (for durable snapshot).
     pub fn peek_next_tx_id(&self) -> u64 {
         self.next_tx_id.load(Ordering::Relaxed)
+    }
+
+    // ── Stage D: group-commit queue ───────────────────────────────────
+
+    /// Enqueue a `PendingCommit` for the next group-commit batch.
+    #[allow(dead_code)]
+    pub fn enqueue_pending(&self, p: PendingCommit) {
+        self.pending_commits.lock().unwrap().push(p);
+    }
+
+    /// Drain all pending commits, returning them to the leader.
+    #[allow(dead_code)]
+    pub fn drain_pending(&self) -> Vec<PendingCommit> {
+        let mut guard = self.pending_commits.lock().unwrap();
+        std::mem::take(&mut *guard)
     }
 
     // ── Phase C: commit-write log ────────────────────────────────────
