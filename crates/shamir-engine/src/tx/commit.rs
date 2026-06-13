@@ -1,5 +1,5 @@
 use shamir_storage::error::DbError;
-use shamir_tx::TxContext;
+use shamir_tx::{PendingCommit, TxContext};
 use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
 
@@ -7,7 +7,7 @@ use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
     apply_counter_phase, apply_data_phase, materialize_async_tail, promote_vectors,
 };
-use crate::tx::materialize::{materialize, post_publish_cleanup};
+use crate::tx::group_commit::{compute_write_set_keys, run_leader};
 use crate::tx::pre_commit::{pre_commit_locked, pre_commit_prelock, PreCommit, PreLockResult};
 use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
@@ -302,34 +302,85 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
         }
     };
 
-    // === CRITICAL SECTION (commit_lock — sequencer) ===
+    // AsyncIndex txs bypass group-commit: their post-commit tail is spawned
+    // as a background task, which is incompatible with the leader processing
+    // another tx's materialization. They always wait for the lock.
+    if tx.visibility == shamir_tx::CommitVisibility::AsyncIndex {
+        return commit_tx_inner_legacy_async(tx, uwl_guards, repo, gate.as_ref(), wal.as_ref())
+            .await;
+    }
+
+    // Compute write-set keys for group-commit conflict detection.
+    let write_set_keys = compute_write_set_keys(&tx);
+
+    // === GROUP-COMMIT ORCHESTRATION ===
     //
-    // Only the SSI/phantom validate, version assignment, WAL begin,
-    // materialize, and publish remain under the lock. Phase 1 and
-    // Phase 2.5/2.6 (the I/O-heavy parts for unique-constrained tables)
-    // have already completed above.
+    // Try to acquire the commit lock without blocking. If we win, we become
+    // the LEADER and process our tx + any queued followers. If we lose, we
+    // become a FOLLOWER and wait for the current leader to process us.
+    let lock_result = gate.try_commit_lock();
+    match lock_result {
+        Some(commit_guard) => {
+            // I'M LEADER.
+            run_leader(
+                tx,
+                uwl_guards,
+                write_set_keys,
+                commit_guard,
+                repo,
+                gate.as_ref(),
+                wal.as_ref(),
+            )
+            .await
+        }
+        None => {
+            // I'M FOLLOWER. Enqueue and wait for leader to process me.
+            let tx_id_u64 = tx.tx_id.0;
+            let snapshot_version = tx.snapshot_version;
+            let (result_tx, rx) = tokio::sync::oneshot::channel();
+            gate.enqueue_pending(PendingCommit::new(
+                tx,
+                write_set_keys,
+                uwl_guards,
+                result_tx,
+            ));
+
+            match rx.await {
+                Ok(Ok(commit_version)) => Ok(TxOutcome {
+                    tx_id: tx_id_u64,
+                    snapshot_version,
+                    commit_version,
+                    materialization: MaterializationState::Complete,
+                    background: None,
+                }),
+                Ok(Err(e)) => Err(TxError::Storage(e)),
+                Err(_) => Err(TxError::Storage(DbError::Internal(
+                    "leader dropped without responding".into(),
+                ))),
+            }
+        }
+    }
+}
+
+/// AsyncIndex commit path: uses the traditional sequential commit_lock.
+/// Group-commit does not apply because the background-task tail is
+/// incompatible with leader-processed materialization.
+async fn commit_tx_inner_legacy_async(
+    mut tx: TxContext,
+    uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    repo: &RepoInstance,
+    gate: &shamir_tx::RepoTxGate,
+    wal: &shamir_tx::RepoWalManager,
+) -> Result<TxOutcome, TxError> {
     let commit_guard = gate.commit_lock().await;
 
     let PreCommit {
         commit_version,
         uwl_guards,
-    } = match pre_commit_locked(&mut tx, repo, gate.as_ref(), wal.as_ref(), uwl_guards).await {
+    } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
-            // C6 empty-tx fast-path. SSI read-set validation (Phase 2) has
-            // already run inside `pre_commit_locked`, so a read-only
-            // Serializable tx with a conflict has already returned `Err`
-            // above. Here the tx staged nothing durable: skip Phase 3
-            // (assign_next_version), Phase 4 (`wal.begin`), and all of
-            // `materialize` (publish + markers + wal.commit). No version is
-            // consumed, no WAL write occurs. Report COMMITTED with
-            // `commit_version` pinned to the tx's snapshot version and
-            // materialization `Complete` (there were no projections to
-            // materialize). Counts as a committed tx for metrics, consistent
-            // with the full path.
             repo.tx_metrics().on_tx_committed();
-            // Level-3 locks are released on commit too (a read-only
-            // Pessimistic tx still holds Shared locks on what it read).
             release_pessimistic_locks(&tx, repo).await;
             drop(commit_guard);
             return Ok(TxOutcome {
@@ -341,197 +392,47 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             });
         }
         Err(e) => {
-            // Pre-commit abort: nothing durable. Release any Level-3 locks
-            // the tx held so blocked txs can proceed (RAII rollback for the
-            // pessimistic dimension).
             release_pessimistic_locks(&tx, repo).await;
             return Err(e);
         }
     };
 
-    // === Commit point crossed: the WAL entry is durable. ===
-    //
-    // From here there is NO abort — only materialization. Failures are
-    // logged + deferred to recovery; the version is still published.
-    //
-    // Level-3 pessimistic locks are released NOW: the commit is decided
-    // (Phase 4 WAL is durable), so the locks have served their purpose
-    // (2PL: locks held until commit, not until post-commit materialization).
-    // Releasing here works for both sync and async modes (tx is still in
-    // scope) and lets blocked txs proceed while materialization runs. No-op
-    // for Snapshot / Serializable (locked_keys is empty).
     release_pessimistic_locks(&tx, repo).await;
 
-    // Branch on the opt-in visibility mode (default `Synchronous` — byte-
-    // identical to the historical behaviour). `AsyncIndex` performs only
-    // the sync-prefix phases inline (5a data, 5b counter, 6 publish, write-
-    // log) and spawns the tail (5c, 6.5, 7, 5d) on a background task — the
-    // client returns once the version is published.
-    let visibility = tx.visibility;
     let snapshot_version = tx.snapshot_version;
     let tx_id_u64 = tx.tx_id.0;
-
-    // Changefeed (Phase 3b): project the committed footprint ONCE here,
-    // while `tx.write_set` is still intact (Phase 5a / `collect_data_batches`
-    // drains it). The projected event is emitted AFTER the version is
-    // published (sync: post-`materialize`; async: post-`publish_committed`),
-    // so neither the live broadcast nor the durable journal can hand out a
-    // version the gate has not yet published. `None` for an empty-data-write
-    // footprint. Emission itself is non-blocking and never fails the commit.
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
-    let outcome = match visibility {
-        shamir_tx::CommitVisibility::Synchronous => {
-            // === Sync mode (default) ===
-            //
-            // `materialize` runs Phases 5a (data) → 5b (counter) → 5c (index)
-            // → 6 (publish) → 6-bis (SSI write-log) UNDER `commit_lock`.
-            // Phase 6.5 (markers) and Phase 7 (WAL cleanup) run OUTSIDE the
-            // lock via `post_publish_cleanup` — they are I/O-bound crash-
-            // recovery bookkeeping that does not affect in-memory visibility
-            // and does not need serialisation against other committers.
-            let post_publish =
-                materialize(&mut tx, repo, gate.as_ref(), commit_version, uwl_guards).await;
+    apply_data_phase(&mut tx, repo, commit_version).await;
+    apply_counter_phase(&tx, repo).await;
+    gate.publish_committed_max(commit_version);
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
 
-            repo.tx_metrics().on_tx_committed();
+    maybe_crash("phase6_async", repo).await;
+    drop(commit_guard);
 
-            // === Release `commit_lock` BEFORE Phase 6.5/7 and HNSW. ===
-            //
-            // Everything that determines visibility (data → main, counter,
-            // index → info) and publishes the version has already run under
-            // the lock. Drop the guard here so other committers proceed
-            // while this tx runs the recovery-only cleanup + vector promote.
-            drop(commit_guard);
+    repo.emit_changefeed_event(changefeed_event).await;
 
-            // Phase 6.5 + 7: markers + WAL cleanup, outside the lock.
-            let materialization =
-                post_publish_cleanup(post_publish, repo, gate.as_ref(), wal.as_ref()).await;
-
-            if materialization == MaterializationState::Deferred {
-                repo.tx_metrics().on_tx_materialization_deferred();
-            }
-
-            // Changefeed emit (Phase 3b): publish already happened inside
-            // `materialize` (Phase 6). Fan the pre-projected event out to the
-            // live broadcast + durable journal — both non-blocking, neither
-            // can fail the commit. Done after the lock drop so the feed work
-            // never sits on the commit critical section.
-            repo.emit_changefeed_event(changefeed_event).await;
-
-            // Phase 5d (moved): promote staged HNSW vectors into the live
-            // graph, OUTSIDE `commit_lock` and AFTER Phase 7. A failure here
-            // does NOT mark the tx Deferred — see `promote_vectors`.
-            promote_vectors(&tx, repo, commit_version).await;
-
-            TxOutcome {
-                tx_id: tx_id_u64,
-                snapshot_version,
-                commit_version,
-                materialization,
-                background: None,
-            }
+    let repo_clone = repo.clone();
+    let metrics = repo.tx_metrics().clone();
+    let join = tokio::spawn(async move {
+        let state = materialize_async_tail(&mut tx, &repo_clone, commit_version, uwl_guards).await;
+        if state == MaterializationState::Deferred {
+            metrics.on_tx_materialization_deferred();
         }
-        shamir_tx::CommitVisibility::AsyncIndex => {
-            // === Async-index mode (opt-in) ===
-            //
-            // Run ONLY the phases that determine the client-visible commit
-            // outcome under `commit_lock`:
-            //   5a (data → MvccStore — read-your-own-writes holds),
-            //   5b (counter — in-memory bump),
-            //   6  (publish_committed — version visible to readers),
-            //   record_commit_writes (SSI phantom log).
-            // Then RELEASE `commit_lock` + ack the client.
-            //
-            // The tail — 5c (index postings to info_store), 6.5 (durable
-            // recovery markers), 7 (wal.commit marker removal), 5d (HNSW
-            // promote) — runs on a `tokio::task`. The tail holds the
-            // per-table `unique_write_lock` guards (Phase 2.5) across 5c
-            // exactly as in sync mode; concurrent non-tx unique writers
-            // to the same tables block on those guards until 5c finishes.
-            //
-            // CONTRACT (re-stated in `CommitVisibility::AsyncIndex` doc):
-            //   * Durability: WAL fsync already happened (Phase 4) — NOT
-            //     relaxed.
-            //   * Data read-your-writes: 5a + 6 already ran — preserved.
-            //   * Secondary-index visibility: may briefly lag (5c is on
-            //     the background task); a data scan immediately sees the
-            //     row.
-            //   * Crash safety: if the process dies before the tail
-            //     finishes, the inflight WAL marker survives → recovery
-            //     replays exactly the same WAL entry that sync-mode
-            //     deferral relies on (`recover_v2_inflight`).
-            apply_data_phase(&mut tx, repo, commit_version).await;
-            apply_counter_phase(&tx, repo).await;
-            // publish_committed_max (monotonic fetch_max): now that non-tx
-            // writes also advance `last_committed` off-lock via the same call,
-            // the tx path must use the CAS form too so a concurrent non-tx
-            // publish can never be overwritten by a plain store. For tx-only
-            // workloads commit_versions are strictly monotonic under
-            // `commit_lock`, so max == plain → behaviour unchanged.
-            gate.publish_committed_max(commit_version);
-            gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+        promote_vectors(&tx, &repo_clone, commit_version).await;
+        state
+    });
 
-            // Crash seam (test-only): version published in-memory but the
-            // background tail has NOT begun. The inflight WAL marker is
-            // still present so a hard crash here is recovered identically
-            // to a `Deferred` sync commit.
-            maybe_crash("phase6_async", repo).await;
+    repo.tx_metrics().on_tx_committed();
 
-            // Release `commit_lock` BEFORE spawning the tail — the whole
-            // point of async mode is that subsequent committers proceed
-            // without waiting on this tx's 5c. The tail will keep the
-            // per-table `uwl_guards` until 5c is done.
-            drop(commit_guard);
-
-            // Changefeed emit (Phase 3b): the version is already published
-            // (above). Fan the pre-projected event out — non-blocking, never
-            // fails the commit, never waits on the background tail. Done
-            // before spawning the tail so the live event is available the
-            // instant the client is acked.
-            repo.emit_changefeed_event(changefeed_event).await;
-
-            // Move ownership of the tx and the per-task guards onto the
-            // background task; `RepoInstance` is `Clone` (Arc-backed), so
-            // a clone is cheap.
-            let repo_clone = repo.clone();
-            let metrics = repo.tx_metrics().clone();
-            let join = tokio::spawn(async move {
-                let state =
-                    materialize_async_tail(&mut tx, &repo_clone, commit_version, uwl_guards).await;
-                if state == MaterializationState::Deferred {
-                    metrics.on_tx_materialization_deferred();
-                }
-                // Phase 5d (post-tail): HNSW promote, derived, never
-                // defers the tx. Done inside the background task so the
-                // client never waits for the per-vector spawn_blocking.
-                promote_vectors(&tx, &repo_clone, commit_version).await;
-                state
-            });
-
-            // Ack-time accounting: count the committed tx, ack the client.
-            repo.tx_metrics().on_tx_committed();
-
-            TxOutcome {
-                tx_id: tx_id_u64,
-                snapshot_version,
-                commit_version,
-                // SYNC-PREFIX phases all landed before ack (5a + 5b + 6 are
-                // unconditional and don't surface failures up here — 5a's
-                // bounded-retry deferral is folded into the tail's state
-                // because failure to materialize data should ALSO leave the
-                // marker inflight). With async mode the prefix doesn't have
-                // sub-phases that can flip the published outcome: 5a
-                // either succeeds or already logged + flipped `ok` inside
-                // the tail's state-tracking shim. Report `Complete` at ack
-                // and let `BackgroundCommitHandle::join` carry the truly
-                // final state.
-                materialization: MaterializationState::Complete,
-                background: Some(BackgroundCommitHandle { join }),
-            }
-        }
-    };
-
-    Ok(outcome)
+    Ok(TxOutcome {
+        tx_id: tx_id_u64,
+        snapshot_version,
+        commit_version,
+        materialization: MaterializationState::Complete,
+        background: Some(BackgroundCommitHandle { join }),
+    })
 }
 
 /// Release every Level-3 pessimistic lock the tx holds, grouped by table.

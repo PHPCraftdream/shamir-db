@@ -101,7 +101,6 @@ pub struct RepoTxGate {
     /// Stage D scaffolding: queue of transactions awaiting group-commit.
     /// Short-section `std::sync::Mutex` — only push/drain, no `.await`
     /// held across. The leader pops the entire vec under lock.
-    #[allow(dead_code)]
     pending_commits: std::sync::Mutex<Vec<PendingCommit>>,
 }
 
@@ -227,6 +226,16 @@ impl RepoTxGate {
         self.commit_mutex.lock().await
     }
 
+    /// Non-blocking attempt to acquire the commit gate.
+    ///
+    /// Used by the group-commit orchestrator: if `try_lock` succeeds the
+    /// caller becomes the LEADER (processes its own tx + any followers
+    /// queued in `pending_commits`). If it fails, the caller becomes a
+    /// FOLLOWER and enqueues itself for the current leader to process.
+    pub fn try_commit_lock(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.commit_mutex.try_lock().ok()
+    }
+
     /// Allocate the next MVCC version. Called under `commit_lock`.
     pub fn assign_next_version(&self) -> u64 {
         self.version_counter.fetch_add(1, Ordering::Relaxed) + 1
@@ -321,13 +330,11 @@ impl RepoTxGate {
     // ── Stage D: group-commit queue ───────────────────────────────────
 
     /// Enqueue a `PendingCommit` for the next group-commit batch.
-    #[allow(dead_code)]
     pub fn enqueue_pending(&self, p: PendingCommit) {
         self.pending_commits.lock().unwrap().push(p);
     }
 
     /// Drain all pending commits, returning them to the leader.
-    #[allow(dead_code)]
     pub fn drain_pending(&self) -> Vec<PendingCommit> {
         let mut guard = self.pending_commits.lock().unwrap();
         std::mem::take(&mut *guard)

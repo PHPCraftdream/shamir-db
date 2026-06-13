@@ -505,8 +505,6 @@ impl TxContext {
     }
 
     /// Iterate `(table_token, &RecordKey)` for every staged write across all tables.
-    // Added for Stage D (group-commit conflict detection).
-    #[allow(dead_code)]
     pub fn write_set_keys(
         &self,
     ) -> impl Iterator<Item = (u64, &shamir_storage::types::RecordKey)> + '_ {

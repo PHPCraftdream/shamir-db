@@ -164,6 +164,90 @@ pub(super) async fn pre_commit_prelock(
     Ok(PreLockResult { uwl_guards })
 }
 
+/// Outcome of [`pre_commit_locked_validate`]: the assigned commit version,
+/// built WAL entry, and uwl_guards — ready for WAL begin (Phase 4).
+pub(super) struct ValidatedPreCommit {
+    pub(super) commit_version: u64,
+    pub(super) uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    pub(super) wal_entry: shamir_wal::WalEntryV2,
+}
+
+/// Locked validation phase: Phases 2 + 2-bis + C6 + 3 + WAL entry build.
+///
+/// Does NOT write the WAL entry (no fsync). The caller is responsible for
+/// calling `wal.begin(entry)` or batching via `wal.begin_many`. This split
+/// enables group-commit fsync amortization.
+///
+/// Returns `Some(ValidatedPreCommit)` when the tx has durable work,
+/// `None` for C6 empty-tx fast-path, or `Err` on validation failure.
+pub(super) async fn pre_commit_locked_validate(
+    tx: &mut TxContext,
+    repo: &RepoInstance,
+    gate: &RepoTxGate,
+    uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+) -> Result<Option<ValidatedPreCommit>, TxError> {
+    // Phase 2 (SSI only): read-set validation.
+    if tx.isolation == IsolationLevel::Serializable {
+        let validation = match tx.version_provider.as_ref() {
+            Some(provider) => {
+                let provider = std::sync::Arc::clone(provider);
+                tx.validate_read_set(move |t, k| provider.version_of(t, k))
+            }
+            None => tx.validate_read_set(|_t, _k| Some(0u64)),
+        };
+        if let Err((_table_id, key)) = validation {
+            repo.tx_metrics().on_tx_aborted_ssi();
+            return Err(TxError::SsiConflict { key });
+        }
+    }
+
+    // Phase 2-bis (SSI only, Phase C): predicate read-set validation.
+    if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
+        let mut conflict_dep: Option<String> = None;
+        tx.predicate_set.with_iter(|dep| {
+            if conflict_dep.is_none() && gate.predicate_conflicts(dep, tx.snapshot_version) {
+                conflict_dep = Some(format!("{:?}", dep));
+            }
+        });
+        if let Some(dep) = conflict_dep {
+            repo.tx_metrics().on_tx_aborted_phantom();
+            return Err(TxError::PhantomConflict { dep });
+        }
+    }
+
+    // C6: empty-tx fast-path.
+    if tx.is_empty() {
+        return Ok(None);
+    }
+
+    // Crash seam (test-only).
+    maybe_crash("pre_commit", repo).await;
+
+    // Phase 3: assign new version.
+    let commit_version = gate.assign_next_version();
+
+    // Build WAL entry (Phase 4 prep) — does NOT persist.
+    let wal_ops = wal_ops_from_tx(tx).await;
+    let interner_delta: Vec<(u64, String, u64)> = tx
+        .interner_deltas
+        .iter()
+        .flat_map(|(token, deltas)| {
+            deltas
+                .iter()
+                .map(move |(name, id)| (*token, name.clone(), *id))
+        })
+        .collect();
+    let mut wal_entry = shamir_wal::WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops)
+        .with_commit_version(commit_version);
+    wal_entry.interner_delta = interner_delta;
+
+    Ok(Some(ValidatedPreCommit {
+        commit_version,
+        uwl_guards,
+        wal_entry,
+    }))
+}
+
 /// Locked phase of the commit pipeline: runs UNDER `commit_lock`.
 ///
 /// Performs:
