@@ -3,7 +3,7 @@ use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
-use shamir_wal::{WalActiveKey, WalEntry, WalEntryV2, WalOp, WalOpV2};
+use shamir_wal::{WalActiveKey, WalEntryV2, WalOpV2};
 use std::sync::Arc;
 
 fn rid(n: u8) -> RecordId {
@@ -95,20 +95,16 @@ async fn commit_async_removes_marker() {
 }
 
 #[tokio::test]
-async fn list_inflight_skips_v1_entries() {
+async fn list_inflight_skips_non_v2_entries() {
     let store = make_store();
     let mgr = make_manager(&store);
 
-    // Write a V1 entry manually (as per-table WalManager would).
-    let v1_entry = WalEntry::new(
-        10,
-        vec![WalOp::RecordCreated {
-            record_id: RecordId::new(),
-        }],
-    );
-    let v1_bytes = bincode::serialize(&v1_entry).expect("v1 serialize");
+    // Write a non-V2 marker manually under a WAL active key (the legacy
+    // per-table KV-WAL wrote bincode that lacks the V2 magic prefix).
+    // `list_inflight` must skip anything that isn't `looks_like_v2`.
+    let non_v2_bytes = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
     store
-        .set(WalActiveKey::new(10).to_bytes(), Bytes::from(v1_bytes))
+        .set(WalActiveKey::new(10).to_bytes(), Bytes::from(non_v2_bytes))
         .await
         .unwrap();
 

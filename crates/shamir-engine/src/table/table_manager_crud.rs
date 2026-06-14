@@ -217,7 +217,7 @@ impl TableManager {
         // Snapshot tx (`run_implicit_batch_tx` → `execute_insert_tx`) and emits
         // ONE `WalEntryV2` to the repo file WAL — and from tests. Crash
         // recoverability is therefore owned by the file WAL, not the V1 marker.
-        // (`shamir_wal::WalManager` + V1 codec removal is deferred to F5.)
+        // (`shamir_wal::WalManager` + V1 codec removed in F5c.)
 
         // 4. counter + indexes (all in info_store).
         self.counter.increment(ids.len() as i64).await?;
