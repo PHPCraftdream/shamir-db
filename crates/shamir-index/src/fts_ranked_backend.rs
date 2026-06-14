@@ -13,7 +13,9 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_collections::THasher;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -49,7 +51,7 @@ impl FtsRankedBackend {
         for &seg in &self.field_path {
             match current {
                 InnerValue::Map(m) => {
-                    let key = shamir_types::core::interner::InternerKey::new(seg);
+                    let key = InternerKey::new(seg);
                     current = m.get(&key)?;
                 }
                 _ => return None,
@@ -61,18 +63,18 @@ impl FtsRankedBackend {
         }
     }
 
-    fn tokenize_with_freq(&self, rec: &InnerValue) -> (HashMap<u64, u32>, u32) {
+    fn tokenize_with_freq(&self, rec: &InnerValue) -> (HashMap<u64, u32, THasher>, u32) {
         match self.extract_text(rec) {
             Some(text) => {
                 let tokens = self.tokenizer.tokenize(text);
                 let doc_len = tokens.len() as u32;
-                let mut freq: HashMap<u64, u32> = HashMap::new();
+                let mut freq: HashMap<u64, u32, THasher> = HashMap::<_, _, THasher>::default();
                 for t in tokens {
                     *freq.entry(token_hash(&t)).or_insert(0) += 1;
                 }
                 (freq, doc_len)
             }
-            None => (HashMap::new(), 0),
+            None => (HashMap::<_, _, THasher>::default(), 0),
         }
     }
 
@@ -285,7 +287,8 @@ impl IndexBackend for FtsRankedBackend {
                             let first = iter.next().unwrap();
                             iter.fold(first, |acc, s| &acc & &s)
                         };
-                        let mut scores: HashMap<RecordId, f64> = HashMap::new();
+                        let mut scores: HashMap<RecordId, f64, THasher> =
+                            HashMap::<_, _, THasher>::default();
                         for entries in per_token.iter() {
                             let df = entries.len() as u64;
                             let idf_val = bm25::idf(total_docs, df);
@@ -310,7 +313,8 @@ impl IndexBackend for FtsRankedBackend {
                     }
                     FtsMode::OrAny => {
                         // Union, accumulate BM25 from each matching term.
-                        let mut scores: HashMap<RecordId, f64> = HashMap::new();
+                        let mut scores: HashMap<RecordId, f64, THasher> =
+                            HashMap::<_, _, THasher>::default();
                         for entries in &per_token {
                             let df = entries.len() as u64;
                             let idf_val = bm25::idf(total_docs, df);

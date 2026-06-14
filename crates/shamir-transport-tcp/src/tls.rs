@@ -6,8 +6,9 @@
 //! - Both: TLS exporter extraction per RFC 9266 with label
 //!   `EXPORTER-ShamirDB-AUTH-v1`.
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, ServerConfig};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -122,24 +123,24 @@ impl<S> ConnectionExporter for tokio_rustls::client::TlsStream<S> {
 #[derive(Debug)]
 struct NoCaVerify;
 
-impl rustls::client::danger::ServerCertVerifier for NoCaVerify {
+impl ServerCertVerifier for NoCaVerify {
     fn verify_server_cert(
         &self,
         _end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
         _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
         _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
         Err(rustls::Error::PeerIncompatible(
             rustls::PeerIncompatible::Tls12NotOffered,
         ))
@@ -149,9 +150,9 @@ impl rustls::client::danger::ServerCertVerifier for NoCaVerify {
         &self,
         _message: &[u8],
         _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {

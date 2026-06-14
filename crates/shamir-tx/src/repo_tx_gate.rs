@@ -82,7 +82,7 @@ pub struct RepoTxGate {
 
     /// Set of open snapshot versions. GC must not delete any version
     /// ≥ `min(active_snapshots)`.
-    active_snapshots: Arc<scc::HashMap<u64, ()>>,
+    active_snapshots: Arc<scc::HashMap<u64, (), THasher>>,
 
     /// Count of currently-open Serializable snapshots. Incremented when
     /// a Serializable tx opens a snapshot; decremented when its
@@ -116,7 +116,7 @@ pub struct RepoTxGate {
 /// the SSI-footprint overhead once no Serializable tx is watching.
 pub struct SnapshotGuard {
     version: u64,
-    snapshots: Arc<scc::HashMap<u64, ()>>,
+    snapshots: Arc<scc::HashMap<u64, (), THasher>>,
     /// Non-None iff this guard was opened for a Serializable tx.
     /// Holds the shared counter so Drop can decrement it without
     /// holding a reference back to the `RepoTxGate`.
@@ -148,7 +148,7 @@ impl RepoTxGate {
             version_counter: AtomicU64::new(last_committed),
             last_committed_version: AtomicU64::new(last_committed),
             next_tx_id: AtomicU64::new(next_tx_id_seed),
-            active_snapshots: Arc::new(scc::HashMap::new()),
+            active_snapshots: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
             commit_write_log: scc::TreeIndex::new(),
             pending_commits: std::sync::Mutex::new(Vec::new()),

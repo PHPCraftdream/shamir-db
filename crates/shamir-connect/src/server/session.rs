@@ -8,7 +8,7 @@
 //! anti-downgrade resumption checks. The store is a `DashMap` keyed by
 //! `session_id` (bearer token).
 
-use crate::common::time::UnixNanos;
+use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, TransportKind};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -244,7 +244,7 @@ pub const MAX_SESSIONS_PER_USER: usize = 16;
 /// Spec §7.8 NORMATIVE: 5-second grace window after disconnect during
 /// which the session is held in `Disconnected` state and may be resumed
 /// without ticket refresh. Past the window, eviction is permanent.
-pub const DISCONNECT_GRACE_NS: u64 = 5 * crate::common::time::ns::SECOND;
+pub const DISCONNECT_GRACE_NS: u64 = 5 * ns::SECOND;
 
 /// Concurrent session store — keyed by `session_id` (bearer token).
 ///

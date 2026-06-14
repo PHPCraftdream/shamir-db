@@ -12,7 +12,9 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_collections::THasher;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::{BTreeSet, HashSet};
@@ -58,7 +60,7 @@ impl FtsBackend {
         for &seg in &self.field_path {
             match current {
                 InnerValue::Map(m) => {
-                    let key = shamir_types::core::interner::InternerKey::new(seg);
+                    let key = InternerKey::new(seg);
                     current = m.get(&key)?;
                 }
                 _ => return None,
@@ -70,7 +72,7 @@ impl FtsBackend {
         }
     }
 
-    fn tokenize_record(&self, rec: &InnerValue) -> HashSet<u64> {
+    fn tokenize_record(&self, rec: &InnerValue) -> HashSet<u64, THasher> {
         match self.extract_text(rec) {
             Some(text) => self
                 .tokenizer
@@ -78,7 +80,7 @@ impl FtsBackend {
                 .into_iter()
                 .map(|t| token_hash(&t))
                 .collect(),
-            None => HashSet::new(),
+            None => HashSet::<_, THasher>::default(),
         }
     }
 

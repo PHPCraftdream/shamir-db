@@ -1,7 +1,7 @@
 //! Integration tests for the bootstrap flow (spec §11).
 
 use shamir_connect::client::bootstrap as client_bs;
-use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
+use shamir_connect::common::crypto::{sha256, Ed25519Keypair, StoredKey};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::time::{ns, UnixNanos};
 use shamir_connect::common::types::TransportKind;
@@ -64,7 +64,7 @@ fn full_bootstrap_round_trip() {
         .consume(
             &request.token,
             request.salt,
-            shamir_connect::common::crypto::StoredKey(request.stored_key),
+            StoredKey(request.stored_key),
             server_key_buf,
             request.kdf_params,
             &fast_kdf(),
@@ -187,7 +187,7 @@ fn cannot_bootstrap_twice() {
         .consume(
             &token,
             [0x55u8; 16],
-            shamir_connect::common::crypto::StoredKey([0xbbu8; 32]),
+            StoredKey([0xbbu8; 32]),
             sk.clone(),
             fast_kdf(),
             &fast_kdf(),
@@ -215,7 +215,7 @@ fn rejects_expired_token() {
     let result = state.consume(
         &token,
         [0x55u8; 16],
-        shamir_connect::common::crypto::StoredKey([0xbbu8; 32]),
+        StoredKey([0xbbu8; 32]),
         zeroize::Zeroizing::new([0xaau8; 32]),
         fast_kdf(),
         &fast_kdf(),
@@ -242,7 +242,7 @@ fn rejects_wrong_token() {
     let result = state.consume(
         &fake_token,
         [0x55u8; 16],
-        shamir_connect::common::crypto::StoredKey([0xbbu8; 32]),
+        StoredKey([0xbbu8; 32]),
         zeroize::Zeroizing::new([0xaau8; 32]),
         fast_kdf(),
         &fast_kdf(),
@@ -270,7 +270,7 @@ fn rejects_kdf_params_below_floor() {
     let result = state.consume(
         &token,
         [0x55u8; 16],
-        shamir_connect::common::crypto::StoredKey([0xbbu8; 32]),
+        StoredKey([0xbbu8; 32]),
         zeroize::Zeroizing::new([0xaau8; 32]),
         too_weak,
         &too_weak,
@@ -294,7 +294,7 @@ fn rejects_mismatched_kdf_params_vs_current() {
     let result = state.consume(
         &token,
         [0x55u8; 16],
-        shamir_connect::common::crypto::StoredKey([0xbbu8; 32]),
+        StoredKey([0xbbu8; 32]),
         zeroize::Zeroizing::new([0xaau8; 32]),
         other,
         &fast_kdf(), // current

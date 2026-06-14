@@ -33,7 +33,7 @@ use crate::write_ops::IndexWriteOp;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
-use shamir_types::core::interner::Interner;
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::core::sort_codec;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
@@ -950,7 +950,7 @@ fn resolve_path_ref<'a>(record: &'a InnerValue, field_path: &[u64]) -> Option<&'
     for &p in field_path {
         match cur {
             InnerValue::Map(map) => {
-                let key = shamir_types::core::interner::InternerKey::new(p);
+                let key = InternerKey::new(p);
                 cur = map.get(&key)?;
             }
             _ => return None,

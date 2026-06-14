@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 shamir-connect      = { path = "../shamir-connect" }
+shamir-collections  = { path = "../shamir-collections" }
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
 shamir-query-types  = { path = "../shamir-query-types" }
 shamir-query-builder = { path = "../shamir-query-builder" }
@@ -42,3 +43,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
 doctest = false
+
+[lints]
+workspace = true

@@ -14,8 +14,10 @@
 //! Database-access helpers (`db()`, `repo()`, `store()`) arrive in a later
 //! slice.
 
+use shamir_collections::THasher;
 use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::db_gateway::DbGateway;
@@ -34,14 +36,14 @@ use super::registry::FunctionRegistry;
 /// Uses `scc::HashMap` (lock-free, CAS-based) per the engine concurrency
 /// invariants — no `std::sync::Mutex` / `RwLock` / `parking_lot`.
 pub struct BatchContext {
-    data: scc::HashMap<String, QueryValue>,
+    data: scc::HashMap<String, QueryValue, THasher>,
 }
 
 impl BatchContext {
     /// Create an empty batch context.
     pub fn new() -> Self {
         Self {
-            data: scc::HashMap::new(),
+            data: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 
@@ -143,14 +145,14 @@ impl Default for BatchContext {
 /// Uses `scc::HashMap` (lock-free, CAS-based) per the engine concurrency
 /// invariants.
 pub struct GlobalVars {
-    data: scc::HashMap<String, QueryValue>,
+    data: scc::HashMap<String, QueryValue, THasher>,
 }
 
 impl GlobalVars {
     /// Create an empty global-vars store.
     pub fn new() -> Self {
         Self {
-            data: scc::HashMap::new(),
+            data: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 
@@ -290,7 +292,7 @@ pub struct FnCtx {
     db: Option<Arc<dyn DbGateway>>,
     repo: String,
     net: Option<Arc<dyn NetGateway>>,
-    secret_grants: Arc<std::collections::HashSet<String>>,
+    secret_grants: Arc<HashSet<String, THasher>>,
     actor: Actor,
 }
 
@@ -308,7 +310,7 @@ impl FnCtx {
             db: None,
             repo: String::new(),
             net: None,
-            secret_grants: Arc::new(std::collections::HashSet::new()),
+            secret_grants: Arc::new(HashSet::<_, THasher>::default()),
             actor: Actor::System,
         }
     }
@@ -323,7 +325,7 @@ impl FnCtx {
             db: None,
             repo: String::new(),
             net: None,
-            secret_grants: Arc::new(std::collections::HashSet::new()),
+            secret_grants: Arc::new(HashSet::<_, THasher>::default()),
             actor: Actor::System,
         }
     }
@@ -437,7 +439,7 @@ impl FnCtx {
     }
 
     /// The secret grants for `env.*` global reads.
-    pub fn secret_grants(&self) -> &Arc<std::collections::HashSet<String>> {
+    pub fn secret_grants(&self) -> &Arc<HashSet<String, THasher>> {
         &self.secret_grants
     }
 

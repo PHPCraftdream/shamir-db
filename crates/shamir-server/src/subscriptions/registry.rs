@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use scc::HashMap as SccHashMap;
+use shamir_collections::THasher;
 use tokio::task::JoinHandle;
 
 /// An active subscription with its bridge task handle.
@@ -17,7 +18,7 @@ impl Drop for ActiveSubscription {
 /// Per-connection subscription registry.
 /// Uses `scc::HashMap` for lock-free concurrent access.
 pub struct SubscriptionRegistry {
-    subs: SccHashMap<u64, ActiveSubscription>,
+    subs: SccHashMap<u64, ActiveSubscription, THasher>,
     next_id: AtomicU64,
 }
 
@@ -30,7 +31,7 @@ impl Default for SubscriptionRegistry {
 impl SubscriptionRegistry {
     pub fn new() -> Self {
         Self {
-            subs: SccHashMap::new(),
+            subs: SccHashMap::with_hasher(THasher::default()),
             next_id: AtomicU64::new(1),
         }
     }

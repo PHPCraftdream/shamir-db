@@ -2,6 +2,7 @@
 
 use shamir_connect::client::changepw as client_cp;
 use shamir_connect::common::crypto::StoredKey;
+use shamir_connect::common::error::Error;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::time::{ns, UnixNanos};
@@ -9,7 +10,7 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::changepw::{
     finalize_change_password, start_change_password_challenge,
-    verify_change_password_request_with_sid,
+    verify_change_password_request_with_sid, ChangePwRequest,
 };
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 
@@ -170,7 +171,7 @@ fn rejects_when_no_pending_challenge() {
     let kdf = fast_kdf();
 
     // Skip Step 2 — client tries to send request without prior challenge.
-    let request = shamir_connect::server::changepw::ChangePwRequest {
+    let request = ChangePwRequest {
         client_proof_old: [0u8; 32],
         new_salt: [0x77u8; 16],
         new_stored_key: [0u8; 32],
@@ -413,10 +414,7 @@ fn build_request_rejects_weak_new_password_per_spec_3_2() {
         &mut new_buf,
         kdf,
     );
-    assert!(matches!(
-        result,
-        Err(shamir_connect::common::error::Error::InvalidPassword(_))
-    ));
+    assert!(matches!(result, Err(Error::InvalidPassword(_))));
 }
 
 /// Spec §3.2: single-repeated-char passwords MUST be rejected client-side.
@@ -443,8 +441,5 @@ fn build_request_rejects_single_repeated_char_new_password() {
         &mut new_buf,
         kdf,
     );
-    assert!(matches!(
-        result,
-        Err(shamir_connect::common::error::Error::InvalidPassword(_))
-    ));
+    assert!(matches!(result, Err(Error::InvalidPassword(_))));
 }

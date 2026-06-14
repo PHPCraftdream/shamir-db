@@ -1,6 +1,6 @@
 #[cfg(feature = "durable-redb")]
 mod inner {
-    use crate::common::time::ns;
+    use crate::common::time::{ns, UnixNanos};
     use crate::server::durable_counters::RedbConsumedCounters;
     use crate::server::resume::ConsumedCounterStore;
     use tempfile::TempDir;
@@ -101,7 +101,7 @@ mod inner {
         assert!(s.peek(&uid, &fam).is_some());
 
         // GC with a far-future cutoff drops all entries.
-        let far = crate::common::time::UnixNanos::now().as_u64() + 48 * ns::HOUR;
+        let far = UnixNanos::now().as_u64() + 48 * ns::HOUR;
         s.gc(far);
         assert!(s.peek(&uid, &fam).is_none());
     }

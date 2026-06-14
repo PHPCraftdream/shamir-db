@@ -5,6 +5,7 @@
 //! Each function is O(1) or O(n) in the size of the input string.
 
 use serde::{Deserialize, Serialize};
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::value::InnerValue;
 
 /// A pure, deterministic expression that transforms a record's field
@@ -133,7 +134,7 @@ fn resolve_path(val: &InnerValue, path: &[u64]) -> Result<InnerValue, ExprError>
     for &seg in path {
         match current {
             InnerValue::Map(m) => {
-                let key = shamir_types::core::interner::InternerKey::new(seg);
+                let key = InternerKey::new(seg);
                 match m.get(&key) {
                     Some(v) => current = v,
                     None => return Err(ExprError::FieldNotFound),

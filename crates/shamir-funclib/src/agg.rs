@@ -32,6 +32,7 @@ use crate::compare;
 use crate::registry::ScalarError;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use shamir_collections::THasher;
 use shamir_types::types::value::InnerValue;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,14 +59,14 @@ pub type AggFactory = Arc<dyn Fn() -> Box<dyn Aggregator> + Send + Sync>;
 /// Name -> [`AggFactory`] table. Plain names, no folder prefix.
 #[derive(Default)]
 pub struct AggRegistry {
-    fns: HashMap<String, AggFactory>,
+    fns: HashMap<String, AggFactory, THasher>,
 }
 
 impl AggRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            fns: HashMap::new(),
+            fns: HashMap::<_, _, THasher>::default(),
         }
     }
 

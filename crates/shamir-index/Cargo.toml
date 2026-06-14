@@ -6,10 +6,11 @@ description = "ShamirDB index system — FTS / Functional / Vector backends."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-shamir-types    = { path = "../shamir-types" }
-shamir-storage  = { path = "../shamir-storage", default-features = false }
-shamir-tx       = { path = "../shamir-tx" }
-shamir-tunables = { path = "../shamir-tunables" }
+shamir-types       = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
+shamir-storage     = { path = "../shamir-storage", default-features = false }
+shamir-tx          = { path = "../shamir-tx" }
+shamir-tunables    = { path = "../shamir-tunables" }
 dashmap         = "6.1.0"
 
 # Async / runtime
@@ -49,3 +50,6 @@ shamir-storage = { path = "../shamir-storage" }
 
 [lib]
 doctest = false
+
+[lints]
+workspace = true

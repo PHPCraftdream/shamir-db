@@ -12,19 +12,20 @@ use super::context::{FnBatch, FnCtx};
 use super::contract::ShamirFunction;
 use super::error::{FnResult, FunctionError};
 use super::params::Params;
+use shamir_collections::THasher;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
 /// Maps an invocation name to a compiled [`ShamirFunction`].
 pub struct FunctionRegistry {
-    functions: scc::HashMap<String, Arc<dyn ShamirFunction>>,
+    functions: scc::HashMap<String, Arc<dyn ShamirFunction>, THasher>,
 }
 
 impl FunctionRegistry {
     /// An empty registry.
     pub fn new() -> Self {
         Self {
-            functions: scc::HashMap::new(),
+            functions: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 

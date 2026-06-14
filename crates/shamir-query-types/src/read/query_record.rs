@@ -146,6 +146,7 @@ impl PartialEq for QueryRecord {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use shamir_types::types::common::new_map_wc;
     use shamir_types::types::value::QueryValue;
 
     use super::QueryRecord;
@@ -155,7 +156,7 @@ mod tests {
     #[test]
     fn byte_identical_to_json_value() {
         // Build a QueryValue map with the same content as the json! literal.
-        let mut map = shamir_types::types::common::new_map_wc(3);
+        let mut map = new_map_wc(3);
         map.insert("name".to_string(), QueryValue::Str("alice".to_string()));
         map.insert("age".to_string(), QueryValue::Int(30));
         map.insert("active".to_string(), QueryValue::Bool(true));

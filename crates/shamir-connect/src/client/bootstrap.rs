@@ -5,24 +5,28 @@
 //! cannot harvest the token + password by impersonating the server.
 
 use crate::common::bootstrap_message::build_bootstrap_input;
-use crate::common::crypto::{constant_time_eq, sha256, Ed25519Keypair};
+use crate::common::crypto::{constant_time_eq, random_array, sha256, Ed25519Keypair};
 use crate::common::error::{Error, Result};
 use crate::common::identity::verify_identity;
 use crate::common::kdf_params::KdfParams;
+use crate::common::password::validate_password;
 use crate::common::scram::DerivedKeys;
+use crate::common::time::ns;
 use crate::common::types::{limits, TransportKind};
 use crate::common::username::NormalizedUsername;
-use crate::server::bootstrap::{BootstrapChallenge, BootstrapHello, BootstrapRequest};
+use crate::server::bootstrap::{
+    make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
+};
 use zeroize::Zeroize;
 
 /// Maximum allowed clock skew between client and server during bootstrap.
 /// Per spec §11.3.4 (d).
-pub const BOOTSTRAP_CLOCK_SKEW_NS: u64 = 60 * crate::common::time::ns::SECOND;
+pub const BOOTSTRAP_CLOCK_SKEW_NS: u64 = 60 * ns::SECOND;
 
 /// Generate a `bootstrap_hello` — caller transmits this as the first wire frame.
 pub fn build_hello() -> BootstrapHello {
     BootstrapHello {
-        client_nonce: crate::common::crypto::random_array::<32>(),
+        client_nonce: random_array::<32>(),
     }
 }
 
@@ -86,9 +90,9 @@ pub fn build_request(
 ) -> Result<BootstrapRequest> {
     // Spec §3.2: enforce password policy BEFORE running Argon2id (server
     // cannot validate; this is the client's only chance).
-    crate::common::password::validate_password(password)?;
+    validate_password(password)?;
     kdf_params.validate_client_limits()?;
-    let salt = crate::common::crypto::random_array::<{ limits::SALT_BYTES }>();
+    let salt = random_array::<{ limits::SALT_BYTES }>();
     let derived = DerivedKeys::derive(password, &salt, &kdf_params)?;
     password.zeroize();
 
@@ -121,12 +125,7 @@ pub fn run_local_bootstrap_with(
     now_ns: u64,
 ) -> Result<BootstrapRequest> {
     let hello = build_hello();
-    let challenge = crate::server::bootstrap::make_bootstrap_challenge(
-        keypair,
-        transport_kind,
-        tls_exporter,
-        &hello,
-    );
+    let challenge = make_bootstrap_challenge(keypair, transport_kind, tls_exporter, &hello);
     verify_challenge(
         pinned_hash,
         transport_kind,

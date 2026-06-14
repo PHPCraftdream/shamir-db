@@ -14,6 +14,7 @@ use crate::common::crypto::{constant_time_eq, hmac_sha256, random_array, sha256,
 use crate::common::error::{Error, Result};
 use crate::common::kdf_params::KdfParams;
 use crate::common::types::limits;
+use crate::common::username::NormalizedUsername;
 use crate::server::session::{PendingChangePwChallenge, Session, SessionStore};
 use zeroize::Zeroizing;
 
@@ -130,9 +131,7 @@ pub fn verify_change_password_request_with_sid(
     }
 
     let am_cp = build_auth_message_cp(ChangePwAuthMessageInputs {
-        username: &crate::common::username::NormalizedUsername::from_normalized_unchecked(
-            session.username.clone(),
-        ),
+        username: &NormalizedUsername::from_normalized_unchecked(session.username.clone()),
         session_id,
         client_nonce_cp: &pending.client_nonce_cp,
         server_nonce_cp: &pending.server_nonce_cp,

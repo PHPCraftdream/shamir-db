@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 shamir-types = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
 shamir-funclib = { path = "../shamir-funclib" }
 tokio = { version = "1.49.0", features = ["full"] }
 async-trait = "0.1.81"
@@ -29,3 +30,6 @@ argon2 = "0.5"
 
 [lib]
 doctest = false
+
+[lints]
+workspace = true

@@ -70,5 +70,5 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 name = "hot_paths"
 harness = false
 
-[lints.clippy]
-all = "warn"
+[lints]
+workspace = true

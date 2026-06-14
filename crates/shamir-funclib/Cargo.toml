@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Value model — every scalar fn operates on InnerValue.
 shamir-types = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
 
 # Canonical-key serialisation for the order-independent record hash (/crypto
 # canonical_hash). serde gives the `Serialize` bound on map keys; rmp-serde
@@ -49,3 +50,6 @@ argon2 = "0.5"
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
 doctest = false
+
+[lints]
+workspace = true

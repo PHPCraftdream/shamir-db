@@ -1,5 +1,6 @@
 use super::super::net_gateway::{HttpRequest, HttpResponse};
 use super::wasm_function::{read_guest_mem, write_value_to_guest, HostState};
+use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::QueryValue;
 
 // ── Async host import: http_fetch (slice 8c) ─────────────────────────
@@ -83,12 +84,12 @@ pub(super) fn decode_http_request(val: &QueryValue) -> Result<HttpRequest, Strin
 /// { "status": Int, "headers": Map, "body": Bin }
 /// ```
 pub(super) fn encode_http_response(resp: HttpResponse) -> QueryValue {
-    let mut header_map = shamir_types::types::common::new_map_wc(resp.headers.len());
+    let mut header_map = new_map_wc(resp.headers.len());
     for (k, v) in resp.headers {
         header_map.insert(k, QueryValue::Str(v));
     }
 
-    let mut map = shamir_types::types::common::new_map_wc(3);
+    let mut map = new_map_wc(3);
     map.insert("status".to_string(), QueryValue::Int(resp.status as i64));
     map.insert("headers".to_string(), QueryValue::Map(header_map));
     map.insert("body".to_string(), QueryValue::Bin(resp.body));

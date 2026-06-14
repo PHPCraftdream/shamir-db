@@ -36,10 +36,10 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 name = "framing"
 harness = false
 
-[lints.clippy]
-all = "warn"
-
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
 doctest = false
+
+[lints]
+workspace = true

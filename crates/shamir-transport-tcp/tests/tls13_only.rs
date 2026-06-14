@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use rustls::{ClientConfig, ServerConfig};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::aws_lc_rs::default_provider;
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig, SignatureScheme};
 use shamir_transport_tcp::tls::{
     generate_self_signed_server_cert, make_client_config_no_ca, make_server_config_from_pem,
 };
@@ -14,7 +17,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 fn install_provider_once() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = default_provider().install_default();
 }
 
 /// Build a TLS 1.2-only client config that accepts any cert. Used to
@@ -54,39 +57,39 @@ fn tls12_only_server_config(cert_pem: &str, key_pem: &str) -> Arc<ServerConfig> 
 #[derive(Debug)]
 struct AcceptAnyCert;
 
-impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+impl ServerCertVerifier for AcceptAnyCert {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
     }
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
     }
     fn verify_tls13_signature(
         &self,
         _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
     }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
         vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256,
         ]
     }
 }
@@ -111,7 +114,7 @@ async fn server_refuses_tls12_only_client_per_transport_tcp_3_1() {
     });
 
     let connector = TlsConnector::from(client_cfg);
-    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let server_name = ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.unwrap();
     let client_result = connector.connect(server_name, tcp).await;
 
@@ -142,7 +145,7 @@ async fn client_refuses_tls12_only_server_per_transport_tcp_3_1() {
     });
 
     let connector = TlsConnector::from(client_cfg);
-    let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let server_name = ServerName::try_from("localhost").unwrap();
     let tcp = TcpStream::connect(addr).await.unwrap();
     let client_result = connector.connect(server_name, tcp).await;
 

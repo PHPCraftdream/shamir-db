@@ -4,6 +4,7 @@ use crate::access::Actor;
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
+use shamir_collections::THasher;
 use shamir_engine::function::{
     EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, NetGateway, WasmEngine,
     WasmFunction, WasmLimits,
@@ -45,15 +46,15 @@ pub enum FunctionSource<'a> {
 /// ```
 #[derive(Clone)]
 pub struct ShamirDb {
-    pub(super) dbs: Arc<DashMap<String, DbInstance>>,
+    pub(super) dbs: Arc<DashMap<String, DbInstance, THasher>>,
     pub(super) system_store: SystemStore,
     /// Serialises admin RMW ops (GrantRole/RevokeRole) per user_name
     /// to close the §B9 read-modify-write race when two concurrent
     /// admin commands target the same user.  Entries leak by design
     /// (each unique user occupies a slot forever), but admin ops are
     /// rare so the memory cost is negligible.
-    pub(super) admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
-    pub(super) active_migrations: Arc<DashMap<String, Arc<MigrationCoordinator>>>,
+    pub(super) admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>, THasher>>,
+    pub(super) active_migrations: Arc<DashMap<String, Arc<MigrationCoordinator>, THasher>>,
     /// Live function registry (builtins + WASM functions loaded on open).
     pub(super) functions: Arc<FunctionRegistry>,
     /// Shared Wasmtime engine used for all WASM function invocations.
@@ -66,7 +67,7 @@ pub struct ShamirDb {
     /// Populated on create/load, updated on rename, removed on drop.
     /// Wrapped in `Arc` so all clones share one map — function metadata
     /// is process-global, exactly like `functions`/`globals`.
-    pub(super) function_meta: Arc<DashMap<String, FunctionMeta>>,
+    pub(super) function_meta: Arc<DashMap<String, FunctionMeta, THasher>>,
     /// Serialises group-id allocation so concurrent create_group calls
     /// can't read-modify-write the same `next_group_id`. Group creation is
     /// rare, so holding this across the (bounded) await sequence is fine.
@@ -106,9 +107,9 @@ impl ShamirDb {
 
         let system_store = SystemStore::init(config).await?;
 
-        let dbs = Arc::new(DashMap::new());
-        let admin_user_locks = Arc::new(DashMap::new());
-        let active_migrations = Arc::new(DashMap::new());
+        let dbs = Arc::new(DashMap::with_hasher(THasher::default()));
+        let admin_user_locks = Arc::new(DashMap::with_hasher(THasher::default()));
+        let active_migrations = Arc::new(DashMap::with_hasher(THasher::default()));
         let wasm_engine =
             Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?);
         let functions = Arc::new(FunctionRegistry::with_builtins());
@@ -126,7 +127,7 @@ impl ShamirDb {
             wasm_engine,
             globals,
             net_allowlist: Arc::new(Vec::new()),
-            function_meta: Arc::new(DashMap::new()),
+            function_meta: Arc::new(DashMap::with_hasher(THasher::default())),
             group_id_lock: Arc::new(Mutex::new(())),
             validators,
             data_root,
@@ -369,11 +370,11 @@ impl ShamirDb {
 
     /// Per-user lock map used to serialise admin RMW ops (GrantRole /
     /// RevokeRole) and close the §B9 read-modify-write race.
-    pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>>> {
+    pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
         &self.admin_user_locks
     }
 
-    pub fn active_migrations(&self) -> &Arc<DashMap<String, Arc<MigrationCoordinator>>> {
+    pub fn active_migrations(&self) -> &Arc<DashMap<String, Arc<MigrationCoordinator>, THasher>> {
         &self.active_migrations
     }
 

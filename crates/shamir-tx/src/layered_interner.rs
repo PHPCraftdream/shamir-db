@@ -4,8 +4,9 @@
 //! `architectural-decisions.md` for rationale.
 
 use scc::HashMap as SccHashMap;
+use shamir_collections::THasher;
 use shamir_storage::error::DbResult;
-use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::core::interner::{Interner, InternerKey, UserKey};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -25,7 +26,7 @@ pub enum LayeredInterner<'a> {
     Direct(&'a Interner),
     Layered {
         base: &'a Interner,
-        overlay: &'a SccHashMap<String, u64>,
+        overlay: &'a SccHashMap<String, u64, THasher>,
         next_overlay_id: &'a AtomicU64,
     },
 }
@@ -132,11 +133,11 @@ impl<'a> LayeredInterner<'a> {
         match self {
             Self::Direct(base) => base
                 .get_str(&InternerKey::new(id))
-                .map(|uk: shamir_types::core::interner::UserKey| uk.as_str().to_string()),
+                .map(|uk: UserKey| uk.as_str().to_string()),
             Self::Layered { base, overlay, .. } => {
                 if id < OVERLAY_ID_BASE {
                     base.get_str(&InternerKey::new(id))
-                        .map(|uk: shamir_types::core::interner::UserKey| uk.as_str().to_string())
+                        .map(|uk: UserKey| uk.as_str().to_string())
                 } else {
                     let mut found: Option<String> = None;
                     overlay.scan(|k: &String, v: &u64| {
@@ -167,7 +168,7 @@ impl<'a> LayeredInterner<'a> {
 /// genuinely new entries inserted into base during merge.
 pub struct OverlayCommitResult {
     /// `overlay_id → final_base_id` for every overlay entry.
-    pub remap: HashMap<u64, u64>,
+    pub remap: HashMap<u64, u64, THasher>,
     /// Entries that were **new** to base (not previously present).
     /// Each tuple is `(field_name, base_id)`.
     pub delta: Vec<(String, u64)>,
@@ -175,9 +176,9 @@ pub struct OverlayCommitResult {
 
 pub async fn commit_interner_overlay(
     base: &Interner,
-    overlay: &SccHashMap<String, u64>,
+    overlay: &SccHashMap<String, u64, THasher>,
 ) -> DbResult<OverlayCommitResult> {
-    let mut remap = HashMap::new();
+    let mut remap = HashMap::<_, _, THasher>::default();
     let mut delta = Vec::new();
     let mut pending: Vec<(String, u64)> = Vec::new();
     overlay

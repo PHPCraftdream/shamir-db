@@ -20,8 +20,10 @@
 use crate::compare::compare;
 use crate::registry::{
     arg_dec, arg_f64, v_bool, v_dec, v_f64, v_int, FnEntry, ScalarError, ScalarRegistry,
+    ScalarResult,
 };
 use rust_decimal::RoundingStrategy;
+use shamir_types::types::value::InnerValue;
 use std::cmp::Ordering;
 
 /// Register the `/math` functions.
@@ -243,10 +245,7 @@ enum Reduce {
 
 /// N-ary min/max over all arguments using cross-type [`compare`]. Returns the
 /// winning argument as-is (no numeric coercion), so mixed types work.
-fn reduce(
-    args: &[shamir_types::types::value::InnerValue],
-    kind: Reduce,
-) -> crate::registry::ScalarResult {
+fn reduce(args: &[InnerValue], kind: Reduce) -> ScalarResult {
     let mut acc = args
         .first()
         .ok_or_else(|| ScalarError::new("missing_arg"))?

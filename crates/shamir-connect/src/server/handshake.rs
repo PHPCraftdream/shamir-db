@@ -309,10 +309,7 @@ pub fn verify_nonces_distinct(
 /// Returns true iff `user_params` is weaker than `current_defaults` along any
 /// axis (memory_kb, time, parallelism). Used to drive the
 /// `kdf_upgrade_required` flag on `auth_ok` per spec §13.
-pub fn needs_kdf_upgrade(
-    user_params: crate::common::kdf_params::KdfParams,
-    current_defaults: crate::common::kdf_params::KdfParams,
-) -> bool {
+pub fn needs_kdf_upgrade(user_params: KdfParams, current_defaults: KdfParams) -> bool {
     user_params.memory_kb < current_defaults.memory_kb
         || user_params.time < current_defaults.time
         || user_params.parallelism < current_defaults.parallelism

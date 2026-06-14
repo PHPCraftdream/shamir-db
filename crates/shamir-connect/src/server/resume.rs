@@ -10,9 +10,10 @@
 //! IMPLEMENTATION_GUIDE NORMATIVE) — wired here as a trait so callers can
 //! plug in their durable backend.
 
-use crate::common::crypto::{aes256gcm_cipher, Aes256GcmCipher};
+use crate::common::crypto::{aes256gcm_cipher, random_array, random_bytes, Aes256GcmCipher};
 use crate::common::error::{Error, Result};
-use crate::common::types::{limits, BindingMode};
+use crate::common::time::UnixNanos;
+use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::server::rotation::ServerIdentityState;
 use crate::server::session::{Session, SessionPermissions, SessionStore};
 use crate::server::ticket::{
@@ -95,7 +96,7 @@ impl ConsumedCounterStore for InMemoryConsumedCounters {
         new_counter: u64,
     ) -> bool {
         let key = (*user_id, *family_id);
-        let now_ns = crate::common::time::UnixNanos::now().as_u64();
+        let now_ns = UnixNanos::now().as_u64();
         let mut accepted = false;
         self.map
             .entry(key)
@@ -295,7 +296,7 @@ pub fn process_resume(
     }
 
     // Step 12: create new Session.
-    let session_id = crate::common::crypto::random_array::<{ limits::SESSION_ID_BYTES }>();
+    let session_id = random_array::<{ limits::SESSION_ID_BYTES }>();
     let expires_at_ns = now_ns.saturating_add(session_max_age_ns);
 
     // Step 12 + 13 fused. Optim #6: avoid deep-cloning `plain.username_nfc`
@@ -309,8 +310,7 @@ pub fn process_resume(
         > now_ns + new_ticket_ttl_ns;
 
     let transport_at_auth = plain.transport_kind_at_auth;
-    let session_transport = crate::common::types::TransportKind::from_u8(transport_at_auth)
-        .unwrap_or(crate::common::types::TransportKind::Tcp);
+    let session_transport = TransportKind::from_u8(transport_at_auth).unwrap_or(TransportKind::Tcp);
 
     let (resumption_ticket, resumption_expires_at_ns) = if issue_refresh {
         // Refresh path: clone what Session also needs, MOVE everything else
@@ -394,7 +394,7 @@ pub fn issue_initial_ticket(
     ttl_ns: u64,
 ) -> Result<(Vec<u8>, u64)> {
     let mut family = [0u8; limits::TICKET_FAMILY_ID_BYTES];
-    crate::common::crypto::random_bytes(&mut family);
+    random_bytes(&mut family);
 
     let plain = TicketPlain {
         version: 1,
@@ -425,11 +425,11 @@ where
 }
 
 /// In-memory user store: simple hashmap-based [`UserStateLookup`].
-pub type InMemoryUserStateMap = Arc<DashMap<[u8; 16], u64>>;
+pub type InMemoryUserStateMap = Arc<DashMap<[u8; 16], u64, FxBuild>>;
 
 /// Construct an empty in-memory user state map.
 pub fn new_user_state_map() -> InMemoryUserStateMap {
-    Arc::new(DashMap::new())
+    Arc::new(DashMap::with_hasher(FxBuild::default()))
 }
 
 impl UserStateLookup for InMemoryUserStateMap {

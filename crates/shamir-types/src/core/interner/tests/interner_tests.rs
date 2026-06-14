@@ -1,7 +1,10 @@
 use crate::core::interner::{Interner, InternerKey, TouchInd, UserKey};
-use crate::types::common::TMap;
+use crate::types::common::{new_map_wc, TMap};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
+
+use crate::types::common::THasher;
 
 #[test]
 fn test_basic_interning() {
@@ -533,7 +536,7 @@ fn test_map_with_interned_keys_compact() {
     println!("\n=== Testing Map<InternedKey, InnerValue> compact serialization ===\n");
 
     // Create a map with InternedKey keys
-    let mut map = crate::types::common::new_map_wc::<InternerKey, InnerValue>(3);
+    let mut map = new_map_wc::<InternerKey, InnerValue>(3);
     let key1 = InternerKey::new(1);
     let key2 = InternerKey::new(2);
     let key3 = InternerKey::new(1000);
@@ -645,12 +648,11 @@ fn test_interner_key_ordering() {
 
 #[test]
 fn test_interner_key_hash_eq_different_sizes() {
-    use std::collections::HashSet;
     // Keys with different byte sizes but same id should be equal and hash same
     let k1 = InternerKey::new(42);
     let k2 = InternerKey::new(42);
     assert_eq!(k1, k2);
-    let mut set = HashSet::new();
+    let mut set = HashSet::<_, THasher>::default();
     set.insert(k1);
     assert!(set.contains(&k2));
 }

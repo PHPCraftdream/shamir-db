@@ -6,6 +6,7 @@ use crate::version_provider::VersionProvider;
 use crate::IndexWriteOp;
 use bytes::Bytes;
 use proptest::prelude::*;
+use shamir_collections::THasher;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::core::interner::InternerKey;
@@ -86,7 +87,7 @@ async fn apply_id_remap_rewrites_write_set_bytes() {
 
     tx.write_set.insert(7, staging);
 
-    let mut remap = StdHashMap::new();
+    let mut remap = StdHashMap::<_, _, THasher>::default();
     remap.insert(100u64, 1000u64);
     tx.apply_id_remap(&remap).await.unwrap();
 
@@ -106,7 +107,7 @@ async fn apply_id_remap_rewrites_write_set_bytes() {
 #[tokio::test]
 async fn apply_id_remap_empty_is_noop() {
     let mut tx = TxContext::new(TxId::new(1), 0, 10, IsolationLevel::Snapshot);
-    let empty = StdHashMap::new();
+    let empty = StdHashMap::<_, _, THasher>::default();
     tx.apply_id_remap(&empty).await.unwrap();
 }
 
@@ -329,8 +330,8 @@ fn conflicts_with_both_empty_is_false() {
 /// IFF rule: Ok iff every recorded key has Some(current) with
 /// current <= version_seen.
 fn oracle_conflict(
-    recorded: &StdHashMap<(u64, Vec<u8>), u64>,
-    provider: &StdHashMap<(u64, Vec<u8>), Option<u64>>,
+    recorded: &StdHashMap<(u64, Vec<u8>), u64, THasher>,
+    provider: &StdHashMap<(u64, Vec<u8>), Option<u64>, THasher>,
 ) -> bool {
     for ((t, k), version_seen) in recorded {
         match provider.get(&(*t, k.clone())) {
@@ -351,11 +352,13 @@ fn oracle_conflict(
 /// ignores later duplicates. (Under a real snapshot, repeat reads of one
 /// key always return the same version, so first == min == last; the
 /// divergence only surfaces with the generator's arbitrary triples.)
+#[allow(clippy::type_complexity)]
 fn build_tx_with_reads(
     reads: &[(u64, Vec<u8>, u64)],
-) -> (TxContext, StdHashMap<(u64, Vec<u8>), u64>) {
+) -> (TxContext, StdHashMap<(u64, Vec<u8>), u64, THasher>) {
     let mut tx = TxContext::new(TxId::new(1), 0, 10, IsolationLevel::Serializable);
-    let mut recorded: StdHashMap<(u64, Vec<u8>), u64> = StdHashMap::new();
+    let mut recorded: StdHashMap<(u64, Vec<u8>), u64, THasher> =
+        StdHashMap::<_, _, THasher>::default();
     for (t, k, v) in reads {
         tx.record_read(*t, Bytes::copy_from_slice(k), *v);
         // First-read-wins: only the first version observed for a key is
@@ -391,8 +394,8 @@ proptest! {
     ) {
         let (tx, recorded) = build_tx_with_reads(&reads);
 
-        let mut provider_map: StdHashMap<(u64, Vec<u8>), Option<u64>> =
-            StdHashMap::new();
+        let mut provider_map: StdHashMap<(u64, Vec<u8>), Option<u64>, THasher> =
+            StdHashMap::<_, _, THasher>::default();
         let keys: Vec<(u64, Vec<u8>)> = recorded.keys().cloned().collect();
         for (i, k) in keys.iter().enumerate() {
             if provider_overrides.is_empty() {
@@ -456,7 +459,7 @@ proptest! {
         let (tx, recorded) = build_tx_with_reads(&reads);
         prop_assume!(!recorded.is_empty());
 
-        let baseline: StdHashMap<(u64, Vec<u8>), u64> = recorded.clone();
+        let baseline: StdHashMap<(u64, Vec<u8>), u64, THasher> = recorded.clone();
 
         let baseline_ref = &baseline;
         let baseline_result = tx.validate_read_set(|t, k| {

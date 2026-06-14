@@ -6,8 +6,8 @@
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
 use crate::core::interner::{Interner, InternerKey, UserKey};
-use crate::types::common::new_map_wc;
-use crate::types::value::{InnerValue, Value};
+use crate::types::common::{new_map_wc, TSet};
+use crate::types::value::{InnerValue, QueryValue, Value};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json as json;
 
@@ -187,7 +187,7 @@ pub fn json_value_to_inner(
 /// is deserialized as `QueryValue` (format-agnostic), this pass interns
 /// the map keys to produce the engine-native representation.
 pub fn query_value_to_inner(
-    qv: &crate::types::value::QueryValue,
+    qv: &QueryValue,
     interner: &Interner,
 ) -> Result<InnerValue, CodecError> {
     query_value_to_inner_with(qv, &|key| intern_string_key(interner, key))
@@ -195,13 +195,12 @@ pub fn query_value_to_inner(
 
 /// Converts a [`QueryValue`] to [`InnerValue`] using a custom interning function.
 pub fn query_value_to_inner_with<F>(
-    qv: &crate::types::value::QueryValue,
+    qv: &QueryValue,
     intern_key: &F,
 ) -> Result<InnerValue, CodecError>
 where
     F: Fn(&str) -> Result<InternerKey, CodecError>,
 {
-    use crate::types::value::Value;
     match qv {
         Value::Null => Ok(InnerValue::Null),
         Value::Bool(b) => Ok(InnerValue::Bool(*b)),
@@ -219,7 +218,7 @@ where
             Ok(InnerValue::List(converted?))
         }
         Value::Set(s) => {
-            let converted: Result<crate::types::common::TSet<InnerValue>, CodecError> = s
+            let converted: Result<TSet<InnerValue>, CodecError> = s
                 .iter()
                 .map(|v| query_value_to_inner_with(v, intern_key))
                 .collect();
@@ -246,7 +245,7 @@ where
 pub fn inner_value_to_query_value(
     value: &InnerValue,
     interner: &Interner,
-) -> Result<crate::types::value::QueryValue, CodecError> {
+) -> Result<QueryValue, CodecError> {
     let rev = interner.reverse_snapshot();
     inner_value_to_query_value_with_rev(value, rev.as_slice())
 }
@@ -254,30 +253,29 @@ pub fn inner_value_to_query_value(
 fn inner_value_to_query_value_with_rev(
     value: &InnerValue,
     rev: &[Option<UserKey>],
-) -> Result<crate::types::value::QueryValue, CodecError> {
-    use crate::types::common::{new_map_wc, TSet};
+) -> Result<QueryValue, CodecError> {
     match value {
-        Value::Null => Ok(crate::types::value::QueryValue::Null),
-        Value::Bool(b) => Ok(crate::types::value::QueryValue::Bool(*b)),
-        Value::Int(i) => Ok(crate::types::value::QueryValue::Int(*i)),
-        Value::F64(f) => Ok(crate::types::value::QueryValue::F64(*f)),
-        Value::Dec(d) => Ok(crate::types::value::QueryValue::Dec(*d)),
-        Value::Big(b) => Ok(crate::types::value::QueryValue::Big(b.clone())),
-        Value::Str(s) => Ok(crate::types::value::QueryValue::Str(s.clone())),
-        Value::Bin(b) => Ok(crate::types::value::QueryValue::Bin(b.clone())),
+        Value::Null => Ok(QueryValue::Null),
+        Value::Bool(b) => Ok(QueryValue::Bool(*b)),
+        Value::Int(i) => Ok(QueryValue::Int(*i)),
+        Value::F64(f) => Ok(QueryValue::F64(*f)),
+        Value::Dec(d) => Ok(QueryValue::Dec(*d)),
+        Value::Big(b) => Ok(QueryValue::Big(b.clone())),
+        Value::Str(s) => Ok(QueryValue::Str(s.clone())),
+        Value::Bin(b) => Ok(QueryValue::Bin(b.clone())),
         Value::List(l) => {
             let arr: Result<Vec<_>, _> = l
                 .iter()
                 .map(|v| inner_value_to_query_value_with_rev(v, rev))
                 .collect();
-            Ok(crate::types::value::QueryValue::List(arr?))
+            Ok(QueryValue::List(arr?))
         }
         Value::Set(s) => {
-            let converted: Result<TSet<crate::types::value::QueryValue>, _> = s
+            let converted: Result<TSet<QueryValue>, _> = s
                 .iter()
                 .map(|v| inner_value_to_query_value_with_rev(v, rev))
                 .collect();
-            Ok(crate::types::value::QueryValue::Set(converted?))
+            Ok(QueryValue::Set(converted?))
         }
         Value::Map(m) => {
             let mut obj = new_map_wc(m.len());
@@ -292,7 +290,7 @@ fn inner_value_to_query_value_with_rev(
                     })?;
                 obj.insert(key_str, inner_value_to_query_value_with_rev(val, rev)?);
             }
-            Ok(crate::types::value::QueryValue::Map(obj))
+            Ok(QueryValue::Map(obj))
         }
     }
 }

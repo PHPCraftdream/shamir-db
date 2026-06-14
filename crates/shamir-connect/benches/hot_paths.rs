@@ -28,8 +28,8 @@ use shamir_bench_utils as bu;
 use shamir_connect::common::auth_message::{AuthMessage, AuthMessageInputs};
 use shamir_connect::common::crypto::{
     aes256gcm_cipher, aes256gcm_decrypt, aes256gcm_decrypt_with_cipher, aes256gcm_encrypt,
-    aes256gcm_encrypt_with_cipher, ed25519_verify_strict, hkdf_sha256, hmac_sha256, random_array,
-    sha256, Ed25519Keypair, StoredKey,
+    aes256gcm_encrypt_with_cipher, constant_time_eq, ed25519_verify_strict, hkdf_sha256,
+    hmac_sha256, random_array, sha256, Ed25519Keypair, StoredKey,
 };
 use shamir_connect::common::envelope::{
     RequestEnvelope, RequestEnvelopeRef, RequestEnvelopeView, ResponseEnvelope,
@@ -44,7 +44,7 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{
-    dispatch_request, dispatch_request_view, DispatchOutcome, RequestHandler,
+    dispatch_request, dispatch_request_view, DispatchOutcome, HandlerFuture, RequestHandler,
 };
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
@@ -198,7 +198,7 @@ impl RequestHandler for EchoHandler {
         _: &'a Session,
         req: &'a [u8],
         _conn: &'a ConnectionServices,
-    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+    ) -> HandlerFuture<'a> {
         let out = req.to_vec();
         Box::pin(async move { Ok(out) })
     }
@@ -725,7 +725,7 @@ fn bench_scram_post_argon(c: &mut Criterion) {
                 recovered[i] = proof[i] ^ sig[i];
             }
             let recomputed = sha256(&recovered);
-            let ok = shamir_connect::common::crypto::constant_time_eq(&recomputed, &stored.0);
+            let ok = constant_time_eq(&recomputed, &stored.0);
             black_box(ok);
         });
     });

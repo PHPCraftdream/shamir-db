@@ -21,7 +21,7 @@
 //! compiles to nothing and only `InMemoryConsumedCounters` (in
 //! `server/resume.rs`) is available.
 
-use crate::common::time::ns;
+use crate::common::time::{ns, UnixNanos};
 use crate::common::types::limits;
 use crate::server::resume::ConsumedCounterStore;
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
@@ -114,7 +114,7 @@ impl ConsumedCounterStore for RedbConsumedCounters {
         new_counter: u64,
     ) -> bool {
         let key = Self::key(user_id, family_id);
-        let now_ns = crate::common::time::UnixNanos::now().as_u64();
+        let now_ns = UnixNanos::now().as_u64();
 
         // Spec §6.2: Durability::Immediate ensures fsync before commit
         // returns. This is the default in redb 3.x but we set it explicitly
