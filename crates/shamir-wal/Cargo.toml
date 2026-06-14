@@ -10,6 +10,7 @@ bytes = "1.11.0"
 serde = { version = "1.0.217", features = ["derive"] }
 bincode = "1.3.3"
 serde_bytes = "0.11"
+crc32fast = "1"
 futures = "0.3"
 tokio = { version = "1.49.0", features = ["rt", "sync", "time"] }
 shamir-types = { path = "../shamir-types" }
@@ -17,6 +18,7 @@ shamir-storage = { path = "../shamir-storage", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "test-util"] }
+tempfile = "3"
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
