@@ -187,10 +187,10 @@ async fn test_concurrent_same_keys_interning() {
 
     // All records should have same 4 keys (name, age, email, index)
     let interner = interner.get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let age_key = interner.touch_ind("age").unwrap().key().clone();
-    let email_key = interner.touch_ind("email").unwrap().key().clone();
-    let index_key = interner.touch_ind("index").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let age_key = interner.touch_ind("age").unwrap().into_key();
+    let email_key = interner.touch_ind("email").unwrap().into_key();
+    let index_key = interner.touch_ind("index").unwrap().into_key();
 
     for (_id, value) in records {
         match value {
@@ -244,8 +244,8 @@ async fn test_concurrent_updates() {
     match final_record {
         InnerValue::Map(m) => {
             let interner = interner.get().await.unwrap();
-            let counter_key = interner.touch_ind("counter").unwrap().key().clone();
-            let thread_key = interner.touch_ind("thread").unwrap().key().clone();
+            let counter_key = interner.touch_ind("counter").unwrap().into_key();
+            let thread_key = interner.touch_ind("thread").unwrap().into_key();
             assert!(m.contains_key(&counter_key));
             assert!(m.contains_key(&thread_key));
         }

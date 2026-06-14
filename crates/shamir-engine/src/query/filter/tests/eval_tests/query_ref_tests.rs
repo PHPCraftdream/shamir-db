@@ -14,7 +14,7 @@ fn test_query_ref_eq() {
 
     // Record: {user_id: 42}
     let mut map = new_map();
-    let k_user_id = interner.touch_ind("user_id").unwrap().key().clone();
+    let k_user_id = interner.touch_ind("user_id").unwrap().into_key();
     map.insert(k_user_id, InnerValue::Int(42));
     let record = InnerValue::Map(map);
 
@@ -50,7 +50,7 @@ fn test_query_ref_no_match() {
     let interner = Interner::new();
 
     let mut map = new_map();
-    let k_user_id = interner.touch_ind("user_id").unwrap().key().clone();
+    let k_user_id = interner.touch_ind("user_id").unwrap().into_key();
     map.insert(k_user_id, InnerValue::Int(99));
     let record = InnerValue::Map(map);
 
@@ -83,7 +83,7 @@ fn test_query_ref_missing_alias() {
     let interner = Interner::new();
 
     let mut map = new_map();
-    let k_user_id = interner.touch_ind("user_id").unwrap().key().clone();
+    let k_user_id = interner.touch_ind("user_id").unwrap().into_key();
     map.insert(k_user_id, InnerValue::Int(42));
     let record = InnerValue::Map(map);
 

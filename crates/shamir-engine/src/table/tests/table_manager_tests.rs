@@ -123,7 +123,7 @@ async fn test_table_manager_insert_many_with_unique_index() {
 
     // Build records using the interner so the index path resolves.
     let interner = ctx.interner().get().await.unwrap();
-    let id_key = interner.touch_ind("id").unwrap().key().clone();
+    let id_key = interner.touch_ind("id").unwrap().into_key();
     let mk = |id: &str| -> InnerValue {
         let mut m = new_map();
         m.insert(id_key.clone(), InnerValue::Str(id.to_string()));
@@ -166,7 +166,7 @@ async fn test_insert_many_rejects_within_batch_duplicate_unique() {
     ctx.create_unique_index("by_id", &["id"]).await.unwrap();
 
     let interner = ctx.interner().get().await.unwrap();
-    let id_key = interner.touch_ind("id").unwrap().key().clone();
+    let id_key = interner.touch_ind("id").unwrap().into_key();
     let mk = |id: &str| -> InnerValue {
         let mut m = new_map();
         m.insert(id_key.clone(), InnerValue::Str(id.to_string()));

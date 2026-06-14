@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use super::ShamirDb;
 use shamir_types::codecs::interned::json::inner_to_json_value;
+use shamir_types::core::interner::Interner;
 use shamir_types::types::value::InnerValue;
+use tokio::sync::OnceCell;
 
 impl ShamirDb {
     /// Decode a changefeed `RecordChange.value` byte slice (MessagePack
@@ -25,6 +29,39 @@ impl ShamirDb {
         let interner = table_manager.interner().get().await.ok()?;
         let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
         inner_to_json_value(&inner, interner).ok()
+    }
+
+    /// Decode a changefeed `RecordChange.value` byte slice into an `InnerValue`
+    /// and return both the decoded value and a shared handle to the table's
+    /// interner cell (needed to resolve interned field-name keys for filter
+    /// evaluation without keeping the `TableManager` alive).
+    ///
+    /// After `interner_manager.get().await` completes (which this function does
+    /// internally), the returned `Arc<OnceCell<Interner>>` is already populated.
+    /// Callers can therefore call `cell.get().unwrap()` synchronously for filter
+    /// evaluation without any additional async overhead.
+    ///
+    /// Cheaper than [`decode_record_value_json`] for the filter-only path: it
+    /// skips `inner_to_json_value` (interner reverse-lookup + JSON allocation)
+    /// entirely, paying only the `rmp_serde::from_slice` decode.  The caller
+    /// converts to JSON lazily via [`inner_to_json_value`] only when the event
+    /// passes the filter and must be delivered.
+    pub async fn decode_record_value_inner(
+        &self,
+        db: &str,
+        repo: &str,
+        table: &str,
+        bytes: &[u8],
+    ) -> Option<(InnerValue, Arc<OnceCell<Interner>>)> {
+        let repo_instance = self.get_db(db)?.get_repo(repo)?;
+        let table_manager = repo_instance.get_table(table).await.ok()?;
+        // Initialize the interner (no-op if already warm) and grab a
+        // shared handle to the OnceCell so the decode cache can hold it
+        // without keeping the TableManager alive.
+        let _ = table_manager.interner().get().await.ok()?;
+        let interner_cell = table_manager.interner().interner_cell();
+        let inner: InnerValue = rmp_serde::from_slice(bytes).ok()?;
+        Some((inner, interner_cell))
     }
 
     // ============================================================================

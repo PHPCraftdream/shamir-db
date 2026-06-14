@@ -24,7 +24,7 @@ fn test_msgpack_to_inner_simple() {
             assert_eq!(m.len(), 2);
 
             // Check name
-            let name_key = interner.touch_ind("name").unwrap().key().clone();
+            let name_key = interner.touch_ind("name").unwrap().into_key();
             assert!(m.contains_key(&name_key));
             assert_eq!(
                 m.get(&name_key),
@@ -32,7 +32,7 @@ fn test_msgpack_to_inner_simple() {
             );
 
             // Check age
-            let age_key = interner.touch_ind("age").unwrap().key().clone();
+            let age_key = interner.touch_ind("age").unwrap().into_key();
             assert!(m.contains_key(&age_key));
             assert_eq!(m.get(&age_key), Some(&InnerValue::Int(30)));
         }
@@ -44,8 +44,8 @@ fn test_msgpack_to_inner_simple() {
 fn test_inner_to_msgpack_simple() {
     let interner = Interner::new();
 
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let age_key = interner.touch_ind("age").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let age_key = interner.touch_ind("age").unwrap().into_key();
 
     let mut map = new_map();
     map.insert(name_key, InnerValue::Str("Alice".to_string()));
@@ -270,7 +270,7 @@ fn test_null_in_map_roundtrip() {
 
     match inner {
         InnerValue::Map(m) => {
-            let key = interner.touch_ind("field").unwrap().key().clone();
+            let key = interner.touch_ind("field").unwrap().into_key();
             assert_eq!(m.get(&key), Some(&InnerValue::Null));
         }
         _ => panic!("Expected Map"),
@@ -295,7 +295,7 @@ fn test_large_unsigned_int() {
 
     match inner {
         InnerValue::Map(m) => {
-            let key = interner.touch_ind("large").unwrap().key().clone();
+            let key = interner.touch_ind("large").unwrap().into_key();
             match m.get(&key) {
                 Some(InnerValue::Str(s)) => {
                     assert_eq!(s, &large_u64.to_string());

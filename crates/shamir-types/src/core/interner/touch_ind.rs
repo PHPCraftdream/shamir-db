@@ -7,15 +7,6 @@ pub enum TouchInd {
     Exists(InternerKey),
 }
 
-impl AsRef<[u8]> for TouchInd {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            TouchInd::New(key) => key.as_bytes(),
-            TouchInd::Exists(key) => key.as_bytes(),
-        }
-    }
-}
-
 impl TouchInd {
     /// Returns the interned key.
     pub fn key(&self) -> &InternerKey {

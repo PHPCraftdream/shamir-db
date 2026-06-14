@@ -2,85 +2,112 @@ use bytes::Bytes;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
-/// Interned binary key - represents a compressed ID stored as variable-size bytes.
-/// Size adapts dynamically: 1, 2, 4, or 8 bytes based on id value.
+/// Interned binary key - represents a compressed ID stored as an inline u64.
+/// Zero heap allocation. Wire format adapts dynamically: 1, 2, 4, or 8 bytes
+/// based on id value (for serialization compatibility).
 #[derive(Clone, Debug)]
-pub struct InternerKey(pub(crate) Bytes);
+pub struct InternerKey(u64);
 
 impl InternerKey {
-    /// Create a new interned key from u64 with minimal byte size.
+    /// Create a new interned key from u64.
+    #[inline]
     pub fn new(id: u64) -> Self {
-        let bytes = if id <= u8::MAX as u64 {
-            Bytes::copy_from_slice(&[id as u8])
-        } else if id <= u16::MAX as u64 {
-            Bytes::copy_from_slice(&(id as u16).to_le_bytes())
-        } else if id <= u32::MAX as u64 {
-            Bytes::copy_from_slice(&(id as u32).to_le_bytes())
-        } else {
-            Bytes::copy_from_slice(&id.to_le_bytes())
-        };
-        Self(bytes)
+        Self(id)
     }
 
-    /// Convert bytes back to u64 ID.
+    /// Get the u64 ID.
+    #[inline]
     pub fn id(&self) -> u64 {
-        match self.0.len() {
-            1 => self.0[0] as u64,
-            2 => u16::from_le_bytes([self.0[0], self.0[1]]) as u64,
-            4 => u32::from_le_bytes([self.0[0], self.0[1], self.0[2], self.0[3]]) as u64,
-            8 => u64::from_le_bytes([
-                self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5], self.0[6],
-                self.0[7],
-            ]),
-            _ => unreachable!(
-                "InternerKey invariant broken: length {} (must be 1/2/4/8)",
-                self.0.len()
-            ),
+        self.0
+    }
+
+    /// Get the minimal wire-format bytes for this key (owned).
+    /// Returns 1, 2, 4, or 8 bytes depending on value magnitude.
+    #[inline]
+    pub fn to_wire_bytes(&self) -> Bytes {
+        if self.0 <= u8::MAX as u64 {
+            Bytes::copy_from_slice(&[self.0 as u8])
+        } else if self.0 <= u16::MAX as u64 {
+            Bytes::copy_from_slice(&(self.0 as u16).to_le_bytes())
+        } else if self.0 <= u32::MAX as u64 {
+            Bytes::copy_from_slice(&(self.0 as u32).to_le_bytes())
+        } else {
+            Bytes::copy_from_slice(&self.0.to_le_bytes())
         }
     }
 
-    /// Get raw bytes reference.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    /// Wire-format byte length (1, 2, 4, or 8).
+    #[inline]
+    pub fn wire_len(&self) -> usize {
+        if self.0 <= u8::MAX as u64 {
+            1
+        } else if self.0 <= u16::MAX as u64 {
+            2
+        } else if self.0 <= u32::MAX as u64 {
+            4
+        } else {
+            8
+        }
     }
 
-    /// Borrow the inner bytes representation.
-    pub fn bytes(&self) -> &Bytes {
-        &self.0
+    /// Borrow the inner bytes representation (allocates on demand).
+    /// Prefer `.id()` or `.to_wire_bytes()` for new code.
+    #[inline]
+    pub fn bytes(&self) -> Bytes {
+        self.to_wire_bytes()
     }
 
-    /// Take ownership of the inner bytes.
+    /// Take ownership of the inner bytes (allocates on demand).
+    /// Prefer `.id()` or `.to_wire_bytes()` for new code.
+    #[inline]
     pub fn into_bytes(self) -> Bytes {
-        self.0
+        self.to_wire_bytes()
+    }
+
+    /// Get raw bytes as a fixed-size array written to stack.
+    /// Returns a buffer and the valid length within it.
+    #[inline]
+    pub fn as_bytes_buf(&self) -> ([u8; 8], usize) {
+        let mut buf = [0u8; 8];
+        let len = self.wire_len();
+        match len {
+            1 => buf[0] = self.0 as u8,
+            2 => buf[..2].copy_from_slice(&(self.0 as u16).to_le_bytes()),
+            4 => buf[..4].copy_from_slice(&(self.0 as u32).to_le_bytes()),
+            8 => buf = self.0.to_le_bytes(),
+            _ => unreachable!(),
+        }
+        (buf, len)
     }
 }
 
-// Hash based on id, not bytes - allows keys of different sizes to match
 impl Hash for InternerKey {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.id().hash(state);
+        self.0.hash(state);
     }
 }
 
-// Eq based on id, not bytes
 impl PartialEq for InternerKey {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
-        self.id() == other.id()
+        self.0 == other.0
     }
 }
 
 impl Eq for InternerKey {}
 
-// Ord based on id
 impl PartialOrd for InternerKey {
+    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for InternerKey {
+    #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        self.id().cmp(&other.id())
+        self.0.cmp(&other.0)
     }
 }
 
@@ -89,7 +116,8 @@ impl serde::Serialize for InternerKey {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_bytes(&self.0)
+        let (buf, len) = self.as_bytes_buf();
+        serializer.serialize_bytes(&buf[..len])
     }
 }
 
@@ -106,10 +134,15 @@ impl<'de> serde::Deserialize<'de> for InternerKey {
 impl InternerKey {
     /// Create from raw bytes (for deserialization).
     fn from_raw_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
-        let len = bytes.len();
-        if len != 1 && len != 2 && len != 4 && len != 8 {
-            return Err("Invalid InternedKey length: must be 1, 2, 4, or 8 bytes");
-        }
-        Ok(Self(Bytes::copy_from_slice(bytes)))
+        let id = match bytes.len() {
+            1 => bytes[0] as u64,
+            2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u64,
+            4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+            8 => u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
+            _ => return Err("Invalid InternedKey length: must be 1, 2, 4, or 8 bytes"),
+        };
+        Ok(Self(id))
     }
 }

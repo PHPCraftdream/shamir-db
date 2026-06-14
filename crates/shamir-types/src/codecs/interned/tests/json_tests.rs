@@ -18,7 +18,7 @@ fn test_json_to_inner_simple() {
             assert_eq!(m.len(), 2);
 
             // Check name
-            let name_key = interner.touch_ind("name").unwrap().key().clone();
+            let name_key = interner.touch_ind("name").unwrap().into_key();
             assert!(m.contains_key(&name_key));
             assert_eq!(
                 m.get(&name_key),
@@ -26,7 +26,7 @@ fn test_json_to_inner_simple() {
             );
 
             // Check age
-            let age_key = interner.touch_ind("age").unwrap().key().clone();
+            let age_key = interner.touch_ind("age").unwrap().into_key();
             assert!(m.contains_key(&age_key));
             assert_eq!(m.get(&age_key), Some(&InnerValue::Int(30)));
         }
@@ -38,8 +38,8 @@ fn test_json_to_inner_simple() {
 fn test_inner_to_json_simple() {
     let interner = Interner::new();
 
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let age_key = interner.touch_ind("age").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let age_key = interner.touch_ind("age").unwrap().into_key();
 
     let mut map = new_map();
     map.insert(name_key, InnerValue::Str("Alice".to_string()));
@@ -172,7 +172,7 @@ fn test_special_numbers() {
 
     match inner {
         InnerValue::Map(m) => {
-            let key = interner.touch_ind("large").unwrap().key().clone();
+            let key = interner.touch_ind("large").unwrap().into_key();
             if let Some(InnerValue::Int(i)) = m.get(&key) {
                 assert_eq!(*i as u64, large_uint);
             } else {
@@ -211,7 +211,7 @@ fn test_null_in_map_roundtrip() {
 
     match inner {
         InnerValue::Map(m) => {
-            let key = interner.touch_ind("field").unwrap().key().clone();
+            let key = interner.touch_ind("field").unwrap().into_key();
             assert_eq!(m.get(&key), Some(&InnerValue::Null));
         }
         _ => panic!("Expected Map"),

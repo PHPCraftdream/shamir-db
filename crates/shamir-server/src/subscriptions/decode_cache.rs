@@ -4,26 +4,38 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use shamir_collections::THasher;
+use shamir_db::core::interner::Interner;
+use shamir_db::types::value::InnerValue;
+use tokio::sync::OnceCell;
 
 /// Global decode cache shared across ALL bridge tasks (all connections, all
-/// repos). Keyed by `(commit_version, change_index)` — unique within a
-/// repo's changefeed. Different repos may share a `commit_version` number,
-/// but the corresponding `change_index` + raw bytes will differ, so a
-/// collision produces a semantically wrong cached value. To prevent this,
-/// the key includes a cheap repo-name hash discriminant.
+/// repos). Keyed by `(repo_hash, commit_version, change_index)`.
+///
+/// Caches `(InnerValue, Arc<OnceCell<Interner>>)` rather than
+/// `serde_json::Value`:
+/// - `InnerValue` is the msgpack-decoded record (no JSON alloc).
+/// - `Arc<OnceCell<Interner>>` is a shared handle to the table's interner;
+///   the cell is guaranteed to be populated before insertion (see
+///   `ShamirDb::decode_record_value_inner`), so callers can do
+///   `cell.get().unwrap()` synchronously for filter field-path resolution.
+///
+/// JSON conversion (`inner_to_json_value`) only happens when the event passes
+/// the filter and must be delivered, eliminating the alloc on rejected events.
 ///
 /// The cache exploits the fact that `tokio::sync::broadcast` delivers
 /// `Arc<ChangelogEvent>` to every subscriber: N bridges receiving the same
-/// event each need the de-interned JSON of every Put change, but the decode
-/// is pure and deterministic — running it once and sharing the result
-/// eliminates O(N) redundant msgpack-deserialize + interner-lookup work.
+/// event each decode the same msgpack bytes — the first bridge pays the
+/// decode; the rest share the cached result.
 static GLOBAL: Lazy<DecodeCache> = Lazy::new(DecodeCache::new);
 
 /// Key: (repo_hash, commit_version, change_index).
 type CacheKey = (u64, u64, usize);
 
+/// Cached value: decoded InnerValue + initialized interner cell.
+pub(crate) type DecodedInner = Arc<Option<(InnerValue, Arc<OnceCell<Interner>>)>>;
+
 pub(crate) struct DecodeCache {
-    inner: DashMap<CacheKey, Arc<Option<serde_json::Value>>, THasher>,
+    inner: DashMap<CacheKey, DecodedInner, THasher>,
     evicted_up_to: AtomicU64,
 }
 
@@ -46,7 +58,7 @@ pub(crate) fn cache_get(
     repo: &str,
     commit_version: u64,
     change_idx: usize,
-) -> Option<Arc<Option<serde_json::Value>>> {
+) -> Option<DecodedInner> {
     let key = (DecodeCache::repo_hash(repo), commit_version, change_idx);
     GLOBAL.inner.get(&key).map(|r| Arc::clone(r.value()))
 }
@@ -58,8 +70,8 @@ pub(crate) fn cache_insert(
     repo: &str,
     commit_version: u64,
     change_idx: usize,
-    value: Option<serde_json::Value>,
-) -> Arc<Option<serde_json::Value>> {
+    value: Option<(InnerValue, Arc<OnceCell<Interner>>)>,
+) -> DecodedInner {
     let key = (DecodeCache::repo_hash(repo), commit_version, change_idx);
     let arc = Arc::new(value);
     GLOBAL.inner.insert(key, Arc::clone(&arc));

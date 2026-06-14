@@ -121,8 +121,8 @@ async fn history_returns_full_timeline_ascending() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     // v1: {name: alice, n: 1}
@@ -188,8 +188,8 @@ async fn history_from_version_filters_low_end() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     let id = insert_first(&tbl, &build_record(&name_key, &n_key, "alice", 1)).await;
@@ -227,8 +227,8 @@ async fn history_limit_caps_whole_result() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     let id = insert_first(&tbl, &build_record(&name_key, &n_key, "alice", 1)).await;
@@ -265,8 +265,8 @@ async fn history_order_desc_reverses() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     let id = insert_first(&tbl, &build_record(&name_key, &n_key, "alice", 1)).await;
@@ -346,8 +346,8 @@ async fn latest_path_unchanged() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     let id = insert_first(&tbl, &build_record(&name_key, &n_key, "alice", 1)).await;
