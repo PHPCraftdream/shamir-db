@@ -54,7 +54,7 @@ pub use changefeed::{
     nontx_event, project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, JournalRead,
     RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
-pub use completion_tracker::CompletionTracker;
+pub use completion_tracker::{CompletionTracker, State as CompletionState};
 pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{
