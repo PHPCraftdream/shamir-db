@@ -91,13 +91,36 @@ construction.
 ./scripts/test.sh --full                   # lib + integration + e2e, all crates
 ./scripts/test.sh -p shamir-tx             # one crate (lib only)
 ./scripts/test.sh -p shamir-tx --full      # one crate (lib + tests)
+./scripts/test.sh -p shamir-tx -p shamir-engine    # multiple crates
 ./scripts/test.sh -- mvcc                  # filter by test name
+./scripts/test.sh -p shamir-tx -- types    # scope + filter
 
 cargo t                                    # equivalent to ./scripts/test.sh --full
 cargo tl                                   # equivalent to ./scripts/test.sh (lib only)
 cargo t -p shamir-tx                       # one-crate full
 cargo tl -p shamir-tx                      # one-crate lib
 ```
+
+**Named scopes** (preset groups for common areas — see
+`scripts/test.sh::scope_args`):
+
+```
+./scripts/test.sh @tx                      # shamir-tx
+./scripts/test.sh @engine                  # shamir-engine
+./scripts/test.sh @oracle                  # tx + engine (Version Oracle area)
+./scripts/test.sh @types                   # shamir-types + shamir-collections
+./scripts/test.sh @storage                 # shamir-storage + shamir-wal
+./scripts/test.sh @server                  # shamir-server + shamir-connect
+./scripts/test.sh @e2e                     # shamir-db + shamir-server (forces --full)
+./scripts/test.sh @all                     # explicit workspace
+./scripts/test.sh @oracle @types           # combine scopes
+./scripts/test.sh @oracle -- watermark     # scope + name filter
+./scripts/test.sh @oracle --full           # + integration tests for that area
+```
+
+Add scopes to `scripts/test.sh::scope_args` as the codebase grows;
+keep them short and topical. Power-user filters via `-E
+'<nextest-expr>'` pass straight through to nextest.
 
 What the wrapper guarantees:
 - `cargo nextest run` (real-time PASS/FAIL per test — no pipe buffering).
