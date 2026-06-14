@@ -5,6 +5,20 @@
 # channel reader, tokio::accept loop, file lock) hangs the whole run with
 # zero output. We've lost hours to this. nextest prints PASS/FAIL per
 # test as it happens AND can hard-kill slow tests.
+#
+# PERIMETER GUARD COUPLING (see .cargo/config.toml [target.'cfg(all())'] runner):
+# The cargo-runner guard in .cargo/config.toml refuses bare `cargo test` and
+# only allows test processes that have the $NEXTEST environment variable set.
+# cargo-nextest sets $NEXTEST in every test process it spawns; that is the
+# sole signal the guard relies on.
+#
+# RISK: if a future cargo-nextest release renames or removes $NEXTEST, the
+# guard will fail-closed — it will refuse ALL test invocations, including
+# those launched through ./scripts/test.sh and `cargo t`.
+#
+# Pinned baseline: cargo-nextest 0.9.137 (commit 75ddba7e9, 2026-05-26).
+# Verify with: cargo nextest --version
+# When upgrading nextest, confirm $NEXTEST is still set before merging.
 
 [profile.default]
 # Print every test result as it completes, with the binary name.
