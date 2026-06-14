@@ -428,8 +428,7 @@ impl RepoTxGate {
         self.commit_write_log.range::<u64, _>(.., &guard).count()
     }
 
-    /// Access the completion tracker (P1a scaffolding, wired in P1c).
-    #[allow(dead_code)]
+    /// Access the completion tracker (P1a scaffolding; abort-path wired in P1b).
     pub fn completion(&self) -> &CompletionTracker {
         &self.completion
     }
