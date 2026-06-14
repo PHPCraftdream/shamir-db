@@ -472,7 +472,10 @@ pub fn project_event(
     Some(ChangelogEvent {
         repo: repo.to_string(),
         commit_version,
-        tx_id: tx.tx_id.0,
+        // EXTERNAL contract: implicit batch txs (non-tx writes routed through
+        // the tx pipeline, F4b-1) report tx_id == 0 — "0 = non-tx write" per
+        // docs/roadmap/LIVE_SUBSCRIPTIONS.md. The INTERNAL tx.tx_id stays real.
+        tx_id: if tx.implicit { 0 } else { tx.tx_id.0 },
         actor: tx.actor.clone(),
         timestamp_ns,
         changes,

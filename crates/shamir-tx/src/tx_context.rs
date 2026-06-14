@@ -219,6 +219,15 @@ pub struct TxContext {
     /// parked on key X). Stays unused for Snapshot / Serializable.
     pub wound_notify: Arc<tokio::sync::Notify>,
 
+    /// True when this tx was opened by the engine's IMPLICIT batch-tx path
+    /// (a non-tx write routed through the tx commit pipeline — F4b-1
+    /// "everything is a transaction"). The INTERNAL `tx_id` stays real
+    /// (nonzero) — the WAL entry and crash-injection seams gate on it — but
+    /// the projected changefeed EVENT reports `tx_id = 0` to preserve the
+    /// EXTERNAL "0 = non-tx write" subscription contract
+    /// (`docs/roadmap/LIVE_SUBSCRIPTIONS.md`). Default `false`.
+    pub implicit: bool,
+
     /// Level-3 locked-key registry: every key this tx has acquired a
     /// pessimistic lock on (across all tables). Populated ONLY for
     /// `Pessimistic` txs; stays empty otherwise. Released as a batch on
@@ -259,8 +268,16 @@ impl TxContext {
             actor: Actor::System,
             wounded: Arc::new(AtomicBool::new(false)),
             wound_notify: Arc::new(tokio::sync::Notify::new()),
+            implicit: false,
             locked_keys: scc::HashMap::with_hasher(THasher::default()),
         }
+    }
+
+    /// Mark this tx as an implicit batch tx (F4b-1). See [`implicit`](Self::implicit).
+    /// Returns `&mut Self` for builder-style chaining.
+    pub fn set_implicit(&mut self, implicit: bool) -> &mut Self {
+        self.implicit = implicit;
+        self
     }
 
     /// Opt into async-index commit visibility (see [`CommitVisibility`]).

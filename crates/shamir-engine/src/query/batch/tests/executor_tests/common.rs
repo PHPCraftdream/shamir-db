@@ -21,9 +21,13 @@ impl TableResolver for TestResolver {
     }
 
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
-        Err(shamir_storage::error::DbError::NotFound(
-            "TestResolver does not back transactional repo lookups".into(),
-        ))
+        // F4b-1: non-tx writes now route through an implicit Snapshot tx, so the
+        // executor calls `resolve_repo` even on the non-transactional path. Back
+        // it with the real in-memory repo so insert tests exercise the implicit
+        // commit pipeline end-to-end.
+        self.db.get_repo(&self.repo).ok_or_else(|| {
+            shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
+        })
     }
 }
 
