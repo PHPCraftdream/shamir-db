@@ -35,6 +35,15 @@ impl CompletionTracker {
         }
     }
 
+    /// Create a tracker with the watermark pre-seeded to `initial`.
+    /// Used on repo open when `last_committed` is recovered from durable state.
+    pub fn with_watermark(initial: u64) -> Self {
+        Self {
+            watermark: AtomicU64::new(initial),
+            states: scc::HashMap::with_hasher(THasher::default()),
+        }
+    }
+
     /// Mark version V as Materialized or Aborted, then try to advance the
     /// watermark. Marking a version ≤ current watermark is a no-op.
     pub fn mark(&self, version: u64, state: State) {

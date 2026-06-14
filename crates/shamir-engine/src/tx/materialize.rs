@@ -200,6 +200,16 @@ pub(super) async fn materialize(
     // Phase 6: publish — atomic publish-committed. ALWAYS runs: the
     // version IS committed (the WAL entry is durable) regardless of
     // whether the projections above landed inline.
+    // P1c: mark materialized in completion tracker; the watermark advances
+    // and syncs the atomic last_committed_version via fetch_max.
+    gate.completion().mark(
+        commit_version,
+        shamir_tx::completion_tracker::State::Materialized,
+    );
+    gate.sync_last_committed_from_watermark();
+    // Legacy publish retained as a fallback for non-tx paths racing ahead
+    // of the watermark (changefeed, recovery). Safe: publish_committed is
+    // a plain store under commit_lock, idempotent with the CAS above.
     gate.publish_committed(commit_version);
 
     // Phase 6-bis (Phase C): record this tx's write footprint into the
