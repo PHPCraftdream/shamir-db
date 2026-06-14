@@ -574,18 +574,22 @@ async fn recover_v2_inflight_replays_in_commit_version_order() {
     );
 }
 
-/// F3 end-to-end crash-recovery proof over the FILE WAL.
+/// F3 end-to-end process-crash recovery proof over the FILE WAL (level-2).
 ///
 /// Builds a disk-backed (sled-raw) repo, commits a tx through the real tx
 /// path (which now appends to the file WAL via `begin_grouped(Buffered)`),
 /// then DROPS the `RepoInstance` WITHOUT a clean shutdown — modelling a
-/// process crash. A fresh `RepoInstance` is opened over the SAME tempdir
-/// (so it sees the same `*.shamirwal/repo.wal` segment), recovery runs, and
-/// the committed record must be present — recovered purely from replaying
-/// the file WAL. This exercises the file-WAL write → replay round-trip end
-/// to end.
+/// **process crash** (level-2 / Buffered contract: the OS page cache keeps
+/// the WAL segment intact across a process exit). A fresh `RepoInstance` is
+/// opened over the SAME tempdir (so it sees the same `*.shamirwal/repo.wal`
+/// segment), recovery runs, and the committed record must be present —
+/// recovered purely from replaying the file WAL.
+///
+/// NOTE: this is NOT a power-loss (level-3) test. A true power-loss test
+/// would require fsync-then-kill-then-truncate-page-cache, which demands a
+/// subprocess harness and is out of scope here.
 #[tokio::test]
-async fn f3_file_wal_crash_recovery_replays_committed_tx() {
+async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     use shamir_tx::IsolationLevel;
 
     let tempdir = tempfile::TempDir::new().expect("tempdir");
@@ -635,5 +639,84 @@ async fn f3_file_wal_crash_recovery_replays_committed_tx() {
     assert!(
         matches!(read_back, InnerValue::Str(ref s) if s == "durable"),
         "expected recovered Str(\"durable\"), got {read_back:?}"
+    );
+}
+
+/// F3 file-WAL replay idempotency: running `recover_v2_inflight` more than
+/// once must converge to the same DATA state and never corrupt or duplicate
+/// records.
+///
+/// The file WAL replays the WHOLE segment on every restart (there is no
+/// per-entry truncation until the F6 checkpoint), so `replay_v2_entry` is
+/// documented as idempotent at the data layer. This test makes that contract
+/// explicit:
+///
+/// 1. Commit a tx on a disk repo (sled_raw + tempdir) — same setup as the
+///    f3 process-crash test.
+/// 2. Reopen the repo (simulated process crash).
+/// 3. Run `recover_v2_inflight()` twice on the same open instance. The second
+///    call will re-read the segment and replay the same entries again (file WAL
+///    has no per-entry truncation until F6) — both calls will return >= 1.
+/// 4. Assert the record reads back as the single correct value after both runs
+///    (no duplication, no corruption).
+#[tokio::test]
+async fn f3_file_wal_replay_is_idempotent() {
+    use shamir_tx::IsolationLevel;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
+
+    // === Phase A: open disk repo, commit a tx. ===
+    let rid;
+    {
+        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let repo =
+            RepoInstance::from_factory("f3_idem".into(), factory, vec![TableConfig::new("t")])
+                .await
+                .expect("from_factory");
+        repo.get_table("t").await.unwrap();
+
+        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let tbl = repo.get_table("t").await.unwrap();
+        rid = tbl
+            .insert_tx(&InnerValue::Str("idempotent".into()), Some(&mut tx))
+            .await
+            .unwrap();
+        repo.commit_tx(tx).await.unwrap();
+
+        // Simulated process crash — drop without clean shutdown.
+        drop(repo);
+    }
+
+    // === Phase B: reopen over the same tempdir. ===
+    let factory = BoxRepoFactory::sled_raw(path.clone());
+    let repo2 = RepoInstance::from_factory("f3_idem".into(), factory, vec![TableConfig::new("t")])
+        .await
+        .expect("reopen from_factory");
+    let tbl2 = repo2.get_table("t").await.unwrap();
+
+    // === Phase C: run recovery TWICE on the same open instance. ===
+    let first = repo2.recover_v2_inflight().await.unwrap();
+    assert!(
+        first >= 1,
+        "first recovery must replay at least one entry, got {first}"
+    );
+
+    // The second call re-reads the file segment (no F6 truncation yet) and
+    // replays the same entries — idempotency means the DATA is unchanged, not
+    // that the count is zero. Assert only that it does not panic/error.
+    let second = repo2.recover_v2_inflight().await.unwrap();
+    assert!(
+        second >= 1,
+        "second recovery also replays the segment (file WAL: no truncation until F6), got {second}"
+    );
+
+    // === VERIFY: single correct value after double replay — no corruption. ===
+    let read_back = tbl2.get(rid).await.unwrap_or_else(|e| {
+        panic!("record {rid:?} must be present after idempotent recovery, got: {e}")
+    });
+    assert!(
+        matches!(read_back, InnerValue::Str(ref s) if s == "idempotent"),
+        "expected Str(\"idempotent\") after double replay, got {read_back:?}"
     );
 }
