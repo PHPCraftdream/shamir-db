@@ -37,10 +37,13 @@ use crate::tx::tx_outcome::MaterializationState;
 /// Phase 6 (`publish_committed_max`) ALWAYS runs — the version is committed
 /// regardless of whether the projections landed inline.
 ///
-/// Phase 6-bis (`record_commit_writes`) is NOT called here — it is called
-/// by the caller UNDER `commit_lock` before releasing it, so that future
-/// SSI validations see this tx's footprint. See `run_single_tx` /
-/// `run_leader`.
+/// Phase 6-bis (`record_commit_writes`) is called here BEFORE Phase 6
+/// publish (P2c). The footprint is inserted into the lock-free
+/// `scc::TreeIndex` before `last_committed_version` advances past
+/// `commit_version`, so any future SSI validator scanning up to
+/// `last_committed()` will see this footprint. This moved OUT of
+/// `commit_lock` — the ordering invariant (footprint visible before
+/// publish) is maintained by sequencing within this function.
 ///
 /// MULTI-TABLE DEFERRAL IS PARTIAL (audit MED, by-design): the Phase 5a
 /// (data) and Phase 5c (index) loops below iterate per table, each with its

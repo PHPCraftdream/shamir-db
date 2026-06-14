@@ -1,5 +1,6 @@
 pub mod commit;
 pub mod commit_phases;
+#[allow(dead_code, unused_imports)]
 pub(crate) mod group_commit;
 pub(super) mod materialize;
 pub(super) mod pre_commit;
