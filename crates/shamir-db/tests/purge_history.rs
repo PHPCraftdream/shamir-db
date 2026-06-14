@@ -157,7 +157,7 @@ async fn purge_older_than_age_removes_old_versions() {
         .unwrap();
 
     // Result shape: { "purge_history": "users", "repo": "main", "purged": N }
-    let result = &resp.results["ph"].records[0];
+    let result = resp.results["ph"].records[0].as_json();
     assert_eq!(result["purge_history"], json!("users"));
     assert_eq!(result["repo"], json!("main"));
     let purged = result["purged"].as_u64().expect("purged is u64");
@@ -234,7 +234,7 @@ async fn purge_older_than_absolute_timestamp() {
         .await
         .unwrap();
 
-    let result = &resp.results["ph"].records[0];
+    let result = resp.results["ph"].records[0].as_json();
     assert_eq!(result["purge_history"], json!("users"));
     assert_eq!(result["repo"], json!("main"));
     let purged = result["purged"].as_u64().expect("purged is u64");

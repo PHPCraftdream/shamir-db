@@ -176,7 +176,7 @@ async fn drop_table_with_correct_hmac_accepted() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = &resp.results["d"].records[0];
+    let row = resp.results["d"].records[0].as_json();
     assert_eq!(row["dropped_table"], json!("items"));
     assert_eq!(row["existed"], json!(true));
 }
@@ -277,7 +277,7 @@ async fn drop_db_with_correct_hmac_accepted() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = &resp.results["d"].records[0];
+    let row = resp.results["d"].records[0].as_json();
     assert_eq!(row["dropped"], json!("victim"));
 }
 
@@ -353,7 +353,7 @@ async fn drop_index_with_correct_hmac_accepted() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = &resp.results["d"].records[0];
+    let row = resp.results["d"].records[0].as_json();
     assert_eq!(row["dropped_index"], json!("by_id"));
     assert_eq!(row["existed"], json!(true));
 }
@@ -512,7 +512,7 @@ async fn create_table_passes_without_hmac() {
             .unwrap(),
     );
     let resp = expect_batch_ok(res);
-    let row = &resp.results["t"].records[0];
+    let row = resp.results["t"].records[0].as_json();
     assert_eq!(row["created_table"], json!("x"));
 }
 

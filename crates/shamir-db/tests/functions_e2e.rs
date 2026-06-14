@@ -102,8 +102,8 @@ async fn e2e_computed_value_persisted_on_insert() {
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["all"].records;
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0]["email"], json!("A@X.COM"));
-    assert_eq!(recs[0]["email_norm"], json!("a@x.com"));
+    assert_eq!(recs[0].as_json()["email"], json!("A@X.COM"));
+    assert_eq!(recs[0].as_json()["email_norm"], json!("a@x.com"));
 }
 
 /// 2. Filtering — `WHERE name == strings/lower("ALICE")` selects exactly the
@@ -124,7 +124,7 @@ async fn e2e_filter_with_fn_call() {
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["match"].records;
     assert_eq!(recs.len(), 1, "only alice matches lower(\"ALICE\")");
-    assert_eq!(recs[0]["name"], json!("alice"));
+    assert_eq!(recs[0].as_json()["name"], json!("alice"));
 }
 
 /// 3. Aggregation — `SELECT city, median(age) GROUP BY city` runs the funclib
@@ -181,6 +181,6 @@ async fn e2e_select_scalar_function() {
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["rows"].records;
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0]["name"], json!("alice"));
-    assert_eq!(recs[0]["up"], json!("ALICE"));
+    assert_eq!(recs[0].as_json()["name"], json!("alice"));
+    assert_eq!(recs[0].as_json()["up"], json!("ALICE"));
 }

@@ -47,7 +47,7 @@ async fn test_list_databases() {
         .await
         .unwrap();
 
-    let dbs = &resp.results["dbs"].records[0]["databases"];
+    let dbs = &resp.results["dbs"].records[0].as_json()["databases"];
     assert!(dbs.as_array().unwrap().contains(&json!("testdb")));
 }
 
@@ -63,7 +63,7 @@ async fn test_list_repos() {
         .await
         .unwrap();
 
-    let repos = &resp.results["repos"].records[0]["repos"];
+    let repos = &resp.results["repos"].records[0].as_json()["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("main")));
 }
 
@@ -79,7 +79,7 @@ async fn test_list_tables() {
         .await
         .unwrap();
 
-    let tables = &resp.results["tables"].records[0]["tables"];
+    let tables = &resp.results["tables"].records[0].as_json()["tables"];
     assert!(tables.as_array().unwrap().contains(&json!("users")));
 }
 
@@ -104,7 +104,7 @@ async fn test_create_repo() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["create"].records[0]["created_repo"],
+        resp.results["create"].records[0].as_json()["created_repo"],
         "hot_cache"
     );
 
@@ -116,7 +116,7 @@ async fn test_create_repo() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let repos = &resp.results["repos"].records[0]["repos"];
+    let repos = &resp.results["repos"].records[0].as_json()["repos"];
     assert!(repos.as_array().unwrap().contains(&json!("hot_cache")));
 }
 
@@ -133,7 +133,7 @@ async fn test_drop_repo() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["drop"].records[0]["existed"], true);
+    assert_eq!(resp.results["drop"].records[0].as_json()["existed"], true);
 }
 
 // ============================================================================
@@ -169,8 +169,11 @@ async fn test_create_index_via_query() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["idx"].records[0]["created_index"], "email_idx");
-    assert_eq!(resp.results["idx"].records[0]["unique"], true);
+    assert_eq!(
+        resp.results["idx"].records[0].as_json()["created_index"],
+        "email_idx"
+    );
+    assert_eq!(resp.results["idx"].records[0].as_json()["unique"], true);
 
     // Now query using the index
     let mut b = Batch::new();
@@ -181,7 +184,7 @@ async fn test_create_index_via_query() {
     );
     let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     assert_eq!(resp.results["find"].records.len(), 1);
-    assert_eq!(resp.results["find"].records[0]["name"], "Alice");
+    assert_eq!(resp.results["find"].records[0].as_json()["name"], "Alice");
 }
 
 #[tokio::test]
@@ -200,7 +203,7 @@ async fn test_drop_index_via_query() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["drop"].records[0]["existed"], true);
+    assert_eq!(resp.results["drop"].records[0].as_json()["existed"], true);
 }
 
 // ============================================================================
@@ -256,7 +259,7 @@ async fn test_ddl_then_dml_pipeline() {
         .await
         .unwrap();
     assert_eq!(resp.results["cheap"].records.len(), 1);
-    assert_eq!(resp.results["cheap"].records[0]["name"], "Widget");
+    assert_eq!(resp.results["cheap"].records[0].as_json()["name"], "Widget");
 }
 
 // ============================================================================
@@ -298,9 +301,8 @@ async fn test_list_indexes() {
         .await
         .unwrap();
 
-    let indexes = resp.results["idxs"].records[0]["indexes"]
-        .as_array()
-        .unwrap();
+    let rec = resp.results["idxs"].records[0].as_json();
+    let indexes = rec["indexes"].as_array().unwrap();
     assert_eq!(indexes.len(), 2);
 
     // Check we have both regular and unique
@@ -334,7 +336,10 @@ async fn test_create_table_then_use_it() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["ct"].records[0]["created_table"], "products");
+    assert_eq!(
+        resp.results["ct"].records[0].as_json()["created_table"],
+        "products"
+    );
 
     // Verify it appears in list
     let mut b = Batch::new();
@@ -344,9 +349,8 @@ async fn test_create_table_then_use_it() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let tables = resp.results["tables"].records[0]["tables"]
-        .as_array()
-        .unwrap();
+    let rec = resp.results["tables"].records[0].as_json();
+    let tables = rec["tables"].as_array().unwrap();
     assert!(tables.contains(&json!("products")));
 
     // Actually insert data into the new table
@@ -382,7 +386,7 @@ async fn test_drop_table() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["dt"].records[0]["existed"], true);
+    assert_eq!(resp.results["dt"].records[0].as_json()["existed"], true);
 
     // Verify it's gone -- insert should fail with table not found
     let mut b = Batch::new();
@@ -409,7 +413,7 @@ async fn test_drop_nonexistent_table() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    assert_eq!(resp.results["dt"].records[0]["existed"], false);
+    assert_eq!(resp.results["dt"].records[0].as_json()["existed"], false);
 }
 
 // ============================================================================

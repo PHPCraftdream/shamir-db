@@ -51,7 +51,7 @@ async fn chmod_then_enforced() {
         ddl::chown(ddl::res::table("testdb", "main", "users"), 7),
     )
     .await;
-    assert_eq!(result.records[0]["owner"], 7);
+    assert_eq!(result.records[0].as_json()["owner"], 7);
 
     // Step 2: chmod the table to 0o700 (owner rwx only) via DDL
     let result = exec_op(
@@ -59,7 +59,7 @@ async fn chmod_then_enforced() {
         ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o700),
     )
     .await;
-    assert_eq!(result.records[0]["mode"], 448);
+    assert_eq!(result.records[0].as_json()["mode"], 448);
 
     // Verify the meta was actually written
     let meta = shamir.resource_meta(&table_path).await;
@@ -104,7 +104,7 @@ async fn group_grant_via_ddl() {
 
     // Step 2: create group "devs"
     let result = exec_op(&shamir, ddl::create_group("devs")).await;
-    let group_id = result.records[0]["group_id"].as_u64().unwrap();
+    let group_id = result.records[0].as_json()["group_id"].as_u64().unwrap();
 
     // Step 3: add User(8) to the group
     exec_op(
@@ -220,7 +220,7 @@ async fn chgrp_clears_group() {
 
     // Create a group and chgrp to it
     let result = exec_op(&shamir, ddl::create_group("testers")).await;
-    let gid = result.records[0]["group_id"].as_u64().unwrap();
+    let gid = result.records[0].as_json()["group_id"].as_u64().unwrap();
 
     exec_op(
         &shamir,
@@ -261,7 +261,7 @@ async fn drop_group_removes_access() {
 
     // Create group, add User(20)
     let result = exec_op(&shamir, ddl::create_group("temp")).await;
-    let gid = result.records[0]["group_id"].as_u64().unwrap();
+    let gid = result.records[0].as_json()["group_id"].as_u64().unwrap();
 
     exec_op(
         &shamir,

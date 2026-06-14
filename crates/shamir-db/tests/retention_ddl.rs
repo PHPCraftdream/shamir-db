@@ -75,10 +75,13 @@ async fn create_table_with_retention_applies_policy() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["ct"].records[0]["created_table"],
+        resp.results["ct"].records[0].as_json()["created_table"],
         json!("events")
     );
-    assert_eq!(resp.results["ct"].records[0]["created"], json!(true));
+    assert_eq!(
+        resp.results["ct"].records[0].as_json()["created"],
+        json!(true)
+    );
 
     // The table's MvccStore must report the retention we set.
     let policy = table_retention(&shamir, "testdb", "main", "events").await;
@@ -139,10 +142,10 @@ async fn set_retention_changes_live_table_policy() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["sr"].records[0]["set_retention"],
+        resp.results["sr"].records[0].as_json()["set_retention"],
         json!("users")
     );
-    assert_eq!(resp.results["sr"].records[0]["ok"], json!(true));
+    assert_eq!(resp.results["sr"].records[0].as_json()["ok"], json!(true));
 
     // The live MvccStore now reports the new policy.
     let after = table_retention(&shamir, "testdb", "main", "users").await;

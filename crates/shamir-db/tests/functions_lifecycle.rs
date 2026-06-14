@@ -686,8 +686,8 @@ async fn wasm_function_inserts_and_queries() {
         1,
         "independent read should find exactly 1 persisted row"
     );
-    assert_eq!(records[0]["id"], json!(1));
-    assert_eq!(records[0]["name"], json!("neo"));
+    assert_eq!(records[0].as_json()["id"], json!(1));
+    assert_eq!(records[0].as_json()["name"], json!("neo"));
 }
 
 /// A WASM function inserts a doc then reads it back by key via `db_get`.
@@ -717,8 +717,8 @@ async fn wasm_function_get_by_key() {
     let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["id"], json!(42));
-    assert_eq!(records[0]["name"], json!("trinity"));
+    assert_eq!(records[0].as_json()["id"], json!(42));
+    assert_eq!(records[0].as_json()["name"], json!("trinity"));
 }
 
 // ── Slice 8c: HTTP egress tests ──────────────────────────────────────

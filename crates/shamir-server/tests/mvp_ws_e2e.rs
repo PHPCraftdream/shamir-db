@@ -383,8 +383,14 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         DbResponse::Batch { response } => {
             let rd = response.results.get("rd").expect("rd alias");
             assert_eq!(rd.records.len(), 1, "exactly one record");
-            assert_eq!(rd.records[0].get("id").and_then(|v| v.as_str()), Some("a"));
-            assert_eq!(rd.records[0].get("n").and_then(|v| v.as_i64()), Some(7));
+            assert_eq!(
+                rd.records[0].as_json().get("id").and_then(|v| v.as_str()),
+                Some("a")
+            );
+            assert_eq!(
+                rd.records[0].as_json().get("n").and_then(|v| v.as_i64()),
+                Some(7)
+            );
         }
         other => panic!("expected Batch, got {:?}", other),
     }

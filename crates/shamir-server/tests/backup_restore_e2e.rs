@@ -416,10 +416,13 @@ async fn backup_then_restore_recovers_data() {
                 "exactly one record must survive backup → wipe → restore"
             );
             assert_eq!(
-                rd.records[0].get("sku").and_then(|v| v.as_str()),
+                rd.records[0].as_json().get("sku").and_then(|v| v.as_str()),
                 Some("X1")
             );
-            assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
+            assert_eq!(
+                rd.records[0].as_json().get("qty").and_then(|v| v.as_i64()),
+                Some(42)
+            );
         }
         DbResponse::Error { code, message } => {
             panic!("expected restored data, got error {{ code: {code:?}, message: {message:?} }}");
