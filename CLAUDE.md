@@ -152,20 +152,16 @@ first-class form through the central point:
 ~0.1 s. The central point IS the narrow-run tool — there is never a
 reason to drop to raw `cargo test` for "just one test".
 
-**`SHAMIR_TEST_BLESSED=1` is a true emergency hatch, NOT a routine
-debug shortcut.** It exists for the rare case where a test binary must
-be run by a tool that cannot go through nextest at all (essentially
-never in practice). If you find yourself typing `SHAMIR_TEST_BLESSED=1`
-to run one test, STOP — use `./scripts/test.sh -p <crate> -- <filter>`
-instead. Normalizing the bypass defeats the entire guard: the hang it
-prevents comes back the moment everyone routes around it. (Caught in
-review: the author was reflexively using the bypass for narrow runs the
-central point already handles — don't repeat it.)
+**There is no escape flag.** The perimeter guard (cargo runner in
+`.cargo/config.toml`) gates on `$NEXTEST` — the marker `cargo nextest`
+sets in every test process it launches. So the ONLY way past the guard
+is to actually use nextest (i.e. `./scripts/test.sh` / `cargo t` /
+`cargo tl`). Bare `cargo test` has no `$NEXTEST` → refused. Nothing to
+discover, nothing to copy, nothing to route around.
 
 **For sub-agents:** every test step in an Agent brief MUST point at
 `./scripts/test.sh` (with `-p` / `@scope` / `-- <filter>` as needed),
-NEVER raw `cargo test` and NEVER `SHAMIR_TEST_BLESSED=1`. The wrapper
-is the contract.
+NEVER raw `cargo test`. The wrapper is the contract.
 
 If `cargo-nextest` is missing on a fresh checkout:
 ```

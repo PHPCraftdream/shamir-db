@@ -10,6 +10,7 @@ pub mod index_rollback_tests;
 pub mod interner_checkpoint_tests;
 pub mod legacy_index_tx_tests;
 pub mod non_tx_mvcc_routing_tests;
+pub mod oracle_stress_tests;
 pub mod pessimistic_lock_tests;
 pub mod predicate_range_tests;
 pub mod read_your_own_writes_tests;
