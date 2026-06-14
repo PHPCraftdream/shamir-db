@@ -185,6 +185,109 @@ fn test_not_in_query_ref_column() {
 }
 
 // ============================================================================
+// InSet fast path — compile-time HashSet when all values are literals
+// ============================================================================
+
+#[test]
+fn test_in_all_literals_compiles_to_inset() {
+    use crate::query::filter::filter_node::FilterNode;
+    let interner = Interner::new();
+    // Touch the field so the interner knows it; otherwise compile_filter returns False.
+    interner.touch_ind("status").unwrap();
+    let filter = Filter::In {
+        field: vec!["status".to_string()],
+        values: vec![
+            FilterValue::String("a".to_string()),
+            FilterValue::String("b".to_string()),
+            FilterValue::String("c".to_string()),
+        ],
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(
+        matches!(node, FilterNode::InSet { .. }),
+        "all-literal $in must compile to InSet"
+    );
+}
+
+#[test]
+fn test_in_with_query_ref_compiles_to_in_vec() {
+    use crate::query::filter::filter_node::FilterNode;
+    let interner = Interner::new();
+    interner.touch_ind("user_id").unwrap();
+    let filter = Filter::In {
+        field: vec!["user_id".to_string()],
+        values: vec![FilterValue::QueryRef {
+            alias: "@users".to_string(),
+            path: Some("[].id".to_string()),
+        }],
+    };
+    let node = compile_filter(&filter, &interner);
+    assert!(
+        matches!(node, FilterNode::In { .. }),
+        "non-literal value must fall back to In (linear scan)"
+    );
+}
+
+#[test]
+fn test_inset_match_present() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::In {
+        field: vec!["status".to_string()],
+        values: vec![
+            FilterValue::String("active".to_string()),
+            FilterValue::String("pending".to_string()),
+            FilterValue::String("suspended".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    // record.status == "active" — must match
+    assert!(cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_inset_match_absent() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let filter = Filter::In {
+        field: vec!["status".to_string()],
+        values: vec![
+            FilterValue::String("deleted".to_string()),
+            FilterValue::String("banned".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    // record.status == "active" — must NOT match
+    assert!(!cb.matches(&record, &ctx));
+}
+
+#[test]
+fn test_not_inset_match() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    // $nin with all literals → InSet, negate=true
+    let filter = Filter::NotIn {
+        field: vec!["status".to_string()],
+        values: vec![
+            FilterValue::String("deleted".to_string()),
+            FilterValue::String("banned".to_string()),
+        ],
+    };
+    let cb = compile_filter(&filter, &interner);
+    // record.status == "active" — not in ["deleted","banned"] → true
+    assert!(cb.matches(&record, &ctx));
+}
+
+// ============================================================================
 // Contains / ContainsAny / ContainsAll
 // ============================================================================
 

@@ -602,7 +602,8 @@ fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
         | FilterNode::Between { .. }
         | FilterNode::FtsMatch { .. }
         | FilterNode::ComputedCompare { .. }
-        | FilterNode::In { .. } => None,
+        | FilterNode::In { .. }
+        | FilterNode::InSet { .. } => None,
     }
 }
 

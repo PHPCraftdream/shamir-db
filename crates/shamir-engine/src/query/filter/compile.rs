@@ -1,3 +1,5 @@
+use shamir_collections::TSet;
+
 use super::filter_node::{CompareOp, FilterNode};
 use super::fts::like_pattern_to_regex;
 use super::resolve::{filter_value_to_inner, intern_field_path, intern_field_path_compact};
@@ -43,27 +45,11 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
         },
 
         Filter::In { field, values } => match intern_field_path_compact(field, interner) {
-            Some(path) => {
-                let pre_resolved = values.iter().map(filter_value_to_inner).collect();
-                FilterNode::In {
-                    field_path: path,
-                    values: values.clone(),
-                    pre_resolved,
-                    negate: false,
-                }
-            }
+            Some(path) => compile_in_node(path, values, false),
             None => FilterNode::False,
         },
         Filter::NotIn { field, values } => match intern_field_path_compact(field, interner) {
-            Some(path) => {
-                let pre_resolved = values.iter().map(filter_value_to_inner).collect();
-                FilterNode::In {
-                    field_path: path,
-                    values: values.clone(),
-                    pre_resolved,
-                    negate: true,
-                }
-            }
+            Some(path) => compile_in_node(path, values, true),
             None => FilterNode::True,
         },
 
@@ -199,6 +185,43 @@ pub(super) fn build_index_expr(
         "field" => base,
         _ => return None,
     })
+}
+
+/// Build a compiled `$in` / `$nin` node.
+///
+/// If ALL `values` are literals (Null/Bool/Int/Float/String/Binary) we
+/// materialise them once into a `TSet<InnerValue>` and emit `FilterNode::InSet`
+/// for O(1) membership checks at eval time.  If any value is a non-literal
+/// (FieldRef, QueryRef, Fn, Param, …) we fall back to `FilterNode::In` with
+/// the pre-resolved parallel slice — the same behaviour as before this
+/// optimisation.
+fn compile_in_node(
+    path: super::filter_node::CompactPath,
+    values: &[FilterValue],
+    negate: bool,
+) -> FilterNode {
+    // Attempt to resolve every value to a literal.
+    let resolved: Vec<Option<shamir_types::types::value::InnerValue>> =
+        values.iter().map(filter_value_to_inner).collect();
+
+    if resolved.iter().all(Option::is_some) {
+        // Fast path: all literals → HashSet.
+        let set: TSet<shamir_types::types::value::InnerValue> =
+            resolved.into_iter().flatten().collect();
+        FilterNode::InSet {
+            field_path: path,
+            values: set,
+            negate,
+        }
+    } else {
+        // Fallback: mixed literals + dynamic values → linear scan.
+        FilterNode::In {
+            field_path: path,
+            values: values.to_vec(),
+            pre_resolved: resolved,
+            negate,
+        }
+    }
 }
 
 pub(super) fn compile_compare(
