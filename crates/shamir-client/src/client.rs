@@ -9,6 +9,7 @@
 //! socket, sends, then awaits the oneshot independently. Responses arrive in
 //! completion order (not send order); the reader task matches each by `rid`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -29,7 +30,9 @@ use shamir_connect::common::push_envelope::PushEnvelope;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
-use shamir_transport_tcp::framing::{read_frame, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT};
+use shamir_transport_tcp::framing::{
+    read_frame, read_frame_into, write_frame, FrameError, MAX_FRAME_SIZE_DEFAULT,
+};
 use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
 
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
@@ -130,9 +133,15 @@ pub(crate) async fn reader_task<R>(
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
+    // T-tcp-1: reuse a single buffer across frames — avoids per-frame heap
+    // allocation. Capacity grows to the high-water mark and is never freed
+    // until the task exits. Borrow is fully released before every `.await`
+    // below that is not `read_frame_into` itself, so no lifetime crosses an
+    // unrelated await point.
+    let mut frame_buf: Vec<u8> = Vec::with_capacity(4096);
     loop {
-        let buf = match read_frame(&mut reader, MAX_FRAME_SIZE_DEFAULT).await {
-            Ok(b) => b,
+        match read_frame_into(&mut reader, MAX_FRAME_SIZE_DEFAULT, &mut frame_buf).await {
+            Ok(()) => {}
             Err(FrameError::PeerClose) => {
                 // Graceful close from server.
                 break;
@@ -141,13 +150,12 @@ pub(crate) async fn reader_task<R>(
                 tracing::debug!("reader_task: read_frame error: {e}");
                 break;
             }
-        };
-
-        let result = match decode_frame(&buf) {
+        }
+        let result = match decode_frame(&frame_buf) {
             Some(r) => r,
             None => {
                 // Not a response/error envelope — try push frame.
-                if let Ok(envelope) = rmp_serde::from_slice::<PushEnvelope>(&buf) {
+                if let Ok(envelope) = rmp_serde::from_slice::<PushEnvelope>(&frame_buf) {
                     let sender = {
                         let map = subscriptions.lock().unwrap_or_else(|p| p.into_inner());
                         map.get(&envelope.sub).cloned()
@@ -181,7 +189,7 @@ pub(crate) async fn reader_task<R>(
                 } else {
                     tracing::debug!(
                         "reader_task: could not decode frame ({} bytes), dropping",
-                        buf.len()
+                        frame_buf.len()
                     );
                 }
                 continue;
@@ -698,7 +706,21 @@ impl Client {
             return Err(ClientError::ConnectionClosed);
         }
 
-        let req_bytes = rmp_serde::to_vec_named(req)?;
+        // T-cl-1: thread-local scratch buffer for request serialisation.
+        // The buffer's capacity grows to the high-water mark and is reused
+        // across calls, avoiding repeated grow-from-0 allocations.
+        // The borrow is released before any `.await` — only a sized copy of
+        // the bytes is passed forward, keeping the thread_local exclusive.
+        thread_local! {
+            static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
+        }
+        let req_bytes: Vec<u8> = REQ_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            rmp_serde::encode::write_named(&mut *buf, req)?;
+            Ok::<Vec<u8>, rmp_serde::encode::Error>(buf.clone())
+        })?;
+
         let rid = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let envelope = RequestEnvelope::new(self.session_id, Some(rid), req_bytes);
         let envelope_bytes = envelope

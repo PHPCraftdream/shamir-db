@@ -30,20 +30,65 @@ use std::sync::{Mutex, OnceLock};
 pub fn register(reg: &mut ScalarRegistry) {
     reg.register(
         "lower",
-        FnEntry::pure(|a| Ok(v_str(arg_str(a, 0)?.to_lowercase())), 1, Some(1)),
+        FnEntry::pure(
+            |a| {
+                let s = arg_str(a, 0)?;
+                // Skip allocation when already lowercase.
+                if s.chars().any(|c| c.is_uppercase()) {
+                    Ok(v_str(s.to_lowercase()))
+                } else {
+                    Ok(v_str(s.to_string()))
+                }
+            },
+            1,
+            Some(1),
+        ),
     );
     reg.register(
         "upper",
-        FnEntry::pure(|a| Ok(v_str(arg_str(a, 0)?.to_uppercase())), 1, Some(1)),
+        FnEntry::pure(
+            |a| {
+                let s = arg_str(a, 0)?;
+                // Skip allocation when already uppercase.
+                if s.chars().any(|c| c.is_lowercase()) {
+                    Ok(v_str(s.to_uppercase()))
+                } else {
+                    Ok(v_str(s.to_string()))
+                }
+            },
+            1,
+            Some(1),
+        ),
     );
     reg.register(
         "trim",
-        FnEntry::pure(|a| Ok(v_str(arg_str(a, 0)?.trim().to_string())), 1, Some(1)),
+        FnEntry::pure(
+            |a| {
+                let s = arg_str(a, 0)?;
+                let trimmed = s.trim();
+                // Skip allocation when already trimmed.
+                if trimmed.len() == s.len() {
+                    Ok(v_str(s.to_string()))
+                } else {
+                    Ok(v_str(trimmed.to_string()))
+                }
+            },
+            1,
+            Some(1),
+        ),
     );
     reg.register(
         "ltrim",
         FnEntry::pure(
-            |a| Ok(v_str(arg_str(a, 0)?.trim_start().to_string())),
+            |a| {
+                let s = arg_str(a, 0)?;
+                let trimmed = s.trim_start();
+                if trimmed.len() == s.len() {
+                    Ok(v_str(s.to_string()))
+                } else {
+                    Ok(v_str(trimmed.to_string()))
+                }
+            },
             1,
             Some(1),
         ),
@@ -51,7 +96,15 @@ pub fn register(reg: &mut ScalarRegistry) {
     reg.register(
         "rtrim",
         FnEntry::pure(
-            |a| Ok(v_str(arg_str(a, 0)?.trim_end().to_string())),
+            |a| {
+                let s = arg_str(a, 0)?;
+                let trimmed = s.trim_end();
+                if trimmed.len() == s.len() {
+                    Ok(v_str(s.to_string()))
+                } else {
+                    Ok(v_str(trimmed.to_string()))
+                }
+            },
             1,
             Some(1),
         ),

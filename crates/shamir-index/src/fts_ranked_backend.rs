@@ -8,7 +8,7 @@ use crate::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult}
 use crate::bm25::{self, Bm25Params, FtsPostingValue, FtsStats};
 use crate::descriptor::IndexDescriptor;
 use crate::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
-use crate::tokenizer::{self, token_hash, Tokenizer, WhitespaceTokenizer};
+use crate::tokenizer::{self, token_hash, TokenizerEnum, WhitespaceTokenizer};
 use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,7 +22,7 @@ use std::sync::Arc;
 pub struct FtsRankedBackend {
     descriptor: IndexDescriptor,
     field_path: Vec<u64>,
-    tokenizer: Arc<dyn Tokenizer>,
+    tokenizer: TokenizerEnum,
     store: Arc<dyn Store>,
     pub(crate) stats: Arc<FtsStats>,
     params: Bm25Params,
@@ -30,11 +30,9 @@ pub struct FtsRankedBackend {
 
 impl FtsRankedBackend {
     pub fn new(descriptor: IndexDescriptor, field_path: Vec<u64>, store: Arc<dyn Store>) -> Self {
-        let tokenizer: Arc<dyn Tokenizer> = match &descriptor.kind {
-            crate::kind::IndexKind::Fts { tokenizer: tk, .. } => {
-                Arc::from(tokenizer::build_tokenizer(tk))
-            }
-            _ => Arc::new(WhitespaceTokenizer),
+        let tokenizer = match &descriptor.kind {
+            crate::kind::IndexKind::Fts { tokenizer: tk, .. } => tokenizer::build_tokenizer(tk),
+            _ => TokenizerEnum::Whitespace(WhitespaceTokenizer),
         };
         Self {
             descriptor,

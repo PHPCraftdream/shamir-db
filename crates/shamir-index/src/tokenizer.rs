@@ -3,6 +3,10 @@
 //! Zero-copy on ASCII paths (Cow::Borrowed), allocates only for
 //! case-folding non-ASCII. No heavy deps — just std + manual
 //! iteration.
+//!
+//! `TokenizerEnum` replaces `Box<dyn Tokenizer>` / `Arc<dyn Tokenizer>` on
+//! hot paths — enum dispatch monomorphises the `tokenize` call and removes
+//! vtable indirection.
 
 use std::borrow::Cow;
 
@@ -12,7 +16,35 @@ pub trait Tokenizer: Send + Sync {
     fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>>;
 }
 
+// ---------------------------------------------------------------------------
+// Enum-dispatch wrapper — zero vtable overhead on hot tokenize() calls.
+// ---------------------------------------------------------------------------
+
+/// Owned enum that covers all built-in tokenizer variants.
+/// Use this instead of `Box<dyn Tokenizer>` / `Arc<dyn Tokenizer>` where the
+/// tokenizer is stored on a struct that lives on a hot path.
+#[derive(Clone)]
+pub enum TokenizerEnum {
+    Whitespace(WhitespaceTokenizer),
+    Unicode(UnicodeTokenizer),
+    Ngram(NgramTokenizer),
+    Full(FullTokenizer),
+}
+
+impl TokenizerEnum {
+    #[inline]
+    pub fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
+        match self {
+            TokenizerEnum::Whitespace(t) => t.tokenize(text),
+            TokenizerEnum::Unicode(t) => t.tokenize(text),
+            TokenizerEnum::Ngram(t) => t.tokenize(text),
+            TokenizerEnum::Full(t) => t.tokenize(text),
+        }
+    }
+}
+
 /// Split on whitespace, lowercase each token.
+#[derive(Clone)]
 pub struct WhitespaceTokenizer;
 
 impl Tokenizer for WhitespaceTokenizer {
@@ -33,6 +65,7 @@ impl Tokenizer for WhitespaceTokenizer {
 }
 
 /// Split on non-alphanumeric boundaries (unicode-aware), lowercase.
+#[derive(Clone)]
 pub struct UnicodeTokenizer;
 
 impl Tokenizer for UnicodeTokenizer {
@@ -73,6 +106,7 @@ fn lowercase_cow(word: &str) -> Cow<'_, str> {
 /// A word shorter than `n` is emitted whole (so short words remain findable).
 /// `n == 0` is treated as `1`. Enables substring / CJK / fuzzy matching where
 /// word-boundary tokenization fails.
+#[derive(Clone)]
 pub struct NgramTokenizer {
     n: usize,
 }
@@ -108,15 +142,28 @@ impl Tokenizer for NgramTokenizer {
 
 /// Lowercase a word, then emit character n-grams (or the whole word if
 /// shorter than `n`).
+///
+/// Uses `char_indices` to find UTF-8 char boundaries directly in the
+/// lowercased string — no `Vec<char>` allocation, no per-gram iterator
+/// collect. Each n-gram is a `&str` slice of `lowered`; only the final
+/// `Cow::Owned` wrapping touches the heap (one allocation per gram vs.
+/// two previously).
 fn emit_ngrams<'a>(word: &str, n: usize, out: &mut Vec<Cow<'a, str>>) {
     let lowered = word.to_lowercase();
-    let chars: Vec<char> = lowered.chars().collect();
-    if chars.len() <= n {
+    // Collect byte offsets of each char boundary (O(len), one pass).
+    let boundaries: Vec<usize> = lowered
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(lowered.len()))
+        .collect();
+    let char_count = boundaries.len() - 1; // boundaries has len+1 entries
+    if char_count <= n {
         out.push(Cow::Owned(lowered));
     } else {
-        for i in 0..=chars.len() - n {
-            let gram: String = chars[i..i + n].iter().collect();
-            out.push(Cow::Owned(gram));
+        for i in 0..=char_count - n {
+            let start = boundaries[i];
+            let end = boundaries[i + n];
+            out.push(Cow::Owned(lowered[start..end].to_owned()));
         }
     }
 }
@@ -188,6 +235,21 @@ fn stem_algorithm(lang: StemLanguage) -> rust_stemmers::Algorithm {
 pub struct FullTokenizer {
     stopwords: Option<&'static std::collections::HashSet<&'static str>>,
     stemmer: Option<rust_stemmers::Stemmer>,
+    /// Stored to allow `Clone` reconstruction — `rust_stemmers::Stemmer`
+    /// holds a bare function pointer and doesn't implement `Clone`.
+    stem_lang: Option<StemLanguage>,
+}
+
+impl Clone for FullTokenizer {
+    fn clone(&self) -> Self {
+        Self {
+            stopwords: self.stopwords,
+            stemmer: self
+                .stem_lang
+                .map(|lang| rust_stemmers::Stemmer::create(stem_algorithm(lang))),
+            stem_lang: self.stem_lang,
+        }
+    }
 }
 
 impl FullTokenizer {
@@ -197,14 +259,12 @@ impl FullTokenizer {
         } else {
             None
         };
-        let stemmer = if stem {
-            Some(rust_stemmers::Stemmer::create(stem_algorithm(language)))
-        } else {
-            None
-        };
+        let stem_lang = if stem { Some(language) } else { None };
+        let stemmer = stem_lang.map(|lang| rust_stemmers::Stemmer::create(stem_algorithm(lang)));
         Self {
             stopwords: stop_set,
             stemmer,
+            stem_lang,
         }
     }
 }
@@ -381,17 +441,20 @@ fn russian_stopwords() -> &'static std::collections::HashSet<&'static str> {
     })
 }
 
-/// Build a `Box<dyn Tokenizer>` from a [`TokenizerKind`].
-pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> Box<dyn Tokenizer> {
+/// Build a [`TokenizerEnum`] from a [`TokenizerKind`].
+///
+/// Returns an owned enum value — callers store it directly (or wrap in
+/// `Arc`) instead of going through `Box<dyn Tokenizer>`.
+pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> TokenizerEnum {
     match kind {
-        crate::kind::TokenizerKind::Whitespace => Box::new(WhitespaceTokenizer),
-        crate::kind::TokenizerKind::Unicode => Box::new(UnicodeTokenizer),
-        crate::kind::TokenizerKind::Ngram { n } => Box::new(NgramTokenizer::new(*n)),
+        crate::kind::TokenizerKind::Whitespace => TokenizerEnum::Whitespace(WhitespaceTokenizer),
+        crate::kind::TokenizerKind::Unicode => TokenizerEnum::Unicode(UnicodeTokenizer),
+        crate::kind::TokenizerKind::Ngram { n } => TokenizerEnum::Ngram(NgramTokenizer::new(*n)),
         crate::kind::TokenizerKind::Full {
             language,
             stopwords,
             stem,
-        } => Box::new(FullTokenizer::new(*language, *stopwords, *stem)),
+        } => TokenizerEnum::Full(FullTokenizer::new(*language, *stopwords, *stem)),
     }
 }
 
