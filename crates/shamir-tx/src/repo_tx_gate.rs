@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use shamir_collections::THasher;
 
+use crate::completion_tracker::CompletionTracker;
 use crate::pending_commit::PendingCommit;
 use crate::TxId;
 
@@ -102,6 +103,11 @@ pub struct RepoTxGate {
     /// Short-section `std::sync::Mutex` — only push/drain, no `.await`
     /// held across. The leader pops the entire vec under lock.
     pending_commits: std::sync::Mutex<Vec<PendingCommit>>,
+
+    /// P1a scaffolding: tracks materialized/aborted state per version
+    /// and maintains a contiguous watermark. Wired in P1c.
+    #[allow(dead_code)]
+    completion: CompletionTracker,
 }
 
 /// RAII guard that removes a snapshot from `active_snapshots` on drop.
@@ -146,6 +152,7 @@ impl RepoTxGate {
             active_serializable_count: Arc::new(AtomicU64::new(0)),
             commit_write_log: scc::TreeIndex::new(),
             pending_commits: std::sync::Mutex::new(Vec::new()),
+            completion: CompletionTracker::new(),
         }
     }
 
@@ -419,6 +426,12 @@ impl RepoTxGate {
     pub fn commit_log_len(&self) -> usize {
         let guard = scc::ebr::Guard::new();
         self.commit_write_log.range::<u64, _>(.., &guard).count()
+    }
+
+    /// Access the completion tracker (P1a scaffolding, wired in P1c).
+    #[allow(dead_code)]
+    pub fn completion(&self) -> &CompletionTracker {
+        &self.completion
     }
 }
 
