@@ -42,7 +42,10 @@ async fn test_create_user() {
     let req = b.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["cu"].records[0]["created_user"], "alice");
+    assert_eq!(
+        resp.results["cu"].records[0].as_json()["created_user"],
+        "alice"
+    );
 }
 
 #[tokio::test]
@@ -64,7 +67,8 @@ async fn test_list_users() {
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
-    let users = resp.results["list"].records[0]["users"].as_array().unwrap();
+    let rec = resp.results["list"].records[0].as_json();
+    let users = rec["users"].as_array().unwrap();
     assert_eq!(users.len(), 2);
 
     // Password hash should NOT be in output
@@ -89,7 +93,7 @@ async fn test_drop_user() {
     b.drop_user("du", ddl::drop_user("alice"));
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["du"].records[0]["existed"], true);
+    assert_eq!(resp.results["du"].records[0].as_json()["existed"], true);
 
     // Drop non-existent
     let mut b = Batch::new();
@@ -97,7 +101,7 @@ async fn test_drop_user() {
     b.drop_user("du", ddl::drop_user("alice"));
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["du"].records[0]["existed"], false);
+    assert_eq!(resp.results["du"].records[0].as_json()["existed"], false);
 }
 
 // ============================================================================
@@ -137,7 +141,10 @@ async fn test_create_role() {
     let req = b.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["cr"].records[0]["created_role"], "analyst");
+    assert_eq!(
+        resp.results["cr"].records[0].as_json()["created_role"],
+        "analyst"
+    );
 }
 
 #[tokio::test]
@@ -169,7 +176,8 @@ async fn test_list_roles() {
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
-    let roles = resp.results["list"].records[0]["roles"].as_array().unwrap();
+    let rec = resp.results["list"].records[0].as_json();
+    let roles = rec["roles"].as_array().unwrap();
     assert_eq!(roles.len(), 1);
     assert_eq!(roles[0]["name"], "analyst");
 }
@@ -189,7 +197,7 @@ async fn test_drop_role() {
     b.drop_role("dr", ddl::drop_role("temp_role"));
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["dr"].records[0]["existed"], true);
+    assert_eq!(resp.results["dr"].records[0].as_json()["existed"], true);
 }
 
 // ============================================================================
@@ -228,7 +236,10 @@ async fn test_grant_and_revoke_role() {
     b.grant_role("grant", ddl::grant_role("analyst", "alice"));
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["grant"].records[0]["granted_role"], "analyst");
+    assert_eq!(
+        resp.results["grant"].records[0].as_json()["granted_role"],
+        "analyst"
+    );
 
     // Verify user has both roles
     let mut b = Batch::new();
@@ -236,7 +247,8 @@ async fn test_grant_and_revoke_role() {
     b.list_users("list", ddl::list_users());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let users = resp.results["list"].records[0]["users"].as_array().unwrap();
+    let rec = resp.results["list"].records[0].as_json();
+    let users = rec["users"].as_array().unwrap();
     let alice = &users[0];
     let roles = alice["roles"].as_array().unwrap();
     assert!(roles.contains(&json!("readonly")));
@@ -248,7 +260,10 @@ async fn test_grant_and_revoke_role() {
     b.revoke_role("revoke", ddl::revoke_role("analyst", "alice"));
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["revoke"].records[0]["revoked_role"], "analyst");
+    assert_eq!(
+        resp.results["revoke"].records[0].as_json()["revoked_role"],
+        "analyst"
+    );
 
     // Verify role removed
     let mut b = Batch::new();
@@ -256,7 +271,8 @@ async fn test_grant_and_revoke_role() {
     b.list_users("list", ddl::list_users());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let users = resp.results["list"].records[0]["users"].as_array().unwrap();
+    let rec = resp.results["list"].records[0].as_json();
+    let users = rec["users"].as_array().unwrap();
     let alice = &users[0];
     let roles = alice["roles"].as_array().unwrap();
     assert!(roles.contains(&json!("readonly")));
@@ -297,7 +313,10 @@ async fn test_create_role_with_row_filter() {
     let req = b.to_request_via_msgpack();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["cr"].records[0]["created_role"], "eu_manager");
+    assert_eq!(
+        resp.results["cr"].records[0].as_json()["created_role"],
+        "eu_manager"
+    );
 
     // Verify role stored with where filter
     let mut b = Batch::new();
@@ -305,7 +324,8 @@ async fn test_create_role_with_row_filter() {
     b.list_roles("list", ddl::list_roles());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    let roles = resp.results["list"].records[0]["roles"].as_array().unwrap();
+    let rec = resp.results["list"].records[0].as_json();
+    let roles = rec["roles"].as_array().unwrap();
     let eu_role = &roles[0];
     assert_eq!(eu_role["name"], "eu_manager");
     // Check that the where filter is present in the permission

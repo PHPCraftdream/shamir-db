@@ -82,8 +82,8 @@ async fn create_table_duplicate_without_if_not_exists_fails() {
     b.create_table("op", ddl::create_table("orders").repo("main"));
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], true);
-    assert_eq!(resp.results["op"].records[0]["existed"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], false);
 
     // Second create without if_not_exists -> error
     let err = db.execute("testdb", &req).await.unwrap_err();
@@ -107,13 +107,13 @@ async fn create_table_with_if_not_exists_idempotent() {
     );
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], true);
-    assert_eq!(resp.results["op"].records[0]["existed"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], false);
 
     // Second create with if_not_exists -> OK, no error
     let resp = db.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], false);
-    assert_eq!(resp.results["op"].records[0]["existed"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
 }
 
 #[tokio::test]
@@ -126,13 +126,13 @@ async fn create_db_with_if_not_exists_idempotent() {
     b.create_db("op", ddl::create_db("newdb").if_not_exists());
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], true);
-    assert_eq!(resp.results["op"].records[0]["existed"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], false);
 
     // Second create with if_not_exists -> OK, existed=true
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], false);
-    assert_eq!(resp.results["op"].records[0]["existed"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
 }
 
 #[tokio::test]
@@ -150,13 +150,13 @@ async fn create_repo_with_if_not_exists_idempotent() {
     );
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], true);
-    assert_eq!(resp.results["op"].records[0]["existed"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], false);
 
     // Second create -> OK
     let resp = shamir.execute("testdb", &req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["created"], false);
-    assert_eq!(resp.results["op"].records[0]["existed"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["created"], false);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
 }
 
 // =====================================================================
@@ -195,7 +195,7 @@ async fn drop_db_with_cascade_succeeds() {
     b.drop_db("op", ddl::drop_db("target_db").cascade());
     let drop_req = b.to_request_via_msgpack();
     let resp = shamir.execute("bootstrap", &drop_req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["existed"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
 
     // Verify the db is gone
     assert!(!shamir.has_db("target_db"));
@@ -228,7 +228,7 @@ async fn drop_repo_with_cascade_succeeds() {
     b.drop_repo("op", ddl::drop_repo("main").cascade());
     let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["existed"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
 
     // Verify the repo is gone
     let db_inst = db.get_db("testdb").unwrap();
@@ -272,7 +272,7 @@ async fn drop_table_cleans_validator_bound_in() {
     b.drop_table("op", ddl::drop_table("users").repo("main"));
     let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
-    assert_eq!(resp.results["op"].records[0]["existed"], true);
+    assert_eq!(resp.results["op"].records[0].as_json()["existed"], true);
 
     // Step 3: now drop_validator should succeed (bound_in was cleaned)
     let mut b = Batch::new();
@@ -281,7 +281,8 @@ async fn drop_table_cleans_validator_bound_in() {
     let drop_val_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_val_req).await.unwrap();
     assert_eq!(
-        resp.results["op"].records[0]["existed"], true,
+        resp.results["op"].records[0].as_json()["existed"],
+        true,
         "validator should have existed and been dropped after bound_in cleanup"
     );
 }

@@ -264,7 +264,10 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
         .execute("testdb", &read_all_request("after_v2"))
         .await
         .unwrap();
-    assert_eq!(resp.results["all"].records[0]["body"], json!("v2"));
+    assert_eq!(
+        resp.results["all"].records[0].as_json()["body"],
+        json!("v2")
+    );
 
     // Stale replay: another writer still holds hash(v1) and tries to update
     // AFTER the row already advanced to v2 → REJECTED with `stale`.
@@ -293,7 +296,7 @@ async fn cas_accepts_fresh_then_rejects_stale_replay() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["all"].records[0]["body"],
+        resp.results["all"].records[0].as_json()["body"],
         json!("v2"),
         "the stale write must not have overwritten v2"
     );
@@ -346,7 +349,7 @@ async fn cas_correct_chain_passes_each_step() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["all"].records[0]["body"],
+        resp.results["all"].records[0].as_json()["body"],
         json!("v3"),
         "the chain v1→v2→v3 must have advanced the row to v3"
     );

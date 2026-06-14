@@ -370,10 +370,13 @@ async fn data_written_via_wire_survives_restart() {
                 let rd = response.results.get("rd").expect("rd alias");
                 assert_eq!(rd.records.len(), 1);
                 assert_eq!(
-                    rd.records[0].get("sku").and_then(|v| v.as_str()),
+                    rd.records[0].as_json().get("sku").and_then(|v| v.as_str()),
                     Some("X1")
                 );
-                assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
+                assert_eq!(
+                    rd.records[0].as_json().get("qty").and_then(|v| v.as_i64()),
+                    Some(42)
+                );
             }
             other => panic!("read failed inside boot #1: {:?}", other),
         }
@@ -408,12 +411,12 @@ async fn data_written_via_wire_survives_restart() {
                 rd.records.len()
             );
             assert_eq!(
-                rd.records[0].get("sku").and_then(|v| v.as_str()),
+                rd.records[0].as_json().get("sku").and_then(|v| v.as_str()),
                 Some("X1"),
                 "sku must match what was written in boot #1"
             );
             assert_eq!(
-                rd.records[0].get("qty").and_then(|v| v.as_i64()),
+                rd.records[0].as_json().get("qty").and_then(|v| v.as_i64()),
                 Some(42),
                 "qty must match what was written in boot #1"
             );

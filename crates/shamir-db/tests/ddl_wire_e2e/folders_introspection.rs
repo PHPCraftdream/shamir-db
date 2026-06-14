@@ -26,7 +26,7 @@ async fn create_function_folder_persists_mkdir_p() {
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
-    let result = &resp.results["op"].records[0];
+    let result = resp.results["op"].records[0].as_json();
     assert_eq!(
         result["created_function_folder"],
         json!(["reports", "daily"])
@@ -56,12 +56,14 @@ async fn create_function_folder_idempotent() {
 
     // First create
     let resp = db.execute("testdb", &req).await.unwrap();
-    let created = resp.results["op"].records[0]["created"].as_array().unwrap();
+    let rec = resp.results["op"].records[0].as_json();
+    let created = rec["created"].as_array().unwrap();
     assert_eq!(created.len(), 1);
 
     // Second create → no error, but nothing new created.
     let resp = db.execute("testdb", &req).await.unwrap();
-    let created = resp.results["op"].records[0]["created"].as_array().unwrap();
+    let rec = resp.results["op"].records[0].as_json();
+    let created = rec["created"].as_array().unwrap();
     assert_eq!(
         created.len(),
         0,
@@ -186,7 +188,7 @@ async fn list_functions_over_wire() {
     b.list_functions("op", ddl::list_functions());
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let result = &resp.results["op"].records[0];
+    let result = resp.results["op"].records[0].as_json();
     let fns = result["functions"].as_array().unwrap();
     assert!(
         fns.iter().any(|f| f == "fn_alpha"),
@@ -213,9 +215,8 @@ async fn list_functions_filtered_by_folder() {
     b.list_functions("op", ddl::list_functions().folder("math"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let fns = resp.results["op"].records[0]["functions"]
-        .as_array()
-        .unwrap();
+    let rec = resp.results["op"].records[0].as_json();
+    let fns = rec["functions"].as_array().unwrap();
     assert_eq!(fns.len(), 2, "should have 2 math functions, got: {:?}", fns);
     assert!(fns.iter().any(|f| f == "math/add"));
     assert!(fns.iter().any(|f| f == "math/sub"));
@@ -253,9 +254,8 @@ async fn list_validators_all_over_wire() {
     b.list_all_validators("op", ddl::list_all_validators());
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let items = resp.results["op"].records[0]["validators"]
-        .as_array()
-        .unwrap();
+    let rec = resp.results["op"].records[0].as_json();
+    let items = rec["validators"].as_array().unwrap();
     assert!(!items.is_empty(), "should have at least one validator");
     let v = items
         .iter()
@@ -282,9 +282,8 @@ async fn list_function_folders_over_wire() {
     b.list_function_folders("op", ddl::list_function_folders());
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let folders = resp.results["op"].records[0]["function_folders"]
-        .as_array()
-        .unwrap();
+    let rec = resp.results["op"].records[0].as_json();
+    let folders = rec["function_folders"].as_array().unwrap();
     assert!(
         folders.contains(&json!("reports")),
         "should contain 'reports'"
@@ -317,9 +316,8 @@ async fn list_function_folders_filtered_by_parent() {
     b.list_function_folders("op", ddl::list_function_folders().parent("alpha"));
     let list_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &list_req).await.unwrap();
-    let folders = resp.results["op"].records[0]["function_folders"]
-        .as_array()
-        .unwrap();
+    let rec = resp.results["op"].records[0].as_json();
+    let folders = rec["function_folders"].as_array().unwrap();
     assert_eq!(
         folders.len(),
         1,

@@ -148,10 +148,13 @@ async fn sdk_full_lifecycle() {
     let rd = resp.results.get("rd").expect("rd alias");
     assert_eq!(rd.records.len(), 1);
     assert_eq!(
-        rd.records[0].get("sku").and_then(|v| v.as_str()),
+        rd.records[0].as_json().get("sku").and_then(|v| v.as_str()),
         Some("X1")
     );
-    assert_eq!(rd.records[0].get("qty").and_then(|v| v.as_i64()), Some(42));
+    assert_eq!(
+        rd.records[0].as_json().get("qty").and_then(|v| v.as_i64()),
+        Some(42)
+    );
 
     // 5. clean close
     client.close().await;

@@ -207,10 +207,13 @@ async fn temporal_lifecycle_e2e() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["ct"].records[0]["created_table"],
+        resp.results["ct"].records[0].as_json()["created_table"],
         json!("users")
     );
-    assert_eq!(resp.results["ct"].records[0]["created"], json!(true));
+    assert_eq!(
+        resp.results["ct"].records[0].as_json()["created"],
+        json!(true)
+    );
     // Fails if CreateTable silently drops the retention knob.
     let policy = table_retention(&shamir, "testdb", "main", "users").await;
     assert_eq!(policy.max_count, Some(5), "CreateTable retention applied");
@@ -351,7 +354,7 @@ async fn temporal_lifecycle_e2e() {
         .execute("testdb", &b.to_request_via_msgpack())
         .await
         .unwrap();
-    let result = &resp.results["ph"].records[0];
+    let result = resp.results["ph"].records[0].as_json();
     assert_eq!(result["purge_history"], json!("users"));
     assert_eq!(result["repo"], json!("main"));
     let purged = result["purged"].as_u64().expect("purged is u64");
@@ -421,10 +424,10 @@ async fn temporal_lifecycle_e2e() {
         .await
         .unwrap();
     assert_eq!(
-        resp.results["sr"].records[0]["set_retention"],
+        resp.results["sr"].records[0].as_json()["set_retention"],
         json!("users")
     );
-    assert_eq!(resp.results["sr"].records[0]["ok"], json!(true));
+    assert_eq!(resp.results["sr"].records[0].as_json()["ok"], json!(true));
     // Fails if SetRetention didn't take effect on the MvccStore.
     let after = table_retention(&shamir, "testdb", "main", "users").await;
     assert_eq!(after.max_count, Some(2), "live policy now max_count=2");

@@ -175,7 +175,7 @@ async fn db_owner_can_create_scoped_user() {
         "db owner should create a user scoped to their db: {resp:?}"
     );
     assert_eq!(
-        resp.unwrap().results["op"].records[0]["created_user"],
+        resp.unwrap().results["op"].records[0].as_json()["created_user"],
         "scoped_bob"
     );
 }

@@ -105,7 +105,7 @@ async fn migration_preserves_fts_index() {
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
     let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
-    let migration_id = mig.results["m"].records[0]["migration_id"]
+    let migration_id = mig.results["m"].records[0].as_json()["migration_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -194,7 +194,7 @@ async fn migration_preserves_functional_index() {
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
     let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
-    let migration_id = mig.results["m"].records[0]["migration_id"]
+    let migration_id = mig.results["m"].records[0].as_json()["migration_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -273,10 +273,11 @@ async fn migration_preserves_vector_index() {
     let src_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let src_records = &src_resp.results["q"].records;
     assert_eq!(src_records.len(), 3);
-    let src_labels: Vec<&str> = src_records
+    let src_label_strs: Vec<String> = src_records
         .iter()
-        .map(|r| r["label"].as_str().unwrap())
+        .map(|r| r.get_str("label").unwrap())
         .collect();
+    let src_labels: Vec<&str> = src_label_strs.iter().map(String::as_str).collect();
     let src_stats = src_resp.results["q"].stats.as_ref().expect("src stats");
     assert_eq!(src_stats.index_used.as_deref(), Some("index2_ranked"));
 
@@ -287,7 +288,7 @@ async fn migration_preserves_vector_index() {
         ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
     );
     let mig = exec_built(&shamir, b.to_request_via_msgpack()).await;
-    let migration_id = mig.results["m"].records[0]["migration_id"]
+    let migration_id = mig.results["m"].records[0].as_json()["migration_id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -310,10 +311,11 @@ async fn migration_preserves_vector_index() {
     let dst_resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
     let dst_records = &dst_resp.results["q"].records;
     assert_eq!(dst_records.len(), 3);
-    let dst_labels: Vec<&str> = dst_records
+    let dst_label_strs: Vec<String> = dst_records
         .iter()
-        .map(|r| r["label"].as_str().unwrap())
+        .map(|r| r.get_str("label").unwrap())
         .collect();
+    let dst_labels: Vec<&str> = dst_label_strs.iter().map(String::as_str).collect();
     let dst_stats = dst_resp.results["q"].stats.as_ref().expect("dst stats");
     assert_eq!(dst_stats.index_used.as_deref(), Some("index2_ranked"));
 
