@@ -498,6 +498,34 @@ impl BoxRepoFactory {
     pub fn cached(inner: BoxRepoFactory, mode: WriteMode) -> Self {
         BoxRepoFactory::Cached(Box::new(CachedRepoFactory { inner, mode }))
     }
+
+    /// The on-disk directory this factory ultimately writes to, if any.
+    ///
+    /// Disk backends return their `path`; `InMemory` returns `None`; the
+    /// `MemBuffer`/`Cached` wrappers delegate to their inner factory so the
+    /// real disk path at the bottom of the stack surfaces. Used by
+    /// [`RepoInstance::repo_wal`] to decide whether to construct a
+    /// file-backed WAL group (disk) or fall back to the KV-marker WAL
+    /// (in-memory).
+    pub fn backing_dir(&self) -> Option<PathBuf> {
+        match self {
+            BoxRepoFactory::InMemory(_) => None,
+            #[cfg(feature = "sled")]
+            BoxRepoFactory::Sled(f) => Some(f.path.clone()),
+            #[cfg(feature = "redb")]
+            BoxRepoFactory::Redb(f) => Some(f.path.clone()),
+            #[cfg(feature = "fjall")]
+            BoxRepoFactory::Fjall(f) => Some(f.path.clone()),
+            #[cfg(feature = "nebari")]
+            BoxRepoFactory::Nebari(f) => Some(f.path.clone()),
+            #[cfg(feature = "persy")]
+            BoxRepoFactory::Persy(f) => Some(f.path.clone()),
+            #[cfg(feature = "canopy")]
+            BoxRepoFactory::Canopy(f) => Some(f.path.clone()),
+            BoxRepoFactory::MemBuffer(f) => f.inner.backing_dir(),
+            BoxRepoFactory::Cached(f) => f.inner.backing_dir(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
