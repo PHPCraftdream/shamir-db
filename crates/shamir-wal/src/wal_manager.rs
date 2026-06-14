@@ -1,5 +1,6 @@
 //! WAL manager — appends / clears in-flight transaction markers.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -12,6 +13,12 @@ use crate::active_key::WalActiveKey;
 use crate::wal_entry::{WalEntry, WalOp};
 use crate::wal_entry_any::WalEntryAny;
 use crate::wal_entry_v2::WalEntryV2;
+
+thread_local! {
+    /// Scratch buffer reused across `begin_with_delta` calls on the same thread.
+    /// Avoids a fresh `Vec<u8>` allocation per WAL marker write.
+    static WAL_ENCODE_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(512));
+}
 
 /// Manages WAL markers for one `info_store`.
 pub struct WalManager {
@@ -70,11 +77,17 @@ impl WalManager {
         counter_delta: i64,
     ) -> DbResult<()> {
         let entry = WalEntry::new_with_delta(txn_id, ops, counter_delta);
-        let bytes = bincode::serialize(&entry)
-            .map_err(|e| DbError::Codec(format!("WAL serialize: {e}")))?;
-        self.info_store
-            .set(Self::marker_key(txn_id), Bytes::from(bytes))
-            .await?;
+        // Reuse a thread-local scratch buffer to avoid a fresh Vec allocation
+        // per begin call. `serialize_into` writes directly into the cleared
+        // buffer; we clone only the final byte slice into an owned `Bytes`.
+        let bytes = WAL_ENCODE_BUF.with(|cell| {
+            let mut buf = cell.borrow_mut();
+            buf.clear();
+            bincode::serialize_into(&mut *buf, &entry)
+                .map_err(|e| DbError::Codec(format!("WAL serialize: {e}")))?;
+            Ok::<Bytes, DbError>(Bytes::copy_from_slice(&buf))
+        })?;
+        self.info_store.set(Self::marker_key(txn_id), bytes).await?;
         Ok(())
     }
 
