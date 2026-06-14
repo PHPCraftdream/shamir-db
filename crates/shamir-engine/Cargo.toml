@@ -95,10 +95,6 @@ shamir-query-builder = { path = "../shamir-query-builder" }
 # `BatchError` types from the two copies wouldn't match.)
 
 [[bench]]
-name = "wal_recovery"
-harness = false
-
-[[bench]]
 name = "interner_concurrent"
 harness = false
 

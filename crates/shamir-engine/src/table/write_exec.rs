@@ -310,7 +310,7 @@ impl TableManager {
         // branch (which routes through the implicit Snapshot tx →
         // `execute_update_tx` → one `WalEntryV2` to the repo file WAL) and from
         // tests, so the V1 marker is dead. Crash recoverability is owned by the
-        // file WAL. (`shamir_wal::WalManager` removal is deferred to F5.)
+        // file WAL. (`shamir_wal::WalManager` + V1 codec removed in F5c.)
 
         // Phase 1: merge + validate, collecting changed rows for batched write.
         let mut batch_pairs: Vec<(RecordId, InnerValue, InnerValue)> =

@@ -13,7 +13,6 @@ use shamir_storage::types::Store;
 use shamir_types::codecs::transform;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::UserValue;
-use shamir_wal::{WalManager, WalOp};
 
 /// Build a fresh in-memory DB with a `users` table, a regular index
 /// on `city`, a unique index on `id`, and a sorted index on `score`.
@@ -157,7 +156,7 @@ async fn repair_heals_drifted_counter() {
 }
 
 #[tokio::test]
-async fn execute_update_clears_its_own_wal_marker_on_success() {
+async fn execute_update_leaves_table_consistent_on_success() {
     use crate::query::filter::eval_context::FilterContext;
 
     let table = seeded(8).await;
@@ -173,18 +172,11 @@ async fn execute_update_clears_its_own_wal_marker_on_success() {
     let result = table.execute_update(&op, &ctx).await.unwrap();
     assert!(result.affected > 0, "expected at least one update");
 
-    // No WAL marker after successful UPDATE.
-    let inflight = table.wal().list_inflight().await.unwrap();
-    assert!(
-        inflight.is_empty(),
-        "successful execute_update must clear its WAL marker, got {} inflight",
-        inflight.len()
-    );
     assert!(table.verify().await.unwrap().is_healthy());
 }
 
 #[tokio::test]
-async fn execute_delete_clears_its_own_wal_marker_on_success() {
+async fn execute_delete_leaves_table_consistent_on_success() {
     use crate::query::filter::eval_context::FilterContext;
 
     let table = seeded(12).await;
@@ -199,52 +191,7 @@ async fn execute_delete_clears_its_own_wal_marker_on_success() {
     let result = table.execute_delete(&op, &ctx).await.unwrap();
     assert!(result.affected > 0);
 
-    let inflight = table.wal().list_inflight().await.unwrap();
-    assert!(
-        inflight.is_empty(),
-        "successful execute_delete must clear its WAL marker"
-    );
     assert!(table.verify().await.unwrap().is_healthy());
-}
-
-#[tokio::test]
-async fn execute_delete_wal_marker_carries_negative_counter_delta() {
-    // Plant a marker manually for an in-flight DELETE: assert that
-    // counter_delta in the serialized entry equals -N.
-    let table = seeded(3).await;
-    let ids: Vec<shamir_types::types::record_id::RecordId> = {
-        use futures::StreamExt;
-        let stream = table.list_stream(1000);
-        futures::pin_mut!(stream);
-        let mut out = Vec::new();
-        while let Some(batch) = stream.next().await {
-            for (id, _) in batch.unwrap() {
-                out.push(id);
-            }
-        }
-        out
-    };
-    let txn_id = table.wal().fresh_txn_id();
-    table
-        .wal()
-        .begin_with_delta(
-            txn_id,
-            shamir_wal::WalManager::ops_record_deleted(&ids),
-            -(ids.len() as i64),
-        )
-        .await
-        .unwrap();
-
-    let inflight = table.wal().list_inflight().await.unwrap();
-    assert_eq!(inflight.len(), 1);
-    let shamir_wal::WalEntryAny::V1(ref v1) = inflight[0] else {
-        panic!("expected V1 entry");
-    };
-    assert_eq!(v1.counter_delta, -3);
-    assert_eq!(v1.ops.len(), 3);
-    for op in &v1.ops {
-        assert!(matches!(op, WalOp::RecordDeleted { .. }));
-    }
 }
 
 #[tokio::test]
@@ -309,8 +256,7 @@ async fn bump_write_counter_is_single_flight() {
 }
 
 #[tokio::test]
-async fn insert_many_clears_its_own_wal_marker_on_success() {
-    // After a successful insert_many, no WAL marker should remain.
+async fn insert_many_leaves_table_consistent_on_success() {
     let table = seeded(0).await;
     let interner = table.interner().get().await.unwrap();
     let mut values = Vec::new();
@@ -329,29 +275,12 @@ async fn insert_many_clears_its_own_wal_marker_on_success() {
     let ids = table.insert_many(&values).await.unwrap();
     assert_eq!(ids.len(), 5);
 
-    let inflight = table.wal().list_inflight().await.unwrap();
-    assert!(
-        inflight.is_empty(),
-        "successful insert_many must clear its WAL marker, got {} inflight",
-        inflight.len()
-    );
-
-    // And state is consistent.
+    // State is consistent.
     assert!(table.verify().await.unwrap().is_healthy());
 }
 
-// Test helper: pull the `info_store` of a TableManager. We don't
-// expose it through a public accessor (correctly), but for these
-// tests we need to reach in via the index_manager which holds an
-// Arc<dyn Store> we can re-fetch from the repo.
-fn info_store_of(_table: &crate::table::TableManager) -> Arc<dyn Store> {
-    // The same Arc lives behind each manager; the simplest path is
-    // to ask the underlying repo. But we don't have it here.
-    // Instead: use the WAL's info_store via a debug accessor. For
-    // now, build a Store handle through the public DbInstance API
-    // would need refactor — so the tests that need raw writes use
-    // a separately-built DB. (This helper is wired through a small
-    // crate-internal accessor below.)
-    let wal: &Arc<WalManager> = _table.wal();
-    wal.info_store_for_test().clone()
+// Test helper: pull the `info_store` of a TableManager so the
+// verify/repair tests can plant bogus index postings directly.
+fn info_store_of(table: &crate::table::TableManager) -> Arc<dyn Store> {
+    Arc::clone(table.info_store())
 }

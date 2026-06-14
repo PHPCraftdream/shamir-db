@@ -9,7 +9,6 @@ use crate::index::index_manager::IndexManager;
 use crate::index::sorted_index_manager::SortedIndexManager;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
-use shamir_wal::WalManager;
 
 /// Compute the deterministic token for a table name.
 /// Same hash as `TableManager::table_token` (instance method).
@@ -35,7 +34,6 @@ pub struct TableManager {
     pub(super) persist_registry: PersistRegistry,
     pub(super) index_manager: IndexManager,
     pub(super) sorted_indexes: SortedIndexManager,
-    pub(super) wal: Arc<WalManager>,
     /// Monotonic counter of mutating operations since open. The
     /// auto-verify background watchdog samples this; every
     /// `AUTO_VERIFY_EVERY_N_WRITES` operations it spawns a verify
@@ -108,7 +106,6 @@ impl Clone for TableManager {
             persist_registry: self.persist_registry.clone(),
             index_manager: self.index_manager.clone(),
             sorted_indexes: self.sorted_indexes.clone(),
-            wal: Arc::clone(&self.wal),
             write_counter: Arc::clone(&self.write_counter),
             verify_running: Arc::clone(&self.verify_running),
             unique_write_lock: Arc::clone(&self.unique_write_lock),
@@ -145,7 +142,6 @@ impl TableManager {
         let index_manager =
             IndexManager::new(Arc::clone(&data_store), Arc::clone(&info_store)).await?;
         let sorted_indexes = SortedIndexManager::new(Arc::clone(&info_store)).await?;
-        let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
         let table = Table::new(data_store);
 
         // Pre-load validator bindings from the info-twin (S2).
@@ -164,7 +160,6 @@ impl TableManager {
             persist_registry,
             index_manager,
             sorted_indexes,
-            wal,
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -262,7 +257,6 @@ impl TableManager {
         let sorted_indexes =
             futures::executor::block_on(SortedIndexManager::new(info_store.clone()))
                 .expect("sorted index manager init for test");
-        let wal = Arc::new(WalManager::new(Arc::clone(&info_store)));
         let mut persist_registry = PersistRegistry::new();
         persist_registry
             .register(Arc::new(interner.clone()) as Arc<dyn super::persistable::Persistable>);
@@ -276,7 +270,6 @@ impl TableManager {
             persist_registry,
             index_manager,
             sorted_indexes,
-            wal,
             write_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             verify_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             unique_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -418,12 +411,6 @@ impl TableManager {
     /// `create_index { sorted: true }` op lands.
     pub fn sorted_indexes(&self) -> &SortedIndexManager {
         &self.sorted_indexes
-    }
-
-    /// Read-only access to the WAL — for recovery callsites and
-    /// integration tests.
-    pub fn wal(&self) -> &Arc<WalManager> {
-        &self.wal
     }
 
     pub fn name(&self) -> &str {
