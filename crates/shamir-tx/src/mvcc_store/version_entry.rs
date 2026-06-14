@@ -39,14 +39,21 @@ use shamir_storage::error::DbResult;
 /// C2 streaming group-by state for `current_stream`. The log is key-major,
 /// version-ascending; this state tracks the last (highest) version per key
 /// and emits the current value once all versions of a key have been seen.
+///
+/// R3 — MVCC pre-floor: `floor` caps version visibility. Versions above
+/// the floor are skipped in the group-by (inlined comparison, no second pass).
 pub(super) enum StreamingGroupByState {
     Start {
         history: Arc<dyn Store>,
         batch_size: usize,
+        /// R3: committed floor — versions > floor are invisible.
+        floor: u64,
     },
     Streaming {
         stream: BoxedLogStream,
         batch_size: usize,
+        /// R3: committed floor — versions > floor are invisible.
+        floor: u64,
         /// `(original_key_bytes, last_value)` — the group being accumulated.
         cur_key: Option<Bytes>,
         last_val: Option<Bytes>,
@@ -64,14 +71,15 @@ impl StreamingGroupByState {
         self,
     ) -> Option<(Result<Vec<(Bytes, Bytes)>, DbError>, Self)> {
         // Pull the streaming fields out; re-pack on return.
-        let (stream, batch_size, mut cur_key, mut last_val, mut out_batch) = match self {
+        let (stream, batch_size, floor, mut cur_key, mut last_val, mut out_batch) = match self {
             StreamingGroupByState::Streaming {
                 stream,
                 batch_size,
+                floor,
                 cur_key,
                 last_val,
                 out_batch,
-            } => (stream, batch_size, cur_key, last_val, out_batch),
+            } => (stream, batch_size, floor, cur_key, last_val, out_batch),
             _ => return None,
         };
         let mut stream = stream;
@@ -79,7 +87,12 @@ impl StreamingGroupByState {
             match stream.next().await {
                 Some(Ok(batch)) => {
                     for (phys_key, val) in batch {
-                        if let Some((orig, _v)) = decode_version_key(&phys_key) {
+                        if let Some((orig, v)) = decode_version_key(&phys_key) {
+                            // R3: skip versions above the committed floor.
+                            // Floor == 0 means bootstrap/recovery — no restriction.
+                            if floor > 0 && v > floor {
+                                continue;
+                            }
                             let orig_bytes = Bytes::copy_from_slice(orig);
                             if cur_key.as_deref() != Some(orig) {
                                 // Flush previous group.
@@ -101,6 +114,7 @@ impl StreamingGroupByState {
                             StreamingGroupByState::Streaming {
                                 stream,
                                 batch_size,
+                                floor,
                                 cur_key,
                                 last_val,
                                 out_batch,
@@ -114,6 +128,7 @@ impl StreamingGroupByState {
                         StreamingGroupByState::Streaming {
                             stream,
                             batch_size,
+                            floor,
                             cur_key,
                             last_val,
                             out_batch,

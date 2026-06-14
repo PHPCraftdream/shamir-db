@@ -387,7 +387,15 @@ impl MvccStore {
     /// tombstones (empty value) and absent keys. Cold-start: when the cell is
     /// absent (`current_version == 0`), scans the log for the latest version
     /// via `seek_latest_version`.
+    ///
+    /// R3 — MVCC pre-floor: reads are capped at the committed floor
+    /// (`gate.last_committed()`). Versions above the floor are not yet
+    /// visible. Under sequential commits this is always equal to the
+    /// cell's latest version, so semantics are unchanged today; once P2b
+    /// lands (out-of-order materialize) this prevents observing
+    /// uncommitted versions.
     pub async fn get_current(&self, key: Bytes) -> DbResult<Option<Bytes>> {
+        let floor = self.gate.last_committed();
         let cur_v = self.current_version(&key);
         let v = if cur_v > 0 {
             cur_v
@@ -400,6 +408,13 @@ impl MvccStore {
                 None => return Ok(None),
             }
         };
+        // R3: if the committed floor is non-zero (gate initialized) and the
+        // resolved version exceeds it, fall back to snapshot read at the
+        // floor (range-scan for newest <= floor). Floor == 0 means bootstrap
+        // / recovery — no visibility restriction applied.
+        if floor > 0 && v > floor {
+            return self.get_at(&key, floor).await;
+        }
         match self.history.get(encode_version_key(&key, v)).await {
             Ok(val) if val.is_empty() => Ok(None),
             Ok(val) => Ok(Some(val)),
@@ -412,6 +427,10 @@ impl MvccStore {
     /// log. The log is key-major, version-ascending; a streaming group-by tracks
     /// the last (highest) version per key — that is the current. Tombstones
     /// (empty value) are suppressed. Emits in batches of `batch`.
+    ///
+    /// R3 — MVCC pre-floor: versions above `gate.last_committed()` are
+    /// excluded from the group-by. The per-entry check is inlined into the
+    /// existing scan loop (one comparison per decoded entry — no second pass).
     pub fn current_stream(
         &self,
         batch: usize,
@@ -419,6 +438,8 @@ impl MvccStore {
         use futures::stream::unfold;
 
         let history = Arc::clone(&self.history);
+        // R3: capture committed floor at stream-open time.
+        let floor = self.gate.last_committed();
         // Box::pin so the returned stream is `Unpin` — callers (e.g.
         // `TableManager::list_stream`) consume it via `.next()` without
         // pinning, matching the P1 `Pin<Box<dyn Stream>>` contract. A raw
@@ -427,18 +448,21 @@ impl MvccStore {
             StreamingGroupByState::Start {
                 history,
                 batch_size: batch,
+                floor,
             },
             |state| async move {
                 match state {
                     StreamingGroupByState::Start {
                         history,
                         batch_size,
+                        floor,
                     } => {
                         let stream = history.iter_stream(batch_size);
                         let pin = Box::pin(stream);
                         let s = StreamingGroupByState::Streaming {
                             stream: pin,
                             batch_size,
+                            floor,
                             cur_key: None,
                             last_val: None,
                             out_batch: Vec::new(),
