@@ -501,12 +501,12 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
             .await
             .unwrap();
 
-        // Sanity: while tx is open, BEFORE commit, the WAL has no inflight
-        // entry (wal.begin runs only in commit Phase 4 — commit.rs:732).
+        // Sanity: while tx is open, BEFORE commit, the WAL has no entry
+        // (the WAL append runs only in commit Phase 4).
         let wal = repo.repo_wal().await.unwrap();
         assert!(
-            wal.list_inflight().await.unwrap().is_empty(),
-            "no WAL entry exists pre-commit — wal.begin runs only in Phase 4"
+            wal.recover().await.unwrap().is_empty(),
+            "no WAL entry exists pre-commit — the append runs only in Phase 4"
         );
 
         // === CRASH === drop tx + guard + repo WITHOUT calling
@@ -524,11 +524,11 @@ async fn crash_mid_interactive_tx_leaves_no_durable_footprint() {
         vec![crate::table::TableConfig::new("users")],
     );
 
-    // (1) No inflight WAL entry survives — none was ever written.
+    // (1) No WAL entry survives — none was ever written.
     let wal = repo.repo_wal().await.unwrap();
     assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "crash before any commit leaves no inflight WAL entry"
+        wal.recover().await.unwrap().is_empty(),
+        "crash before any commit leaves no WAL entry"
     );
 
     // (2) Recovery is a no-op.

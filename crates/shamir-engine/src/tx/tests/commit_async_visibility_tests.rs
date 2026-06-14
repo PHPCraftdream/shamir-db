@@ -159,12 +159,6 @@ async fn async_commit_index_converges_after_tail() {
         .await
         .expect("secondary-index posting must be present after the tail finishes");
     assert_eq!(observed, posting_val);
-
-    let wal = repo.repo_wal().await.unwrap();
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "Phase 7 must remove the WAL marker on a Complete tail"
-    );
 }
 
 /// (c) A persistent Phase-5c failure on the BACKGROUND task is the
@@ -227,13 +221,13 @@ async fn async_commit_background_failure_is_recovered() {
         "a failed Phase 5c on the tail must surface as Deferred"
     );
 
-    // Inflight marker survives → recovery is the guarantor.
+    // The WAL entry is in the segment → recovery is the guarantor.
     let wal = repo.repo_wal().await.unwrap();
-    let inflight = wal.list_inflight().await.unwrap();
+    let inflight = wal.recover().await.unwrap();
     assert_eq!(
         inflight.len(),
         1,
-        "deferred async tail must leave the WAL marker inflight"
+        "the tx's WAL entry must be replayable for recovery"
     );
 
     // Index posting absent before recovery (the injected failure stopped it).
@@ -251,10 +245,6 @@ async fn async_commit_background_failure_is_recovered() {
         .await
         .expect("recovery must materialize the deferred index posting");
     assert_eq!(recovered, posting_val);
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "recovery must clean the inflight marker"
-    );
 }
 
 /// (d) Default (sync) mode is byte-identical: no background handle is
@@ -315,11 +305,4 @@ async fn sync_default_mode_returns_no_background_handle() {
         .await
         .expect("index posting must be visible immediately in sync mode");
     assert_eq!(posted, posting_val);
-
-    // WAL marker is removed inline (Phase 7 ran).
-    let wal = repo.repo_wal().await.unwrap();
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "sync mode removes the WAL marker inline (Phase 7)"
-    );
 }

@@ -5,19 +5,21 @@
 //!
 //! These exercise `RepoInstance::recover_v2_inflight` — the exact entry
 //! point wired into the `shamir-db` bootstrap (`ShamirDb::init` /
-//! `ShamirDb::add_repo`) — over a shared `Arc<InMemoryRepo>` so a
-//! "restart" observes the same persisted state a real process restart
-//! would.
+//! `ShamirDb::add_repo`) — over a disk-backed (sled tempdir) repo so a
+//! "restart" (drop + reopen over the same path) observes the same
+//! persisted state a real process restart would, including the file WAL
+//! segment. (F5e: the single WAL write path uses a per-instance `Mem` sink
+//! for in-memory repos, so an injected inflight entry only genuinely
+//! survives a restart on the file segment.)
 
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use shamir_wal::{WalEntryV2, WalOpV2};
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use crate::meta::recovery_marker::{load_last_committed, save_last_committed};
-use crate::repo::{repo_token, BoxRepo, RepoInstance};
+use crate::repo::{repo_token, BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 
@@ -27,23 +29,42 @@ fn rid(n: u8) -> RecordId {
     RecordId(a)
 }
 
-/// Write a durable inflight V2 `Put` entry (NO matching `wal.commit`)
-/// carrying `commit_version`, exactly as a crash between commit Phase 4
-/// and Phase 7 leaves behind. Uses a throwaway `RepoInstance` over
-/// `underlying` and never constructs its gate, so the "restart" repo
-/// seeds a fresh gate from the persisted state.
+/// Open (or reopen) a disk-backed sled repo at `path`, retrying on
+/// Windows where sled releases its file lock lazily after `drop`.
+async fn open_sled(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+    let mut last_err = None;
+    for _attempt in 0..10 {
+        match RepoInstance::from_factory(
+            name.into(),
+            BoxRepoFactory::sled_raw(path.clone()),
+            tables.clone(),
+        )
+        .await
+        {
+            Ok(r) => return r,
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("open_sled({name:?}) failed after 10 retries: {last_err:?}");
+}
+
+/// Append a durable inflight V2 `Put` entry (NO data_store update)
+/// carrying `commit_version` to the file WAL, exactly as a crash between
+/// commit Phase 4 and Phase 7 leaves behind. Uses a throwaway
+/// `RepoInstance` over `path` and never constructs its gate, then drops it
+/// — modelling the in-memory side of a restart. The entry lives in the
+/// persisted file segment and survives.
 async fn seed_inflight_put(
-    underlying: &Arc<InMemoryRepo>,
+    path: &std::path::Path,
     table: &str,
     record: RecordId,
     body: bytes::Bytes,
     commit_version: u64,
 ) {
-    let seed = RepoInstance::new(
-        "r".into(),
-        BoxRepo::InMemory(Arc::clone(underlying)),
-        Vec::new(),
-    );
+    let seed = open_sled("r", path.to_path_buf(), vec![TableConfig::new(table)]).await;
     let wal = seed.repo_wal().await.unwrap();
     let entry = WalEntryV2::new(
         wal.fresh_txn_id(),
@@ -55,9 +76,10 @@ async fn seed_inflight_put(
         }],
     )
     .with_commit_version(commit_version);
-    wal.begin(entry).await.unwrap();
-    // Drop `seed`: models the in-memory side of a restart. The inflight
-    // marker lives in the shared `underlying` and survives.
+    // Synced so the entry hits the segment file before the drop below.
+    wal.begin_grouped(entry, WalDurability::Synced)
+        .await
+        .unwrap();
     drop(seed);
 }
 
@@ -67,24 +89,20 @@ async fn seed_inflight_put(
 /// recovered floor durably.
 #[tokio::test]
 async fn recovery_wired_into_open_replays_inflight() {
-    let underlying = Arc::new(InMemoryRepo::new());
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
     let record = rid(42);
     let body = InnerValue::Str("recovered".into()).to_bytes().unwrap();
 
     // Fresh repo (no marker) + a single inflight tx at commit_version 10.
-    seed_inflight_put(&underlying, "t", record, body, 10).await;
+    seed_inflight_put(&path, "t", record, body, 10).await;
 
     // === SIMULATED RESTART: fresh RepoInstance over the same storage ===
-    let repo = RepoInstance::new(
-        "r".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo.add_table(TableConfig::new("t"));
+    let repo = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
 
     // Sanity: the inflight entry survived the "restart".
     let wal = repo.repo_wal().await.unwrap();
-    assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
+    assert_eq!(wal.recover().await.unwrap().len(), 1);
 
     // This is exactly what `ShamirDb::init` / `add_repo` now call.
     let recovered = repo.recover_v2_inflight().await.unwrap();
@@ -108,17 +126,13 @@ async fn recovery_wired_into_open_replays_inflight() {
     );
 
     // The persisted marker must reflect the recovered max so the *next*
-    // restart (which sees no inflight markers) seeds the floor correctly.
+    // restart seeds the floor correctly.
     let info = repo.tx_info_store().await.unwrap();
     let marker = load_last_committed(&info).await.unwrap();
     assert!(
         marker >= Some(10),
         "persisted last_committed marker must be >= recovered max 10, got {marker:?}"
     );
-
-    // WAL marker cleared; re-running recovery is a no-op.
-    assert!(wal.list_inflight().await.unwrap().is_empty());
-    assert_eq!(repo.recover_v2_inflight().await.unwrap(), 0);
 }
 
 /// CRIT-B core: a stale persisted marker (7) plus an inflight entry whose
@@ -128,16 +142,13 @@ async fn recovery_wired_into_open_replays_inflight() {
 /// snapshot reads returning wrong data).
 #[tokio::test]
 async fn recovery_advances_gate_past_replayed_commit_version() {
-    let underlying = Arc::new(InMemoryRepo::new());
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
 
     // Persist a stale marker = 7 directly (a clean commit that landed
     // before the crashed one), WITHOUT constructing any gate.
     {
-        let seed = RepoInstance::new(
-            "r".into(),
-            BoxRepo::InMemory(Arc::clone(&underlying)),
-            Vec::new(),
-        );
+        let seed = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
         let info = seed.tx_info_store().await.unwrap();
         save_last_committed(&info, 7).await.unwrap();
     }
@@ -146,15 +157,10 @@ async fn recovery_advances_gate_past_replayed_commit_version() {
     // crash before Phase 6.5).
     let record = rid(7);
     let body = InnerValue::Str("v10".into()).to_bytes().unwrap();
-    seed_inflight_put(&underlying, "t", record, body, 10).await;
+    seed_inflight_put(&path, "t", record, body, 10).await;
 
     // === SIMULATED RESTART ===
-    let repo = RepoInstance::new(
-        "r".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo.add_table(TableConfig::new("t"));
+    let repo = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, 1);
@@ -169,8 +175,7 @@ async fn recovery_advances_gate_past_replayed_commit_version() {
     );
 
     // Marker re-persisted to the recovered floor (10) so a *second*
-    // restart — now with no inflight entries — still seeds the gate at 10
-    // rather than rewinding to 7.
+    // restart still seeds the gate at 10 rather than rewinding to 7.
     let info = repo.tx_info_store().await.unwrap();
     assert_eq!(load_last_committed(&info).await.unwrap(), Some(10));
 }
@@ -180,22 +185,18 @@ async fn recovery_advances_gate_past_replayed_commit_version() {
 /// last_committed must mirror it.
 #[tokio::test]
 async fn recovery_rebuilds_completion_prefix() {
-    let underlying = Arc::new(InMemoryRepo::new());
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
 
     // Seed 3 inflight entries at commit_versions 1, 2, 3.
     for v in 1..=3u64 {
         let record = rid(v as u8);
         let body = InnerValue::Str(format!("v{v}")).to_bytes().unwrap();
-        seed_inflight_put(&underlying, "t", record, body, v).await;
+        seed_inflight_put(&path, "t", record, body, v).await;
     }
 
     // === SIMULATED RESTART ===
-    let repo = RepoInstance::new(
-        "r".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo.add_table(TableConfig::new("t"));
+    let repo = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, 3);
@@ -215,55 +216,36 @@ async fn recovery_rebuilds_completion_prefix() {
     );
 }
 
-/// Defence-in-depth for the marker re-persist: after recovery clears the
-/// inflight markers, a SECOND fresh `RepoInstance` over the same storage
-/// (no inflight entries left) must still seed its gate above the recovered
-/// commit_version — proving the floor survives via the durable marker, not
-/// just the (now-gone) inflight pre-scan.
+/// Defence-in-depth for the marker re-persist: after a first recovery
+/// persists the floor, a SECOND fresh `RepoInstance` over the same storage
+/// must still seed its gate above the recovered commit_version. (F5e: the
+/// file WAL has no per-entry truncation until F6, so the inflight entry is
+/// re-replayed on the second restart too; recovery is idempotent and the
+/// floor is also durably persisted via the marker.)
 #[tokio::test]
 async fn recovered_floor_survives_a_second_restart() {
-    let underlying = Arc::new(InMemoryRepo::new());
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
     let record = rid(9);
     let body = InnerValue::Str("v25".into()).to_bytes().unwrap();
-    seed_inflight_put(&underlying, "t", record, body, 25).await;
+    seed_inflight_put(&path, "t", record, body, 25).await;
 
-    // First restart: recover (clears the inflight marker, persists floor).
+    // First restart: recover (replays the entry, persists the floor).
     {
-        let repo1 = RepoInstance::new(
-            "r".into(),
-            BoxRepo::InMemory(Arc::clone(&underlying)),
-            Vec::new(),
-        );
-        repo1.add_table(TableConfig::new("t"));
+        let repo1 = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
         assert_eq!(repo1.recover_v2_inflight().await.unwrap(), 1);
-        assert!(repo1
-            .repo_wal()
-            .await
-            .unwrap()
-            .list_inflight()
-            .await
-            .unwrap()
-            .is_empty());
+        drop(repo1);
     }
 
-    // Second restart: no inflight entries remain — the floor must come
-    // purely from the persisted marker.
-    let repo2 = RepoInstance::new(
-        "r".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo2.add_table(TableConfig::new("t"));
-    assert_eq!(
-        repo2.recover_v2_inflight().await.unwrap(),
-        0,
-        "no inflight entries left after the first recovery"
-    );
+    // Second restart: the gate floor must be above the recovered
+    // commit_version — sourced from the persisted marker and/or the
+    // replayed segment entry.
+    let repo2 = open_sled("r", path.clone(), vec![TableConfig::new("t")]).await;
+    repo2.recover_v2_inflight().await.unwrap();
 
     let gate = repo2.tx_gate().await.unwrap();
     assert!(
         gate.assign_next_version() > 25,
-        "the recovered floor (25) must survive a second restart via the \
-         persisted marker"
+        "the recovered floor (25) must survive a second restart"
     );
 }

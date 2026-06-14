@@ -158,31 +158,32 @@ async fn buffered_only_window_issues_no_fsync() {
 }
 
 #[tokio::test]
-async fn noop_append_returns_ok() {
-    let sink = Arc::new(WalSink::Noop);
+async fn mem_append_returns_ok_and_replays() {
+    let sink = Arc::new(WalSink::mem());
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
         .await
         .unwrap();
 
-    // Noop replay always returns empty.
+    // Mem replay returns the appended entry (in-RAM segment).
     let replayed = sink.replay().await.unwrap();
-    assert!(replayed.is_empty());
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].txn_id, 1);
 }
 
 #[tokio::test]
-async fn noop_sync_returns_ok() {
-    let sink = Arc::new(WalSink::Noop);
+async fn mem_sync_returns_ok() {
+    let sink = Arc::new(WalSink::mem());
     let gc = WalGroupCommit::new(Arc::clone(&sink));
 
+    // Mem sync is a no-op; a Synced append still succeeds.
     gc.append(entry(1, 10).encode().unwrap(), WalDurability::Synced)
         .await
         .unwrap();
 
-    // Noop replay always returns empty.
     let replayed = sink.replay().await.unwrap();
-    assert!(replayed.is_empty());
+    assert_eq!(replayed.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -28,11 +28,12 @@ use shamir_storage::types::Store;
 use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId, VersionProvider};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use shamir_wal::{WalEntryV2, WalOpV2};
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_token;
 use crate::repo::repo_types::BoxRepo;
+use crate::repo::BoxRepoFactory;
 use crate::repo::RepoVersionProvider;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
@@ -330,18 +331,40 @@ fn rid(n: u8) -> RecordId {
     RecordId(a)
 }
 
+/// Open (or reopen) a disk-backed sled repo, retrying on Windows where
+/// sled releases its file lock lazily after `drop`.
+async fn open_sled(path: &std::path::Path, tables: Vec<TableConfig>) -> RepoInstance {
+    let mut last_err = None;
+    for _attempt in 0..10 {
+        match RepoInstance::from_factory(
+            "stress".into(),
+            BoxRepoFactory::sled_raw(path.to_path_buf()),
+            tables.clone(),
+        )
+        .await
+        {
+            Ok(r) => return r,
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("open_sled failed after 10 retries: {last_err:?}");
+}
+
+/// Append a durable inflight V2 `Put` to the file WAL (F5e: the file
+/// segment is the medium that survives a simulated restart — the `Mem`
+/// sink is per-instance), modelling a crash after WAL fsync but before the
+/// data_store update.
 async fn seed_inflight_put(
-    underlying: &Arc<InMemoryRepo>,
+    path: &std::path::Path,
     table: &str,
     record: RecordId,
     body: bytes::Bytes,
     commit_version: u64,
 ) {
-    let seed = RepoInstance::new(
-        "stress".into(),
-        BoxRepo::InMemory(Arc::clone(underlying)),
-        Vec::new(),
-    );
+    let seed = open_sled(path, vec![TableConfig::new(table)]).await;
     let wal = seed.repo_wal().await.unwrap();
     let entry = WalEntryV2::new(
         wal.fresh_txn_id(),
@@ -353,7 +376,9 @@ async fn seed_inflight_put(
         }],
     )
     .with_commit_version(commit_version);
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Synced)
+        .await
+        .unwrap();
     drop(seed);
 }
 
@@ -362,22 +387,18 @@ async fn seed_inflight_put(
 #[tokio::test]
 async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
     const N: u64 = 10;
-    let underlying = Arc::new(InMemoryRepo::new());
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
 
     // Seed N inflight entries at commit_versions 1..=N.
     for v in 1..=N {
         let record = rid(v as u8);
         let body = InnerValue::Str(format!("crash_{v}")).to_bytes().unwrap();
-        seed_inflight_put(&underlying, "t", record, body, v).await;
+        seed_inflight_put(&path, "t", record, body, v).await;
     }
 
     // Simulated restart.
-    let repo = RepoInstance::new(
-        "stress".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo.add_table(TableConfig::new("t"));
+    let repo = open_sled(&path, vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, N as usize);
@@ -400,10 +421,6 @@ async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
         N,
         "watermark must equal highest recovered version"
     );
-
-    // No inflight markers left.
-    let wal = repo.repo_wal().await.unwrap();
-    assert!(wal.list_inflight().await.unwrap().is_empty());
 
     // Next assigned version > N.
     assert!(gate.assign_next_version() > N);
@@ -449,20 +466,16 @@ async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
 /// pre-seeds from `max_inflight`, resolving the gap implicitly.
 #[tokio::test]
 async fn oracle_stress_recovery_gap_in_versions() {
-    let underlying = Arc::new(InMemoryRepo::new());
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
 
     for v in [1u64, 2, 4, 5] {
         let record = rid(v as u8);
         let body = InnerValue::Str(format!("g_{v}")).to_bytes().unwrap();
-        seed_inflight_put(&underlying, "t", record, body, v).await;
+        seed_inflight_put(&path, "t", record, body, v).await;
     }
 
-    let repo = RepoInstance::new(
-        "stress".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo.add_table(TableConfig::new("t"));
+    let repo = open_sled(&path, vec![TableConfig::new("t")]).await;
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(recovered, 4, "4 durable WAL entries must be replayed");

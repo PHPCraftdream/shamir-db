@@ -1,9 +1,7 @@
 use crate::repo_wal_manager::RepoWalManager;
 use bytes::Bytes;
-use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
-use shamir_wal::{WalActiveKey, WalEntryV2, WalOpV2};
+use shamir_wal::{WalDurability, WalEntryV2, WalGroupCommit, WalOpV2, WalSink};
 use std::sync::Arc;
 
 fn rid(n: u8) -> RecordId {
@@ -12,12 +10,11 @@ fn rid(n: u8) -> RecordId {
     RecordId(a)
 }
 
-fn make_store() -> Arc<dyn Store> {
-    Arc::new(InMemoryStore::new())
-}
-
-fn make_manager(store: &Arc<dyn Store>) -> RepoWalManager {
-    RepoWalManager::new(store.clone(), 1000)
+/// Build a manager over a fresh in-RAM (`Mem`) group — the single write
+/// path shared with disk repos.
+fn make_manager() -> RepoWalManager {
+    let group = Arc::new(WalGroupCommit::new(Arc::new(WalSink::mem())));
+    RepoWalManager::new(1000, group)
 }
 
 fn simple_entry(txn_id: u64) -> WalEntryV2 {
@@ -33,93 +30,39 @@ fn simple_entry(txn_id: u64) -> WalEntryV2 {
 }
 
 #[tokio::test]
-async fn begin_commit_no_inflight() {
-    let store = make_store();
-    let mgr = make_manager(&store);
+async fn begin_then_recover() {
+    let mgr = make_manager();
     let entry = simple_entry(100);
 
-    mgr.begin(entry).await.unwrap();
-    let inflight = mgr.list_inflight().await.unwrap();
+    mgr.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
+    let inflight = mgr.recover().await.unwrap();
     assert_eq!(inflight.len(), 1);
     assert_eq!(inflight[0].txn_id, 100);
 
+    // commit is a no-op now (entries live in the segment until truncation);
+    // recovery replays them idempotently.
     mgr.commit(100).await.unwrap();
-    let inflight = mgr.list_inflight().await.unwrap();
-    assert!(inflight.is_empty(), "commit must remove the marker");
 }
 
 #[tokio::test]
-async fn begin_without_commit_survives_reopen() {
-    let store = make_store();
-    let mgr1 = make_manager(&store);
-    let entry = simple_entry(200);
-
-    mgr1.begin(entry.clone()).await.unwrap();
-
-    let mgr2 = make_manager(&store);
-    let inflight = mgr2.list_inflight().await.unwrap();
-    assert_eq!(inflight.len(), 1);
-    assert_eq!(inflight[0].txn_id, 200);
-    assert_eq!(inflight[0].ops.len(), 1);
-}
-
-#[tokio::test]
-async fn commit_is_idempotent() {
-    let store = make_store();
-    let mgr = make_manager(&store);
-    mgr.begin(simple_entry(300)).await.unwrap();
-
-    mgr.commit(300).await.unwrap();
-    mgr.commit(300).await.unwrap();
-
-    let inflight = mgr.list_inflight().await.unwrap();
-    assert!(inflight.is_empty());
-}
-
-#[tokio::test]
-async fn commit_async_removes_marker() {
-    let store = make_store();
-    let mgr = make_manager(&store);
-    mgr.begin(simple_entry(400)).await.unwrap();
-    assert_eq!(mgr.list_inflight().await.unwrap().len(), 1);
-
-    let handle = mgr.commit_async(400);
-    handle.await.unwrap().unwrap();
-
-    let inflight = mgr.list_inflight().await.unwrap();
-    assert!(
-        inflight.is_empty(),
-        "commit_async must remove the marker (got {} inflight)",
-        inflight.len()
-    );
-}
-
-#[tokio::test]
-async fn list_inflight_skips_non_v2_entries() {
-    let store = make_store();
-    let mgr = make_manager(&store);
-
-    // Write a non-V2 marker manually under a WAL active key (the legacy
-    // per-table KV-WAL wrote bincode that lacks the V2 magic prefix).
-    // `list_inflight` must skip anything that isn't `looks_like_v2`.
-    let non_v2_bytes = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
-    store
-        .set(WalActiveKey::new(10).to_bytes(), Bytes::from(non_v2_bytes))
+async fn commit_is_idempotent_noop() {
+    let mgr = make_manager();
+    mgr.begin_grouped(simple_entry(300), WalDurability::Buffered)
         .await
         .unwrap();
 
-    // Write a V2 entry through RepoWalManager.
-    mgr.begin(simple_entry(500)).await.unwrap();
+    mgr.commit(300).await.unwrap();
+    mgr.commit(300).await.unwrap();
 
-    let inflight = mgr.list_inflight().await.unwrap();
-    assert_eq!(inflight.len(), 1, "should only see the V2 entry");
-    assert_eq!(inflight[0].txn_id, 500);
+    // Entry remains replayable (commit does not remove it).
+    assert_eq!(mgr.recover().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn fresh_txn_ids_monotonic() {
-    let store = make_store();
-    let mgr = make_manager(&store);
+    let mgr = make_manager();
     let a = mgr.fresh_txn_id();
     let b = mgr.fresh_txn_id();
     let c = mgr.fresh_txn_id();
@@ -129,9 +72,8 @@ async fn fresh_txn_ids_monotonic() {
 
 #[tokio::test]
 async fn seed_floor_raises_counter_and_is_monotonic() {
-    let store = make_store();
     // Constructor seed = 1000 (see `make_manager`).
-    let mgr = make_manager(&store);
+    let mgr = make_manager();
 
     // A floor below the current seed is a no-op: the counter does not
     // rewind, and the next id stays at the seed.
@@ -152,16 +94,21 @@ async fn seed_floor_raises_counter_and_is_monotonic() {
 }
 
 #[tokio::test]
-async fn begin_multiple_then_list() {
-    let store = make_store();
-    let mgr = make_manager(&store);
+async fn begin_multiple_then_recover() {
+    let mgr = make_manager();
 
-    mgr.begin(simple_entry(600)).await.unwrap();
-    mgr.begin(simple_entry(601)).await.unwrap();
-    mgr.begin(simple_entry(602)).await.unwrap();
+    mgr.begin_grouped(simple_entry(600), WalDurability::Buffered)
+        .await
+        .unwrap();
+    mgr.begin_grouped(simple_entry(601), WalDurability::Buffered)
+        .await
+        .unwrap();
+    mgr.begin_grouped(simple_entry(602), WalDurability::Buffered)
+        .await
+        .unwrap();
 
     let mut ids: Vec<u64> = mgr
-        .list_inflight()
+        .recover()
         .await
         .unwrap()
         .into_iter()
@@ -169,27 +116,11 @@ async fn begin_multiple_then_list() {
         .collect();
     ids.sort();
     assert_eq!(ids, vec![600, 601, 602]);
-
-    mgr.commit(601).await.unwrap();
-    let mut ids: Vec<u64> = mgr
-        .list_inflight()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|e| e.txn_id)
-        .collect();
-    ids.sort();
-    assert_eq!(ids, vec![600, 602]);
-
-    mgr.commit(600).await.unwrap();
-    mgr.commit(602).await.unwrap();
-    assert!(mgr.list_inflight().await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn recovery_round_trip_all_op_variants() {
-    let store = make_store();
-    let mgr = make_manager(&store);
+    let mgr = make_manager();
 
     let entry = WalEntryV2 {
         txn_id: 999,
@@ -228,9 +159,11 @@ async fn recovery_round_trip_all_op_variants() {
         interner_delta: vec![],
     };
 
-    mgr.begin(entry.clone()).await.unwrap();
+    mgr.begin_grouped(entry.clone(), WalDurability::Buffered)
+        .await
+        .unwrap();
 
-    let inflight = mgr.list_inflight().await.unwrap();
+    let inflight = mgr.recover().await.unwrap();
     assert_eq!(inflight.len(), 1);
     assert_eq!(
         inflight[0], entry,
@@ -240,8 +173,7 @@ async fn recovery_round_trip_all_op_variants() {
 
 #[tokio::test]
 async fn begin_many_round_trip() {
-    let store = make_store();
-    let mgr = make_manager(&store);
+    let mgr = make_manager();
 
     let entries: Vec<WalEntryV2> = (0..5)
         .map(|i| {
@@ -257,9 +189,11 @@ async fn begin_many_round_trip() {
         })
         .collect();
 
-    mgr.begin_many(&entries).await.unwrap();
+    mgr.begin_grouped_many(&entries, WalDurability::Buffered)
+        .await
+        .unwrap();
 
-    let mut inflight = mgr.list_inflight().await.unwrap();
+    let mut inflight = mgr.recover().await.unwrap();
     inflight.sort_by_key(|e| e.txn_id);
     assert_eq!(inflight.len(), 5);
     for (i, entry) in inflight.iter().enumerate() {
@@ -267,25 +201,13 @@ async fn begin_many_round_trip() {
         assert_eq!(entry.ops.len(), 1);
         assert_eq!(entries[i], *entry, "entry {i} must round-trip identically");
     }
-
-    // Commit two, verify remaining three.
-    mgr.commit(701).await.unwrap();
-    mgr.commit(703).await.unwrap();
-    let mut ids: Vec<u64> = mgr
-        .list_inflight()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|e| e.txn_id)
-        .collect();
-    ids.sort();
-    assert_eq!(ids, vec![700, 702, 704]);
 }
 
 #[tokio::test]
 async fn begin_many_empty_is_noop() {
-    let store = make_store();
-    let mgr = make_manager(&store);
-    mgr.begin_many(&[]).await.unwrap();
-    assert!(mgr.list_inflight().await.unwrap().is_empty());
+    let mgr = make_manager();
+    mgr.begin_grouped_many(&[], WalDurability::Buffered)
+        .await
+        .unwrap();
+    assert!(mgr.recover().await.unwrap().is_empty());
 }

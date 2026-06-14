@@ -129,14 +129,14 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
     );
     assert!(outcome.commit_version > 0, "version must be assigned");
 
-    // (2) WAL marker still inflight — Phase 7 was skipped so recovery
-    //     re-applies the entry on the next open.
+    // (2) The WAL entry is in the segment so recovery re-applies it — the
+    //     deferred projection's safety net.
     let wal = repo.repo_wal().await.unwrap();
-    let inflight = wal.list_inflight().await.unwrap();
+    let inflight = wal.recover().await.unwrap();
     assert_eq!(
         inflight.len(),
         1,
-        "deferred materialization must leave the WAL marker inflight"
+        "the deferred tx's WAL entry must be replayable"
     );
     assert_eq!(inflight[0].txn_id, INJECT_TX_ID);
 
@@ -167,15 +167,16 @@ async fn post_commit_phase5_failure_is_committed_then_recovered() {
         "recovered data must match the committed body, got {recovered_data:?}"
     );
 
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "recovery must remove the WAL marker after reconciliation"
-    );
-
-    // Final state is consistent + queryable: both the data record and the
-    // index posting are present and a re-run of recovery is a no-op.
-    let count2 = repo.recover_v2_inflight().await.unwrap();
-    assert_eq!(count2, 0, "second recovery pass must be a no-op");
+    // Final state is consistent + queryable. The file/Mem WAL has no
+    // per-entry truncation until F6, so a re-run replays the same entry
+    // again; replay is idempotent — the data + posting converge to the same
+    // single value.
+    repo.recover_v2_inflight().await.unwrap();
+    let again = tbl
+        .get(rid)
+        .await
+        .expect("data record must still be present after an idempotent re-replay");
+    assert!(matches!(again, InnerValue::Str(ref s) if s == "materialized-by-recovery"));
 }
 
 /// The other half of the boundary: a PRE-commit-point failure (here an
@@ -215,8 +216,8 @@ async fn pre_commit_failure_aborts_and_leaves_nothing() {
     // was ever written.
     let wal = repo.repo_wal().await.unwrap();
     assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "a pre-commit abort must leave no inflight WAL marker"
+        wal.recover().await.unwrap().is_empty(),
+        "a pre-commit abort must leave no WAL entry"
     );
 }
 
@@ -371,14 +372,10 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
         "a failed second-table Phase 5a must defer materialization (not abort)"
     );
 
-    // (b) One inflight WAL marker (Phase 7 skipped because `ok=false`).
+    // (b) One WAL entry in the segment (the deferred tx's, for recovery).
     let wal = repo.repo_wal().await.unwrap();
-    let inflight = wal.list_inflight().await.unwrap();
-    assert_eq!(
-        inflight.len(),
-        1,
-        "deferral must leave the WAL marker inflight"
-    );
+    let inflight = wal.recover().await.unwrap();
+    assert_eq!(inflight.len(), 1, "the deferred tx's WAL entry must replay");
     assert_eq!(inflight[0].txn_id, MULTI_TABLE_INJECT_TX_ID);
 
     // (c) BEFORE recovery: the cross-table split is observable at the same
@@ -429,14 +426,10 @@ async fn multi_table_partial_deferral_is_reconciled_by_recovery() {
         posting_a_val
     );
 
-    // Marker cleaned; a second recovery pass is a no-op.
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "recovery must remove the WAL marker after reconciliation"
-    );
-    assert_eq!(
-        repo.recover_v2_inflight().await.unwrap(),
-        0,
-        "second recovery pass must be a no-op"
-    );
+    // The WAL has no per-entry truncation until F6, so a second recovery
+    // pass replays the same entry again; replay is idempotent — both tables
+    // remain at their single committed values.
+    repo.recover_v2_inflight().await.unwrap();
+    let b_again = tbl_b.get(rid_b).await.unwrap();
+    assert!(matches!(b_again, InnerValue::Str(ref s) if s == "table-b-row"));
 }
