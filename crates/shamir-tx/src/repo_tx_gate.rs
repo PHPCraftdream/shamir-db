@@ -104,9 +104,9 @@ pub struct RepoTxGate {
     /// held across. The leader pops the entire vec under lock.
     pending_commits: std::sync::Mutex<Vec<PendingCommit>>,
 
-    /// P1a scaffolding: tracks materialized/aborted state per version
-    /// and maintains a contiguous watermark. Wired in P1c.
-    #[allow(dead_code)]
+    /// Tracks materialized/aborted state per version and maintains a
+    /// contiguous watermark. The watermark drives `last_committed_version`
+    /// via [`sync_last_committed_from_watermark`](Self::sync_last_committed_from_watermark).
     completion: CompletionTracker,
 }
 
@@ -152,7 +152,7 @@ impl RepoTxGate {
             active_serializable_count: Arc::new(AtomicU64::new(0)),
             commit_write_log: scc::TreeIndex::new(),
             pending_commits: std::sync::Mutex::new(Vec::new()),
-            completion: CompletionTracker::new(),
+            completion: CompletionTracker::with_watermark(last_committed),
         }
     }
 
@@ -292,6 +292,17 @@ impl RepoTxGate {
                 Err(actual) => current = actual,
             }
         }
+    }
+
+    /// Sync `last_committed_version` from the completion tracker's watermark.
+    ///
+    /// Called after `completion.mark(version, Materialized)` on the tx commit
+    /// path. The watermark is monotonic, so this only ever advances the atomic.
+    /// Uses `publish_committed_max` (CAS loop) to coexist safely with non-tx
+    /// writes that also advance the atomic independently.
+    pub fn sync_last_committed_from_watermark(&self) {
+        let wm = self.completion.watermark();
+        self.publish_committed_max(wm);
     }
 
     /// Minimum alive snapshot version — for GC. Returns

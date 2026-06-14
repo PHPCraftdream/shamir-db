@@ -405,6 +405,12 @@ async fn commit_tx_inner_legacy_async(
 
     apply_data_phase(&mut tx, repo, commit_version).await;
     apply_counter_phase(&tx, repo).await;
+    // P1c: mark materialized and sync watermark → last_committed atomic.
+    gate.completion().mark(
+        commit_version,
+        shamir_tx::completion_tracker::State::Materialized,
+    );
+    gate.sync_last_committed_from_watermark();
     gate.publish_committed_max(commit_version);
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
 
