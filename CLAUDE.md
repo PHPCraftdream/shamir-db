@@ -67,49 +67,73 @@ gate (`fmt --check` + `clippy --all-targets` + `test --lib`) **once at
 the end**, not between baseline / post-change bench runs. Spacing gate
 checks through the cycle invalidates the bench cache for nothing.
 
-**Hang protection: use `cargo nextest`, not `cargo test`, for any
-workspace-wide run.** Three losses to this trap so far: workspace
-`--tests` looks identical for two cases — (1) Pipe-buffering (Windows
-shells fully buffer pipes, output drips out only when cargo exits —
-~10 min for 30+ test binaries) and (2) a real deadlock in one e2e
-test (tokio::accept that never returns, broadcast channel reader,
-file-lock race). Both show zero output for many minutes; the second
-hangs forever.
+### 🧪 Centralised test entry point — MANDATORY
 
-Solution that fixes BOTH: `cargo nextest`:
+**Tests are run ONLY through `./scripts/test.sh` (or the
+`cargo t` / `cargo tl` aliases from `.cargo/config.toml`).
+Raw `cargo test` is BANNED for anything beyond a single-crate `--lib`
+scratch run.** This isn't preference — it's a hard rule baked into
+infrastructure to prevent the silent-hang trap that has cost us
+multiple hours.
+
+Why centralisation: we've lost hours twice to `cargo test --workspace
+--tests 2>&1 | grep ...` looking like a hang. Two indistinguishable
+causes — (1) Windows shell fully buffers the pipe (10+ min silent
+for 30+ test binaries) and (2) a real deadlock in one e2e test
+(tokio::accept that never returns, broadcast channel reader,
+file-lock race) — hangs forever. The wrapper rules out both by
+construction.
+
+**How to run tests:**
 
 ```
-# Workspace-wide:
-cargo nextest run --workspace --no-fail-fast
+./scripts/test.sh                          # lib tests, all crates (fastest signal)
+./scripts/test.sh --full                   # lib + integration + e2e, all crates
+./scripts/test.sh -p shamir-tx             # one crate (lib only)
+./scripts/test.sh -p shamir-tx --full      # one crate (lib + tests)
+./scripts/test.sh -- mvcc                  # filter by test name
 
-# Per-crate (preferred for iterative work):
-cargo nextest run -p shamir-tx -p shamir-engine
+cargo t                                    # equivalent to ./scripts/test.sh --full
+cargo tl                                   # equivalent to ./scripts/test.sh (lib only)
+cargo t -p shamir-tx                       # one-crate full
+cargo tl -p shamir-tx                      # one-crate lib
 ```
 
-Why nextest:
-- Prints PASS/FAIL per test AS IT FINISHES (no buffering).
-- Hard-kills any single test that runs past the timeout
-  (`.config/nextest.toml` defines slow-timeout + terminate-after).
-- A deadlocked test now shows up as `LEAK` or `TIMEOUT` with its
-  full name, not a silent 3-hour hang.
+What the wrapper guarantees:
+- `cargo nextest run` (real-time PASS/FAIL per test — no pipe buffering).
+- `--no-fail-fast` (always collect every failure in one pass).
+- Per-test timeout via `.config/nextest.toml`:
+  - default slow-timeout = 30 s × 6 = **180 s kill** per single test.
+  - `wasm_function_*` override = 120 s × 2 = 240 s (legit ~99 s).
+  - SCRAM tests = 10 s × 6 = 60 s (Argon2-bound).
+- A deadlocked test surfaces as `TIMEOUT [name]` after 180 s, not a
+  3-hour silent hang.
 
-Config lives at `.config/nextest.toml`:
-- Default: kill any test running >180 s.
-- wasm_function_*: legitimately slow (~99 s), kill at 240 s.
-- SCRAM tests: Argon2-bound, kill at 60 s.
+**Banned patterns** (will reintroduce the hang):
 
-Legacy `cargo test` is still fine for `--lib` runs (one binary per
-crate, no e2e shenanigans). Use `cargo nextest run` whenever a test
-binary involves tokio servers, file locks, WASM, or transport.
-
-If for some reason nextest is unavailable, fall back to:
 ```
-cargo test --workspace --tests --no-fail-fast  # no pipe, see output live
+cargo test --workspace --tests          # ← multi-binary, can hang
+cargo test ... 2>&1 | grep ...          # ← pipe buffering trap
+cargo test --workspace --no-fail-fast   # ← still multi-binary, no timeout
 ```
-NOT `cargo test ... 2>&1 | grep ...` — that pipe hides everything.
 
-Prefer per-crate (`-p <crate>`) over `--workspace` for iterative work
-— one crate finishes in 10–60s and gives immediate signal.
+**Allowed direct cargo** (narrow scope only):
+
+```
+cargo test -p <crate> --lib             # one binary, no e2e, finishes in <60 s
+cargo test -p <crate> --lib -- <filter> # one binary, one test
+```
+
+**For sub-agents:** every test step in an Agent brief MUST point at
+`./scripts/test.sh` or `cargo t`/`cargo tl`, NOT raw `cargo test ... |
+grep ...`. The wrapper is the contract; bypass it and the next run
+silently hangs at 3 a.m.
+
+If `cargo-nextest` is missing on a fresh checkout:
+```
+cargo install cargo-nextest --locked
+```
+The wrapper checks for it and exits with an installation hint.
 
 **Quick mode is default.** Benches run in QUICK mode by default —
 sample_size=10, measurement=1s, warm_up=1s — completing every variant

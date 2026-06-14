@@ -32,3 +32,25 @@ debug = false
 codegen-units = 256
 incremental = true
 debug = 1
+
+# ---------------------------------------------------------------------------
+# Test command aliases — the SINGLE entry point for running tests.
+#
+# Background: we lost hours twice to silent test hangs. `cargo test` piped to
+# grep on Windows fully buffers (no output for 10+ min); a single deadlocked
+# e2e test hangs the whole run forever. CLAUDE.md mandates `cargo nextest`
+# with per-test timeout (.config/nextest.toml). These aliases enforce that
+# convention so nobody (human or sub-agent) reaches for raw `cargo test`.
+#
+# Use:
+#   cargo t                  — run all workspace tests with hang protection
+#   cargo t -p <crate>       — narrow to one crate
+#   cargo t -p <crate> -- <filter>  — narrow further by test name
+#   cargo tl                 — lib tests only (fastest signal during /opti)
+#
+# Raw `cargo test` is only for `--lib` of a single crate during local
+# scratch — DO NOT use it for --workspace or --tests runs.
+# ---------------------------------------------------------------------------
+[alias]
+t  = "nextest run --no-fail-fast"
+tl = "nextest run --lib --no-fail-fast"
