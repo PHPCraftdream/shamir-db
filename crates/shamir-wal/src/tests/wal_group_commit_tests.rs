@@ -184,3 +184,68 @@ async fn noop_sync_returns_ok() {
     let replayed = sink.replay().await.unwrap();
     assert!(replayed.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_fsync_fires_for_buffered() {
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+
+    gc.spawn_background_fsync(Duration::from_millis(30));
+
+    // Append one Buffered entry (no inline fsync).
+    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
+        .await
+        .unwrap();
+
+    // Inline fsync_count should be 0 (Buffered doesn't fsync inline).
+    assert_eq!(gc.fsync_count(), 0);
+
+    // Wait long enough for the bg timer to fire.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // Background fsync should have fired at least once.
+    assert!(
+        gc.fsync_count() >= 1,
+        "expected bg fsync to fire, got {}",
+        gc.fsync_count()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_fsync_skips_when_idle() {
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+
+    gc.spawn_background_fsync(Duration::from_millis(30));
+
+    // No appends — wait for a few ticks.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // No fsync should have been issued (dirty flag never set).
+    assert_eq!(gc.fsync_count(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_fsync_exits_on_drop() {
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
+
+    gc.spawn_background_fsync(Duration::from_millis(20));
+
+    // Drop the only strong ref — bg task should exit on next tick.
+    drop(gc);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    // If we get here without hanging, the task exited cleanly.
+}

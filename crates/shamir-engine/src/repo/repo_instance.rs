@@ -439,6 +439,12 @@ impl RepoInstance {
                         let seg = shamir_wal::WalSegment::open(wal_dir.join("repo.wal")).await?;
                         let sink = shamir_wal::WalSink::File(seg);
                         let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
+                        // RF1: background fsync bounds the power-loss window for
+                        // Buffered (level 2) commits. 250 ms = max data-at-risk.
+                        const WAL_BG_FSYNC_MS: u64 = 250;
+                        group.spawn_background_fsync(std::time::Duration::from_millis(
+                            WAL_BG_FSYNC_MS,
+                        ));
                         shamir_tx::RepoWalManager::new_with_group(info_store, initial_txn_id, group)
                     }
                     None => shamir_tx::RepoWalManager::new(info_store, initial_txn_id),

@@ -46,6 +46,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::{Mutex, Notify};
@@ -97,6 +98,8 @@ pub struct WalGroupCommit {
     flushing: AtomicBool,
     // Count of fsyncs this coordinator issued (for the batching test).
     fsync_count: AtomicU64,
+    // RF1: true when a Buffered append completed but no fsync has run since.
+    dirty_since_sync: AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -107,6 +110,7 @@ impl WalGroupCommit {
             pending: Mutex::new(Vec::new()),
             flushing: AtomicBool::new(false),
             fsync_count: AtomicU64::new(0),
+            dirty_since_sync: AtomicBool::new(false),
         }
     }
 
@@ -169,6 +173,10 @@ impl WalGroupCommit {
             // Wake Buffered waiters immediately — level 2 reached. (write()
             // success means bytes are in the OS page cache regardless of a
             // later fsync outcome.)
+            let has_buffered = metas.iter().any(|(t, _)| *t == WalDurability::Buffered);
+            if write_ok && has_buffered {
+                self.dirty_since_sync.store(true, Ordering::Release);
+            }
             for (tier, w) in &metas {
                 if *tier == WalDurability::Buffered {
                     w.complete(write_ok);
@@ -178,7 +186,11 @@ impl WalGroupCommit {
             let needs_fsync = metas.iter().any(|(t, _)| *t == WalDurability::Synced);
             let sync_ok = if write_ok && needs_fsync {
                 self.fsync_count.fetch_add(1, Ordering::Relaxed);
-                self.sink.sync().await.is_ok()
+                let ok = self.sink.sync().await.is_ok();
+                if ok {
+                    self.dirty_since_sync.store(false, Ordering::Release);
+                }
+                ok
             } else {
                 write_ok
             };
@@ -205,7 +217,40 @@ impl WalGroupCommit {
     /// Force a durable `fsync` of the sink (level 2 → level 3). Used by the
     /// `synced` durability tier at batch granularity.
     pub async fn sync_now(&self) -> DbResult<()> {
-        self.sink.sync().await
+        let res = self.sink.sync().await;
+        if res.is_ok() {
+            self.dirty_since_sync.store(false, Ordering::Release);
+        }
+        self.fsync_count.fetch_add(1, Ordering::Relaxed);
+        res
+    }
+
+    /// Atomically read and clear the dirty flag. Returns `true` if a
+    /// Buffered append happened since the last fsync.
+    pub fn take_dirty(&self) -> bool {
+        self.dirty_since_sync.swap(false, Ordering::AcqRel)
+    }
+
+    /// Spawn a background task that fsyncs the WAL every `interval` IFF a
+    /// Buffered append happened since the last sync, bounding the power-loss
+    /// window for level-2 (Buffered) commits. Weak-ref lifecycle: the task
+    /// exits when the last `Arc<WalGroupCommit>` is dropped (no leak —
+    /// mirrors MemBufferStore's flusher). No-op sinks make `sync_now()` cheap.
+    pub fn spawn_background_fsync(self: &Arc<Self>, interval: Duration) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match weak.upgrade() {
+                    Some(g) => {
+                        if g.take_dirty() {
+                            let _ = g.sync_now().await;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        });
     }
 
     #[cfg(test)]
