@@ -168,6 +168,7 @@ If `cargo-nextest` is missing on a fresh checkout:
 cargo install cargo-nextest --locked
 ```
 The wrapper checks for it and exits with an installation hint.
+Pinned baseline: **0.9.137** — see `.config/nextest.toml` header for the guard-coupling note.
 
 **Quick mode is default.** Benches run in QUICK mode by default —
 sample_size=10, measurement=1s, warm_up=1s — completing every variant
