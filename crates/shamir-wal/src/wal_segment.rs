@@ -83,9 +83,9 @@ impl WalSegment {
                     .and_then(|_| f.write_all(&crc.to_le_bytes()))
                     .map_err(|e| DbError::Storage(format!("WalSegment append: {e}")))?;
             }
-            // Flush the userspace buffer to the OS page cache (level 2).
-            f.flush()
-                .map_err(|e| DbError::Storage(format!("WalSegment flush: {e}")))?;
+            // Level 2 (OS page cache) is reached by write_all itself — the
+            // write() syscall copies data into kernel buffers. std::fs::File
+            // is unbuffered, so there is no userspace buffer to flush.
             Ok(())
         })
         .await
@@ -93,14 +93,15 @@ impl WalSegment {
         Ok(last_seq)
     }
 
-    /// fsync the segment (level 3). Call after `append_batch` for the
-    /// Synced tier, or on a background timer to bound the power-loss
-    /// window for level-2 appends.
+    /// fsync the segment (level 3). Uses `sync_all()` (not `sync_data()`)
+    /// because this is a growing append-only file: metadata (file size) must
+    /// be flushed alongside data to guarantee the new extent is visible after
+    /// power loss on all platforms.
     pub async fn sync(&self) -> DbResult<()> {
         let file = Arc::clone(&self.file);
         spawn_blocking(move || -> DbResult<()> {
             let f = file.lock().expect("WalSegment file mutex poisoned");
-            f.sync_data()
+            f.sync_all()
                 .map_err(|e| DbError::Storage(format!("WalSegment sync: {e}")))
         })
         .await
@@ -138,7 +139,12 @@ impl WalSegment {
                     buf[pos + 7 + len],
                 ]);
                 if crc32fast::hash(payload) != crc_stored {
-                    break; // corrupt / torn frame — stop
+                    log::warn!(
+                        "WalSegment replay: CRC mismatch at byte offset {pos} \
+                         (full frame present but payload corrupted); \
+                         discarding this frame and all remaining data"
+                    );
+                    break;
                 }
                 out.push(WalEntryV2::decode(payload)?);
                 pos = frame_end;
