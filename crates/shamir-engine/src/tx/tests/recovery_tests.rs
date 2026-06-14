@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use shamir_query_builder::write::{self, doc};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -665,6 +666,89 @@ async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     assert!(
         matches!(read_back, InnerValue::Str(ref s) if s == "durable"),
         "expected recovered Str(\"durable\"), got {read_back:?}"
+    );
+}
+
+/// F4b-4 end-to-end process-crash recovery proof for a NON-TX write over the
+/// FILE WAL (level-2).
+///
+/// Before F4b the non-tx batch INSERT path emitted a V1 per-table WAL marker
+/// (`WalManager::begin_with_delta`/`commit`); F4b routes every non-tx batch
+/// write through an implicit Snapshot tx so it folds into ONE `WalEntryV2` on
+/// the repo file WAL — exactly like a real tx. F4b-4 removed the now-dead V1
+/// emission; this test proves the non-tx write is still crash-recoverable, now
+/// purely from the file WAL.
+///
+/// The query_runner is not easily callable from an engine-level test (it needs
+/// a `TableResolver`), so we drive the implicit-tx pipeline directly the same
+/// way `run_implicit_batch_tx` does: open a Snapshot tx, mark it implicit,
+/// stage the insert via `execute_insert_tx`, and commit. Then DROP the repo
+/// WITHOUT clean shutdown (process-crash model, level-2 Buffered contract),
+/// reopen over the SAME tempdir, run recovery, and assert the record reads
+/// back — recovered purely by replaying the file WAL.
+#[tokio::test]
+async fn f4b_nontx_insert_crash_recovery() {
+    use shamir_tx::IsolationLevel;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
+
+    // === Phase A: open disk repo, perform a non-tx batch INSERT through the
+    //     implicit-tx pipeline (mirrors `run_implicit_batch_tx`). ===
+    let rid;
+    {
+        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let repo = RepoInstance::from_factory("f4b".into(), factory, vec![TableConfig::new("t")])
+            .await
+            .expect("from_factory");
+        let tbl = repo.get_table("t").await.unwrap();
+
+        let op = write::insert("t")
+            .row(doc().set("name", "nontx_durable"))
+            .build();
+
+        // Implicit single-op BATCH tx: Snapshot isolation (never aborts on
+        // SSI), marked implicit — exactly what the non-tx query_runner branch
+        // does.
+        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        tx.set_implicit(true);
+        let wr = tbl.execute_insert_tx(&op, &mut tx, true).await.unwrap();
+        repo.commit_tx(tx).await.unwrap();
+
+        // Capture the assigned record id from the returned result record.
+        let id_str = wr.records[0].as_json()["_id"]
+            .as_str()
+            .expect("_id present in insert result")
+            .to_string();
+        rid = id_str.parse::<RecordId>().expect("parse RecordId");
+
+        // === Phase B: SIMULATED CRASH — drop without clean shutdown. ===
+        // The committed entry lives in the file WAL (level 2, survives a
+        // process crash). We deliberately do NOT flush/checkpoint.
+        drop(repo);
+    }
+
+    // === Phase C: reopen a fresh instance over the SAME tempdir. ===
+    let repo2 = reopen_sled_repo("f4b", path.clone(), vec![TableConfig::new("t")]).await;
+    let tbl2 = repo2.get_table("t").await.unwrap();
+
+    // === Phase D: recovery replays the file WAL. ===
+    let recovered = repo2.recover_v2_inflight().await.unwrap();
+    assert!(
+        recovered >= 1,
+        "expected at least one entry replayed from the file WAL for the \
+         non-tx insert, got {recovered}"
+    );
+
+    // === VERIFY: the non-tx-inserted record is present (recovered from WAL). ===
+    let read_back = tbl2.get(rid).await.unwrap_or_else(|e| {
+        panic!("non-tx record {rid:?} must be recovered from the file WAL, got error: {e}")
+    });
+    let interner = tbl2.interner().get().await.unwrap();
+    let json = shamir_types::codecs::interned::inner_to_json_value(&read_back, interner).unwrap();
+    assert_eq!(
+        json["name"], "nontx_durable",
+        "expected recovered non-tx record with name=nontx_durable, got {json:?}"
     );
 }
 

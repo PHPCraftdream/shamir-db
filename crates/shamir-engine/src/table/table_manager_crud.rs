@@ -210,26 +210,13 @@ impl TableManager {
             (ids, 0)
         };
 
-        // 3. Open a WAL marker — records the record_ids we just
-        //    inserted so that crash recovery can scope its check
-        //    to exactly these records. The marker write is one
-        //    info_store.set call; on backends with eventual flush
-        //    (sled / redb-Durability::None) it amortises through
-        //    the same flush window as the rest of the batch — no
-        //    extra fsync on the happy path.
-        //
-        //    Gap: a crash between step 2 and step 3 leaves orphan
-        //    records in data_store with no WAL marker; doctor's
-        //    full-rebuild (`TableManager::repair()`) handles that
-        //    fallback case.
-        let txn_id = self.wal.fresh_txn_id();
-        self.wal
-            .begin_with_delta(
-                txn_id,
-                shamir_wal::WalManager::ops_record_created(&ids),
-                ids.len() as i64,
-            )
-            .await?;
+        // F4b-4: the V1 per-table WAL marker (`begin_with_delta`/`commit`)
+        // is GONE. This batched non-tx insert path is now reachable only via
+        // the query_runner's non-tx branch — which routes through the implicit
+        // Snapshot tx (`run_implicit_batch_tx` → `execute_insert_tx`) and emits
+        // ONE `WalEntryV2` to the repo file WAL — and from tests. Crash
+        // recoverability is therefore owned by the file WAL, not the V1 marker.
+        // (`shamir_wal::WalManager` + V1 codec removal is deferred to F5.)
 
         // 4. counter + indexes (all in info_store).
         self.counter.increment(ids.len() as i64).await?;
@@ -247,22 +234,16 @@ impl TableManager {
             self.index2_on_insert(id, value).await;
         }
 
-        // 5. Clear the WAL marker — durable batch from here on.
-        self.wal.commit(txn_id).await?;
-
-        // 6. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES
+        // 5. Bump the watchdog. Every AUTO_VERIFY_EVERY_N_WRITES
         //    operations a background verify fires and logs any
         //    inconsistency. Non-blocking, single-flight, best-
         //    effort signal.
         self.bump_write_counter(ids.len() as u64);
 
-        // SSI footprint: record the batch insert so Serializable txs see it.
-        // One CommitWriteRecord at batch_version with all SetPosting keys.
-        let ssi_ops = self
-            .sorted_indexes
-            .plan_records_created_batch(ids.iter().zip(values.iter()), batch_version)
-            .unwrap_or_default();
-        self.record_nontx_ssi_footprint(batch_version, &ssi_ops);
+        // F4b-4: the SSI footprint for this batch is now recorded by the
+        // implicit-tx commit path (`gate.record_commit_writes`), since the only
+        // live caller (query_runner non-tx branch) routes through that tx. The
+        // redundant `record_nontx_ssi_footprint` call was removed here.
 
         Ok((ids, batch_version))
     }
