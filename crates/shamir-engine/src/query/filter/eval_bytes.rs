@@ -598,7 +598,9 @@ fn eval_node_raw(node: &FilterNode, bytes: &[u8]) -> Option<bool> {
         | FilterNode::Regex { .. }
         | FilterNode::Contains { .. }
         | FilterNode::ContainsAny { .. }
+        | FilterNode::ContainsAnySet { .. }
         | FilterNode::ContainsAll { .. }
+        | FilterNode::ContainsAllSet { .. }
         | FilterNode::Between { .. }
         | FilterNode::FtsMatch { .. }
         | FilterNode::ComputedCompare { .. }

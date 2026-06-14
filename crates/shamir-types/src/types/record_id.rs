@@ -2,7 +2,9 @@ use crate::types::base::{self, Base58Error};
 use bytes::Bytes;
 use chrono::Utc;
 use rand::RngCore;
+use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fmt;
 use std::str::FromStr;
 
@@ -27,13 +29,17 @@ impl RecordId {
         let relative_micros = now_micros.saturating_sub(CUSTOM_EPOCH_MICROS);
         bytes[0..8].copy_from_slice(&relative_micros.to_be_bytes());
 
-        // Random part — `thread_rng` is a thread-local ChaCha
-        // CSPRNG re-seeded periodically from `OsRng`. Per-call
-        // cost is ~5 ns (pure user-space) vs. ~150 ns for
-        // `OsRng` (BCryptGenRandom syscall on Windows). RecordId
-        // gets called once per inserted record, so this is the
-        // dominant non-timestamp cost on hot insert paths.
-        rand::thread_rng().fill_bytes(&mut bytes[8..16]);
+        // Random part — thread-local Xoshiro256++ seeded once from OsRng.
+        // ~1-2 ns/call vs ~5 ns for ChaCha (thread_rng). Xoshiro256++ has
+        // excellent statistical quality (passes BigCrush) and is sufficient
+        // for collision-resistant IDs; CSPRNG is unnecessary here.
+        thread_local! {
+            static RNG: RefCell<Xoshiro256PlusPlus> = {
+                use rand::SeedableRng;
+                RefCell::new(Xoshiro256PlusPlus::from_entropy())
+            };
+        }
+        RNG.with(|rng| rng.borrow_mut().fill_bytes(&mut bytes[8..16]));
         Self(bytes)
     }
 

@@ -2372,7 +2372,7 @@ dependencies = [
  "metrics",
  "quanta",
  "rand 0.9.2",
- "rand_xoshiro",
+ "rand_xoshiro 0.7.0",
  "sketches-ddsketch",
 ]
 
@@ -3099,6 +3099,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_xoshiro"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
+dependencies = [
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -4121,10 +4130,8 @@ dependencies = [
  "indexmap",
  "log",
  "num-bigint",
- "once_cell",
- "parking_lot 0.12.5",
  "rand 0.8.5",
- "regex",
+ "rand_xoshiro 0.6.0",
  "rmp",
  "rmp-serde",
  "rmpv",

@@ -113,11 +113,24 @@ impl Store for InMemoryStore {
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        // Idempotent upsert: remove (capturing prior existence), then insert.
-        // Two epoch-protected ops; a concurrent reader between them sees the
-        // pre-existing value through `peek_with` (no torn state visible).
-        let existed = self.data.remove(&key);
-        let _ = self.data.insert(key, value);
+        // Optimistic single-traversal path: try insert first (1 B+ tree
+        // walk). On collision, fall back to remove+insert — 2 traversals
+        // only when the key already exists. Avoids always-2-traversal of
+        // the prior remove+insert pattern.
+        let existed = match self.data.insert(key.clone(), value.clone()) {
+            Ok(()) => false, // new key — done in one traversal
+            Err((k, v)) => {
+                // Key already exists (insert rejected): remove then re-insert.
+                // scc::TreeIndex has no update-in-place API so 2 traversals
+                // are unavoidable for the update case. Concurrent readers
+                // may observe a brief absence between remove and insert;
+                // InMemoryStore is a single-session in-memory backend where
+                // this window is acceptable (no durability guarantee).
+                self.data.remove(&k);
+                let _ = self.data.insert(k, v);
+                true
+            }
+        };
         Ok(!existed)
     }
 

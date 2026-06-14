@@ -107,9 +107,23 @@ pub enum FilterNode {
         field_path: CompactPath,
         values: Vec<FilterValue>,
     },
+    /// Fast-path for `$contains_any` when ALL values are literals.
+    /// Each element of the field array is checked via O(1) `TSet::contains`
+    /// instead of the O(N×M) nested scan in `ContainsAny`.
+    ContainsAnySet {
+        field_path: CompactPath,
+        values: TSet<shamir_types::types::value::InnerValue>,
+    },
     ContainsAll {
         field_path: CompactPath,
         values: Vec<FilterValue>,
+    },
+    /// Fast-path for `$contains_all` when ALL values are literals.
+    /// Counts how many set members appear in the field array; passes when
+    /// the count equals `values.len()` — O(field_len) instead of O(N×M).
+    ContainsAllSet {
+        field_path: CompactPath,
+        values: TSet<shamir_types::types::value::InnerValue>,
     },
     Between {
         field_path: CompactPath,
@@ -332,6 +346,18 @@ impl FilterNode {
                 })
             }
 
+            FilterNode::ContainsAnySet { field_path, values } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                match field_val {
+                    InnerValue::List(list) => list.iter().any(|item| values.contains(item)),
+                    InnerValue::Set(set) => set.iter().any(|item| values.contains(item)),
+                    _ => false,
+                }
+            }
+
             FilterNode::ContainsAll { field_path, values } => {
                 let field_val = match resolve_field_ref(record, field_path) {
                     Some(v) => v,
@@ -352,6 +378,26 @@ impl FilterNode {
                         _ => false,
                     }
                 })
+            }
+
+            FilterNode::ContainsAllSet { field_path, values } => {
+                let field_val = match resolve_field_ref(record, field_path) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                // Count how many required values appear in the field array/set.
+                // Pass when every required value was found (count == values.len()).
+                let required = values.len();
+                let found = match field_val {
+                    InnerValue::List(list) => {
+                        list.iter().filter(|item| values.contains(*item)).count()
+                    }
+                    InnerValue::Set(set) => {
+                        set.iter().filter(|item| values.contains(*item)).count()
+                    }
+                    _ => return false,
+                };
+                found >= required
             }
 
             FilterNode::Between {

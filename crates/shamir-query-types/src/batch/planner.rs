@@ -42,9 +42,11 @@
 //! Stage 2 runs `orders` after Stage 1 completes.
 //! Stage 3 runs `stats` after Stage 2 completes.
 
+use std::collections::VecDeque;
+
 use crate::batch::{BatchError, BatchLimits, BatchOp, BatchPlan, QueryEntry};
 use crate::filter::Filter;
-use shamir_collections::{new_map, new_set, TMap, TSet};
+use shamir_collections::{new_map, new_set, THasher, TMap, TSet};
 use shamir_types::types::value::QueryValue;
 
 // Maximum stack depth for the iterative nesting-depth walk (safety cap).
@@ -328,47 +330,59 @@ impl BatchPlanner {
     }
 
     /// Detect cycle in dependency graph using DFS (white-gray-black algorithm).
+    ///
+    /// Uses borrow-based `HashSet<&str>` to avoid per-node `String` allocations
+    /// in the DFS hot loop. Only allocates when a cycle is found (rare / error path).
     fn detect_cycle(deps: &TMap<String, TSet<String>>) -> Option<Vec<String>> {
-        let mut white: TSet<String> = deps.keys().cloned().collect();
-        let mut gray: TSet<String> = new_set();
-        let mut black: TSet<String> = new_set();
+        use std::collections::HashSet;
 
-        fn dfs(
-            node: &str,
-            deps: &TMap<String, TSet<String>>,
-            white: &mut TSet<String>,
-            gray: &mut TSet<String>,
-            black: &mut TSet<String>,
-            path: &mut Vec<String>,
+        // Borrow-based sets — no allocations in the happy path.
+        let mut white: HashSet<&str, THasher> = deps.keys().map(String::as_str).collect();
+        let mut gray: HashSet<&str, THasher> = HashSet::with_hasher(THasher::default());
+        let mut black: HashSet<&str, THasher> = HashSet::with_hasher(THasher::default());
+
+        fn dfs<'a>(
+            node: &'a str,
+            deps: &'a TMap<String, TSet<String>>,
+            white: &mut HashSet<&'a str, THasher>,
+            gray: &mut HashSet<&'a str, THasher>,
+            black: &mut HashSet<&'a str, THasher>,
+            path: &mut Vec<&'a str>,
         ) -> Option<Vec<String>> {
-            white.shift_remove(node);
-            gray.insert(node.to_string());
-            path.push(node.to_string());
+            white.remove(node);
+            gray.insert(node);
+            path.push(node);
 
             if let Some(neighbors) = deps.get(node) {
                 for neighbor in neighbors {
-                    if gray.contains(neighbor) {
-                        // Found cycle - extract it
-                        let cycle_start = path.iter().position(|n| n == neighbor)?;
-                        return Some(path[cycle_start..].to_vec());
+                    let nb: &str = neighbor.as_str();
+                    if gray.contains(nb) {
+                        // Found cycle — allocate only here (error path).
+                        let cycle_start = path.iter().position(|&n| n == nb)?;
+                        return Some(path[cycle_start..].iter().map(|&s| s.to_string()).collect());
                     }
-                    if white.contains(neighbor) {
-                        if let Some(cycle) = dfs(neighbor, deps, white, gray, black, path) {
+                    if white.contains(nb) {
+                        if let Some(cycle) = dfs(nb, deps, white, gray, black, path) {
                             return Some(cycle);
                         }
                     }
                 }
             }
 
-            gray.shift_remove(node);
-            black.insert(node.to_string());
+            gray.remove(node);
+            black.insert(node);
             path.pop();
             None
         }
 
-        while let Some(node) = white.iter().next().cloned() {
-            let mut path = Vec::new();
-            if let Some(cycle) = dfs(&node, deps, &mut white, &mut gray, &mut black, &mut path) {
+        // Collect keys once so we can iterate without borrowing `white` mutably.
+        let all_nodes: Vec<&str> = deps.keys().map(String::as_str).collect();
+        for node in all_nodes {
+            if !white.contains(node) {
+                continue;
+            }
+            let mut path: Vec<&str> = Vec::new();
+            if let Some(cycle) = dfs(node, deps, &mut white, &mut gray, &mut black, &mut path) {
                 return Some(cycle);
             }
         }
@@ -445,41 +459,66 @@ impl BatchPlanner {
         max
     }
 
-    /// Topological sort into parallel stages.
+    /// Topological sort into parallel stages using Kahn's algorithm — O(V+E).
     ///
     /// Each stage contains queries whose dependencies are all satisfied
-    /// by previous stages.
+    /// by previous stages. Ties within a stage are broken by insertion order
+    /// (`order` slice) for deterministic output.
     fn topological_sort(deps: &TMap<String, TSet<String>>, order: &[String]) -> Vec<Vec<String>> {
+        // Build a position map for O(1) tie-breaking.
+        let pos: TMap<&str, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.as_str(), i))
+            .collect();
+
+        // In this DAG an edge A→B means "A depends on B, so B must run first".
+        // For Kahn's we need the *reverse* adjacency (B→A: "completing B unblocks A")
+        // and in-degree[A] = number of A's dependencies.
+
+        // in_degree[node] = how many deps the node still has outstanding.
+        let mut in_degree: TMap<&str, usize> =
+            deps.keys().map(|k| (k.as_str(), deps[k].len())).collect();
+
+        // reverse_adj[dep] = list of nodes that depend on `dep`.
+        let mut reverse_adj: TMap<&str, Vec<&str>> =
+            deps.keys().map(|k| (k.as_str(), vec![])).collect();
+        for (node, neighbors) in deps {
+            for n in neighbors {
+                if let Some(list) = reverse_adj.get_mut(n.as_str()) {
+                    list.push(node.as_str());
+                }
+            }
+        }
+
+        // Seed the queue with zero-in-degree nodes (no dependencies).
+        let mut queue: VecDeque<&str> = in_degree
+            .iter()
+            .filter_map(|(&k, &v)| if v == 0 { Some(k) } else { None })
+            .collect();
+
         let mut stages: Vec<Vec<String>> = Vec::new();
-        let mut completed: TSet<String> = new_set();
-        let mut remaining: TSet<String> = deps.keys().cloned().collect();
 
-        while !remaining.is_empty() {
-            // Find all queries whose dependencies are satisfied
-            let mut ready: Vec<String> = remaining
-                .iter()
-                .filter(|alias| {
-                    deps.get(*alias)
-                        .map(|d| d.is_subset(&completed))
-                        .unwrap_or(true)
-                })
-                .cloned()
-                .collect();
+        while !queue.is_empty() {
+            // Collect the current wave, sort by original insertion order.
+            let mut wave: Vec<&str> = queue.drain(..).collect();
+            wave.sort_by_key(|&s| pos.get(s).copied().unwrap_or(usize::MAX));
 
-            if ready.is_empty() && !remaining.is_empty() {
-                // Should not happen if we validated for cycles
-                break;
+            // For each completed node, decrement in-degree of dependents.
+            for &node in &wave {
+                if let Some(dependents) = reverse_adj.get(node) {
+                    for &dep_node in dependents {
+                        if let Some(deg) = in_degree.get_mut(dep_node) {
+                            *deg -= 1;
+                            if *deg == 0 {
+                                queue.push_back(dep_node);
+                            }
+                        }
+                    }
+                }
             }
 
-            // Sort by original order for deterministic output
-            ready.sort_by_key(|a| order.iter().position(|x| x == a).unwrap_or(usize::MAX));
-
-            for alias in &ready {
-                remaining.shift_remove(alias);
-                completed.insert(alias.clone());
-            }
-
-            stages.push(ready);
+            stages.push(wave.into_iter().map(str::to_string).collect());
         }
 
         stages

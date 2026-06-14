@@ -92,17 +92,11 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             None => FilterNode::False,
         },
         Filter::ContainsAny { field, values } => match intern_field_path_compact(field, interner) {
-            Some(path) => FilterNode::ContainsAny {
-                field_path: path,
-                values: values.clone(),
-            },
+            Some(path) => compile_contains_any_node(path, values),
             None => FilterNode::False,
         },
         Filter::ContainsAll { field, values } => match intern_field_path_compact(field, interner) {
-            Some(path) => FilterNode::ContainsAll {
-                field_path: path,
-                values: values.clone(),
-            },
+            Some(path) => compile_contains_all_node(path, values),
             None => FilterNode::False,
         },
         Filter::Between { field, from, to } => match intern_field_path_compact(field, interner) {
@@ -220,6 +214,58 @@ fn compile_in_node(
             values: values.to_vec(),
             pre_resolved: resolved,
             negate,
+        }
+    }
+}
+
+/// Build a compiled `$contains_any` node.
+///
+/// When ALL `values` are literals, materialise them into a `TSet<InnerValue>`
+/// and emit `FilterNode::ContainsAnySet` for O(1) per-element membership checks
+/// instead of the O(N×M) nested scan in `ContainsAny`.
+fn compile_contains_any_node(
+    path: super::filter_node::CompactPath,
+    values: &[FilterValue],
+) -> FilterNode {
+    let resolved: Vec<Option<shamir_types::types::value::InnerValue>> =
+        values.iter().map(filter_value_to_inner).collect();
+    if resolved.iter().all(Option::is_some) {
+        let set: TSet<shamir_types::types::value::InnerValue> =
+            resolved.into_iter().flatten().collect();
+        FilterNode::ContainsAnySet {
+            field_path: path,
+            values: set,
+        }
+    } else {
+        FilterNode::ContainsAny {
+            field_path: path,
+            values: values.to_vec(),
+        }
+    }
+}
+
+/// Build a compiled `$contains_all` node.
+///
+/// When ALL `values` are literals, materialise them into a `TSet<InnerValue>`
+/// and emit `FilterNode::ContainsAllSet` for O(field_len) counting instead of
+/// the O(N×M) nested scan in `ContainsAll`.
+fn compile_contains_all_node(
+    path: super::filter_node::CompactPath,
+    values: &[FilterValue],
+) -> FilterNode {
+    let resolved: Vec<Option<shamir_types::types::value::InnerValue>> =
+        values.iter().map(filter_value_to_inner).collect();
+    if resolved.iter().all(Option::is_some) {
+        let set: TSet<shamir_types::types::value::InnerValue> =
+            resolved.into_iter().flatten().collect();
+        FilterNode::ContainsAllSet {
+            field_path: path,
+            values: set,
+        }
+    } else {
+        FilterNode::ContainsAll {
+            field_path: path,
+            values: values.to_vec(),
         }
     }
 }
