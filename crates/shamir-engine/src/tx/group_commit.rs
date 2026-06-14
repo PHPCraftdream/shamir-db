@@ -22,7 +22,7 @@ use tokio::sync::oneshot;
 use crate::repo::RepoInstance;
 use crate::tx::commit::{maybe_crash, release_pessimistic_locks, TxError};
 use crate::tx::commit_phases::promote_vectors;
-use crate::tx::materialize::{materialize, post_publish_cleanup, PostPublishState};
+use crate::tx::materialize::{materialize, post_publish_cleanup};
 use crate::tx::pre_commit::pre_commit_locked_validate;
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};
 
@@ -240,55 +240,72 @@ pub(super) async fn run_leader(
 
     maybe_crash("phase4", repo).await;
 
-    // Step 4: Per-survivor materialize + publish (under lock).
+    // Step 4: Record SSI footprints UNDER lock, release locks, notify followers,
+    // then materialize OUTSIDE lock (P2b).
     struct PostWork {
         tx: TxContext,
         commit_version: u64,
-        post_publish: PostPublishState,
+        uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
         changefeed_event: Option<shamir_tx::ChangelogEvent>,
         is_leader: bool,
     }
 
     let mut post_works: Vec<PostWork> = Vec::with_capacity(validated.len());
 
-    for mut v in validated {
+    for v in &validated {
         let commit_version = v.commit_version;
+        // Phase 6-bis (Phase C): record SSI write footprint UNDER commit_lock
+        // so the next batch's SSI validation sees this tx's writes (P2b).
+        gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&v.tx, commit_version));
         release_pessimistic_locks(&v.tx, repo).await;
-
-        let changefeed_event = shamir_tx::project_event(&v.tx, repo.name(), commit_version);
-        let post_publish = materialize(&mut v.tx, repo, gate, commit_version, v.uwl_guards).await;
         repo.tx_metrics().on_tx_committed();
+    }
 
-        // Notify follower.
+    // Notify followers that their tx committed (version assigned, WAL durable,
+    // footprint recorded). They can proceed while materialize runs.
+    for v in &validated {
         if !v.is_leader {
             if let Some(sender) = panic_guard.senders[v.pg_idx].take() {
-                let _ = sender.send(Ok(commit_version));
+                let _ = sender.send(Ok(v.commit_version));
             }
         }
+    }
 
+    // Release the commit lock — materialize runs outside it (P2b).
+    drop(commit_guard);
+    // Disarm panic guard safely (all followers notified, versions recorded in P1c).
+    panic_guard.senders.clear();
+    panic_guard.versions.clear();
+    std::mem::forget(panic_guard);
+
+    // Consume validated into post_works (need ownership for materialize's &mut tx).
+    for v in validated {
+        let changefeed_event = shamir_tx::project_event(&v.tx, repo.name(), v.commit_version);
         post_works.push(PostWork {
             tx: v.tx,
-            commit_version,
-            post_publish,
+            commit_version: v.commit_version,
+            uwl_guards: v.uwl_guards,
             changefeed_event,
             is_leader: v.is_leader,
         });
     }
-
-    // Step 5: Release lock, run post-lock work.
-    drop(commit_guard);
-    // Disarm panic guard safely (all followers notified, versions materialized in P1c).
-    panic_guard.senders.clear();
-    panic_guard.versions.clear();
-    std::mem::forget(panic_guard);
 
     let mut leader_version = 0u64;
     let mut leader_materialization = MaterializationState::Complete;
     let mut leader_snapshot = 0u64;
     let mut leader_tx_id = 0u64;
 
-    for work in post_works {
-        let mat = post_publish_cleanup(work.post_publish, repo, gate, wal).await;
+    // P2b: materialize each survivor OUTSIDE commit_lock, gated by uwl_guards.
+    for mut work in post_works {
+        let post_publish = materialize(
+            &mut work.tx,
+            repo,
+            gate,
+            work.commit_version,
+            work.uwl_guards,
+        )
+        .await;
+        let mat = post_publish_cleanup(post_publish, repo, gate, wal).await;
         if mat == MaterializationState::Deferred {
             repo.tx_metrics().on_tx_materialization_deferred();
         }
@@ -356,10 +373,16 @@ async fn run_single_tx(
     let commit_version = pre.commit_version;
     release_pessimistic_locks(&tx, repo).await;
 
-    let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
-    let post_publish = materialize(&mut tx, repo, gate, commit_version, pre.uwl_guards).await;
+    // Phase 6-bis (Phase C): record SSI write footprint UNDER commit_lock
+    // so the next batch's SSI validation sees this tx's writes (P2b).
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
     repo.tx_metrics().on_tx_committed();
     drop(commit_guard);
+
+    // P2b: materialize runs OUTSIDE commit_lock, gated by per-table
+    // uwl_guards. Disjoint-table commits proceed in parallel.
+    let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+    let post_publish = materialize(&mut tx, repo, gate, commit_version, pre.uwl_guards).await;
 
     let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
     if materialization == MaterializationState::Deferred {
