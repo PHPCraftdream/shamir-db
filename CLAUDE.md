@@ -132,6 +132,29 @@ What the wrapper guarantees:
 - A deadlocked test surfaces as `TIMEOUT [name]` after 180 s, not a
   3-hour silent hang.
 
+**NEVER grep / pipe-filter the test output.** Run `./scripts/test.sh`
+directly and read the full stream — or capture it to a file and grep the
+FILE. A `./scripts/test.sh … | grep "Summary|FAIL"` pipeline is BANNED: it
+(a) discards the per-test `SLOW [> 30s]` / `TIMEOUT [name]` lines that NAME a
+hanging test, and (b) masks the real exit code (a pipe returns grep's `0`).
+This has hidden real deadlocks. If you must cut noise:
+```
+./scripts/test.sh @x > run.log 2>&1; rc=$?
+grep -aE "Summary|FAIL|TIMEOUT|SLOW|ABORT|panic|leak" run.log; echo "exit=$rc"
+```
+— full log on disk, the grep surfaces the COMPLETE failure set (incl.
+SLOW/TIMEOUT), and `$rc` is the real nextest exit.
+
+**Hangs and test-locks are BUGS — hunt and fix them, never tolerate.** A
+`SLOW`/`TIMEOUT` marker is a deadlock / livelock / backpressure bug (in the
+code OR the test harness). Reproduce it (loop the suite under load — these
+surface under nextest's parallelism, often not in isolation), find the root
+(lock-order cycle, bounded-channel backpressure with no drain, a `Barrier`
+a task never reaches, a guard held across `.await`, runtime starvation),
+and FIX it. NEVER raise the timeout to paper over it. The wrapper also reaps
+stray test binaries on start so one hang can't wedge the next run's link
+(Windows LNK1104 cascade).
+
 **`cargo test` is BLOCKED outright** by the perimeter guard (cargo
 runner in `.cargo/config.toml`) — there is NO "allowed direct cargo
 test". Every narrow case the old guidance reached for already has a
