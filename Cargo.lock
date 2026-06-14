@@ -4155,6 +4155,7 @@ dependencies = [
  "bytes",
  "crc32fast",
  "futures",
+ "log",
  "serde",
  "serde_bytes",
  "shamir-storage",

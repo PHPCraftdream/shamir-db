@@ -94,6 +94,30 @@ async fn crc_detects_corruption() {
 }
 
 #[tokio::test]
+async fn corruption_in_first_frame_stops_replay_entirely() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+
+    let entries = [entry(1, 10), entry(2, 20)];
+    let payloads: Vec<Vec<u8>> = entries.iter().map(|e| e.encode().unwrap()).collect();
+    seg.append_batch(payloads).await.unwrap();
+
+    // Corrupt the FIRST frame's payload (flip a byte past the 4-byte len header).
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[6] ^= 0xFF; // inside first payload
+    std::fs::write(&path, &bytes).unwrap();
+
+    let replayed = seg.replay().await.unwrap();
+    // First frame CRC fails → replay returns 0; the valid second frame is NOT recovered.
+    assert_eq!(
+        replayed.len(),
+        0,
+        "corruption in first frame must stop replay; second frame must NOT be recovered"
+    );
+}
+
+#[tokio::test]
 async fn sync_after_append_succeeds() {
     let dir = TempDir::new().unwrap();
     let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
