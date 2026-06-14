@@ -34,9 +34,11 @@ impl TableResolver for TestResolver {
     }
 
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
-        Err(shamir_storage::error::DbError::NotFound(
-            "TestResolver does not support transactional repo lookups".into(),
-        ))
+        // F4b-1: non-tx inserts route through an implicit Snapshot tx, so the
+        // executor now resolves the repo even on the non-transactional path.
+        self.db.get_repo("default").ok_or_else(|| {
+            shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
+        })
     }
 }
 
