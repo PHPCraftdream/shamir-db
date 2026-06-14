@@ -48,9 +48,21 @@
 set -u
 
 if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev/null 2>&1; then
-    echo "ERROR: cargo-nextest is not installed." >&2
-    echo "Install: cargo install cargo-nextest --locked" >&2
-    exit 2
+    # Binary exists but not on PATH? Check common locations.
+    _found=""
+    for _dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin"; do
+        if [ -x "$_dir/cargo-nextest" ]; then
+            _found="$_dir"
+            break
+        fi
+    done
+    if [ -n "$_found" ]; then
+        export PATH="$_found:$PATH"
+    else
+        echo "ERROR: cargo-nextest is not installed." >&2
+        echo "Install: cargo install cargo-nextest --locked" >&2
+        exit 2
+    fi
 fi
 
 # ---------------------------------------------------------------------------
