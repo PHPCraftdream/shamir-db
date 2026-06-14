@@ -440,16 +440,14 @@ impl<'a> QueryRunner<'a> {
                     &subst_op
                 };
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => {
-                        table
-                            .execute_update_tx(op_ref, &ctx, tx)
-                            .await
-                            .map_err(|e| BatchError::QueryError {
-                                alias: alias.to_string(),
-                                message: e.to_string(),
-                                code: None,
-                            })?
-                    }
+                    Some(tx) => table
+                        .execute_update_tx(op_ref, &ctx, tx)
+                        .await
+                        .map_err(|e| BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        })?,
                     // F4b-2: "everything is a transaction" — a non-tx update
                     // routes through the implicit single-op BATCH transaction
                     // (same pattern as INSERT in F4b-1).
@@ -460,10 +458,7 @@ impl<'a> QueryRunner<'a> {
                                 .await
                                 .map_err(|e| BatchError::QueryError {
                                     alias: alias.to_string(),
-                                    message: format!(
-                                        "resolve_repo({}): {}",
-                                        table_ref.repo, e
-                                    ),
+                                    message: format!("resolve_repo({}): {}", table_ref.repo, e),
                                     code: None,
                                 })?;
                         let owned_op: shamir_query_types::write::UpdateOp = op_ref.clone();
@@ -495,14 +490,43 @@ impl<'a> QueryRunner<'a> {
                     }
                 })?;
                 let wr = match self.tx.as_deref_mut() {
-                    Some(tx) => table.execute_delete_tx(op, &ctx, tx).await,
-                    None => table.execute_delete(op, &ctx).await,
-                }
-                .map_err(|e| BatchError::QueryError {
-                    alias: alias.to_string(),
-                    message: e.to_string(),
-                    code: None,
-                })?;
+                    Some(tx) => table.execute_delete_tx(op, &ctx, tx).await.map_err(|e| {
+                        BatchError::QueryError {
+                            alias: alias.to_string(),
+                            message: e.to_string(),
+                            code: None,
+                        }
+                    })?,
+                    // F4b-3: "everything is a transaction" — a non-tx delete
+                    // routes through the implicit single-op BATCH transaction
+                    // (same pattern as INSERT in F4b-1 and UPDATE in F4b-2).
+                    None => {
+                        let repo =
+                            self.resolver
+                                .resolve_repo(&table_ref.repo)
+                                .await
+                                .map_err(|e| BatchError::QueryError {
+                                    alias: alias.to_string(),
+                                    message: format!("resolve_repo({}): {}", table_ref.repo, e),
+                                    code: None,
+                                })?;
+                        let owned_op: shamir_query_types::write::DeleteOp = op.clone();
+                        let owned_table = table.clone();
+                        let owned_refs = resolved_refs.clone();
+                        let owned_params = self.params.clone();
+                        let owned_actor = self.actor.clone();
+                        run_implicit_batch_tx(&repo, self.actor.clone(), alias, move |tx| {
+                            Box::pin(async move {
+                                let interner = owned_table.interner().get().await?;
+                                let ctx = FilterContext::new(interner, &owned_refs)
+                                    .with_actor(owned_actor)
+                                    .with_params(&owned_params);
+                                owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+                            })
+                        })
+                        .await?
+                    }
+                };
                 Ok(write_result_to_query_result(wr))
             }
 
