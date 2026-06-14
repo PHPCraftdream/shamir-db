@@ -67,7 +67,8 @@ pub use predicate_set::{
     key_in_interval, PredicateDep, PredicateSet, SORTED_PREFIX_LEN, SORTED_TAG,
 };
 pub use repo_tx_gate::{
-    build_footprint_from_tx, CommitWriteRecord, RepoTxGate, SnapshotGuard, TableWriteFootprint,
+    build_footprint_from_tx, record_conflicts, CommitWriteRecord, RepoTxGate, SnapshotGuard,
+    TableWriteFootprint,
 };
 pub use repo_wal_manager::RepoWalManager;
 pub use staging_store::StagingStore;

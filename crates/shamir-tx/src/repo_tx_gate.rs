@@ -447,7 +447,9 @@ impl RepoTxGate {
 
 /// PROPOSED (Phase C). Conflict-check for ONE committed record.
 /// Free function so it stays testable without a `RepoTxGate` instance.
-fn record_conflicts(rec: &CommitWriteRecord, dep: &crate::predicate_set::PredicateDep) -> bool {
+/// Public so the group-commit leader can check batch-local footprints
+/// against a survivor's predicates (inter-batch phantom detection, P3a).
+pub fn record_conflicts(rec: &CommitWriteRecord, dep: &crate::predicate_set::PredicateDep) -> bool {
     match dep {
         crate::predicate_set::PredicateDep::TableScan { table_token } => {
             rec.per_table.get(table_token).is_some_and(|f| f.touched)
