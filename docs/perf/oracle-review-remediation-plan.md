@@ -1,5 +1,7 @@
 # Execution Plan: Oracle review remediation — WAL group-fsync + cleanup
 
+> **Superseded in part** by `docs/perf/durability-model.md` (Реализация B — file WAL): the WAL-layer group-fsync over the KV store + watch\<u64\> generation design here was replaced by a file-backed WalSegment + per-entry-waiter WalGroupCommit.
+
 Follow-up to the Version Oracle (`version-oracle-execution-plan.md`,
 fully landed) addressing the post-implementation review. The review's
 six P2c/P3a findings + eight P3b findings collapse onto **one root
