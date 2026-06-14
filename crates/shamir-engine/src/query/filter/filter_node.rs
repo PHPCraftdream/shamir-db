@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 
 use regex::Regex;
+use shamir_collections::TSet;
 use smallvec::SmallVec;
 
 use super::eval_context::FilterContext;
@@ -79,6 +80,14 @@ pub enum FilterNode {
         /// Hoisting literal materialisation off the per-record path eliminates
         /// O(records × |list|) `String::clone` / `Vec::clone` allocations.
         pre_resolved: Vec<Option<shamir_types::types::value::InnerValue>>,
+        negate: bool,
+    },
+    /// Fast-path for `$in`/`$nin` when ALL values are literals.
+    /// Membership check is O(1) via `TSet<InnerValue>` (IndexSet + FxHasher)
+    /// instead of the O(N) linear scan in `In`.
+    InSet {
+        field_path: CompactPath,
+        values: TSet<shamir_types::types::value::InnerValue>,
         negate: bool,
     },
     Like {
@@ -187,6 +196,22 @@ impl FilterNode {
                 resolve_field_ref(record, field_path),
                 None | Some(InnerValue::Null)
             ),
+
+            FilterNode::InSet {
+                field_path,
+                values,
+                negate,
+            } => {
+                let found = match resolve_field_ref(record, field_path) {
+                    Some(v) => values.contains(v),
+                    None => false,
+                };
+                if *negate {
+                    !found
+                } else {
+                    found
+                }
+            }
 
             FilterNode::In {
                 field_path,
