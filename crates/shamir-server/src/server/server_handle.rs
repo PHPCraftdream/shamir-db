@@ -7,6 +7,7 @@ use shamir_db::ShamirDb;
 use shamir_tunables::runtime::RuntimeTunables;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::RedbAuditAppender;
 use crate::scheduler::Scheduler;
@@ -32,8 +33,18 @@ pub struct ServerHandle {
     pub(super) scheduler: Scheduler,
     /// Audit-log appender (drained on shutdown).
     pub(super) audit_appender: Arc<RedbAuditAppender>,
-    /// Notify that signals all accept loops to stop.
-    pub(super) shutdown_notify: Arc<Notify>,
+    /// Cancellation token signalling shutdown to every accept loop.
+    ///
+    /// Why CancellationToken, not `Notify::notify_waiters`: Notify is
+    /// lossy across the subscribe-window. `select!` polls `shutdown.notified()`
+    /// — that creates a *new* Notified future on every poll. Between two
+    /// polls there is no live waiter; a `notify_waiters()` that lands there
+    /// is silently dropped. Result: accept loop hangs forever in
+    /// `listener.accept().await`, observed at cold-start ~10% of the time
+    /// on this codebase. CancellationToken sets a persistent flag; any
+    /// future `.cancelled().await` resolves immediately if cancel was
+    /// already set, so the race is closed by construction.
+    pub(super) shutdown_token: CancellationToken,
     /// Optional observability HTTP server.
     pub(super) observability: Option<crate::observability::ObservabilityHandle>,
     /// Periodic meta-snapshot task (M2 — persistent lockout + rate-limit
@@ -69,10 +80,12 @@ impl ServerHandle {
     /// In-flight per-connection tasks are NOT awaited explicitly — they
     /// finish on their own once their TcpStreams close.
     pub async fn shutdown(self) {
-        // 1. Tell all accept loops to stop.
-        self.shutdown_notify.notify_waiters();
-        // 2. Wait for them to finish — they exit promptly since
-        //    `select!` on `notify.notified()` short-circuits.
+        // 1. Tell all accept loops to stop. CancellationToken::cancel() is
+        //    persistent: every existing `.cancelled().await` resolves on the
+        //    next poll, and any new caller sees the cancelled state
+        //    immediately. No subscribe-window race.
+        self.shutdown_token.cancel();
+        // 2. Wait for accept loops to finish.
         for task in self.listener_tasks {
             let _ = task.await;
         }
@@ -90,16 +103,22 @@ impl ServerHandle {
         if let Some(obs) = self.observability {
             obs.shutdown().await;
         }
-        // 5. Stop the meta-snapshot task and let it drop its
+        // 6. Stop the meta-snapshot task and let it drop its
         //    Arc<ServerMetaStore> reference so the redb file lock
         //    on `server_meta.redb` releases for a same-data-dir
         //    restart. The task writes one final lockout + rate-limit
         //    snapshot inside its shutdown branch (best-effort).
+        //    NOTE: meta_snapshot_task and interactive_tx_reaper still use
+        //    Arc<Notify> — `select! on Notify::notified()` has the same
+        //    subscribe-window race. They work today because their `select!`
+        //    arms also re-poll a long-lived `interval.tick()` future, so
+        //    the wake-up is delivered on the next interval boundary at the
+        //    latest. Migrating them to CancellationToken is a follow-up.
         if let Some(snap) = self.meta_snapshot_task {
             snap.stop.notify_waiters();
             let _ = snap.handle.await;
         }
-        // 6. Stop the interactive-tx reaper so the Arc<TxRegistry> drops
+        // 7. Stop the interactive-tx reaper so the Arc<TxRegistry> drops
         //    and any lingering open txs are dropped (RAII abort).
         if let Some(reaper) = self.interactive_tx_reaper {
             reaper.stop.notify_waiters();

@@ -37,6 +37,13 @@ tokio-rustls = "0.26"
 rustls = "0.23"
 futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
+# CancellationToken — persistent shutdown signal. Used in place of
+# tokio::sync::Notify::notify_waiters which is lossy across the
+# subscribe-window between polls (re-poll of `notified()` creates a
+# new future each time; a notify that lands between two polls when no
+# Notified future is alive is dropped). CancellationToken sets a flag
+# that all future `.cancelled()` callers observe immediately — race-free.
+tokio-util = "0.7"
 # WebSocket transport — re-exported types appear in `framer::WsFramer`'s
 # generic parameters and as the value the WS accept loop hands to it.
 tokio-tungstenite = "0.24"

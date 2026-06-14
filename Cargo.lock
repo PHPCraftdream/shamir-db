@@ -4010,6 +4010,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
