@@ -1,5 +1,6 @@
 //! V2 recovery tests (Stage 7.1.a skeleton + 7.1.c–d apply logic).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use shamir_storage::storage_in_memory::InMemoryRepo;
@@ -10,6 +11,32 @@ use shamir_wal::{WalEntryV2, WalOpV2};
 use crate::repo::{repo_token, BoxRepo, BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
+
+/// Retry helper for reopening a sled-backed repo on Windows, where sled's
+/// file lock is released lazily after `drop`. On non-Windows platforms this
+/// almost always succeeds on the first attempt.
+async fn reopen_sled_repo(name: &str, path: PathBuf, tables: Vec<TableConfig>) -> RepoInstance {
+    let mut last_err = None;
+    for _attempt in 0..10 {
+        match RepoInstance::from_factory(
+            name.into(),
+            BoxRepoFactory::sled_raw(path.clone()),
+            tables.clone(),
+        )
+        .await
+        {
+            Ok(r) => return r,
+            Err(e) => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!(
+        "reopen_sled_repo({name:?}) failed after 10 retries: {:?}",
+        last_err
+    );
+}
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -619,10 +646,9 @@ async fn f3_file_wal_process_crash_recovery_replays_committed_tx() {
     }
 
     // === Phase C: reopen a fresh instance over the SAME tempdir. ===
-    let factory = BoxRepoFactory::sled_raw(path.clone());
-    let repo2 = RepoInstance::from_factory("f3".into(), factory, vec![TableConfig::new("t")])
-        .await
-        .expect("reopen from_factory");
+    // Use the retry helper: on Windows, sled releases its file lock lazily
+    // after drop, so the reopen can occasionally fail on the first attempt.
+    let repo2 = reopen_sled_repo("f3", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
 
     // === Phase D: recovery replays the file WAL. ===
@@ -689,10 +715,9 @@ async fn f3_file_wal_replay_is_idempotent() {
     }
 
     // === Phase B: reopen over the same tempdir. ===
-    let factory = BoxRepoFactory::sled_raw(path.clone());
-    let repo2 = RepoInstance::from_factory("f3_idem".into(), factory, vec![TableConfig::new("t")])
-        .await
-        .expect("reopen from_factory");
+    // Use the retry helper: on Windows, sled releases its file lock lazily
+    // after drop, so the reopen can occasionally fail on the first attempt.
+    let repo2 = reopen_sled_repo("f3_idem", path.clone(), vec![TableConfig::new("t")]).await;
     let tbl2 = repo2.get_table("t").await.unwrap();
 
     // === Phase C: run recovery TWICE on the same open instance. ===
