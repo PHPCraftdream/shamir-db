@@ -305,30 +305,12 @@ impl TableManager {
             .unwrap_or(UpdateReturnMode::Changed);
         let wants_records = op.select.is_some();
 
-        // Open a WAL marker for the whole UPDATE batch. counter_delta
-        // is 0 because UPDATE doesn't change row count. Recovery for
-        // RecordUpdated reapplies index hooks idempotently against
-        // the current record value (post-restart it sees either the
-        // pre- or post-update value, depending on where the crash
-        // hit, but either is consistent with itself).
-        //
-        // Marker covers EVERY matched id, even ones whose merge
-        // turned out to be a no-op (`changed == false`) — keeps the
-        // recovery scope correct if a crash hit mid-merge.
-        let candidate_ids: Vec<RecordId> = matched.iter().map(|(id, _)| *id).collect();
-        let txn_id = if !candidate_ids.is_empty() {
-            let id = self.wal().fresh_txn_id();
-            self.wal()
-                .begin_with_delta(
-                    id,
-                    shamir_wal::WalManager::ops_record_updated(&candidate_ids),
-                    0,
-                )
-                .await?;
-            Some(id)
-        } else {
-            None
-        };
+        // F4b-4: the V1 per-table WAL marker for the UPDATE batch is GONE.
+        // This non-tx path is now reachable only via the query_runner's non-tx
+        // branch (which routes through the implicit Snapshot tx →
+        // `execute_update_tx` → one `WalEntryV2` to the repo file WAL) and from
+        // tests, so the V1 marker is dead. Crash recoverability is owned by the
+        // file WAL. (`shamir_wal::WalManager` removal is deferred to F5.)
 
         // Phase 1: merge + validate, collecting changed rows for batched write.
         let mut batch_pairs: Vec<(RecordId, InnerValue, InnerValue)> =
@@ -379,10 +361,6 @@ impl TableManager {
             affected = batch_pairs.len() as u64;
         }
 
-        // Clear the WAL marker — the UPDATE batch is durable.
-        if let Some(id) = txn_id {
-            self.wal().commit(id).await?;
-        }
         self.bump_write_counter(affected);
 
         // Persist any newly interned keys (set fields may have new keys)
@@ -555,6 +533,14 @@ impl TableManager {
                 result
             };
 
+        // F4b-4: this V1 per-table WAL marker is RETAINED (not dead). Unlike
+        // INSERT/UPDATE, `execute_delete` still has LIVE non-runner callers —
+        // `shamir-db` system_store (system_store.rs) and admin user/role
+        // teardown (execute/admin_users_roles.rs) call it directly, NOT through
+        // the implicit-tx query_runner path. Those callers rely on the V1
+        // marker for crash recoverability, so it stays until F5 migrates the
+        // single-record CRUD + direct-delete callers off the V1 codec.
+        //
         // Open a WAL marker spanning the whole DELETE batch.
         // counter_delta is set pessimistically to -|to_delete| (the
         // ids we INTEND to delete). If some ids turn out not to
