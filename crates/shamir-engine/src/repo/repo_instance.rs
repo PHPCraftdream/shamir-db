@@ -16,7 +16,7 @@ pub struct RepoInstance {
     name: String,
     repo: BoxRepo,
     configs: Arc<TDashMap<String, TableConfig>>,
-    tables: Arc<TDashMap<String, OnceCell<TableManager>>>,
+    tables: Arc<TDashMap<String, Arc<OnceCell<TableManager>>>>,
     /// Lazy-initialized RepoTxGate. Created on first call to `tx_gate()`.
     tx_gate: Arc<OnceCell<Arc<shamir_tx::RepoTxGate>>>,
     /// Lazy-initialized RepoWalManager. Created on first call to `repo_wal()`.
@@ -106,7 +106,7 @@ impl RepoInstance {
             configs_map.insert(cfg.name.clone(), cfg);
         }
 
-        let tables: TDashMap<String, OnceCell<TableManager>> = new_dash_map_wc(100);
+        let tables: TDashMap<String, Arc<OnceCell<TableManager>>> = new_dash_map_wc(100);
 
         Self {
             name,
@@ -167,10 +167,22 @@ impl RepoInstance {
     /// calls retry; no partial table is exposed. The clone of the cell
     /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
-        let cell = self
-            .tables
-            .entry(table_name.to_string())
-            .or_insert_with(OnceCell::new);
+        // Clone the `Arc<OnceCell>` out of the DashMap and DROP the shard
+        // guard BEFORE the init `.await`. DashMap shards are backed by a
+        // synchronous `RwLock`; holding the `entry()` write guard across the
+        // long-running `create_table_context().await` (which itself awaits
+        // store_get / tx_gate / changefeed init) is a guard-across-await
+        // deadlock: under runtime oversubscription every worker thread can
+        // become wedged on the OS `RwLock` of a shard whose guard-holder is
+        // parked at an `.await`, and a synchronous lock cannot yield. The
+        // `OnceCell` itself provides the single-init serialization — the
+        // shard lock only needs to protect the map insert, not the init.
+        let cell = Arc::clone(
+            self.tables
+                .entry(table_name.to_string())
+                .or_insert_with(|| Arc::new(OnceCell::new()))
+                .value(),
+        );
 
         // §B13: existence-check happens INSIDE the init closure, so it
         // is serialized with the actual context construction. Doing the
