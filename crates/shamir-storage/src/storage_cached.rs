@@ -4,7 +4,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::Stream;
-use shamir_types::types::common::{new_dash_map, TDashMap};
+use scc::TreeIndex;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -39,25 +39,37 @@ pub enum WriteMode {
 /// - Constructor: loads all data from inner into local cache
 /// - Reads: from cache first, fallback to inner on miss (lazy load)
 /// - Writes: depends on WriteMode (sync or async)
+///
+/// ## Cache structure:
+/// `scc::TreeIndex` — lock-free sorted B+ tree. Gives O(log N + k) prefix
+/// range scans (no collect+sort) and O(log N) point ops. Replaces the
+/// previous `DashMap` shape that did O(N log N) full-collect+sort on every
+/// `iter_stream` / `scan_prefix_stream` call.
 pub struct CachedStore {
     inner: Arc<dyn Store>,
-    cache: Arc<TDashMap<RecordKey, Bytes>>,
+    cache: Arc<TreeIndex<RecordKey, Bytes>>,
     mode: WriteMode,
     pending_writes: Arc<AtomicUsize>,
+    /// Tracks the number of entries in the cache.
+    /// `TreeIndex` has no O(1) `len()`, so we maintain a counter ourselves.
+    size: Arc<AtomicUsize>,
 }
 
 impl CachedStore {
     async fn new_with_mode(inner: Arc<dyn Store>, mode: WriteMode) -> DbResult<Self> {
         use futures::StreamExt;
 
-        let cache = Arc::new(new_dash_map());
+        let cache = Arc::new(TreeIndex::new());
+        let size = Arc::new(AtomicUsize::new(0));
 
         // Load ALL data from inner store into cache (streaming to avoid double allocation)
         let mut stream = inner.iter_stream(shamir_tunables::store_defaults::FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key, value) in batch {
-                cache.insert(key, value);
+                if cache.insert(key, value).is_ok() {
+                    size.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
 
@@ -66,6 +78,7 @@ impl CachedStore {
             cache,
             mode,
             pending_writes: Arc::new(AtomicUsize::new(0)),
+            size,
         })
     }
 
@@ -86,8 +99,8 @@ impl CachedStore {
         &self.inner
     }
 
-    /// Get reference to the cache (for inspection/debugging).
-    pub fn cache(&self) -> &Arc<TDashMap<RecordKey, Bytes>> {
+    /// Get reference to the underlying `TreeIndex` cache (for inspection/debugging).
+    pub fn cache(&self) -> &Arc<TreeIndex<RecordKey, Bytes>> {
         &self.cache
     }
 
@@ -98,7 +111,7 @@ impl CachedStore {
 
     /// Get number of entries currently in cache.
     pub fn cache_size(&self) -> usize {
-        self.cache.len()
+        self.size.load(Ordering::Relaxed)
     }
 
     /// Get number of pending async writes (0 for Sync mode).
@@ -111,8 +124,9 @@ impl CachedStore {
     pub async fn reload(&self) -> DbResult<()> {
         use futures::StreamExt;
 
-        // Clear current cache
+        // Clear current cache and reset size counter
         self.cache.clear();
+        self.size.store(0, Ordering::Relaxed);
 
         // Reload all data from inner (streaming)
         let mut stream = self
@@ -121,7 +135,9 @@ impl CachedStore {
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (key, value) in batch {
-                self.cache.insert(key, value);
+                if self.cache.insert(key, value).is_ok() {
+                    self.size.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
 
@@ -142,6 +158,18 @@ impl CachedStore {
 
         Ok(())
     }
+
+    /// Cache-internal upsert: remove old entry (updating size), then insert new.
+    /// Returns `true` if this was a new key (didn't exist before).
+    fn cache_upsert(&self, key: RecordKey, value: Bytes) -> bool {
+        let existed = self.cache.remove(&key);
+        if !existed {
+            self.size.fetch_add(1, Ordering::Relaxed);
+        }
+        // insert always succeeds after remove
+        let _ = self.cache.insert(key, value);
+        !existed
+    }
 }
 
 #[async_trait]
@@ -151,8 +179,9 @@ impl Store for CachedStore {
         // Async mode only applies to set/remove, not insert
         let key = self.inner.insert(value.clone()).await?;
 
-        // Cache the value immediately
-        self.cache.insert(key.clone(), value);
+        // Cache the value immediately (new key, so always increments size)
+        let _ = self.cache.insert(key.clone(), value);
+        self.size.fetch_add(1, Ordering::Relaxed);
         Ok(key)
     }
 
@@ -161,13 +190,12 @@ impl Store for CachedStore {
             WriteMode::Sync => {
                 // Write to both inner store and cache synchronously
                 let created = self.inner.set(key.clone(), value.clone()).await?;
-                self.cache.insert(key, value);
+                self.cache_upsert(key, value);
                 Ok(created)
             }
             WriteMode::Async => {
                 // Write to cache immediately
-                let existed = self.cache.contains_key(&key);
-                self.cache.insert(key.clone(), value.clone());
+                let created = self.cache_upsert(key.clone(), value.clone());
 
                 // Background write to inner store
                 let inner = self.inner.clone();
@@ -186,29 +214,34 @@ impl Store for CachedStore {
                     pending.fetch_sub(1, Ordering::Relaxed);
                 });
 
-                Ok(!existed)
+                Ok(created)
             }
         }
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         // Try cache first
-        if let Some(ref_) = self.cache.get(&key) {
-            return Ok(ref_.value().clone());
+        if let Some(v) = self.cache.peek_with(&key, |_, v| v.clone()) {
+            return Ok(v);
         }
 
         // Cache miss - load from inner store and cache it
         // This handles cases where inner was modified externally
         let value = self.inner.get(key.clone()).await?;
 
-        // Store in cache for future access
-        self.cache.insert(key, value.clone());
+        // Store in cache for future access (new entry → increment size)
+        if self.cache.insert(key, value.clone()).is_ok() {
+            self.size.fetch_add(1, Ordering::Relaxed);
+        }
 
         Ok(value)
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        let existed = self.cache.remove(&key).is_some();
+        let existed = self.cache.remove(&key);
+        if existed {
+            self.size.fetch_sub(1, Ordering::Relaxed);
+        }
 
         match self.mode {
             WriteMode::Sync => self.inner.remove(key).await,
@@ -241,22 +274,21 @@ impl Store for CachedStore {
         &self,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        let cache = self.cache.clone();
+        // Snapshot under an epoch guard; TreeIndex iter is already sorted —
+        // no collect+sort needed (was O(N log N) with the previous DashMap).
+        let entries: Vec<(RecordKey, Bytes)> = {
+            let g = scc::ebr::Guard::new();
+            self.cache
+                .iter(&g)
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
 
         Box::pin(stream! {
-            let all_items: Vec<(RecordKey, Bytes)> = cache
-                .iter()
-                .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
-                .collect();
-
-            let mut items = all_items;
-            items.sort_by(|a, b| a.0.cmp(&b.0)); // Sort for consistent ordering
-
-            while !items.is_empty() {
-                let batch: Vec<_> = items
-                    .drain(..std::cmp::min(batch_size, items.len()))
-                    .collect();
-
+            let mut entries = entries;
+            while !entries.is_empty() {
+                let take = std::cmp::min(batch_size, entries.len());
+                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
                 yield Ok(batch);
             }
         })
@@ -267,23 +299,22 @@ impl Store for CachedStore {
         prefix: Bytes,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        let cache = self.cache.clone();
+        // O(log N + matches) via TreeIndex::range from the prefix start.
+        // The previous DashMap shape did O(N) full-iter+filter+sort.
+        let entries: Vec<(RecordKey, Bytes)> = {
+            let g = scc::ebr::Guard::new();
+            self.cache
+                .range(prefix.clone().., &g)
+                .take_while(|(k, _)| k.starts_with(&prefix[..]))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
 
         Box::pin(stream! {
-            let matching_items: Vec<(RecordKey, Bytes)> = cache
-                .iter()
-                .filter(|ref_| ref_.key().starts_with(prefix.as_ref()))
-                .map(|ref_| (ref_.key().clone(), ref_.value().clone()))
-                .collect();
-
-            let mut items = matching_items;
-            items.sort_by(|a, b| a.0.cmp(&b.0)); // Sort for consistent ordering
-
-            while !items.is_empty() {
-                let batch: Vec<_> = items
-                    .drain(..std::cmp::min(batch_size, items.len()))
-                    .collect();
-
+            let mut entries = entries;
+            while !entries.is_empty() {
+                let take = std::cmp::min(batch_size, entries.len());
+                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
                 yield Ok(batch);
             }
         })
@@ -306,7 +337,9 @@ impl Store for CachedStore {
         // Invalidate cache for affected keys so subsequent reads
         // see the transacted state, not stale cached values.
         for k in keys {
-            self.cache.remove(&k);
+            if self.cache.remove(&k) {
+                self.size.fetch_sub(1, Ordering::Relaxed);
+            }
         }
         Ok(())
     }

@@ -63,7 +63,7 @@ async fn test_cached_store_sync_mode() {
     let value1 = InnerValue::Str("sync_value".to_string());
     let key1 = cached.insert(value1.to_bytes().unwrap()).await.unwrap();
 
-    assert!(cached.cache().get(&key1).is_some());
+    assert!(cached.cache().peek_with(&key1, |_, _| ()).is_some());
     assert!(inner.get(key1.clone()).await.is_ok());
 }
 
@@ -76,7 +76,7 @@ async fn test_cached_store_async_mode() {
     let value1 = InnerValue::Str("async_value".to_string());
     let key1 = cached.insert(value1.to_bytes().unwrap()).await.unwrap();
 
-    assert!(cached.cache().get(&key1).is_some());
+    assert!(cached.cache().peek_with(&key1, |_, _| ()).is_some());
 
     // May not be in inner yet (background write)
     // But eventually should be
