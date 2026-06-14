@@ -9,6 +9,7 @@
 use bytes::Bytes;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tx::version_codec::encode_version_key;
+use shamir_tx::CompletionState;
 use shamir_wal::WalOpV2;
 
 use crate::repo::RepoInstance;
@@ -260,10 +261,23 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
     for entry in entries {
         max_replayed = max_replayed.max(entry.commit_version);
         replay_v2_entry(&entry, repo).await?;
+        // P1d: mark version as materialized so the completion tracker
+        // rebuilds the contiguous prefix. Every durable WAL entry is
+        // treated as Materialized — there is no commit/abort marker
+        // distinction in the WAL (durable = committed). Legacy entries
+        // with commit_version == 0 are skipped (watermark already ≥ 0).
+        if entry.commit_version > 0 {
+            gate.completion()
+                .mark(entry.commit_version, CompletionState::Materialized);
+        }
         wal.commit(entry.txn_id).await?;
     }
 
     if count > 0 {
+        // P1d: sync last_committed from the tracker watermark so readers
+        // see the full recovered prefix without gaps.
+        gate.sync_last_committed_from_watermark();
+
         // Step 3: persist the (possibly advanced) floor so a clean
         // restart — which sees no inflight markers — still seeds the gate
         // above the recovered commit versions. `gate.last_committed()`

@@ -175,6 +175,46 @@ async fn recovery_advances_gate_past_replayed_commit_version() {
     assert_eq!(load_last_committed(&info).await.unwrap(), Some(10));
 }
 
+/// P1d: recovery rebuilds the completion-prefix. After replaying 3 durable
+/// WAL entries (V=1,2,3), the completion tracker watermark must equal 3 and
+/// last_committed must mirror it.
+#[tokio::test]
+async fn recovery_rebuilds_completion_prefix() {
+    let underlying = Arc::new(InMemoryRepo::new());
+
+    // Seed 3 inflight entries at commit_versions 1, 2, 3.
+    for v in 1..=3u64 {
+        let record = rid(v as u8);
+        let body = InnerValue::Str(format!("v{v}")).to_bytes().unwrap();
+        seed_inflight_put(&underlying, "t", record, body, v).await;
+    }
+
+    // === SIMULATED RESTART ===
+    let repo = RepoInstance::new(
+        "r".into(),
+        BoxRepo::InMemory(Arc::clone(&underlying)),
+        Vec::new(),
+    );
+    repo.add_table(TableConfig::new("t"));
+
+    let recovered = repo.recover_v2_inflight().await.unwrap();
+    assert_eq!(recovered, 3);
+
+    let gate = repo.tx_gate().await.unwrap();
+    // P1d: watermark must advance to 3 (all versions ≤ 3 are Materialized).
+    assert_eq!(
+        gate.completion().watermark(),
+        3,
+        "completion watermark must equal highest recovered commit_version"
+    );
+    // last_committed must mirror the watermark.
+    assert_eq!(
+        gate.last_committed(),
+        3,
+        "last_committed must equal the completion watermark after recovery"
+    );
+}
+
 /// Defence-in-depth for the marker re-persist: after recovery clears the
 /// inflight markers, a SECOND fresh `RepoInstance` over the same storage
 /// (no inflight entries left) must still seed its gate above the recovered
