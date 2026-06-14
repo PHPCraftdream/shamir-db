@@ -187,6 +187,13 @@ impl WalGroupCommit {
                     w.complete(write_ok && sync_ok);
                 }
             }
+            // Circuit breaker: on write or sync error, release leadership
+            // and return so the next append elects a fresh leader. Without
+            // this, a dead segment causes infinite spin.
+            if !write_ok || (needs_fsync && !sync_ok) {
+                self.flushing.store(false, Ordering::Release);
+                return;
+            }
         }
     }
 
