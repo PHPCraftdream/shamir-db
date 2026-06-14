@@ -659,3 +659,99 @@ fn test_normal_nesting_roundtrip_still_works() {
     let result = inner_to_msgpack(&interner, &inner).unwrap();
     assert_eq!(buf, result);
 }
+
+/// Property test: zerocopy decoder produces identical results to legacy rmpv-based decoder.
+#[test]
+fn test_zerocopy_vs_legacy_equivalence() {
+    use crate::codecs::interned::messagepack::msgpack_to_inner_legacy;
+
+    let interner = Interner::new();
+
+    // Collection of representative values to encode then decode both ways
+    let test_values: Vec<InnerValue> = vec![
+        InnerValue::Null,
+        InnerValue::Bool(true),
+        InnerValue::Bool(false),
+        InnerValue::Int(0),
+        InnerValue::Int(1),
+        InnerValue::Int(-1),
+        InnerValue::Int(127),
+        InnerValue::Int(-32),
+        InnerValue::Int(128),
+        InnerValue::Int(255),
+        InnerValue::Int(256),
+        InnerValue::Int(65535),
+        InnerValue::Int(65536),
+        InnerValue::Int(i32::MAX as i64),
+        InnerValue::Int(i32::MIN as i64),
+        InnerValue::Int(i64::MAX),
+        InnerValue::Int(i64::MIN),
+        InnerValue::F64(0.0),
+        InnerValue::F64(3.125),
+        InnerValue::F64(-1.5e100),
+        InnerValue::F64(f64::INFINITY),
+        InnerValue::F64(f64::NEG_INFINITY),
+        InnerValue::Str(String::new()),
+        InnerValue::Str("hello".into()),
+        InnerValue::Str("a".repeat(31)),  // fixstr boundary
+        InnerValue::Str("b".repeat(32)),  // str8
+        InnerValue::Str("c".repeat(256)), // str16
+        InnerValue::Bin(vec![]),
+        InnerValue::Bin(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        InnerValue::List(vec![]),
+        InnerValue::List(vec![
+            InnerValue::Int(1),
+            InnerValue::Str("two".into()),
+            InnerValue::Null,
+        ]),
+        // nested map
+        {
+            let mut m = new_map();
+            m.insert(
+                crate::codecs::interned::common::intern_string_key(&interner, "name").unwrap(),
+                InnerValue::Str("test".into()),
+            );
+            m.insert(
+                crate::codecs::interned::common::intern_string_key(&interner, "age").unwrap(),
+                InnerValue::Int(42),
+            );
+            m.insert(
+                crate::codecs::interned::common::intern_string_key(&interner, "nested").unwrap(),
+                {
+                    let mut inner_m = new_map();
+                    inner_m.insert(
+                        crate::codecs::interned::common::intern_string_key(&interner, "x").unwrap(),
+                        InnerValue::F64(1.5),
+                    );
+                    InnerValue::Map(inner_m)
+                },
+            );
+            InnerValue::Map(m)
+        },
+        // deeply nested array
+        InnerValue::List(vec![InnerValue::List(vec![InnerValue::List(vec![
+            InnerValue::Int(99),
+        ])])]),
+    ];
+
+    // Use a separate interner for legacy to avoid cross-contamination
+    for val in &test_values {
+        let interner_new = Interner::new();
+        let interner_old = Interner::new();
+
+        let encoded = inner_to_msgpack(&interner, val).unwrap();
+
+        let decoded_new = msgpack_to_inner(&interner_new, &encoded).unwrap();
+        let decoded_old = msgpack_to_inner_legacy(&interner_old, &encoded).unwrap();
+
+        // Compare structurally (keys may have different intern IDs, compare via re-encode)
+        let re_encoded_new = inner_to_msgpack(&interner_new, &decoded_new).unwrap();
+        let re_encoded_old = inner_to_msgpack(&interner_old, &decoded_old).unwrap();
+
+        assert_eq!(
+            re_encoded_new, re_encoded_old,
+            "Mismatch for value: {:?}",
+            val
+        );
+    }
+}
