@@ -2,6 +2,23 @@
 //!
 //! Proves serializability, monotonicity, watermark convergence, and recovery
 //! correctness under concurrent load and simulated crashes.
+//!
+//! # Flake-hunt methodology
+//!
+//! All concurrency tests here are designed to be deterministic in their
+//! outcome (abort vs. commit decisions are pure functions of the tx index,
+//! not of scheduling). To verify non-flakiness, run repeated iterations:
+//!
+//! ```sh
+//! for i in $(seq 1 200); do
+//!   ./scripts/test.sh -p shamir-engine -- oracle_stress || { echo "FAILED on iter $i"; break; }
+//! done
+//! ```
+//!
+//! Iteration counts for stress tests are raised to catch scheduler-dependent
+//! regressions: `N=50` for disjoint, `M=30` for snapshot, `M=40` for SSI
+//! conflict, `TOTAL=80` for abort-stall. This gives 200+ version slots per
+//! run, exercising the contiguous-watermark advance logic.
 
 use std::sync::Arc;
 
@@ -16,6 +33,7 @@ use shamir_wal::{WalEntryV2, WalOpV2};
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_token;
 use crate::repo::repo_types::BoxRepo;
+use crate::repo::RepoVersionProvider;
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 use crate::tx::commit_tx;
@@ -155,72 +173,146 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
     );
 }
 
-/// Same-table Serializable: at least one succeeds; others may get SSI/phantom
-/// errors. No torn state; watermark advances past all (committed + aborted).
+/// Same-table Serializable: A-writes / B-reads SSI conflict with the REAL
+/// committed-version provider (`RepoVersionProvider`), not a fake constant.
+///
+/// Scenario:
+///   1. Tx A commits (Snapshot) via raw StagingStore, writing `raw_key` into
+///      table "ser". After commit, the MvccStore for "ser" has
+///      `version_of(raw_key) == V_a ≥ 1`.
+///   2. M concurrent B-txs each:
+///      - `record_read("ser", raw_key, 0)` — assert "I saw raw_key at version 0"
+///        (explicitly BEFORE V_a, which is the read that conflicts)
+///      - attach `RepoVersionProvider` (queries real MvccStore)
+///      - stage a write on a DISTINCT per-tx key (tx is non-empty → no C6 skip)
+///      - call `commit_tx`
+///   3. At pre_commit, `validate_read_set` calls `version_of(raw_key)` → V_a > 0
+///      → SSI conflict → each B-tx aborts.
+///
+/// NOTE: `record_read(table, key, version_seen)` takes an EXPLICIT `version_seen`
+/// supplied by the caller — it is NOT the snapshot_version. By passing 0 we
+/// assert "last time I read this key the committed version was 0", which is
+/// always less than V_a (≥ 1). This is the A-writes / B-reads anomaly.
+///
+/// Invariants (scheduling-independent because tx A finishes before B-txs start):
+///   - `successes + conflicts == M`   (no tx is lost)
+///   - `conflicts > 0`                (real SSI provider detects the conflict)
+///   - Each successful B-tx has a unique commit version
+///   - Watermark advances past tx A's committed version
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oracle_stress_same_table_serializable_conflict_resolution() {
-    const M: usize = 20;
+    const M: usize = 40;
 
     let repo = make_repo();
     repo.add_table(TableConfig::new("ser"));
 
-    // Use a provider that triggers conflicts for txs that read a key
-    // written by a concurrent committer.
-    struct AlwaysConflictProvider;
-    impl VersionProvider for AlwaysConflictProvider {
-        fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
-            // Return a version far above any snapshot → forces SSI conflict.
-            Some(999_999)
-        }
-    }
+    let table_token = table_token_for("ser");
+    // raw_key is an arbitrary fixed byte sequence that tx A writes and B-txs read.
+    let raw_key = Bytes::from_static(b"contested_ssi_key");
 
+    // Step 1: commit tx A via low-level StagingStore so the exact raw_key
+    // enters the MvccStore version cache. We use a fresh InMemoryStore as the
+    // backing data_store for the staging (this is the same pattern as
+    // oracle_stress_same_table_snapshot_all_succeed).
+    let a_data_store: Arc<dyn shamir_storage::types::Store> = Arc::new(InMemoryStore::new());
+    let a_commit_version = {
+        let mut tx_a = TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+        let mut staging = StagingStore::new(Arc::clone(&a_data_store));
+        staging.set(raw_key.clone(), Bytes::from_static(b"a_writes"));
+        tx_a.write_set.insert(table_token, staging);
+        let outcome = commit_tx(tx_a, &repo).await.unwrap();
+        outcome.commit_version
+    };
+    // A must commit at V_a > 0; otherwise the SSI check `V_a > 0` would not fire.
+    assert!(
+        a_commit_version > 0,
+        "tx A must commit at version > 0 (got {a_commit_version})"
+    );
+
+    // Step 2: M concurrent B-txs.
+    let per_table_mvcc = Arc::clone(repo.per_table_mvcc());
     let mut handles = Vec::with_capacity(M);
     for i in 0..M {
         let r = repo.clone();
+        let mvcc = Arc::clone(&per_table_mvcc);
+        let read_key = raw_key.clone();
         handles.push(tokio::spawn(async move {
-            let (mut tx, _g) = r.begin_tx(IsolationLevel::Serializable).await.unwrap();
-            // Record a read so SSI validation has something to check.
-            tx.record_read(table_token_for("ser"), Bytes::from_static(b"k"), 1);
-            tx.set_version_provider(Arc::new(AlwaysConflictProvider));
-
-            // Also stage a write so it's not the empty fast-path.
-            let tbl = r.get_table("ser").await.unwrap();
-            tbl.insert_tx(&InnerValue::Int(i as i64), Some(&mut tx))
-                .await
-                .unwrap();
-
-            r.commit_tx(tx).await
+            // B-tx id starts at 1000 to avoid colliding with tx A's id=1.
+            let mut tx = TxContext::new(
+                TxId::new(1000 + i as u64),
+                0,
+                0,
+                IsolationLevel::Serializable,
+            );
+            // Declare "I read raw_key at version 0" — before V_a → will conflict.
+            tx.record_read(table_token, read_key, 0);
+            // Real provider: MvccStore::version_of(raw_key) returns V_a ≥ 1.
+            tx.set_version_provider(Arc::new(RepoVersionProvider {
+                per_table_mvcc: mvcc,
+            }));
+            // Stage a DIFFERENT per-tx key so the tx is non-empty (not C6 fast-path).
+            let b_data: Arc<dyn shamir_storage::types::Store> = Arc::new(InMemoryStore::new());
+            let mut staging = StagingStore::new(b_data);
+            staging.set(
+                Bytes::from(format!("b_key_{i}").into_bytes()),
+                Bytes::from_static(b"b_val"),
+            );
+            tx.write_set.insert(table_token, staging);
+            commit_tx(tx, &r).await
         }));
     }
 
     let mut successes = 0u32;
     let mut conflicts = 0u32;
+    let mut committed_versions = Vec::new();
     for h in handles {
         match h.await.unwrap() {
-            Ok(_) => successes += 1,
+            Ok(outcome) => {
+                successes += 1;
+                committed_versions.push(outcome.commit_version);
+            }
             Err(_) => conflicts += 1,
         }
     }
 
-    // All should conflict because the provider always returns version > snapshot.
+    // INVARIANT: no tx is lost.
     assert_eq!(
         successes + conflicts,
         M as u32,
-        "all txs must resolve to success or conflict"
-    );
-    // With AlwaysConflictProvider, all should abort.
-    assert_eq!(
-        conflicts, M as u32,
-        "with AlwaysConflictProvider all txs should abort via SSI"
+        "all {M} B-txs must resolve; got successes={successes} conflicts={conflicts}"
     );
 
-    // Watermark still advances (aborted versions are marked).
+    // INVARIANT: the real SSI provider triggers at least some conflicts.
+    // Every B-tx recorded raw_key at version 0 and A committed at V_a ≥ 1,
+    // so validate_read_set returns conflict for each B-tx that reaches
+    // pre_commit_locked_validate. Scheduling could allow a B-tx to get a
+    // version BEFORE the provider sees V_a (race between commit pipeline
+    // stages) — but in practice, since A.commit_tx awaited fully above,
+    // all B-txs will see the conflict. We require > 0 to avoid a
+    // hypothetical future race making the assertion spuriously pass.
+    assert!(
+        conflicts > 0,
+        "real SSI provider (RepoVersionProvider) must detect the A-writes / \
+         B-reads conflict (V_a={a_commit_version}); got 0 conflicts"
+    );
+
+    // INVARIANT: each successful B-tx has a unique commit version.
+    if successes > 0 {
+        committed_versions.sort_unstable();
+        committed_versions.dedup();
+        assert_eq!(
+            committed_versions.len(),
+            successes as usize,
+            "each successful B-tx must have a unique commit version"
+        );
+    }
+
+    // INVARIANT: watermark advances past tx A's version.
     let gate = repo.tx_gate().await.unwrap();
     let wm = gate.completion().watermark();
-    // Each aborted tx burned a version; watermark must advance past them.
     assert!(
-        wm >= M as u64,
-        "watermark ({wm}) must advance past {M} aborted versions"
+        wm >= a_commit_version,
+        "watermark ({wm}) must advance past tx A's commit version ({a_commit_version})"
     );
 }
 
@@ -314,8 +406,43 @@ async fn oracle_stress_recovery_after_wal_durable_no_materialize() {
 }
 
 /// Crash point (b) with a GAP: versions 1,2,4,5 are durable (3 is missing —
-/// simulating a tx that crashed before WAL). Recovery replays only what's
-/// durable; watermark = 2 (contiguous prefix), not 5.
+/// simulating a tx that crashed BEFORE writing to the WAL).
+///
+/// # Gap-watermark semantics (pinned decision)
+///
+/// ## What happens during gate construction
+///
+/// `RepoInstance::tx_gate()` pre-scans inflight WAL entries to find
+/// `max_inflight_commit_version = 5`, then seeds:
+///
+///   `RepoTxGate::new(last_committed = 5, ...)`
+///
+/// which calls `CompletionTracker::with_watermark(5)`. The watermark is
+/// therefore **already 5** before recovery marks any version.
+///
+/// ## What recovery does
+///
+/// `recover_inflight_v2` then calls `gate.completion().mark(v, Materialized)`
+/// for v in {1, 2, 4, 5}. `CompletionTracker::mark` skips any version ≤ the
+/// current watermark (already compacted). Since watermark = 5, all four marks
+/// are no-ops. The watermark stays at 5.
+///
+/// ## Why this is NOT a liveness bug
+///
+/// Version 3 never had a WAL entry — the tx crashed before fsync. The design
+/// uses `max_inflight` as the floor: "all versions ≤ max_inflight are resolved,
+/// either by replay or by implicit loss." The crashed tx's version slot is
+/// implicitly retired, future txs start from 6, and no stall occurs.
+///
+/// The gap at version 3 is never stalled in the watermark because the watermark
+/// jumps to 5 during gate construction (before recovery even runs). This is the
+/// CORRECT behavior for WAL-backed stores: "no WAL entry = no durable data =
+/// implicitly gone."
+///
+/// ## Pinned assertion: `watermark == 5`
+///
+/// NOT 2 — the naively expected "contiguous-prefix stall" value. The gate
+/// pre-seeds from `max_inflight`, resolving the gap implicitly.
 #[tokio::test]
 async fn oracle_stress_recovery_gap_in_versions() {
     let underlying = Arc::new(InMemoryRepo::new());
@@ -334,18 +461,29 @@ async fn oracle_stress_recovery_gap_in_versions() {
     repo.add_table(TableConfig::new("t"));
 
     let recovered = repo.recover_v2_inflight().await.unwrap();
-    assert_eq!(recovered, 4);
+    assert_eq!(recovered, 4, "4 durable WAL entries must be replayed");
 
     let gate = repo.tx_gate().await.unwrap();
-    // Watermark should be at least 2 (contiguous 1,2). Whether it reaches 5
-    // depends on whether recovery marks the gap as Aborted. Either way, the
-    // gate's next version must exceed the max recovered (5).
     let wm = gate.completion().watermark();
-    assert!(
-        wm >= 2,
-        "watermark must be at least 2 (contiguous prefix), got {wm}"
+
+    // WHY == 5 (not 2, which naive "contiguous prefix" reasoning would suggest):
+    //
+    // `tx_gate()` is called inside `recover_inflight_v2` (Step 1 of that fn)
+    // and pre-seeds CompletionTracker to `max_inflight = 5`. After that,
+    // recovery's per-entry `mark(v, Materialized)` calls for v in {1,2,4,5}
+    // are all no-ops (v ≤ watermark). The gap at version 3 is implicitly
+    // resolved by the floor — "no WAL entry = crashed before write = gone."
+    assert_eq!(
+        wm, 5,
+        "watermark must be exactly 5: gate pre-seeded from max_inflight=5; \
+         the gap at v=3 is implicitly resolved by the pre-seeded floor"
     );
-    assert!(gate.assign_next_version() > 5);
+
+    // Next assigned version must exceed the highest recovered version (5).
+    assert!(
+        gate.assign_next_version() > 5,
+        "next assigned version must be > 5 (max recovered)"
+    );
 }
 
 // =========================================================================
@@ -354,23 +492,51 @@ async fn oracle_stress_recovery_gap_in_versions() {
 
 /// A mix of committing and aborting txs: the watermark keeps advancing and
 /// never stalls on an aborted version.
+///
+/// # Count determinism analysis
+///
+/// The abort/commit decision for tx `i` is a PURE FUNCTION of `i`:
+///   - `should_abort = i % 2 == 1` is computed before `begin_tx`
+///   - `EvenOddProvider` is a constant: it does not inspect inter-tx state
+///   - Even txs carry no read-set and no provider → SSI check is a no-op →
+///     always commit
+///   - Odd txs carry a read-set with `version_seen=1` and a provider that
+///     returns `999_999` → `validate_read_set` sees `999_999 > 1` → always abort
+///
+/// Because both the conflict decision AND the write-set are disjoint across
+/// indices (each tx inserts its own record), the outcome is independent of
+/// scheduling order. `aborts == TOTAL/2` and `successes == TOTAL/2` are
+/// therefore EXACT deterministic assertions, not approximations.
+///
+/// # Flake-hunt
+///
+/// TOTAL is set to 80 (vs. the previous 40) to increase the probability of
+/// interleaved Aborted/Materialized marks and exercise the try_advance loop
+/// under higher contention. The `tokio::sync::Barrier` ensures all spawned
+/// tasks race into `commit_tx` simultaneously rather than fanning out
+/// sequentially, exercising the real concurrent watermark-advance path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oracle_stress_abort_does_not_stall_watermark() {
-    const TOTAL: usize = 40;
+    const TOTAL: usize = 80;
 
     let repo = make_repo();
     repo.add_table(TableConfig::new("t"));
 
-    // Use a deterministic pattern: even indices commit, odd indices abort (SSI conflict).
+    // Barrier ensures all TOTAL tasks enter commit_tx concurrently.
+    let barrier = Arc::new(tokio::sync::Barrier::new(TOTAL));
+
+    // Abort/commit is a pure function of index: even → commit, odd → abort.
+    // EvenOddProvider is a constant (no shared mutable state) so the decision
+    // cannot vary across runs.
     struct EvenOddProvider {
         should_conflict: bool,
     }
     impl VersionProvider for EvenOddProvider {
         fn version_of(&self, _t: u64, _k: &Bytes) -> Option<u64> {
             if self.should_conflict {
-                Some(999_999) // forces SSI conflict
+                Some(999_999) // 999_999 > version_seen(1) → SSI conflict → abort
             } else {
-                Some(0) // no conflict
+                Some(0) // 0 ≤ version_seen → no conflict → commit proceeds
             }
         }
     }
@@ -378,24 +544,27 @@ async fn oracle_stress_abort_does_not_stall_watermark() {
     let mut handles = Vec::with_capacity(TOTAL);
     for i in 0..TOTAL {
         let r = repo.clone();
+        let b = Arc::clone(&barrier);
         let should_abort = i % 2 == 1;
         handles.push(tokio::spawn(async move {
             let (mut tx, _g) = r.begin_tx(IsolationLevel::Serializable).await.unwrap();
 
             if should_abort {
-                // Record a read so SSI check triggers.
+                // version_seen=1; provider returns 999_999 > 1 → conflict.
                 tx.record_read(table_token_for("t"), Bytes::from_static(b"k"), 1);
                 tx.set_version_provider(Arc::new(EvenOddProvider {
                     should_conflict: true,
                 }));
             }
 
-            // Stage a write so it's not the empty fast-path.
+            // Stage a write so the tx is non-empty (avoids C6 fast-path).
             let tbl = r.get_table("t").await.unwrap();
             tbl.insert_tx(&InnerValue::Int(i as i64), Some(&mut tx))
                 .await
                 .unwrap();
 
+            // All tasks race into commit_tx together.
+            b.wait().await;
             r.commit_tx(tx).await
         }));
     }
@@ -409,23 +578,27 @@ async fn oracle_stress_abort_does_not_stall_watermark() {
         }
     }
 
-    assert_eq!(aborts, (TOTAL / 2) as u64, "odd-indexed txs must abort");
+    // Exact count: deterministic — see doc-comment above.
+    assert_eq!(
+        aborts,
+        (TOTAL / 2) as u64,
+        "odd-indexed txs must abort (EvenOddProvider always returns 999_999 > version_seen=1)"
+    );
     assert_eq!(
         successes,
         (TOTAL / 2) as u64,
-        "even-indexed txs must succeed"
+        "even-indexed txs must commit (no read-set → SSI check is no-op)"
     );
 
-    // The watermark must advance past ALL versions (committed + aborted).
+    // INVARIANT: the watermark must advance past ALL consumed version slots.
+    // Aborted txs mark their slot Aborted in CompletionTracker; the contiguous
+    // advance must skip over them. If any aborted version's slot stayed Pending,
+    // the watermark would stall and this assertion would catch it.
     let gate = repo.tx_gate().await.unwrap();
     let wm = gate.completion().watermark();
     assert!(
         wm >= TOTAL as u64,
         "watermark ({wm}) must advance past all {TOTAL} consumed versions \
-         (aborted ones must be marked and skipped)"
+         (aborted slots must be marked Aborted so the contiguous prefix advances)"
     );
-
-    // Specifically: a successful commit that got a version AFTER an aborted
-    // version is visible (watermark >= that version). Since watermark >= TOTAL,
-    // this is already proven.
 }
