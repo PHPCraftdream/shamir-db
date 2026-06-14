@@ -173,8 +173,12 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
     );
 }
 
-/// Same-table Serializable: A-writes / B-reads SSI conflict with the REAL
-/// committed-version provider (`RepoVersionProvider`), not a fake constant.
+/// Same-table Serializable: post-hoc read-set staleness detection via
+/// `RepoVersionProvider`. This validates the ABORT path when a B-tx declares
+/// `version_seen=0` for a key that A already committed at V_a ≥ 1. It is NOT
+/// a concurrent anti-dependency SSI conflict (A finishes fully before B starts),
+/// but rather exercises the `validate_read_set` abort logic with the real
+/// `MvccStore`-backed provider.
 ///
 /// Scenario:
 ///   1. Tx A commits (Snapshot) via raw StagingStore, writing `raw_key` into
@@ -187,7 +191,7 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
 ///      - stage a write on a DISTINCT per-tx key (tx is non-empty → no C6 skip)
 ///      - call `commit_tx`
 ///   3. At pre_commit, `validate_read_set` calls `version_of(raw_key)` → V_a > 0
-///      → SSI conflict → each B-tx aborts.
+///      → read-set staleness → each B-tx aborts.
 ///
 /// NOTE: `record_read(table, key, version_seen)` takes an EXPLICIT `version_seen`
 /// supplied by the caller — it is NOT the snapshot_version. By passing 0 we
@@ -200,7 +204,7 @@ async fn oracle_stress_same_table_snapshot_all_succeed() {
 ///   - Each successful B-tx has a unique commit version
 ///   - Watermark advances past tx A's committed version
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn oracle_stress_same_table_serializable_conflict_resolution() {
+async fn oracle_stress_same_table_serializable_posthoc_readset_staleness() {
     const M: usize = 40;
 
     let repo = make_repo();
