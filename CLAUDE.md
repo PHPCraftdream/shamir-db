@@ -67,6 +67,26 @@ gate (`fmt --check` + `clippy --all-targets` + `test --lib`) **once at
 the end**, not between baseline / post-change bench runs. Spacing gate
 checks through the cycle invalidates the bench cache for nothing.
 
+**Quick mode is default.** Benches run in QUICK mode by default —
+sample_size=10, measurement=1s, warm_up=1s — completing every variant
+in seconds. For statistically-rigorous release-signal benchmarks, set
+`BENCH_FULL=1` to use the per-bench defaults (typically sample_size=100,
+measurement=5s, warm_up=3s).
+
+```
+# Iterative /opti — quick (default):
+CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p <crate> --bench <name>
+
+# Release-signal — full rigor:
+BENCH_FULL=1 CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p <crate> --bench <name>
+```
+
+Every new bench function MUST call `shamir_bench_utils::tune(&mut group,
+sample_size, measurement_secs, warm_up_secs)` (or the individual
+`sample_size`/`measurement_time`/`warm_up_time` helpers) so the QUICK
+default actually kicks in. A bench function using raw Criterion defaults
+will hit minutes-per-variant.
+
 ---
 
 ## 🧹 Code quality (MANDATORY)
