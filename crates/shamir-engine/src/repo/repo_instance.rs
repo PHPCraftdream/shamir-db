@@ -406,13 +406,43 @@ impl RepoInstance {
                         .await
                         .unwrap_or(None)
                         .unwrap_or(1);
-                // W4 will construct the WalSegment+WalGroupCommit here when
-                // it wires the commit cutover, using a `dir.file_name()`-based
-                // sibling path (NOT OsString::push, which breaks on trailing
-                // separators). For now ALL repos use the KV-marker path.
-                #[allow(unused_variables)]
-                let _ = &self.wal_dir;
-                let mgr = shamir_tx::RepoWalManager::new(info_store, initial_txn_id);
+                // F2: build the file-backed `WalSink` + `WalGroupCommit` for
+                // disk repos (sibling `<name>.shamirwal/` directory via
+                // `file_name()` — NOT `OsString::push` on the full path, which
+                // breaks on trailing separators), or `Noop` for in-memory
+                // repos. F3: the live commit path now appends via
+                // `begin_grouped(Buffered)` and recovery replays via
+                // `recover()` (segment `replay()` in file mode).
+                // F3: only disk repos get a file-backed group (which drives
+                // `begin_grouped`/`recover` over the segment). In-memory repos
+                // (no `wal_dir`) keep the KV-marker path via `new` — durability
+                // is meaningless for RAM-only repos, and the no-group path is
+                // what `commit`/`recover` fall back to. Tying the group to a
+                // File sink (never Noop) makes `group.is_some()` ⟺ file mode.
+                let mgr = match &self.wal_dir {
+                    Some(dir) => {
+                        let wal_dir = match dir.file_name() {
+                            Some(name) => {
+                                let mut n = name.to_os_string();
+                                n.push(".shamirwal");
+                                dir.with_file_name(n)
+                            }
+                            None => dir.join("shamirwal"),
+                        };
+                        let wal_dir_for_blocking = wal_dir.clone();
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::create_dir_all(&wal_dir_for_blocking)
+                        })
+                        .await
+                        .map_err(|e| DbError::Storage(format!("wal dir join: {e}")))?
+                        .map_err(|e| DbError::Storage(format!("wal dir create: {e}")))?;
+                        let seg = shamir_wal::WalSegment::open(wal_dir.join("repo.wal")).await?;
+                        let sink = shamir_wal::WalSink::File(seg);
+                        let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
+                        shamir_tx::RepoWalManager::new_with_group(info_store, initial_txn_id, group)
+                    }
+                    None => shamir_tx::RepoWalManager::new(info_store, initial_txn_id),
+                };
 
                 // Floor the counter above any inflight txn_id (mirror of the
                 // version-floor pre-scan in `tx_gate`). `repo_wal` is the
@@ -798,6 +828,12 @@ impl RepoInstance {
     /// concurrent synced commits on this repo share one flush+fsync.
     pub async fn synced_flush(&self) -> DbResult<()> {
         self.group_commit.run(|| self.flush_buffers()).await
+    }
+
+    /// Force a durable `fsync` of this repo's file WAL (level 2 → level 3).
+    /// In-memory repos have no file WAL — this is a no-op there.
+    pub async fn sync_wal(&self) -> DbResult<()> {
+        self.repo_wal().await?.sync_wal().await
     }
 
     /// Spawn a background task that runs GC periodically.

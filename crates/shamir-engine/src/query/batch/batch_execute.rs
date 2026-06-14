@@ -134,6 +134,15 @@ pub(super) fn execute_batch_impl<'a>(
                         message: format!("synced flush {}/{}: {}", db_name, repo_name, e),
                         code: None,
                     })?;
+                // Belt-and-suspenders: also fsync the file WAL spine so the
+                // committed entries reach level 3 (the WAL is the source of
+                // truth; data-store flush above is derived). No-op for
+                // in-memory repos.
+                repo.sync_wal().await.map_err(|e| BatchError::QueryError {
+                    alias: String::new(),
+                    message: format!("synced wal {}/{}: {}", db_name, repo_name, e),
+                    code: None,
+                })?;
             }
         }
 

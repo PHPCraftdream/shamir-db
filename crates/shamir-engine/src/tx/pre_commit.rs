@@ -367,7 +367,10 @@ pub(super) async fn pre_commit_locked(
     let mut entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     entry.interner_delta = interner_delta;
-    if let Err(e) = wal.begin(entry).await {
+    if let Err(e) = wal
+        .begin_grouped(entry, shamir_wal::WalDurability::Buffered)
+        .await
+    {
         gate.completion().mark(commit_version, State::Aborted);
         return Err(TxError::Storage(e));
     }

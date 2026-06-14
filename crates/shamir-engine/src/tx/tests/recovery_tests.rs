@@ -7,7 +7,7 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalEntryV2, WalOpV2};
 
-use crate::repo::{repo_token, BoxRepo, RepoInstance};
+use crate::repo::{repo_token, BoxRepo, BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
 
@@ -571,5 +571,69 @@ async fn recover_v2_inflight_replays_in_commit_version_order() {
          value (commit_version=2 must apply after commit_version=1), \
          got {:?}",
         read_back
+    );
+}
+
+/// F3 end-to-end crash-recovery proof over the FILE WAL.
+///
+/// Builds a disk-backed (sled-raw) repo, commits a tx through the real tx
+/// path (which now appends to the file WAL via `begin_grouped(Buffered)`),
+/// then DROPS the `RepoInstance` WITHOUT a clean shutdown — modelling a
+/// process crash. A fresh `RepoInstance` is opened over the SAME tempdir
+/// (so it sees the same `*.shamirwal/repo.wal` segment), recovery runs, and
+/// the committed record must be present — recovered purely from replaying
+/// the file WAL. This exercises the file-WAL write → replay round-trip end
+/// to end.
+#[tokio::test]
+async fn f3_file_wal_crash_recovery_replays_committed_tx() {
+    use shamir_tx::IsolationLevel;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
+
+    // === Phase A: open disk repo, commit a tx via the real tx path. ===
+    let rid;
+    {
+        let factory = BoxRepoFactory::sled_raw(path.clone());
+        let repo = RepoInstance::from_factory("f3".into(), factory, vec![TableConfig::new("t")])
+            .await
+            .expect("from_factory");
+        repo.get_table("t").await.unwrap();
+
+        let (mut tx, _g) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+        let tbl = repo.get_table("t").await.unwrap();
+        rid = tbl
+            .insert_tx(&InnerValue::Str("durable".into()), Some(&mut tx))
+            .await
+            .unwrap();
+        repo.commit_tx(tx).await.unwrap();
+
+        // === Phase B: SIMULATED CRASH — drop without clean shutdown. ===
+        // The committed entry lives in the file WAL (level 2, survives a
+        // process crash). We deliberately do NOT flush/checkpoint.
+        drop(repo);
+    }
+
+    // === Phase C: reopen a fresh instance over the SAME tempdir. ===
+    let factory = BoxRepoFactory::sled_raw(path.clone());
+    let repo2 = RepoInstance::from_factory("f3".into(), factory, vec![TableConfig::new("t")])
+        .await
+        .expect("reopen from_factory");
+    let tbl2 = repo2.get_table("t").await.unwrap();
+
+    // === Phase D: recovery replays the file WAL. ===
+    let recovered = repo2.recover_v2_inflight().await.unwrap();
+    assert!(
+        recovered >= 1,
+        "expected at least one entry replayed from the file WAL, got {recovered}"
+    );
+
+    // === VERIFY: the committed record is present (recovered from WAL). ===
+    let read_back = tbl2.get(rid).await.unwrap_or_else(|e| {
+        panic!("record {rid:?} must be recovered from the file WAL, got error: {e}")
+    });
+    assert!(
+        matches!(read_back, InnerValue::Str(ref s) if s == "durable"),
+        "expected recovered Str(\"durable\"), got {read_back:?}"
     );
 }

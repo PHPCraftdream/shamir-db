@@ -292,7 +292,10 @@ pub(super) async fn run_leader(
 
     // Step 3: Batched WAL begin (ONE fsync for all survivors).
     let wal_entries: Vec<_> = validated.iter().map(|v| v.wal_entry.clone()).collect();
-    if let Err(e) = wal.begin_many(&wal_entries).await {
+    if let Err(e) = wal
+        .begin_grouped_many(&wal_entries, shamir_wal::WalDurability::Buffered)
+        .await
+    {
         for v in &validated {
             gate.completion().mark(v.commit_version, State::Aborted);
             if !v.is_leader {
