@@ -406,39 +406,13 @@ impl RepoInstance {
                         .await
                         .unwrap_or(None)
                         .unwrap_or(1);
-                // Disk-backed repos build a file WAL segment + group-commit
-                // coordinator rooted in a `<backing>.shamirwal/` directory
-                // SIBLING to the backend's on-disk path. The path returned by
-                // `backing_dir()` is the backend's own root, which is a single
-                // FILE for redb/persy/nebari/canopy and a DIRECTORY for
-                // sled/fjall — so we cannot nest a `wal` child inside it (that
-                // fails for the file backends: the parent is an existing
-                // file). Appending a `.shamirwal` suffix to the OS path string
-                // yields an unambiguous sibling that never collides with the
-                // backend's file/dir in either case. INERT (W3): the group is
-                // constructed and handed to the manager, but the live commit
-                // path still uses the KV-marker `begin` and recovery still
-                // uses `list_inflight` — the file-WAL cutover is W4/W5.
-                // In-memory repos (`wal_dir == None`) build the manager
-                // exactly as before (no group → KV fallback).
-                let mgr = match &self.wal_dir {
-                    Some(dir) => {
-                        let mut os = dir.clone().into_os_string();
-                        os.push(".shamirwal");
-                        let wal_subdir = std::path::PathBuf::from(os);
-                        let mk_dir = wal_subdir.clone();
-                        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&mk_dir))
-                            .await
-                            .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?
-                            .map_err(|e| {
-                                DbError::Storage(format!("create wal dir {wal_subdir:?}: {e}"))
-                            })?;
-                        let seg = shamir_wal::WalSegment::open(wal_subdir.join("repo.wal")).await?;
-                        let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(seg)));
-                        shamir_tx::RepoWalManager::new_with_group(info_store, initial_txn_id, group)
-                    }
-                    None => shamir_tx::RepoWalManager::new(info_store, initial_txn_id),
-                };
+                // W4 will construct the WalSegment+WalGroupCommit here when
+                // it wires the commit cutover, using a `dir.file_name()`-based
+                // sibling path (NOT OsString::push, which breaks on trailing
+                // separators). For now ALL repos use the KV-marker path.
+                #[allow(unused_variables)]
+                let _ = &self.wal_dir;
+                let mgr = shamir_tx::RepoWalManager::new(info_store, initial_txn_id);
 
                 // Floor the counter above any inflight txn_id (mirror of the
                 // version-floor pre-scan in `tx_gate`). `repo_wal` is the
