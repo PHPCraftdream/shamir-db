@@ -7,6 +7,7 @@ use tempfile::TempDir;
 use crate::wal_entry_v2::{WalEntryV2, WalOpV2};
 use crate::wal_group_commit::{WalDurability, WalGroupCommit};
 use crate::wal_segment::WalSegment;
+use crate::wal_sink::WalSink;
 
 fn rid(n: u8) -> RecordId {
     let mut a = [0u8; 16];
@@ -33,14 +34,15 @@ fn seg_path(dir: &TempDir) -> std::path::PathBuf {
 #[tokio::test]
 async fn buffered_append_durable() {
     let dir = TempDir::new().unwrap();
-    let seg = Arc::new(WalSegment::open(seg_path(&dir)).await.unwrap());
-    let gc = WalGroupCommit::new(Arc::clone(&seg));
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
         .await
         .unwrap();
 
-    let replayed = seg.replay().await.unwrap();
+    let replayed = sink.replay().await.unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(replayed[0].txn_id, 1);
 }
@@ -48,14 +50,15 @@ async fn buffered_append_durable() {
 #[tokio::test]
 async fn synced_append_durable() {
     let dir = TempDir::new().unwrap();
-    let seg = Arc::new(WalSegment::open(seg_path(&dir)).await.unwrap());
-    let gc = WalGroupCommit::new(Arc::clone(&seg));
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = WalGroupCommit::new(Arc::clone(&sink));
 
     gc.append(entry(1, 10).encode().unwrap(), WalDurability::Synced)
         .await
         .unwrap();
 
-    let replayed = seg.replay().await.unwrap();
+    let replayed = sink.replay().await.unwrap();
     assert_eq!(replayed.len(), 1);
     assert_eq!(replayed[0].txn_id, 1);
     assert!(gc.fsync_count() >= 1);
@@ -64,8 +67,9 @@ async fn synced_append_durable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_mixed_tiers_all_durable() {
     let dir = TempDir::new().unwrap();
-    let seg = Arc::new(WalSegment::open(seg_path(&dir)).await.unwrap());
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&seg)));
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     let mut handles = Vec::new();
     // txn_ids 1..=32 Buffered, 33..=64 Synced — all distinct.
@@ -86,7 +90,7 @@ async fn concurrent_mixed_tiers_all_durable() {
         h.await.unwrap();
     }
 
-    let replayed = seg.replay().await.unwrap();
+    let replayed = sink.replay().await.unwrap();
     assert_eq!(replayed.len(), 64);
     let got: HashSet<u64> = replayed.iter().map(|e| e.txn_id).collect();
     let want: HashSet<u64> = (1..=64u64).collect();
@@ -96,8 +100,9 @@ async fn concurrent_mixed_tiers_all_durable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn synced_fsyncs_are_batched() {
     let dir = TempDir::new().unwrap();
-    let seg = Arc::new(WalSegment::open(seg_path(&dir)).await.unwrap());
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&seg)));
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     let mut handles = Vec::new();
     for i in 1..=32u64 {
@@ -112,7 +117,7 @@ async fn synced_fsyncs_are_batched() {
         h.await.unwrap();
     }
 
-    let replayed = seg.replay().await.unwrap();
+    let replayed = sink.replay().await.unwrap();
     assert_eq!(replayed.len(), 32);
 
     let fsyncs = gc.fsync_count();
@@ -126,8 +131,9 @@ async fn synced_fsyncs_are_batched() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn buffered_only_window_issues_no_fsync() {
     let dir = TempDir::new().unwrap();
-    let seg = Arc::new(WalSegment::open(seg_path(&dir)).await.unwrap());
-    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&seg)));
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    let sink = Arc::new(WalSink::File(seg));
+    let gc = Arc::new(WalGroupCommit::new(Arc::clone(&sink)));
 
     // A workload of ONLY Buffered appends — no matter how the windows
     // form, none of them carry a Synced waiter, so no fsync is ever
@@ -146,7 +152,35 @@ async fn buffered_only_window_issues_no_fsync() {
         h.await.unwrap();
     }
 
-    let replayed = seg.replay().await.unwrap();
+    let replayed = sink.replay().await.unwrap();
     assert_eq!(replayed.len(), 16);
     assert_eq!(gc.fsync_count(), 0);
+}
+
+#[tokio::test]
+async fn noop_append_returns_ok() {
+    let sink = Arc::new(WalSink::Noop);
+    let gc = WalGroupCommit::new(Arc::clone(&sink));
+
+    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Buffered)
+        .await
+        .unwrap();
+
+    // Noop replay always returns empty.
+    let replayed = sink.replay().await.unwrap();
+    assert!(replayed.is_empty());
+}
+
+#[tokio::test]
+async fn noop_sync_returns_ok() {
+    let sink = Arc::new(WalSink::Noop);
+    let gc = WalGroupCommit::new(Arc::clone(&sink));
+
+    gc.append(entry(1, 10).encode().unwrap(), WalDurability::Synced)
+        .await
+        .unwrap();
+
+    // Noop replay always returns empty.
+    let replayed = sink.replay().await.unwrap();
+    assert!(replayed.is_empty());
 }
