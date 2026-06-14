@@ -327,14 +327,16 @@ impl TableManager {
             None
         };
 
+        // Phase 1: merge + validate, collecting changed rows for batched write.
+        let mut batch_pairs: Vec<(RecordId, InnerValue, InnerValue)> =
+            Vec::with_capacity(matched.len());
+
         for (id, old_record) in &matched {
-            // Merge: overlay set_map onto existing record
             let new_record = merge_inner_maps(old_record, set_map);
             let changed = &new_record != old_record;
 
             if changed {
                 // S3: run validators before persisting.
-                // TODO actor threading — use Actor::System for now.
                 self.run_validators(
                     WriteOp::Update,
                     Some(&new_record),
@@ -344,9 +346,7 @@ impl TableManager {
                 .await
                 .map_err(validator_failure_to_db_error)?;
 
-                let (_created, ver) = self.set_returning_version(*id, &new_record).await?;
-                max_write_version = max_write_version.max(ver);
-                affected += 1;
+                batch_pairs.push((*id, old_record.clone(), new_record.clone()));
                 changefeed_puts.push((*id, new_record.clone()));
             }
 
@@ -363,6 +363,17 @@ impl TableManager {
                     )?));
                 }
             }
+        }
+
+        // Phase 2: batched write — one MVCC transaction (one fsync).
+        if !batch_pairs.is_empty() {
+            let refs: Vec<(RecordId, &InnerValue, &InnerValue)> = batch_pairs
+                .iter()
+                .map(|(id, old, new_val)| (*id, old, new_val))
+                .collect();
+            let ver = self.update_many_returning_version(&refs).await?;
+            max_write_version = max_write_version.max(ver);
+            affected = batch_pairs.len() as u64;
         }
 
         // Clear the WAL marker — the UPDATE batch is durable.
