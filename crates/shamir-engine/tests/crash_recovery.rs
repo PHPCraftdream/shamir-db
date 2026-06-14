@@ -371,15 +371,26 @@ async fn crash_at_phase6_5_recovers_full_tx() {
     );
 }
 
-/// Crash after Phase 7 (WAL marker already removed, tx fully
-/// materialized). The data + index are PRESENT and recovery is a no-op:
-/// the on-disk state is already a clean committed state.
+/// Crash after Phase 7 (tx fully materialized). The data + index are
+/// PRESENT and recovery converges to the same clean committed state.
+///
+/// File-WAL contract: there is no per-entry marker removal until the F6
+/// checkpoint (`wal.commit` is a no-op in file mode), so the durable entry
+/// stays in the segment and replay re-applies it once. Idempotency means
+/// the DATA is unchanged (still exactly one record), NOT that the replay
+/// count is zero. When F6 truncation lands this tightens back to `== 0`.
 #[tokio::test]
 async fn crash_at_phase7_is_clean_committed() {
     let (replayed, data, fts) = crash_then_recover("phase7").await;
-    assert_eq!(replayed, 0, "WAL marker gone → recovery is a no-op");
-    assert_eq!(data, 1, "already materialized before the crash");
-    assert!(fts >= 1, "index postings already present (got {fts})");
+    assert_eq!(
+        replayed, 1,
+        "file WAL replays the durable entry once (no F6 truncation yet)"
+    );
+    assert_eq!(data, 1, "idempotent re-materialization — still one record");
+    assert!(
+        fts >= 1,
+        "index postings present after recovery (got {fts})"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -486,10 +497,23 @@ async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
         "recovery must publish a non-zero commit floor covering both tables"
     );
 
-    // Re-recovery is a no-op (marker cleaned).
+    // Re-recovery is idempotent. File-WAL contract: no per-entry marker
+    // removal until F6 truncation, so the segment replays the same entry
+    // again (count >= 1). Idempotency means the DATA is unchanged — both
+    // tables still hold exactly one record — not that the count is zero.
+    // When F6 truncation lands this tightens back to `== 0`.
+    assert!(
+        repo.recover_v2_inflight().await.unwrap() >= 1,
+        "second recovery replays the segment (file WAL: no truncation until F6)"
+    );
     assert_eq!(
-        repo.recover_v2_inflight().await.unwrap(),
-        0,
-        "second recovery pass must be a no-op"
+        store_record_count(&tbl_a).await,
+        1,
+        "table A unchanged after second replay (idempotent)"
+    );
+    assert_eq!(
+        store_record_count(&tbl_b).await,
+        1,
+        "table B unchanged after second replay (idempotent)"
     );
 }

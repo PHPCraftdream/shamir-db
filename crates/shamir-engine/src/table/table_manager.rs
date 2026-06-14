@@ -228,20 +228,11 @@ impl TableManager {
             }
         }
 
-        // Auto-recovery on open. Cheap on clean shutdown (one
-        // prefix scan returning zero entries); targeted recovery
-        // (O(batch_size)) or full repair (O(table_size)) when a
-        // crash left WAL markers behind. Surfaces silently in the
-        // log; the caller can also call `recover_on_open()`
-        // explicitly later to receive the report.
-        if let Some(report) = mgr.recover_on_open().await? {
-            log::warn!(
-                "Table '{}' opened with WAL markers — recovered {} record(s) in {} ms",
-                mgr.name(),
-                report.records_scanned,
-                report.elapsed_ms,
-            );
-        }
+        // Crash recovery is owned by the repo-level file WAL replay
+        // (`RepoInstance::recover_v2_inflight`), which runs on repo open.
+        // The legacy per-table KV-WAL scan that used to live here was
+        // removed in F5d: after the non-tx write cutover (F4b/F5a) the
+        // per-table WAL is no longer written, so this scan was a no-op.
 
         Ok(mgr)
     }
