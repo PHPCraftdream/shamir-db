@@ -11,12 +11,17 @@ use crate::tx::commit_phases::{
 };
 use crate::tx::tx_outcome::MaterializationState;
 
-/// Phases 5a–6-bis of the commit pipeline, run UNDER `commit_lock`.
+/// Phases 5a–6 of the commit pipeline, run OUTSIDE `commit_lock` (P2b).
+///
+/// Gated by per-table `uwl_guards` (unique_write_lock) already held since
+/// pre_commit_prelock. Disjoint-table commits materialize in parallel;
+/// overlapping-table commits serialize on the uwl_guard, not on the global
+/// commit_mutex.
 ///
 /// cancel-safe: NO, and it does NOT need to be — by the time this runs
 /// the tx is already COMMITTED (Phase 4 succeeded). It applies the WAL
 /// entry's visibility-bearing projections (data → main, counter, index →
-/// info), publishes the version, and records the SSI write footprint.
+/// info) and publishes the version via P1c's contiguous-prefix watermark.
 /// It does NOT promote HNSW vectors — that derived, rebuild-on-open
 /// read-accelerator moved OUT of the commit critical section (III.5).
 /// NONE of the projections here may abort the tx: a sub-phase failure is
@@ -26,25 +31,24 @@ use crate::tx::tx_outcome::MaterializationState;
 /// replay is intentionally skipped, HNSW is rebuilt on open).
 ///
 /// Returns a [`PostPublishState`] that the caller passes to
-/// [`post_publish_cleanup`] AFTER releasing `commit_lock`. Phase 6.5
-/// (markers) and Phase 7 (WAL cleanup) are I/O-bound but do NOT need
-/// the commit lock — they only affect crash-recovery state, and recovery
-/// tolerates stale markers (`recover_inflight_v2` re-persists the floor
-/// when it consumes the inflight entry). Moving them out of the lock
-/// shrinks the critical section from O(rows + index + 2× info_store.set
-/// + WAL remove) to O(rows + index + publish), improving multi-committer
-///   throughput.
+/// [`post_publish_cleanup`]. Phase 6.5 (markers) and Phase 7 (WAL cleanup)
+/// are I/O-bound and also run outside the lock.
 ///
-/// Phase 6 (`publish_committed`) ALWAYS runs — the version is committed
+/// Phase 6 (`publish_committed_max`) ALWAYS runs — the version is committed
 /// regardless of whether the projections landed inline.
+///
+/// Phase 6-bis (`record_commit_writes`) is NOT called here — it is called
+/// by the caller UNDER `commit_lock` before releasing it, so that future
+/// SSI validations see this tx's footprint. See `run_single_tx` /
+/// `run_leader`.
 ///
 /// MULTI-TABLE DEFERRAL IS PARTIAL (audit MED, by-design): the Phase 5a
 /// (data) and Phase 5c (index) loops below iterate per table, each with its
 /// own bounded retry. A failure on ONE table flips `ok` but does NOT halt
 /// the other tables — so a tx touching tables A and B can materialize A
-/// inline and leave B for recovery, yet `publish_committed` still publishes
-/// the single shared `commit_version`. The result is a cross-table /
-/// data-vs-index inconsistency that is *restart-bounded eventually
+/// inline and leave B for recovery, yet `publish_committed_max` still
+/// publishes the single shared `commit_version`. The result is a cross-table
+/// / data-vs-index inconsistency that is *restart-bounded eventually
 /// consistent*: it is reconciled only when the next `recover_v2_inflight`
 /// replays the one inflight WAL entry (which carries every table's ops).
 /// There is no online reconciler. This is honest, not reassuring — see
@@ -207,15 +211,9 @@ pub(super) async fn materialize(
         shamir_tx::completion_tracker::State::Materialized,
     );
     gate.sync_last_committed_from_watermark();
-    // Legacy publish retained as a fallback for non-tx paths racing ahead
-    // of the watermark (changefeed, recovery). Safe: publish_committed is
-    // a plain store under commit_lock, idempotent with the CAS above.
-    gate.publish_committed(commit_version);
-
-    // Phase 6-bis (Phase C): record this tx's write footprint into the
-    // commit-write log so future Serializable txs can detect phantoms
-    // against our writes. No-op off Serializable (footprint is empty).
-    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(tx, commit_version));
+    // CAS-based publish: safe outside commit_lock (P2b). Moves the
+    // reader-visible floor forward only; never backwards.
+    gate.publish_committed_max(commit_version);
 
     // Crash seam (test-only): version published in-memory but lost with
     // the process; markers (6.5) not yet persisted and Phase 7 not run.
@@ -241,8 +239,8 @@ pub(super) async fn materialize(
     }
 }
 
-/// State carried from [`materialize`] (under `commit_lock`) to
-/// [`post_publish_cleanup`] (outside `commit_lock`).
+/// State carried from [`materialize`] to [`post_publish_cleanup`].
+/// Both run outside `commit_lock` (P2b).
 pub(super) struct PostPublishState {
     pub tx_id: u64,
     pub commit_version: u64,
