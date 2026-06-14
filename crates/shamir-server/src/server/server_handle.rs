@@ -5,20 +5,18 @@ use std::sync::Arc;
 
 use shamir_db::ShamirDb;
 use shamir_tunables::runtime::RuntimeTunables;
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::RedbAuditAppender;
 use crate::scheduler::Scheduler;
 
-/// Handle for the periodic meta-snapshot task. Owns a stop signal plus the
-/// `JoinHandle` so [`ServerHandle::shutdown`] can wake the task out of its
-/// `interval.tick()` immediately rather than waiting up to one full
-/// interval.
+/// Handle for the periodic meta-snapshot task. Just the `JoinHandle` — the
+/// stop signal is the shared root `shutdown_token` (cancelled by
+/// [`ServerHandle::shutdown`] before this handle is awaited), so no per-task
+/// stop channel is needed.
 pub(super) struct MetaSnapshotTask {
     pub(super) handle: JoinHandle<()>,
-    pub(super) stop: Arc<Notify>,
 }
 
 /// Owner of the runtime state of a launched server.
@@ -103,25 +101,20 @@ impl ServerHandle {
         if let Some(obs) = self.observability {
             obs.shutdown().await;
         }
-        // 6. Stop the meta-snapshot task and let it drop its
-        //    Arc<ServerMetaStore> reference so the redb file lock
-        //    on `server_meta.redb` releases for a same-data-dir
-        //    restart. The task writes one final lockout + rate-limit
-        //    snapshot inside its shutdown branch (best-effort).
-        //    NOTE: meta_snapshot_task and interactive_tx_reaper still use
-        //    Arc<Notify> — `select! on Notify::notified()` has the same
-        //    subscribe-window race. They work today because their `select!`
-        //    arms also re-poll a long-lived `interval.tick()` future, so
-        //    the wake-up is delivered on the next interval boundary at the
-        //    latest. Migrating them to CancellationToken is a follow-up.
+        // 6. Join the meta-snapshot task. It was already told to stop by the
+        //    `shutdown_token.cancel()` at the top of this method (it holds a
+        //    clone of the root token). Awaiting its handle lets it drop its
+        //    Arc<ServerMetaStore> reference so the redb file lock on
+        //    `server_meta.redb` releases for a same-data-dir restart. The
+        //    task writes one final lockout + rate-limit snapshot inside its
+        //    cancel branch (best-effort) before exiting.
         if let Some(snap) = self.meta_snapshot_task {
-            snap.stop.notify_waiters();
             let _ = snap.handle.await;
         }
-        // 7. Stop the interactive-tx reaper so the Arc<TxRegistry> drops
-        //    and any lingering open txs are dropped (RAII abort).
+        // 7. Join the interactive-tx reaper (also cancelled by the root token
+        //    above) so its Arc<TxRegistry> drops and any lingering open txs
+        //    are dropped (RAII abort).
         if let Some(reaper) = self.interactive_tx_reaper {
-            reaper.stop.notify_waiters();
             let _ = reaper.handle.await;
         }
     }

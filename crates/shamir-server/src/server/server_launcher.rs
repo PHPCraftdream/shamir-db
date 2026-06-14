@@ -83,6 +83,19 @@ impl ServerLauncher {
         let ServerLauncher { config, bootstrap } = self;
         config.validate()?;
 
+        // Root shutdown token — the single source of truth for "the server
+        // is stopping". Every long-lived task (accept loops, meta-snapshot,
+        // tx-reaper) holds a clone; `ServerHandle::shutdown` calls `.cancel()`
+        // exactly once and the signal cascades to all of them. The tree of
+        // tasks maps onto one cancellation: shutdown is a LEVEL (a state),
+        // and CancellationToken is level-triggered (persistent) — unlike
+        // `Notify::notify_waiters`, which is edge-triggered and lossy across
+        // the `select!` subscribe-window (a notify that lands while a task is
+        // executing its tick-branch body, not parked in `select!`, is
+        // silently dropped — the cold-start hang we chased through the accept
+        // loops). One concept, race-free by construction.
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
+
         // 1. Durable stores.
         std::fs::create_dir_all(&config.data_dir)?;
 
@@ -211,6 +224,7 @@ impl ServerLauncher {
         let meta_snapshot_task = Some(spawn_meta_snapshot_task(
             lockout.clone(),
             rate_limit.clone(),
+            shutdown_token.clone(),
         ));
 
         // 4. Audit chain — load from checkpoint if present.
@@ -322,13 +336,14 @@ impl ServerLauncher {
         let handler: Arc<dyn RequestHandler> = handler_concrete;
 
         // Phase B Stage 6 — background reaper for interactive txs that
-        // outlive their idle TTL or absolute deadline. Mirrors the
-        // `MetaSnapshotTask` lifecycle: Notify-based stop + JoinHandle
-        // drained on shutdown.
+        // outlive their idle TTL or absolute deadline. Shares the root
+        // shutdown token: `ServerHandle::shutdown` cancels it once and this
+        // task observes the cancel on its next `select!` poll.
         let interactive_tx_reaper = Some(crate::tx_registry::spawn_reaper_task(
             tx_registry_for_reaper,
             crate::tx_registry::DEFAULT_INTERACTIVE_TX_IDLE_TTL,
             crate::tx_registry::DEFAULT_REAPER_INTERVAL,
+            shutdown_token.clone(),
         ));
 
         // 6. ResumeConfig.
@@ -400,16 +415,10 @@ impl ServerLauncher {
         }
         let tls_acceptor = TlsAcceptor::from(tls_server);
 
-        // 10. Spawn accept loops.
-        //
-        // Use tokio_util::sync::CancellationToken (not Notify::notify_waiters)
-        // for the shutdown signal. Notify is lossy across the poll-cycle of
-        // `select!` — `shutdown.notified()` creates a new future each poll,
-        // and a notify that lands between polls when no Notified future is
-        // alive is silently dropped. CancellationToken is persistent: cancel
-        // sets a flag; every existing `.cancelled().await` wakes; every new
-        // `.cancelled()` returns immediately. Race-closed by construction.
-        let shutdown_token = tokio_util::sync::CancellationToken::new();
+        // 10. Spawn accept loops. They share the root `shutdown_token`
+        //     created at the top of `launch()` — `shutdown()` cancels it
+        //     once and every accept loop observes the cancel on its next
+        //     `select!` poll.
         let mut bound_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(config.listeners.len());
         let mut listener_tasks: Vec<JoinHandle<()>> = Vec::new();
 
