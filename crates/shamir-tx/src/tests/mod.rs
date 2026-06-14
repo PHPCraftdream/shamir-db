@@ -1,3 +1,4 @@
+pub mod completion_tracker_tests;
 pub mod id_remap_tests;
 pub mod layered_interner_tests;
 pub mod mvcc_store_tests;
