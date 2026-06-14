@@ -193,9 +193,12 @@ impl TableManager {
         };
 
         // S3: run validators on each record before staging.
+        // tx path: resolve keys through the tx overlay so brand-new field
+        // names (staged above into the layered interner, not yet in base)
+        // resolve at validation time.
         // TODO actor threading — use Actor::System for now.
         for iv in &inner_values {
-            self.run_validators(WriteOp::Insert, Some(iv), None, &Actor::System)
+            self.run_validators_tx(WriteOp::Insert, Some(iv), None, &Actor::System, &*tx)
                 .await
                 .map_err(validator_failure_to_db_error)?;
         }
@@ -481,13 +484,14 @@ impl TableManager {
             let changed = &new_record != old_record;
 
             if changed {
-                // S3: run validators before staging.
+                // S3: run validators before staging (tx overlay-aware).
                 // TODO actor threading — use Actor::System for now.
-                self.run_validators(
+                self.run_validators_tx(
                     WriteOp::Update,
                     Some(&new_record),
                     Some(old_record),
                     &Actor::System,
+                    &*tx,
                 )
                 .await
                 .map_err(validator_failure_to_db_error)?;
@@ -670,7 +674,7 @@ impl TableManager {
             let records = self.get_many(&to_delete).await?;
             for rec in records.iter().flatten() {
                 // TODO actor threading — use Actor::System for now.
-                self.run_validators(WriteOp::Delete, None, Some(rec), &Actor::System)
+                self.run_validators_tx(WriteOp::Delete, None, Some(rec), &Actor::System, &*tx)
                     .await
                     .map_err(validator_failure_to_db_error)?;
             }
@@ -881,11 +885,12 @@ impl TableManager {
 
             // S3: run validators (Upsert — existing found → update path, tx).
             // TODO actor threading — use Actor::System for now.
-            self.run_validators(
+            self.run_validators_tx(
                 WriteOp::Upsert,
                 Some(&merged),
                 Some(&existing),
                 &Actor::System,
+                &*tx,
             )
             .await
             .map_err(validator_failure_to_db_error)?;
@@ -907,9 +912,15 @@ impl TableManager {
         } else {
             // S3: run validators (Upsert — no existing → insert path, tx).
             // TODO actor threading — use Actor::System for now.
-            self.run_validators(WriteOp::Upsert, Some(&new_inner), None, &Actor::System)
-                .await
-                .map_err(validator_failure_to_db_error)?;
+            self.run_validators_tx(
+                WriteOp::Upsert,
+                Some(&new_inner),
+                None,
+                &Actor::System,
+                &*tx,
+            )
+            .await
+            .map_err(validator_failure_to_db_error)?;
 
             let id = self.insert_tx(&new_inner, Some(&mut *tx)).await?;
             // Build result JSON from original op.value to avoid overlay-id

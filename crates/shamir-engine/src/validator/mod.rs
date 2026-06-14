@@ -17,7 +17,7 @@ mod validator_binding;
 
 pub use decode::{decode_validation_result, ValidatorDecodeError};
 pub use persisted_validators::PersistedValidators;
-pub use query_value_conv::inner_to_query_value;
+pub use query_value_conv::{inner_to_query_value, inner_to_query_value_with};
 pub use validation_outcome::{ValidationOutcome, ValidatorFailure};
 pub use validator_binding::ValidatorBinding;
 
