@@ -35,7 +35,6 @@ mod tests;
 
 pub mod changefeed;
 pub mod completion_tracker;
-pub mod group_fsync;
 pub mod id_remap;
 pub mod index_write_op;
 pub mod layered_interner;
@@ -56,7 +55,6 @@ pub use changefeed::{
     RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
 pub use completion_tracker::{CompletionTracker, State as CompletionState};
-pub use group_fsync::GroupFsync;
 pub use id_remap::{remap_inner_value_bytes, remap_value};
 pub use index_write_op::IndexWriteOp;
 pub use layered_interner::{
