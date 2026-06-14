@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use bytes::Bytes;
 use shamir_collections::THasher;
 use shamir_storage::error::DbError;
+use shamir_tx::completion_tracker::State;
 use shamir_tx::{RepoTxGate, RepoWalManager, TxContext};
 use tokio::sync::oneshot;
 
@@ -32,12 +33,25 @@ pub(crate) fn compute_write_set_keys(tx: &TxContext) -> HashSet<(u64, Bytes), TH
         .collect()
 }
 
-/// RAII guard: on leader panic, notifies all still-pending follower oneshots.
-struct PanicGuard(Vec<Option<oneshot::Sender<Result<u64, DbError>>>>);
+/// RAII guard: on leader panic, marks all assigned versions as Aborted and
+/// notifies all still-pending follower oneshots.
+struct PanicGuard<'g> {
+    senders: Vec<Option<oneshot::Sender<Result<u64, DbError>>>>,
+    /// Commit versions assigned to entries in this batch (leader + followers).
+    /// Populated BEFORE any panic-risky work so Drop always sees them.
+    versions: Vec<u64>,
+    /// Completion tracker reference (gate outlives the guard).
+    completion: &'g shamir_tx::completion_tracker::CompletionTracker,
+}
 
-impl Drop for PanicGuard {
+impl Drop for PanicGuard<'_> {
     fn drop(&mut self) {
-        for slot in self.0.iter_mut() {
+        if std::thread::panicking() {
+            for &v in &self.versions {
+                self.completion.mark(v, State::Aborted);
+            }
+        }
+        for slot in self.senders.iter_mut() {
             if let Some(tx) = slot.take() {
                 let _ = tx.send(Err(DbError::Internal("leader aborted".into())));
             }
@@ -87,8 +101,12 @@ pub(super) async fn run_leader(
         is_leader: true,
     });
 
-    // panic_guard.0 has one slot per accepted follower, in order.
-    let mut panic_guard = PanicGuard(Vec::with_capacity(followers.len()));
+    // panic_guard.senders has one slot per accepted follower, in order.
+    let mut panic_guard = PanicGuard {
+        senders: Vec::with_capacity(followers.len()),
+        versions: Vec::with_capacity(1 + followers.len()),
+        completion: gate.completion(),
+    };
 
     for f in followers {
         let conflicts = accepted_wsk
@@ -101,7 +119,7 @@ pub(super) async fn run_leader(
             )));
         } else {
             accepted_wsk.push(f.write_set_keys);
-            panic_guard.0.push(Some(f.result_tx));
+            panic_guard.senders.push(Some(f.result_tx));
             entries.push(Entry {
                 tx: f.tx,
                 uwl_guards: f.uwl_guards,
@@ -118,7 +136,7 @@ pub(super) async fn run_leader(
         commit_version: u64,
         wal_entry: shamir_wal::WalEntryV2,
         is_leader: bool,
-        /// Index into panic_guard.0 (meaningful only for followers).
+        /// Index into panic_guard.senders (meaningful only for followers).
         pg_idx: usize,
     }
 
@@ -137,6 +155,9 @@ pub(super) async fn run_leader(
 
         match pre_commit_locked_validate(&mut entry.tx, repo, gate, entry.uwl_guards).await {
             Ok(Some(vpc)) => {
+                // Record version in panic_guard BEFORE any subsequent
+                // panic-risky work so Drop always marks it Aborted.
+                panic_guard.versions.push(vpc.commit_version);
                 validated.push(Validated {
                     tx: entry.tx,
                     uwl_guards: vpc.uwl_guards,
@@ -158,7 +179,7 @@ pub(super) async fn run_leader(
                         materialization: MaterializationState::Complete,
                         background: None,
                     });
-                } else if let Some(sender) = panic_guard.0[pg_idx].take() {
+                } else if let Some(sender) = panic_guard.senders[pg_idx].take() {
                     let _ = sender.send(Ok(entry.tx.snapshot_version));
                 }
             }
@@ -168,7 +189,7 @@ pub(super) async fn run_leader(
                     // Leader failed SSI — abort all validated followers too.
                     for v in &validated {
                         if !v.is_leader {
-                            if let Some(s) = panic_guard.0[v.pg_idx].take() {
+                            if let Some(s) = panic_guard.senders[v.pg_idx].take() {
                                 let _ = s.send(Err(DbError::Internal(
                                     "batch aborted: leader failed".into(),
                                 )));
@@ -180,7 +201,7 @@ pub(super) async fn run_leader(
                     return Err(e);
                 }
                 // Follower failed — notify, continue.
-                if let Some(sender) = panic_guard.0[pg_idx].take() {
+                if let Some(sender) = panic_guard.senders[pg_idx].take() {
                     let _ = sender.send(Err(tx_error_to_db_error(&e)));
                 }
             }
@@ -198,8 +219,9 @@ pub(super) async fn run_leader(
     let wal_entries: Vec<_> = validated.iter().map(|v| v.wal_entry.clone()).collect();
     if let Err(e) = wal.begin_many(&wal_entries).await {
         for v in &validated {
+            gate.completion().mark(v.commit_version, State::Aborted);
             if !v.is_leader {
-                if let Some(s) = panic_guard.0[v.pg_idx].take() {
+                if let Some(s) = panic_guard.senders[v.pg_idx].take() {
                     let _ = s.send(Err(DbError::Storage(e.to_string())));
                 }
             }
@@ -232,7 +254,7 @@ pub(super) async fn run_leader(
 
         // Notify follower.
         if !v.is_leader {
-            if let Some(sender) = panic_guard.0[v.pg_idx].take() {
+            if let Some(sender) = panic_guard.senders[v.pg_idx].take() {
                 let _ = sender.send(Ok(commit_version));
             }
         }
@@ -248,8 +270,9 @@ pub(super) async fn run_leader(
 
     // Step 5: Release lock, run post-lock work.
     drop(commit_guard);
-    // Disarm panic guard safely (all followers notified).
-    let _ = std::mem::take(&mut panic_guard.0);
+    // Disarm panic guard safely (all followers notified, versions materialized in P1c).
+    panic_guard.senders.clear();
+    panic_guard.versions.clear();
     std::mem::forget(panic_guard);
 
     let mut leader_version = 0u64;

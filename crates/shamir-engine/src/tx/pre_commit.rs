@@ -1,4 +1,5 @@
 use shamir_storage::error::DbError;
+use shamir_tx::completion_tracker::State;
 use shamir_tx::{IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
 use shamir_wal::WalEntryV2;
 
@@ -371,7 +372,10 @@ pub(super) async fn pre_commit_locked(
     let mut entry =
         WalEntryV2::new(tx.tx_id.0, tx.repo_id, wal_ops).with_commit_version(commit_version);
     entry.interner_delta = interner_delta;
-    wal.begin(entry).await?;
+    if let Err(e) = wal.begin(entry).await {
+        gate.completion().mark(commit_version, State::Aborted);
+        return Err(TxError::Storage(e));
+    }
 
     // Crash seam (test-only): a HARD crash here is AT the commit point —
     // the WAL entry is durable but no projection (5a..6.5) ran and Phase
