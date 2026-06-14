@@ -66,6 +66,31 @@ if ! command -v cargo-nextest >/dev/null 2>&1 && ! cargo nextest --version >/dev
 fi
 
 # ---------------------------------------------------------------------------
+# Reap stray test/bench binaries from a previously-wedged run (Windows).
+#
+# A test that hangs hits the per-test slow-timeout (.config/nextest.toml) and
+# nextest kills the test thread — but on Windows the test PROCESS can linger
+# (orphaned blocking thread / held file handle) still holding its own `.exe`.
+# That zombie then wedges the NEXT run's link step (LNK1104: cannot open file
+# ...exe), turning one flaky hang into a cascade that looks like "tests run
+# for 20 minutes". We reap such strays up front so a prior hang never blocks
+# the next run.
+#
+# Targets ONLY hashed cargo/nextest binaries `shamir_<crate>-<hex>.exe`
+# (note the underscore + hash), never the plain `shamir-server` / `shamir-db`
+# runtime binary (dash, no hash). No-op off Windows (no `tasklist`).
+# NOTE: do not run two `test.sh` concurrently — the reaper would kill the
+# other run's binaries (sequential is the contract anyway).
+# ---------------------------------------------------------------------------
+if command -v tasklist >/dev/null 2>&1; then
+    tasklist //FO CSV //NH 2>/dev/null \
+        | awk -F'","' '$1 ~ /shamir_[a-z_]+-[0-9a-f]/ { gsub(/"/, "", $2); print $2 }' \
+        | while read -r _pid; do
+            [ -n "$_pid" ] && taskkill //F //PID "$_pid" >/dev/null 2>&1 || true
+        done
+fi
+
+# ---------------------------------------------------------------------------
 # Scope dictionary — short names → list of -p <crate> args.
 # Add entries as the codebase grows; keep them short and topical.
 # ---------------------------------------------------------------------------
