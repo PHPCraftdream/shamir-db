@@ -6,8 +6,6 @@
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
-#[cfg(test)]
-use crate::types::common::new_map;
 use crate::types::common::new_map_wc;
 use crate::types::value::{InnerValue, Value};
 use rmp::decode::{read_marker, RmpRead};
@@ -472,7 +470,7 @@ fn rmpv_value_to_inner(
             Ok(InnerValue::List(converted?))
         }
         RmpvValue::Map(map) => {
-            let mut converted = new_map();
+            let mut converted = new_map_wc(map.len());
             for (key_val, val) in map {
                 let key_str = match key_val {
                     RmpvValue::String(s) => s.as_str().ok_or_else(|| {

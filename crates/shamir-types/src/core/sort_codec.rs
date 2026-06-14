@@ -112,14 +112,19 @@ pub fn encode_f64(buf: &mut Vec<u8>, v: f64) -> Result<(), SortCodecError> {
 /// flipped by their suffix.
 pub fn encode_str(buf: &mut Vec<u8>, s: &str) {
     buf.push(TAG_STR);
-    for &b in s.as_bytes() {
+    // Reserve: best-case no nulls → s.len() + 2 (terminator).
+    buf.reserve(s.len() + 2);
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
         if b == 0x00 {
+            buf.extend_from_slice(&bytes[start..i]);
             buf.push(0x00);
             buf.push(0x01);
-        } else {
-            buf.push(b);
+            start = i + 1;
         }
     }
+    buf.extend_from_slice(&bytes[start..]);
     buf.push(0x00);
     buf.push(0x00);
 }
@@ -128,14 +133,18 @@ pub fn encode_str(buf: &mut Vec<u8>, s: &str) {
 /// the doc-comment there for the reason and the encoding shape.
 pub fn encode_bytes(buf: &mut Vec<u8>, b: &[u8]) {
     buf.push(TAG_BYTES);
-    for &byte in b {
+    // Reserve: best-case no nulls → b.len() + 2 (terminator).
+    buf.reserve(b.len() + 2);
+    let mut start = 0;
+    for (i, &byte) in b.iter().enumerate() {
         if byte == 0x00 {
+            buf.extend_from_slice(&b[start..i]);
             buf.push(0x00);
             buf.push(0x01);
-        } else {
-            buf.push(byte);
+            start = i + 1;
         }
     }
+    buf.extend_from_slice(&b[start..]);
     buf.push(0x00);
     buf.push(0x00);
 }

@@ -70,7 +70,7 @@ impl TableManager {
         tx: Option<&shamir_tx::TxContext>,
     ) -> DbResult<QueryResult> {
         let start = Instant::now();
-        let batch_size = 1000;
+        let batch_size = shamir_tunables::store_defaults::FULL_SCAN_BATCH;
         let interner = self.interner().get().await?;
 
         // T4: temporal reads. `History` returns the per-key version

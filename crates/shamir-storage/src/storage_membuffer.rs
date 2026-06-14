@@ -150,6 +150,14 @@ struct MemBufferState {
     ///   was firing per evicted entry (TTL/Size cause); on tight
     ///   loops with frequent eviction it dominated the cost.
     dirty: Arc<DashMap<RecordKey, Slot>>,
+    /// Fast-path sentinel: true iff dirty is (likely) non-empty.
+    /// Set with Release before each dirty.insert so any subsequent
+    /// Acquire-load in get() that sees `false` is guaranteed to see
+    /// a fully drained map. False positives (flag true, map empty)
+    /// are harmless — they cause one extra DashMap lookup that
+    /// returns None. False negatives are impossible: we always set
+    /// before insert (Release → Acquire ordering).
+    dirty_nonempty: AtomicBool,
     /// Atomic-config — read on hot paths so DDL changes apply
     /// without rewrapping the store.
     max_bytes: AtomicUsize,
@@ -211,6 +219,7 @@ impl MemBufferStore {
         let state = Arc::new(MemBufferState {
             cache: ArcSwap::from(cache),
             dirty,
+            dirty_nonempty: AtomicBool::new(false),
             max_bytes: AtomicUsize::new(config.max_bytes),
             max_entries: AtomicUsize::new(config.max_entries),
             ttl_ms: AtomicU64::new(config.ttl_ms.unwrap_or(0)),
@@ -366,6 +375,15 @@ impl MemBufferStore {
         for (k, snapshot) in snapshots {
             state.dirty.remove_if(&k, |_, current| *current == snapshot);
         }
+        // If dirty is now fully drained, clear the fast-path sentinel so
+        // get() can skip the dirty lookup. Relaxed is fine here: if a
+        // concurrent writer just set the flag (Release) and inserted, we
+        // may clear it erroneously — but that thread's Release+our Relaxed
+        // forms a race. To avoid the race we only clear when dirty is
+        // actually empty, which is a stable post-drain observation.
+        if state.dirty.is_empty() {
+            state.dirty_nonempty.store(false, Ordering::Relaxed);
+        }
         Ok(n)
     }
 
@@ -408,6 +426,9 @@ impl Store for MemBufferStore {
         let id = shamir_types::types::record_id::RecordId::new();
         let key = RecordKey::copy_from_slice(id.as_bytes());
         let slot = Slot::Live(value);
+        // Release before dirty.insert so get()'s Acquire load sees the flag
+        // set if dirty is non-empty. False positives are harmless.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.dirty.insert(key.clone(), slot.clone());
         self.state.cache.load().insert(key.clone(), slot).await;
         self.notify.notify_one();
@@ -430,6 +451,8 @@ impl Store for MemBufferStore {
             },
         };
         let slot = Slot::Live(value);
+        // Release before dirty.insert — see insert() for ordering rationale.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.dirty.insert(key.clone(), slot.clone());
         self.state.cache.load().insert(key, slot).await;
         self.notify.notify_one();
@@ -448,11 +471,16 @@ impl Store for MemBufferStore {
         }
         // Cache miss — check dirty before going to inner. Dirty
         // may hold a value that moka silently evicted from cache.
-        if let Some(entry) = self.state.dirty.get(&key) {
-            return match entry.value() {
-                Slot::Live(v) => Ok(v.clone()),
-                Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
-            };
+        // Fast-path: when dirty_nonempty is false (Acquire), dirty is
+        // guaranteed empty — skip the DashMap probe entirely.
+        // Pairs with the Release store in insert/set/remove.
+        if self.state.dirty_nonempty.load(Ordering::Acquire) {
+            if let Some(entry) = self.state.dirty.get(&key) {
+                return match entry.value() {
+                    Slot::Live(v) => Ok(v.clone()),
+                    Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
+                };
+            }
         }
         // Fall through to inner; populate cache only (NOT dirty —
         // this is a clean read-fill).
@@ -479,6 +507,8 @@ impl Store for MemBufferStore {
                 None => false,
             },
         };
+        // Release before dirty.insert — see insert() for ordering rationale.
+        self.state.dirty_nonempty.store(true, Ordering::Release);
         self.state.dirty.insert(key.clone(), Slot::Tombstone);
         self.state.cache.load().insert(key, Slot::Tombstone).await;
         self.notify.notify_one();

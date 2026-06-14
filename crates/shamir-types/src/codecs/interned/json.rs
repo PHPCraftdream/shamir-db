@@ -6,7 +6,7 @@
 use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::CodecError;
 use crate::core::interner::{Interner, InternerKey, UserKey};
-use crate::types::common::new_map;
+use crate::types::common::new_map_wc;
 use crate::types::value::{InnerValue, Value};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use serde_json as json;
@@ -162,7 +162,7 @@ where
             Ok(InnerValue::List(converted?))
         }
         json::Value::Object(obj) => {
-            let mut converted = new_map();
+            let mut converted = new_map_wc(obj.len());
             for (key_str, val) in obj {
                 let interned_key = intern_key(key_str)?;
                 let converted_val = json_value_to_inner_with(val, intern_key)?;
@@ -226,7 +226,7 @@ where
             Ok(InnerValue::Set(converted?))
         }
         Value::Map(m) => {
-            let mut converted = crate::types::common::new_map();
+            let mut converted = new_map_wc(m.len());
             for (key_str, val) in m {
                 let interned_key = intern_key(key_str)?;
                 let converted_val = query_value_to_inner_with(val, intern_key)?;
