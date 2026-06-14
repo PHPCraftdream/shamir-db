@@ -69,25 +69,44 @@ async fn serve_boots_and_shuts_down_on_trigger() {
         password: Zeroizing::new(b"test-password".to_vec()),
     };
 
-    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // init_done: server fires this AFTER listeners bind + bootstrap completes.
+    // Previously the test used a fixed `sleep(500ms)` here — under load
+    // (parallel nextest run, Argon2 KDF + self-signed cert gen + bind) this
+    // was nondeterministic: shutdown fired before the server was ready,
+    // leading to spurious failures. Synchronise on the actual readiness
+    // signal — no time-based race remains.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut ready_tx = Some(ready_tx);
 
     let serve_task = tokio::spawn(serve(
         config,
         bootstrap,
         async {
-            let _ = rx.await;
+            let _ = shutdown_rx.await;
         },
-        || {},
+        move || {
+            // Called by serve() once listeners are bound + bootstrap is done.
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(());
+            }
+        },
     ));
 
-    // Give the server a moment to bind listeners before triggering shutdown.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for the server's actual readiness signal (no fixed sleep).
+    // Generous timeout: cold-start Argon2 + cert gen can take seconds on
+    // a contended CI / dev box. 30 s is well above the legit envelope and
+    // still catches genuine bring-up regressions.
+    tokio::time::timeout(Duration::from_secs(30), ready_rx)
+        .await
+        .expect("server did not reach ready state within 30s")
+        .expect("ready signal channel closed (server panicked during init)");
 
-    tx.send(()).expect("send shutdown trigger");
+    shutdown_tx.send(()).expect("send shutdown trigger");
 
     let result = tokio::time::timeout(Duration::from_secs(10), serve_task)
         .await
-        .expect("serve task did not finish within 10s")
+        .expect("serve task did not finish within 10s of shutdown")
         .expect("serve task did not panic");
 
     assert!(result.is_ok(), "serve should return Ok(())");
