@@ -6,12 +6,12 @@
 
 use serde_json::json;
 
-use shamir_types::access::ResourceMeta;
+use shamir_types::access::{Actor, ResourceMeta};
 
 use crate::codecs::interned::json_value_to_inner;
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::repo::repo_types::BoxRepoFactory;
-use crate::engine::repo::RepoConfig;
+use crate::engine::repo::{RepoConfig, RepoInstance};
 use crate::engine::table::{TableConfig, TableManager};
 use crate::{DbError, DbResult};
 
@@ -90,6 +90,41 @@ impl SystemStore {
         self.db.get_table(SYSTEM_REPO, name).await
     }
 
+    /// Resolve the SYSTEM_REPO [`RepoInstance`].
+    ///
+    /// F5a: system-store DELETEs route through the repo's implicit-tx
+    /// file-WAL path (`run_implicit_batch_tx` + `execute_delete_tx`) instead
+    /// of the direct V1-marker `execute_delete`, so the V1 DELETE marker
+    /// becomes dead.
+    pub(crate) fn system_repo(&self) -> DbResult<RepoInstance> {
+        self.db
+            .get_repo(SYSTEM_REPO)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", SYSTEM_REPO)))
+    }
+
+    /// Route a single non-tx DELETE through the implicit-tx file-WAL path
+    /// (mirrors the `query_runner` non-tx Delete branch). Maps the
+    /// [`BatchError`] surfaced by the implicit tx onto a [`DbError`].
+    async fn delete_via_implicit_tx(
+        &self,
+        table: &TableManager,
+        op: &crate::query::write::DeleteOp,
+    ) -> DbResult<crate::query::write::WriteResult> {
+        let repo = self.system_repo()?;
+        let owned_op = op.clone();
+        let owned_table = table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "", move |tx| {
+            Box::pin(async move {
+                let interner = owned_table.interner().get().await?;
+                let refs = crate::types::common::new_map();
+                let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+                owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+            })
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))
+    }
+
     // ========================================================================
     // Database metadata
     // ========================================================================
@@ -121,9 +156,6 @@ impl SystemStore {
     /// Remove database metadata.
     pub async fn remove_database(&self, name: &str) -> DbResult<()> {
         let table = self.table(TABLE_DATABASES).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_DATABASES),
             where_clause: crate::query::filter::Filter::Eq {
@@ -131,7 +163,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         Ok(())
     }
 
@@ -189,9 +221,6 @@ impl SystemStore {
     /// Remove repository metadata.
     pub async fn remove_repository(&self, db_name: &str, repo_name: &str) -> DbResult<()> {
         let table = self.table(TABLE_REPOSITORIES).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_REPOSITORIES),
             where_clause: crate::query::filter::Filter::And {
@@ -207,7 +236,7 @@ impl SystemStore {
                 ],
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
         Ok(())
@@ -278,9 +307,6 @@ impl SystemStore {
         table_name: &str,
     ) -> DbResult<()> {
         let table = self.table(TABLE_TABLES).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_TABLES),
             where_clause: crate::query::filter::Filter::And {
@@ -300,7 +326,7 @@ impl SystemStore {
                 ],
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
         Ok(())
@@ -403,9 +429,6 @@ impl SystemStore {
     /// Remove a function catalogue entry by name.
     pub async fn remove_function(&self, name: &str) -> DbResult<()> {
         let table = self.table(TABLE_FUNCTIONS).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_FUNCTIONS),
             where_clause: crate::query::filter::Filter::Eq {
@@ -413,7 +436,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
         Ok(())
@@ -568,9 +591,6 @@ impl SystemStore {
     /// Remove a group record by id.
     pub async fn remove_group(&self, group_id: u64) -> DbResult<()> {
         let table = self.table(TABLE_GROUPS).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_GROUPS),
             where_clause: crate::query::filter::Filter::Eq {
@@ -578,7 +598,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::Int(group_id as i64),
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         table.data_store().flush().await?;
         Ok(())
     }
@@ -761,9 +781,6 @@ impl SystemStore {
     /// Remove a validator catalogue entry by name.
     pub async fn remove_validator(&self, name: &str) -> DbResult<()> {
         let table = self.table(TABLE_VALIDATORS).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_VALIDATORS),
             where_clause: crate::query::filter::Filter::Eq {
@@ -771,7 +788,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(name.to_string()),
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
         Ok(())
@@ -861,9 +878,6 @@ impl SystemStore {
     /// Remove a function folder catalogue entry by path key.
     pub async fn remove_function_folder(&self, path_key: &str) -> DbResult<()> {
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
-        let interner = table.interner().get().await?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
             where_clause: crate::query::filter::Filter::Eq {
@@ -871,7 +885,7 @@ impl SystemStore {
                 value: crate::query::filter::FilterValue::String(path_key.to_string()),
             },
         };
-        table.execute_delete(&op, &ctx).await?;
+        self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
         table.data_store().flush().await?;
         Ok(())

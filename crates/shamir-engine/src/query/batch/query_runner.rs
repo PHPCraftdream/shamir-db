@@ -15,11 +15,7 @@ use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
 
 use crate::query::batch::param_subst::substitute_params;
-use crate::repo::RepoInstance;
 use shamir_query_types::filter::Filter;
-use shamir_storage::error::DbResult;
-use std::future::Future;
-use std::pin::Pin;
 
 /// Build resolved_refs map containing only the declared dependencies.
 pub(super) fn build_resolved_refs(
@@ -397,7 +393,7 @@ impl<'a> QueryRunner<'a> {
                         // HRTB requires no other caller-scope borrows).
                         let owned_op: shamir_query_types::write::InsertOp = op_ref.clone();
                         let owned_table = table.clone();
-                        run_implicit_batch_tx(&repo, self.actor.clone(), alias, move |tx| {
+                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
                                 owned_table
                                     .execute_insert_tx(&owned_op, tx, return_result)
@@ -466,7 +462,7 @@ impl<'a> QueryRunner<'a> {
                         let owned_refs = resolved_refs.clone();
                         let owned_params = self.params.clone();
                         let owned_actor = self.actor.clone();
-                        run_implicit_batch_tx(&repo, self.actor.clone(), alias, move |tx| {
+                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
                                 let interner = owned_table.interner().get().await?;
                                 let ctx = FilterContext::new(interner, &owned_refs)
@@ -515,7 +511,7 @@ impl<'a> QueryRunner<'a> {
                         let owned_refs = resolved_refs.clone();
                         let owned_params = self.params.clone();
                         let owned_actor = self.actor.clone();
-                        run_implicit_batch_tx(&repo, self.actor.clone(), alias, move |tx| {
+                        repo.run_implicit_batch_tx(self.actor.clone(), alias, move |tx| {
                             Box::pin(async move {
                                 let interner = owned_table.interner().get().await?;
                                 let ctx = FilterContext::new(interner, &owned_refs)
@@ -629,78 +625,6 @@ pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
         }),
         pagination: None,
         value: None,
-    }
-}
-
-/// Run a single non-tx write as an implicit single-op BATCH transaction.
-///
-/// F4b-1 keystone of "everything is a transaction": instead of taking the
-/// direct V1 write path (which emits `begin_with_delta`/`commit` WAL markers),
-/// a non-tx write opens a [`IsolationLevel::Snapshot`] tx on `repo`, stages
-/// the write via the `_tx` execute path (`stage`), and commits — folding the
-/// data, index postings, and counter into ONE `WalEntryV2` and consuming ONE
-/// commit version.
-///
-/// Snapshot isolation is deliberate: SSI validation is gated on
-/// `Serializable`, so the implicit tx NEVER aborts on a read/write conflict —
-/// this preserves non-tx last-writer-wins semantics. Unique-index violations
-/// still surface (the unique re-validation in pre-commit is unconditional) and
-/// are mapped to a coded `unique_violation` error.
-///
-/// On a `stage` error or a commit error the `TxContext` / `SnapshotGuard`
-/// drop = clean RAII abort.
-///
-/// `stage` receives the open `&mut TxContext` and returns the write's
-/// [`WriteResult`]; the returned ids / shape are identical to the direct path.
-async fn run_implicit_batch_tx<F>(
-    repo: &RepoInstance,
-    actor: Actor,
-    alias: &str,
-    stage: F,
-) -> Result<WriteResult, BatchError>
-where
-    F: for<'t> FnOnce(
-        &'t mut shamir_tx::TxContext,
-    ) -> Pin<Box<dyn Future<Output = DbResult<WriteResult>> + Send + 't>>,
-{
-    let (mut tx, _guard) = repo
-        .begin_tx(shamir_tx::IsolationLevel::Snapshot)
-        .await
-        .map_err(|e| BatchError::QueryError {
-            alias: alias.to_string(),
-            message: format!("implicit begin_tx: {}", e),
-            code: None,
-        })?;
-    // Provenance: thread the actor for commit-time attribution (R2).
-    tx.set_actor(actor);
-    // Mark implicit so the changefeed event reports tx_id == 0 (preserving
-    // the "0 = non-tx write" subscription contract). The internal tx_id
-    // stays real for WAL / crash-injection seams.
-    tx.set_implicit(true);
-
-    // Stage the write into the tx. On error drop tx/_guard = RAII abort.
-    let wr = stage(&mut tx).await.map_err(|e| BatchError::QueryError {
-        alias: alias.to_string(),
-        message: e.to_string(),
-        code: None,
-    })?;
-
-    // Commit — folds everything into one WalEntryV2 / one commit_version.
-    match repo.commit_tx(tx).await {
-        Ok(_outcome) => Ok(wr),
-        Err(commit_err) => {
-            let (message, code) = match commit_err {
-                crate::tx::CommitError::UniqueViolation { .. } => {
-                    (commit_err.to_string(), Some("unique_violation".to_string()))
-                }
-                other => (other.to_string(), None),
-            };
-            Err(BatchError::QueryError {
-                alias: alias.to_string(),
-                message,
-                code,
-            })
-        }
     }
 }
 

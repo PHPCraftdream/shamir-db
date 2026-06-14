@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::access::{Action, ResourcePath};
+use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
 
@@ -140,10 +140,27 @@ impl ShamirAdminExecutor {
                 value: crate::query::filter::FilterValue::String(op.drop_user.clone()),
             },
         };
-        let result = table
-            .execute_delete(&del_op, &ctx)
-            .await
+        // F5a: route the delete through the implicit-tx file-WAL path
+        // (`run_implicit_batch_tx` + `execute_delete_tx`) instead of the
+        // direct V1-marker `execute_delete`, mirroring the query_runner
+        // non-tx Delete branch.
+        let repo = self
+            .shamir
+            .system_store()
+            .system_repo()
             .map_err(|e| err(e.to_string()))?;
+        let owned_op = del_op.clone();
+        let owned_table = table.clone();
+        let result = repo
+            .run_implicit_batch_tx(Actor::System, "", move |tx| {
+                Box::pin(async move {
+                    let interner = owned_table.interner().get().await?;
+                    let refs = crate::types::common::new_map();
+                    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+                    owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+                })
+            })
+            .await?;
         Ok(admin_result(
             json!({"dropped_user": op.drop_user, "existed": result.affected > 0}),
         ))
@@ -227,13 +244,6 @@ impl ShamirAdminExecutor {
             .roles_table()
             .await
             .map_err(|e| err(e.to_string()))?;
-        let interner = table
-            .interner()
-            .get()
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        let refs = crate::types::common::new_map();
-        let ctx = crate::query::filter::FilterContext::new(interner, &refs);
         let del_op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new("roles"),
             where_clause: crate::query::filter::Filter::Eq {
@@ -241,10 +251,24 @@ impl ShamirAdminExecutor {
                 value: crate::query::filter::FilterValue::String(op.drop_role.clone()),
             },
         };
-        let result = table
-            .execute_delete(&del_op, &ctx)
-            .await
+        // F5a: implicit-tx file-WAL delete path (see handle_drop_user).
+        let repo = self
+            .shamir
+            .system_store()
+            .system_repo()
             .map_err(|e| err(e.to_string()))?;
+        let owned_op = del_op.clone();
+        let owned_table = table.clone();
+        let result = repo
+            .run_implicit_batch_tx(Actor::System, "", move |tx| {
+                Box::pin(async move {
+                    let interner = owned_table.interner().get().await?;
+                    let refs = crate::types::common::new_map();
+                    let ctx = crate::query::filter::FilterContext::new(interner, &refs);
+                    owned_table.execute_delete_tx(&owned_op, &ctx, tx).await
+                })
+            })
+            .await?;
         Ok(admin_result(
             json!({"dropped_role": op.drop_role, "existed": result.affected > 0}),
         ))
