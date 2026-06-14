@@ -38,7 +38,6 @@ use shamir_transport_ws::listener::{bind_validated as bind_ws, WsListenerProfile
 use shamir_transport_ws::server::{accept_browser_ws, accept_native_ws};
 
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
@@ -402,7 +401,15 @@ impl ServerLauncher {
         let tls_acceptor = TlsAcceptor::from(tls_server);
 
         // 10. Spawn accept loops.
-        let shutdown_notify = Arc::new(Notify::new());
+        //
+        // Use tokio_util::sync::CancellationToken (not Notify::notify_waiters)
+        // for the shutdown signal. Notify is lossy across the poll-cycle of
+        // `select!` — `shutdown.notified()` creates a new future each poll,
+        // and a notify that lands between polls when no Notified future is
+        // alive is silently dropped. CancellationToken is persistent: cancel
+        // sets a flag; every existing `.cancelled().await` wakes; every new
+        // `.cancelled()` returns immediately. Race-closed by construction.
+        let shutdown_token = tokio_util::sync::CancellationToken::new();
         let mut bound_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(config.listeners.len());
         let mut listener_tasks: Vec<JoinHandle<()>> = Vec::new();
 
@@ -487,10 +494,11 @@ impl ServerLauncher {
                         auth_init_timeout,
                     );
                     let acceptor = tls_acceptor.clone();
-                    let notify = shutdown_notify.clone();
+                    let token = shutdown_token.clone();
+
                     let limiter = conn_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_tcp(
-                        listener, acceptor, ctx, notify, limiter,
+                        listener, acceptor, ctx, token, limiter,
                     )));
                     local_addr
                 }
@@ -521,10 +529,11 @@ impl ServerLauncher {
                         auth_init_timeout,
                     );
                     let acceptor = tls_acceptor.clone();
-                    let notify = shutdown_notify.clone();
+                    let token = shutdown_token.clone();
+
                     let limiter = conn_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_ws_native(
-                        listener, acceptor, ctx, notify, limiter,
+                        listener, acceptor, ctx, token, limiter,
                     )));
                     local_addr
                 }
@@ -555,10 +564,11 @@ impl ServerLauncher {
                         auth_init_timeout,
                     );
                     let acceptor = tls_acceptor.clone();
-                    let notify = shutdown_notify.clone();
+                    let token = shutdown_token.clone();
+
                     let limiter = conn_limiter.clone();
                     listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
-                        listener, acceptor, ctx, notify, limiter, policy,
+                        listener, acceptor, ctx, token, limiter, policy,
                     )));
                     local_addr
                 }
@@ -611,7 +621,8 @@ impl ServerLauncher {
             listener_tasks,
             scheduler,
             audit_appender,
-            shutdown_notify,
+            shutdown_token,
+
             observability,
             meta_snapshot_task,
             interactive_tx_reaper,
@@ -705,14 +716,14 @@ async fn accept_loop_tcp(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
-    shutdown: Arc<Notify>,
+    shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
 ) {
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.notified() => {
-                tracing::debug!("accept_loop_tcp: shutdown notified, exiting");
+            _ = shutdown.cancelled() => {
+                tracing::debug!("accept_loop_tcp: shutdown cancelled, exiting");
                 break;
             }
             res = listener.accept() => {
@@ -767,14 +778,14 @@ async fn accept_loop_ws_native(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
-    shutdown: Arc<Notify>,
+    shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
 ) {
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.notified() => {
-                tracing::debug!("accept_loop_ws_native: shutdown notified, exiting");
+            _ = shutdown.cancelled() => {
+                tracing::debug!("accept_loop_ws_native: shutdown cancelled, exiting");
                 break;
             }
             res = listener.accept() => {
@@ -835,15 +846,15 @@ async fn accept_loop_ws_browser(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     ctx: Arc<ConnectionContext>,
-    shutdown: Arc<Notify>,
+    shutdown: tokio_util::sync::CancellationToken,
     limiter: ConnLimiter,
     policy: BrowserOriginPolicy,
 ) {
     loop {
         tokio::select! {
             biased;
-            _ = shutdown.notified() => {
-                tracing::debug!("accept_loop_ws_browser: shutdown notified, exiting");
+            _ = shutdown.cancelled() => {
+                tracing::debug!("accept_loop_ws_browser: shutdown cancelled, exiting");
                 break;
             }
             res = listener.accept() => {
