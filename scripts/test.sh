@@ -66,4 +66,8 @@ case "$mode" in
 esac
 
 echo "» cargo nextest run ${nextest_args[*]} ${extra_args[*]:-}" >&2
+# Bless this run for the cargo-test-guard runner — nextest itself bypasses
+# the runner, but if it launches anything through cargo, the env var
+# threads through so the guard lets it pass.
+export SHAMIR_TEST_BLESSED=1
 exec cargo nextest run "${nextest_args[@]}" "${extra_args[@]}"

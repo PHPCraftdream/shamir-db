@@ -54,3 +54,26 @@ debug = 1
 [alias]
 t  = "nextest run --no-fail-fast"
 tl = "nextest run --lib --no-fail-fast"
+
+# ---------------------------------------------------------------------------
+# Cargo runner — perimeter defense.
+#
+# Cargo invokes the configured runner for every test/bench binary it wants
+# to execute. Our runner (`scripts/cargo-test-guard.sh`) lets bench binaries
+# through (release-profile path) and lets blessed runs through
+# (SHAMIR_TEST_BLESSED=1, set by ./scripts/test.sh + cargo t / cargo tl),
+# but BLOCKS bare `cargo test` with a clear error pointing at the
+# centralised entry point. nextest itself bypasses this runner — it
+# launches binaries directly — so the legitimate path stays fast.
+# ---------------------------------------------------------------------------
+[target.'cfg(all())']
+# Inline guard — cargo invokes this for every test/bench binary.
+# - Lets release-profile binaries through (bench harnesses).
+# - Lets blessed runs through (SHAMIR_TEST_BLESSED=1, set by
+#   ./scripts/test.sh + cargo t / cargo tl).
+# - Otherwise prints a clear refusal and exits 2.
+# nextest bypasses the runner entirely (launches binaries direct),
+# so the centralised entry point stays fast.
+# Inlined here (not a separate script) so bash always finds it
+# regardless of cargo's invocation cwd.
+runner = ["bash", "-c", "case \"$0\" in */release/*|*\\\\release\\\\*) exec \"$0\" \"$@\";; esac; if [ -n \"${SHAMIR_TEST_BLESSED:-}\" ]; then exec \"$0\" \"$@\"; fi; printf '\\n══════════════════════════════════════════════════════════════════════\\n  ⛔  Direct `cargo test` is BANNED in this repository.\\n\\n  Use the centralised entry point (see CLAUDE.md §🧪):\\n    ./scripts/test.sh                  # lib tests, all crates\\n    ./scripts/test.sh --full           # + integration + e2e\\n    cargo t                            # alias for --full\\n    cargo tl                           # alias for lib\\n\\n  Why: silent multi-hour hangs (Windows pipe-buffering + e2e\\n  deadlocks). The wrapper enforces per-test timeouts.\\n\\n  One-shot debug bypass:\\n    SHAMIR_TEST_BLESSED=1 cargo test -p <crate> --lib -- <name>\\n══════════════════════════════════════════════════════════════════════\\n' >&2; exit 2"]
