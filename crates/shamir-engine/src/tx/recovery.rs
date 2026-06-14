@@ -270,6 +270,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
             gate.completion()
                 .mark(entry.commit_version, CompletionState::Materialized);
         }
+        // File mode: no-op (no per-entry markers; segment cleaned by F6 truncation). KV mode: removes the marker.
         wal.commit(entry.txn_id).await?;
     }
 
