@@ -385,18 +385,28 @@ impl RepoInstance {
     /// call. Shares the `"__tx__"` info store with [`tx_gate`].
     ///
     /// The `next_txn_id` counter is seeded from
-    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)` — the txn_id
-    /// mirror of the CRIT-B version floor in [`tx_gate`]. The persisted
-    /// `NextTxId` snapshot is written only periodically, so after a crash
-    /// it can lag the txn_id of an *inflight* (uncommitted, uncleaned) V2
-    /// WAL entry. Seeding solely from the snapshot would let
-    /// `fresh_txn_id()` re-issue an id the crashed-and-about-to-be-
-    /// recovered entry already used → two WAL entries sharing one txn_id.
-    /// We pre-scan the inflight entries (the same `list_inflight()`
-    /// recovery runs) and floor the counter above their max. Best-effort:
-    /// a WAL read error falls back to the snapshot rather than blocking
-    /// construction — recovery (which propagates errors) runs separately
-    /// on the open path.
+    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)`.
+    ///
+    /// **Context (KV-marker model only).** In KV-backed repos each WAL
+    /// entry is stored under `WalActiveKey(txn_id)` — a unique marker.
+    /// If two entries shared a `txn_id` the second would overwrite the
+    /// first marker, silently losing inflight state. The persisted
+    /// `NextTxId` snapshot is written only periodically, so after a
+    /// crash it can lag behind an inflight entry's txn_id. Flooring the
+    /// counter above the max inflight txn_id prevents reuse.
+    ///
+    /// **File mode (append-only segment).** The live tx commit path
+    /// stamps WAL entries with the gate's `tx.tx_id.0` (see
+    /// `pre_commit.rs`), NOT `RepoWalManager::fresh_txn_id()` — the
+    /// latter has no caller in the tx commit path. Furthermore, in file
+    /// mode `list_inflight()` returns empty (no KV markers are written),
+    /// so the floor below is a no-op. Even if txn_ids repeated after a
+    /// crash, the segment is append-only: entries are sequential frames
+    /// keyed by position, and recovery replays by the monotonically-
+    /// floored `commit_version` — no ordering ambiguity or data loss.
+    ///
+    /// The floor is therefore a **KV-path-only safeguard**, inert in
+    /// file mode by construction.
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
         self.repo_wal
             .get_or_try_init(|| async {
@@ -450,11 +460,10 @@ impl RepoInstance {
                     None => shamir_tx::RepoWalManager::new(info_store, initial_txn_id),
                 };
 
-                // Floor the counter above any inflight txn_id (mirror of the
-                // version-floor pre-scan in `tx_gate`). `repo_wal` is the
-                // cell that *builds* the manager, so we scan through the
-                // just-constructed `mgr` rather than re-entering this cell
-                // via `max_inflight_commit_version`.
+                // KV-path safeguard: floor next_txn_id above any inflight
+                // txn_id to prevent marker key collision after crash.
+                // Inert in file mode — list_inflight() returns empty (no
+                // KV markers written), so the branch is never taken.
                 if let Ok(entries) = mgr.list_inflight().await {
                     if let Some(max_txn_id) = entries.iter().map(|e| e.txn_id).max() {
                         mgr.seed_floor_at_least(max_txn_id + 1);
