@@ -75,14 +75,20 @@ impl WalSegment {
         let last_seq = self.next_seq.fetch_add(n, Ordering::AcqRel) + n - 1;
         let file = Arc::clone(&self.file);
         spawn_blocking(move || -> DbResult<()> {
-            let mut f = file.lock().expect("WalSegment file mutex poisoned");
+            // Coalesce all frames into one buffer → a single write() syscall
+            // instead of 3N (len header + payload + crc per entry).
+            // Frame format is unchanged: [u32 len LE][payload][u32 crc32 LE].
+            let total: usize = payloads.iter().map(|p| p.len() + 8).sum();
+            let mut buf = Vec::with_capacity(total);
             for p in &payloads {
                 let crc = crc32fast::hash(p);
-                f.write_all(&(p.len() as u32).to_le_bytes())
-                    .and_then(|_| f.write_all(p))
-                    .and_then(|_| f.write_all(&crc.to_le_bytes()))
-                    .map_err(|e| DbError::Storage(format!("WalSegment append: {e}")))?;
+                buf.extend_from_slice(&(p.len() as u32).to_le_bytes());
+                buf.extend_from_slice(p);
+                buf.extend_from_slice(&crc.to_le_bytes());
             }
+            let mut f = file.lock().expect("WalSegment file mutex poisoned");
+            f.write_all(&buf)
+                .map_err(|e| DbError::Storage(format!("WalSegment append: {e}")))?;
             // Level 2 (OS page cache) is reached by write_all itself — the
             // write() syscall copies data into kernel buffers. std::fs::File
             // is unbuffered, so there is no userspace buffer to flush.
