@@ -47,13 +47,14 @@ impl TableManager {
     /// Validates unique indexes BEFORE insert, returns error if constraint violated.
     ///
     /// cancel-safe: NO — sequence is data-write → counter-bump → 3 index
-    /// updates with no WAL marker around it (unlike `insert_many` which
-    /// uses `wal.begin_with_delta`/`commit`). Cancellation between the
+    /// updates with no WAL marker around it. Cancellation between the
     /// data write (`self.table.insert`) and the index hooks leaves the
-    /// data store with orphan records that the indexes don't see; the
-    /// doctor's `repair()` pass is the recovery path. Do NOT call this
-    /// under `tokio::select!` or `tokio::time::timeout` — use
-    /// `insert_many(&[value])` for the WAL-covered single-record path.
+    /// data store with orphan records that the indexes don't see.
+    /// F5a: single-record CRUD is best-effort no-WAL (recovery via the
+    /// doctor's `repair()` pass); the WAL-covered path is the batch /
+    /// implicit-tx route. Do NOT call this under `tokio::select!` or
+    /// `tokio::time::timeout` — use the batch / implicit-tx path for
+    /// WAL-covered writes.
     pub async fn insert(&self, value: &InnerValue) -> DbResult<RecordId> {
         let (id, _version) = self.insert_returning_version(value).await?;
         Ok(id)
@@ -345,8 +346,10 @@ impl TableManager {
     /// deletes without WAL coverage. Cancellation after the data delete
     /// but before the index hooks leaves orphan index entries (a record
     /// the data store no longer has but the indexes still point to).
-    /// The batch path `execute_delete` uses WAL; this single-record path
-    /// does not. Do NOT call this under `tokio::select!` or
+    /// F5a: single-record CRUD is best-effort no-WAL (recovery via the
+    /// doctor's `repair()` pass); the WAL-covered delete path is the
+    /// batch / implicit-tx route (`run_implicit_batch_tx` +
+    /// `execute_delete_tx`). Do NOT call this under `tokio::select!` or
     /// `tokio::time::timeout`.
     pub async fn delete(&self, id: RecordId) -> DbResult<bool> {
         let (removed, _version) = self.delete_returning_version(id).await?;

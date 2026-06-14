@@ -533,33 +533,16 @@ impl TableManager {
                 result
             };
 
-        // F4b-4: this V1 per-table WAL marker is RETAINED (not dead). Unlike
-        // INSERT/UPDATE, `execute_delete` still has LIVE non-runner callers —
-        // `shamir-db` system_store (system_store.rs) and admin user/role
-        // teardown (execute/admin_users_roles.rs) call it directly, NOT through
-        // the implicit-tx query_runner path. Those callers rely on the V1
-        // marker for crash recoverability, so it stays until F5 migrates the
-        // single-record CRUD + direct-delete callers off the V1 codec.
-        //
-        // Open a WAL marker spanning the whole DELETE batch.
-        // counter_delta is set pessimistically to -|to_delete| (the
-        // ids we INTEND to delete). If some ids turn out not to
-        // exist, recovery still works — the doctor's verify pass
-        // would reconcile. Most realistic case: every id was just
-        // looked up via index, so they all exist.
-        let txn_id = if !to_delete.is_empty() {
-            let id = self.wal().fresh_txn_id();
-            self.wal()
-                .begin_with_delta(
-                    id,
-                    shamir_wal::WalManager::ops_record_deleted(&to_delete),
-                    -(to_delete.len() as i64),
-                )
-                .await?;
-            Some(id)
-        } else {
-            None
-        };
+        // F5a: the V1 per-table WAL marker is GONE. All former direct
+        // callers — `shamir-db` system_store (system_store.rs) and admin
+        // user/role teardown (execute/admin_users_roles.rs) — now route their
+        // deletes through `RepoInstance::run_implicit_batch_tx` +
+        // `execute_delete_tx` (the implicit-tx file-WAL path, one V2 entry per
+        // tx), exactly like the query_runner non-tx Delete branch. This
+        // direct `execute_delete` method is therefore WAL-less, consistent
+        // with `execute_set`: single-record CRUD is best-effort no-WAL
+        // (recovery via doctor `repair()`); the WAL-covered path is the
+        // batch/implicit-tx route. The V1 codec / WalManager removal is F5c.
 
         // S3: run validators on each record before deleting.
         // Only fetch old records if there are delete-bound validators.
@@ -591,10 +574,6 @@ impl TableManager {
             }
         }
 
-        // Clear the WAL marker — DELETE batch durable.
-        if let Some(id) = txn_id {
-            self.wal().commit(id).await?;
-        }
         self.bump_write_counter(affected);
 
         // Flush the counter cache (delete decremented it).
