@@ -44,6 +44,13 @@ pub struct RepoInstance {
     /// durable journal writer over the `"__changelog__"` store. Created on
     /// first call to [`changefeed`](Self::changefeed). Shared across clones.
     changefeed: Arc<OnceCell<ChangefeedHandle>>,
+    /// On-disk backing directory for this repo, captured from the factory's
+    /// `backing_dir()` at construction. `Some(dir)` for disk-backed repos —
+    /// [`repo_wal`](Self::repo_wal) builds a file-backed `WalGroupCommit`
+    /// rooted at `dir/wal`. `None` for in-memory/test repos — the WAL falls
+    /// back to KV markers. INERT plumbing (W3): the file WAL is constructed
+    /// but not yet written by the live commit path (W4/W5).
+    wal_dir: Option<std::path::PathBuf>,
 }
 
 /// Bundle of the per-repo changefeed and the store it journals into.
@@ -69,6 +76,7 @@ impl Clone for RepoInstance {
             tx_metrics: Arc::clone(&self.tx_metrics),
             group_commit: Arc::clone(&self.group_commit),
             changefeed: Arc::clone(&self.changefeed),
+            wal_dir: self.wal_dir.clone(),
         }
     }
 }
@@ -79,6 +87,16 @@ impl RepoInstance {
     }
 
     fn from_box_repo(name: String, repo: BoxRepo, configs: Vec<TableConfig>) -> Self {
+        // In-memory / test path: no disk backing → KV-marker WAL.
+        Self::from_box_repo_with_wal_dir(name, repo, configs, None)
+    }
+
+    fn from_box_repo_with_wal_dir(
+        name: String,
+        repo: BoxRepo,
+        configs: Vec<TableConfig>,
+        wal_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         let configs_map: TDashMap<String, TableConfig> = new_dash_map_wc(configs.len().max(16));
         let initial_cap = configs.len().max(16);
         let token_names: scc::HashMap<u64, String, THasher> =
@@ -105,6 +123,7 @@ impl RepoInstance {
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
             group_commit: Arc::new(GroupCommit::new()),
             changefeed: Arc::new(OnceCell::new()),
+            wal_dir,
         }
     }
 
@@ -119,8 +138,13 @@ impl RepoInstance {
         factory: BoxRepoFactory,
         configs: Vec<TableConfig>,
     ) -> DbResult<Self> {
+        // Capture the disk backing dir BEFORE consuming the factory, so a
+        // disk-backed repo gets a file-WAL group (W3, inert plumbing).
+        let wal_dir = factory.backing_dir();
         let repo = factory.create().await?;
-        Ok(Self::from_box_repo(name, repo, configs))
+        Ok(Self::from_box_repo_with_wal_dir(
+            name, repo, configs, wal_dir,
+        ))
     }
 
     /// Repository name.
@@ -382,7 +406,39 @@ impl RepoInstance {
                         .await
                         .unwrap_or(None)
                         .unwrap_or(1);
-                let mgr = shamir_tx::RepoWalManager::new(info_store, initial_txn_id);
+                // Disk-backed repos build a file WAL segment + group-commit
+                // coordinator rooted in a `<backing>.shamirwal/` directory
+                // SIBLING to the backend's on-disk path. The path returned by
+                // `backing_dir()` is the backend's own root, which is a single
+                // FILE for redb/persy/nebari/canopy and a DIRECTORY for
+                // sled/fjall — so we cannot nest a `wal` child inside it (that
+                // fails for the file backends: the parent is an existing
+                // file). Appending a `.shamirwal` suffix to the OS path string
+                // yields an unambiguous sibling that never collides with the
+                // backend's file/dir in either case. INERT (W3): the group is
+                // constructed and handed to the manager, but the live commit
+                // path still uses the KV-marker `begin` and recovery still
+                // uses `list_inflight` — the file-WAL cutover is W4/W5.
+                // In-memory repos (`wal_dir == None`) build the manager
+                // exactly as before (no group → KV fallback).
+                let mgr = match &self.wal_dir {
+                    Some(dir) => {
+                        let mut os = dir.clone().into_os_string();
+                        os.push(".shamirwal");
+                        let wal_subdir = std::path::PathBuf::from(os);
+                        let mk_dir = wal_subdir.clone();
+                        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&mk_dir))
+                            .await
+                            .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?
+                            .map_err(|e| {
+                                DbError::Storage(format!("create wal dir {wal_subdir:?}: {e}"))
+                            })?;
+                        let seg = shamir_wal::WalSegment::open(wal_subdir.join("repo.wal")).await?;
+                        let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(seg)));
+                        shamir_tx::RepoWalManager::new_with_group(info_store, initial_txn_id, group)
+                    }
+                    None => shamir_tx::RepoWalManager::new(info_store, initial_txn_id),
+                };
 
                 // Floor the counter above any inflight txn_id (mirror of the
                 // version-floor pre-scan in `tx_gate`). `repo_wal` is the

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::Store;
-use shamir_wal::{WalActiveKey, WalEntryV2};
+use shamir_wal::{WalActiveKey, WalDurability, WalEntryV2, WalGroupCommit};
 
 /// Repo-scoped WAL — one entry per tx/batch, covering all tables.
 ///
@@ -22,6 +22,12 @@ use shamir_wal::{WalActiveKey, WalEntryV2};
 pub struct RepoWalManager {
     info_store: Arc<dyn Store>,
     next_txn_id: AtomicU64,
+    /// Optional file-backed group-commit coordinator. `Some` for
+    /// disk-backed repos (constructed in `RepoInstance::repo_wal`), `None`
+    /// for in-memory repos — in which case [`begin_grouped`](Self::begin_grouped)
+    /// falls back to the KV-marker [`begin`](Self::begin) path. Wired but
+    /// not yet driven by the live commit path (that cutover is W4/W5).
+    group: Option<Arc<WalGroupCommit>>,
 }
 
 impl RepoWalManager {
@@ -33,6 +39,22 @@ impl RepoWalManager {
         Self {
             info_store,
             next_txn_id: AtomicU64::new(initial_txn_id),
+            group: None,
+        }
+    }
+
+    /// Like [`new`](Self::new), but attaches a file-backed
+    /// [`WalGroupCommit`] so [`begin_grouped`](Self::begin_grouped) writes
+    /// to the segment file instead of falling back to KV markers.
+    pub fn new_with_group(
+        info_store: Arc<dyn Store>,
+        initial_txn_id: u64,
+        group: Arc<WalGroupCommit>,
+    ) -> Self {
+        Self {
+            info_store,
+            next_txn_id: AtomicU64::new(initial_txn_id),
+            group: Some(group),
         }
     }
 
@@ -75,6 +97,33 @@ impl RepoWalManager {
             .set(WalActiveKey::new(entry.txn_id).to_bytes(), encoded.into())
             .await?;
         Ok(())
+    }
+
+    /// cancel-safe: yes — when a group is present, parks on the
+    /// group-commit waiter (`WalGroupCommit::append`); cancellation drops
+    /// the future. When absent, delegates to the cancel-safe
+    /// [`begin`](Self::begin).
+    ///
+    /// Backend-agnostic WAL begin. When a file-backed [`WalGroupCommit`] is
+    /// attached (disk repos), encodes `entry` and appends it to the segment
+    /// at the requested durability tier. Otherwise falls back to the KV-marker
+    /// [`begin`](Self::begin) path (in-memory repos).
+    ///
+    /// Wired but not yet driven by the live commit path — that cutover is
+    /// W4/W5; today `commit_tx_lockfree` still calls [`begin`](Self::begin).
+    #[allow(dead_code)]
+    pub async fn begin_grouped(
+        &self,
+        entry: WalEntryV2,
+        durability: WalDurability,
+    ) -> DbResult<()> {
+        match &self.group {
+            Some(g) => {
+                let encoded = entry.encode()?;
+                g.append(encoded, durability).await
+            }
+            None => self.begin(entry).await,
+        }
     }
 
     /// Batch-write N WAL entries in a single `set_many` + `flush`.
