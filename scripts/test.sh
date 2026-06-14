@@ -142,8 +142,8 @@ case "$mode" in
 esac
 
 echo "» cargo nextest run ${nextest_args[*]} ${extra_args[*]:-}" >&2
-# Bless this run for the cargo-test-guard runner — nextest itself bypasses
-# the runner, but if it launches anything through cargo, the env var
-# threads through so the guard lets it pass.
-export SHAMIR_TEST_BLESSED=1
+# The cargo-runner guard (.cargo/config.toml) gates on $NEXTEST, which
+# nextest sets itself for every test process it launches — so no
+# project-specific escape flag is needed here. Bare `cargo test` (no
+# $NEXTEST) is refused; this path always passes.
 exec cargo nextest run "${nextest_args[@]}" "${extra_args[@]}"
