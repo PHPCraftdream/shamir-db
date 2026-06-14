@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use shamir_tx::{SnapshotGuard, TxContext};
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Phase B Stage 6 — default idle TTL for an open interactive tx.
 /// Matches `TRANSACTIONS.md` (30 s) and `PHASE_B_INTERACTIVE_TX.md` §6.4.
@@ -45,12 +45,11 @@ pub const DEFAULT_INTERACTIVE_TX_IDLE_TTL: Duration = Duration::from_secs(30);
 pub const DEFAULT_REAPER_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Phase B Stage 6 — handle for the periodic interactive-tx reaper task.
-/// Same shape as the server's `MetaSnapshotTask`: a `JoinHandle<()>` plus
-/// a `Notify` stop signal so shutdown wakes the task immediately rather
-/// than waiting one full sweep interval.
+/// Just the `JoinHandle<()>` — the stop signal is the shared root
+/// `shutdown_token` (cancelled by `ServerHandle::shutdown` before this
+/// handle is awaited), so no per-task stop channel is needed.
 pub struct ReaperTask {
     pub handle: JoinHandle<()>,
-    pub stop: Arc<Notify>,
 }
 
 /// Errors surfaced when driving a handle through the registry.
@@ -293,9 +292,8 @@ pub fn spawn_reaper_task(
     registry: Arc<TxRegistry>,
     idle_ttl: Duration,
     reap_interval: Duration,
+    shutdown: CancellationToken,
 ) -> ReaperTask {
-    let stop = Arc::new(Notify::new());
-    let stop_inner = stop.clone();
     let handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(reap_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -305,8 +303,8 @@ pub fn spawn_reaper_task(
         loop {
             tokio::select! {
                 biased;
-                _ = stop_inner.notified() => {
-                    tracing::debug!("interactive_tx_reaper: shutdown notified");
+                _ = shutdown.cancelled() => {
+                    tracing::debug!("interactive_tx_reaper: shutdown cancelled");
                     break;
                 }
                 _ = interval.tick() => {
@@ -326,5 +324,5 @@ pub fn spawn_reaper_task(
             }
         }
     });
-    ReaperTask { handle, stop }
+    ReaperTask { handle }
 }

@@ -168,10 +168,12 @@ async fn reaper_task_reaps_past_deadline_tx() {
     assert_eq!(reg.len(), 1);
 
     // Tight sweep, generous idle TTL -> only the absolute-deadline branch fires.
+    let shutdown = tokio_util::sync::CancellationToken::new();
     let reaper = spawn_reaper_task(
         Arc::clone(&reg),
         Duration::from_secs(60),
         Duration::from_millis(50),
+        shutdown.clone(),
     );
     // The first tick is dropped (set in spawn_reaper_task), so the first
     // real sweep fires ~50ms later. Sleep generously to avoid CI flake.
@@ -183,7 +185,7 @@ async fn reaper_task_reaps_past_deadline_tx() {
     ));
 
     // Clean drain -- mirror ServerHandle::shutdown so the test never leaks the task.
-    reaper.stop.notify_waiters();
+    shutdown.cancel();
     let _ = reaper.handle.await;
 }
 

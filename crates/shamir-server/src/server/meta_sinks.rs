@@ -10,7 +10,7 @@ use shamir_connect::server::lockout::{
 use shamir_connect::server::rate_limit::{
     InMemoryRateLimiter, RateLimitSnapshot, RateLimitSnapshotError, RateLimitSnapshotSink,
 };
-use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::server::server_handle::MetaSnapshotTask;
 use crate::server_meta::ServerMetaStore;
@@ -86,18 +86,24 @@ impl RateLimitSnapshotSink for MetaRateLimitSink {
 /// the loop continues — losing one snapshot is recoverable on the next
 /// tick.
 ///
-/// Shutdown is driven by the returned `stop` `Notify`. The task writes one
-/// final snapshot of each on the way out so a clean restart sees the
-/// freshest possible state — important for both the durability story and
-/// for integration tests that boot, do work, shut down, and reboot from
-/// the same data dir (the redb file lock on `server_meta.redb` cannot be
-/// re-acquired until this task drops its `Arc<ServerMetaStore>`).
+/// Shutdown is driven by the shared root `shutdown` [`CancellationToken`]:
+/// `ServerHandle::shutdown` cancels it once and this task observes the cancel
+/// on its next `select!` poll. The task writes one final snapshot of each on
+/// the way out so a clean restart sees the freshest possible state —
+/// important for both the durability story and for integration tests that
+/// boot, do work, shut down, and reboot from the same data dir (the redb file
+/// lock on `server_meta.redb` cannot be re-acquired until this task drops its
+/// `Arc<ServerMetaStore>`).
+///
+/// CancellationToken (not `Notify`) closes the lossy subscribe-window race:
+/// a cancel that lands while this task executes its tick-branch body (instead
+/// of parked in `select!`) is still observed on the next loop iteration,
+/// because the token's cancelled state is persistent — it does not evaporate.
 pub(super) fn spawn_meta_snapshot_task(
     lockout: Arc<InMemoryLockoutStore>,
     rate_limit: Arc<InMemoryRateLimiter>,
+    shutdown: CancellationToken,
 ) -> MetaSnapshotTask {
-    let stop = Arc::new(Notify::new());
-    let stop_inner = stop.clone();
     let handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(LOCKOUT_SNAPSHOT_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -107,8 +113,8 @@ pub(super) fn spawn_meta_snapshot_task(
         loop {
             tokio::select! {
                 biased;
-                _ = stop_inner.notified() => {
-                    tracing::debug!("meta_snapshot: shutdown notified, writing final snapshots");
+                _ = shutdown.cancelled() => {
+                    tracing::debug!("meta_snapshot: shutdown cancelled, writing final snapshots");
                     if let Err(e) = lockout.persist_snapshot() {
                         tracing::warn!(error = %e, "final lockout snapshot persist failed");
                     }
@@ -159,5 +165,5 @@ pub(super) fn spawn_meta_snapshot_task(
             }
         }
     });
-    MetaSnapshotTask { handle, stop }
+    MetaSnapshotTask { handle }
 }
