@@ -184,10 +184,15 @@ pub(super) async fn run_leader(
                 }
             }
             Err(e) => {
+                // Note: the version for THIS entry was already marked
+                // Aborted inside pre_commit_locked_validate on error.
                 release_pessimistic_locks(&entry.tx, repo).await;
                 if entry.is_leader {
                     // Leader failed SSI — abort all validated followers too.
+                    // Their versions were assigned successfully but will not
+                    // materialize — mark each Aborted.
                     for v in &validated {
+                        gate.completion().mark(v.commit_version, State::Aborted);
                         if !v.is_leader {
                             if let Some(s) = panic_guard.senders[v.pg_idx].take() {
                                 let _ = s.send(Err(DbError::Internal(
@@ -196,6 +201,8 @@ pub(super) async fn run_leader(
                             }
                         }
                     }
+                    // Clear panic_guard versions — already marked above.
+                    panic_guard.versions.clear();
                     drop(panic_guard);
                     drop(commit_guard);
                     return Err(e);

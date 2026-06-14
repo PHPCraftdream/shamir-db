@@ -3,6 +3,7 @@ pub mod commit_async_visibility_tests;
 pub mod commit_phase5_defer_tests;
 pub mod commit_phase5_tests;
 pub mod commit_tests;
+pub mod early_assign_tests;
 pub mod gc_tests;
 pub mod group_commit_tests;
 pub mod index_rollback_tests;

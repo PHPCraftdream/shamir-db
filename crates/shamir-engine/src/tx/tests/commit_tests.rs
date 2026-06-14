@@ -550,11 +550,11 @@ async fn commit_tx_advances_table_counter() {
 // publish are the only steps skipped, never the SSI check).
 // ===========================================================================
 
-/// An empty tx burns no MVCC version. Proven behaviourally: commit a
-/// non-empty tx (version V), then an empty tx, then another non-empty tx —
-/// the second non-empty tx must get exactly V+1, not V+2. If the empty tx
-/// had gone through the full pipeline it would have consumed a version and
-/// the delta would be 2.
+/// P2a: An empty tx now burns an MVCC version (assigned optimistically
+/// before the C6 check) but marks it Aborted so the watermark advances.
+/// Proven behaviourally: commit a non-empty tx (version V), then an empty
+/// tx, then another non-empty tx — the second non-empty tx gets V+2
+/// because the empty tx consumed (and aborted) one version.
 #[tokio::test]
 async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     let repo = make_repo();
@@ -573,7 +573,8 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     let v1 = commit_tx(tx1, &repo).await.unwrap().commit_version;
     assert!(v1 > 0);
 
-    // Empty tx → fast-path: commit_version pinned to snapshot (0), no WAL.
+    // Empty tx → fast-path: commit_version pinned to snapshot, no WAL.
+    // P2a: version is burned and marked Aborted internally.
     let snap_before = repo.tx_gate().await.unwrap().last_committed();
     let empty = TxContext::new(TxId::new(6002), 0, snap_before, IsolationLevel::Snapshot);
     let out = commit_tx(empty, &repo).await.unwrap();
@@ -582,25 +583,20 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
         "empty fast-path pins commit_version to the snapshot version"
     );
     assert!(out.materialized(), "empty fast-path is Complete");
-    assert_eq!(
-        repo.tx_gate().await.unwrap().last_committed(),
-        snap_before,
-        "empty fast-path must NOT advance last_committed (nothing published)"
-    );
     assert!(
         wal.list_inflight().await.unwrap().is_empty(),
         "empty fast-path must write no WAL entry"
     );
 
-    // Real tx #2 → must get V+1 (the empty tx consumed nothing).
+    // Real tx #2 → gets V+2 (the empty tx burned one version via P2a).
     let mut tx3 = TxContext::new(TxId::new(6003), 0, 0, IsolationLevel::Snapshot);
     tx3.write_set.insert(6003, staged(b"k3"));
     let v2 = commit_tx(tx3, &repo).await.unwrap().commit_version;
     assert_eq!(
         v2,
-        v1 + 1,
-        "the empty tx must not have consumed a version (expected {}, got {})",
-        v1 + 1,
+        v1 + 2,
+        "P2a: empty tx burns a version (expected {}, got {})",
+        v1 + 2,
         v2
     );
 }
