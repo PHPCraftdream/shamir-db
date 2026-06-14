@@ -676,3 +676,80 @@ async fn read_only_serializable_with_conflict_still_aborts() {
         "a pre-commit SSI abort leaves no WAL entry"
     );
 }
+
+// ===========================================================================
+// P2c — disjoint-table parallelism (commit_lock dissolved)
+// ===========================================================================
+
+/// Two txs writing to DISJOINT tables commit fully in parallel (no global
+/// serialization). Both succeed with distinct commit_versions.
+#[tokio::test]
+async fn p2c_disjoint_table_commits_run_in_parallel() {
+    let repo = make_repo();
+
+    let make_tx = |tx_id: u64, table_token: u64, key: &'static [u8]| {
+        let mut tx = TxContext::new(TxId::new(tx_id), 0, 0, IsolationLevel::Snapshot);
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let mut staging = StagingStore::new(data_store);
+        staging.set(Bytes::from_static(key), Bytes::from_static(b"v"));
+        tx.write_set.insert(table_token, staging);
+        tx
+    };
+
+    let tx_a = make_tx(9001, 100, b"ka");
+    let tx_b = make_tx(9002, 200, b"kb");
+
+    // Spawn both commits concurrently — without commit_mutex they should
+    // not block each other.
+    let repo2 = repo.clone();
+    let (ra, rb) = tokio::join!(commit_tx(tx_a, &repo), commit_tx(tx_b, &repo2),);
+
+    let oa = ra.expect("disjoint tx_a must succeed");
+    let ob = rb.expect("disjoint tx_b must succeed");
+    assert_ne!(
+        oa.commit_version, ob.commit_version,
+        "disjoint txs must get distinct versions"
+    );
+}
+
+/// Two txs writing to the SAME (table, key) under Snapshot isolation:
+/// both succeed because Snapshot does not detect write-write conflicts
+/// (last-writer-wins). The uwl_guard serializes their materialize phases.
+#[tokio::test]
+async fn p2c_same_table_snapshot_both_succeed_last_writer_wins() {
+    let repo = make_repo();
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+
+    let make_tx = |tx_id: u64| {
+        let mut tx = TxContext::new(TxId::new(tx_id), 0, 0, IsolationLevel::Snapshot);
+        let mut staging = StagingStore::new(Arc::clone(&data_store));
+        staging.set(
+            Bytes::from_static(b"same_key"),
+            Bytes::from(format!("v{}", tx_id)),
+        );
+        tx.write_set.insert(42, staging);
+        tx
+    };
+
+    let tx_a = make_tx(9010);
+    let tx_b = make_tx(9011);
+
+    let repo2 = repo.clone();
+    let (ra, rb) = tokio::join!(commit_tx(tx_a, &repo), commit_tx(tx_b, &repo2),);
+
+    // Under Snapshot isolation, both commits succeed (no conflict detection
+    // for write-write — last-writer-wins at the data layer).
+    ra.expect("same-table Snapshot tx_a must succeed");
+    rb.expect("same-table Snapshot tx_b must succeed");
+
+    // The data store has one of the two values (last-writer-wins).
+    let got = data_store
+        .get(Bytes::from_static(b"same_key"))
+        .await
+        .unwrap();
+    assert!(
+        got == "v9010" || got == "v9011",
+        "last-writer-wins: got {:?}",
+        got
+    );
+}

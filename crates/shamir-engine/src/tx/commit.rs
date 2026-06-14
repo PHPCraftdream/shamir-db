@@ -1,5 +1,5 @@
 use shamir_storage::error::DbError;
-use shamir_tx::{PendingCommit, TxContext};
+use shamir_tx::TxContext;
 use shamir_types::types::common::THasher;
 use shamir_wal::WalOpV2;
 
@@ -7,7 +7,6 @@ use crate::repo::RepoInstance;
 use crate::tx::commit_phases::{
     apply_counter_phase, apply_data_phase, materialize_async_tail, promote_vectors,
 };
-use crate::tx::group_commit::{compute_write_set_keys, run_leader};
 use crate::tx::pre_commit::{pre_commit_locked, pre_commit_prelock, PreCommit, PreLockResult};
 use crate::tx::tx_outcome::{BackgroundCommitHandle, MaterializationState, TxOutcome};
 
@@ -310,56 +309,22 @@ async fn commit_tx_inner(mut tx: TxContext, repo: &RepoInstance) -> Result<TxOut
             .await;
     }
 
-    // Compute write-set keys for group-commit conflict detection.
-    let write_set_keys = compute_write_set_keys(&tx);
-
-    // === GROUP-COMMIT ORCHESTRATION ===
+    // === P2c: LOCKFREE COMMIT PATH ===
     //
-    // Try to acquire the commit lock without blocking. If we win, we become
-    // the LEADER and process our tx + any queued followers. If we lose, we
-    // become a FOLLOWER and wait for the current leader to process us.
-    let lock_result = gate.try_commit_lock();
-    match lock_result {
-        Some(commit_guard) => {
-            // I'M LEADER.
-            run_leader(
-                tx,
-                uwl_guards,
-                write_set_keys,
-                commit_guard,
-                repo,
-                gate.as_ref(),
-                wal.as_ref(),
-            )
-            .await
-        }
-        None => {
-            // I'M FOLLOWER. Enqueue and wait for leader to process me.
-            let tx_id_u64 = tx.tx_id.0;
-            let snapshot_version = tx.snapshot_version;
-            let (result_tx, rx) = tokio::sync::oneshot::channel();
-            gate.enqueue_pending(PendingCommit::new(
-                tx,
-                write_set_keys,
-                uwl_guards,
-                result_tx,
-            ));
-
-            match rx.await {
-                Ok(Ok(commit_version)) => Ok(TxOutcome {
-                    tx_id: tx_id_u64,
-                    snapshot_version,
-                    commit_version,
-                    materialization: MaterializationState::Complete,
-                    background: None,
-                }),
-                Ok(Err(e)) => Err(TxError::Storage(e)),
-                Err(_) => Err(TxError::Storage(DbError::Internal(
-                    "leader dropped without responding".into(),
-                ))),
-            }
-        }
-    }
+    // Disjoint-table commits run fully in parallel — no global
+    // `commit_mutex`. Correctness relies on per-table uwl_guards:
+    // same-table committers serialize at uwl acquisition (pre-lock);
+    // disjoint-table committers never conflict in SSI predicates.
+    //
+    // Sequence (all lock-free or per-table-locked):
+    //   1. validate (atomic version + lock-free TreeIndex scan)
+    //   2. WAL begin (unique key per txn_id — concurrent-safe)
+    //   3. record_commit_writes (lock-free TreeIndex insert)
+    //   4. materialize (gated by uwl_guards, not commit_mutex)
+    //
+    // Group-commit WAL batching is sacrificed for parallelism; the
+    // WAL backend's internal batching (if any) still amortizes fsync.
+    commit_tx_lockfree(tx, uwl_guards, repo, gate.as_ref(), wal.as_ref()).await
 }
 
 /// AsyncIndex commit path: uses the traditional sequential commit_lock.
@@ -438,6 +403,88 @@ async fn commit_tx_inner_legacy_async(
         commit_version,
         materialization: MaterializationState::Complete,
         background: Some(BackgroundCommitHandle { join }),
+    })
+}
+
+/// P2c lockfree commit path: no global `commit_mutex`.
+///
+/// Per-table uwl_guards (acquired in pre_commit_prelock in sorted token
+/// order) provide the serialization invariant: same-table committers
+/// serialize at uwl acquisition; disjoint-table committers proceed fully
+/// in parallel. The SSI footprint (`record_commit_writes`) is inserted
+/// into the lock-free `scc::TreeIndex` BEFORE `publish_committed_max`
+/// advances the reader-visible floor, so future SSI validators see it.
+async fn commit_tx_lockfree(
+    mut tx: TxContext,
+    uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
+    repo: &RepoInstance,
+    gate: &shamir_tx::RepoTxGate,
+    wal: &shamir_tx::RepoWalManager,
+) -> Result<TxOutcome, TxError> {
+    use crate::tx::materialize::{materialize, post_publish_cleanup};
+    use crate::tx::pre_commit::pre_commit_locked_validate;
+
+    // Phase 3 + 2 + 2-bis + WAL entry build (no lock needed).
+    let validated = match pre_commit_locked_validate(&mut tx, repo, gate, uwl_guards).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            // C6 empty-tx fast-path.
+            repo.tx_metrics().on_tx_committed();
+            release_pessimistic_locks(&tx, repo).await;
+            return Ok(TxOutcome {
+                tx_id: tx.tx_id.0,
+                snapshot_version: tx.snapshot_version,
+                commit_version: tx.snapshot_version,
+                materialization: MaterializationState::Complete,
+                background: None,
+            });
+        }
+        Err(e) => {
+            release_pessimistic_locks(&tx, repo).await;
+            return Err(e);
+        }
+    };
+
+    let commit_version = validated.commit_version;
+
+    // Phase 4: WAL begin — THE COMMIT POINT.
+    // Concurrent-safe: each tx writes a unique WAL key (txn_id).
+    if let Err(e) = wal.begin(validated.wal_entry).await {
+        gate.completion().mark(
+            commit_version,
+            shamir_tx::completion_tracker::State::Aborted,
+        );
+        release_pessimistic_locks(&tx, repo).await;
+        return Err(TxError::Storage(e));
+    }
+
+    maybe_crash("phase4", repo).await;
+
+    // Phase 6-bis: record SSI footprint BEFORE publish (lock-free insert).
+    gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
+
+    release_pessimistic_locks(&tx, repo).await;
+    repo.tx_metrics().on_tx_committed();
+
+    // Phases 5–7: materialize OUTSIDE any global lock, gated by uwl_guards.
+    let snapshot_version = tx.snapshot_version;
+    let tx_id_u64 = tx.tx_id.0;
+    let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
+
+    let post_publish = materialize(&mut tx, repo, gate, commit_version, validated.uwl_guards).await;
+    let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
+    if materialization == MaterializationState::Deferred {
+        repo.tx_metrics().on_tx_materialization_deferred();
+    }
+    repo.emit_changefeed_event(changefeed_event).await;
+    crate::tx::commit_phases::promote_vectors(&tx, repo, commit_version).await;
+
+    Ok(TxOutcome {
+        tx_id: tx_id_u64,
+        snapshot_version,
+        commit_version,
+        materialization,
+        background: None,
     })
 }
 
