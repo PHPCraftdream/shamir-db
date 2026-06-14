@@ -1,10 +1,10 @@
-//! Two-tier group-commit coordinator over a [`WalSegment`] (W2, additive).
+//! Two-tier group-commit coordinator over a [`WalSink`] (W2, additive).
 //!
 //! [`WalGroupCommit`] coalesces many concurrent appends through one
 //! rotating leader: a single `AtomicBool` CAS elects the leader, which
 //! drains the pending queue and issues ONE
-//! [`append_batch`](WalSegment::append_batch) (`write()` → OS page cache,
-//! level 2) and at most ONE [`sync`](WalSegment::sync) (`fsync`, level 3)
+//! [`append_batch`](WalSink::append_batch) (`write()` → OS page cache,
+//! level 2) and at most ONE [`sync`](WalSink::sync) (`fsync`, level 3)
 //! per window. The rest park until their physical entry reaches the
 //! requested durability tier.
 //!
@@ -50,7 +50,7 @@ use std::sync::Arc;
 use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::{Mutex, Notify};
 
-use crate::wal_segment::WalSegment;
+use crate::wal_sink::WalSink;
 
 /// Durability tier for a single WAL append.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,11 +85,11 @@ impl Waiter {
 
 type Pending = (Vec<u8>, WalDurability, Arc<Waiter>);
 
-/// Lock-free-leader group commit over a [`WalSegment`]. See module-level
+/// Lock-free-leader group commit over a [`WalSink`]. See module-level
 /// correctness argument (and `group_fsync.rs`, D1b — identical structure).
 #[allow(dead_code)]
 pub struct WalGroupCommit {
-    segment: Arc<WalSegment>,
+    sink: Arc<WalSink>,
     // Sanctioned tokio::sync::Mutex (CLAUDE.md): O(1) push / mem::take only,
     // NEVER held across append_batch/sync .await. One push per concurrent
     // committer + one take per window.
@@ -101,9 +101,9 @@ pub struct WalGroupCommit {
 
 #[allow(dead_code)]
 impl WalGroupCommit {
-    pub fn new(segment: Arc<WalSegment>) -> Self {
+    pub fn new(sink: Arc<WalSink>) -> Self {
         Self {
-            segment,
+            sink,
             pending: Mutex::new(Vec::new()),
             flushing: AtomicBool::new(false),
             fsync_count: AtomicU64::new(0),
@@ -165,7 +165,7 @@ impl WalGroupCommit {
                 metas.push((tier, w));
             }
             // One write() for the whole window (level 2).
-            let write_ok = self.segment.append_batch(payloads).await.is_ok();
+            let write_ok = self.sink.append_batch(payloads).await.is_ok();
             // Wake Buffered waiters immediately — level 2 reached. (write()
             // success means bytes are in the OS page cache regardless of a
             // later fsync outcome.)
@@ -178,7 +178,7 @@ impl WalGroupCommit {
             let needs_fsync = metas.iter().any(|(t, _)| *t == WalDurability::Synced);
             let sync_ok = if write_ok && needs_fsync {
                 self.fsync_count.fetch_add(1, Ordering::Relaxed);
-                self.segment.sync().await.is_ok()
+                self.sink.sync().await.is_ok()
             } else {
                 write_ok
             };
@@ -195,6 +195,17 @@ impl WalGroupCommit {
                 return;
             }
         }
+    }
+
+    /// Replay all `WalEntryV2` records persisted in the underlying sink.
+    pub async fn replay(&self) -> DbResult<Vec<crate::wal_entry_v2::WalEntryV2>> {
+        self.sink.replay().await
+    }
+
+    /// Force a durable `fsync` of the sink (level 2 → level 3). Used by the
+    /// `synced` durability tier at batch granularity.
+    pub async fn sync_now(&self) -> DbResult<()> {
+        self.sink.sync().await
     }
 
     #[cfg(test)]
