@@ -132,25 +132,40 @@ What the wrapper guarantees:
 - A deadlocked test surfaces as `TIMEOUT [name]` after 180 s, not a
   3-hour silent hang.
 
-**Banned patterns** (will reintroduce the hang):
+**`cargo test` is BLOCKED outright** by the perimeter guard (cargo
+runner in `.cargo/config.toml`) — there is NO "allowed direct cargo
+test". Every narrow case the old guidance reached for already has a
+first-class form through the central point:
 
 ```
-cargo test --workspace --tests          # ← multi-binary, can hang
-cargo test ... 2>&1 | grep ...          # ← pipe buffering trap
-cargo test --workspace --no-fail-fast   # ← still multi-binary, no timeout
+# narrow to one crate:
+./scripts/test.sh -p shamir-tx
+
+# narrow to one test (substring filter — forwarded to nextest):
+./scripts/test.sh -p shamir-tx -- p3a_batch_footprint
+
+# named scope + filter:
+./scripts/test.sh @oracle -- watermark
 ```
 
-**Allowed direct cargo** (narrow scope only):
+`./scripts/test.sh -- <substring>` runs ONLY the matching tests in
+~0.1 s. The central point IS the narrow-run tool — there is never a
+reason to drop to raw `cargo test` for "just one test".
 
-```
-cargo test -p <crate> --lib             # one binary, no e2e, finishes in <60 s
-cargo test -p <crate> --lib -- <filter> # one binary, one test
-```
+**`SHAMIR_TEST_BLESSED=1` is a true emergency hatch, NOT a routine
+debug shortcut.** It exists for the rare case where a test binary must
+be run by a tool that cannot go through nextest at all (essentially
+never in practice). If you find yourself typing `SHAMIR_TEST_BLESSED=1`
+to run one test, STOP — use `./scripts/test.sh -p <crate> -- <filter>`
+instead. Normalizing the bypass defeats the entire guard: the hang it
+prevents comes back the moment everyone routes around it. (Caught in
+review: the author was reflexively using the bypass for narrow runs the
+central point already handles — don't repeat it.)
 
 **For sub-agents:** every test step in an Agent brief MUST point at
-`./scripts/test.sh` or `cargo t`/`cargo tl`, NOT raw `cargo test ... |
-grep ...`. The wrapper is the contract; bypass it and the next run
-silently hangs at 3 a.m.
+`./scripts/test.sh` (with `-p` / `@scope` / `-- <filter>` as needed),
+NEVER raw `cargo test` and NEVER `SHAMIR_TEST_BLESSED=1`. The wrapper
+is the contract.
 
 If `cargo-nextest` is missing on a fresh checkout:
 ```
