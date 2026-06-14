@@ -173,11 +173,15 @@ pub(super) struct ValidatedPreCommit {
     pub(super) wal_entry: shamir_wal::WalEntryV2,
 }
 
-/// Locked validation phase: Phases 2 + 2-bis + C6 + 3 + WAL entry build.
+/// Locked validation phase: Phases 3 + 2 + 2-bis + C6 + WAL entry build.
 ///
 /// Does NOT write the WAL entry (no fsync). The caller is responsible for
 /// calling `wal.begin(entry)` or batching via `wal.begin_many`. This split
 /// enables group-commit fsync amortization.
+///
+/// Phase 3 (assign_next_version) is now FIRST — the version is allocated
+/// optimistically via atomic fetch_add BEFORE validation. If any subsequent
+/// phase aborts, the version is marked Aborted in the CompletionTracker.
 ///
 /// Returns `Some(ValidatedPreCommit)` when the tx has durable work,
 /// `None` for C6 empty-tx fast-path, or `Err` on validation failure.
@@ -187,6 +191,11 @@ pub(super) async fn pre_commit_locked_validate(
     gate: &RepoTxGate,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Option<ValidatedPreCommit>, TxError> {
+    // Phase 3 (P2a): assign new version BEFORE validation.
+    // Pure atomic fetch_add — lock-free, safe to call without commit_mutex.
+    // If any subsequent phase aborts, the version is marked Aborted.
+    let commit_version = gate.assign_next_version();
+
     // Phase 2 (SSI only): read-set validation.
     if tx.isolation == IsolationLevel::Serializable {
         let validation = match tx.version_provider.as_ref() {
@@ -198,6 +207,7 @@ pub(super) async fn pre_commit_locked_validate(
         };
         if let Err((_table_id, key)) = validation {
             repo.tx_metrics().on_tx_aborted_ssi();
+            gate.completion().mark(commit_version, State::Aborted);
             return Err(TxError::SsiConflict { key });
         }
     }
@@ -212,20 +222,20 @@ pub(super) async fn pre_commit_locked_validate(
         });
         if let Some(dep) = conflict_dep {
             repo.tx_metrics().on_tx_aborted_phantom();
+            gate.completion().mark(commit_version, State::Aborted);
             return Err(TxError::PhantomConflict { dep });
         }
     }
 
-    // C6: empty-tx fast-path.
+    // C6: empty-tx fast-path. Version was allocated but tx has no durable
+    // work — mark it Aborted so the watermark advances past it.
     if tx.is_empty() {
+        gate.completion().mark(commit_version, State::Aborted);
         return Ok(None);
     }
 
     // Crash seam (test-only).
     maybe_crash("pre_commit", repo).await;
-
-    // Phase 3: assign new version.
-    let commit_version = gate.assign_next_version();
 
     // Build WAL entry (Phase 4 prep) — does NOT persist.
     let wal_ops = wal_ops_from_tx(tx).await;
@@ -252,11 +262,11 @@ pub(super) async fn pre_commit_locked_validate(
 /// Locked phase of the commit pipeline: runs UNDER `commit_lock`.
 ///
 /// Performs:
+/// - Phase 3: assign_next_version (P2a: moved BEFORE validation).
 /// - Phase 2: SSI read-set validation (must be atomic with Phase 6
 ///   record_commit_writes — both under lock).
 /// - Phase 2-bis: phantom predicate validation.
 /// - C6: empty-tx fast-path check.
-/// - Phase 3: assign_next_version.
 /// - Phase 4: WAL begin (the commit point).
 ///
 /// Returns `Some(PreCommit)` on successful Phase 4, `None` for the C6
@@ -269,6 +279,11 @@ pub(super) async fn pre_commit_locked(
     wal: &RepoWalManager,
     uwl_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Option<PreCommit>, TxError> {
+    // Phase 3 (P2a): assign new version BEFORE validation.
+    // Pure atomic fetch_add — lock-free, safe without commit_mutex.
+    // If any subsequent phase aborts, the version is marked Aborted.
+    let commit_version = gate.assign_next_version();
+
     // Phase 2 (SSI only): read-set validation.
     //
     // For each (table_id, key) the tx read at version_seen, ensure the
@@ -286,22 +301,12 @@ pub(super) async fn pre_commit_locked(
         };
         if let Err((_table_id, key)) = validation {
             repo.tx_metrics().on_tx_aborted_ssi();
+            gate.completion().mark(commit_version, State::Aborted);
             return Err(TxError::SsiConflict { key });
         }
     }
 
     // Phase 2-bis (SSI only, Phase C): predicate read-set validation.
-    //
-    // Phase 2 above caught rw-antidependencies on keys the tx ACTUALLY READ
-    // (the point read-set). It does NOT catch phantoms — a concurrent
-    // committer inserting a NEW key that matches one of this tx's
-    // predicate/range reads. Phase C records those dependencies in
-    // `tx.predicate_set` (populated only on Serializable; empty otherwise)
-    // and validates them here against `RepoTxGate`'s commit-write-log.
-    //
-    // Zero-overhead: gated on `Serializable` AND on a non-empty
-    // `predicate_set`, so Snapshot, non-tx, and Serializable-with-only-point-
-    // reads skip the loop entirely.
     if tx.isolation == IsolationLevel::Serializable && !tx.predicate_set.is_empty() {
         let mut conflict_dep: Option<String> = None;
         tx.predicate_set.with_iter(|dep| {
@@ -311,30 +316,23 @@ pub(super) async fn pre_commit_locked(
         });
         if let Some(dep) = conflict_dep {
             repo.tx_metrics().on_tx_aborted_phantom();
+            gate.completion().mark(commit_version, State::Aborted);
             return Err(TxError::PhantomConflict { dep });
         }
     }
 
     // === C6: empty-tx fast-path ===
     //
-    // A tx that staged nothing durable (read-only Serializable txs, or any
-    // tx whose write_set / index_write_set / staged_vectors / counter_deltas
-    // / interner_overlay are all empty) has no commit point to cross: there
-    // is nothing to assign a version for, nothing to write to the WAL, and
-    // nothing to publish. Short-circuit BEFORE Phase 3 (assign_next_version)
-    // and Phase 4 (the durable `wal.begin`) so an empty commit is a pure
-    // in-memory no-op — no monotonic version is burned and no fsync is paid.
+    // Version was allocated but tx has no durable work — mark Aborted so
+    // the watermark advances past it.
     //
     // ORDERING IS LOAD-BEARING: this sits AFTER the Phase 2 SSI block above.
     // A read-only Serializable tx still records reads, and its read_set must
     // still be validated against current committed versions — a read-only
     // tx that observed stale data MUST abort (returned as `Err` above), not
-    // silently fast-path to success. `is_empty()` deliberately does NOT gate
-    // on `read_set` (read-only ⇒ fast-path-eligible) nor on `unique_guards`
-    // (a guard only ever accompanies a staged write, so an empty `write_set`
-    // already implies no guards). Phase 2.5/2.6 (unique re-validation) are
-    // skipped only because they are no-ops with no guards.
+    // silently fast-path to success.
     if tx.is_empty() {
+        gate.completion().mark(commit_version, State::Aborted);
         return Ok(None);
     }
 
@@ -342,9 +340,6 @@ pub(super) async fn pre_commit_locked(
     // point — staging is dropped, no WAL entry exists, locks release by
     // RAII. Recovery must find nothing → clean abort.
     maybe_crash("pre_commit", repo).await;
-
-    // Phase 3: assign new version
-    let commit_version = gate.assign_next_version();
 
     // Phase 4: write WAL entry — THE COMMIT POINT.
     //
