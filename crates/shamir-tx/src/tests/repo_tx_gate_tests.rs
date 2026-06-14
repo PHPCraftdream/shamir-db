@@ -1,6 +1,6 @@
 use crate::predicate_set::{PredicateDep, SORTED_PREFIX_LEN, SORTED_TAG};
 use crate::repo_tx_gate::{
-    build_footprint_from_tx, CommitWriteRecord, RepoTxGate, TableWriteFootprint,
+    build_footprint_from_tx, record_conflicts, CommitWriteRecord, RepoTxGate, TableWriteFootprint,
 };
 use crate::types::{IsolationLevel, TxId};
 use crate::IndexWriteOp;
@@ -158,6 +158,55 @@ fn commit_log_window_scan_excludes_at_or_below_snapshot() {
     assert!(!gate.predicate_conflicts(&PredicateDep::TableScan { table_token: 42 }, 15));
     // Disjoint table -> no conflict at any snapshot.
     assert!(!gate.predicate_conflicts(&PredicateDep::TableScan { table_token: 99 }, 0));
+}
+
+// ── P3a: inter-batch phantom — record_conflicts against a batch-local
+//        footprint (the building blocks the group-commit leader composes
+//        inline in run_leader). The committed-log path is already covered by
+//        commit_log_window_scan_*; this verifies the SAME footprint shape
+//        (build_footprint_from_tx) and the SAME conflict predicate
+//        (record_conflicts) detect an intra-batch phantom without going
+//        through the gate's published log. ──────────────────────────────
+
+#[test]
+fn p3a_batch_footprint_table_scan_conflict_detected() {
+    // A footprint produced exactly as the leader produces it for an
+    // accepted survivor: build_footprint_from_tx on a Serializable tx that
+    // touched table 42.
+    let footprint = CommitWriteRecord {
+        commit_version: 7,
+        per_table: HashMap::<_, _, THasher>::from_iter([(
+            42u64,
+            TableWriteFootprint {
+                touched: true,
+                inserted_index_keys: vec![],
+            },
+        )]),
+    };
+
+    // A subsequent survivor whose predicate scans table 42 → conflict.
+    assert!(
+        record_conflicts(&footprint, &PredicateDep::TableScan { table_token: 42 }),
+        "table-scan predicate over a written table must conflict with the batch footprint"
+    );
+    // A predicate over a disjoint table → no conflict.
+    assert!(
+        !record_conflicts(&footprint, &PredicateDep::TableScan { table_token: 99 }),
+        "disjoint table predicate must NOT conflict"
+    );
+}
+
+#[test]
+fn p3a_build_footprint_from_tx_snapshot_is_empty() {
+    // Snapshot txs never produce SSI footprints — so the leader's
+    // `!footprint.is_empty()` guard skips accumulating them, and the
+    // intra-batch phantom check is a no-op for non-Serializable survivors.
+    let ctx = crate::TxContext::new(TxId::new(1), 0, 0, IsolationLevel::Snapshot);
+    let fp = build_footprint_from_tx(&ctx, 5);
+    assert!(
+        fp.is_empty(),
+        "Snapshot tx footprint must be empty (no phantom protection)"
+    );
 }
 
 #[test]

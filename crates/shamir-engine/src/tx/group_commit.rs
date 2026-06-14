@@ -16,7 +16,7 @@ use bytes::Bytes;
 use shamir_collections::THasher;
 use shamir_storage::error::DbError;
 use shamir_tx::completion_tracker::State;
-use shamir_tx::{RepoTxGate, RepoWalManager, TxContext};
+use shamir_tx::{CommitWriteRecord, IsolationLevel, RepoTxGate, RepoWalManager, TxContext};
 use tokio::sync::oneshot;
 
 use crate::repo::RepoInstance;
@@ -144,6 +144,11 @@ pub(super) async fn run_leader(
     let mut leader_empty_outcome: Option<TxOutcome> = None;
     let mut follower_counter: usize = 0; // tracks pg_idx for followers
 
+    // P3a: batch-local footprint accumulator for inter-batch phantom detection.
+    // As each survivor passes validation, its write-footprint is appended here
+    // so subsequent survivors' predicate checks cover earlier batch members.
+    let mut batch_footprints: Vec<CommitWriteRecord> = Vec::new();
+
     for mut entry in entries {
         let pg_idx = if entry.is_leader {
             usize::MAX // sentinel — not used for leader
@@ -155,9 +160,72 @@ pub(super) async fn run_leader(
 
         match pre_commit_locked_validate(&mut entry.tx, repo, gate, entry.uwl_guards).await {
             Ok(Some(vpc)) => {
+                // P3a: inter-batch phantom check — scan this survivor's
+                // predicates against footprints of earlier accepted survivors
+                // in this batch. The committed log is already checked inside
+                // pre_commit_locked_validate; this closes the gap for
+                // intra-batch phantoms.
+                let phantom_conflict = if entry.tx.isolation == IsolationLevel::Serializable
+                    && !entry.tx.predicate_set.is_empty()
+                    && !batch_footprints.is_empty()
+                {
+                    let mut conflict_dep: Option<String> = None;
+                    entry.tx.predicate_set.with_iter(|dep| {
+                        if conflict_dep.is_none() {
+                            for fp in &batch_footprints {
+                                if shamir_tx::record_conflicts(fp, dep) {
+                                    conflict_dep = Some(format!("{:?}", dep));
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                    conflict_dep
+                } else {
+                    None
+                };
+
+                if let Some(dep) = phantom_conflict {
+                    // Abort this survivor due to intra-batch phantom.
+                    repo.tx_metrics().on_tx_aborted_phantom();
+                    gate.completion().mark(vpc.commit_version, State::Aborted);
+                    release_pessimistic_locks(&entry.tx, repo).await;
+                    if entry.is_leader {
+                        // Leader failed — abort all validated followers too.
+                        for v in &validated {
+                            gate.completion().mark(v.commit_version, State::Aborted);
+                            if !v.is_leader {
+                                if let Some(s) = panic_guard.senders[v.pg_idx].take() {
+                                    let _ = s.send(Err(DbError::Internal(
+                                        "batch aborted: leader failed".into(),
+                                    )));
+                                }
+                            }
+                        }
+                        panic_guard.versions.clear();
+                        drop(panic_guard);
+                        drop(commit_guard);
+                        return Err(TxError::PhantomConflict { dep });
+                    }
+                    // Follower failed — notify, continue.
+                    if let Some(sender) = panic_guard.senders[pg_idx].take() {
+                        let _ = sender
+                            .send(Err(DbError::Conflict(format!("phantom conflict: {}", dep))));
+                    }
+                    continue;
+                }
+
                 // Record version in panic_guard BEFORE any subsequent
                 // panic-risky work so Drop always marks it Aborted.
                 panic_guard.versions.push(vpc.commit_version);
+
+                // P3a: accumulate this survivor's footprint for subsequent
+                // survivors' phantom checks.
+                let footprint = shamir_tx::build_footprint_from_tx(&entry.tx, vpc.commit_version);
+                if !footprint.is_empty() {
+                    batch_footprints.push(footprint);
+                }
+
                 validated.push(Validated {
                     tx: entry.tx,
                     uwl_guards: vpc.uwl_guards,
