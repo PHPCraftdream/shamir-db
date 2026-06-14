@@ -250,7 +250,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
     let gate = repo.tx_gate().await?;
 
     let wal = repo.repo_wal().await?;
-    let mut entries = wal.list_inflight().await?;
+    let mut entries = wal.recover().await?;
     entries.sort_by_key(|e| e.commit_version);
     let count = entries.len();
 

@@ -109,9 +109,6 @@ impl RepoWalManager {
     /// at the requested durability tier. Otherwise falls back to the KV-marker
     /// [`begin`](Self::begin) path (in-memory repos).
     ///
-    /// Wired but not yet driven by the live commit path — that cutover is
-    /// W4/W5; today `commit_tx_lockfree` still calls [`begin`](Self::begin).
-    #[allow(dead_code)]
     pub async fn begin_grouped(
         &self,
         entry: WalEntryV2,
@@ -123,6 +120,38 @@ impl RepoWalManager {
                 g.append(encoded, durability).await
             }
             None => self.begin(entry).await,
+        }
+    }
+
+    /// File-mode batch WAL begin. When a [`WalGroupCommit`] is attached
+    /// (disk repos), appends each entry through the group at the requested
+    /// tier (one append per entry — correctness over batching; this path is
+    /// the non-hot AsyncIndex leader). Otherwise falls back to the KV
+    /// [`begin_many`](Self::begin_many) (in-memory repos).
+    pub async fn begin_grouped_many(
+        &self,
+        entries: &[WalEntryV2],
+        durability: WalDurability,
+    ) -> DbResult<()> {
+        match &self.group {
+            Some(g) => {
+                for entry in entries {
+                    let encoded = entry.encode()?;
+                    g.append(encoded, durability).await?;
+                }
+                Ok(())
+            }
+            None => self.begin_many(entries).await,
+        }
+    }
+
+    /// Force a durable `fsync` of the file WAL (level 2 → level 3). In file
+    /// mode, syncs the group's sink; in non-file mode this is a no-op (the
+    /// KV path is made durable by its own `flush`).
+    pub async fn sync_wal(&self) -> DbResult<()> {
+        match &self.group {
+            Some(g) => g.sync_now().await,
+            None => Ok(()),
         }
     }
 
@@ -154,6 +183,13 @@ impl RepoWalManager {
     ///
     /// Remove the marker — tx writes have landed durably. Idempotent.
     pub async fn commit(&self, txn_id: u64) -> DbResult<()> {
+        // File mode: there are no per-entry markers to remove — entries live
+        // in the segment until F6 truncation, and recovery replays them
+        // idempotently. The KV-marker removal below applies only to the
+        // in-memory (no group) path.
+        if self.group.is_some() {
+            return Ok(());
+        }
         self.info_store
             .remove(WalActiveKey::new(txn_id).to_bytes())
             .await?;
@@ -174,6 +210,17 @@ impl RepoWalManager {
             info_store.remove(key).await?;
             Ok(())
         })
+    }
+
+    /// Replay-based recovery source (file WAL). Returns the entries from
+    /// the group's sink, or falls back to the KV `list_inflight` when no
+    /// group is attached. Additive — the live recovery path still uses
+    /// `list_inflight` until F3.
+    pub async fn recover(&self) -> DbResult<Vec<WalEntryV2>> {
+        match &self.group {
+            Some(g) => g.replay().await,
+            None => self.list_inflight().await,
+        }
     }
 
     /// cancel-safe: yes — read-only prefix stream over `info_store`.
