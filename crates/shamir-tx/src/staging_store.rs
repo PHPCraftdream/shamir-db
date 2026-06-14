@@ -17,28 +17,57 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_types::types::value::InnerValue;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Wrapper for staged row payload. Initial implementation holds only
 /// already-serialized Bytes; future cycle (18c) adds a Live(InnerValue)
 /// variant for lazy serialization on the hot insert path.
-#[derive(Debug, Clone)]
+/// `StagedRow` with `OnceLock`-based serialization cache for the `Live` variant.
+///
+/// `Clone` resets the cache so the cloned row re-serializes on first access —
+/// this is correct because `OnceLock` is not `Clone`. Resetting is cheaper than
+/// the alternative (serializing eagerly on every clone), and `StagedRow` clones
+/// are rare (only in `StagedKind::Set` reads and tests).
+#[derive(Debug)]
 pub enum StagedRow {
     /// Already-serialized msgpack bytes.
     Bytes(Bytes),
-    /// Decoded value. Serialization deferred until commit/WAL emit.
-    Live(InnerValue),
+    /// Decoded value. Serialization is deferred and cached via `OnceLock`.
+    Live {
+        inner: InnerValue,
+        /// Cached msgpack encoding. Populated on the first `as_bytes()` call
+        /// and reused for all subsequent calls — `OnceLock::get_or_init` is
+        /// lock-free after initialization.
+        encoded: OnceLock<Bytes>,
+    },
+}
+
+impl Clone for StagedRow {
+    fn clone(&self) -> Self {
+        match self {
+            StagedRow::Bytes(b) => StagedRow::Bytes(b.clone()),
+            // Reset the cache: the clone is a fresh value.
+            StagedRow::Live { inner, .. } => StagedRow::Live {
+                inner: inner.clone(),
+                encoded: OnceLock::new(),
+            },
+        }
+    }
 }
 
 impl StagedRow {
-    /// Serialize to msgpack Bytes. Identity for the Bytes variant; allocates
-    /// for the Live variant.
+    /// Serialize to msgpack Bytes. Identity for the Bytes variant; serializes
+    /// once and caches for the Live variant.
     pub fn as_bytes(&self) -> Bytes {
         match self {
             StagedRow::Bytes(b) => b.clone(),
-            StagedRow::Live(v) => v
-                .to_bytes()
-                .expect("InnerValue::to_bytes never fails on valid data"),
+            StagedRow::Live { inner, encoded } => encoded
+                .get_or_init(|| {
+                    inner
+                        .to_bytes()
+                        .expect("InnerValue::to_bytes never fails on valid data")
+                })
+                .clone(),
         }
     }
 
@@ -46,14 +75,14 @@ impl StagedRow {
     pub fn len_bytes(&self) -> usize {
         match self {
             StagedRow::Bytes(b) => b.len(),
-            StagedRow::Live(_) => self.as_bytes().len(),
+            StagedRow::Live { .. } => self.as_bytes().len(),
         }
     }
 
     /// Borrow the decoded value. Live is zero-copy; Bytes deserializes.
     pub fn as_inner(&self) -> Cow<'_, InnerValue> {
         match self {
-            StagedRow::Live(v) => Cow::Borrowed(v),
+            StagedRow::Live { inner, .. } => Cow::Borrowed(inner),
             StagedRow::Bytes(b) => Cow::Owned(
                 InnerValue::from_bytes(b).expect("StagedRow::Bytes always holds valid msgpack"),
             ),
@@ -163,7 +192,13 @@ impl StagingStore {
     /// Aborted txs skip encoding entirely.
     pub fn set_many_live(&mut self, items: impl IntoIterator<Item = (RecordKey, InnerValue)>) {
         for (k, v) in items {
-            self.writes.insert(k, StagedOp::Set(StagedRow::Live(v)));
+            self.writes.insert(
+                k,
+                StagedOp::Set(StagedRow::Live {
+                    inner: v,
+                    encoded: OnceLock::new(),
+                }),
+            );
         }
     }
 
@@ -274,13 +309,17 @@ impl StagingStore {
         for op in self.writes.values_mut() {
             if let StagedOp::Set(row) = op {
                 let mut inner = match row {
-                    StagedRow::Live(v) => std::mem::replace(v, InnerValue::Null),
+                    StagedRow::Live { inner, .. } => std::mem::replace(inner, InnerValue::Null),
                     StagedRow::Bytes(b) => {
                         InnerValue::from_bytes(b).map_err(|e| format!("remap decode: {e}"))?
                     }
                 };
                 f(&mut inner)?;
-                *row = StagedRow::Live(inner);
+                // Reset encoded cache: inner was mutated by f.
+                *row = StagedRow::Live {
+                    inner,
+                    encoded: OnceLock::new(),
+                };
             }
         }
         Ok(())
