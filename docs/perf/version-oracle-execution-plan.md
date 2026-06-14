@@ -28,6 +28,9 @@ R1 (read audit) ─┼─ [parallel-ok] все три независимы, rese
 R2 (abort census) ─┘
         │ (все три завершены, go подтверждён)
         ▼
+R3 (MVCC pre-floor — structural pre-refactor) ← findings R1: 5 mines
+        │ (non-tx readers no longer bypass version-reconciliation)
+        ▼
 P1a (tracker scaffold) → P1b (abort marking) → P1c (watermark advance) → P1d (recovery)
         │ (P1 полностью зелёный)
         ▼
@@ -123,6 +126,67 @@ P3a (footprint accumulator #5) → P3b (stress + crash-injection verify)
   Полнота критична: один пропуск = зависший watermark.
 - **Отчёт:** список + замечание о путях, появляющихся только после P2a.
   <400 слов.
+
+---
+
+## R3 — MVCC pre-floor (structural pre-refactor)
+
+- **Agent:** structural · **РИСК: средний**
+- **Prereq:** P0 (go), R1 (5 mines found), R2 (census)
+- **Контекст:** R1 нашёл, что premise Оракула НЕ ПОЛНА для non-tx
+  чтения: `MvccStore::get_current` и `current_stream` берут highest
+  version per cell/log БЕЗ visibility-floor — под concurrent
+  out-of-order materialize они увидят версию ДО watermark. 5 mine-точек:
+  `MvccStore::get_current`, `current_stream`, `TableManager::get`,
+  `TableManager::get_many` (materialization sink ВСЕХ scan'ов),
+  `list_stream`/`list_stream_filtered`.
+- **Файлы:**
+  - `crates/shamir-tx/src/mvcc_store/mod.rs` (`get_current`, `current_stream`).
+  - `crates/shamir-engine/src/table/table_manager_crud.rs`
+    (`TableManager::get`, `TableManager::get_many`).
+  - `crates/shamir-engine/src/table/table_manager_streaming.rs`
+    (`list_stream`, `list_stream_filtered`).
+- **Задача:** дать `get_current` / `current_stream` явный
+  visibility-floor (committed_max snapshot). Сегодня это
+  `gate.committed_max()` — после P1c им станет contiguous watermark,
+  но API сейчас не меняется. Реализация:
+  - `MvccStore::get_current(key)` → внутри читать `floor =
+    gate.committed_max()` и делегировать в `get_at(key, floor)`. ИЛИ
+    добавить параметр `floor: u64` и пробросить.
+  - `current_stream(batch)` → suppress версии > floor per key (один
+    проход дополнительной фильтрации поверх range-scan).
+  - `TableManager::get` / `get_many` → передавать committed_max как
+    snapshot. Все call sites материализации scan'ов наследуют floor.
+  - `list_stream`/`list_stream_filtered` → передают floor вниз.
+- **Ограничения:** **семантика non-tx чтения сегодня уже монотонна**
+  (sequential commits → cell.version monotonic). Pre-floor НЕ должен
+  ничего ломать пока ОПУБЛИКОВАННЫЙ floor совпадает с cell.latest.
+  Только после P2b (concurrent materialize) появятся версии выше floor,
+  которые надо подавлять.
+  - Semantic identity preserved на sequential workload (все текущие
+    тесты).
+  - read-only paths: НИКАКИХ изменений в callers — только source
+    primitives. Read API surface stays.
+  - All `use` at file top.
+- **Done:** workspace --lib + --tests зелёные. Семантически тождественно
+  пока commits sequential. Архитектура готова к P2b.
+- **Отчёт:**
+```
+[R3 — MVCC pre-floor]
+Mines neutralized:
+  - get_current: <how>
+  - current_stream: <how>
+  - TableManager::get / get_many: <how>
+  - list_stream / _filtered: <how>
+
+Floor source: gate.committed_max() (today's monotonic counter).
+After P1c — switch to gate.contiguous_watermark(); after P2b — needed.
+
+Tests: green (workspace --lib + --tests)
+Files touched: <list>
+Gates: fmt ✓ / clippy --workspace --all-targets ✓
+```
+Под 400 слов.
 
 ---
 

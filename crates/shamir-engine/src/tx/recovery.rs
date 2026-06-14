@@ -370,4 +370,13 @@ async fn seed_version_cache_for_entry(entry: &shamir_wal::WalEntryV2, repo: &Rep
             mvcc.seed_version(rid.to_bytes(), v).await;
         }
     }
+    // R3: advance the reader-visible floor so subsequent `get_current` /
+    // `current_stream` see the recovered version. Recovery writes bypass
+    // `apply_committed_ops` / `set_versioned`, so the gate must be
+    // advanced explicitly. Monotonic fetch_max — safe to call redundantly.
+    if v > 0 {
+        if let Ok(gate) = repo.tx_gate().await {
+            gate.publish_committed_max(v);
+        }
+    }
 }

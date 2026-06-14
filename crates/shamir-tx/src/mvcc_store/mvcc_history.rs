@@ -275,6 +275,12 @@ impl MvccStore {
             };
             self.publish_cell(key, commit_version).await;
         }
+        // R3: advance the reader-visible floor so subsequent `get_current` /
+        // `current_stream` see the materialized version. In the tx commit
+        // path the caller (`commit_tx`) publishes via `gate.publish_committed`;
+        // in recovery / direct-call paths no external publish happens, so we
+        // do it here (monotonic fetch_max — safe to call redundantly).
+        self.gate.publish_committed_max(commit_version);
         Ok(())
     }
 }

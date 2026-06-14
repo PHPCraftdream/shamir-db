@@ -67,6 +67,29 @@ gate (`fmt --check` + `clippy --all-targets` + `test --lib`) **once at
 the end**, not between baseline / post-change bench runs. Spacing gate
 checks through the cycle invalidates the bench cache for nothing.
 
+**Pipe-buffering trap.** `cargo test/bench ... 2>&1 | grep ...`
+**hides all progress until the command finishes** — Windows shells
+fully buffer the pipe. With ~30 test binaries in `--workspace --tests`
+(wasm ~99s, handshake several seconds, e2e suites several seconds
+each) a normal run looks like a deadlock for 10+ minutes. Don't pipe
+to grep for long runs:
+
+```
+# WRONG — looks like a hang for 10 min:
+cargo test --workspace --tests 2>&1 | grep "FAILED\|test result"
+
+# RIGHT — output streams to file, tail it from another shell:
+cargo test --workspace --tests --no-fail-fast 2>&1 > /tmp/test.out
+# in another shell: tail -f /tmp/test.out
+
+# Or, for incremental progress visible to the harness:
+cargo test --workspace --tests --no-fail-fast  # no redirect, see output live
+```
+
+Prefer per-crate runs (`cargo test -p <crate> --tests`) over
+`--workspace --tests` for iterative work — one crate finishes in 10–60s
+and gives immediate signal.
+
 **Quick mode is default.** Benches run in QUICK mode by default —
 sample_size=10, measurement=1s, warm_up=1s — completing every variant
 in seconds. For statistically-rigorous release-signal benchmarks, set
