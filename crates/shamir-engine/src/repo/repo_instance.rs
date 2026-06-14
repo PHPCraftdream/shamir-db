@@ -339,7 +339,7 @@ impl RepoInstance {
     /// `last_committed_version` to this floor, so the next
     /// `assign_next_version()` is strictly greater than every version a
     /// recovered entry will replay at. The scan is the same cheap
-    /// `list_inflight()` recovery runs and happens once per gate (OnceCell).
+    /// `recover()` replay recovery runs and happens once per gate (OnceCell).
     pub async fn tx_gate(&self) -> DbResult<Arc<shamir_tx::RepoTxGate>> {
         self.tx_gate
             .get_or_try_init(|| async {
@@ -371,9 +371,8 @@ impl RepoInstance {
             .cloned()
     }
 
-    /// cancel-safe: yes — read-only `list_inflight()` scan over the
-    /// repo's `"__tx__"` store; cancellation drops the future with no
-    /// state change.
+    /// cancel-safe: yes — read-only `recover()` replay over the repo's
+    /// WAL; cancellation drops the future with no state change.
     ///
     /// Returns the current (last committed) version for this repo.
     ///
@@ -390,7 +389,7 @@ impl RepoInstance {
     /// re-issued.
     pub(crate) async fn max_inflight_commit_version(&self) -> DbResult<u64> {
         let wal = self.repo_wal().await?;
-        let entries = wal.list_inflight().await?;
+        let entries = wal.recover().await?;
         Ok(entries.iter().map(|e| e.commit_version).max().unwrap_or(0))
     }
 
@@ -402,28 +401,13 @@ impl RepoInstance {
     /// call. Shares the `"__tx__"` info store with [`tx_gate`].
     ///
     /// The `next_txn_id` counter is seeded from
-    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)`.
-    ///
-    /// **Context (KV-marker model only).** In KV-backed repos each WAL
-    /// entry is stored under `WalActiveKey(txn_id)` — a unique marker.
-    /// If two entries shared a `txn_id` the second would overwrite the
-    /// first marker, silently losing inflight state. The persisted
-    /// `NextTxId` snapshot is written only periodically, so after a
-    /// crash it can lag behind an inflight entry's txn_id. Flooring the
-    /// counter above the max inflight txn_id prevents reuse.
-    ///
-    /// **File mode (append-only segment).** The live tx commit path
-    /// stamps WAL entries with the gate's `tx.tx_id.0` (see
-    /// `pre_commit.rs`), NOT `RepoWalManager::fresh_txn_id()` — the
-    /// latter has no caller in the tx commit path. Furthermore, in file
-    /// mode `list_inflight()` returns empty (no KV markers are written),
-    /// so the floor below is a no-op. Even if txn_ids repeated after a
-    /// crash, the segment is append-only: entries are sequential frames
-    /// keyed by position, and recovery replays by the monotonically-
-    /// floored `commit_version` — no ordering ambiguity or data loss.
-    ///
-    /// The floor is therefore a **KV-path-only safeguard**, inert in
-    /// file mode by construction.
+    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)`. The floor is
+    /// computed from `recover()` (segment/Mem replay) — empty on a fresh
+    /// in-memory instance (safeguard inert), the durable entries on a disk
+    /// repo. The append-only segment keys entries by frame position and
+    /// recovery replays by the monotonically-floored `commit_version`, so
+    /// even a repeated txn_id after a crash carries no ordering ambiguity
+    /// or data loss; the floor is a belt-and-braces anti-collision guard.
     pub async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
         self.repo_wal
             .get_or_try_init(|| async {
@@ -433,20 +417,16 @@ impl RepoInstance {
                         .await
                         .unwrap_or(None)
                         .unwrap_or(1);
-                // F2: build the file-backed `WalSink` + `WalGroupCommit` for
-                // disk repos (sibling `<name>.shamirwal/` directory via
+                // F5e: build a `WalGroupCommit` for EVERY repo — `File` sink
+                // for disk repos (sibling `<name>.shamirwal/` directory via
                 // `file_name()` — NOT `OsString::push` on the full path, which
-                // breaks on trailing separators), or `Noop` for in-memory
-                // repos. F3: the live commit path now appends via
-                // `begin_grouped(Buffered)` and recovery replays via
-                // `recover()` (segment `replay()` in file mode).
-                // F3: only disk repos get a file-backed group (which drives
-                // `begin_grouped`/`recover` over the segment). In-memory repos
-                // (no `wal_dir`) keep the KV-marker path via `new` — durability
-                // is meaningless for RAM-only repos, and the no-group path is
-                // what `commit`/`recover` fall back to. Tying the group to a
-                // File sink (never Noop) makes `group.is_some()` ⟺ file mode.
-                let mgr = match &self.wal_dir {
+                // breaks on trailing separators), `Mem` sink (in-RAM Vec) for
+                // in-memory repos. The group is always present, so the live
+                // commit path is one code path: `begin_grouped(Buffered)` to
+                // append, `recover()` (segment/Mem `replay()`) to recover.
+                // Only disk repos get a background fsync — the Mem sink's
+                // `sync` is a no-op, so a timer would be pointless.
+                let group = match &self.wal_dir {
                     Some(dir) => {
                         let wal_dir = match dir.file_name() {
                             Some(name) => {
@@ -472,16 +452,21 @@ impl RepoInstance {
                         group.spawn_background_fsync(std::time::Duration::from_millis(
                             WAL_BG_FSYNC_MS,
                         ));
-                        shamir_tx::RepoWalManager::new_with_group(info_store, initial_txn_id, group)
+                        group
                     }
-                    None => shamir_tx::RepoWalManager::new(info_store, initial_txn_id),
+                    None => {
+                        let sink = shamir_wal::WalSink::mem();
+                        Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)))
+                    }
                 };
+                let mgr = shamir_tx::RepoWalManager::new(initial_txn_id, group);
 
-                // KV-path safeguard: floor next_txn_id above any inflight
-                // txn_id to prevent marker key collision after crash.
-                // Inert in file mode — list_inflight() returns empty (no
-                // KV markers written), so the branch is never taken.
-                if let Ok(entries) = mgr.list_inflight().await {
+                // Anti-collision safeguard: floor next_txn_id above any
+                // inflight txn_id replayed from the WAL, so a fresh
+                // `fresh_txn_id` can never reuse an id a crashed entry already
+                // used. On a fresh Mem instance `recover()` is empty → inert;
+                // on a disk repo it returns the durable entries.
+                if let Ok(entries) = mgr.recover().await {
                     if let Some(max_txn_id) = entries.iter().map(|e| e.txn_id).max() {
                         mgr.seed_floor_at_least(max_txn_id + 1);
                     }

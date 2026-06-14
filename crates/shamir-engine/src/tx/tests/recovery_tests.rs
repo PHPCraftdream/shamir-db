@@ -7,7 +7,7 @@ use shamir_query_builder::write::{self, doc};
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use shamir_wal::{WalEntryV2, WalOpV2};
+use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
 use crate::repo::{repo_token, BoxRepo, BoxRepoFactory, RepoInstance};
 use crate::table::table_manager::table_token_for;
@@ -67,16 +67,15 @@ async fn recover_v2_inflight_replays_and_removes_entries() {
             body: bytes::Bytes::from_static(b"payload"),
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
-    let inflight = wal.list_inflight().await.unwrap();
+    let inflight = wal.recover().await.unwrap();
     assert_eq!(inflight.len(), 1);
 
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 1);
-
-    let inflight = wal.list_inflight().await.unwrap();
-    assert!(inflight.is_empty(), "marker must be cleaned after recovery");
 }
 
 #[tokio::test]
@@ -93,12 +92,13 @@ async fn recover_v2_inflight_handles_multiple_entries() {
                 delta: 1,
             }],
         );
-        wal.begin(entry).await.unwrap();
+        wal.begin_grouped(entry, WalDurability::Buffered)
+            .await
+            .unwrap();
     }
 
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 3);
-    assert!(wal.list_inflight().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -125,7 +125,9 @@ async fn recover_v2_inflight_replays_put_applies_to_data_store() {
             body,
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     assert!(tbl.get(rid).await.is_err());
 
@@ -173,7 +175,9 @@ async fn recover_v2_inflight_replays_delete_removes_from_data_store() {
         }],
     )
     .with_commit_version(insert_v + 1);
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     repo.recover_v2_inflight().await.unwrap();
 
@@ -206,7 +210,9 @@ async fn recover_v2_inflight_skips_counter_delta_replay() {
             delta: 5,
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     repo.recover_v2_inflight().await.unwrap();
 
@@ -214,10 +220,6 @@ async fn recover_v2_inflight_skips_counter_delta_replay() {
     assert_eq!(
         after, before,
         "recovery must NOT replay CounterDelta — happy-path commit owns it"
-    );
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "marker still removed even when CounterDelta replay is a no-op"
     );
 }
 
@@ -237,11 +239,12 @@ async fn recover_v2_inflight_unknown_table_skips_gracefully() {
             body: bytes::Bytes::from_static(b"orphan"),
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 1);
-    assert!(wal.list_inflight().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -267,7 +270,9 @@ async fn recover_v2_inflight_replays_index_put_with_table_id() {
             value: value.clone(),
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     repo.recover_v2_inflight().await.unwrap();
 
@@ -297,7 +302,9 @@ async fn recover_v2_inflight_replays_index_put_broadcast() {
             value: value.clone(),
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     repo.recover_v2_inflight().await.unwrap();
 
@@ -330,7 +337,9 @@ async fn recover_v2_inflight_replays_index_del() {
             key: key.clone(),
         }],
     );
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     repo.recover_v2_inflight().await.unwrap();
     assert!(info.get(key).await.is_err(), "key removed by IndexDel");
@@ -339,36 +348,25 @@ async fn recover_v2_inflight_replays_index_del() {
 // Renamed from `crash_simulation_inflight_recovery_replays_full_state`.
 //
 // NOTE: this test does NOT simulate a real crash at the storage/fsync
-// layer. It constructs the in-memory state a *real* crash *would*
-// leave behind (an inflight WAL marker over a shared `Arc<InMemoryRepo>`)
-// by injecting the marker directly, then drops the original
-// `RepoInstance` and rebuilds a fresh one over the same underlying
-// storage. That exercises the recovery replay logic — which is the
-// useful coverage here — but it does not validate crash atomicity at
-// the storage layer; that requires a subprocess-kill harness
-// (TODO Stage 7.rest).
+// layer. It constructs the on-disk state a *real* crash *would* leave
+// behind — an inflight WAL entry written to the file segment but never
+// followed by the data_store update — by appending the entry directly to
+// the file WAL, then drops the original `RepoInstance` and reopens a fresh
+// one over the SAME tempdir (so it re-reads the same `*.shamirwal/repo.wal`
+// segment). That exercises the recovery replay logic — the useful coverage
+// here — but it does not validate crash atomicity at the storage layer;
+// that requires a subprocess-kill harness (TODO Stage 7.rest).
+//
+// F5e: this test is disk-backed (sled tempdir). Under the single
+// WAL write path the `Mem` sink is per-instance, so an injected entry
+// would not survive reopen of an in-memory repo; the file segment is the
+// medium that genuinely persists across a simulated restart.
 #[tokio::test]
 async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     use crate::repo::repo_token;
 
-    // Shared underlying repo so "restart" sees the same persisted state.
-    let underlying = Arc::new(InMemoryRepo::new());
-
-    // Phase A: original repo opens, adds a table, has counter at 0.
-    let repo1 = RepoInstance::new(
-        "crash_test".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo1.add_table(TableConfig::new("t"));
-    let _tbl1 = repo1.get_table("t").await.unwrap();
-
-    // Phase B: simulate the in-memory state of a crash mid-commit_tx:
-    // write a V2 WAL entry with two Put ops + counter delta, but
-    // DON'T call wal.commit(txn_id) so the marker stays inflight.
-    let wal = repo1.repo_wal().await.unwrap();
-    let token = table_token_for("t");
-    let txn_id = wal.fresh_txn_id();
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
 
     let mut rid_a_bytes = [0u8; 16];
     rid_a_bytes[15] = 1;
@@ -377,58 +375,65 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     rid_b_bytes[15] = 2;
     let rid_b = RecordId(rid_b_bytes);
 
-    let body_a = InnerValue::Str("alice".into()).to_bytes().unwrap();
-    let body_b = InnerValue::Str("bob".into()).to_bytes().unwrap();
-
-    let entry = WalEntryV2::new(
-        txn_id,
-        repo_token(repo1.name()),
-        vec![
-            WalOpV2::Put {
-                table_id_interned: token,
-                rid: rid_a,
-                body: body_a,
-            },
-            WalOpV2::Put {
-                table_id_interned: token,
-                rid: rid_b,
-                body: body_b,
-            },
-            WalOpV2::CounterDelta {
-                table_id_interned: token,
-                delta: 2,
-            },
-        ],
-    );
-    wal.begin(entry).await.unwrap();
-
-    // Pre-recovery state: data not visible, counter is 0, marker exists.
+    // === Phase A+B: open a disk repo, append an inflight V2 entry (two
+    //     Puts + a counter delta) directly to the file WAL WITHOUT applying
+    //     it to the data_store — exactly the on-disk shape a crash
+    //     mid-commit_tx leaves behind. ===
     {
+        let repo1 = reopen_sled_repo("crash_test", path.clone(), vec![TableConfig::new("t")]).await;
+        let _tbl1 = repo1.get_table("t").await.unwrap();
+
+        let wal = repo1.repo_wal().await.unwrap();
+        let token = table_token_for("t");
+        let txn_id = wal.fresh_txn_id();
+
+        let body_a = InnerValue::Str("alice".into()).to_bytes().unwrap();
+        let body_b = InnerValue::Str("bob".into()).to_bytes().unwrap();
+
+        let entry = WalEntryV2::new(
+            txn_id,
+            repo_token(repo1.name()),
+            vec![
+                WalOpV2::Put {
+                    table_id_interned: token,
+                    rid: rid_a,
+                    body: body_a,
+                },
+                WalOpV2::Put {
+                    table_id_interned: token,
+                    rid: rid_b,
+                    body: body_b,
+                },
+                WalOpV2::CounterDelta {
+                    table_id_interned: token,
+                    delta: 2,
+                },
+            ],
+        );
+        // Synced so the entry hits the segment file before the drop below.
+        wal.begin_grouped(entry, WalDurability::Synced)
+            .await
+            .unwrap();
+
+        // Pre-recovery state: data not visible, counter is 0, entry inflight.
         let tbl_pre = repo1.get_table("t").await.unwrap();
         assert!(tbl_pre.get(rid_a).await.is_err(), "data not yet applied");
         assert!(tbl_pre.get(rid_b).await.is_err());
         assert_eq!(tbl_pre.counter().get().await.unwrap(), 0);
-        assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
+        assert_eq!(wal.recover().await.unwrap().len(), 1);
+
+        // === SIMULATED RESTART === drop without clean shutdown.
+        drop(repo1);
     }
 
-    // === SIMULATED RESTART ===
-    // Phase C: drop repo1 — this models *only* the in-memory side of
-    // a restart (the underlying Arc<InMemoryRepo> is kept alive via
-    // the clone we hold). Real crash atomicity at the storage/fsync
-    // layer is not exercised here; see the test-level doc comment.
-    drop(repo1);
-
-    let repo2 = RepoInstance::new(
-        "crash_test".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
-    repo2.add_table(TableConfig::new("t"));
+    // === Phase C: reopen a fresh instance over the SAME tempdir. ===
+    let repo2 = reopen_sled_repo("crash_test", path.clone(), vec![TableConfig::new("t")]).await;
+    repo2.get_table("t").await.unwrap();
 
     // Sanity: repo2's WAL sees the inflight entry from before.
     let wal2 = repo2.repo_wal().await.unwrap();
     assert_eq!(
-        wal2.list_inflight().await.unwrap().len(),
+        wal2.recover().await.unwrap().len(),
         1,
         "inflight WAL entry must survive restart"
     );
@@ -438,7 +443,7 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
     assert_eq!(count, 1);
 
     // === VERIFY ===
-    // Post-recovery: data present in main store; WAL clean.
+    // Post-recovery: data present in main store.
     //
     // Counter is intentionally NOT applied by recovery — see CRIT-3
     // Option A in `recovery::replay_v2_op`'s CounterDelta branch.
@@ -462,16 +467,14 @@ async fn replay_inflight_v2_from_simulated_partial_commit_state() {
          never ran in this crash simulation"
     );
 
-    assert!(
-        wal2.list_inflight().await.unwrap().is_empty(),
-        "WAL marker removed after recovery"
-    );
-
     // === IDEMPOTENT RE-RUN ===
-    // Running recovery again should be a no-op (zero entries) and
-    // not double-apply.
-    let count2 = repo2.recover_v2_inflight().await.unwrap();
-    assert_eq!(count2, 0);
+    // The file WAL has no per-entry truncation until F6, so a second
+    // recovery re-reads and replays the whole segment again. Replay is
+    // idempotent at the data layer: the records converge to the same
+    // single value and the counter still does not advance.
+    repo2.recover_v2_inflight().await.unwrap();
+    let v_a2 = tbl_post.get(rid_a).await.unwrap();
+    assert!(matches!(v_a2, InnerValue::Str(ref s) if s == "alice"));
     assert_eq!(tbl_post.counter().get().await.unwrap(), 0);
 }
 
@@ -507,7 +510,9 @@ async fn wal_recovery_applies_interner_delta_before_replay() {
     .with_commit_version(1);
     entry.interner_delta = vec![(token, "fresh_field".to_string(), 42)];
 
-    wal.begin(entry).await.unwrap();
+    wal.begin_grouped(entry, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     // Before recovery: the interner should NOT know about "fresh_field".
     {
@@ -586,8 +591,12 @@ async fn recover_v2_inflight_replays_in_commit_version_order() {
     )
     .with_commit_version(2);
 
-    wal.begin(entry_older).await.unwrap();
-    wal.begin(entry_newer).await.unwrap();
+    wal.begin_grouped(entry_older, WalDurability::Buffered)
+        .await
+        .unwrap();
+    wal.begin_grouped(entry_newer, WalDurability::Buffered)
+        .await
+        .unwrap();
 
     let count = repo.recover_v2_inflight().await.unwrap();
     assert_eq!(count, 2);

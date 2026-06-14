@@ -204,24 +204,22 @@ pub async fn replay_v2_op(op: &WalOpV2, repo: &RepoInstance) -> DbResult<()> {
     }
 }
 
-/// cancel-safe: NO — iterates inflight entries, replaying each then
-/// removing its WAL marker. Cancellation between `replay_v2_entry` and
-/// `wal.commit` leaves a replayed entry whose marker still exists;
-/// the next recovery will replay it again. Replay ops are idempotent
-/// at the data layer so eventual convergence is fine, but the function
-/// itself is not safe to drop mid-flight as a single atomic step.
+/// cancel-safe: NO — iterates inflight entries, replaying each. Replay
+/// ops are idempotent at the data layer so eventual convergence is fine
+/// (entries stay in the segment until F6 truncation and the next
+/// recovery replays them again), but the function itself is not safe to
+/// drop mid-flight as a single atomic step.
 ///
 /// Walk all inflight V2 WAL entries for the repo and replay each one.
-/// Marker is removed on successful replay (per-entry).
 ///
 /// HIGH-5: entries are sorted by `commit_version` ascending before
 /// replay so the order in which post-crash recovery applies multi-tx
 /// state matches the order the original commit pipeline assigned.
-/// `wal.list_inflight()` returns entries in `WalActiveKey`
-/// (txn_id big-endian) byte order, but txn_id and commit_version
-/// are allocated independently — two concurrent transactions can
-/// commit out of txn_id order. Without this sort, last-write-wins
-/// ops (Put/IndexPut) would resolve to the wrong final value.
+/// `wal.recover()` returns entries in WAL append order, but txn_id
+/// and commit_version are allocated independently — two concurrent
+/// transactions can commit out of append order. Without this sort,
+/// last-write-wins ops (Put/IndexPut) would resolve to the wrong
+/// final value.
 ///
 /// Legacy entries written before HIGH-5 carry `commit_version = 0`;
 /// they sort first, preserving the previous lexical-key behaviour
@@ -270,7 +268,8 @@ pub async fn recover_inflight_v2(repo: &RepoInstance) -> DbResult<usize> {
             gate.completion()
                 .mark(entry.commit_version, CompletionState::Materialized);
         }
-        // File mode: no-op (no per-entry markers; segment cleaned by F6 truncation). KV mode: removes the marker.
+        // No-op: there are no per-entry markers; the segment is cleaned by
+        // F6 truncation and replay is idempotent.
         wal.commit(entry.txn_id).await?;
     }
 

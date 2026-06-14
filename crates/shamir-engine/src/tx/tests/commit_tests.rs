@@ -62,13 +62,12 @@ async fn commit_advances_last_committed() {
 }
 
 #[tokio::test]
-async fn commit_writes_then_clears_wal_entry() {
+async fn commit_writes_wal_entry() {
     let repo = make_repo();
     let wal = repo.repo_wal().await.unwrap();
 
-    // Non-empty: an empty tx now takes the C6 fast-path and never writes the
-    // WAL at all, so it could not exercise Phase 7 cleanup. Stage a write so
-    // Phase 4 writes the marker and Phase 7 must remove it.
+    // Non-empty: an empty tx takes the C6 fast-path and never writes the
+    // WAL at all. Stage a write so the commit appends a WAL entry.
     let mut tx = TxContext::new(TxId::new(3), 0, 0, IsolationLevel::Snapshot);
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let mut staging = StagingStore::new(Arc::clone(&data_store));
@@ -76,10 +75,13 @@ async fn commit_writes_then_clears_wal_entry() {
     tx.write_set.insert(3, staging);
     let _ = commit_tx(tx, &repo).await.unwrap();
 
-    let inflight = wal.list_inflight().await.unwrap();
+    // F5e: the single WAL write path appends the entry to the segment; it
+    // stays there (no per-entry removal) until F6 truncation, and replay
+    // is idempotent.
+    let inflight = wal.recover().await.unwrap();
     assert!(
-        inflight.is_empty(),
-        "phase 7 must remove the WAL entry after commit"
+        !inflight.is_empty(),
+        "commit must append the tx's WAL entry to the segment"
     );
 }
 
@@ -573,6 +575,10 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
     let v1 = commit_tx(tx1, &repo).await.unwrap().commit_version;
     assert!(v1 > 0);
 
+    // WAL entry count after the real tx (which appended one entry; entries
+    // persist in the segment until F6 truncation).
+    let wal_len_before = wal.recover().await.unwrap().len();
+
     // Empty tx → fast-path: commit_version pinned to snapshot, no WAL.
     // P2a: version is burned and marked Aborted internally.
     let snap_before = repo.tx_gate().await.unwrap().last_committed();
@@ -583,9 +589,10 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
         "empty fast-path pins commit_version to the snapshot version"
     );
     assert!(out.materialized(), "empty fast-path is Complete");
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "empty fast-path must write no WAL entry"
+    assert_eq!(
+        wal.recover().await.unwrap().len(),
+        wal_len_before,
+        "empty fast-path must append no WAL entry"
     );
 
     // Real tx #2 → gets V+2 (the empty tx burned one version via P2a).
@@ -630,7 +637,7 @@ async fn read_only_serializable_no_conflict_fast_paths() {
     );
     assert!(out.materialized());
     assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
+        wal.recover().await.unwrap().is_empty(),
         "read-only fast-path must write no WAL entry"
     );
 }
@@ -672,7 +679,7 @@ async fn read_only_serializable_with_conflict_still_aborts() {
 
     // The abort happened in Phase 2, before any WAL write.
     assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
+        wal.recover().await.unwrap().is_empty(),
         "a pre-commit SSI abort leaves no WAL entry"
     );
 }

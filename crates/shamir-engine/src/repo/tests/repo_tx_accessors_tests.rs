@@ -44,21 +44,42 @@ async fn repo_wal_initializes_lazy() {
 /// txn_id, never reusing it.
 #[tokio::test]
 async fn repo_wal_seeds_txn_id_floor_above_inflight() {
-    use shamir_wal::{WalEntryV2, WalOpV2};
+    use crate::repo::BoxRepoFactory;
+    use shamir_wal::{WalDurability, WalEntryV2, WalOpV2};
 
-    let underlying = Arc::new(InMemoryRepo::new());
+    // F5e: the single WAL write path uses a per-instance `Mem` sink for
+    // in-memory repos, so an injected inflight entry only genuinely survives a
+    // restart on the file segment — this test is therefore disk-backed.
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let path = tempdir.path().to_path_buf();
 
-    // Seed a high inflight txn_id WITHOUT committing (no `wal.commit`), as a
-    // crash between commit Phase 4 and Phase 7 leaves behind. Use a throwaway
-    // RepoInstance over the shared storage and drop it (models the in-memory
-    // side of a restart; the marker survives in `underlying`).
+    async fn open_sled(path: &std::path::Path) -> RepoInstance {
+        let mut last_err = None;
+        for _attempt in 0..10 {
+            match RepoInstance::from_factory(
+                "r".into(),
+                BoxRepoFactory::sled_raw(path.to_path_buf()),
+                vec![TableConfig::new("t")],
+            )
+            .await
+            {
+                Ok(r) => return r,
+                Err(e) => {
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+        panic!("open_sled failed after 10 retries: {last_err:?}");
+    }
+
+    // Seed a high inflight txn_id WITHOUT committing, as a crash between commit
+    // Phase 4 and Phase 7 leaves behind. Use a throwaway RepoInstance over the
+    // disk path and drop it (models the in-memory side of a restart; the entry
+    // survives in the file segment).
     const HIGH_TXN_ID: u64 = 5_000;
     {
-        let seed = RepoInstance::new(
-            "r".into(),
-            BoxRepo::InMemory(Arc::clone(&underlying)),
-            Vec::new(),
-        );
+        let seed = open_sled(&path).await;
         let wal = seed.repo_wal().await.unwrap();
         let entry = WalEntryV2::new(
             HIGH_TXN_ID,
@@ -73,20 +94,18 @@ async fn repo_wal_seeds_txn_id_floor_above_inflight() {
                 body: bytes::Bytes::from_static(b"x"),
             }],
         );
-        wal.begin(entry).await.unwrap();
+        wal.begin_grouped(entry, WalDurability::Synced)
+            .await
+            .unwrap();
         drop(seed);
     }
 
-    // === SIMULATED RESTART: fresh RepoInstance over the same storage ===
-    let repo = RepoInstance::new(
-        "r".into(),
-        BoxRepo::InMemory(Arc::clone(&underlying)),
-        Vec::new(),
-    );
+    // === SIMULATED RESTART: fresh RepoInstance over the same path ===
+    let repo = open_sled(&path).await;
 
     // The inflight entry survived the "restart".
     let wal = repo.repo_wal().await.unwrap();
-    assert_eq!(wal.list_inflight().await.unwrap().len(), 1);
+    assert_eq!(wal.recover().await.unwrap().len(), 1);
 
     // The decisive assertion: the next id must clear the inflight txn_id —
     // no reuse. (The persisted `NextTxId` snapshot was never written here, so

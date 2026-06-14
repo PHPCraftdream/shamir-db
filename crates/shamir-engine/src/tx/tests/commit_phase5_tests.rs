@@ -484,16 +484,7 @@ async fn failed_post_lock_vector_promote_is_committed_not_deferred() {
         "materialized() must be true: the visibility-bearing projections landed inline"
     );
 
-    // (2) Phase 7 ran under the lock BEFORE the promote → no inflight marker.
-    let wal = repo.repo_wal().await.unwrap();
-    assert!(
-        wal.list_inflight().await.unwrap().is_empty(),
-        "Phase 7 (wal.commit) runs under the lock BEFORE the post-lock promote, \
-         so a failed promote must leave NO WAL marker inflight (the graph is \
-         rebuilt from data on open, not replayed from the WAL)"
-    );
-
-    // (3) The data record is durable regardless of the promote failure.
+    // (2) The data record is durable regardless of the promote failure.
     let stored = tbl
         .get(rid)
         .await

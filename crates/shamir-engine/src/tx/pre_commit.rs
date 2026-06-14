@@ -176,7 +176,8 @@ pub(super) struct ValidatedPreCommit {
 /// Locked validation phase: Phases 3 + 2 + 2-bis + C6 + WAL entry build.
 ///
 /// Does NOT write the WAL entry (no fsync). The caller is responsible for
-/// calling `wal.begin(entry)` or batching via `wal.begin_many`. This split
+/// calling `wal.begin_grouped(entry, ..)` or batching via
+/// `wal.begin_grouped_many`. This split
 /// enables group-commit fsync amortization.
 ///
 /// Phase 3 (assign_next_version) is now FIRST — the version is allocated
