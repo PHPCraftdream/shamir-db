@@ -10,8 +10,8 @@ fn test_roundtrip<C: InternedCodec>(codec: &C, format_name: &str) {
 
     // Create test data
     let mut map = new_map();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let age_key = interner.touch_ind("age").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let age_key = interner.touch_ind("age").unwrap().into_key();
 
     map.insert(name_key, InnerValue::Str("Alice".to_string()));
     map.insert(age_key, InnerValue::Int(30));

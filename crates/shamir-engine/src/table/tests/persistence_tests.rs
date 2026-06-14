@@ -163,9 +163,9 @@ async fn test_interner_persistence_after_restart() {
 
     // Verify each record has correct structure
     let interner = interner2.get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let email_key = interner.touch_ind("email").unwrap().key().clone();
-    let age_key = interner.touch_ind("age").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let email_key = interner.touch_ind("email").unwrap().into_key();
+    let age_key = interner.touch_ind("age").unwrap().into_key();
 
     for (_id, value) in all_records {
         match value {

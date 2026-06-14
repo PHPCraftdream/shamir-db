@@ -1,8 +1,28 @@
+use std::sync::Arc;
+
+use shamir_collections::TMap;
+use shamir_db::core::interner::Interner;
+use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_tx::ChangeOp;
+use tokio::sync::OnceCell;
 
 use crate::subscriptions::target_match::{mask_matches, matches_any};
+
+/// Build a `(InnerValue, Arc<OnceCell<Interner>>)` tuple from flat key-value
+/// pairs, suitable for passing as `inner_decoded` to `matches_any`.
+fn make_inner(fields: &[(&str, InnerValue)]) -> (InnerValue, Arc<OnceCell<Interner>>) {
+    let interner = Interner::new();
+    let mut map: TMap<_, InnerValue> = TMap::default();
+    for (field, val) in fields {
+        let key = interner.touch_ind(*field).expect("intern field").into_key();
+        map.insert(key, val.clone());
+    }
+    let cell = OnceCell::new();
+    cell.set(interner).unwrap();
+    (InnerValue::Map(map), Arc::new(cell))
+}
 
 #[test]
 fn mask_all_matches_everything() {
@@ -91,10 +111,10 @@ fn put_with_matching_filter_delivered() {
         value: FilterValue::String("active".to_string()),
     };
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, Some(filter))];
-    let record = serde_json::json!({
-        "status": "active",
-        "name": "alice"
-    });
+    let record = make_inner(&[
+        ("status", InnerValue::Str("active".to_string())),
+        ("name", InnerValue::Str("alice".to_string())),
+    ]);
     assert!(matches_any(
         &targets,
         "repo",
@@ -111,10 +131,10 @@ fn put_with_non_matching_filter_skipped() {
         value: FilterValue::String("active".to_string()),
     };
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, Some(filter))];
-    let record = serde_json::json!({
-        "status": "inactive",
-        "name": "bob"
-    });
+    let record = make_inner(&[
+        ("status", InnerValue::Str("inactive".to_string())),
+        ("name", InnerValue::Str("bob".to_string())),
+    ]);
     assert!(!matches_any(
         &targets,
         "repo",
@@ -143,7 +163,7 @@ fn delete_with_filter_delivered_regardless() {
 #[test]
 fn put_without_filter_delivered() {
     let targets = vec![("repo".into(), "users".into(), EventMask::Put, None)];
-    let record = serde_json::json!({"status": "anything"});
+    let record = make_inner(&[("status", InnerValue::Str("anything".to_string()))]);
     assert!(matches_any(
         &targets,
         "repo",

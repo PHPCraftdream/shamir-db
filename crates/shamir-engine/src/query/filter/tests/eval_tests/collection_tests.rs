@@ -78,7 +78,7 @@ fn test_in_query_ref_column() {
 
     // Record: {user_id: 2}
     let mut map = new_map();
-    let k = interner.touch_ind("user_id").unwrap().key().clone();
+    let k = interner.touch_ind("user_id").unwrap().into_key();
     map.insert(k, InnerValue::Int(2));
     let record = InnerValue::Map(map);
 
@@ -117,7 +117,7 @@ fn test_in_query_ref_column_no_match() {
     let interner = Interner::new();
 
     let mut map = new_map();
-    let k = interner.touch_ind("user_id").unwrap().key().clone();
+    let k = interner.touch_ind("user_id").unwrap().into_key();
     map.insert(k, InnerValue::Int(99));
     let record = InnerValue::Map(map);
 
@@ -153,7 +153,7 @@ fn test_not_in_query_ref_column() {
     let interner = Interner::new();
 
     let mut map = new_map();
-    let k = interner.touch_ind("user_id").unwrap().key().clone();
+    let k = interner.touch_ind("user_id").unwrap().into_key();
     map.insert(k, InnerValue::Int(99));
     let record = InnerValue::Map(map);
 

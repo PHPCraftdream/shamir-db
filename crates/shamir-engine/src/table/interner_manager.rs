@@ -127,6 +127,17 @@ impl InternerManager {
         }
     }
 
+    /// Return a cloned `Arc` to the underlying `OnceCell<Interner>`.
+    ///
+    /// Used by callers that need to hold a long-lived handle to the interner
+    /// (e.g. for storing in a shared decode cache) without keeping the full
+    /// `TableManager` alive.  The `OnceCell` will be populated after the first
+    /// `get().await` call; subsequent accesses via `cell.get()` are sync and
+    /// lock-free (a single `AtomicPtr` load inside `tokio::sync::OnceCell`).
+    pub fn interner_cell(&self) -> Arc<OnceCell<Interner>> {
+        Arc::clone(&self.interner)
+    }
+
     /// Get interner, loading it lazily on first access
     pub async fn get(&self) -> DbResult<&Interner> {
         if self.interner.get().is_some() {

@@ -24,7 +24,7 @@ fn seed(n: usize) -> (Arc<Interner>, Vec<String>, Vec<InternerKey>) {
     for i in 0..n {
         let s = format!("user_key_{i}");
         let touch = interner.touch_ind(&s).expect("touch");
-        let ik = touch.key().clone();
+        let ik = touch.into_key();
         user_keys.push(s);
         interner_keys.push(ik);
     }

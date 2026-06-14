@@ -3,10 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use shamir_collections::THasher;
-
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_connect::server::conn_services::PushSink;
 use shamir_db::access::Actor;
+use shamir_db::codecs::interned::json::inner_to_json_value;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::query::Query;
@@ -124,9 +124,9 @@ pub(crate) async fn bridge_task(
                             ) {
                                 continue;
                             }
-                            let value_json = match (&change.op, change.value.as_deref()) {
+                            let decoded_inner = match (&change.op, change.value.as_deref()) {
                                 (ChangeOp::Put, Some(bytes)) => {
-                                    db.decode_record_value_json(
+                                    db.decode_record_value_inner(
                                         &db_name,
                                         repo,
                                         &change.table,
@@ -142,10 +142,19 @@ pub(crate) async fn bridge_task(
                                 ri,
                                 &change.table,
                                 &change.op,
-                                value_json.as_ref(),
+                                decoded_inner.as_ref(),
                             ) {
                                 continue;
                             }
+                            // Convert InnerValue → JSON lazily: only for events
+                            // that passed the filter and must be delivered.
+                            let value_json: Option<serde_json::Value> = match decoded_inner.as_ref()
+                            {
+                                Some((inner, cell)) => {
+                                    cell.get().and_then(|i| inner_to_json_value(inner, i).ok())
+                                }
+                                None => None,
+                            };
                             let data = make_deliver_data(
                                 &deliver,
                                 &db,
@@ -274,11 +283,12 @@ pub(crate) async fn bridge_task(
                         ) {
                             continue;
                         }
-                        // De-intern the Put value once per event across
-                        // all bridge tasks: the decode cache deduplicates
-                        // the expensive msgpack+interner decode so that N
-                        // subscribers pay O(1) instead of O(N).
-                        let value_json_arc = match (&change.op, change.value.as_deref()) {
+                        // Decode the Put value once per event across all
+                        // bridge tasks: the decode cache deduplicates the
+                        // msgpack decode so that N subscribers pay O(1).
+                        // We cache InnerValue + Interner (skipping JSON
+                        // alloc); JSON is produced lazily only for delivery.
+                        let decoded_arc = match (&change.op, change.value.as_deref()) {
                             (ChangeOp::Put, Some(bytes)) => {
                                 if let Some(cached) =
                                     cache_get(&repo, event.commit_version, change_idx)
@@ -286,7 +296,7 @@ pub(crate) async fn bridge_task(
                                     cached
                                 } else {
                                     let decoded = db
-                                        .decode_record_value_json(
+                                        .decode_record_value_inner(
                                             &db_name,
                                             &repo,
                                             &change.table,
@@ -298,22 +308,33 @@ pub(crate) async fn bridge_task(
                             }
                             _ => {
                                 static NONE_ARC: std::sync::OnceLock<
-                                    Arc<Option<serde_json::Value>>,
+                                    super::decode_cache::DecodedInner,
                                 > = std::sync::OnceLock::new();
                                 Arc::clone(NONE_ARC.get_or_init(|| Arc::new(None)))
                             }
                         };
-                        let value_json: Option<&serde_json::Value> = (*value_json_arc).as_ref();
+                        let inner_ref = (*decoded_arc).as_ref();
                         if !matches_any_indexed(
                             &targets,
                             &target_index,
                             ri,
                             &change.table,
                             &change.op,
-                            value_json,
+                            inner_ref,
                         ) {
                             continue;
                         }
+                        // Convert InnerValue → JSON lazily (only for events
+                        // that passed the filter and must be delivered).
+                        // The deliver cache stores the final serialized bytes
+                        // so this conversion happens at most once per event.
+                        let value_json: Option<serde_json::Value> = match inner_ref {
+                            Some((inner, cell)) => {
+                                cell.get().and_then(|i| inner_to_json_value(inner, i).ok())
+                            }
+                            None => None,
+                        };
+                        let value_json_ref = value_json.as_ref();
                         // For Records/Keys modes the payload is identical
                         // across all subscribers — use the deliver cache to
                         // build it once and share via Arc.
@@ -344,7 +365,7 @@ pub(crate) async fn bridge_task(
                                     &db_name,
                                     &actor,
                                     change,
-                                    value_json,
+                                    value_json_ref,
                                     event.commit_version,
                                 )
                                 .await;
@@ -365,7 +386,7 @@ pub(crate) async fn bridge_task(
                                 &db_name,
                                 &actor,
                                 change,
-                                value_json,
+                                value_json_ref,
                                 event.commit_version,
                             )
                             .await;

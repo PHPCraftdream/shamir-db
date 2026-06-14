@@ -118,7 +118,8 @@ fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
             h.write_u8(6);
             h.write_usize(m.len());
             for (k, v) in m.iter() {
-                h.write(k.as_bytes());
+                let (buf, len) = k.as_bytes_buf();
+                h.write(&buf[..len]);
                 hash_inner(v, h);
             }
         }

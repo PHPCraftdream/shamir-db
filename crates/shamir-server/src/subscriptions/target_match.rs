@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use shamir_collections::THasher;
+use shamir_db::core::interner::Interner;
+use shamir_db::types::value::InnerValue;
 use shamir_query_types::filter::Filter;
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_tx::ChangeOp;
+use tokio::sync::OnceCell;
 
-use super::filter_eval::filter_matches_value;
+use super::filter_eval::filter_matches_inner;
 
 /// Per-bridge index built once at subscribe time:
 /// maps `(repo_idx, table_name)` → sorted list of target indices
@@ -61,13 +65,18 @@ pub fn any_target_interested_indexed(
 }
 
 /// O(1)-gated full filter match using the target index.
+///
+/// `inner_decoded` carries the decoded `InnerValue` and the table's
+/// `Arc<OnceCell<Interner>>` (guaranteed populated) needed to intern
+/// field-name segments for filter evaluation.
+/// JSON conversion is not performed here — that is deferred to the deliver path.
 pub fn matches_any_indexed(
     targets: &[(String, String, EventMask, Option<Filter>)],
     index: &TargetIndex,
     repo_idx: usize,
     table: &str,
     op: &ChangeOp,
-    value: Option<&serde_json::Value>,
+    inner_decoded: Option<&(InnerValue, Arc<OnceCell<Interner>>)>,
 ) -> bool {
     match indexed_targets(index, repo_idx, table) {
         None => false,
@@ -77,11 +86,11 @@ pub fn matches_any_indexed(
                 return false;
             }
             match (filter, op) {
-                (Some(f), ChangeOp::Put) => match value {
-                    Some(v) => filter_matches_value(f, v),
+                (Some(f), ChangeOp::Put) => match inner_decoded {
+                    Some((inner, interner_cell)) => filter_matches_inner(f, inner, interner_cell),
                     None => {
                         tracing::warn!(
-                            "subscription filter: de-intern decode failed for Put value, \
+                            "subscription filter: decode failed for Put value, \
                              skipping event (fail-closed)"
                         );
                         false
@@ -95,7 +104,7 @@ pub fn matches_any_indexed(
 
 /// Cheap synchronous gate: does any target want this (repo, table, op) at all,
 /// ignoring filter evaluation? Used to short-circuit the per-change async
-/// `decode_record_value_json` call when no subscriber could possibly match.
+/// decode call when no subscriber could possibly match.
 /// Filter evaluation still runs in `matches_any` for surviving changes.
 #[inline]
 pub fn any_target_interested(
@@ -116,7 +125,7 @@ pub fn matches_any(
     repo: &str,
     table: &str,
     op: &ChangeOp,
-    value: Option<&serde_json::Value>,
+    inner_decoded: Option<&(InnerValue, Arc<OnceCell<Interner>>)>,
 ) -> bool {
     targets
         .iter()
@@ -125,11 +134,11 @@ pub fn matches_any(
                 return false;
             }
             match (filter, op) {
-                (Some(f), ChangeOp::Put) => match value {
-                    Some(v) => filter_matches_value(f, v),
+                (Some(f), ChangeOp::Put) => match inner_decoded {
+                    Some((inner, interner_cell)) => filter_matches_inner(f, inner, interner_cell),
                     None => {
                         tracing::warn!(
-                            "subscription filter: de-intern decode failed for Put value, \
+                            "subscription filter: decode failed for Put value, \
                              skipping event (fail-closed)"
                         );
                         false

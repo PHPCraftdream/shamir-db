@@ -62,16 +62,16 @@ fn test_with_state_initialization() {
 fn test_interned_key_size() {
     // Test that InternedKey uses minimal size based on id value
     let key_u8 = InternerKey::new(42);
-    assert_eq!(key_u8.as_bytes().len(), 1);
+    assert_eq!(key_u8.wire_len(), 1);
 
     let key_u16 = InternerKey::new(256);
-    assert_eq!(key_u16.as_bytes().len(), 2);
+    assert_eq!(key_u16.wire_len(), 2);
 
     let key_u32 = InternerKey::new(65536);
-    assert_eq!(key_u32.as_bytes().len(), 4);
+    assert_eq!(key_u32.wire_len(), 4);
 
     let key_u64 = InternerKey::new(4294967296);
-    assert_eq!(key_u64.as_bytes().len(), 8);
+    assert_eq!(key_u64.wire_len(), 8);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn test_concurrent_reverse_lookup() {
         handles.push(thread::spawn(move || {
             for (id, expected_key) in id_lookup_clone {
                 let key = interner_clone.get_str(&id);
-                assert!(key.is_some(), "Failed to look up ID: {:?}", id.as_bytes());
+                assert!(key.is_some(), "Failed to look up ID: {}", id.id());
                 assert_eq!(key, Some(UserKey::from_str(expected_key)));
             }
         }));
@@ -443,19 +443,19 @@ fn test_interned_key_serialization() {
     let bytes1 = rmp_serde::to_vec(&key1).unwrap();
     let decoded1: InternerKey = rmp_serde::from_slice(&bytes1).unwrap();
     assert_eq!(key1.id(), decoded1.id());
-    assert_eq!(key1.as_bytes(), decoded1.as_bytes());
+    assert_eq!(key1, decoded1);
 
     let key2 = InternerKey::new(1000);
     let bytes2 = rmp_serde::to_vec(&key2).unwrap();
     let decoded2: InternerKey = rmp_serde::from_slice(&bytes2).unwrap();
     assert_eq!(key2.id(), decoded2.id());
-    assert_eq!(key2.as_bytes(), decoded2.as_bytes());
+    assert_eq!(key2, decoded2);
 
     let key3 = InternerKey::new(100000);
     let bytes3 = rmp_serde::to_vec(&key3).unwrap();
     let decoded3: InternerKey = rmp_serde::from_slice(&bytes3).unwrap();
     assert_eq!(key3.id(), decoded3.id());
-    assert_eq!(key3.as_bytes(), decoded3.as_bytes());
+    assert_eq!(key3, decoded3);
 }
 
 #[test]
@@ -470,10 +470,10 @@ fn test_interned_key_compact_messagepack_serialization() {
     let key_u64 = InternerKey::new(5000000000);
 
     println!("Raw key sizes:");
-    println!("  U8: {} bytes", key_u8.as_bytes().len());
-    println!("  U16: {} bytes", key_u16.as_bytes().len());
-    println!("  U32: {} bytes", key_u32.as_bytes().len());
-    println!("  U64: {} bytes", key_u64.as_bytes().len());
+    println!("  U8: {} bytes", key_u8.wire_len());
+    println!("  U16: {} bytes", key_u16.wire_len());
+    println!("  U32: {} bytes", key_u32.wire_len());
+    println!("  U64: {} bytes", key_u64.wire_len());
     println!();
 
     // Serialize to MessagePack
@@ -519,7 +519,7 @@ fn test_interned_key_compact_messagepack_serialization() {
     // Test round-trip
     let recovered: InternerKey = rmp_serde::from_slice(&bytes_u8).expect("Failed to deserialize");
     assert_eq!(recovered.id(), 42, "Recovered ID should be 42");
-    assert_eq!(recovered.as_bytes().len(), 1, "Recovered should be 1 byte");
+    assert_eq!(recovered.wire_len(), 1, "Recovered should be 1 byte");
 
     println!("PASS: InternedKey serializes COMPACTLY!");
     println!("1-byte ID = 3 bytes (MessagePack overhead + 1 byte data)");
@@ -597,28 +597,28 @@ fn test_map_with_interned_keys_compact() {
 #[test]
 fn test_interner_key_u8_boundary() {
     let key = InternerKey::new(u8::MAX as u64);
-    assert_eq!(key.as_bytes().len(), 1);
+    assert_eq!(key.wire_len(), 1);
     assert_eq!(key.id(), u8::MAX as u64);
 }
 
 #[test]
 fn test_interner_key_u16_boundary() {
     let key = InternerKey::new(u16::MAX as u64);
-    assert_eq!(key.as_bytes().len(), 2);
+    assert_eq!(key.wire_len(), 2);
     assert_eq!(key.id(), u16::MAX as u64);
 }
 
 #[test]
 fn test_interner_key_u32_boundary() {
     let key = InternerKey::new(u32::MAX as u64);
-    assert_eq!(key.as_bytes().len(), 4);
+    assert_eq!(key.wire_len(), 4);
     assert_eq!(key.id(), u32::MAX as u64);
 }
 
 #[test]
 fn test_interner_key_u64_max() {
     let key = InternerKey::new(u64::MAX);
-    assert_eq!(key.as_bytes().len(), 8);
+    assert_eq!(key.wire_len(), 8);
     assert_eq!(key.id(), u64::MAX);
 }
 
@@ -626,10 +626,10 @@ fn test_interner_key_u64_max() {
 fn test_interner_key_bytes_roundtrip() {
     for &id in &[1u64, 100, 300, 70_000, 5_000_000_000] {
         let key = InternerKey::new(id);
-        assert_eq!(key.bytes().len(), key.as_bytes().len());
+        assert_eq!(key.bytes().len(), key.wire_len());
         assert_eq!(key.id(), id);
         let consumed = key.into_bytes();
-        assert_eq!(consumed.len(), InternerKey::new(id).as_bytes().len());
+        assert_eq!(consumed.len(), InternerKey::new(id).wire_len());
     }
 }
 
@@ -827,10 +827,10 @@ fn test_user_key_serde_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_touch_ind_as_ref() {
+fn test_touch_ind_wire_bytes() {
     let interner = Interner::new();
     let touch = interner.touch_ind("test").unwrap();
-    let bytes: &[u8] = touch.as_ref();
+    let bytes = touch.key().to_wire_bytes();
     assert!(!bytes.is_empty());
 }
 

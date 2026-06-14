@@ -118,8 +118,8 @@ async fn asof_version_returns_state_at_that_version() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     // v1: {name: alice, n: 1}
@@ -179,8 +179,8 @@ async fn asof_excludes_records_not_yet_created() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     // Insert A, capture vA.
@@ -230,8 +230,8 @@ async fn asof_where_filter_on_as_of_value() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     // v_old: {name: alice, n: 1}
@@ -291,8 +291,8 @@ async fn asof_timestamp_resolves_or_errors() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     // Write a record so at least one ts-key exists.
@@ -362,8 +362,8 @@ async fn latest_and_history_unchanged() {
     intern_fields(&tbl).await;
 
     let interner = tbl.interner().get().await.unwrap();
-    let name_key = interner.touch_ind("name").unwrap().key().clone();
-    let n_key = interner.touch_ind("n").unwrap().key().clone();
+    let name_key = interner.touch_ind("name").unwrap().into_key();
+    let n_key = interner.touch_ind("n").unwrap().into_key();
     tbl.interner().persist().await.unwrap();
 
     let id = insert_first(&tbl, &build_record(&name_key, &n_key, "alice", 1)).await;

@@ -134,8 +134,8 @@ async fn test_table_interning_persistence() {
     match retrieved2 {
         InnerValue::Map(m) => {
             let interner = interner.get().await.unwrap();
-            let name_key = interner.touch_ind("name").unwrap().key().clone();
-            let age_key = interner.touch_ind("age").unwrap().key().clone();
+            let name_key = interner.touch_ind("name").unwrap().into_key();
+            let age_key = interner.touch_ind("age").unwrap().into_key();
             assert_eq!(
                 m.get(&name_key),
                 Some(&InnerValue::Str("Charlie".to_string()))
@@ -172,8 +172,8 @@ async fn test_table_update() {
     match retrieved {
         InnerValue::Map(m) => {
             let interner = interner.get().await.unwrap();
-            let name_key = interner.touch_ind("name").unwrap().key().clone();
-            let age_key = interner.touch_ind("age").unwrap().key().clone();
+            let name_key = interner.touch_ind("name").unwrap().into_key();
+            let age_key = interner.touch_ind("age").unwrap().into_key();
             assert_eq!(
                 m.get(&name_key),
                 Some(&InnerValue::Str("David".to_string()))

@@ -124,9 +124,6 @@ harness = false
 name = "duplex_throughput"
 harness = false
 
-[[bench]]
-name = "subscription_hot_paths"
-harness = false
 
 [[bench]]
 name = "subscription_throughput"

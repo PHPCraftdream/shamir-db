@@ -123,8 +123,7 @@ impl TableManager {
                                                         e.to_string(),
                                                     )
                                                 })?
-                                                .key()
-                                                .clone();
+                                                .into_key();
                                             inner_map.insert(key, leaf);
                                         }
                                         matched.push((*id, InnerValue::Map(inner_map)));

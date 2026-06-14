@@ -58,8 +58,8 @@ async fn make_mvcc_table() -> (TableManager, Arc<MvccStore>) {
 /// Returns the assigned `RecordId`.
 async fn insert_record(tbl: &TableManager, score: i64, email: &str) -> RecordId {
     let interner = tbl.interner().get().await.unwrap();
-    let score_key = interner.touch_ind("score").unwrap().key().clone();
-    let email_key = interner.touch_ind("email").unwrap().key().clone();
+    let score_key = interner.touch_ind("score").unwrap().into_key();
+    let email_key = interner.touch_ind("email").unwrap().into_key();
 
     // Save any newly-minted keys before we write.
     // (touch_ind on a fresh interner may create new entries; persist them.)

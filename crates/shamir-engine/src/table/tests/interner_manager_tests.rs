@@ -29,13 +29,14 @@ async fn test_interner_save_new_keys() {
 
     let interner1 = manager1.get().await.unwrap();
     let result1 = interner1.touch_ind("name").unwrap();
-    let new_keys = vec![(result1.key().clone(), UserKey::from_str("name"))];
+    let result1_id = result1.key().id();
+    let new_keys = vec![(result1.into_key(), UserKey::from_str("name"))];
     manager1.save_new_keys(&new_keys).await.unwrap();
 
     let interner2 = manager2.get().await.unwrap();
     let result2 = interner2.touch_ind("name").unwrap();
 
-    assert_eq!(result1.as_ref(), result2.as_ref());
+    assert_eq!(result1_id, result2.key().id());
 }
 
 #[tokio::test]
@@ -57,12 +58,12 @@ async fn test_interner_persistence() {
 
     assert_eq!(interner2.len(), 2);
     assert_eq!(
-        interner2.touch_ind("name").unwrap().as_ref(),
-        name_key.as_ref()
+        interner2.touch_ind("name").unwrap().key().id(),
+        name_key.key().id()
     );
     assert_eq!(
-        interner2.touch_ind("age").unwrap().as_ref(),
-        age_key.as_ref()
+        interner2.touch_ind("age").unwrap().key().id(),
+        age_key.key().id()
     );
 }
 
@@ -83,13 +84,13 @@ async fn test_interner_multiple_saves() {
 
     let key1 = interner.touch_ind("key1").unwrap();
     manager
-        .save_new_keys(&[(key1.key().clone(), UserKey::from_str("key1"))])
+        .save_new_keys(&[(key1.into_key(), UserKey::from_str("key1"))])
         .await
         .unwrap();
 
     let key2 = interner.touch_ind("key2").unwrap();
     manager
-        .save_new_keys(&[(key2.key().clone(), UserKey::from_str("key2"))])
+        .save_new_keys(&[(key2.into_key(), UserKey::from_str("key2"))])
         .await
         .unwrap();
 
