@@ -34,10 +34,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
 rmp-serde = "1.3"
 
-[lints.clippy]
-all = "warn"
-
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.
 doctest = false
+
+[lints]
+workspace = true

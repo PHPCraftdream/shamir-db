@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
 use crate::core::interner::InternerKey;
-use crate::types::common::{new_map_wc, TMap, TSet};
+use crate::types::common::{new_map, new_map_wc, TMap, TSet};
 use bytes::Bytes;
 use fxhash::FxHasher;
 use num_bigint::BigInt;
@@ -411,7 +411,7 @@ impl From<serde_json::Value> for Value<String> {
                 Value::List(arr.into_iter().map(Value::from).collect())
             }
             serde_json::Value::Object(map) => {
-                let mut m = crate::types::common::new_map();
+                let mut m = new_map();
                 for (k, v) in map {
                     m.insert(k, Value::from(v));
                 }

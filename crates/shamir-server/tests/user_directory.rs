@@ -7,6 +7,7 @@
 //! All tests use `tempfile::TempDir` so the redb file is cleaned up after
 //! each run.
 
+use shamir_collections::THasher;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
@@ -288,7 +289,7 @@ fn concurrent_inserts_assign_distinct_user_ids() {
         handles.push(handle);
     }
 
-    let mut ids: HashSet<[u8; 16]> = HashSet::new();
+    let mut ids: HashSet<[u8; 16], THasher> = HashSet::<_, THasher>::default();
     for h in handles {
         let uid = h.join().expect("thread panicked");
         assert!(ids.insert(uid), "user_id collision detected across threads");

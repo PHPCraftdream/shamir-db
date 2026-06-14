@@ -5,6 +5,7 @@ use crate::types::{RecordKey, Store};
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures::stream::StreamExt;
+use shamir_types::types::record_id::RecordId;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -65,8 +66,8 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
 
     // ---- set_many -----------------------------------------------------
     // Mix: update existing 2, create new 2.
-    let new_id1 = shamir_types::types::record_id::RecordId::new();
-    let new_id2 = shamir_types::types::record_id::RecordId::new();
+    let new_id1 = RecordId::new();
+    let new_id2 = RecordId::new();
     let new_k1 = Bytes::copy_from_slice(new_id1.as_bytes());
     let new_k2 = Bytes::copy_from_slice(new_id2.as_bytes());
 
@@ -94,7 +95,7 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     assert!(empty_set.is_empty());
 
     // ---- remove_many --------------------------------------------------
-    let missing_id = shamir_types::types::record_id::RecordId::new();
+    let missing_id = RecordId::new();
     let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
     let to_remove = vec![keys[2].clone(), keys[3].clone(), missing_k];
     let remove_flags = store.remove_many(to_remove).await.expect("remove_many");
@@ -122,7 +123,7 @@ pub async fn run_batch_store_tests(store: Arc<dyn Store>) {
     // ---- get_many -----------------------------------------------------
     // Mix of hits (the just-set keys) and a missing key. Result must
     // preserve input order: Some(bytes) per hit, None per miss.
-    let missing_id = shamir_types::types::record_id::RecordId::new();
+    let missing_id = RecordId::new();
     let missing_k = Bytes::copy_from_slice(missing_id.as_bytes());
     let probe_keys = vec![
         keys[0].clone(),   // hit — was set to "updated-0"

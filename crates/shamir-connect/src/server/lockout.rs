@@ -51,7 +51,7 @@
 //! costs one disk write per invalid password attempt, which is too much.
 
 use crate::common::crypto::hmac_sha256;
-use crate::common::time::ns;
+use crate::common::time::{ns, UnixNanos};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -340,7 +340,7 @@ impl InMemoryLockoutStore {
     /// `(key, value)` pairs; no locks are held across an .await
     /// boundary (this is a synchronous function).
     pub fn snapshot(&self) -> LockoutSnapshot {
-        let captured_at_ns = crate::common::time::UnixNanos::now().as_u64();
+        let captured_at_ns = UnixNanos::now().as_u64();
         let mut failures = Vec::with_capacity(self.failures.len());
         for entry in self.failures.iter() {
             failures.push((*entry.key(), *entry.value()));

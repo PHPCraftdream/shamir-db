@@ -23,6 +23,7 @@ use crate::registry::{
     arg_i64, arg_str, v_bool, v_int, v_str, FnEntry, ScalarError, ScalarRegistry,
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc, Weekday};
+use shamir_types::types::value::InnerValue;
 
 /// Convert epoch-millis UTC into a `DateTime<Utc>`, or `"out_of_range"`.
 fn to_dt(ms: i64) -> Result<DateTime<Utc>, ScalarError> {
@@ -33,10 +34,7 @@ fn to_dt(ms: i64) -> Result<DateTime<Utc>, ScalarError> {
 }
 
 /// First epoch-millis argument decoded into a `DateTime<Utc>`.
-fn dt_arg(
-    a: &[shamir_types::types::value::InnerValue],
-    i: usize,
-) -> Result<DateTime<Utc>, ScalarError> {
+fn dt_arg(a: &[InnerValue], i: usize) -> Result<DateTime<Utc>, ScalarError> {
     to_dt(arg_i64(a, i)?)
 }
 

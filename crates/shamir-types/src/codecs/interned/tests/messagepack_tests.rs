@@ -1,3 +1,4 @@
+use crate::codecs::interned::common::intern_string_key;
 use crate::codecs::interned::{inner_to_msgpack, msgpack_to_inner};
 use crate::core::interner::Interner;
 use crate::types::common::{new_map, new_set};
@@ -708,24 +709,21 @@ fn test_zerocopy_vs_legacy_equivalence() {
         {
             let mut m = new_map();
             m.insert(
-                crate::codecs::interned::common::intern_string_key(&interner, "name").unwrap(),
+                intern_string_key(&interner, "name").unwrap(),
                 InnerValue::Str("test".into()),
             );
             m.insert(
-                crate::codecs::interned::common::intern_string_key(&interner, "age").unwrap(),
+                intern_string_key(&interner, "age").unwrap(),
                 InnerValue::Int(42),
             );
-            m.insert(
-                crate::codecs::interned::common::intern_string_key(&interner, "nested").unwrap(),
-                {
-                    let mut inner_m = new_map();
-                    inner_m.insert(
-                        crate::codecs::interned::common::intern_string_key(&interner, "x").unwrap(),
-                        InnerValue::F64(1.5),
-                    );
-                    InnerValue::Map(inner_m)
-                },
-            );
+            m.insert(intern_string_key(&interner, "nested").unwrap(), {
+                let mut inner_m = new_map();
+                inner_m.insert(
+                    intern_string_key(&interner, "x").unwrap(),
+                    InnerValue::F64(1.5),
+                );
+                InnerValue::Map(inner_m)
+            });
             InnerValue::Map(m)
         },
         // deeply nested array

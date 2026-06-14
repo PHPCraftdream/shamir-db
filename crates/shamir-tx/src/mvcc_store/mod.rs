@@ -32,6 +32,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use bytes::{BufMut, Bytes, BytesMut};
 use scc::HashMap as SccHashMap;
+use shamir_collections::THasher;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
 use shamir_storage::types::Store;
@@ -99,12 +100,12 @@ pub struct MvccStore {
     pub(super) gate: Arc<RepoTxGate>,
     /// In-memory coordination state: key → record cell (latest committed version).
     /// Cold start: first `get_at` for a key does a range scan, populates cache.
-    pub(super) cells: SccHashMap<Bytes, RecordCell>,
+    pub(super) cells: SccHashMap<Bytes, RecordCell, THasher>,
     /// Level-3 pessimistic lock registry. Populated ONLY for keys locked by a
     /// `Pessimistic` tx; stays empty otherwise → zero overhead on the snapshot
     /// / serializable read/write hot paths. Each entry is an `Arc<KeyLock>`
     /// shared between concurrent requesters of the same key.
-    pub(super) locks: SccHashMap<Bytes, Arc<KeyLockInner>>,
+    pub(super) locks: SccHashMap<Bytes, Arc<KeyLockInner>, THasher>,
     /// T1b.2: history-retention policy (lock-free `ArcSwap<Retention>`).
     /// Defaults to [`Retention::current_only`] (eager vacuum). Set via
     /// [`Self::set_retention`].
@@ -127,8 +128,8 @@ impl MvccStore {
         Self {
             history,
             gate,
-            cells: SccHashMap::new(),
-            locks: SccHashMap::new(),
+            cells: SccHashMap::with_hasher(THasher::default()),
+            locks: SccHashMap::with_hasher(THasher::default()),
             retention: ArcSwap::new(Arc::new(Retention::current_only())),
             test_now_millis: AtomicU64::new(0),
         }

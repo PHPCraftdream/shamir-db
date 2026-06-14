@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use rustls::crypto::aws_lc_rs::default_provider;
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::kdf_params::KdfParams;
@@ -112,7 +113,7 @@ fn make_user(password: &[u8]) -> (UserRecord, NormalizedUsername) {
 #[tokio::test]
 async fn full_handshake_over_tcp_tls() {
     // Install rustls crypto provider once.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = default_provider().install_default();
 
     // ---- Test fixture: identity, user record, password ----
     let identity = Arc::new(Ed25519Keypair::generate());

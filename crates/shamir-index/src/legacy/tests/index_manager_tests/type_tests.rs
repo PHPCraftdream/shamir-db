@@ -2,7 +2,7 @@ use super::helpers::{create_manager, create_test_value};
 use crate::legacy::index_definition::IndexDefinition;
 use crate::legacy::index_info_item::IndexInfoItem;
 use shamir_types::core::interner::InternerKey;
-use shamir_types::types::common::TSet;
+use shamir_types::types::common::{new_map, TSet};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -60,7 +60,7 @@ async fn test_create_index_with_list_value() {
 async fn test_create_index_with_map_value() {
     let (data_store, _, manager) = create_manager();
 
-    let mut inner_map = shamir_types::types::common::new_map();
+    let mut inner_map = new_map();
     inner_map.insert(InternerKey::new(100), InnerValue::Str("inner".to_string()));
     let map = InnerValue::Map(inner_map);
 

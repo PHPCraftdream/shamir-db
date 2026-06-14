@@ -60,7 +60,7 @@
 //! spec §8.6 warmup window (rate /4 for the first 60s) layers additional
 //! defence on top during exactly this recovery interval.
 
-use crate::common::time::ns;
+use crate::common::time::{ns, UnixNanos};
 use crate::server::lockout::Subnet;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -270,7 +270,7 @@ impl InMemoryRateLimiter {
     /// Holds map shards only long enough to clone `(key, value)` pairs; no
     /// locks are held across an `.await` (this is a synchronous function).
     pub fn snapshot(&self) -> RateLimitSnapshot {
-        let captured_at_ns = crate::common::time::UnixNanos::now().as_u64();
+        let captured_at_ns = UnixNanos::now().as_u64();
         let mut buckets = Vec::with_capacity(self.buckets.len());
         for entry in self.buckets.iter() {
             buckets.push((*entry.key(), *entry.value()));

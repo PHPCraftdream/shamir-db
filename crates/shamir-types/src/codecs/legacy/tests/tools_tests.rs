@@ -1,3 +1,4 @@
+use crate::codecs::basic::json::JsonCodec;
 use crate::codecs::transform::{inner_to_user, user_to_inner};
 use crate::codecs::Codec;
 use crate::core::interner::Interner;
@@ -68,7 +69,7 @@ fn test_round_trip_transformation() {
 
 #[test]
 fn test_full_lifecycle_transformation() {
-    let json_codec = crate::codecs::basic::json::JsonCodec;
+    let json_codec = JsonCodec;
     let interner = Interner::new();
     let large_number_str = "123456789012345678901234567890";
     let raw_json_1 = format!(

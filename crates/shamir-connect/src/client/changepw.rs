@@ -4,6 +4,7 @@ use crate::common::changepw::{build_auth_message_cp, ChangePwAuthMessageInputs};
 use crate::common::crypto::{hmac_sha256, random_array};
 use crate::common::error::Result;
 use crate::common::kdf_params::KdfParams;
+use crate::common::password::validate_password;
 use crate::common::scram::DerivedKeys;
 use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::common::username::NormalizedUsername;
@@ -39,7 +40,7 @@ pub fn build_request(
     // about to be discarded — validating it here would lock legitimate users
     // out of their own changePassword flow. Per spec the policy check
     // applies to the password being SET.
-    crate::common::password::validate_password(new_password)?;
+    validate_password(new_password)?;
     new_kdf_params_recommendation.validate_client_limits()?;
 
     // Build canonical auth_message_cp.

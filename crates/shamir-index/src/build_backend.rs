@@ -5,6 +5,8 @@
 
 use crate::backend::IndexBackend;
 use crate::descriptor::IndexDescriptor;
+use crate::kind::IndexKind;
+use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use shamir_storage::types::Store;
 use std::sync::Arc;
 
@@ -28,11 +30,11 @@ pub fn build_index2_backend(
                 Arc::clone(info_store),
             ))
         }
-        crate::kind::IndexKind::Vector(cfg) => {
-            let adapter = Arc::new(crate::vector::hnsw_adapter::HnswAdapter::new(
+        IndexKind::Vector(cfg) => {
+            let adapter = Arc::new(HnswAdapter::new(
                 cfg.dim,
                 cfg.metric,
-                crate::vector::hnsw_adapter::HnswConfig {
+                HnswConfig {
                     max_elements: 100_000,
                     m: 16,
                     ef_construction: 200,

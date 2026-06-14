@@ -13,6 +13,10 @@ resolver = "2"
 # so the `crates/*` glob doesn't try to load it as a workspace member.
 exclude = ["crates/shamir-client-node", "crates/shamir-client-ts"]
 
+[workspace.lints.clippy]
+absolute_paths = "warn"
+disallowed_methods = "warn"
+
 [profile.dev]
 opt-level = 0
 codegen-units = 14

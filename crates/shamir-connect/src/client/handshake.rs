@@ -24,6 +24,7 @@ use crate::common::kdf_params::{validate_client_kdf_safe, KdfParams};
 use crate::common::scram::{build_client_proof, build_server_signature, ClientProof, DerivedKeys};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
+use crate::server::rotation::RotationInProgressPayload;
 use zeroize::Zeroize;
 
 /// Server-supplied challenge fields.
@@ -67,7 +68,7 @@ pub struct ServerAuthOk {
     pub resumption_expires_at_ns: Option<u64>,
     /// Optional orphan-recovery payload — see
     /// [`crate::server::rotation::RotationInProgressPayload`].
-    pub rotation_in_progress: Option<crate::server::rotation::RotationInProgressPayload>,
+    pub rotation_in_progress: Option<RotationInProgressPayload>,
     /// Optional flag asking client to run changePassword to upgrade KDF.
     pub kdf_upgrade_required: Option<bool>,
 }

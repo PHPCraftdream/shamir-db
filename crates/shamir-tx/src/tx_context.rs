@@ -120,7 +120,7 @@ pub struct TxContext {
 
     /// Interner overlay: new `(key_name → id)` mappings created during
     /// this tx. Merged into base interner on commit; dropped on abort.
-    pub interner_overlay: scc::HashMap<String, u64>,
+    pub interner_overlay: scc::HashMap<String, u64, THasher>,
 
     /// Next id to hand out from the overlay.  Starts at
     /// [`OVERLAY_ID_BASE`](crate::layered_interner::OVERLAY_ID_BASE)
@@ -146,7 +146,7 @@ pub struct TxContext {
     /// what makes Serializable isolation actually detect write-skew (before
     /// this, `record_read` was wired only from unit tests, so the read-set
     /// was always empty in production and SSI silently degraded to Snapshot).
-    pub read_set: scc::HashMap<(u64, Bytes), u64>,
+    pub read_set: scc::HashMap<(u64, Bytes), u64, THasher>,
 
     /// Token → original table name. Populated alongside `write_set`
     /// entries. Used at commit time to look up table names for WAL
@@ -226,7 +226,7 @@ pub struct TxContext {
     /// is `(table_token, key)` so release can route to the right table's
     /// `MvccStore`. Interior-mutable (`scc::HashMap`) so the read path
     /// (which holds `&TxContext`) can record locks without `&mut`.
-    pub locked_keys: scc::HashMap<(u64, Bytes), ()>,
+    pub locked_keys: scc::HashMap<(u64, Bytes), (), THasher>,
 }
 
 impl TxContext {
@@ -244,10 +244,10 @@ impl TxContext {
             write_set: HashMap::with_hasher(THasher::default()),
             index_write_set: Vec::new(),
             staged_vectors: HashMap::with_hasher(THasher::default()),
-            interner_overlay: scc::HashMap::new(),
+            interner_overlay: scc::HashMap::with_hasher(THasher::default()),
             next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
             counter_deltas: HashMap::with_hasher(THasher::default()),
-            read_set: scc::HashMap::new(),
+            read_set: scc::HashMap::with_hasher(THasher::default()),
             table_tokens: HashMap::with_hasher(THasher::default()),
             interner_deltas: HashMap::with_hasher(THasher::default()),
             version_provider: None,
@@ -259,7 +259,7 @@ impl TxContext {
             actor: Actor::System,
             wounded: Arc::new(AtomicBool::new(false)),
             wound_notify: Arc::new(tokio::sync::Notify::new()),
-            locked_keys: scc::HashMap::new(),
+            locked_keys: scc::HashMap::with_hasher(THasher::default()),
         }
     }
 
@@ -597,9 +597,9 @@ impl TxContext {
     ///
     /// Errors if any staged value fails to decode/re-encode. Caller
     /// should abort the transaction on error.
-    pub async fn apply_id_remap(
+    pub async fn apply_id_remap<S: std::hash::BuildHasher>(
         &mut self,
-        remap: &std::collections::HashMap<u64, u64>,
+        remap: &std::collections::HashMap<u64, u64, S>,
     ) -> Result<(), String> {
         if remap.is_empty() {
             return Ok(());

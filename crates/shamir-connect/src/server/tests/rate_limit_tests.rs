@@ -1,4 +1,4 @@
-use crate::common::time::ns;
+use crate::common::time::{ns, UnixNanos};
 use crate::server::lockout::Subnet;
 use crate::server::rate_limit::{
     BucketState, InMemoryRateLimiter, RateDecision, RateLimitSnapshot, RateLimitSnapshotError,
@@ -160,7 +160,7 @@ fn ratelimit_snapshot_round_trips() {
     // same clock for the idle-GC check in `rehydrate` to behave as it
     // does in production (where capture time and bucket refill time
     // share one clock).
-    let boot = crate::common::time::UnixNanos::now().as_u64();
+    let boot = UnixNanos::now().as_u64();
     let r = InMemoryRateLimiter::new(boot);
     // Past warmup → 10/sec, full bucket of 10 tokens.
     let now = boot + WARMUP_WINDOW_NS + 1;
@@ -206,7 +206,7 @@ fn ratelimit_snapshot_round_trips() {
 #[test]
 fn with_snapshot_sink_rehydrates_and_persists() {
     let sink = MemSink::new();
-    let boot = crate::common::time::UnixNanos::now().as_u64();
+    let boot = UnixNanos::now().as_u64();
     let now = boot + WARMUP_WINDOW_NS + 1;
     {
         let r = InMemoryRateLimiter::with_snapshot_sink(sink.clone(), boot);

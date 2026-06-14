@@ -1,5 +1,7 @@
 //! Codec traits with interning support
 
+use crate::codecs::interned::json::{inner_to_json, json_to_inner};
+use crate::codecs::interned::messagepack::{inner_to_msgpack, msgpack_to_inner};
 use crate::codecs::CodecError;
 use crate::core::interner::Interner;
 use crate::types::value::InnerValue;
@@ -40,7 +42,7 @@ impl InternedCodec for JsonInternedCodec {
         bytes: &[u8],
         interner: &Interner,
     ) -> Result<InnerValue, CodecError> {
-        crate::codecs::interned::json::json_to_inner(interner, bytes)
+        json_to_inner(interner, bytes)
     }
 
     fn encode_with_interner(
@@ -48,7 +50,7 @@ impl InternedCodec for JsonInternedCodec {
         value: &InnerValue,
         interner: &Interner,
     ) -> Result<Vec<u8>, CodecError> {
-        crate::codecs::interned::json::inner_to_json(interner, value)
+        inner_to_json(interner, value)
     }
 
     fn format_name(&self) -> &'static str {
@@ -69,7 +71,7 @@ impl InternedCodec for MsgPackInternedCodec {
         bytes: &[u8],
         interner: &Interner,
     ) -> Result<InnerValue, CodecError> {
-        crate::codecs::interned::messagepack::msgpack_to_inner(interner, bytes)
+        msgpack_to_inner(interner, bytes)
     }
 
     fn encode_with_interner(
@@ -77,7 +79,7 @@ impl InternedCodec for MsgPackInternedCodec {
         value: &InnerValue,
         interner: &Interner,
     ) -> Result<Vec<u8>, CodecError> {
-        crate::codecs::interned::messagepack::inner_to_msgpack(interner, value)
+        inner_to_msgpack(interner, value)
     }
 
     fn format_name(&self) -> &'static str {

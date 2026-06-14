@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use rustls::crypto::aws_lc_rs::default_provider;
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::envelope::{
@@ -19,11 +20,14 @@ use shamir_connect::common::envelope::{
 };
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
 use shamir_connect::server::conn_services::ConnectionServices;
-use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome, RequestHandler};
+use shamir_connect::server::dispatch::{
+    dispatch_request_view, DispatchOutcome, HandlerFuture, RequestHandler,
+};
 use shamir_connect::server::handshake::{
     AuthInitView, ProofOutcome, ServerHandshake, SESSION_MAX_AGE_NS,
 };
@@ -104,7 +108,7 @@ impl RequestHandler for EchoHandler {
         _session: &'a Session,
         req: &'a [u8],
         _conn: &'a ConnectionServices,
-    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+    ) -> HandlerFuture<'a> {
         self.counter.fetch_add(1, Ordering::Relaxed);
         let out = req.to_vec();
         Box::pin(async move { Ok(out) })
@@ -147,7 +151,7 @@ fn make_user(password: &[u8]) -> (UserRecord, NormalizedUsername) {
 
 #[tokio::test]
 async fn echo_full_pipeline_with_session_and_invalidation() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let _ = default_provider().install_default();
 
     // ---- Fixtures ----
     let identity = Arc::new(Ed25519Keypair::generate());
@@ -259,7 +263,7 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         };
 
         // Insert into SessionStore so dispatch_request can find it.
-        let now_ns = shamir_connect::common::time::UnixNanos::now().as_u64();
+        let now_ns = UnixNanos::now().as_u64();
         let session = Session::new(
             alice_uid,
             server_username.as_str().to_string(),
@@ -419,7 +423,7 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
 
     // ----- 4. Bump tickets_invalid_before_ns → next request must receive
     //          session_invalidated (per spec §7.5).
-    let now_ns = shamir_connect::common::time::UnixNanos::now().as_u64();
+    let now_ns = UnixNanos::now().as_u64();
     tickets_invalid_before_ns.store(now_ns + 60, Ordering::Relaxed);
 
     let env = RequestEnvelope::new(sid, Some(99), b"after-bump".to_vec());

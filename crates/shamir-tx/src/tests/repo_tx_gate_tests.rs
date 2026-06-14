@@ -5,9 +5,8 @@ use crate::repo_tx_gate::{
 use crate::types::{IsolationLevel, TxId};
 use crate::IndexWriteOp;
 use bytes::Bytes;
-use std::collections::HashMap;
-
 use shamir_collections::THasher;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -105,7 +104,7 @@ async fn assign_next_version_concurrent_no_duplicates() {
         let g = Arc::clone(&gate);
         handles.push(tokio::spawn(async move { g.assign_next_version() }));
     }
-    let mut versions = std::collections::HashSet::new();
+    let mut versions = HashSet::<_, THasher>::default();
     for h in handles {
         let v = h.await.unwrap();
         assert!(versions.insert(v), "duplicate version {v}");
@@ -122,7 +121,7 @@ async fn fresh_tx_id_concurrent_no_duplicates() {
         let g = Arc::clone(&gate);
         handles.push(tokio::spawn(async move { g.fresh_tx_id() }));
     }
-    let mut ids = std::collections::HashSet::new();
+    let mut ids = HashSet::<_, THasher>::default();
     for h in handles {
         let id = h.await.unwrap();
         assert!(ids.insert(id.raw()), "duplicate tx_id");

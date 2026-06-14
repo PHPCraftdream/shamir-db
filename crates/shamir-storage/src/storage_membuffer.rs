@@ -81,6 +81,8 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use futures::stream::Stream;
 use moka::future::Cache as MokaCache;
+use shamir_collections::THasher;
+use shamir_types::types::record_id::RecordId;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -149,7 +151,7 @@ struct MemBufferState {
     /// + a moka async eviction listener to flush. The listener
     ///   was firing per evicted entry (TTL/Size cause); on tight
     ///   loops with frequent eviction it dominated the cost.
-    dirty: Arc<DashMap<RecordKey, Slot>>,
+    dirty: Arc<DashMap<RecordKey, Slot, THasher>>,
     /// Fast-path sentinel: true iff dirty is (likely) non-empty.
     /// Set with Release before each dirty.insert so any subsequent
     /// Acquire-load in get() that sees `false` is guaranteed to see
@@ -213,7 +215,8 @@ fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, Slot> {
 
 impl MemBufferStore {
     pub fn new(inner: Arc<dyn Store>, config: MemBufferConfig) -> Self {
-        let dirty: Arc<DashMap<RecordKey, Slot>> = Arc::new(DashMap::new());
+        let dirty: Arc<DashMap<RecordKey, Slot, THasher>> =
+            Arc::new(DashMap::with_hasher(THasher::default()));
         let cache = Arc::new(build_cache(&config));
 
         let state = Arc::new(MemBufferState {
@@ -423,7 +426,7 @@ type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, Db
 #[async_trait]
 impl Store for MemBufferStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        let id = shamir_types::types::record_id::RecordId::new();
+        let id = RecordId::new();
         let key = RecordKey::copy_from_slice(id.as_bytes());
         let slot = Slot::Live(value);
         // Release before dirty.insert so get()'s Acquire load sees the flag
@@ -653,7 +656,7 @@ impl Store for MemBufferStore {
         let mut keys = Vec::with_capacity(values.len());
         let cache = self.state.cache.load();
         for v in values {
-            let id = shamir_types::types::record_id::RecordId::new();
+            let id = RecordId::new();
             let key = RecordKey::copy_from_slice(id.as_bytes());
             let slot = Slot::Live(v);
             self.state.dirty.insert(key.clone(), slot.clone());

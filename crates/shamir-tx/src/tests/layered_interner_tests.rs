@@ -1,5 +1,6 @@
 use crate::layered_interner::{commit_interner_overlay, LayeredInterner, OVERLAY_ID_BASE};
 use scc::HashMap as SccHashMap;
+use shamir_collections::THasher;
 use shamir_types::core::interner::Interner;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -8,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// of `layered_interner`.
 fn make_layered<'a>(
     base: &'a Interner,
-    overlay: &'a SccHashMap<String, u64>,
+    overlay: &'a SccHashMap<String, u64, THasher>,
     next: &'a AtomicU64,
 ) -> LayeredInterner<'a> {
     LayeredInterner::Layered {
@@ -21,7 +22,7 @@ fn make_layered<'a>(
 #[test]
 fn touch_sync_same_as_async() {
     let base = Interner::new();
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
     let li = make_layered(&base, &overlay, &next);
 
@@ -58,7 +59,7 @@ async fn direct_mode_no_overhead() {
 #[tokio::test]
 async fn layered_touch_new_goes_to_overlay() {
     let base = Interner::new();
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
     let li = make_layered(&base, &overlay, &next);
 
@@ -87,7 +88,7 @@ async fn layered_touch_existing_in_base_returns_base_id() {
         .key()
         .id();
 
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
     let li = make_layered(&base, &overlay, &next);
     let id = li.touch("foo").await;
@@ -98,7 +99,7 @@ async fn layered_touch_existing_in_base_returns_base_id() {
 #[tokio::test]
 async fn layered_touch_repeat_returns_same_overlay_id() {
     let base = Interner::new();
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
     let li = make_layered(&base, &overlay, &next);
 
@@ -111,7 +112,7 @@ async fn layered_touch_repeat_returns_same_overlay_id() {
 #[tokio::test]
 async fn get_id_does_not_allocate() {
     let base = Interner::new();
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
     let li = make_layered(&base, &overlay, &next);
 
@@ -130,7 +131,7 @@ async fn get_str_reads_base_and_overlay() {
         .key()
         .id();
 
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
     let li = make_layered(&base, &overlay, &next);
     let overlay_id = li.touch("bar").await;
@@ -142,7 +143,7 @@ async fn get_str_reads_base_and_overlay() {
 #[tokio::test]
 async fn commit_overlay_merges_into_base() {
     let base = Interner::new();
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let next = AtomicU64::new(OVERLAY_ID_BASE);
 
     let overlay_a = next.fetch_add(1, Ordering::SeqCst);
@@ -176,7 +177,7 @@ async fn commit_overlay_with_race_uses_existing_base_id() {
         .key()
         .id();
 
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let overlay_id: u64 = OVERLAY_ID_BASE + 99;
     overlay
         .insert_async("foo".to_string(), overlay_id)
@@ -192,7 +193,7 @@ async fn commit_overlay_with_race_uses_existing_base_id() {
 #[tokio::test]
 async fn commit_overlay_empty_is_noop() {
     let base = Interner::new();
-    let overlay = SccHashMap::new();
+    let overlay = SccHashMap::with_hasher(THasher::default());
     let base_len = base.len();
 
     let result = commit_interner_overlay(&base, &overlay).await.unwrap();

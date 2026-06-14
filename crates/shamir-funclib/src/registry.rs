@@ -10,6 +10,7 @@
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use shamir_collections::THasher;
 use shamir_types::types::value::InnerValue;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -81,7 +82,7 @@ impl FnEntry {
 /// inserts the plain name as-is.
 #[derive(Default)]
 pub struct ScalarRegistry {
-    fns: HashMap<String, FnEntry>,
+    fns: HashMap<String, FnEntry, THasher>,
     prefix: String,
 }
 
@@ -89,7 +90,7 @@ impl ScalarRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            fns: HashMap::new(),
+            fns: HashMap::<_, _, THasher>::default(),
             prefix: String::new(),
         }
     }

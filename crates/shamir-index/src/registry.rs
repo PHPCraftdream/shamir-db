@@ -6,20 +6,21 @@
 //! counter is single-source (no cross-process coordination).
 
 use crate::backend::{IndexBackend, IndexError};
+use shamir_collections::THasher;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 pub struct IndexRegistry {
-    by_id: scc::HashMap<u32, Arc<dyn IndexBackend>>,
-    by_name: scc::HashMap<u64, u32>,
+    by_id: scc::HashMap<u32, Arc<dyn IndexBackend>, THasher>,
+    by_name: scc::HashMap<u64, u32, THasher>,
     next_id: AtomicU32,
 }
 
 impl IndexRegistry {
     pub fn new() -> Self {
         Self {
-            by_id: scc::HashMap::new(),
-            by_name: scc::HashMap::new(),
+            by_id: scc::HashMap::with_hasher(THasher::default()),
+            by_name: scc::HashMap::with_hasher(THasher::default()),
             next_id: AtomicU32::new(1),
         }
     }

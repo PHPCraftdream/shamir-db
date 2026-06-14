@@ -6,6 +6,7 @@ use crate::tests::types_tests::collect_stream;
 use crate::types::{RecordKey, Store};
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -28,8 +29,7 @@ async fn test_cached_store_flush_via_dyn_store() {
     // we issue many in a tight loop to widen the window.
     let mut keys = Vec::new();
     for _ in 0..200 {
-        let k =
-            RecordKey::copy_from_slice(shamir_types::types::record_id::RecordId::new().as_bytes());
+        let k = RecordKey::copy_from_slice(RecordId::new().as_bytes());
         cached_dyn
             .set(k.clone(), Bytes::from_static(b"async-write"))
             .await

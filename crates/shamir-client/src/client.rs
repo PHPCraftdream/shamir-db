@@ -15,6 +15,9 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use rustls::crypto::aws_lc_rs::default_provider;
+use rustls::pki_types::ServerName;
+use shamir_collections::THasher;
 use tokio::io::{split, AsyncWriteExt, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -118,7 +121,7 @@ fn decode_frame(buf: &[u8]) -> Option<DemuxResult> {
 /// Per-pending-request slot: either resolved with response bytes or with a
 /// transport-level error.
 pub(crate) type PendingSender = oneshot::Sender<Result<Vec<u8>, ClientError>>;
-pub(crate) type PendingMap = Arc<StdMutex<HashMap<u32, PendingSender>>>;
+pub(crate) type PendingMap = Arc<StdMutex<HashMap<u32, PendingSender, THasher>>>;
 
 /// Background reader loop.  Owns `ReadHalf`; demuxes frames to pending waiters.
 ///
@@ -282,7 +285,7 @@ impl Client {
     pub async fn connect(opts: ConnectOptions) -> Result<Self, ClientError> {
         // Install rustls crypto provider once. `install_default` is a
         // no-op on second call.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = default_provider().install_default();
 
         let username = NormalizedUsername::from_raw(&opts.username)
             .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
@@ -290,7 +293,7 @@ impl Client {
         // ---- TLS ----
         let client_cfg = make_client_config_no_ca();
         let connector = TlsConnector::from(client_cfg);
-        let server_name = rustls::pki_types::ServerName::try_from(opts.server_name.clone())
+        let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
         let tcp = TcpStream::connect(opts.addr).await?;
         let tls = connector.connect(server_name, tcp).await?;
@@ -448,9 +451,11 @@ impl Client {
             .expect("either trusted_pin pre-set or TOFU callback fired");
 
         // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
-        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(HashMap::new()));
-        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
+        let subscriptions: SubscriptionMap =
+            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
+        let early_buffer: EarlyBuffer =
+            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
         let closed = Arc::new(AtomicBool::new(false));
 
         // §B21: store JoinHandle — never drop silently.
@@ -489,12 +494,12 @@ impl Client {
     ///    with a new session id and optionally a rotated ticket.
     /// 4. Spawn background reader task; return ready `Client`.
     pub async fn resume(opts: ResumeOptions) -> Result<Self, ClientError> {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = default_provider().install_default();
 
         // ---- TLS ----
         let client_cfg = make_client_config_no_ca();
         let connector = TlsConnector::from(client_cfg);
-        let server_name = rustls::pki_types::ServerName::try_from(opts.server_name.clone())
+        let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
         let tcp = TcpStream::connect(opts.addr).await?;
         let tls = connector.connect(server_name, tcp).await?;
@@ -546,9 +551,11 @@ impl Client {
         };
 
         // ---- Spawn background reader ----
-        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
-        let subscriptions: SubscriptionMap = Arc::new(StdMutex::new(HashMap::new()));
-        let early_buffer: EarlyBuffer = Arc::new(StdMutex::new(HashMap::new()));
+        let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
+        let subscriptions: SubscriptionMap =
+            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
+        let early_buffer: EarlyBuffer =
+            Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
         let closed = Arc::new(AtomicBool::new(false));
         let reader_handle = tokio::spawn(reader_task(
             r,

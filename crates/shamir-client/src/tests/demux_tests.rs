@@ -4,6 +4,7 @@
 //! hand-crafted response frames and asserting that each waiter receives
 //! exactly the payload it expects, regardless of the order frames arrive.
 
+use shamir_collections::THasher;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -48,11 +49,11 @@ async fn write_push(writer: &mut (impl AsyncWriteExt + Unpin), envelope: &PushEn
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn make_subs() -> SubscriptionMap {
-    Arc::new(StdMutex::new(HashMap::new()))
+    Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()))
 }
 
 fn make_early_buffer() -> EarlyBuffer {
-    Arc::new(StdMutex::new(HashMap::new()))
+    Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()))
 }
 
 #[allow(clippy::type_complexity)]
@@ -61,7 +62,7 @@ fn make_pending() -> (
     oneshot::Receiver<Result<Vec<u8>, ClientError>>,
     oneshot::Receiver<Result<Vec<u8>, ClientError>>,
 ) {
-    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
     let (tx1, rx1) = oneshot::channel();
     let (tx2, rx2) = oneshot::channel();
     {
@@ -210,7 +211,7 @@ async fn demux_eof_drains_all_pending() {
 /// as a `ClientError::Protocol`.
 #[tokio::test]
 async fn demux_error_envelope_routed_to_waiter() {
-    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
     let (tx, rx) = oneshot::channel();
     pending.lock().unwrap().insert(7, tx);
 
@@ -242,7 +243,7 @@ async fn demux_error_envelope_routed_to_waiter() {
 #[tokio::test]
 async fn demux_late_response_for_unknown_rid_is_dropped() {
     // Only rid=1 is registered; server sends rid=99 (orphan) + rid=1.
-    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
     let (tx1, rx1) = oneshot::channel();
     pending.lock().unwrap().insert(1, tx1);
 
@@ -274,7 +275,7 @@ async fn demux_late_response_for_unknown_rid_is_dropped() {
 /// A push frame routes to a registered subscription handle.
 #[tokio::test]
 async fn push_frame_routes_to_registered_subscription() {
-    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
     let subs = make_subs();
     let closed = Arc::new(AtomicBool::new(false));
 
@@ -312,7 +313,7 @@ async fn push_frame_routes_to_registered_subscription() {
 /// A push frame for an unregistered sub_id is buffered — no panic, no loss.
 #[tokio::test]
 async fn push_frame_for_unknown_sub_is_buffered() {
-    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
     let (tx1, rx1) = oneshot::channel();
     pending.lock().unwrap().insert(1, tx1);
 
@@ -354,7 +355,7 @@ async fn push_frame_for_unknown_sub_is_buffered() {
 /// deterministic, independent of `CLIENT_SUB_CHANNEL_CAP` tuning.
 #[tokio::test]
 async fn push_frame_bounded_channel_drops_on_full() {
-    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::new()));
+    let pending: PendingMap = Arc::new(StdMutex::new(HashMap::<_, _, THasher>::default()));
     let subs = make_subs();
     let closed = Arc::new(AtomicBool::new(false));
 

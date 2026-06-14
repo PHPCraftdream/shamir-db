@@ -11,3 +11,6 @@ fxhash = "0.2.1"
 
 [lib]
 doctest = false
+
+[lints]
+workspace = true

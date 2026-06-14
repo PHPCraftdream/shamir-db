@@ -92,7 +92,7 @@ pub(super) struct HostState {
     pub(super) net: Option<Arc<dyn NetGateway>>,
     /// Env-var names this function may read via `global_get("env.X")`.
     /// Non-`env.` globals are ungated; a denied secret looks absent.
-    pub(super) secret_grants: Arc<std::collections::HashSet<String>>,
+    pub(super) secret_grants: Arc<std::collections::HashSet<String, shamir_collections::THasher>>,
 }
 
 // ── WasmFunction ─────────────────────────────────────────────────────

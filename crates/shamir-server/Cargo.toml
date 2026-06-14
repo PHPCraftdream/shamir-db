@@ -152,5 +152,5 @@ harness = false
 name = "wire_pipelining"
 harness = false
 
-[lints.clippy]
-all = "warn"
+[lints]
+workspace = true

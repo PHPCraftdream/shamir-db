@@ -10,6 +10,7 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use futures::StreamExt;
 use shamir_storage::types::Store;
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
@@ -38,7 +39,7 @@ impl VectorBackend {
         for &seg in &self.field_path {
             match current {
                 InnerValue::Map(m) => {
-                    let key = shamir_types::core::interner::InternerKey::new(seg);
+                    let key = InternerKey::new(seg);
                     current = m.get(&key)?;
                 }
                 _ => return None,

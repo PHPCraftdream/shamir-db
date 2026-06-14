@@ -4,6 +4,7 @@ use shamir_connect::client::rotation::{
     verify_identity_rotation_event, verify_rotation_in_progress, ROTATION_MAX_TRANSITION_NS,
 };
 use shamir_connect::common::crypto::sha256;
+use shamir_connect::common::error::Error;
 use shamir_connect::common::time::{ns, UnixNanos};
 use shamir_connect::server::rotation::{
     build_identity_rotation_event, build_rotation_in_progress_payload, ServerIdentityState,
@@ -262,10 +263,7 @@ fn orphan_recovery_rejects_tampered_identity_sig_previous_per_diagram_05() {
         now,
         true,
     );
-    assert!(matches!(
-        result,
-        Err(shamir_connect::common::error::Error::ServerSignatureInvalid)
-    ));
+    assert!(matches!(result, Err(Error::ServerSignatureInvalid)));
 }
 
 /// Diagram 05 Part B step 67: server signs identity_sig_previous over the
@@ -286,10 +284,7 @@ fn orphan_recovery_rejects_identity_input_mismatch_per_diagram_05() {
     // verify must reject because identity_sig_previous won't match.
     let other_input: &[u8] = b"SHAMIR-IDENTITY-v1-different-bytes-mismatched-handshake";
     let result = verify_rotation_in_progress(&payload, &new_pub, other_input, &pinned, now, true);
-    assert!(matches!(
-        result,
-        Err(shamir_connect::common::error::Error::ServerSignatureInvalid)
-    ));
+    assert!(matches!(result, Err(Error::ServerSignatureInvalid)));
 }
 
 /// Diagram 05 Part B step 70: the payload returned by

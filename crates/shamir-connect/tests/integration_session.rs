@@ -4,6 +4,7 @@ use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelope, ResponseE
 use shamir_connect::common::time::{ns, UnixNanos};
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::conn_services::ConnectionServices;
+use shamir_connect::server::dispatch::HandlerFuture;
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 use shamir_connect::server::{dispatch_request, DispatchOutcome, RequestHandler};
 
@@ -11,10 +12,10 @@ struct Echo;
 impl RequestHandler for Echo {
     fn handle<'a>(
         &'a self,
-        _session: &'a shamir_connect::server::Session,
+        _session: &'a Session,
         req: &'a [u8],
         _conn: &'a ConnectionServices,
-    ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
+    ) -> HandlerFuture<'a> {
         let out = req.to_vec();
         Box::pin(async move { Ok(out) })
     }

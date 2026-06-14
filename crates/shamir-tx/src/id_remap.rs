@@ -7,6 +7,7 @@
 //! references before the bytes hit `transact()`.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 use bytes::Bytes;
 use shamir_types::core::interner::InternerKey;
@@ -14,7 +15,7 @@ use shamir_types::types::value::InnerValue;
 
 /// Recursively replace `InternerKey` ids in `value` according to
 /// `remap`. Keys not present in the remap are left unchanged.
-pub fn remap_value(value: &mut InnerValue, remap: &HashMap<u64, u64>) {
+pub fn remap_value<S: BuildHasher>(value: &mut InnerValue, remap: &HashMap<u64, u64, S>) {
     match value {
         InnerValue::Map(m) => {
             let entries: Vec<(InternerKey, InnerValue)> = m.drain(..).collect();
@@ -49,9 +50,9 @@ pub fn remap_value(value: &mut InnerValue, remap: &HashMap<u64, u64>) {
 /// Returns `Err` only on serde failure. If `remap` is empty this is a
 /// no-op decode+encode round-trip — caller can skip the call when the
 /// remap is empty.
-pub fn remap_inner_value_bytes(
+pub fn remap_inner_value_bytes<S: BuildHasher>(
     bytes: Bytes,
-    remap: &HashMap<u64, u64>,
+    remap: &HashMap<u64, u64, S>,
 ) -> Result<Bytes, rmp_serde::encode::Error> {
     let mut value = InnerValue::from_bytes(&bytes)
         .map_err(|e| rmp_serde::encode::Error::Syntax(format!("decode failed: {e}")))?;

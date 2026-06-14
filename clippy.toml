@@ -1,0 +1,21 @@
+# --- absolute_paths (variant B) ---------------------------------------------
+# Inline absolute paths deeper than 3 segments are banned — import the item
+# at the top of the file. `std::mem::take` (3 segs) and anything under the
+# allowed crates are fine; `a::b::c::d::new()` (4+ segs, non-allowed crate)
+# must be a top-level `use`. Catches the deep-path smell without churning
+# idiomatic std/tokio calls.
+absolute-paths-max-segments = 5
+absolute-paths-allowed-crates = ["std", "core", "alloc", "tokio"]
+
+# --- disallowed-methods (Fx-only hashing, ideology pillar 4) ------------------
+# Default-hasher (RandomState) constructors are banned: use Fx via
+# `THasher` / `TMap` / `TSet` / `with_hasher(THasher::default())`.
+# `with_hasher` / `with_capacity_and_hasher` (explicit hasher) stay allowed.
+disallowed-methods = [
+    { path = "std::collections::HashMap::new", reason = "Fx-only: TMap or HashMap::<_, _, THasher>::default()" },
+    { path = "std::collections::HashMap::with_capacity", reason = "Fx-only: HashMap::with_capacity_and_hasher(n, THasher::default())" },
+    { path = "std::collections::HashSet::new", reason = "Fx-only: TSet or HashSet::<_, THasher>::default()" },
+    { path = "std::collections::HashSet::with_capacity", reason = "Fx-only: HashSet::with_capacity_and_hasher(n, THasher::default())" },
+    { path = "dashmap::DashMap::new", reason = "Fx-only: DashMap::with_hasher(THasher::default())" },
+    { path = "scc::HashMap::new", reason = "Fx-only: scc::HashMap::with_hasher(THasher::default())" },
+]

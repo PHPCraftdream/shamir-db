@@ -1,4 +1,4 @@
-use crate::common::time::ns;
+use crate::common::time::{ns, UnixNanos};
 use crate::server::lockout::{
     subnet_of, username_hash, FailureOutcome, FailureState, InMemoryLockoutStore, LockoutSnapshot,
     LockoutSnapshotError, LockoutSnapshotSink, LockoutState, LockoutStore, PairKey, Subnet,
@@ -220,7 +220,7 @@ fn lockout_state_survives_snapshot_roundtrip() {
     // `captured_at_ns = UnixNanos::now()` doesn't make the rehydrated
     // entries look stale.
     let s = InMemoryLockoutStore::new();
-    let now = crate::common::time::UnixNanos::now().as_u64();
+    let now = UnixNanos::now().as_u64();
     let k = key(1, 1);
 
     // Drive to lockout.
@@ -250,7 +250,7 @@ fn failure_backoff_survives_snapshot_roundtrip() {
     let s = InMemoryLockoutStore::new();
     // Use wall-clock-ish timestamps so rehydrate's freshness check
     // does not discard the entry.
-    let now = crate::common::time::UnixNanos::now().as_u64();
+    let now = UnixNanos::now().as_u64();
     let k = key(1, 1);
     s.register_failure(k, now);
     s.register_failure(k, now);

@@ -1,6 +1,8 @@
 use crate::query::batch::executor_traits::TableResolver;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
+use shamir_collections::THasher;
 use shamir_types::types::common::TMap;
+use std::collections::HashSet;
 
 /// Validate that all referenced tables exist before execution.
 ///
@@ -53,12 +55,9 @@ pub(super) async fn validate_tables(
 ///    inside that repo is implicitly "being created").
 pub(super) fn tables_created_in_batch(
     queries: &TMap<String, QueryEntry>,
-) -> (
-    std::collections::HashSet<String>,
-    std::collections::HashSet<String>,
-) {
-    let mut created_tables = std::collections::HashSet::new();
-    let mut created_repos = std::collections::HashSet::new();
+) -> (HashSet<String, THasher>, HashSet<String, THasher>) {
+    let mut created_tables = HashSet::<_, THasher>::default();
+    let mut created_repos = HashSet::<_, THasher>::default();
 
     for entry in queries.values() {
         match &entry.op {

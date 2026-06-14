@@ -381,7 +381,7 @@ async fn duplex_test4_burst_16_requests() {
     }
 
     // Collect all 16 responses.
-    let mut received_rids = std::collections::HashSet::new();
+    let mut received_rids = std::collections::HashSet::<_, shamir_collections::THasher>::default();
     for _ in 0..N {
         let rid = timeout(Duration::from_secs(2), client_recv_rid(&mut cr))
             .await
@@ -389,7 +389,7 @@ async fn duplex_test4_burst_16_requests() {
         received_rids.insert(rid);
     }
 
-    let expected: std::collections::HashSet<u32> = (1..=N).collect();
+    let expected: std::collections::HashSet<u32, shamir_collections::THasher> = (1..=N).collect();
     assert_eq!(
         received_rids, expected,
         "all 16 rids must be received exactly once"

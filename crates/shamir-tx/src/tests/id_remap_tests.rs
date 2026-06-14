@@ -1,4 +1,5 @@
 use crate::id_remap::{remap_inner_value_bytes, remap_value};
+use shamir_collections::THasher;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::InnerValue;
@@ -11,7 +12,7 @@ fn remap_replaces_top_level_map_keys() {
     m.insert(InternerKey::new(200), InnerValue::Int(42));
     let mut value = InnerValue::Map(m);
 
-    let mut remap = HashMap::new();
+    let mut remap = HashMap::<_, _, THasher>::default();
     remap.insert(100, 1000);
     remap.insert(200, 2000);
 
@@ -35,7 +36,7 @@ fn remap_recurses_into_nested_map() {
     outer.insert(InternerKey::new(1), InnerValue::Map(inner));
     let mut value = InnerValue::Map(outer);
 
-    let mut remap = HashMap::new();
+    let mut remap = HashMap::<_, _, THasher>::default();
     remap.insert(50, 5000);
     remap.insert(1, 100);
 
@@ -59,7 +60,7 @@ fn remap_leaves_unknown_keys_untouched() {
     m.insert(InternerKey::new(7), InnerValue::Bool(true));
     let mut value = InnerValue::Map(m);
 
-    let remap = HashMap::new();
+    let remap = HashMap::<_, _, THasher>::default();
     remap_value(&mut value, &remap);
 
     if let InnerValue::Map(m) = value {
@@ -75,7 +76,7 @@ fn remap_inside_list() {
     inner_map.insert(InternerKey::new(9), InnerValue::Int(1));
     let mut v = InnerValue::List(vec![InnerValue::Map(inner_map)]);
 
-    let mut remap = HashMap::new();
+    let mut remap = HashMap::<_, _, THasher>::default();
     remap.insert(9, 99);
     remap_value(&mut v, &remap);
 
@@ -97,7 +98,7 @@ fn remap_inner_value_bytes_roundtrip() {
     let value = InnerValue::Map(m);
     let bytes = value.to_bytes().unwrap();
 
-    let mut remap = HashMap::new();
+    let mut remap = HashMap::<_, _, THasher>::default();
     remap.insert(11, 111);
 
     let new_bytes = remap_inner_value_bytes(bytes, &remap).unwrap();
@@ -117,6 +118,6 @@ fn remap_inner_value_bytes_empty_remap_is_noop() {
     let bytes = value.to_bytes().unwrap();
     let original = bytes.clone();
 
-    let new_bytes = remap_inner_value_bytes(bytes, &HashMap::new()).unwrap();
+    let new_bytes = remap_inner_value_bytes(bytes, &HashMap::<_, _, THasher>::default()).unwrap();
     assert_eq!(new_bytes, original);
 }
