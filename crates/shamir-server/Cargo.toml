@@ -109,6 +109,7 @@ sd-notify = "0.4"
 windows-service = "0.8"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 fxhash = "0.2"
 hex = "0.4"
 serial_test = "3"

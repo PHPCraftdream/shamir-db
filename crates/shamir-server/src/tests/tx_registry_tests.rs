@@ -160,7 +160,7 @@ async fn reaper_contract_past_deadline_tx_is_removed() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn reaper_task_reaps_past_deadline_tx() {
     let reg = Arc::new(TxRegistry::new());
     let (handle, it) = make_tx(SID_A, Duration::ZERO, 1).await;
@@ -175,9 +175,17 @@ async fn reaper_task_reaps_past_deadline_tx() {
         Duration::from_millis(50),
         shutdown.clone(),
     );
-    // The first tick is dropped (set in spawn_reaper_task), so the first
-    // real sweep fires ~50ms later. Sleep generously to avoid CI flake.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // With paused time, advance past two intervals: the first tick is
+    // dropped by spawn_reaper_task, the second is the real sweep.
+    // Deterministic — no wall-clock dependence.
+    // Advance in two steps to ensure the spawned task processes each tick:
+    // 1) first interval tick (dropped by reaper on boot)
+    tokio::time::advance(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    // 2) second interval tick — the real sweep fires
+    tokio::time::advance(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
     assert!(reg.is_empty(), "reaper task drained the past-deadline tx");
     assert!(matches!(
         reg.get_owned(handle, &SID_A),
