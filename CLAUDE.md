@@ -67,28 +67,49 @@ gate (`fmt --check` + `clippy --all-targets` + `test --lib`) **once at
 the end**, not between baseline / post-change bench runs. Spacing gate
 checks through the cycle invalidates the bench cache for nothing.
 
-**Pipe-buffering trap.** `cargo test/bench ... 2>&1 | grep ...`
-**hides all progress until the command finishes** — Windows shells
-fully buffer the pipe. With ~30 test binaries in `--workspace --tests`
-(wasm ~99s, handshake several seconds, e2e suites several seconds
-each) a normal run looks like a deadlock for 10+ minutes. Don't pipe
-to grep for long runs:
+**Hang protection: use `cargo nextest`, not `cargo test`, for any
+workspace-wide run.** Three losses to this trap so far: workspace
+`--tests` looks identical for two cases — (1) Pipe-buffering (Windows
+shells fully buffer pipes, output drips out only when cargo exits —
+~10 min for 30+ test binaries) and (2) a real deadlock in one e2e
+test (tokio::accept that never returns, broadcast channel reader,
+file-lock race). Both show zero output for many minutes; the second
+hangs forever.
+
+Solution that fixes BOTH: `cargo nextest`:
 
 ```
-# WRONG — looks like a hang for 10 min:
-cargo test --workspace --tests 2>&1 | grep "FAILED\|test result"
+# Workspace-wide:
+cargo nextest run --workspace --no-fail-fast
 
-# RIGHT — output streams to file, tail it from another shell:
-cargo test --workspace --tests --no-fail-fast 2>&1 > /tmp/test.out
-# in another shell: tail -f /tmp/test.out
-
-# Or, for incremental progress visible to the harness:
-cargo test --workspace --tests --no-fail-fast  # no redirect, see output live
+# Per-crate (preferred for iterative work):
+cargo nextest run -p shamir-tx -p shamir-engine
 ```
 
-Prefer per-crate runs (`cargo test -p <crate> --tests`) over
-`--workspace --tests` for iterative work — one crate finishes in 10–60s
-and gives immediate signal.
+Why nextest:
+- Prints PASS/FAIL per test AS IT FINISHES (no buffering).
+- Hard-kills any single test that runs past the timeout
+  (`.config/nextest.toml` defines slow-timeout + terminate-after).
+- A deadlocked test now shows up as `LEAK` or `TIMEOUT` with its
+  full name, not a silent 3-hour hang.
+
+Config lives at `.config/nextest.toml`:
+- Default: kill any test running >180 s.
+- wasm_function_*: legitimately slow (~99 s), kill at 240 s.
+- SCRAM tests: Argon2-bound, kill at 60 s.
+
+Legacy `cargo test` is still fine for `--lib` runs (one binary per
+crate, no e2e shenanigans). Use `cargo nextest run` whenever a test
+binary involves tokio servers, file locks, WASM, or transport.
+
+If for some reason nextest is unavailable, fall back to:
+```
+cargo test --workspace --tests --no-fail-fast  # no pipe, see output live
+```
+NOT `cargo test ... 2>&1 | grep ...` — that pipe hides everything.
+
+Prefer per-crate (`-p <crate>`) over `--workspace` for iterative work
+— one crate finishes in 10–60s and gives immediate signal.
 
 **Quick mode is default.** Benches run in QUICK mode by default —
 sample_size=10, measurement=1s, warm_up=1s — completing every variant

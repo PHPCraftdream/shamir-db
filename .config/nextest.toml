@@ -1,0 +1,41 @@
+# cargo-nextest config — solves the silent-hang problem.
+#
+# Why: `cargo test --workspace --tests` runs 30+ test binaries through a
+# pipe that Windows fully buffers — a single deadlocked test (broadcast
+# channel reader, tokio::accept loop, file lock) hangs the whole run with
+# zero output. We've lost hours to this. nextest prints PASS/FAIL per
+# test as it happens AND can hard-kill slow tests.
+
+[profile.default]
+# Print every test result as it completes, with the binary name.
+# This is the single most important feature: a stalled run shows the
+# last-started test before it hung.
+status-level = "all"
+# Show slow tests so we know what to optimize / hard-kill.
+slow-timeout = { period = "30s", terminate-after = 6 }
+# Treat 30-second tests as "slow" warnings; kill any single test that
+# runs over 3 minutes (slow-timeout × terminate-after = 30 s × 6 = 180 s).
+# WASM tests legitimately take ~99 s — that's under the kill threshold.
+# A real deadlock fires the kill at 180 s instead of hanging forever.
+
+final-status-level = "all"
+failure-output = "immediate"
+success-output = "never"
+fail-fast = false
+
+[profile.ci]
+# CI profile: never fail-fast, full output on failure.
+status-level = "all"
+slow-timeout = { period = "60s", terminate-after = 10 }
+failure-output = "final"
+success-output = "never"
+fail-fast = false
+
+# Per-test overrides (extend as we discover legitimately-slow tests).
+[[profile.default.overrides]]
+filter = "test(wasm_function_inserts_and_queries)"
+slow-timeout = { period = "120s", terminate-after = 2 }  # ~99 s legit, kill at 240 s.
+
+[[profile.default.overrides]]
+filter = "package(shamir-connect) and test(/.*scram.*/)"
+slow-timeout = { period = "10s", terminate-after = 6 }   # Argon2-bound; kill at 60 s.
