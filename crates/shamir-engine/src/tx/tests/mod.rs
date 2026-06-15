@@ -3,6 +3,7 @@ pub mod commit_async_visibility_tests;
 pub mod commit_phase5_defer_tests;
 pub mod commit_phase5_tests;
 pub mod commit_tests;
+pub mod drainer_tests;
 pub mod durable_watermark_tests;
 pub mod early_assign_tests;
 pub mod gc_tests;

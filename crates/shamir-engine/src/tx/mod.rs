@@ -1,5 +1,10 @@
 pub mod commit;
 pub mod commit_phases;
+// P1d-2a: additive repo-level drainer (generalized recovery loop). Defined
+// and unit-tested, but NOT wired into the commit path — the cutover that
+// makes it the sole history writer is P1d-2b. `dead_code` until then.
+#[allow(dead_code)]
+pub(crate) mod drainer;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod group_commit;
 pub(super) mod materialize;
