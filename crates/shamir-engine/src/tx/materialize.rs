@@ -349,41 +349,19 @@ pub(super) async fn post_publish_cleanup(
     }
 
     // A5: Phase 7 gating — WAL truncation is safe ONLY when every
-    // interner id in the entry's delta has been durably persisted. If
-    // the delta contains ids beyond a table's persisted high-water mark
-    // the entry MUST stay inflight (the next checkpoint will advance the
-    // hwm and a later Phase 7 pass will clean up).
-    let mut interner_safe = true;
-    if !interner_delta_max_ids.is_empty() {
-        for &(table_token, max_id) in &interner_delta_max_ids {
-            match repo.table_by_token(table_token).await {
-                Ok(Some(tbl)) => {
-                    let hwm = tbl.interner().persisted_high_water() as u64;
-                    if max_id > hwm {
-                        log::debug!(
-                            "Phase 7 gated: table {table_token} interner delta max_id \
-                             {max_id} > persisted hwm {hwm}; deferring WAL truncation \
-                             for tx {tx_id}"
-                        );
-                        interner_safe = false;
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    // Table gone — delta is stale; safe to truncate (the
-                    // table's interner no longer exists to corrupt).
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Phase 7 gating: table_by_token {table_token}: {e}; \
-                         conservatively deferring WAL truncation for tx {tx_id}"
-                    );
-                    interner_safe = false;
-                    break;
-                }
-            }
-        }
-    }
+    // interner id in the entry's delta has been durably persisted. The
+    // check is factored into [`interner_delta_safe_to_truncate`] so the
+    // background drainer (P1d-2) applies the SAME gate before its
+    // `wal.commit`. A conservative error → `false` (defer truncation).
+    let interner_safe = interner_delta_safe_to_truncate(repo, &interner_delta_max_ids)
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!(
+                "Phase 7 gating: interner-hwm check for tx {tx_id}: {e}; \
+                 conservatively deferring WAL truncation"
+            );
+            false
+        });
 
     // Phase 7: WAL cleanup — ONLY on full materialization AND when the
     // interner delta is covered by persisted state (A5 invariant).
@@ -421,4 +399,43 @@ pub(super) async fn post_publish_cleanup(
     } else {
         MaterializationState::Deferred
     }
+}
+
+/// A5 interner-hwm gate: true iff WAL truncation for an entry carrying these
+/// per-table interner delta max-ids is safe — i.e. every table's persisted
+/// interner high-water mark covers the entry's max id.
+///
+/// Shared by the inline Phase-7 path ([`post_publish_cleanup`]) and the
+/// background [`Drainer`](crate::tx::drainer::Drainer): truncating an entry
+/// whose delta references intern-ids NOT yet persisted would, on a crash,
+/// leave the interner unable to decode the very records the (now-truncated)
+/// entry would have re-supplied. The entry MUST stay inflight until a future
+/// checkpoint advances the hwm.
+///
+/// `interner_delta_max_ids` is `(table_token, max_id)`. An empty slice is
+/// trivially safe. A missing table (dropped since the delta was captured) is
+/// safe to truncate — its interner no longer exists to corrupt. A table
+/// lookup error returns `Err` so the caller can conservatively defer.
+pub(crate) async fn interner_delta_safe_to_truncate(
+    repo: &RepoInstance,
+    interner_delta_max_ids: &[(u64, u64)],
+) -> shamir_storage::error::DbResult<bool> {
+    for &(table_token, max_id) in interner_delta_max_ids {
+        match repo.table_by_token(table_token).await? {
+            Some(tbl) => {
+                let hwm = tbl.interner().persisted_high_water() as u64;
+                if max_id > hwm {
+                    log::debug!(
+                        "interner-hwm gate: table {table_token} delta max_id {max_id} \
+                         > persisted hwm {hwm}; truncation unsafe"
+                    );
+                    return Ok(false);
+                }
+            }
+            None => {
+                // Table gone — delta is stale; safe to truncate.
+            }
+        }
+    }
+    Ok(true)
 }
