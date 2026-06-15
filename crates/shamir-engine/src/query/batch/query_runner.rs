@@ -14,7 +14,7 @@ use shamir_types::access::{authorize, Action, Actor, ResourcePath};
 use shamir_types::types::common::{new_map, new_map_wc, TMap};
 use shamir_types::types::value::InnerValue;
 
-use crate::query::batch::param_subst::substitute_params;
+use crate::query::batch::param_subst::{contains_param_ref, substitute_params};
 use shamir_query_types::filter::Filter;
 
 /// Build resolved_refs map containing only the declared dependencies.
@@ -350,32 +350,39 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
-                // Substitute $param references inside each inserted value row.
-                // substitute_params has a fast path (clone) for rows with no $param nodes.
-                let subst_values: Result<Vec<_>, _> = op
-                    .values
-                    .iter()
-                    .map(|v| {
-                        substitute_params(v, self.params).map_err(|name| {
-                            BatchError::query_coded(
-                                alias,
-                                "unbound_param",
-                                format!("$param '{}' is not bound in this sub-batch", name),
-                            )
-                        })
-                    })
-                    .collect();
+                // C2: substitute $param references inside each inserted value
+                // row — but ONLY when a row actually contains a `$param` node.
+                //
+                // The common bulk-insert path carries no params: a cheap scan
+                // (`contains_param_ref`, no allocation) lets us borrow `op`
+                // directly — skipping the per-row clone-Vec AND the O(N) deep
+                // structural `values == op.values` compare that the old code
+                // paid on every insert to discover "nothing changed". Only when
+                // some row references a `$param` do we build the substituted op
+                // (and pay the clone), where substitution is genuinely needed.
                 let subst_op;
-                let op_ref: &shamir_query_types::write::InsertOp = match subst_values {
-                    Ok(values) if values == op.values => op,
-                    Ok(values) => {
-                        subst_op = shamir_query_types::write::InsertOp {
-                            insert_into: op.insert_into.clone(),
-                            values,
-                        };
-                        &subst_op
-                    }
-                    Err(e) => return Err(e),
+                let needs_subst = op.values.iter().any(contains_param_ref);
+                let op_ref: &shamir_query_types::write::InsertOp = if !needs_subst {
+                    op
+                } else {
+                    let values: Vec<_> = op
+                        .values
+                        .iter()
+                        .map(|v| {
+                            substitute_params(v, self.params).map_err(|name| {
+                                BatchError::query_coded(
+                                    alias,
+                                    "unbound_param",
+                                    format!("$param '{}' is not bound in this sub-batch", name),
+                                )
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    subst_op = shamir_query_types::write::InsertOp {
+                        insert_into: op.insert_into.clone(),
+                        values,
+                    };
+                    &subst_op
                 };
                 let wr = match self.tx.as_deref_mut() {
                     Some(tx) => table
@@ -626,13 +633,16 @@ pub(super) async fn execute_single_impl(
 }
 
 /// Convert WriteResult to QueryResult for BatchResponse compatibility.
+///
+/// C1: fold each already-built [`InsertedRecord`] straight into a
+/// [`QueryRecord::Inserted`] — NO `serde_json::to_value` re-materialisation.
+/// The old path serialised every row a SECOND time (per-record
+/// `serde_json::Map` allocation) just to wrap it in `QueryRecord::Json`;
+/// `QueryRecord::Inserted` serialises via the same `InsertedRecord` impl, so
+/// the wire bytes are byte-identical while the duplicate build is gone.
 pub(super) fn write_result_to_query_result(wr: WriteResult) -> QueryResult {
     QueryResult {
-        records: wr
-            .records
-            .into_iter()
-            .map(|r| QueryRecord::Json(serde_json::to_value(r).unwrap_or(serde_json::Value::Null)))
-            .collect(),
+        records: wr.records.into_iter().map(QueryRecord::from).collect(),
         stats: Some(QueryStats {
             index_used: None,
             records_scanned: wr.affected,
