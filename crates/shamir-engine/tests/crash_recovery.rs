@@ -700,6 +700,40 @@ async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
 // still holds replays idempotently (I6).
 // ---------------------------------------------------------------------------
 
+/// D4 — crash MID-DRAIN at `drain_replay`: the drainer fired the seam AFTER
+/// `replay_v2_entry` wrote an entry's ops into `history` but BEFORE
+/// `mark_durable` advanced the durable watermark for that version, with the WAL
+/// marker still inflight. This is the gap between F6c's truncation seams (which
+/// fire on a SEGMENT boundary, after a full per-entry cycle) and the ack-path
+/// `phase4..phase6_5` seams (which fire BEFORE the drainer runs at all): it
+/// kills the process IN THE MIDDLE of the per-entry replay loop, with history
+/// partially written and the watermark un-advanced for the in-flight version.
+///
+/// Recovery must lose nothing: `recover_inflight_v2` re-replays every still-
+/// inflight WAL entry idempotently (last-write-wins), so the partially-drained
+/// version and every other durably-committed record reconstruct exactly. This
+/// proves the drain is NOT atomic but recovery is CONVERGENT — replay is
+/// idempotent and the durable watermark re-converges to visibility on reopen.
+#[tokio::test]
+async fn crash_mid_drain_recovers_all() {
+    let (recovered, committed) = trunc_crash_then_recover("drain_replay").await;
+    assert!(
+        committed >= 1,
+        "the child must have durably committed at least one record before the \
+         drain_replay crash fired"
+    );
+    // Zero loss (see `pre_truncate` for the +1 survivor window): the entry being
+    // replayed when the process died is still inflight (mark_durable did not run),
+    // so recovery re-replays it idempotently along with every other inflight
+    // entry — no durably-committed record is lost.
+    assert!(
+        recovered >= committed && recovered <= TRUNC_RECORDS,
+        "drain_replay: history partially written + watermark un-advanced → \
+         recovery re-replays the inflight WAL idempotently, losing nothing \
+         (recovered {recovered}, durably committed {committed}, max {TRUNC_RECORDS})"
+    );
+}
+
 /// Crash at `pre_truncate` — BEFORE history-flush + any unlink. Every sealed
 /// WAL segment is still on disk; recovery replays all of them and reconstructs
 /// every record. Zero loss.

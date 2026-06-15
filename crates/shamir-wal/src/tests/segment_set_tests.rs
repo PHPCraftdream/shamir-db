@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 
 use shamir_types::types::record_id::RecordId;
@@ -346,6 +348,121 @@ async fn bounded_segment_count_under_append_truncate_loop() {
         max_post_trunc <= 4,
         "post-truncate count must stay at the steady-state floor regardless of \
          K={K} (max_post_trunc={max_post_trunc})"
+    );
+}
+
+/// Path of the ACTIVE segment file (highest-seq `NNNNNNNN.wal`) — the append
+/// tail, the only file a torn tail can legitimately land in.
+fn active_seg_path(dir: &std::path::Path) -> std::path::PathBuf {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_owned();
+            let stem = name.strip_suffix(".wal")?;
+            let seq = stem.parse::<u64>().ok()?;
+            Some((seq, e.path()))
+        })
+        .max_by_key(|(seq, _)| *seq)
+        .map(|(_, p)| p)
+        .expect("at least one .wal segment present")
+}
+
+/// D4 — torn tail at the SegmentSet level: in a MULTI-segment set a partial
+/// trailing write can only ever land in the ACTIVE segment (the append tail);
+/// the sealed segments were fsync'd at seal time (I4), so they are fully written
+/// and replay whole. We construct exactly that on-disk state — several sealed
+/// segments + an active segment holding valid records — then hand-append a torn
+/// frame (len header promises more bytes than follow) to the ACTIVE file, the
+/// same shape as `wal_segment_tests::replay_stops_at_torn_tail`. `replay()` must
+/// return EVERY sealed record plus EVERY valid active record, discarding only
+/// the torn tail, with zero errors. This proves the active-only torn-tail
+/// boundary: the rupture in `active` does not truncate or corrupt the sealed
+/// prefix.
+#[tokio::test]
+async fn torn_tail_only_on_active_sealed_intact() {
+    let dir = TempDir::new().unwrap();
+    // Cap 100 straddles a single frame (one record does NOT cross it, two do),
+    // so records seal in pairs and the LAST record stays in a non-empty active
+    // segment — the torn frame then coexists with a genuine valid record in
+    // active, the realistic crash shape.
+    let set = SegmentSet::open(dir.path().to_path_buf(), 100)
+        .await
+        .unwrap();
+
+    // Confirm the cap straddles one frame (same assumption as
+    // `truncate_keeps_active_with_sealed_present`).
+    let probe_len = entry(0, 0).encode().unwrap().len() as u64 + 8;
+    assert!(
+        probe_len < 100 && probe_len * 2 >= 100,
+        "test threshold assumption broke: frame={probe_len}"
+    );
+
+    // 7 strictly-versioned records: with the cap-100 pairing, records 1..=6 seal
+    // (3 sealed segments) and record 7 (v=70) lives in the active segment.
+    let entries: Vec<WalEntryV2> = (1..=7u64).map(|i| entry(i, i * 10)).collect();
+    for e in &entries {
+        set.append_batch(vec![e.encode().unwrap()], e.commit_version)
+            .await
+            .unwrap();
+    }
+    set.sync().await.unwrap();
+
+    // Confirm we genuinely have a multi-segment set (>= 1 sealed + active) AND
+    // that the active segment is non-empty (holds the trailing valid record).
+    assert!(
+        seg_file_count(dir.path()) >= 2,
+        "test needs >= 2 segments (sealed + active) to exercise the boundary"
+    );
+    let active = active_seg_path(dir.path());
+    let active_before = WalSegment::open(active.clone())
+        .await
+        .unwrap()
+        .replay()
+        .await
+        .unwrap();
+    assert_eq!(
+        active_before
+            .iter()
+            .map(|e| e.commit_version)
+            .collect::<Vec<_>>(),
+        vec![70],
+        "the active segment must hold the trailing valid record (v=70) so the \
+         torn frame coexists with a real record, not an empty file"
+    );
+
+    // Hand-append a TORN frame to the ACTIVE segment: a len header claiming 999
+    // bytes follow but only 2 bytes written — exactly the crash-tail shape. The
+    // sealed segments are left untouched (fully written + fsync'd at seal, I4).
+    {
+        let mut f = OpenOptions::new().append(true).open(&active).unwrap();
+        f.write_all(&999u32.to_le_bytes()).unwrap();
+        f.write_all(b"xx").unwrap();
+        f.flush().unwrap();
+    }
+
+    // Reopen and replay: the torn tail in active is discarded, but EVERY sealed
+    // record AND the valid active record (v=70) survive. Zero errors.
+    let reopened = SegmentSet::open(dir.path().to_path_buf(), 100)
+        .await
+        .unwrap();
+    let replayed = reopened.replay().await.unwrap();
+    assert_eq!(
+        replayed, entries,
+        "sealed segments replay whole (fsync'd at seal, I4); the active torn \
+         tail is dropped but its valid record (v=70) survives — no sealed \
+         truncation, no error"
+    );
+    // Explicitly: the LAST sealed record (v=60) AND the trailing active record
+    // (v=70) are both present, proving the active rupture did not bleed into the
+    // sealed prefix nor swallow the valid active record before it.
+    assert!(
+        replayed.iter().any(|e| e.commit_version == 60),
+        "the last sealed record must survive an active-segment torn tail"
+    );
+    assert!(
+        replayed.iter().any(|e| e.commit_version == 70),
+        "the valid active record before the torn frame must survive"
     );
 }
 

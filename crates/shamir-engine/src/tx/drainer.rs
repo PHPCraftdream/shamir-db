@@ -155,6 +155,16 @@ impl Drainer {
                 break;
             }
 
+            // D4 crash seam: `replay_v2_entry` wrote this entry's ops into
+            // `history` (the value is durable) but `mark_durable(v)` below has
+            // NOT yet run — the durable watermark does not cover `v` and the WAL
+            // entry is still inflight. A HARD crash HERE proves the drain is not
+            // atomic but recovery is convergent: `recover_inflight_v2` re-replays
+            // the still-inflight entry idempotently (last-write-wins), the data is
+            // unchanged, and the durable watermark re-converges to visibility.
+            // Zero cost in release builds (see `maybe_crash`).
+            crate::tx::commit::maybe_crash("drain_replay", repo).await;
+
             // 2) The value is now durable in history → advance the durable
             //    watermark (contiguous; safe to call redundantly).
             gate.mark_durable(v);
