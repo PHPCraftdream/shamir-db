@@ -21,17 +21,38 @@
 //!
 //! ## Correctness + liveness
 //!
-//! This reuses the verified leader/follower structure from
-//! `shamir-tx`'s `group_fsync.rs` (D1b) verbatim:
-//!   - leadership is released under the SAME `pending` lock as `push`
-//!     (in [`WalGroupCommit::lead_until_drained`]) — a late push is either
-//!     seen by the current leader or wins leadership itself, so no entry
-//!     is ever stranded;
-//!   - the `enable()`-before-check `Notify` park loop closes the
-//!     subscribe-window race (no lost wakeup);
+//! This reuses the verified leader/follower structure originally proved in
+//! `shamir-tx`'s `group_fsync.rs` (D1b). That file was REMOVED in `e9e48c9`
+//! ("remove dead GroupFsync — superseded by file-WAL WalGroupCommit"); the
+//! verbatim liveness proof it carried lives on in git at
+//! `f62fe18:crates/shamir-tx/src/group_fsync.rs`, and the L1/L2/L3 arguments
+//! it established are reproduced below and in
+//! `docs/perf/capstone-subplan.md` §1:
+//!   - **L1 (no stranded committer):** leadership is released under the SAME
+//!     `pending` lock as `push` (in [`WalGroupCommit::lead_until_drained`]) —
+//!     a late push is either seen by the current leader or wins leadership
+//!     itself, so no entry is ever stranded;
+//!   - **L2 (no lost wakeup):** the `enable()`-before-check `Notify` park
+//!     loop closes the subscribe-window race;
+//!   - **L3 (circuit-breaker):** on a write/sync error the leader releases
+//!     leadership and returns, so the next append elects a fresh leader and
+//!     no task spins on a dead segment;
 //!   - completion is tied to the PHYSICAL entry: the leader that drains a
 //!     `(payload, tier, waiter)` tuple is the task that calls
 //!     `waiter.complete(..)` once that exact tuple has reached its tier.
+//!
+//! A single-writer-task replacement for the rotating leader (this `pending`
+//! Mutex → bounded MPSC, the `flushing` CAS deleted) is designed in
+//! `docs/perf/capstone-subplan.md`. It was PROTOTYPED and REVERTED: a
+//! permanent writer task mandates a per-append cross-task `oneshot`
+//! round-trip that suspends the executor on every append, whereas this
+//! rotating leader drains the in-RAM `Mem` sink synchronously within one
+//! poll. That regressed mem N=1 latency ~+22% (the subplan §0 GO/NO-GO
+//! criterion) and broke an atomicity property the engine commit path relies
+//! on (the non-yielding Mem append keeps a commit atomic on a current-thread
+//! runtime; the mandatory yield let concurrent SSI committers all validate
+//! before any published). The subtraction is therefore DEFERRED, not
+//! rejected — see the subplan §5/§5-bis.
 //!
 //! ## Out of scope for W2
 //!
@@ -91,14 +112,36 @@ type Pending = (
     Arc<Waiter>,
 );
 
-/// Lock-free-leader group commit over a [`WalSink`]. See module-level
-/// correctness argument (and `group_fsync.rs`, D1b — identical structure).
+/// Lock-free-leader group commit over a [`WalSink`]. See the module-level
+/// correctness argument (L1/L2/L3 — the structure originally proved in the
+/// now-removed `group_fsync.rs`, preserved at `f62fe18`).
 #[allow(dead_code)]
 pub struct WalGroupCommit {
     sink: Arc<WalSink>,
-    // Sanctioned tokio::sync::Mutex (CLAUDE.md): O(1) push / mem::take only,
-    // NEVER held across append_batch/sync .await. One push per concurrent
-    // committer + one take per window.
+    // Sanctioned tokio::sync::Mutex (CLAUDE.md "Banned in hot paths"):
+    // guards a tiny O(1) push / mem::take critical section, NEVER held
+    // across `append_batch`/`sync` .await. Contention model: one push per
+    // concurrent committer + one `mem::take` per drain window — sub-µs
+    // under lock.
+    //
+    // SINGLE-WRITER BY CONSTRUCTION + MEASURED non-bottleneck. The rotating
+    // leader (CAS on `flushing`) makes exactly one task drain at a time, so
+    // this lock simulates a single writer out of many equal committers. The
+    // WAL-append bench (`benches/wal_append.rs`, baseline `2e3bd51`) confirms
+    // it is not the ceiling: mem-sink append SCALES 4.4× with concurrency
+    // (20.5K→91.2K, N=1→64) — a lock-bound path would plateau/regress;
+    // group-commit coalescing makes each added committer CHEAPER.
+    //
+    // A single-writer-task replacement (this `Mutex` → bounded MPSC, leader
+    // CAS deleted) is designed in `docs/perf/capstone-subplan.md`. It was
+    // PROTOTYPED and REVERTED (subplan §5/§5-bis): the permanent writer task
+    // mandates a per-append cross-task `oneshot` round-trip that suspends the
+    // executor on every append, whereas this leader drains the in-RAM `Mem`
+    // sink synchronously within one poll. Measured cost: mem N=1 latency
+    // ~+22% (the subplan §0 GO/NO-GO criterion) plus a broken commit-path
+    // atomicity property (the non-yielding Mem append keeps a commit atomic
+    // on a current-thread runtime; the mandatory yield let concurrent SSI
+    // committers all validate before any published). Deferred, not rejected.
     pending: Mutex<Vec<Pending>>,
     flushing: AtomicBool,
     // Count of fsyncs this coordinator issued (for the batching test).
