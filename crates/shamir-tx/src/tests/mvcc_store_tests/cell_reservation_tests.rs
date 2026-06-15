@@ -199,6 +199,71 @@ async fn guard_disarm_skips_release() {
     assert_eq!(cell_state(&mvcc, &key), Some((12, 0)));
 }
 
+/// SSI fix S3 — I-Crash: a reservation is VOLATILE in-RAM cell-state, so a
+/// crash + recovery can never strand one.
+///
+/// A reservation lives only on `RecordCell.reserved_by` inside the `MvccStore`
+/// `cells` map — it is NEVER written to the WAL or `history` (the WAL holds
+/// only committed WINNERS; the reservation marker is a freshness/serialization
+/// marker, not data). A process crash destroys the whole `MvccStore`, including
+/// every `reserved_by`. Recovery rebuilds each cell from the durable history
+/// via the publish path (`finalize_reservation` / `publish_cell`), which always
+/// sets `reserved_by = 0`.
+///
+/// This test models the crash at the primitive level deterministically:
+///   1. `store_a` reserves K (a committer claimed it, then died mid-commit).
+///   2. `store_a` is DROPPED — the reservation marker is gone with it (volatile).
+///   3. `store_b` is a fresh store (the reopened instance). Recovery rebuilds
+///      K's committed version via `finalize_reservation` (the publish path) —
+///      which clears any reservation by construction.
+///   4. A fresh `try_reserve` on `store_b` for K WINS: no phantom reservation
+///      survived. The cell shows the recovered version, freshly claimed.
+#[tokio::test]
+async fn crash_drops_reservation_recovery_leaves_cell_claimable() {
+    let key = Bytes::from_static(b"k");
+
+    // store_a: a committer reserved K (snapshot u64::MAX so the claim hinges
+    // only on the reservation marker), then the process "crashes".
+    let store_a = make_mvcc();
+    store_a.publish_cell(key.clone(), 5).await; // K had a committed version 5.
+    assert!(
+        store_a.try_reserve(key.clone(), u64::MAX, 4242),
+        "the dying committer holds K's reservation"
+    );
+    assert_eq!(
+        cell_state(&store_a, &key),
+        Some((5, 4242)),
+        "reserved_by is set on the doomed store"
+    );
+
+    // === CRASH === drop store_a: the entire cell map (and the reservation)
+    // is destroyed. The marker is volatile RAM — nothing of it persists.
+    drop(store_a);
+
+    // === RECOVERY === store_b is the reopened instance with an EMPTY cell map.
+    // Replaying K's committed version 5 from the durable history goes through
+    // the publish path, which sets reserved_by = 0.
+    let store_b = make_mvcc();
+    assert_eq!(
+        cell_state(&store_b, &key),
+        None,
+        "the reopened store starts with NO cells — no reserved_by survived"
+    );
+    store_b.finalize_reservation(key.clone(), 5); // recovery rebuilds the cell.
+    assert_eq!(
+        cell_state(&store_b, &key),
+        Some((5, 0)),
+        "recovery rebuilds K with reserved_by = 0 (no phantom reservation)"
+    );
+
+    // A fresh committer claims K and WINS — the cell was never wedged.
+    assert!(
+        store_b.try_reserve(key.clone(), u64::MAX, 9001),
+        "post-recovery K must be claimable — no leaked reservation"
+    );
+    assert_eq!(cell_state(&store_b, &key), Some((5, 9001)));
+}
+
 /// KEYSTONE — N tasks race to `try_reserve` ONE cell; EXACTLY one wins each
 /// round, regardless of the scheduler. This is the atomicity proof the whole
 /// SSI fix depends on: `cells.entry(key)` is per-entry exclusive, so the
