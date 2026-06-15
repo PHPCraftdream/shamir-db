@@ -342,6 +342,7 @@ async fn commit_tx_inner_legacy_async(
     let PreCommit {
         commit_version,
         uwl_guards,
+        version_guard,
     } = match pre_commit_locked(&mut tx, repo, gate, wal, uwl_guards).await {
         Ok(Some(pc)) => pc,
         Ok(None) => {
@@ -370,13 +371,12 @@ async fn commit_tx_inner_legacy_async(
 
     apply_data_phase(&mut tx, repo, commit_version).await;
     apply_counter_phase(&tx, repo).await;
-    // P1c: mark materialized and sync watermark → last_committed atomic.
-    gate.completion().mark(
-        commit_version,
-        shamir_tx::completion_tracker::State::Materialized,
-    );
-    gate.sync_last_committed_from_watermark();
-    gate.publish_committed_max(commit_version);
+    // P0a: consume the RAII VersionGuard → mark(Materialized) + advance
+    // last_committed_version from the watermark (fetch_max). Replaces the
+    // prior manual mark + sync_last_committed_from_watermark +
+    // publish_committed_max trio (identical watermark semantics). Closes H1:
+    // a panic between WAL-durable and here drops the guard → Aborted.
+    version_guard.commit();
     gate.record_commit_writes(shamir_tx::build_footprint_from_tx(&tx, commit_version));
 
     maybe_crash("phase6_async", repo).await;
@@ -446,6 +446,7 @@ async fn commit_tx_lockfree(
     };
 
     let commit_version = validated.commit_version;
+    let version_guard = validated.version_guard;
 
     // Phase 4: WAL begin — THE COMMIT POINT.
     // Concurrent-safe: each tx writes a unique WAL key (txn_id).
@@ -453,10 +454,9 @@ async fn commit_tx_lockfree(
         .begin_grouped(validated.wal_entry, shamir_wal::WalDurability::Buffered)
         .await
     {
-        gate.completion().mark(
-            commit_version,
-            shamir_tx::completion_tracker::State::Aborted,
-        );
+        // version_guard drops here → mark(Aborted): WAL begin failed, the
+        // tx is a pre-commit abort and nothing durable exists.
+        drop(version_guard);
         release_pessimistic_locks(&tx, repo).await;
         return Err(TxError::Storage(e));
     }
@@ -474,7 +474,7 @@ async fn commit_tx_lockfree(
     let tx_id_u64 = tx.tx_id.0;
     let changefeed_event = shamir_tx::project_event(&tx, repo.name(), commit_version);
 
-    let post_publish = materialize(&mut tx, repo, gate, commit_version, validated.uwl_guards).await;
+    let post_publish = materialize(&mut tx, repo, version_guard, validated.uwl_guards).await;
     let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
     if materialization == MaterializationState::Deferred {
         repo.tx_metrics().on_tx_materialization_deferred();

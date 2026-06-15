@@ -48,7 +48,9 @@ pub mod staging_store;
 pub mod tx_context;
 pub mod types;
 pub mod version_codec;
+pub mod version_guard;
 pub mod version_provider;
+pub mod versioned_overlay;
 
 pub use changefeed::{
     nontx_event, project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, JournalRead,
@@ -75,4 +77,6 @@ pub use staging_store::StagingStore;
 pub use tx_context::{CommitVisibility, TxContext, UniqueGuard};
 pub use types::{IsolationLevel, TxId};
 pub use version_codec::{decode_version_key, encode_version_key};
+pub use version_guard::VersionGuard;
 pub use version_provider::VersionProvider;
+pub use versioned_overlay::VersionedOverlay;

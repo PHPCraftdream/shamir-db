@@ -607,15 +607,15 @@ async fn oracle_stress_abort_does_not_stall_watermark() {
         "even-indexed txs must commit (no read-set → SSI check is no-op)"
     );
 
-    // INVARIANT: the watermark must advance past ALL consumed version slots.
-    // Aborted txs mark their slot Aborted in CompletionTracker; the contiguous
-    // advance must skip over them. If any aborted version's slot stayed Pending,
-    // the watermark would stall and this assertion would catch it.
+    // INVARIANT (P0c): SSI-aborted txs no longer allocate version slots
+    // (assign is deferred past validation). Only the TOTAL/2 successful txs
+    // consume slots, so the watermark must advance past all of them.
+    let expected = (TOTAL / 2) as u64;
     let gate = repo.tx_gate().await.unwrap();
     let wm = gate.completion().watermark();
     assert!(
-        wm >= TOTAL as u64,
-        "watermark ({wm}) must advance past all {TOTAL} consumed versions \
-         (aborted slots must be marked Aborted so the contiguous prefix advances)"
+        wm >= expected,
+        "watermark ({wm}) must advance past all {expected} committed versions \
+         (SSI-aborted txs allocate no slot under P0c)"
     );
 }

@@ -9,29 +9,36 @@ use super::MvccStore;
 use crate::version_codec::{decode_version_key, encode_version_key};
 
 impl MvccStore {
-    /// Range-scan the log for the latest version ≤ `snapshot`.
-    /// Returns `None` for tombstones (empty value) and absent keys.
-    pub(super) async fn scan_history_for_version(
+    /// P1b: range-scan the log for the newest version ≤ `snapshot`, returning
+    /// BOTH its version and raw value (tombstone = empty `Bytes` is NOT
+    /// collapsed to `None` here — the caller needs the version to break the
+    /// overlay-vs-history tie in [`MvccStore::resolve_read`]'s fallback).
+    ///
+    /// Returns `None` when the key has no version ≤ `snapshot`. The scan is
+    /// key-major, version-ascending, so the last decoded entry whose original
+    /// key matches and whose version ≤ snapshot is the newest.
+    pub(super) async fn scan_history_newest(
         &self,
         key: &[u8],
         snapshot: u64,
-    ) -> DbResult<Option<Bytes>> {
+    ) -> DbResult<Option<(u64, Bytes)>> {
         let lo = encode_version_key(key, 0);
         let hi = encode_version_key(key, snapshot);
         let stream = self
             .history
             .iter_range_stream(Some(lo), Some(hi), HISTORY_SCAN_BATCH);
         futures::pin_mut!(stream);
-        let mut latest: Option<Bytes> = None;
+        let mut latest: Option<(u64, Bytes)> = None;
         while let Some(batch) = stream.next().await {
-            for (_, val) in batch? {
-                latest = Some(val);
+            for (phys_key, val) in batch? {
+                if let Some((orig, v)) = decode_version_key(&phys_key) {
+                    if orig == key {
+                        latest = Some((v, val));
+                    }
+                }
             }
         }
-        match latest {
-            Some(val) if val.is_empty() => Ok(None),
-            other => Ok(other),
-        }
+        Ok(latest)
     }
 
     /// C2: cold-start helper for when the cell is absent after restart.
@@ -256,6 +263,25 @@ impl MvccStore {
         // The log is the sole durable write target.
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
+        }
+
+        // P1c: dual-write — populate the in-memory overlay with the SAME
+        // (key, version) → value pair that landed in history. The overlay value
+        // is byte-identical to the history payload: the raw value for `Set`, an
+        // empty `Bytes` tombstone for `Remove`. Ordering rationale:
+        //  • AFTER `history.transact`: a failed batch write (`?` above) must not
+        //    leave visible overlay entries for a tx that never durably committed.
+        //  • BEFORE the `publish_cell` loop (and the `guard.commit()` the caller
+        //    runs after `materialize` returns): by the time any version is
+        //    reader-visible — cell bumped here, floor advanced via the watermark
+        //    — the overlay already carries its value. There is therefore never a
+        //    window where the cell reports `commit_version` while both the
+        //    overlay and history are empty.
+        for op in &ops {
+            match op {
+                KvOp::Set(k, v) => self.overlay.insert(k.clone(), commit_version, v.clone()),
+                KvOp::Remove(k) => self.overlay.insert(k.clone(), commit_version, Bytes::new()),
+            }
         }
 
         // T1c: record the commit timestamp for the tx commit version (one ts
