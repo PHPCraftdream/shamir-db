@@ -196,6 +196,15 @@ impl Drainer {
                     );
                 }
             }
+
+            // D2 P1d-2c crash seam: `v` is now fully durable in history and
+            // truncation has been attempted — the post-cutover equivalent of
+            // the old inline "phase7" (the ack-path no longer reaches it after
+            // the cutover). A HARD crash here leaves the data durable in
+            // history with the WAL entry still replayable (no-op truncation
+            // until F6), so recovery re-applies idempotently. Zero cost in
+            // release builds (see `maybe_crash`).
+            crate::tx::commit::maybe_crash("phase7", repo).await;
         }
 
         if drained > 0 {

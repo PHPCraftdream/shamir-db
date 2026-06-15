@@ -207,6 +207,14 @@ async fn run_child_scenario(path: PathBuf) {
     // commit_tx will read SHAMIR_TEST_CRASH_AFTER and abort at the
     // matching seam. If the label is unknown it commits normally.
     let _ = repo.commit_tx(tx).await;
+
+    // D2 P1d-2c: post-cutover the "phase7" seam (tx fully materialized + WAL
+    // cleanup) lives in the background drainer, not the ack-path. Drive the
+    // drainer so a `phase7` crash fires here. For the inline phases
+    // (pre_commit..phase6_5) the process has already `process::abort`ed inside
+    // `commit_tx` above and never reaches this line.
+    let _ = repo.drainer().drain_all(&repo).await;
+
     drop(guard);
 }
 
@@ -423,6 +431,14 @@ async fn run_child_scenario_multi_table(path: PathBuf) {
 
     // commit_tx reads SHAMIR_TEST_CRASH_AFTER and aborts at `phase4`.
     let _ = repo.commit_tx(tx).await;
+
+    // D2 P1d-2c: post-cutover the "phase7" seam (tx fully materialized + WAL
+    // cleanup) lives in the background drainer, not the ack-path. Drive the
+    // drainer so a `phase7` crash fires here. For the inline phases
+    // (pre_commit..phase6_5) the process has already `process::abort`ed inside
+    // `commit_tx` above and never reaches this line.
+    let _ = repo.drainer().drain_all(&repo).await;
+
     drop(guard);
 }
 
