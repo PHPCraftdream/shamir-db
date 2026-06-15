@@ -116,6 +116,22 @@ pub struct RepoTxGate {
     /// `mark(version, …)` obligation by RAII without a back-reference to
     /// the gate.
     completion: Arc<CompletionTracker>,
+
+    /// P1d-1: second `CompletionTracker` whose contiguous watermark tracks
+    /// the highest version `V` for which **the value is durable in the history
+    /// log** (i.e. Phase 5a / inline history write succeeded). Under inline
+    /// materialize this watermark coincides with `last_committed_version`
+    /// (visibility) because durable-history landing and ack-publish happen on
+    /// the same code path; P1d-2 then decouples them by moving `history.transact`
+    /// off the ack-path into a background drain.
+    ///
+    /// `State::Materialized` is reused here to mean "data for this version is
+    /// durable in history". Nothing in the production read or commit path
+    /// consumes this watermark in P1d-1 — only tests assert the invariant
+    /// `durable_watermark() <= last_committed()` and the equality under inline
+    /// materialize. P1d-2 will gate Phase-7 WAL truncation on it, and overlay
+    /// GC will use it as the lower drain bound.
+    durable_completion: Arc<CompletionTracker>,
 }
 
 /// RAII guard that removes a snapshot from `active_snapshots` on drop.
@@ -161,6 +177,12 @@ impl RepoTxGate {
             commit_write_log: scc::TreeIndex::new(),
             pending_commits: std::sync::Mutex::new(Vec::new()),
             completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
+            // P1d-1: seed the durable watermark at `last_committed` — on repo
+            // open everything visible is, by induction, also durable in history
+            // (visibility was driven by the inline materialize path). Under the
+            // current inline path the durable watermark is kept in lock-step
+            // with the visibility watermark by `mark_durable` on each commit.
+            durable_completion: Arc::new(CompletionTracker::with_watermark(last_committed)),
         }
     }
 
@@ -271,6 +293,7 @@ impl RepoTxGate {
         VersionGuard::new(
             version,
             Arc::clone(&self.completion),
+            Arc::clone(&self.durable_completion),
             Arc::clone(&self.last_committed_version),
         )
     }
@@ -469,6 +492,57 @@ impl RepoTxGate {
     /// Access the completion tracker (P1a scaffolding; abort-path wired in P1b).
     pub fn completion(&self) -> &CompletionTracker {
         &self.completion
+    }
+
+    // ── P1d-1: durable watermark (additive, zero behavior change) ──────────
+
+    /// Highest contiguous version V for which the value is durable in the
+    /// history log.
+    ///
+    /// Under the current inline-materialize path this equals
+    /// [`last_committed`](Self::last_committed) by construction (every commit
+    /// calls [`mark_durable`](Self::mark_durable) at the same point it commits
+    /// its [`VersionGuard`]). P1d-2 will decouple the two by moving
+    /// `history.transact` of the tx-path off the ack-path into a background
+    /// drain leader; until then the durable watermark is a redundant view
+    /// kept current so the rest of the machinery can be wired and tested.
+    ///
+    /// Invariant: `durable_watermark() <= last_committed()` always — every
+    /// site that marks durable does so AFTER the visibility mark
+    /// (`guard.commit()`), so visibility either equals or leads durable, never
+    /// trails it.
+    pub fn durable_watermark(&self) -> u64 {
+        self.durable_completion.watermark()
+    }
+
+    /// Record that `version`'s value is durable in the history log.
+    ///
+    /// `State::Materialized` is reused as the "durable" terminal state for
+    /// this tracker: there is no Aborted analogue (an aborted version was
+    /// never written and is irrelevant to durability — but the contiguous
+    /// watermark still needs to advance past it). For now we rely on the
+    /// non-tx path and tx-path Complete-outcome callers to mark every
+    /// non-aborted version. Aborted versions are marked here too (see
+    /// [`mark_durable_aborted`](Self::mark_durable_aborted)) so the
+    /// contiguous prefix on the durable tracker matches the visibility
+    /// tracker under inline materialize.
+    ///
+    /// Idempotent: marking the same version twice (or marking a version at
+    /// or below the current watermark) is a no-op.
+    pub fn mark_durable(&self, version: u64) {
+        self.durable_completion
+            .mark(version, crate::completion_tracker::State::Materialized);
+    }
+
+    /// Record that `version` will never be durable (aborted before any
+    /// physical write), so the contiguous durable watermark advances past
+    /// it. Used by the same RAII path that marks the visibility tracker
+    /// `Aborted` on early returns; under inline materialize this keeps
+    /// `durable_watermark() == last_committed()` even when an SSI / phantom
+    /// / WAL-begin abort burns a version.
+    pub fn mark_durable_aborted(&self, version: u64) {
+        self.durable_completion
+            .mark(version, crate::completion_tracker::State::Aborted);
     }
 }
 

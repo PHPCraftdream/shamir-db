@@ -215,3 +215,28 @@ crash-покрытие после P1e; F6 (#2) растворяется в P1e.
 
 Data integrity > performance. На любой неопределённости в P0a/P1d/P1e —
 STOP с цифрами, как со всеми структурными стопами кампании.
+
+---
+
+## Addendum — P1d decomposition (post-spike)
+
+P1d расщеплён на два среза (спайк: WalGroupCommit leader-паттерн + crash-связка
+«Phase-7 truncation только после durable history»):
+
+- **P1d-1 (additive, zero behavior change).** Ввести второй `CompletionTracker`
+  как `durable_tracker` в `RepoTxGate` + `durable_watermark()` + `mark_durable(V)`.
+  Помечать V durable РОВНО когда её данные durable в history: tx-путь — после
+  успеха Phase 5a (все таблицы), non-tx — после inline history-записи. Под
+  текущим inline-materialize `durable_watermark == last_committed (visibility)`.
+  Ничего не читает durable_watermark, кроме тестов → ноль изменений поведения.
+  Устанавливает машинерию для P1d-2. Gate @oracle @engine.
+
+- **P1d-2 (cutover, HIGH risk).** Дренаж-лидер (CAS-leader по образцу
+  `WalGroupCommit::lead_until_drained`) выносит history.transact tx-пути с
+  ack-пути; помечает durable из дренажа, не из materialize. Убрать inline
+  history-запись из tx-materialize (Phase 5a). Overlay — единственный источник
+  для (durable_wm, visibility_wm]. Гейт Phase-7 WAL-truncation на
+  `durable_watermark >= commit_version` (НЕ inline). Crash-seam (e): WAL durable,
+  value в overlay не в history → recovery реплеит из WAL. non-tx single-row
+  остаётся inline (его best-effort/no-WAL контракт не трогаем). Gate @oracle
+  @engine @e2e + crash.

@@ -376,6 +376,11 @@ pub(super) async fn run_leader(
         let mat = post_publish_cleanup(post_publish, repo, gate, wal).await;
         if mat == MaterializationState::Deferred {
             repo.tx_metrics().on_tx_materialization_deferred();
+        } else {
+            // P1d-1: Complete ⇒ this survivor's value is durable in history.
+            // Mark durable AFTER `materialize` consumed the version_guard
+            // (visibility), keeping `durable_watermark() <= last_committed()`.
+            gate.mark_durable(work.commit_version);
         }
         repo.emit_changefeed_event(work.changefeed_event).await;
         promote_vectors(&work.tx, repo, work.commit_version).await;
@@ -455,6 +460,10 @@ async fn run_single_tx(
     let materialization = post_publish_cleanup(post_publish, repo, gate, wal).await;
     if materialization == MaterializationState::Deferred {
         repo.tx_metrics().on_tx_materialization_deferred();
+    } else {
+        // P1d-1: Complete ⇒ value is durable in history. Mark durable
+        // AFTER the visibility commit (consumed inside `materialize`).
+        gate.mark_durable(commit_version);
     }
     repo.emit_changefeed_event(changefeed_event).await;
     promote_vectors(&tx, repo, commit_version).await;
