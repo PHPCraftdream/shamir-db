@@ -232,7 +232,13 @@ impl MvccStore {
     /// advances monotonically rather than silently keeping a stale value.
     pub async fn seed_version(&self, key: Bytes, version: u64) {
         self.cells
-            .upsert_async(key, super::RecordCell { version })
+            .upsert_async(
+                key,
+                super::RecordCell {
+                    version,
+                    reserved_by: 0,
+                },
+            )
             .await;
     }
 

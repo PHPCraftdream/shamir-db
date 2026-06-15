@@ -92,6 +92,16 @@ pub(crate) struct RecordCell {
     /// before the physical store mutation. Read by get_at / current_version /
     /// version_of / live_version.
     pub(crate) version: u64,
+    /// SSI fix S1 — cell-reservation marker. `0` = free; otherwise the
+    /// `txn_id` of the committer that has CLAIMED this cell as the explicit
+    /// serialization point for a write-write conflict (`try_reserve`). The
+    /// claim blocks competing writers (their `try_reserve` returns `false`)
+    /// but is INVISIBLE to readers — every read path consults `version`
+    /// only, never this field. In S1 this is purely additive: no live path
+    /// ever sets it non-zero (every `RecordCell` constructor initialises it
+    /// to `0`), so behaviour is byte-identical. S2 wires `try_reserve` into
+    /// `pre_commit` and `finalize_reservation` into the publish path.
+    pub(crate) reserved_by: u64,
 }
 
 /// Versioned layer over the history version log.
@@ -323,7 +333,10 @@ impl MvccStore {
                 e.get_mut().version = version;
             }
             scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell { version });
+                e.insert_entry(RecordCell {
+                    version,
+                    reserved_by: 0,
+                });
             }
         }
     }
@@ -339,7 +352,123 @@ impl MvccStore {
                 e.get_mut().version = version;
             }
             scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(RecordCell { version });
+                e.insert_entry(RecordCell {
+                    version,
+                    reserved_by: 0,
+                });
+            }
+        }
+    }
+
+    // ========================================================================
+    // SSI fix S1 — cell-reservation primitive (additive; NOT yet wired).
+    //
+    // Three atomic acts on the per-key `RecordCell`, all via `cells.entry(key)`
+    // (scc per-entry exclusive — the same check-and-update primitive
+    // `publish_cell_sync` already relies on). They turn "publish decides who
+    // won" (after the WAL commit point) into "claim decides who won" (BEFORE
+    // it): a single committer claims the cell, losers see the claim and abort
+    // with `SsiConflict` having never touched the WAL.
+    //
+    // S1 only BUILDS these — `try_reserve` is never called on the live commit
+    // path yet, so `reserved_by` stays `0` everywhere and behaviour is
+    // byte-identical. S2 invokes `try_reserve` in `pre_commit` (after
+    // read-validate, before WAL), `finalize_reservation` in the publish path,
+    // and `release_reservation` from the abort-path RAII guard.
+    //
+    // Sync (`entry`, not `entry_async`) because every call site is the
+    // synchronous commit hot path — same rationale as `publish_cell_sync`:
+    // the cell map is lock-free / sharded, so `entry` is a bounded CAS, not a
+    // contended lock.
+    // ========================================================================
+
+    /// SSI fix S1 — atomically CLAIM this key's cell for `txn_id`, the explicit
+    /// serialization point for a write-write conflict.
+    ///
+    /// Returns `true` iff the claim WON (this committer may proceed to WAL /
+    /// publish); `false` on CONFLICT (another committer holds the claim, or the
+    /// cell has already advanced past this committer's snapshot — a stale
+    /// write). A conflict NEVER blocks — the caller aborts with `SsiConflict`.
+    ///
+    /// Cases, all inside one atomic `entry`:
+    /// - **Vacant** → the key has never published a version, so it is free.
+    ///   Insert `RecordCell { version: 0, reserved_by: txn_id }` and WIN. The
+    ///   `version: 0` sentinel matches `current_version`'s "no version tracked"
+    ///   convention; `finalize_reservation` later overwrites it with the real
+    ///   commit version.
+    /// - **Occupied** → WIN iff `version <= snapshot_version && reserved_by == 0`:
+    ///   the cell is unclaimed AND has not advanced past our snapshot. Set
+    ///   `reserved_by = txn_id`. Otherwise CONFLICT (`false`): either the cell
+    ///   moved past the snapshot (someone published — stale-write detection) or
+    ///   it is already claimed by another committer.
+    ///
+    /// `#[allow(dead_code)]`: S1 is additive — no live path calls this yet
+    /// (only the S1 unit tests do, which don't count for the lib build). S2
+    /// wires it into `pre_commit`. Until then the lib sees it as unused.
+    #[allow(dead_code)]
+    pub(crate) fn try_reserve(&self, key: Bytes, snapshot_version: u64, txn_id: u64) -> bool {
+        match self.cells.entry(key) {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                let cell = e.get_mut();
+                if cell.version <= snapshot_version && cell.reserved_by == 0 {
+                    cell.reserved_by = txn_id;
+                    true
+                } else {
+                    false
+                }
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(RecordCell {
+                    version: 0,
+                    reserved_by: txn_id,
+                });
+                true
+            }
+        }
+    }
+
+    /// SSI fix S1 — atomically convert a held claim into the published
+    /// `version` and CLEAR the reservation, in one `entry`.
+    ///
+    /// Called on the publish path (S2: Phase 5a) AFTER the committer has won
+    /// its claim and the write is becoming visible. Sets `version = version`
+    /// and `reserved_by = 0`. If the cell is somehow Vacant (defensive — a
+    /// claim should have inserted it), insert `RecordCell { version,
+    /// reserved_by: 0 }` so the published version is never lost.
+    ///
+    /// `#[allow(dead_code)]`: S1 is additive — no live path calls this yet
+    /// (only the S1 unit tests do). S2 wires it into the publish path.
+    #[allow(dead_code)]
+    pub(crate) fn finalize_reservation(&self, key: Bytes, version: u64) {
+        match self.cells.entry(key) {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                let cell = e.get_mut();
+                cell.version = version;
+                cell.reserved_by = 0;
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(RecordCell {
+                    version,
+                    reserved_by: 0,
+                });
+            }
+        }
+    }
+
+    /// SSI fix S1 — release a claim held by `txn_id` (abort path), in one
+    /// `entry`. Idempotent and ownership-checked: only clears `reserved_by`
+    /// when it still equals `txn_id`.
+    ///
+    /// A no-op when the cell is Vacant, or when `reserved_by != txn_id` — the
+    /// latter covers both "another committer now owns the claim" (we must not
+    /// steal it) and "our claim was already finalized" (`reserved_by` is
+    /// already `0`). This makes the RAII guard's `Drop` safe to fire after a
+    /// successful `finalize_reservation`.
+    pub(crate) fn release_reservation(&self, key: Bytes, txn_id: u64) {
+        if let scc::hash_map::Entry::Occupied(mut e) = self.cells.entry(key) {
+            let cell = e.get_mut();
+            if cell.reserved_by == txn_id {
+                cell.reserved_by = 0;
             }
         }
     }

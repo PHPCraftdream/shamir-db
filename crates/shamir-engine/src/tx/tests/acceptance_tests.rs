@@ -649,3 +649,78 @@ async fn concurrent_ssi_storm_exactly_one_wins() {
     );
     assert_eq!(err_count, n - 1);
 }
+
+/// REPRO for task #24 — SSI "exactly one wins" under TRUE parallelism.
+///
+/// Identical workload to `concurrent_ssi_storm_exactly_one_wins`, but on a
+/// multi_thread runtime (worker_threads = 4) and looped 40× so the
+/// validate→publish_cell race actually gets scheduled apart. The hypothesis
+/// under test: SSI read-set validation (pre_commit.rs:208 `version_of` →
+/// `MvccStore::current_version`) reads `cells[key].version`, while the
+/// winner's NEW version is published into that same cell only in Phase 5a
+/// (`apply_committed_visible` → `publish_cell_sync`, mvcc_history.rs:317),
+/// which runs AFTER Phase 4 WAL begin. If a yield separates detect and
+/// publish in production, N committers can all validate against the
+/// pre-commit cell version → all pass → all publish → ">1 ok".
+///
+/// On the in-memory Mem-sink path Phase 4 does NOT spawn_blocking, but a
+/// multi_thread runtime still interleaves the non-atomic
+/// validate(Phase2)→assign(Phase3)→WAL(Phase4)→publish(Phase5a) span across
+/// committers running on different worker threads — the cell version is
+/// published at a DIFFERENT instant than it is read.
+#[ignore = "repro for task #24 — fails: SSI 'exactly one wins' not serializable under multi_thread (validate→publish_cell non-atomic for non-unique tables)"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repro24_concurrent_ssi_storm_multithread() {
+    use tokio::sync::Barrier;
+
+    const ROUNDS: usize = 40;
+    let mut violations: Vec<(usize, usize)> = Vec::new();
+
+    for round in 0..ROUNDS {
+        let repo = make_repo();
+        repo.add_table(crate::table::TableConfig::new("t"));
+        let tbl = repo.get_table("t").await.unwrap();
+        let rid = tbl.insert(&InnerValue::Int(0)).await.unwrap();
+        let token = crate::table::table_manager::table_token_for("t");
+
+        let n = 20;
+        let barrier = Arc::new(Barrier::new(n));
+        let mut handles = Vec::new();
+
+        for i in 0..n {
+            let r = repo.clone();
+            let t = tbl.clone();
+            let b = barrier.clone();
+            let key = rid.to_bytes();
+            handles.push(tokio::spawn(async move {
+                let (mut tx, _g) = r.begin_tx(IsolationLevel::Serializable).await.unwrap();
+                tx.record_read(token, key, tx.snapshot_version);
+                t.update_tx(rid, &InnerValue::Int(i as i64), Some(&mut tx))
+                    .await
+                    .unwrap();
+                b.wait().await;
+                r.commit_tx(tx).await
+            }));
+        }
+
+        let mut ok_count = 0;
+        let mut err_count = 0;
+        for h in handles {
+            match h.await.unwrap() {
+                Ok(_) => ok_count += 1,
+                Err(_) => err_count += 1,
+            }
+        }
+        if ok_count != 1 {
+            violations.push((round, ok_count));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "SSI 'exactly one wins' VIOLATED on multi_thread runtime: \
+         {} of {ROUNDS} rounds committed >1 tx (round, ok_count): {:?}",
+        violations.len(),
+        violations
+    );
+}
