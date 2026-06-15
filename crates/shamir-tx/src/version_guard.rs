@@ -34,6 +34,18 @@ use crate::completion_tracker::{CompletionTracker, State};
 pub struct VersionGuard {
     version: u64,
     completion: Arc<CompletionTracker>,
+    /// P1d-1: second tracker for "value durable in history". On the abort
+    /// path (Drop with `armed == true`) we mark this Aborted so its
+    /// contiguous watermark advances past the burned version — otherwise it
+    /// would wedge below the visibility watermark on every SSI / phantom /
+    /// WAL-begin abort, violating the inline-materialize invariant
+    /// `durable_watermark == last_committed`. On the success path
+    /// (`commit()`) we do NOT mark durable here — the caller (engine
+    /// commit / non-tx write) calls `gate.mark_durable(version)` AFTER the
+    /// physical history write succeeds (Phase 5a `Complete` for tx,
+    /// `history.set/transact` for non-tx). Until P1d-2 the two marks land
+    /// on the same code path so the durable watermark stays in lock-step.
+    durable_completion: Arc<CompletionTracker>,
     last_committed: Arc<AtomicU64>,
     armed: bool,
 }
@@ -47,11 +59,13 @@ impl VersionGuard {
     pub(crate) fn new(
         version: u64,
         completion: Arc<CompletionTracker>,
+        durable_completion: Arc<CompletionTracker>,
         last_committed: Arc<AtomicU64>,
     ) -> Self {
         Self {
             version,
             completion,
+            durable_completion,
             last_committed,
             armed: true,
         }
@@ -91,6 +105,13 @@ impl Drop for VersionGuard {
             // WAL-begin failure, or a panic). Mark it Aborted so the
             // contiguous watermark advances past it.
             self.completion.mark(self.version, State::Aborted);
+            // P1d-1: also advance the durable watermark past the aborted
+            // version. An aborted version was never written to history, so
+            // it cannot block durable contiguity — but if we do not mark it
+            // here the durable tracker would wedge at `version - 1` while
+            // visibility moves past it, breaking the inline-materialize
+            // invariant `durable_watermark == last_committed`.
+            self.durable_completion.mark(self.version, State::Aborted);
             self.advance_last_committed();
         }
     }

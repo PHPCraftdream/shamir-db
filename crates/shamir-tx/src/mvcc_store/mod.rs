@@ -333,6 +333,14 @@ impl MvccStore {
         // from the resulting watermark (mirrors the tx commit path). This
         // replaces the direct `publish_committed_max(new_v)`.
         guard.commit();
+        // P1d-1: the history write above is the durable-history landing for
+        // this version (synchronous inline path); mark durable AFTER the
+        // visibility mark so `durable_watermark() <= last_committed()` holds
+        // at every observation point. Under inline materialize this keeps
+        // the two watermarks in lock-step; P1d-2 will move tx-path history
+        // writes to a background drain and the non-tx path keeps marking
+        // durable inline (its best-effort / no-WAL contract is unchanged).
+        self.gate.mark_durable(new_v);
         // T1b.2: per-key count-aware vacuum reclaims superseded history
         // versions beyond the retention bound (floor: min_alive).
         self.vacuum_key(&key_snapshot).await;
@@ -418,6 +426,15 @@ impl MvccStore {
         for guard in guards {
             guard.commit();
         }
+        // P1d-1: every batched version is durable in history (the single
+        // `history.transact` above succeeded); mark each durable AFTER the
+        // visibility commits so `durable_watermark() <= last_committed()` is
+        // maintained at every observation. Order across `new_versions` does
+        // not matter — the durable tracker resolves contiguity the same way
+        // the visibility tracker does.
+        for &v in &new_versions {
+            self.gate.mark_durable(v);
+        }
         // T1b.2: per-key count-aware vacuum for every key in the batch.
         for key in &keys {
             self.vacuum_key(key).await;
@@ -465,6 +482,10 @@ impl MvccStore {
         // Mark Materialized and advance the reader-visible floor from the
         // watermark (replaces the direct `publish_committed_max(new_v)`).
         guard.commit();
+        // P1d-1: the tombstone is durable in history (inline write above);
+        // mark durable AFTER the visibility commit. Same rationale as
+        // `set_versioned` — keeps `durable_watermark() <= last_committed()`.
+        self.gate.mark_durable(new_v);
         // T1b.2: per-key count-aware vacuum reclaims superseded history
         // versions beyond the retention bound (floor: min_alive).
         self.vacuum_key(&key).await;
