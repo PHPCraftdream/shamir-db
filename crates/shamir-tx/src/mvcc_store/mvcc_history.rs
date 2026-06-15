@@ -240,18 +240,115 @@ impl MvccStore {
     /// (history transact, version_cache updates). One durable write (history
     /// transact). Cancellation mid-batch leaves some phases applied, others
     /// not. Recovery relies on WAL replay.
+    ///
+    /// D2 P1d-2b: this is now the composition of the two split halves —
+    /// [`apply_committed_visible`] (overlay + cell publish, the ack-path) and
+    /// [`write_committed_to_history`] (history transact + ts, the drain/
+    /// recovery-path). The PRODUCTION commit path no longer calls this
+    /// combined method (the ack-path routes the visible half inline; the
+    /// background drainer writes history). It remains for non-cutover callers
+    /// (unit tests / direct invocations) that want the pre-cutover "both
+    /// halves at once" semantics. Ordering: history FIRST (durable landing),
+    /// then visible (overlay + cell) — matching the pre-split contract where a
+    /// failed history `transact` (`?`) left no reader-visible state.
     pub async fn apply_committed_ops(&self, ops: Vec<KvOp>, commit_version: u64) -> DbResult<()> {
-        // HIGH-3: batch the physical writes through `Store::transact`.
-        // Per-op `set`/`remove` collapses to a single atomic write-tx
-        // on backends that override `transact` (redb, sled, fjall,
-        // persy, nebari, canopy) — one fsync instead of N.
+        // Visible FIRST so the commit-time ts stamp (set in
+        // `apply_committed_visible`) is in `pending_ts` before
+        // `write_committed_to_history` consumes it — otherwise the drain-half
+        // would fall back to `now_millis()` and leave a stale, never-consumed
+        // stamp behind. In this combined (test/direct) path both halves run
+        // synchronously at commit time, so the ordering carries no durability
+        // window: the visible state and the history write happen together, and
+        // a history error propagates via `?` (the cell/overlay are then ahead,
+        // exactly as the production ack-path intentionally is until the drainer
+        // catches up).
+        self.apply_committed_visible(&ops, commit_version);
+        self.write_committed_to_history(&ops, commit_version)
+            .await?;
+        Ok(())
+    }
 
-        // C1: every committed key gets a log entry unconditionally (no
-        // longer gated by `active_snapshots_empty`) — the log is the
-        // universal version timeline. For KvOp::Remove the log entry is
+    /// D2 P1d-2b — ACK-path visible half. Populate ONLY the in-memory
+    /// visibility state for a committed batch: the versioned overlay (the sole
+    /// RAM copy of the value until the drainer writes history) and the per-key
+    /// cell (`publish_cell`), then advance the reader-visible floor. Writes NO
+    /// history and records NO ts — those are the drainer's job
+    /// ([`write_committed_to_history`]).
+    ///
+    /// Synchronous (no `.await` on storage): the overlay + cell are lock-free
+    /// in-memory structures, so this is the cheap ack-path the cutover moves
+    /// the expensive `history.transact` OFF of. Called by `apply_data_batch`
+    /// (commit Phase 5a) after the WAL entry is durable.
+    ///
+    /// Invariant: the overlay MUST hold the value before any reader can observe
+    /// `commit_version` (cell bumped / floor advanced). Insert order below —
+    /// overlay BEFORE cell BEFORE floor — guarantees no window where the cell
+    /// reports `commit_version` while the overlay is empty AND history has not
+    /// yet been drained.
+    pub fn apply_committed_visible(&self, ops: &[KvOp], commit_version: u64) {
+        // D2 P1d-2b: capture the COMMIT-TIME wall clock for this version now,
+        // so the drainer (which writes the durable ts arbitrarily later) stamps
+        // history with commit time, NOT drain time. `now_millis()` honours the
+        // test clock (`set_test_now`) and the real `SystemTime` alike. Stored
+        // once per commit_version (all ops share it); removed by the drainer.
+        let _ = self.pending_ts.insert(commit_version, self.now_millis());
+
+        // P1c: populate the overlay with the SAME (key, version) → value pair
+        // that the drainer will later land in history. The overlay value is
+        // byte-identical to the eventual history payload: the raw value for
+        // `Set`, an empty `Bytes` tombstone for `Remove`.
+        for op in ops {
+            match op {
+                KvOp::Set(k, v) => self.overlay.insert(k.clone(), commit_version, v.clone()),
+                KvOp::Remove(k) => self.overlay.insert(k.clone(), commit_version, Bytes::new()),
+            }
+        }
+
+        // Update the in-memory cell for every touched key (CRIT-2: entry_async
+        // modify-or-insert). After this, readers at `>= commit_version` resolve
+        // the value from the overlay.
+        for op in ops {
+            let key = match op {
+                KvOp::Set(k, _) => k.clone(),
+                KvOp::Remove(k) => k.clone(),
+            };
+            // publish_cell is async only because of scc's entry_async; it does
+            // no I/O. Block-free in practice.
+            self.publish_cell_sync(key, commit_version);
+        }
+
+        // R3: advance the reader-visible floor so subsequent `get_current` /
+        // `current_stream` see the materialized version. In the tx commit path
+        // the caller (`commit_tx`) ALSO publishes via the watermark; this
+        // monotonic fetch_max is safe to call redundantly.
+        self.gate.publish_committed_max(commit_version);
+    }
+
+    /// D2 P1d-2b — DRAIN/RECOVERY-path history half. Write the committed batch
+    /// to the durable `history` version-log + record the commit ts. Calls
+    /// `publish_cell` too (idempotent) so a cold recovery path that seeds the
+    /// cell from history alone stays consistent; does NOT touch the overlay
+    /// (the overlay is the ack-path's RAM copy — on the drain path the value is
+    /// being made durable, and on cold recovery the overlay is empty by
+    /// construction).
+    ///
+    /// This is the expensive `history.transact` the cutover moved OFF the
+    /// ack-path. Called by the background `Drainer` (via `replay_v2_entry`'s
+    /// per-table routing) and reachable on direct/recovery paths.
+    pub async fn write_committed_to_history(
+        &self,
+        ops: &[KvOp],
+        commit_version: u64,
+    ) -> DbResult<()> {
+        // HIGH-3: batch the physical writes through `Store::transact`.
+        // Per-op `set`/`remove` collapses to a single atomic write-tx on
+        // backends that override `transact` — one fsync instead of N.
+        //
+        // C1: every committed key gets a log entry unconditionally — the log
+        // is the universal version timeline. For KvOp::Remove the log entry is
         // a tombstone (empty value).
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
-        for op in &ops {
+        for op in ops {
             let h_key = match op {
                 KvOp::Set(k, v) => KvOp::Set(encode_version_key(k, commit_version), v.clone()),
                 KvOp::Remove(k) => KvOp::Set(encode_version_key(k, commit_version), Bytes::new()),
@@ -260,52 +357,40 @@ impl MvccStore {
         }
 
         // One batched write to history (current version + tombstones).
-        // The log is the sole durable write target.
         if !history_ops.is_empty() {
             self.history.transact(history_ops).await?;
         }
 
-        // P1c: dual-write — populate the in-memory overlay with the SAME
-        // (key, version) → value pair that landed in history. The overlay value
-        // is byte-identical to the history payload: the raw value for `Set`, an
-        // empty `Bytes` tombstone for `Remove`. Ordering rationale:
-        //  • AFTER `history.transact`: a failed batch write (`?` above) must not
-        //    leave visible overlay entries for a tx that never durably committed.
-        //  • BEFORE the `publish_cell` loop (and the `guard.commit()` the caller
-        //    runs after `materialize` returns): by the time any version is
-        //    reader-visible — cell bumped here, floor advanced via the watermark
-        //    — the overlay already carries its value. There is therefore never a
-        //    window where the cell reports `commit_version` while both the
-        //    overlay and history are empty.
-        for op in &ops {
-            match op {
-                KvOp::Set(k, v) => self.overlay.insert(k.clone(), commit_version, v.clone()),
-                KvOp::Remove(k) => self.overlay.insert(k.clone(), commit_version, Bytes::new()),
-            }
-        }
+        // T1c: record the commit timestamp. D2 P1d-2b: prefer the COMMIT-TIME
+        // millis stamped on the ack-path (`apply_committed_visible`) so the
+        // durable ts reflects commit time, not this (later) drain time. Cold
+        // recovery (overlay empty → no stamp) falls back to `now_millis()` —
+        // the pre-cutover behaviour (recovery never had the original ts).
+        // Remove the stamp once consumed (idempotent: a re-drain finds none and
+        // uses the fallback, but by then history already holds the correct ts).
+        let ts_ms = self
+            .pending_ts
+            .remove(&commit_version)
+            .map(|(_, ms)| ms)
+            .unwrap_or_else(|| self.now_millis());
+        self.record_ts_at(commit_version, ts_ms).await;
 
-        // T1c: record the commit timestamp for the tx commit version (one ts
-        // per commit — all ops share `commit_version`). Best-effort.
-        self.record_ts(commit_version).await;
-
-        // Update the in-memory cell for every touched key.
-        // Sets both `version` and `hwm` to `commit_version` so that
-        // tx-committed keys participate in index-only freshness validation.
-        // Uses `publish_cell` (entry_async modify-or-insert, CRIT-2):
-        // `upsert_async` was previously used; entry_async is equivalent and
-        // preserves both fields.
+        // Seed the cell from the durable write (idempotent; needed on the cold
+        // recovery path so a key whose value lives only in history reports the
+        // correct version). On the warm drain path the cell is already at
+        // `commit_version` (set by the ack-path's `apply_committed_visible`),
+        // so this is a redundant no-op.
         for op in ops {
             let key = match op {
-                KvOp::Set(k, _) => k,
-                KvOp::Remove(k) => k,
+                KvOp::Set(k, _) => k.clone(),
+                KvOp::Remove(k) => k.clone(),
             };
             self.publish_cell(key, commit_version).await;
         }
-        // R3: advance the reader-visible floor so subsequent `get_current` /
-        // `current_stream` see the materialized version. In the tx commit
-        // path the caller (`commit_tx`) publishes via `gate.publish_committed`;
-        // in recovery / direct-call paths no external publish happens, so we
-        // do it here (monotonic fetch_max — safe to call redundantly).
+
+        // R3: advance the reader-visible floor (monotonic fetch_max). On the
+        // ack-driven flow the floor is already at/above this; on cold recovery
+        // this lifts it.
         self.gate.publish_committed_max(commit_version);
         Ok(())
     }

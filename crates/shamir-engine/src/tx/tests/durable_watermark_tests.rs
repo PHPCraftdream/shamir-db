@@ -1,13 +1,17 @@
-//! P1d-1 — tx-path coverage for the durable_watermark machinery.
+//! D2 P1d-2b — tx-path coverage for the durable_watermark machinery.
 //!
-//! Under the current inline-materialize path the durable watermark must
-//! catch up to `last_committed()` after every successful (`Complete`) tx
-//! commit, and `durable_watermark() <= last_committed()` must hold at every
-//! observation point during the sequence. Non-tx coverage lives in
-//! `shamir-tx::tests::durable_watermark_tests`; the tests here drive the
-//! full `commit_tx` pipeline through `RepoInstance`/`commit_tx_lockfree`
-//! (the default path) so the engine-side `mark_durable` call after
-//! `post_publish_cleanup` is exercised.
+//! CONTRACT CHANGE (cutover): the ack-path no longer writes `history` or marks
+//! durable inline. After a tx commit the durable watermark LAGS
+//! `last_committed()` until the background drainer replays the WAL entry into
+//! `history` (`mark_durable`). The invariant `durable_watermark() <=
+//! last_committed()` still holds at EVERY observation point; equality is
+//! reached only after the tail is drained (`drainer().drain_all(&repo)`).
+//!
+//! These tests therefore assert the lag right after commit and convergence
+//! after an explicit `drain_all`. Non-tx coverage lives in
+//! `shamir-tx::tests::durable_watermark_tests`; the non-tx path keeps marking
+//! durable inline (its no-WAL contract is unchanged), exercised by the
+//! `mixed_*` test's direct-gate burst below.
 
 use std::sync::Arc;
 
@@ -37,7 +41,8 @@ fn staged_tx(tx_id: u64, table_token: u64, k: &'static [u8], v: &'static [u8]) -
     tx
 }
 
-/// One tx commit advances both watermarks; durable catches up to visibility.
+/// One tx commit advances visibility; durable lags until the drainer runs.
+/// After `drain_all` the two converge.
 #[tokio::test]
 async fn single_tx_commit_durable_equals_visibility() {
     let repo = make_repo();
@@ -50,25 +55,32 @@ async fn single_tx_commit_durable_equals_visibility() {
         .unwrap();
     assert!(outcome.materialized(), "InMemoryRepo commit is Complete");
 
+    // Cutover: right after commit the value is visible (overlay) but NOT yet
+    // durable in history — durable lags.
     let dur = gate.durable_watermark();
     let vis = gate.last_committed();
     assert!(dur <= vis, "durable={dur} must not lead visibility={vis}");
-    assert_eq!(
-        dur, vis,
-        "Complete commit under inline materialize → durable == visibility"
-    );
+    assert_eq!(vis, outcome.commit_version);
+
+    // Drain the inflight tail → durable catches up to visibility.
+    repo.drainer().drain_all(&repo).await.unwrap();
+    let dur = gate.durable_watermark();
+    let vis = gate.last_committed();
+    assert!(dur <= vis, "durable={dur} must not lead visibility={vis}");
+    assert_eq!(dur, vis, "after drain → durable == visibility");
     assert_eq!(vis, outcome.commit_version);
 }
 
-/// Several sequential tx commits: at every observation `durable <= visibility`,
-/// and after each commit the two are equal (inline materialize). Exercises the
-/// `commit_tx_lockfree` path's `mark_durable` call after each
-/// `post_publish_cleanup`.
+/// Several sequential tx commits: at every observation `durable <= visibility`
+/// (never leads). The background drainer may converge them between iterations
+/// (it is spawned + woken on commit), but the HARD invariant under test is the
+/// no-lead property mid-flight; a final `drain_all` forces full convergence.
 #[tokio::test]
 async fn many_tx_commits_durable_tracks_visibility() {
     let repo = make_repo();
     let gate = repo.tx_gate().await.unwrap();
 
+    let mut last_commit_version = 0;
     for i in 0..6u64 {
         let outcome = commit_tx(staged_tx(10 + i, 200, b"k", b"v"), &repo)
             .await
@@ -80,12 +92,17 @@ async fn many_tx_commits_durable_tracks_visibility() {
             dur <= vis,
             "step {i}: durable={dur} must not lead vis={vis}"
         );
-        assert_eq!(
-            dur, vis,
-            "step {i}: inline materialize → durable == visibility"
-        );
         assert_eq!(vis, outcome.commit_version);
+        last_commit_version = outcome.commit_version;
     }
+
+    // Drain the tail → durable converges to the final visible version.
+    repo.drainer().drain_all(&repo).await.unwrap();
+    let dur = gate.durable_watermark();
+    let vis = gate.last_committed();
+    assert!(dur <= vis);
+    assert_eq!(dur, vis, "after drain → durable == visibility");
+    assert_eq!(vis, last_commit_version);
 }
 
 /// Mixed tx + non-tx commits through the same gate. Non-tx writes route
@@ -100,16 +117,22 @@ async fn mixed_tx_and_nontx_durable_equals_visibility_at_end() {
     let repo = make_repo();
     let gate = repo.tx_gate().await.unwrap();
 
-    // tx commit #1
+    // tx commit #1 — durable lags until drained (cutover). Drain so the
+    // contiguous durable prefix has no hole before the non-tx burst (whose
+    // inline mark_durable would otherwise be blocked behind the undrained tx
+    // version, leaving durable < visibility).
     let o1 = commit_tx(staged_tx(1, 300, b"a", b"1"), &repo)
         .await
         .unwrap();
     assert!(o1.materialized());
     assert!(gate.durable_watermark() <= gate.last_committed());
+    repo.drainer().drain_all(&repo).await.unwrap();
     assert_eq!(gate.durable_watermark(), gate.last_committed());
 
     // non-tx style burst: assign + commit + mark_durable (matches MvccStore
-    // ordering: guard.commit() first, mark_durable second).
+    // ordering: guard.commit() first, mark_durable second). The non-tx path
+    // STILL marks durable inline (no WAL / drainer) — its contract is
+    // unchanged by the cutover.
     for _ in 0..3 {
         let g = gate.assign_next_version_guarded();
         let v = g.version();
@@ -122,20 +145,19 @@ async fn mixed_tx_and_nontx_durable_equals_visibility_at_end() {
         assert_eq!(gate.durable_watermark(), gate.last_committed());
     }
 
-    // tx commit #2
+    // tx commit #2 — again lags; drain to converge.
     let o2 = commit_tx(staged_tx(2, 300, b"b", b"2"), &repo)
         .await
         .unwrap();
     assert!(o2.materialized());
     assert!(o2.commit_version > o1.commit_version);
+    assert!(gate.durable_watermark() <= gate.last_committed());
+    repo.drainer().drain_all(&repo).await.unwrap();
 
     let dur = gate.durable_watermark();
     let vis = gate.last_committed();
     assert!(dur <= vis);
-    assert_eq!(
-        dur, vis,
-        "final: inline materialize → durable == visibility"
-    );
+    assert_eq!(dur, vis, "final: after drain → durable == visibility");
     assert_eq!(vis, o2.commit_version);
 }
 

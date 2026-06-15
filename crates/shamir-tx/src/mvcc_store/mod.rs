@@ -125,6 +125,18 @@ pub struct MvccStore {
     /// on the production path (filled in P1c), so it stays empty and every
     /// probe returns `None` → behaviour is byte-identical to history-only.
     overlay: VersionedOverlay,
+    /// D2 P1d-2b: per-version COMMIT-TIME timestamp, stamped on the ack-path
+    /// (`apply_committed_visible`) and consumed by the drainer
+    /// (`write_committed_to_history`). The cutover moved the durable `record_ts`
+    /// write OFF the ack-path into the drainer, but the ts VALUE must reflect
+    /// COMMIT time, not drain time (the drainer runs arbitrarily later, and a
+    /// frozen test clock or a real clock that advanced would mis-stamp the
+    /// version — breaking age-retention / as-of-by-ts). So we capture the
+    /// commit-time millis here at ack and the drainer writes THAT into history.
+    /// Entry removed once durably written. Cold recovery (overlay empty) finds
+    /// no entry and falls back to `now_millis()` — its conservative pre-cutover
+    /// behaviour (recovery already could not reconstruct the original ts).
+    pending_ts: SccHashMap<u64, u64, THasher>,
 }
 
 impl MvccStore {
@@ -142,6 +154,7 @@ impl MvccStore {
             retention: ArcSwap::new(Arc::new(Retention::current_only())),
             test_now_millis: AtomicU64::new(0),
             overlay: VersionedOverlay::new(),
+            pending_ts: SccHashMap::with_hasher(THasher::default()),
         }
     }
 
@@ -193,10 +206,20 @@ impl MvccStore {
     /// conservatively keeps the version, never reclaims it wrongly). This
     /// matches the eager-vacuum error policy.
     pub(super) async fn record_ts(&self, version: u64) {
-        let ms = self.now_millis().to_le_bytes();
+        self.record_ts_at(version, self.now_millis()).await;
+    }
+
+    /// D2 P1d-2b: record an EXPLICIT commit timestamp `ms` for `version` under
+    /// `ts_key(version)` in `history`. Used by the drainer
+    /// ([`write_committed_to_history`](Self::write_committed_to_history)) to
+    /// stamp the COMMIT-time millis it captured on the ack-path, decoupling the
+    /// recorded ts from the (later) drain time. Best-effort like
+    /// [`record_ts`](Self::record_ts).
+    pub(super) async fn record_ts_at(&self, version: u64, ms: u64) {
+        let bytes = ms.to_le_bytes();
         let _ = self
             .history
-            .set(ts_key(version), Bytes::from(ms.to_vec()))
+            .set(ts_key(version), Bytes::from(bytes.to_vec()))
             .await;
     }
 
@@ -220,6 +243,22 @@ impl MvccStore {
     /// cell mutation.)
     pub(super) async fn publish_cell(&self, key: Bytes, version: u64) {
         match self.cells.entry_async(key).await {
+            scc::hash_map::Entry::Occupied(mut e) => {
+                e.get_mut().version = version;
+            }
+            scc::hash_map::Entry::Vacant(e) => {
+                e.insert_entry(RecordCell { version });
+            }
+        }
+    }
+
+    /// D2 P1d-2b: synchronous sibling of [`Self::publish_cell`] for the
+    /// ack-path visible half ([`Self::apply_committed_visible`]), which does no
+    /// I/O and must stay off `.await`. Uses scc's blocking `entry` (no async
+    /// suspension): the cell map is lock-free / sharded, so this is a bounded
+    /// CAS, not a contended lock on the commit hot path.
+    pub(super) fn publish_cell_sync(&self, key: Bytes, version: u64) {
+        match self.cells.entry(key) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 e.get_mut().version = version;
             }

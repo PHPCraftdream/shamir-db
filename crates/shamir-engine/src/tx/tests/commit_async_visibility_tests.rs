@@ -221,7 +221,10 @@ async fn async_commit_background_failure_is_recovered() {
         "a failed Phase 5c on the tail must surface as Deferred"
     );
 
-    // The WAL entry is in the segment → recovery is the guarantor.
+    // The WAL entry is in the segment → recovery is the guarantor. (The
+    // entry stays replayable: `wal.commit` is a no-op truncation until F6,
+    // so even after the background drainer drains it the entry is still
+    // recoverable.)
     let wal = repo.repo_wal().await.unwrap();
     let inflight = wal.recover().await.unwrap();
     assert_eq!(
@@ -230,15 +233,23 @@ async fn async_commit_background_failure_is_recovered() {
         "the tx's WAL entry must be replayable for recovery"
     );
 
-    // Index posting absent before recovery (the injected failure stopped it).
-    assert!(
-        tbl.info_store().get(posting_key.clone()).await.is_err(),
-        "secondary index posting must be absent before recovery"
-    );
-
-    // Recovery materializes the deferred posting.
+    // D2 P1d-2b CONTRACT CHANGE: the deferred index posting is NO LONGER
+    // guaranteed absent here. The background drainer is *generalized recovery*
+    // — woken on commit, it replays the inflight WAL entry (data AND index)
+    // into history/info. On the `current_thread` runtime it gets to run while
+    // this test `.await`s (e.g. inside `bg.join()`), so it may have ALREADY
+    // materialized the posting the injected Phase-5c failure skipped. We no
+    // longer assert "absent before recovery".
+    //
+    // What still holds — and is the point of the test — is that the deferred
+    // posting IS reconciled from the durable WAL entry (by the drainer and/or
+    // the explicit recovery below) and is present afterwards. Drive explicit
+    // recovery to converge deterministically, then assert presence.
     let count = repo.recover_v2_inflight().await.unwrap();
-    assert_eq!(count, 1, "recovery must replay the one inflight entry");
+    assert_eq!(
+        count, 1,
+        "recovery still replays the one inflight entry (idempotent over the drainer)"
+    );
     let recovered = tbl
         .info_store()
         .get(posting_key)

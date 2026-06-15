@@ -307,6 +307,22 @@ impl<'a> QueryRunner<'a> {
                         code: None,
                     }
                 })?;
+                // D2 P1d-2b: TEMPORAL reads (AsOf / History) scan the durable
+                // `history` version-log, which the cutover made the background
+                // drainer fill (the ack-path now writes only the in-memory
+                // overlay). The standard `Latest` read is overlay-aware (P1b
+                // seams) and needs no drain, but a temporal read issued right
+                // after a commit could race the async drainer and miss the
+                // freshly-committed tail. Drain the repo first so temporal
+                // reads are coherent regardless of drainer timing. `drain_all`
+                // is idempotent / cheap when caught up; skipped for `Latest`.
+                if !matches!(query.temporal, shamir_query_types::read::Temporal::Latest) {
+                    if let Ok(repo) = self.resolver.resolve_repo(&table_ref.repo).await {
+                        if let Err(e) = repo.drainer().drain_all(&repo).await {
+                            log::warn!("temporal read: drain_all {}: {e}", table_ref.repo);
+                        }
+                    }
+                }
                 // Vector I.1: in a transactional batch route the read through
                 // `read_tx` with a SHARED `&TxContext` so the SELECT records
                 // into the read-set (Serializable → SSI write-skew detection
