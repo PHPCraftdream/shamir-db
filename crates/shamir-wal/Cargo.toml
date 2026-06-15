@@ -20,6 +20,12 @@ log = "0.4"
 [dev-dependencies]
 tokio = { version = "1.49.0", features = ["full", "test-util"] }
 tempfile = "3"
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+shamir-bench-utils = { path = "../shamir-bench-utils" }
+
+[[bench]]
+name = "wal_append"
+harness = false
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
